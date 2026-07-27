@@ -1,0 +1,575 @@
+{
+  "schema_name": "labcraft.sil_capability_coverage",
+  "schema_version": 1,
+  "manifest_id": "sil_capability_coverage_v1",
+  "capabilities": [
+    {
+      "id": "sil.hardware_isolation.host",
+      "risk": "A SIL workflow could construct or access physical hardware.",
+      "owner_role": "verification maintainers",
+      "status": "covered",
+      "required_verification_layers": ["contract", "host_sil"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
+      "required_assertion_ids": ["sil.host_hardware_disabled"],
+      "related_source_areas": ["tools/virtual_workflows/scenarios.py", "FreeRTOS-interface/App.py"],
+      "limitations": ["In-process isolation does not prove firmware or physical-device behavior."],
+      "max_evidence_age_days": 30
+    },
+    {
+      "id": "sil.hardware_isolation.pi",
+      "risk": "A Pi SIL run could escape its private-device sandbox or omit traced proof.",
+      "owner_role": "verification maintainers",
+      "status": "covered",
+      "required_verification_layers": ["contract", "pi_sil"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
+      "required_assertion_ids": ["sil.pi_evidence_valid"],
+      "related_source_areas": ["scripts/pi/run_virtual_workflow_sil.sh", "tools/run_pi_virtual_workflow.ps1"],
+      "limitations": ["Pi isolation evidence does not validate attached MCU or printer hardware."],
+      "max_evidence_age_days": 14
+    },
+    {
+      "id": "ui.real_app_construction",
+      "risk": "Tests could bypass the composed Model, Controller, and MainWindow.",
+      "owner_role": "application verification maintainers",
+      "status": "covered",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": ["print_array_regression_96_v1"],
+      "required_assertion_ids": ["ui.real_app_constructed"],
+      "related_source_areas": ["FreeRTOS-interface/App.py", "FreeRTOS-interface/View.py"],
+      "limitations": ["Offscreen Qt composition does not validate a native compositor."],
+      "max_evidence_age_days": 30
+    },
+    {
+      "id": "execution.array_happy_path",
+      "risk": "A prepared print array could fail to reach terminal completion.",
+      "owner_role": "execution verification maintainers",
+      "status": "covered",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
+      "required_assertion_ids": ["execution.expected_completions"],
+      "related_source_areas": ["FreeRTOS-interface/Controller.py", "FreeRTOS-interface/Model.py"],
+      "limitations": ["Completion is simulated and does not prove physical dispensing."],
+      "max_evidence_age_days": 30
+    },
+    {
+      "id": "execution.lookahead_no_starvation",
+      "risk": "Array lookahead could drain unexpectedly before terminal completion.",
+      "owner_role": "execution verification maintainers",
+      "status": "covered",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
+      "required_assertion_ids": ["execution.no_queue_starvation"],
+      "related_source_areas": ["FreeRTOS-interface/Controller.py", "tools/virtual_workflows/scenarios.py"],
+      "limitations": ["The in-process simulator does not reproduce serial or firmware queue timing."],
+      "max_evidence_age_days": 30
+    },
+    {
+      "id": "execution.intent_durability",
+      "risk": "Completion progress could be acknowledged without the required durable intent sequence.",
+      "owner_role": "execution persistence maintainers",
+      "status": "covered",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
+      "required_assertion_ids": ["execution.intent_durability_exact"],
+      "related_source_areas": ["FreeRTOS-interface/Model.py", "tools/virtual_workflows/persistence_io.py"],
+      "limitations": ["Host filesystem durability evidence does not characterize power-loss hardware."],
+      "max_evidence_age_days": 30
+    },
+    {
+      "id": "execution.terminal_bundle",
+      "risk": "Terminal execution files could disagree after the last completion.",
+      "owner_role": "execution persistence maintainers",
+      "status": "covered",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
+      "required_assertion_ids": ["execution.terminal_bundle_valid"],
+      "related_source_areas": ["FreeRTOS-interface/Model.py", "FreeRTOS-interface/Controller.py"],
+      "limitations": ["Terminal validation covers isolated scenario data only."],
+      "max_evidence_age_days": 30
+    },
+    {
+      "id": "experiment.editor_create_finalize",
+      "risk": "A user may be unable to create and finalize an experiment through the editor.",
+      "owner_role": "experiment lifecycle maintainers",
+      "status": "planned",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": [],
+      "required_assertion_ids": [],
+      "related_source_areas": ["FreeRTOS-interface/View.py", "FreeRTOS-interface/Controller.py"],
+      "limitations": ["No composed editor lifecycle scenario exists yet."],
+      "max_evidence_age_days": null
+    },
+    {
+      "id": "experiment.prepared_reopen",
+      "risk": "A finalized but unstarted experiment may not reopen consistently.",
+      "owner_role": "experiment lifecycle maintainers",
+      "status": "planned",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": [],
+      "required_assertion_ids": [],
+      "related_source_areas": ["FreeRTOS-interface/View.py", "FreeRTOS-interface/Model.py"],
+      "limitations": ["No composed reopen scenario exists yet."],
+      "max_evidence_age_days": null
+    },
+    {
+      "id": "experiment.prepared_rename_refinalize",
+      "risk": "A prepared experiment rename may fail or leave conflicting authoritative files.",
+      "owner_role": "experiment lifecycle maintainers",
+      "status": "planned",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": [],
+      "required_assertion_ids": [],
+      "related_source_areas": ["FreeRTOS-interface/View.py", "FreeRTOS-interface/Model.py"],
+      "limitations": ["The observed rename/refinalize regression has no composed SIL scenario yet."],
+      "max_evidence_age_days": null
+    },
+    {
+      "id": "experiment.design_plan_consistency",
+      "risk": "Experiment design and execution-plan identities may diverge after finalization.",
+      "owner_role": "experiment lifecycle maintainers",
+      "status": "planned",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": [],
+      "required_assertion_ids": [],
+      "related_source_areas": ["FreeRTOS-interface/Model.py", "FreeRTOS-interface/ExecutionPlan.py"],
+      "limitations": ["No editor-driven close-and-reload consistency scenario exists yet."],
+      "max_evidence_age_days": null
+    },
+    {
+      "id": "experiment.active_edit_lock",
+      "risk": "An experiment with calibration or print history may remain editable in place.",
+      "owner_role": "experiment lifecycle maintainers",
+      "status": "planned",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": [],
+      "required_assertion_ids": [],
+      "related_source_areas": ["FreeRTOS-interface/View.py", "FreeRTOS-interface/Controller.py"],
+      "limitations": ["No composed post-start lock-boundary scenario exists yet."],
+      "max_evidence_age_days": null
+    },
+    {
+      "id": "experiment.editable_copy",
+      "risk": "A locked experiment may not produce a safe editable copy.",
+      "owner_role": "experiment lifecycle maintainers",
+      "status": "partial",
+      "required_verification_layers": ["contract", "host_sil"],
+      "active_scenario_ids": [],
+      "required_assertion_ids": [],
+      "related_source_areas": ["FreeRTOS-interface/View.py", "FreeRTOS-interface/Model.py"],
+      "limitations": ["Existing unit coverage is not yet backed by a composed editor scenario."],
+      "max_evidence_age_days": null
+    },
+    {
+      "id": "execution.soft_stop_resume",
+      "risk": "A user soft stop may lose progress or resume with duplicates.",
+      "owner_role": "execution lifecycle maintainers",
+      "status": "planned",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": [],
+      "required_assertion_ids": [],
+      "related_source_areas": ["FreeRTOS-interface/Controller.py", "tools/virtual_workflows/scenarios.py"],
+      "limitations": ["Simulator lifecycle tests exist below the composed workflow level."],
+      "max_evidence_age_days": null
+    },
+    {
+      "id": "execution.refill_resume",
+      "risk": "A refill-required pause could lose progress or resume incorrectly.",
+      "owner_role": "execution lifecycle maintainers",
+      "status": "deferred",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": [],
+      "required_assertion_ids": [],
+      "related_source_areas": ["FreeRTOS-interface/Controller.py", "FreeRTOS-interface/Model.py"],
+      "limitations": ["Volume tracking is disabled, so the production prerequisite is absent."],
+      "max_evidence_age_days": null
+    },
+    {
+      "id": "execution.authoritative_reload_resume",
+      "risk": "Durable partial progress may not reload and resume authoritatively.",
+      "owner_role": "execution lifecycle maintainers",
+      "status": "planned",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": [],
+      "required_assertion_ids": [],
+      "related_source_areas": ["FreeRTOS-interface/Model.py", "FreeRTOS-interface/Controller.py"],
+      "limitations": ["No composed two-application reload scenario exists yet."],
+      "max_evidence_age_days": null
+    },
+    {
+      "id": "execution.disconnect_fail_closed",
+      "risk": "Execution may continue advancing after simulated disconnection.",
+      "owner_role": "execution lifecycle maintainers",
+      "status": "planned",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": [],
+      "required_assertion_ids": [],
+      "related_source_areas": ["FreeRTOS-interface/Controller.py", "tools/virtual_workflows/scenarios.py"],
+      "limitations": ["Protocol and physical disconnect behavior are outside in-process SIL."],
+      "max_evidence_age_days": null
+    },
+    {
+      "id": "execution.multi_stock_head_exchange",
+      "risk": "Stock passes may use the wrong virtual head or exchange while work is queued.",
+      "owner_role": "execution lifecycle maintainers",
+      "status": "partial",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": ["print_array_stress_384x10_v1"],
+      "required_assertion_ids": ["execution.multi_stock_head_exchange"],
+      "related_source_areas": ["tools/virtual_workflows/scenarios.py", "tests/system/test_virtual_print_array_384x10_workflow.py"],
+      "limitations": ["The current reduced test is not yet a named lifecycle scenario."],
+      "max_evidence_age_days": 30
+    },
+    {
+      "id": "ui.event_loop_stall_detection",
+      "risk": "A blocked Qt event loop may go undetected or lack diagnostic attribution.",
+      "owner_role": "UI verification maintainers",
+      "status": "covered",
+      "required_verification_layers": ["contract", "host_sil"],
+      "active_scenario_ids": ["print_array_regression_96_v1"],
+      "required_assertion_ids": ["ui.injected_stall_detected"],
+      "related_source_areas": ["tools/virtual_workflows/metrics.py", "tools/virtual_workflows/scenarios.py"],
+      "limitations": ["Injected stalls validate detection, not host-specific acceptance thresholds."],
+      "max_evidence_age_days": 30
+    },
+    {
+      "id": "ui.sustained_responsiveness.windows",
+      "risk": "Sustained Windows execution may develop unacceptable UI service gaps.",
+      "owner_role": "performance verification maintainers",
+      "status": "partial",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
+      "required_assertion_ids": ["ui.responsiveness_metrics_present"],
+      "related_source_areas": ["tools/virtual_workflows/metrics.py", "tools/virtual_workflows/compare.py"],
+      "limitations": ["Evidence is scheduled and host-specific; current stress failures remain findings."],
+      "max_evidence_age_days": 14
+    },
+    {
+      "id": "ui.sustained_responsiveness.pi",
+      "risk": "Sustained Pi execution may develop unacceptable UI service gaps.",
+      "owner_role": "performance verification maintainers",
+      "status": "partial",
+      "required_verification_layers": ["pi_sil"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
+      "required_assertion_ids": ["ui.responsiveness_metrics_present", "sil.pi_evidence_valid"],
+      "related_source_areas": ["tools/virtual_workflows/metrics.py", "scripts/pi/run_virtual_workflow_sil.sh"],
+      "limitations": ["Pi evidence is machine-specific and traced timings are excluded from comparison."],
+      "max_evidence_age_days": 14
+    },
+    {
+      "id": "resources.sustained_growth.windows",
+      "risk": "The Windows stress workflow may exhibit unbounded resource growth.",
+      "owner_role": "performance verification maintainers",
+      "status": "partial",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": ["print_array_stress_384x10_v1"],
+      "required_assertion_ids": ["resources.metrics_present"],
+      "related_source_areas": ["tools/virtual_workflows/metrics.py", "tools/virtual_workflows/scenarios.py"],
+      "limitations": ["Resource classification requires scheduled same-host evidence."],
+      "max_evidence_age_days": 14
+    },
+    {
+      "id": "resources.sustained_growth.pi",
+      "risk": "The Pi stress workflow may exhibit unbounded resource growth.",
+      "owner_role": "performance verification maintainers",
+      "status": "partial",
+      "required_verification_layers": ["pi_sil"],
+      "active_scenario_ids": ["print_array_stress_384x10_v1"],
+      "required_assertion_ids": ["resources.metrics_present", "sil.pi_evidence_valid"],
+      "related_source_areas": ["tools/virtual_workflows/metrics.py", "scripts/pi/run_virtual_workflow_sil.sh"],
+      "limitations": ["Resource classification requires scheduled evidence from the designated Pi."],
+      "max_evidence_age_days": 35
+    },
+    {
+      "id": "protocol.serial_lifecycle",
+      "risk": "In-process SIL could be mistaken for serial framing and acknowledgement coverage.",
+      "owner_role": "protocol verification maintainers",
+      "status": "deferred",
+      "required_verification_layers": ["protocol_simulation", "hil"],
+      "active_scenario_ids": [],
+      "required_assertion_ids": [],
+      "related_source_areas": ["FreeRTOS-interface", "firmware"],
+      "limitations": ["A virtual MCU or prepared HIL fixture is required."],
+      "max_evidence_age_days": null
+    },
+    {
+      "id": "protocol.reset_mid_array",
+      "risk": "A controller or MCU reset may leave execution state ambiguous.",
+      "owner_role": "protocol verification maintainers",
+      "status": "deferred",
+      "required_verification_layers": ["protocol_simulation", "hil"],
+      "active_scenario_ids": [],
+      "required_assertion_ids": [],
+      "related_source_areas": ["FreeRTOS-interface", "firmware"],
+      "limitations": ["Reset semantics require protocol simulation or prepared HIL."],
+      "max_evidence_age_days": null
+    },
+    {
+      "id": "hardware.motion_pressure_droplet",
+      "risk": "Software evidence could be misrepresented as physical print-quality evidence.",
+      "owner_role": "hardware verification maintainers",
+      "status": "deferred",
+      "required_verification_layers": ["hil"],
+      "active_scenario_ids": [],
+      "required_assertion_ids": [],
+      "related_source_areas": ["firmware", "Documentation"],
+      "limitations": ["Only prepared hardware validation can cover motion, pressure, and droplets."],
+      "max_evidence_age_days": null
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "print_array_regression_96_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "virtual_print_array_96_v1",
+      "workload_fixture_id": "virtual_print_array_96_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/virtual_print_array_96_v1.json",
+      "tier": "regression",
+      "suite_ids": ["host_regression", "pi_primary"],
+      "supported_platforms": ["windows_sil", "pi_sil"],
+      "timeout_seconds": 180,
+      "action_ids": ["legacy.print_array.prepare", "legacy.print_array.start", "legacy.print_array.wait_terminal", "legacy.print_array.inject_stall", "legacy.print_array.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "sil.pi_evidence_valid", "ui.real_app_constructed", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "artifacts.required_present", "ui.injected_stall_detected", "ui.responsiveness_metrics_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "sil.hardware_isolation.pi", "ui.real_app_construction", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle", "ui.event_loop_stall_detection", "ui.sustained_responsiveness.windows", "ui.sustained_responsiveness.pi"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The scenario validates application-facing SIL behavior, not firmware or physical printing."],
+      "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_fixture_contract_is_exact_and_serpentine", "tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_workflow.py::test_injected_ui_stall_is_detected_attributed_and_captures_stack", "tests/system/test_virtual_print_array_workflow.py::test_timeout_failure_retains_diagnostics_and_failure_screenshot", "tests/system/test_virtual_print_array_workflow.py::test_scenario_source_has_no_production_machine_or_device_construction"],
+      "pi_safety_evidence": ["preflight", "hardware_proof"]
+    },
+    {
+      "id": "print_array_stress_384x10_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "virtual_print_array_384x10_v1",
+      "workload_fixture_id": "virtual_print_array_384x10_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/virtual_print_array_384x10_v1.json",
+      "tier": "stress",
+      "suite_ids": ["host_stress", "pi_stress"],
+      "supported_platforms": ["windows_sil", "pi_sil"],
+      "timeout_seconds": 1800,
+      "action_ids": ["legacy.print_array.prepare", "legacy.print_array.start", "legacy.print_array.exchange_heads", "legacy.print_array.wait_terminal", "legacy.print_array.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "sil.pi_evidence_valid", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "execution.multi_stock_head_exchange", "artifacts.required_present", "ui.responsiveness_metrics_present", "resources.metrics_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "sil.hardware_isolation.pi", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle", "execution.multi_stock_head_exchange", "ui.sustained_responsiveness.windows", "ui.sustained_responsiveness.pi", "resources.sustained_growth.windows", "resources.sustained_growth.pi"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "screenshots", "scenario_root"],
+      "expected_outcome": "informational",
+      "limitations": ["Stress findings are verification evidence and do not authorize production optimization."],
+      "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_tracked_384x10_fixture_is_exact_and_serpentine", "tests/system/test_virtual_print_array_384x10_workflow.py::test_cli_exposes_stress_scenario_and_single_report_set", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order", "tests/system/test_virtual_print_array_384x10_workflow.py::test_stress_scenario_source_stays_hardware_isolated"],
+      "pi_safety_evidence": ["preflight", "hardware_proof"]
+    }
+  ],
+  "suites": [
+    {
+      "id": "standard",
+      "status": "planned",
+      "kind": "standard",
+      "platform": "windows_sil",
+      "scenario_ids": [],
+      "requires_pi_safety_evidence": []
+    },
+    {
+      "id": "lifecycle",
+      "status": "planned",
+      "kind": "lifecycle",
+      "platform": "windows_sil",
+      "scenario_ids": [],
+      "requires_pi_safety_evidence": []
+    },
+    {
+      "id": "host_regression",
+      "status": "active",
+      "kind": "regression",
+      "platform": "windows_sil",
+      "scenario_ids": ["print_array_regression_96_v1"],
+      "requires_pi_safety_evidence": []
+    },
+    {
+      "id": "host_stress",
+      "status": "active",
+      "kind": "stress",
+      "platform": "windows_sil",
+      "scenario_ids": ["print_array_stress_384x10_v1"],
+      "requires_pi_safety_evidence": []
+    },
+    {
+      "id": "pi_primary",
+      "status": "active",
+      "kind": "regression",
+      "platform": "pi_sil",
+      "scenario_ids": ["print_array_regression_96_v1"],
+      "requires_pi_safety_evidence": ["preflight", "hardware_proof"]
+    },
+    {
+      "id": "pi_stress",
+      "status": "active",
+      "kind": "stress",
+      "platform": "pi_sil",
+      "scenario_ids": ["print_array_stress_384x10_v1"],
+      "requires_pi_safety_evidence": ["preflight", "hardware_proof"]
+    }
+  ],
+  "schedules": [
+    {
+      "id": "standard_every_change",
+      "suite_id": "standard",
+      "cadence": "every_change",
+      "owner_role": "verification maintainers",
+      "automation_status": "not_configured",
+      "max_evidence_age_days": 1
+    },
+    {
+      "id": "lifecycle_nightly",
+      "suite_id": "lifecycle",
+      "cadence": "nightly",
+      "owner_role": "verification maintainers",
+      "automation_status": "not_configured",
+      "max_evidence_age_days": 2
+    },
+    {
+      "id": "host_regression_nightly",
+      "suite_id": "host_regression",
+      "cadence": "nightly",
+      "owner_role": "verification maintainers",
+      "automation_status": "not_configured",
+      "max_evidence_age_days": 7
+    },
+    {
+      "id": "host_stress_weekly",
+      "suite_id": "host_stress",
+      "cadence": "weekly",
+      "owner_role": "verification maintainers",
+      "automation_status": "not_configured",
+      "max_evidence_age_days": 14
+    },
+    {
+      "id": "pi_primary_weekly",
+      "suite_id": "pi_primary",
+      "cadence": "weekly",
+      "owner_role": "verification maintainers",
+      "automation_status": "not_configured",
+      "max_evidence_age_days": 14
+    },
+    {
+      "id": "pi_stress_monthly",
+      "suite_id": "pi_stress",
+      "cadence": "monthly",
+      "owner_role": "verification maintainers",
+      "automation_status": "not_configured",
+      "max_evidence_age_days": 35
+    }
+  ],
+  "policy": {
+    "default_registry_id": "virtual_print_array_96_v1",
+    "standard_forbidden_tiers": ["stress"],
+    "pi_required_evidence": ["preflight", "hardware_proof"],
+    "path_policy": "repository_relative_posix",
+    "generated_evidence_updates_manifest": false,
+    "coverage_join_status": "deferred_to_slice_6",
+    "action_catalog": [
+      {
+        "id": "legacy.print_array.prepare",
+        "implementation_status": "embedded",
+        "source_path": "tools/virtual_workflows/scenarios.py"
+      },
+      {
+        "id": "legacy.print_array.start",
+        "implementation_status": "embedded",
+        "source_path": "tools/virtual_workflows/scenarios.py"
+      },
+      {
+        "id": "legacy.print_array.wait_terminal",
+        "implementation_status": "embedded",
+        "source_path": "tools/virtual_workflows/scenarios.py"
+      },
+      {
+        "id": "legacy.print_array.inject_stall",
+        "implementation_status": "embedded",
+        "source_path": "tools/virtual_workflows/scenarios.py"
+      },
+      {
+        "id": "legacy.print_array.exchange_heads",
+        "implementation_status": "embedded",
+        "source_path": "tools/virtual_workflows/scenarios.py"
+      },
+      {
+        "id": "legacy.print_array.teardown",
+        "implementation_status": "embedded",
+        "source_path": "tools/virtual_workflows/scenarios.py"
+      }
+    ],
+    "assertion_catalog": [
+      {
+        "id": "sil.host_hardware_disabled",
+        "evidence_kind": "report_path",
+        "evidence_path": "safety.hardware_interfaces",
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_scenario_source_has_no_production_machine_or_device_construction", "tests/system/test_virtual_print_array_384x10_workflow.py::test_stress_scenario_source_stays_hardware_isolated"]
+      },
+      {
+        "id": "sil.pi_evidence_valid",
+        "evidence_kind": "report_path",
+        "evidence_path": "safety.pi_sil",
+        "test_node_ids": ["tests/system/test_pi_virtual_workflow_lane.py::test_pi_preflight_and_proof_validation_are_fail_closed", "tests/system/test_pi_virtual_workflow_lane.py::test_pi_shell_is_private_device_only_and_never_launches_production_app"]
+      },
+      {
+        "id": "ui.real_app_constructed",
+        "evidence_kind": "pytest",
+        "evidence_path": null,
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report"]
+      },
+      {
+        "id": "execution.expected_completions",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.completed_stock_well_count",
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+      },
+      {
+        "id": "execution.no_queue_starvation",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.queue.values.unexpected_starvation_count",
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+      },
+      {
+        "id": "execution.intent_durability_exact",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.authoritative_io",
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+      },
+      {
+        "id": "execution.terminal_bundle_valid",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.terminal_plan_state",
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+      },
+      {
+        "id": "execution.multi_stock_head_exchange",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.queue.values.event_trace_retention.counts.virtual_head_exchange",
+        "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+      },
+      {
+        "id": "artifacts.required_present",
+        "evidence_kind": "report_path",
+        "evidence_path": "artifacts",
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report"]
+      },
+      {
+        "id": "ui.injected_stall_detected",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.responsiveness.values.injected_stall_assessment",
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_injected_ui_stall_is_detected_attributed_and_captures_stack"]
+      },
+      {
+        "id": "ui.responsiveness_metrics_present",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.responsiveness",
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+      },
+      {
+        "id": "resources.metrics_present",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.resources",
+        "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+      }
+    ]
+  }
+}

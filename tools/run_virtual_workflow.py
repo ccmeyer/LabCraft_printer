@@ -14,6 +14,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tools.virtual_workflows.registry import (  # noqa: E402
+    DEFAULT_SCENARIO_ID,
+    registered_scenario_ids,
+    run_registered_scenario,
+)
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -24,11 +30,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--scenario",
-        choices=(
-            "virtual_print_array_96_v1",
-            "virtual_print_array_384x10_v1",
-        ),
-        default="virtual_print_array_96_v1",
+        choices=registered_scenario_ids(),
+        default=DEFAULT_SCENARIO_ID,
     )
     parser.add_argument(
         "--output-root",
@@ -284,24 +287,20 @@ def main(argv: list[str] | None = None) -> int:
             write_report_set,
         )
         from tools.virtual_workflows.scenarios import (
-            VirtualPrintArrayScenarioConfig,
             VirtualWorkflowScenarioError,
-            run_virtual_print_array_scenario,
         )
 
         def run_once() -> dict[str, object]:
-            return run_virtual_print_array_scenario(
-                VirtualPrintArrayScenarioConfig(
-                    scenario_id=args.scenario,
-                    output_root=args.output_root,
-                    visible=args.visible,
-                    speed_multiplier=args.speed_multiplier,
-                    timeout_seconds=args.timeout_seconds,
-                    inject_ui_stall_ms=args.inject_ui_stall_ms,
-                    inject_after_completion=args.inject_after_completion,
-                    pi_preflight_path=args.pi_preflight,
-                    pi_hardware_proof_path=args.pi_hardware_proof,
-                )
+            return run_registered_scenario(
+                args.scenario,
+                output_root=args.output_root,
+                visible=args.visible,
+                speed_multiplier=args.speed_multiplier,
+                timeout_seconds=args.timeout_seconds,
+                inject_ui_stall_ms=args.inject_ui_stall_ms,
+                inject_after_completion=args.inject_after_completion,
+                pi_preflight_path=args.pi_preflight,
+                pi_hardware_proof_path=args.pi_hardware_proof,
             )
 
         if not repeated and args.accept_baseline is None:

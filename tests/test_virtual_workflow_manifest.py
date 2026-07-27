@@ -1,0 +1,385 @@
+from __future__ import annotations
+
+import copy
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from tools.run_virtual_workflow import _parser, main
+from tools.virtual_workflows.registry import (
+    DEFAULT_SCENARIO_ID,
+    MANIFEST_ID,
+    MANIFEST_PATH,
+    MANIFEST_SCHEMA_NAME,
+    MANIFEST_SCHEMA_VERSION,
+    REGISTERED_SCENARIOS,
+    ManifestValidationError,
+    get_registered_scenario,
+    load_capability_manifest,
+    registered_scenario_ids,
+    run_registered_scenario,
+    validate_capability_manifest,
+)
+from tools.virtual_workflows.scenarios import (
+    SCENARIO_COMPLETION_COUNTS,
+    SCENARIO_FIXTURES,
+    STRESS_WORKLOAD_ID,
+    WORKLOAD_ID,
+    VirtualPrintArrayScenarioConfig,
+    load_virtual_print_array_fixture,
+)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _raw_manifest() -> dict[str, object]:
+    return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+
+
+def _row(payload: dict[str, object], section: str, row_id: str) -> dict[str, object]:
+    return next(
+        row
+        for row in payload[section]
+        if isinstance(row, dict) and row["id"] == row_id
+    )
+
+
+def test_registry_preserves_legacy_default_order_fixtures_and_counts():
+    assert DEFAULT_SCENARIO_ID == WORKLOAD_ID
+    assert registered_scenario_ids() == (WORKLOAD_ID, STRESS_WORKLOAD_ID)
+
+    for scenario_id in (WORKLOAD_ID, STRESS_WORKLOAD_ID):
+        definition = get_registered_scenario(scenario_id)
+        fixture = load_virtual_print_array_fixture(scenario_id=scenario_id)
+
+        assert definition.registry_id == scenario_id
+        assert definition.workload_id == scenario_id
+        assert definition.fixture_path == SCENARIO_FIXTURES[scenario_id]
+        assert definition.expected_completion_count == (
+            SCENARIO_COMPLETION_COUNTS[scenario_id]
+        )
+        assert fixture["fixture_id"] == scenario_id
+        assert fixture["workload"]["completion_count"] == (
+            definition.expected_completion_count
+        )
+
+    with pytest.raises(TypeError):
+        REGISTERED_SCENARIOS["another"] = get_registered_scenario(WORKLOAD_ID)
+
+
+def test_tracked_manifest_validates_and_describes_current_truth():
+    payload = load_capability_manifest()
+
+    assert payload["schema_name"] == MANIFEST_SCHEMA_NAME
+    assert payload["schema_version"] == MANIFEST_SCHEMA_VERSION
+    assert payload["manifest_id"] == MANIFEST_ID
+    assert {
+        scenario["registry_id"] for scenario in payload["scenarios"]
+    } == set(registered_scenario_ids())
+
+    standard = _row(payload, "suites", "standard")
+    lifecycle = _row(payload, "suites", "lifecycle")
+    assert standard["status"] == lifecycle["status"] == "planned"
+    assert standard["scenario_ids"] == lifecycle["scenario_ids"] == []
+
+    capabilities = {
+        capability["id"]: capability for capability in payload["capabilities"]
+    }
+    assert capabilities["execution.refill_resume"]["status"] == "deferred"
+    assert capabilities["experiment.editor_create_finalize"]["status"] == "planned"
+    assert (
+        capabilities["experiment.prepared_rename_refinalize"]["status"]
+        == "planned"
+    )
+    assert (
+        capabilities["execution.multi_stock_head_exchange"]["status"]
+        == "partial"
+    )
+    assert {
+        schedule["automation_status"] for schedule in payload["schedules"]
+    } == {"not_configured"}
+    assert payload["policy"]["coverage_join_status"] == "deferred_to_slice_6"
+    assert payload["policy"]["generated_evidence_updates_manifest"] is False
+
+
+def test_cli_scenario_surface_is_registry_driven_and_legacy_compatible():
+    parser = _parser()
+    action = next(item for item in parser._actions if item.dest == "scenario")
+
+    assert tuple(action.choices) == registered_scenario_ids()
+    assert parser.parse_args([]).scenario == DEFAULT_SCENARIO_ID
+    assert parser.parse_args(
+        ["--scenario", STRESS_WORKLOAD_ID]
+    ).scenario == STRESS_WORKLOAD_ID
+
+
+@pytest.mark.parametrize("scenario_id", [WORKLOAD_ID, STRESS_WORKLOAD_ID])
+def test_registry_dispatch_uses_existing_config_and_runner(
+    scenario_id,
+    tmp_path,
+    monkeypatch,
+):
+    from tools.virtual_workflows import scenarios
+
+    captured = []
+
+    def fake_run(config):
+        captured.append(config)
+        return {"scenario_id": config.scenario_id}
+
+    monkeypatch.setattr(scenarios, "run_virtual_print_array_scenario", fake_run)
+
+    result = run_registered_scenario(
+        scenario_id,
+        output_root=tmp_path,
+        speed_multiplier=25,
+        timeout_seconds=90,
+    )
+
+    assert result == {"scenario_id": scenario_id}
+    assert len(captured) == 1
+    config = captured[0]
+    assert isinstance(config, VirtualPrintArrayScenarioConfig)
+    assert config.scenario_id == scenario_id
+    assert config.fixture_path == SCENARIO_FIXTURES[scenario_id].resolve()
+    assert config.output_root == tmp_path.resolve()
+    assert config.speed_multiplier == 25
+    assert config.timeout_seconds == 90
+
+
+@pytest.mark.parametrize("scenario_id", [WORKLOAD_ID, STRESS_WORKLOAD_ID])
+def test_cli_dispatches_each_legacy_id_through_registry(
+    scenario_id,
+    tmp_path,
+    monkeypatch,
+):
+    import tools.run_virtual_workflow as cli
+
+    calls = []
+
+    def fake_dispatch(selected, **config_values):
+        calls.append((selected, config_values))
+        report_dir = tmp_path / f"report-{len(calls)}"
+        scenario_root = report_dir / "scenario-root"
+        scenario_root.mkdir(parents=True)
+        (report_dir / "summary.txt").write_text("synthetic\n", encoding="utf-8")
+        return {
+            "safety": {"scenario_root": str(scenario_root)},
+            "classification": {"status": "pass"},
+        }
+
+    monkeypatch.setattr(cli, "run_registered_scenario", fake_dispatch)
+
+    assert main(
+        [
+            "--scenario",
+            scenario_id,
+            "--output-root",
+            str(tmp_path / "unused-output"),
+        ]
+    ) == 0
+    assert len(calls) == 1
+    selected, config_values = calls[0]
+    assert selected == scenario_id
+    assert config_values["output_root"] == (tmp_path / "unused-output")
+    assert config_values["visible"] is False
+    assert config_values["speed_multiplier"] == 1.0
+    assert config_values["timeout_seconds"] == 180.0
+    assert config_values["pi_preflight_path"] is None
+    assert config_values["pi_hardware_proof_path"] is None
+
+
+def test_registry_import_and_cli_help_are_application_import_free():
+    script = """
+import sys
+from tools.run_virtual_workflow import _parser
+_parser().format_help()
+forbidden = {
+    "App",
+    "Controller",
+    "Model",
+    "View",
+    "Machine_FreeRTOS",
+    "PySide6",
+    "tools.virtual_workflows.scenarios",
+}
+loaded = sorted(forbidden.intersection(sys.modules))
+if loaded:
+    raise SystemExit(f"unexpected imports: {loaded}")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def _unknown_top_level(payload):
+    payload["unexpected"] = True
+
+
+def _invalid_capability_status(payload):
+    payload["capabilities"][0]["status"] = "green"
+
+
+def _duplicate_capability(payload):
+    payload["capabilities"].append(copy.deepcopy(payload["capabilities"][0]))
+
+
+def _duplicate_scenario(payload):
+    payload["scenarios"].append(copy.deepcopy(payload["scenarios"][0]))
+
+
+def _duplicate_suite(payload):
+    payload["suites"].append(copy.deepcopy(payload["suites"][0]))
+
+
+def _duplicate_action(payload):
+    catalog = payload["policy"]["action_catalog"]
+    catalog.append(copy.deepcopy(catalog[0]))
+
+
+def _duplicate_assertion(payload):
+    catalog = payload["policy"]["assertion_catalog"]
+    catalog.append(copy.deepcopy(catalog[0]))
+
+
+def _unreferenced_action(payload):
+    payload["policy"]["action_catalog"].append(
+        {
+            "id": "unused.action",
+            "implementation_status": "embedded",
+            "source_path": "tools/virtual_workflows/scenarios.py",
+        }
+    )
+
+
+def _unreferenced_assertion(payload):
+    payload["policy"]["assertion_catalog"].append(
+        {
+            "id": "unused.assertion",
+            "evidence_kind": "pytest",
+            "evidence_path": None,
+            "test_node_ids": [
+                "tests/test_virtual_workflow_manifest.py::test_tracked_manifest_validates_and_describes_current_truth"
+            ],
+        }
+    )
+
+
+def _missing_registry_scenario(payload):
+    payload["scenarios"].pop()
+
+
+def _unknown_registry_scenario(payload):
+    payload["scenarios"][0]["registry_id"] = "unknown_scenario_v1"
+
+
+def _absolute_fixture_path(payload):
+    payload["scenarios"][0]["workload_fixture_path"] = "C:/private/fixture.json"
+
+
+def _scenario_without_assertions(payload):
+    payload["scenarios"][0]["assertion_ids"] = []
+
+
+def _scenario_with_unknown_action(payload):
+    payload["scenarios"][0]["action_ids"].append("unknown.action")
+
+
+def _scenario_with_unknown_suite(payload):
+    payload["scenarios"][0]["suite_ids"].append("unknown_suite")
+
+
+def _scenario_with_missing_test(payload):
+    payload["scenarios"][0]["test_node_ids"][0] = (
+        "tests/system/test_virtual_print_array_workflow.py::test_missing"
+    )
+
+
+def _covered_capability_without_scenario(payload):
+    payload["capabilities"][0]["active_scenario_ids"] = []
+
+
+def _covered_capability_without_required_assertion(payload):
+    payload["capabilities"][0]["active_scenario_ids"] = [
+        "print_array_regression_96_v1"
+    ]
+    payload["capabilities"][0]["required_assertion_ids"] = ["resources.metrics_present"]
+
+
+def _capability_scenario_membership_drift(payload):
+    stress = _row(payload, "scenarios", "print_array_stress_384x10_v1")
+    stress["capability_ids"].remove("sil.hardware_isolation.host")
+
+
+def _stress_in_standard(payload):
+    stress = _row(payload, "scenarios", "print_array_stress_384x10_v1")
+    standard = _row(payload, "suites", "standard")
+    stress["suite_ids"].append("standard")
+    standard["scenario_ids"].append(stress["id"])
+
+
+def _pi_suite_without_proof(payload):
+    suite = _row(payload, "suites", "pi_primary")
+    suite["requires_pi_safety_evidence"] = ["preflight"]
+
+
+def _schedule_with_unknown_suite(payload):
+    payload["schedules"][0]["suite_id"] = "unknown_suite"
+
+
+def _secret_like_field(payload):
+    payload["policy"]["password"] = "do-not-store"
+
+
+def _uri_credentials(payload):
+    payload["capabilities"][0]["limitations"][0] = "https://user:pass@example.test"
+
+
+@pytest.mark.parametrize(
+    ("mutator", "message"),
+    [
+        (_unknown_top_level, "unknown fields"),
+        (_invalid_capability_status, "must be one of"),
+        (_duplicate_capability, "duplicate ID"),
+        (_duplicate_scenario, "duplicate ID"),
+        (_duplicate_suite, "duplicate ID"),
+        (_duplicate_action, "duplicate ID"),
+        (_duplicate_assertion, "duplicate ID"),
+        (_unreferenced_action, "unreferenced actions"),
+        (_unreferenced_assertion, "unreferenced assertions"),
+        (_missing_registry_scenario, "manifest/registry scenario drift"),
+        (_unknown_registry_scenario, "unsupported registered scenario"),
+        (_absolute_fixture_path, "portable POSIX separators"),
+        (_scenario_without_assertions, "requires assertions"),
+        (_scenario_with_unknown_action, "unknown actions"),
+        (_scenario_with_unknown_suite, "unknown suites"),
+        (_scenario_with_missing_test, "missing test function"),
+        (_covered_capability_without_scenario, "requires scenarios and assertions"),
+        (
+            _covered_capability_without_required_assertion,
+            "capability .* lacks assertion-backed scenario",
+        ),
+        (_capability_scenario_membership_drift, "scenario membership drifted"),
+        (_stress_in_standard, "cannot join standard"),
+        (_pi_suite_without_proof, "Pi safety evidence is inconsistent"),
+        (_schedule_with_unknown_suite, "references unknown suite"),
+        (_secret_like_field, "secret-like field"),
+        (_uri_credentials, "URI credentials"),
+    ],
+)
+def test_manifest_validator_rejects_drift_and_unsafe_claims(mutator, message):
+    payload = _raw_manifest()
+    mutator(payload)
+
+    with pytest.raises(ManifestValidationError, match=message):
+        validate_capability_manifest(payload)

@@ -178,6 +178,38 @@ Prerequisites:
 - `QT_QPA_PLATFORM=offscreen` for headless use (set automatically by the CLI
   unless `--visible` is supplied).
 
+### SIL scenario registry and capability manifest
+
+The existing 96-well and 384x10 IDs are registered in
+`tools/virtual_workflows/registry.py`. The CLI obtains its `--scenario`
+choices from that registry, but continues to construct the existing
+`VirtualPrintArrayScenarioConfig` and execute the existing scenario runner.
+The default remains `virtual_print_array_96_v1`.
+
+The tracked current-truth portfolio is
+`tools/virtual_workflows/manifests/capability_coverage_v1.json`, with schema
+identity `labcraft.sil_capability_coverage` version 1. It records capabilities,
+registered scenarios, planned/active suites, intended schedules, embedded
+action/assertion IDs, limitations, and freshness policy. Generated reports do
+not rewrite it. The `standard` and `lifecycle` suites are intentionally planned
+and empty until their later framework slices; suite/capability CLI selection
+is not available yet.
+
+Validate registry/fixture drift, manifest references, portable paths, test
+nodes, Pi safety requirements, and current capability claims with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_virtual_workflow_manifest.py `
+  tests\test_virtual_workflow_contract_freeze.py
+```
+
+Validation failures identify the manifest field or stable ID that drifted.
+Keep all manifest paths repository-relative with POSIX separators, do not store
+credentials or machine-local paths, and do not mark a capability `covered`
+without an active assertion-backed scenario. This validation is read-only and
+does not launch Qt, a workflow, physical hardware, or a remote Pi operation.
+
 Run the normal one-timescale characterization:
 
 ```powershell

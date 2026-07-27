@@ -165,6 +165,12 @@ Before proceeding to the next slice:
 | 9. Expanded workflow scenario catalog | `deferred` | Stop/resume, reset, loading, calibration adapters | Selected workflows produce trustworthy artifacts |
 | 10. Codex skill, AGENTS rules, and automation | `not_started` | Make lane selection repeatable and enforceable | Codex/human instructions invoke repository tooling |
 
+The separate
+[SIL verification framework hardening plan](sil_verification_framework_hardening_plan.md)
+is a follow-on verification-tooling effort. It does not resume performance
+remediation, change production behavior, or alter the slice statuses above.
+The performance-focused **Current Next Action** in this plan remains unchanged.
+
 ## Verification Layers
 
 | Layer | Typical duration | Primary purpose | Required hardware |
