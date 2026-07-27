@@ -14,6 +14,7 @@ from tools.virtual_workflows.actions import (
     ScenarioContext,
     capture_milestone,
     drive_editor_create_finalize,
+    drive_editor_prestart_rename_refinalize,
     execute_action,
     install_dialog_handler,
     stage_virtual_head,
@@ -299,6 +300,85 @@ def test_editor_driver_propagates_global_deadline_and_rejects_dialog(
 
     with pytest.raises(ScenarioActionError) as caught:
         drive_editor_create_finalize(context, {})
+
+    assert caught.value.action_id == "editor.open_via_ui"
+    assert caught.value.stage == "timeout"
+    assert context.action_results[0]["failure_stage"] == "timeout"
+    assert dialog.isVisible() is False
+    dialog.deleteLater()
+    button.deleteLater()
+    qapp.processEvents()
+
+
+def test_editor_rename_driver_rejects_the_wrong_modal(qapp, tmp_path):
+    from PySide6 import QtCore, QtWidgets
+
+    context, _, _ = _context(tmp_path)
+    context.app = qapp
+    context.qt_core = QtCore
+    button = QtWidgets.QPushButton("Experiment Editor")
+    wrong = QtWidgets.QDialog()
+    wrong.setWindowTitle("Wrong rename modal")
+    button.clicked.connect(wrong.exec)
+    context.view = SimpleNamespace(
+        well_plate_widget=SimpleNamespace(
+            design_experiment_button=button
+        )
+    )
+
+    with pytest.raises(
+        ScenarioActionError,
+        match="unexpected active modal",
+    ) as caught:
+        drive_editor_prestart_rename_refinalize(
+            context,
+            initial_name="before",
+            renamed_name="after",
+        )
+
+    assert caught.value.action_id == "editor.open_via_ui"
+    assert caught.value.evidence["modal_title"] == "Wrong rename modal"
+    assert wrong.isVisible() is False
+    assert (context.screenshots_dir / "failure.png").is_file()
+    wrong.deleteLater()
+    button.deleteLater()
+    qapp.processEvents()
+
+
+def test_editor_rename_driver_propagates_global_deadline_and_rejects_dialog(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    from PySide6 import QtCore, QtWidgets
+    import View
+
+    clock = FakeClock()
+    context, _, _ = _context(
+        tmp_path,
+        timeout_seconds=0.01,
+        clock=clock,
+    )
+    context.app = qapp
+    context.qt_core = QtCore
+    button = QtWidgets.QPushButton("Experiment Editor")
+    dialog = QtWidgets.QDialog()
+    dialog.setWindowTitle("Synthetic prepared editor")
+    button.clicked.connect(dialog.exec)
+    context.view = SimpleNamespace(
+        well_plate_widget=SimpleNamespace(
+            design_experiment_button=button
+        )
+    )
+    monkeypatch.setattr(View, "ExperimentDesignDialog", QtWidgets.QDialog)
+    clock.value += 1.0
+
+    with pytest.raises(ScenarioActionError) as caught:
+        drive_editor_prestart_rename_refinalize(
+            context,
+            initial_name="before",
+            renamed_name="after",
+        )
 
     assert caught.value.action_id == "editor.open_via_ui"
     assert caught.value.stage == "timeout"

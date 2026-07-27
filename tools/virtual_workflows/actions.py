@@ -36,8 +36,11 @@ EDITOR_LIFECYCLE_ACTION_IDS = frozenset(
         "editor.configure_design_via_ui",
         "editor.optimize_generate_via_ui",
         "editor.finish_via_ui",
+        "editor.rename_prepared_via_ui",
+        "editor.refinalize_prepared_via_ui",
         "artifact.capture_milestone",
         "validation.prepared_bundle",
+        "validation.refinalized_bundle",
         "experiment.reload_authoritative",
         "scenario.teardown",
     }
@@ -1277,6 +1280,271 @@ def drive_editor_create_finalize(
     }
 
 
+def drive_editor_prestart_rename_refinalize(
+    context: ScenarioContext,
+    *,
+    initial_name: str,
+    renamed_name: str,
+) -> dict[str, Any]:
+    """Reopen a prepared design, rename it, and Finish through real Qt controls."""
+
+    if context.app is None or context.qt_core is None or context.view is None:
+        raise RuntimeError("editor automation requires a launched Qt application")
+
+    from PySide6 import QtTest, QtWidgets
+    from View import ExperimentDesignDialog
+
+    QtCore = context.qt_core
+    button = context.view.well_plate_widget.design_experiment_button
+    if not button.isEnabled():
+        raise ScenarioActionError(
+            "editor.open_via_ui",
+            "Experiment Editor button is disabled",
+            stage="precondition",
+        )
+
+    state: dict[str, Any] = {
+        "entered": False,
+        "finished": False,
+        "error": None,
+        "dialog": None,
+        "before": None,
+        "after": None,
+    }
+    driver_timer = QtCore.QTimer(context.app)
+    driver_timer.setInterval(5)
+
+    def click(widget: Any) -> None:
+        QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
+        context.app.processEvents()
+
+    def toggle_checkbox(widget: Any) -> None:
+        widget.setFocus()
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key.Key_Space)
+        context.app.processEvents()
+
+    def design_surface(dialog: Any) -> dict[str, Any]:
+        reagent_rows: list[dict[str, Any]] = []
+        for row in range(dialog._reagent_row_count()):
+            values: dict[str, Any] = {}
+            for column in range(dialog.COL_DELETE):
+                widget = dialog._reagent_cell_widget(row, column)
+                if isinstance(widget, QtWidgets.QLineEdit):
+                    value: Any = widget.text()
+                elif isinstance(widget, QtWidgets.QComboBox):
+                    value = widget.currentText()
+                elif isinstance(
+                    widget,
+                    (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox),
+                ):
+                    value = widget.value()
+                elif isinstance(widget, QtWidgets.QCheckBox):
+                    value = widget.isChecked()
+                elif isinstance(widget, QtWidgets.QLabel):
+                    value = widget.text()
+                else:
+                    value = None
+                values[str(column)] = value
+            reagent_rows.append(values)
+        return {
+            "replicates": dialog.rep_spin.value(),
+            "printed_volume_nL": dialog.v_spin.value(),
+            "final_volume_nL": dialog.final_v_spin.value(),
+            "printed_volume_tolerance_nL": dialog.volume_tolerance_spin.value(),
+            "plate_name": dialog.plate_format_combo.currentText(),
+            "allow_two_stock_solutions": dialog.allow_two_chk.isChecked(),
+            "randomize_assignments": dialog.randomize_chk.isChecked(),
+            "well_ids": list(
+                dialog.model.get_auto_assignment_included_wells() or []
+            ),
+            "reagent_rows": reagent_rows,
+        }
+
+    def run_driver() -> None:
+        if state["entered"]:
+            return
+        state["entered"] = True
+        driver_timer.stop()
+        active = context.app.activeModalWidget()
+        try:
+            if not isinstance(active, ExperimentDesignDialog):
+                title = active.windowTitle() if active is not None else None
+                if isinstance(active, QtWidgets.QDialog):
+                    active.reject()
+                execute_action(
+                    context,
+                    "editor.open_via_ui",
+                    lambda: {},
+                    precondition=lambda: (
+                        False,
+                        "unexpected active modal while reopening prepared editor",
+                        {
+                            "modal_type": (
+                                type(active).__name__
+                                if active is not None
+                                else None
+                            ),
+                            "modal_title": title,
+                        },
+                    ),
+                )
+            dialog = active
+            state["dialog"] = dialog
+            execute_action(
+                context,
+                "editor.open_via_ui",
+                lambda: {
+                    "dialog_type": type(dialog).__name__,
+                    "window_title": dialog.windowTitle(),
+                    "prepared_reopen": True,
+                },
+            )
+            capture_milestone(
+                context,
+                "rename_editor_opened",
+                evidence={
+                    "experiment_name": dialog.exp_name_edit.text(),
+                    "editable": (
+                        dialog.exp_name_edit.isEnabled()
+                        and not dialog.exp_name_edit.isReadOnly()
+                    ),
+                },
+                widget=dialog,
+            )
+
+            def rename() -> Mapping[str, Any]:
+                _ensure_editor_deadline(
+                    context, "editor.rename_prepared_via_ui", "rename"
+                )
+                if (
+                    not dialog.exp_name_edit.isEnabled()
+                    or dialog.exp_name_edit.isReadOnly()
+                ):
+                    raise RuntimeError(
+                        "prepared experiment name control is not editable"
+                    )
+                if dialog.exp_name_edit.text() != initial_name:
+                    raise RuntimeError(
+                        "prepared editor did not reopen with the initial name"
+                    )
+                if dialog.auto_update_chk.isChecked():
+                    toggle_checkbox(dialog.auto_update_chk)
+                if dialog.auto_update_chk.isChecked():
+                    raise RuntimeError("auto update could not be disabled")
+                before = design_surface(dialog)
+                _qt_replace_text(
+                    QtCore,
+                    QtTest,
+                    dialog.exp_name_edit,
+                    renamed_name,
+                )
+                QtTest.QTest.keyClick(
+                    dialog.exp_name_edit,
+                    QtCore.Qt.Key.Key_Tab,
+                )
+                context.app.processEvents()
+                after = design_surface(dialog)
+                if dialog.exp_name_edit.text() != renamed_name:
+                    raise RuntimeError("experiment name edit was not retained")
+                if after != before:
+                    raise RuntimeError(
+                        "a non-name editor control changed during prepared rename"
+                    )
+                state["before"] = before
+                state["after"] = after
+                return {
+                    "initial_name": initial_name,
+                    "renamed_name": renamed_name,
+                    "non_name_controls_unchanged": True,
+                }
+
+            execute_action(
+                context,
+                "editor.rename_prepared_via_ui",
+                rename,
+            )
+            capture_milestone(
+                context,
+                "renamed",
+                evidence={
+                    "initial_name": initial_name,
+                    "renamed_name": renamed_name,
+                    "non_name_controls_unchanged": True,
+                },
+                widget=dialog,
+            )
+
+            def refinalize() -> Mapping[str, Any]:
+                click(dialog.finish_btn)
+                _ensure_editor_deadline(
+                    context,
+                    "editor.refinalize_prepared_via_ui",
+                    "refinalized",
+                )
+                if dialog.result() != QtWidgets.QDialog.DialogCode.Accepted:
+                    raise RuntimeError(
+                        "prepared editor did not accept after second Finish"
+                    )
+                return {
+                    "dialog_result": int(dialog.result()),
+                    "apply_requested": bool(dialog._apply_requested),
+                    "unexpected_dialog_count": len(
+                        context.unexpected_dialogs
+                    ),
+                }
+
+            execute_action(
+                context,
+                "editor.refinalize_prepared_via_ui",
+                refinalize,
+            )
+            capture_milestone(
+                context,
+                "refinalized",
+                evidence={"experiment_name": renamed_name},
+                widget=dialog,
+            )
+            state["finished"] = True
+        except BaseException as exc:
+            state["error"] = exc
+            try:
+                if "failure" not in context.screenshots:
+                    capture_failure_screenshot(context, widget=active)
+            except Exception:
+                pass
+            if isinstance(active, QtWidgets.QDialog) and active.isVisible():
+                active.reject()
+
+    driver_timer.timeout.connect(run_driver)
+    driver_timer.start()
+    try:
+        QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+    finally:
+        driver_timer.stop()
+        driver_timer.deleteLater()
+    if state["error"] is not None:
+        raise state["error"]
+    if not state["entered"]:
+        raise ScenarioActionError(
+            "editor.open_via_ui",
+            "the prepared editor did not open",
+            stage="timeout",
+        )
+    if not state["finished"]:
+        raise ScenarioActionError(
+            "editor.refinalize_prepared_via_ui",
+            "the prepared editor did not finish",
+            stage="operation",
+        )
+    return {
+        "dialog_type": type(state["dialog"]).__name__,
+        "initial_name": initial_name,
+        "renamed_name": renamed_name,
+        "non_name_controls_unchanged": state["before"] == state["after"],
+        "refinalized": True,
+    }
+
+
 def validate_prepared_bundle(
     context: ScenarioContext,
     validator: Callable[[], Mapping[str, Any]],
@@ -1294,6 +1562,24 @@ def validate_prepared_bundle(
     return validation
 
 
+def validate_refinalized_bundle(
+    context: ScenarioContext,
+    validator: Callable[[], Mapping[str, Any]],
+) -> dict[str, Any]:
+    validation: dict[str, Any] = {}
+
+    def run() -> Mapping[str, Any]:
+        validation.update(dict(validator()))
+        return {
+            "plan_state": validation.get("plan_state"),
+            "eligibility_status": validation.get("eligibility_status"),
+            "renamed_name": validation.get("renamed_name"),
+        }
+
+    execute_action(context, "validation.refinalized_bundle", run)
+    return validation
+
+
 def reload_authoritative_experiment(
     context: ScenarioContext,
     operation: Callable[[], Mapping[str, Any]],
@@ -1305,16 +1591,20 @@ def reload_authoritative_experiment(
     )
 
 
-def capture_failure_screenshot(context: ScenarioContext) -> Path:
+def capture_failure_screenshot(
+    context: ScenarioContext,
+    *,
+    widget: Any | None = None,
+) -> Path:
     """Best-effort failure artifact capture outside the ordinary action stream."""
 
-    if context.view is None:
+    if widget is None and context.view is None:
         raise RuntimeError("failure screenshot requires a launched view")
     path = (context.screenshots_dir / "failure.png").resolve()
     if context.screenshots_dir not in path.parents:
         raise RuntimeError("failure screenshot escaped the screenshot directory")
     path.parent.mkdir(parents=True, exist_ok=True)
-    image = context.view.grab()
+    image = (widget if widget is not None else context.view).grab()
     if image.isNull() or not image.save(str(path), "PNG"):
         raise RuntimeError("could not capture screenshot failure.png")
     if not path.is_file() or path.stat().st_size <= 0:
@@ -1530,6 +1820,7 @@ __all__ = [
     "capture_milestone",
     "connect_machine_ready",
     "drive_editor_create_finalize",
+    "drive_editor_prestart_rename_refinalize",
     "enable_pressure_regulation",
     "execute_action",
     "install_dialog_handler",
@@ -1540,6 +1831,7 @@ __all__ = [
     "start_array_via_ui",
     "teardown_scenario",
     "validate_prepared_bundle",
+    "validate_refinalized_bundle",
     "validate_terminal_bundle",
     "wait_for_array_state",
     "wait_for_completions",

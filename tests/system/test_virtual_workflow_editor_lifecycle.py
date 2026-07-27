@@ -8,10 +8,14 @@ import pytest
 
 from tools.virtual_workflows.editor_scenarios import (
     ASSERTION_IDS,
+    RENAME_ASSERTION_IDS,
+    RENAME_WORKLOAD_ID,
     WORKLOAD_ID,
     EditorLifecycleScenarioConfig,
     load_editor_create_finalize_fixture,
+    load_editor_prestart_rename_refinalize_fixture,
     run_editor_create_finalize_scenario,
+    run_editor_prestart_rename_refinalize_scenario,
 )
 from tools.virtual_workflows.actions import ScenarioActionError
 from tools.virtual_workflows.report import validate_report_v1
@@ -47,6 +51,42 @@ def test_editor_create_finalize_fixture_contract_is_exact():
         "workload": {
             "completion_count": 1,
             "expected_editor_finalization_operations": 1,
+        },
+    }
+
+
+def test_editor_prestart_rename_refinalize_fixture_contract_is_exact():
+    fixture = load_editor_prestart_rename_refinalize_fixture()
+
+    assert fixture == {
+        "fixture_id": RENAME_WORKLOAD_ID,
+        "schema_version": 1,
+        "experiment": {
+            "initial_name": "sil-editor-prestart-rename-v1",
+            "renamed_name": "sil-editor-prestart-renamed-v1",
+            "plate_name": "shallow-384_well_plate",
+            "replicates": 2,
+            "expected_well_ids": ["A1", "A2"],
+            "printed_volume_nL": 10.0,
+            "final_volume_nL": 10.0,
+            "printed_volume_tolerance_nL": 0.0,
+            "randomize_assignments": False,
+            "allow_two_stock_solutions": False,
+        },
+        "reagent": {
+            "stock_label": "Editor Stock",
+            "group": "Additive",
+            "printing_mode": "droplet",
+            "starting_concentration": 0.0,
+            "targets": [1.0],
+            "units": "x",
+            "fixed_stock_concentration": 1.0,
+            "droplet_volume_nL": 10.0,
+        },
+        "workload": {
+            "completion_count": 2,
+            "expected_editor_finalization_operations": 2,
+            "expected_rename_operations": 1,
         },
     }
 
@@ -203,5 +243,178 @@ def test_editor_lifecycle_failure_reports_failed_and_incomplete_assertions(
     cleanup = report["metrics"]["workflow"]["values"]["cleanup_results"]
     assert cleanup
     assert {item["status"] for item in cleanup} == {"pass"}
+    report_dir = Path(report["safety"]["scenario_root"]).parent
+    assert (report_dir / "failure_traceback.txt").is_file()
+
+
+@pytest.mark.sil_lifecycle
+def test_editor_prestart_rename_refinalize_lifecycle_report(qapp, tmp_path):
+    started = time.perf_counter()
+    report = run_editor_prestart_rename_refinalize_scenario(
+        EditorLifecycleScenarioConfig(
+            output_root=tmp_path,
+            scenario_id=RENAME_WORKLOAD_ID,
+            speed_multiplier=1000.0,
+            timeout_seconds=60.0,
+            run_id="editor-prestart-rename-refinalize",
+        )
+    )
+    elapsed = time.perf_counter() - started
+    validate_report_v1(report)
+
+    assert elapsed < 60
+    assert report["run"]["duration_ms"] < 60_000
+    assert (
+        report["run"]["scenario_name"]
+        == "experiment_editor_prestart_rename_refinalize"
+    )
+    assert report["classification"] == {
+        "status": "pass",
+        "threshold_maturity": "informational",
+        "reasons": [],
+    }
+    assert report["workload"]["operation_count"] == 2
+    assert report["workload"]["experiment_name"] == (
+        "sil-editor-prestart-rename-v1"
+    )
+    assert report["workload"]["renamed_experiment_name"] == (
+        "sil-editor-prestart-renamed-v1"
+    )
+
+    workflow = report["metrics"]["workflow"]["values"]
+    assert workflow["dialogs"] == []
+    assert workflow["unexpected_dialogs"] == []
+    assert workflow["errors"] == []
+    assert [item["name"] for item in workflow["lifecycle_milestones"]] == [
+        "editor_opened",
+        "generated",
+        "initial_finalized",
+        "rename_editor_opened",
+        "renamed",
+        "refinalized",
+        "reloaded",
+        "validated",
+    ]
+    assert [item["action_id"] for item in workflow["action_results"]] == [
+        "app.launch_simulated",
+        "editor.open_via_ui",
+        "artifact.capture_milestone",
+        "editor.new_experiment_via_ui",
+        "editor.configure_design_via_ui",
+        "editor.optimize_generate_via_ui",
+        "artifact.capture_milestone",
+        "editor.finish_via_ui",
+        "artifact.capture_milestone",
+        "validation.prepared_bundle",
+        "editor.open_via_ui",
+        "artifact.capture_milestone",
+        "editor.rename_prepared_via_ui",
+        "artifact.capture_milestone",
+        "editor.refinalize_prepared_via_ui",
+        "artifact.capture_milestone",
+        "validation.refinalized_bundle",
+        "experiment.reload_authoritative",
+        "artifact.capture_milestone",
+        "artifact.capture_milestone",
+        "scenario.teardown",
+    ]
+    assert {item["status"] for item in workflow["action_results"]} == {"pass"}
+    assert {item["status"] for item in workflow["cleanup_results"]} == {"pass"}
+    assertions = {
+        item["assertion_id"]: item for item in workflow["assertion_results"]
+    }
+    assert set(assertions) == set(RENAME_ASSERTION_IDS)
+    assert {item["decision"] for item in assertions.values()} == {"pass"}
+
+    persistence = report["metrics"]["persistence"]["values"]
+    before = persistence["rename_refinalization"]["before"]
+    after = persistence["rename_refinalization"]["after"]
+    refinalized = persistence["refinalized_bundle"]
+    reloaded = persistence["reload_activation"]
+    assert before["metadata_name"] == "sil-editor-prestart-rename-v1"
+    assert after["renamed_name"] == "sil-editor-prestart-renamed-v1"
+    assert refinalized["failed_checks"] == []
+    assert refinalized["plan_state"] == "prepared"
+    assert refinalized["eligibility_status"] == "ready_to_start"
+    assert refinalized["total_added_droplets"] == 0
+    assert refinalized["experiment_directories"] == [
+        "sil-editor-prestart-renamed-v1"
+    ]
+    assert refinalized["staging_directories"] == []
+    assert reloaded["eligibility_status"] == "ready_to_start"
+    assert reloaded["resume_state"] == "clean"
+    assert reloaded["resume_intent_count"] == 0
+
+    report_dir = Path(report["safety"]["scenario_root"]).parent
+    assert set(report["artifacts"]["screenshots"]) == {
+        "editor_opened",
+        "generated",
+        "initial_finalized",
+        "rename_editor_opened",
+        "renamed",
+        "refinalized",
+        "reloaded",
+        "validated",
+    }
+    for relative in report["artifacts"]["screenshots"].values():
+        path = report_dir / relative
+        assert path.is_file()
+        assert path.stat().st_size > 0
+    assert not (report_dir / "failure_traceback.txt").exists()
+
+
+@pytest.mark.sil_lifecycle
+def test_editor_rename_failure_retains_evidence_and_incomplete_assertions(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    import tools.virtual_workflows.editor_scenarios as scenarios
+
+    def fail_refinalize(_context, *, initial_name, renamed_name):
+        raise ScenarioActionError(
+            "editor.refinalize_prepared_via_ui",
+            "synthetic prepared refinalization failure",
+            stage="operation",
+            evidence={
+                "initial_name": initial_name,
+                "renamed_name": renamed_name,
+            },
+        )
+
+    monkeypatch.setattr(
+        scenarios,
+        "drive_editor_prestart_rename_refinalize",
+        fail_refinalize,
+    )
+    report = run_editor_prestart_rename_refinalize_scenario(
+        EditorLifecycleScenarioConfig(
+            output_root=tmp_path,
+            scenario_id=RENAME_WORKLOAD_ID,
+            timeout_seconds=60,
+            run_id="editor-rename-failure",
+        )
+    )
+
+    assert report["classification"]["status"] == "fail"
+    assertions = {
+        item["assertion_id"]: item["decision"]
+        for item in report["metrics"]["workflow"]["values"][
+            "assertion_results"
+        ]
+    }
+    assert assertions["experiment.prepared_rename_refinalize"] == "fail"
+    assert assertions["artifacts.required_present"] == "fail"
+    assert assertions["experiment.refinalized_bundle_valid"] == "incomplete"
+    assert assertions["experiment.prepared_reload_ready"] == "incomplete"
+    assert {
+        item["status"]
+        for item in report["metrics"]["workflow"]["values"]["cleanup_results"]
+    } == {"pass"}
+    persistence = report["metrics"]["persistence"]["values"]
+    assert persistence["prepared_bundle"]["failed_checks"] == []
+    assert persistence["rename_refinalization"]["before"]["metadata_name"] == (
+        "sil-editor-prestart-rename-v1"
+    )
     report_dir = Path(report["safety"]["scenario_root"]).parent
     assert (report_dir / "failure_traceback.txt").is_file()

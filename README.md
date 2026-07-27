@@ -260,9 +260,11 @@ Longer composed SIL tiers are opt-in:
 .\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle
 ```
 
-The lifecycle command runs the active editor create/finalize scenario. Without
-these flags, tests marked `sil_lifecycle`, `sil_regression`, or `sil_stress`
-are collected but skipped; the editor fixture contract is still checked.
+The lifecycle command runs the editor create/finalize scenario and any
+candidate lifecycle gates, including the planned prepared rename/refinalize
+regression. Without these flags, tests marked `sil_lifecycle`,
+`sil_regression`, or `sil_stress` are collected but skipped; both editor
+fixture contracts are still checked.
 Fast registry, manifest, report, comparison, and local Pi safety-contract
 tests continue to run normally.
 The `sil_pi_contract` marker never launches a remote Pi operation; remote Pi
@@ -285,6 +287,26 @@ design and activates the authoritative runtime without rebuilding the design.
 A passing report retains `editor_opened`, `generated`, `finalized`,
 `reloaded`, and `validated` screenshots and reports every declared lifecycle
 assertion as `pass`.
+
+Run the prepared rename/refinalize regression directly with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario experiment_editor_prestart_rename_refinalize_v1 `
+  --timeout-seconds 60
+```
+
+This scenario first creates the same minimal A1/A2 prepared experiment, then
+reopens the real editor, changes only the experiment name, and presses Finish
+again. Its target contract requires a single renamed directory, a consistent
+prepared authoritative bundle, zero progress, and a `ready_to_start` reload.
+The current implementation reproduces the tracked regression: the second
+Finish displays `Could not apply experiment design` because the retained
+prepared plan does not match the renamed design hash. The report is retained
+with the warning text, failed action, modal screenshot, pre-rename bundle,
+post-rename filesystem state, and cleanup evidence. The command remains a
+failing lifecycle gate until a separately scoped MVC fix lands; it is not an
+expected-success exception or `xfail`.
 
 Lifecycle scenarios are single-run functional evidence. They reject Pi
 evidence, injected-stall controls, report-set repetition, and baseline

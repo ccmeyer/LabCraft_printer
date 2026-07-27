@@ -396,6 +396,26 @@
       "limitations": ["The lifecycle scenario creates and reloads a minimal prepared design without connecting or executing print commands."],
       "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_create_finalize_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_create_finalize_lifecycle_report"],
       "pi_safety_evidence": []
+    },
+    {
+      "id": "experiment_editor_prestart_rename_refinalize_v1",
+      "version": 1,
+      "status": "planned",
+      "registry_id": "experiment_editor_prestart_rename_refinalize_v1",
+      "workload_fixture_id": "experiment_editor_prestart_rename_refinalize_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/experiment_editor_prestart_rename_refinalize_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": [],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 60,
+      "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "editor.rename_prepared_via_ui", "editor.refinalize_prepared_via_ui", "artifact.capture_milestone", "validation.prepared_bundle", "validation.refinalized_bundle", "experiment.reload_authoritative", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "experiment.prepared_rename_refinalize", "experiment.renamed_artifacts_unique", "experiment.refinalized_bundle_valid", "experiment.prepared_reload_ready", "experiment.runtime_assignments_match", "experiment.key_files_consistent", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "experiment.prepared_rename_refinalize", "experiment.prepared_reopen", "experiment.design_plan_consistency"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The planned lifecycle scenario covers an unstarted prepared rename only; post-start edit locking remains Slice 4.3."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_lifecycle_report"],
+      "pi_safety_evidence": []
     }
   ],
   "suites": [
@@ -572,12 +592,27 @@
         "source_path": "tools/virtual_workflows/actions.py"
       },
       {
+        "id": "editor.rename_prepared_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "editor.refinalize_prepared_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
         "id": "artifact.capture_milestone",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py"
       },
       {
         "id": "validation.prepared_bundle",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "validation.refinalized_bundle",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py"
       },
@@ -699,6 +734,24 @@
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.prepared_bundle.key_rows",
         "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_create_finalize_lifecycle_report"]
+      },
+      {
+        "id": "experiment.prepared_rename_refinalize",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_lifecycle_report"]
+      },
+      {
+        "id": "experiment.renamed_artifacts_unique",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.refinalized_bundle.experiment_directories",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_lifecycle_report"]
+      },
+      {
+        "id": "experiment.refinalized_bundle_valid",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.refinalized_bundle",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_lifecycle_report"]
       }
     ]
   }

@@ -1460,6 +1460,98 @@ Next permitted action:
   disconnect, scheduled automation, performance remediation, and production
   behavior changes out of that milestone.
 
+#### Slice 4.2: Prepared rename and refinalize
+
+Status: `in_progress`
+
+Call path:
+
+`QTest -> first real editor finalization -> zero-progress PREPARED execution -> reopen ExperimentDesignDialog -> edit only experiment name -> Finish -> _ensure_experiment_dir -> ExperimentModel.rename_experiment -> save_experiment -> MainWindow.complete_experiment_design -> create_or_reuse_initial_execution_plan -> authoritative inspection/reload`
+
+Implementation:
+
+- Added strict fixture
+  `experiment_editor_prestart_rename_refinalize_v1` with initial name
+  `sil-editor-prestart-rename-v1`, renamed name
+  `sil-editor-prestart-renamed-v1`, the Slice 4.1 A1/A2 design, two Finish
+  operations, and one rename.
+- Extended the shared modal QTest actions to reopen the prepared editor, prove
+  the name control is editable, change only that control, press Finish, reject
+  every unexpected warning, and retain modal failure evidence.
+- Generalized the editor lifecycle configuration and registry dispatch
+  additively while preserving the Slice 4.1 exports, default, report, and
+  direct runner.
+- Added pre-rename hashes/audit/runtime evidence, successful refinalized-bundle
+  and reload invariants, and post-rename failure-state capture. A successful
+  implementation may replace, revise, or re-identify the prepared plan as
+  long as the final persisted bundle is internally consistent.
+- Added the scenario to the registry and manifest as `planned`. It remains
+  absent from the active lifecycle suite, and
+  `experiment.prepared_rename_refinalize` remains `planned`.
+- Added exact fixture, action, registry/CLI, synthetic failure-policy, and
+  composed expected-success tests. The expected-success test is intentionally
+  a failing gate while the production regression remains; it is not `xfail`.
+
+Verification record (2026-07-26):
+
+- Started at commit `adbb5b86a11222e48b592ef45728451edc17f97b`
+  with a clean tracked worktree and the six pre-existing inaccessible
+  execution-cache directories untouched.
+- The pre-edit focused lifecycle selection passed 109 tests with 30 existing
+  Qt chart deprecation warnings in 7.58 seconds.
+- Fast default-tier action/registry/manifest/editor collection passed 74 tests
+  and skipped four opt-in composed lifecycle tests in 3.44 seconds.
+- The Slice 4.1 composed scenario, shared framework tests, and both synthetic
+  lifecycle failure-policy tests passed 77 tests with 30 existing warnings in
+  6.17 seconds.
+- The real Slice 4.2 expected-success test failed at the second Finish, as
+  required for an unresolved functional regression. The failure occurred in
+  2.63 seconds and was not converted to an expected failure.
+- The final requested focused lifecycle selection reported 121 passes, the
+  single expected-success Slice 4.2 gate failure, and 50 existing warnings in
+  10.22 seconds. All other focused framework and lifecycle tests passed.
+- The final direct CLI diagnostic classified `fail` in 2,034.187 ms. It
+  retained the initial valid PREPARED bundle, successful name-only action,
+  exact warning, failed refinalization action, post-rename filesystem state,
+  traceback, six screenshots including `failure.png`, and 11 passing cleanup
+  phases:
+  `verification_reports/virtual_workflows/experiment_editor_prestart_rename_refinalize_v1/20260727T025546327055Z_adbb5b86a112/report.json`.
+- The warning was `Could not apply experiment design`: the renamed
+  `experiment_design.json` no longer matched the retained
+  `execution_plan.json` design hash. The old directory was absent, the renamed
+  directory and metadata name were present, and the conflicting prepared plan
+  remained inspectable for the separate defect effort.
+- Default editor-lifecycle selection passed both fixture contracts and skipped
+  the four composed lifecycle tests (`2 passed, 4 skipped`) in 0.05 seconds.
+- The isolated 96-well regression, comparison, and local Pi-contract retry
+  passed all 43 tests with 30 existing warnings in 13.11 seconds. A preceding
+  parallel invocation hit the known transient missing-checkpoint failure; the
+  immediate isolated retry passed without code changes.
+- All three retained reports passed report-v1 validation with classifications
+  Windows 96-well `pass`, Windows 384x10 `fail`, and Pi 384x10 `fail`. Both
+  tracked baselines loaded with distinct `offscreen_windows_sil` and
+  `offscreen_pi_sil` identities.
+- With only the six pre-existing inaccessible cache directories ignored, the
+  full default Python suite passed 3,560 tests, skipped 32, and reported 118
+  existing warnings in 487.43 seconds.
+- No production, simulator, firmware, protocol, performance, baseline, Pi, or
+  hardware behavior changed.
+
+Failure disposition, risks, and rollback:
+
+- Slice 4.2 remains `in_progress`; the scenario and capability remain
+  `planned`, and the active lifecycle suite remains Slice 4.1 only.
+- The next permitted action is a separately scoped MVC defect covering
+  `_ensure_experiment_dir -> rename_experiment -> save_experiment ->
+  complete_experiment_design -> create_or_reuse_initial_execution_plan`.
+  Slice 4.3 does not begin until the defect is fixed and this gate passes.
+- Do not accept the warning, weaken the final invariants, delete the retained
+  conflict, or modify the test into an `xfail`.
+- Rollback removes the Slice 4.2 fixture, actions, runner/registry/manifest
+  entries, tests, and documentation while preserving verified Slices 0-4.1.
+  No application data, production, firmware, protocol, hardware, baseline, or
+  Pi rollback is required.
+
 ### Slice 5: Suites and scheduling contracts
 
 Goal:

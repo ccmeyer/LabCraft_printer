@@ -331,6 +331,32 @@ are required and nonempty on a passing run; failures retain the failed action,
 dialogs/errors, authoritative files, traceback, and a best-effort failure
 screenshot.
 
+`experiment_editor_prestart_rename_refinalize_v1` adds compatible nested
+evidence for the second editor session:
+
+- `lifecycle_milestones` targets `editor_opened`, `generated`,
+  `initial_finalized`, `rename_editor_opened`, `renamed`, `refinalized`,
+  `reloaded`, and `validated` on a passing run;
+- `metrics.persistence.values.rename_refinalization.before` contains the
+  initial prepared directory, metadata/plan identity, runtime assignments,
+  audit rows, resume presence, and SHA-256 hashes for authoritative files;
+- `rename_refinalization.after` records the corresponding successful renamed
+  identity, hashes, and audit evidence;
+- `rename_refinalization.failure_state` is present when the rename succeeds
+  but the second Finish fails. It records old/new directory state, saved name
+  and design hash, current-plan presence/hash, retained paths, and audit rows;
+- `metrics.persistence.values.refinalized_bundle` contains final design/plan,
+  immutable-history, progress, key, directory-uniqueness, and
+  `ready_to_start` checks; and
+- `reload_activation` retains the disk reload, clean zero-intent checkpoint,
+  and runtime-assignment checks.
+
+The rename scenario requires eight nonempty success screenshots. A failed
+second Finish instead retains all milestones reached before failure plus
+`failure.png`, exact dialog/error text, traceback, initial prepared evidence,
+post-rename filesystem evidence, and complete teardown results. It remains a
+functional failure; the report schema does not mark the regression expected.
+
 `metrics.persistence.values.authoritative_io` adds compatible diagnostic
 evidence for the guarded active-runtime checkpoint:
 
