@@ -99,15 +99,16 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert standard["scenario_ids"] == ["print_array_smoke_24_v1"]
     assert lifecycle["status"] == "active"
     assert lifecycle["scenario_ids"] == [
-        "experiment_editor_create_finalize_v1"
+        "experiment_editor_create_finalize_v1",
+        "experiment_editor_prestart_rename_refinalize_v1",
     ]
     rename_scenario = _row(
         payload,
         "scenarios",
         "experiment_editor_prestart_rename_refinalize_v1",
     )
-    assert rename_scenario["status"] == "planned"
-    assert rename_scenario["suite_ids"] == []
+    assert rename_scenario["status"] == "active"
+    assert rename_scenario["suite_ids"] == ["lifecycle"]
     assert rename_scenario["registry_id"] == EDITOR_RENAME_WORKLOAD_ID
 
     smoke = _row(payload, "scenarios", "print_array_smoke_24_v1")
@@ -126,7 +127,7 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert capabilities["experiment.design_plan_consistency"]["status"] == "covered"
     assert (
         capabilities["experiment.prepared_rename_refinalize"]["status"]
-        == "planned"
+        == "partial"
     )
     assert (
         capabilities["execution.multi_stock_head_exchange"]["status"]

@@ -926,7 +926,7 @@ def _run_editor_lifecycle_scenario(
                     if path.is_dir()
                 )
                 current_plan_paths = sorted(
-                    str(path.relative_to(experiments_root))
+                    path.relative_to(experiments_root).as_posix()
                     for path in experiments_root.rglob(
                         "execution_plan.json"
                     )

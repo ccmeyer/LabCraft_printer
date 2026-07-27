@@ -11145,17 +11145,253 @@ class ExperimentModel(QObject):
         return True
 
     def rename_experiment(self, new_name: str) -> bool:
-        """Rename experiment dir (if it does not already exist)."""
-        import os
-        new_dir = os.path.join(self.experiments_root, new_name)
-        if os.path.exists(new_dir):
+        """Transactionally rename a design and replace only an untouched prepared plan."""
+        source = Path(self.experiment_dir_path or "").resolve()
+        normalized_name = self.sanitize_experiment_name(new_name)
+        destination = source.parent / normalized_name
+        if destination.exists():
             return False
-        os.rename(self.experiment_dir_path, new_dir)
-        self.metadata["name"] = new_name
-        self.experiment_dir_path = new_dir
-        self.update_all_paths()
-        self.save_experiment()
-        return True
+        if not source.is_dir():
+            raise RuntimeError("The current experiment folder is unavailable.")
+
+        original_path = self.experiment_dir_path
+        original_snapshot = self._execution_plan_snapshot
+        original_source = self._execution_plan_source
+        original_reconstructed = self._reconstructed_execution_plan
+        original_reference = self._progress_execution_reference
+        original_progress = dict(self.progress_data)
+        original_unsaved = self.unsaved_changes
+
+        with open(source / "experiment_design.json", "r", encoding="utf-8") as handle:
+            original_design = json.load(handle)
+        if not isinstance(original_design, dict):
+            raise RuntimeError("The current experiment design is invalid.")
+        original_metadata_name = (original_design.get("metadata") or {}).get("name")
+
+        original_bundle = None
+        original_plan = None
+        plan_path = source / "execution_plan.json"
+        try:
+            if plan_path.is_file():
+                original_bundle = inspect_authoritative_execution(source, original_design)
+                if not original_bundle.valid or original_bundle.plan is None:
+                    detail = "; ".join(issue.message for issue in original_bundle.issues)
+                    raise RuntimeError(
+                        "The existing execution bundle is inconsistent and cannot be renamed: "
+                        + (detail or "authoritative validation failed")
+                    )
+                original_plan = original_bundle.plan
+                if (
+                    original_plan.state is not ExecutionPlanState.PREPARED
+                    or original_plan.plan_revision != 1
+                    or original_bundle.eligibility.status != "ready_to_start"
+                    or original_bundle.resume is not None
+                ):
+                    raise RuntimeError(
+                        "Only an untouched PREPARED execution with no resume checkpoint may be renamed."
+                    )
+                if original_bundle.calibrations is not None and (
+                    original_bundle.calibrations.records
+                    or original_bundle.calibrations.manual_refuel_checks
+                ):
+                    raise RuntimeError(
+                        "An execution with calibration history cannot be renamed in place."
+                    )
+                if any(
+                    int(details.get("added_droplets", 0) or 0) != 0
+                    or bool(well.get("completed"))
+                    for well in original_bundle.progress_wells.values()
+                    for details in (well.get("reagents") or {}).values()
+                ):
+                    raise RuntimeError(
+                        "An execution with printing progress cannot be renamed in place."
+                    )
+        except Exception:
+            self.metadata["name"] = original_metadata_name
+            raise
+
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".{normalized_name}.staging-",
+                dir=source.parent,
+            )
+        ).resolve()
+        published = False
+        candidate = None
+        try:
+            shutil.copytree(source, staging, dirs_exist_ok=True)
+            if original_plan is not None:
+                requested_design = self.to_dict()
+                original_without_name = json.loads(json.dumps(original_design))
+                requested_without_name = json.loads(json.dumps(requested_design))
+                original_metadata = original_without_name.setdefault("metadata", {})
+                requested_metadata = requested_without_name.setdefault("metadata", {})
+                original_metadata.pop("name", None)
+                requested_metadata.pop("name", None)
+                for runtime_plate_field in (
+                    "plate_name",
+                    "plate_rows",
+                    "plate_columns",
+                ):
+                    if runtime_plate_field not in original_metadata:
+                        requested_metadata.pop(runtime_plate_field, None)
+                if original_without_name != requested_without_name:
+                    raise RuntimeError(
+                        "Prepared execution replacement permits an experiment-name-only change."
+                    )
+
+                self.metadata = dict(original_design.get("metadata") or {})
+                self.metadata["name"] = normalized_name
+            else:
+                self.metadata["name"] = normalized_name
+            self.experiment_dir_path = str(staging)
+            self.update_all_paths()
+            self.save_experiment()
+
+            with open(self.experiment_file_path, "r", encoding="utf-8") as handle:
+                renamed_design = json.load(handle)
+
+            if original_plan is not None:
+                renamed_without_name = json.loads(json.dumps(renamed_design))
+                renamed_without_name.setdefault("metadata", {}).pop("name", None)
+                if original_without_name != renamed_without_name:
+                    raise RuntimeError(
+                        "Prepared execution replacement permits an experiment-name-only change."
+                    )
+                candidate = self.build_initial_execution_plan_from_runtime()
+                if (
+                    candidate.plate != original_plan.plate
+                    or candidate.volume_basis != original_plan.volume_basis
+                    or candidate.stocks != original_plan.stocks
+                    or candidate.wells != original_plan.wells
+                ):
+                    raise RuntimeError(
+                        "Prepared execution replacement changed frozen runtime assignments."
+                    )
+
+                archive = (
+                    staging
+                    / "superseded_prepared_execution_plans"
+                    / original_plan.plan_id
+                )
+                archive.mkdir(parents=True)
+                os.replace(
+                    self.execution_plan_file_path,
+                    archive / "prepared_plan_at_replacement.json",
+                )
+                os.replace(
+                    self.execution_plan_revisions_dir_path,
+                    archive / REVISION_DIRECTORY_NAME,
+                )
+                save_execution_plan(self.execution_plan_file_path, candidate)
+                persist_immutable_revision(
+                    self.execution_plan_revisions_dir_path,
+                    candidate,
+                )
+                validate_revision_history(
+                    self.execution_plan_revisions_dir_path,
+                    latest_plan=candidate,
+                )
+                if (
+                    self.execution_calibrations_file_path
+                    and os.path.isfile(self.execution_calibrations_file_path)
+                ):
+                    save_execution_calibrations(
+                        self.execution_calibrations_file_path,
+                        ExecutionCalibrationDocument(plan_id=candidate.plan_id),
+                    )
+                self._execution_plan_snapshot = candidate
+                self._execution_plan_source = "new_finalization"
+                self._reconstructed_execution_plan = None
+                self._progress_execution_reference = ProgressExecutionReference(
+                    plan_id=candidate.plan_id,
+                    plan_revision=candidate.plan_revision,
+                )
+                replacement_progress = encode_execution_progress_v2(
+                    candidate,
+                    original_bundle.progress_wells,
+                )
+                self._atomic_write_text(
+                    self.progress_file_path,
+                    serialize_execution_progress(
+                        replacement_progress,
+                        default=self.convert_to_serializable,
+                    ),
+                )
+                decoded_progress = decode_execution_progress(
+                    candidate,
+                    replacement_progress,
+                )
+                self.progress_data = decoded_progress.progress_wells
+                self._progress_execution_reference = decoded_progress.reference
+                self._write_execution_plan_exports(candidate, renamed_design)
+                ExperimentAuditLog(
+                    audit_path=Path(self.experiment_audit_file_path)
+                ).record(
+                    "prepared_execution_replaced",
+                    "Untouched prepared execution replaced after experiment rename",
+                    details={
+                        "previous_plan_id": original_plan.plan_id,
+                        "replacement_plan_id": candidate.plan_id,
+                        "previous_name": str(
+                            (original_design.get("metadata") or {}).get("name") or ""
+                        ),
+                        "replacement_name": normalized_name,
+                    },
+                )
+                staged_bundle = inspect_authoritative_execution(
+                    staging,
+                    renamed_design,
+                )
+                if (
+                    not staged_bundle.valid
+                    or staged_bundle.plan != candidate
+                    or staged_bundle.eligibility.status != "ready_to_start"
+                ):
+                    detail = "; ".join(
+                        issue.message for issue in staged_bundle.issues
+                    )
+                    raise RuntimeError(
+                        "The reconciled prepared execution did not validate: "
+                        + (detail or staged_bundle.eligibility.reason)
+                    )
+
+            rollback = source.parent / (
+                f".{source.name}.rollback-{time.time_ns()}"
+            )
+            os.replace(source, rollback)
+            try:
+                os.replace(staging, destination)
+            except Exception:
+                os.replace(rollback, source)
+                raise
+            try:
+                shutil.rmtree(rollback)
+            except Exception:
+                os.replace(destination, staging)
+                os.replace(rollback, source)
+                raise
+
+            published = True
+            self.experiment_dir_path = str(destination)
+            self.update_all_paths()
+            self.unsaved_changes = False
+            self.set_execution_plan_finalization_error(None)
+            self.set_execution_plan_sync_error(None)
+            return True
+        finally:
+            if not published:
+                self.metadata["name"] = original_metadata_name
+                self.experiment_dir_path = original_path
+                self.update_all_paths()
+                self._execution_plan_snapshot = original_snapshot
+                self._execution_plan_source = original_source
+                self._reconstructed_execution_plan = original_reconstructed
+                self._progress_execution_reference = original_reference
+                self.progress_data = original_progress
+                self.unsaved_changes = original_unsaved
+                if staging.exists():
+                    shutil.rmtree(staging)
 
     def duplicate_design_from(self, source_design_path: str, new_name: str, new_experiment_path: str) -> bool:
         """Create a fresh experiment from another experiment_design.json."""

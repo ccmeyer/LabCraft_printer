@@ -115,13 +115,13 @@
       "id": "experiment.prepared_rename_refinalize",
       "risk": "A prepared experiment rename may fail or leave conflicting authoritative files.",
       "owner_role": "experiment lifecycle maintainers",
-      "status": "planned",
+      "status": "partial",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": [],
-      "required_assertion_ids": [],
+      "active_scenario_ids": ["experiment_editor_prestart_rename_refinalize_v1"],
+      "required_assertion_ids": ["experiment.prepared_rename_refinalize", "experiment.renamed_artifacts_unique", "experiment.refinalized_bundle_valid", "experiment.prepared_reload_ready", "experiment.runtime_assignments_match", "experiment.key_files_consistent"],
       "related_source_areas": ["FreeRTOS-interface/View.py", "FreeRTOS-interface/Model.py"],
-      "limitations": ["The observed rename/refinalize regression has no composed SIL scenario yet."],
-      "max_evidence_age_days": null
+      "limitations": ["Coverage is limited to name-only refinalization of an untouched prepared execution; the composed post-start edit-lock boundary remains Slice 4.3."],
+      "max_evidence_age_days": 2
     },
     {
       "id": "experiment.design_plan_consistency",
@@ -400,12 +400,12 @@
     {
       "id": "experiment_editor_prestart_rename_refinalize_v1",
       "version": 1,
-      "status": "planned",
+      "status": "active",
       "registry_id": "experiment_editor_prestart_rename_refinalize_v1",
       "workload_fixture_id": "experiment_editor_prestart_rename_refinalize_v1",
       "workload_fixture_path": "tools/virtual_workflows/fixtures/experiment_editor_prestart_rename_refinalize_v1.json",
       "tier": "lifecycle",
-      "suite_ids": [],
+      "suite_ids": ["lifecycle"],
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
       "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "editor.rename_prepared_via_ui", "editor.refinalize_prepared_via_ui", "artifact.capture_milestone", "validation.prepared_bundle", "validation.refinalized_bundle", "experiment.reload_authoritative", "scenario.teardown"],
@@ -413,7 +413,7 @@
       "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "experiment.prepared_rename_refinalize", "experiment.prepared_reopen", "experiment.design_plan_consistency"],
       "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
-      "limitations": ["The planned lifecycle scenario covers an unstarted prepared rename only; post-start edit locking remains Slice 4.3."],
+      "limitations": ["The lifecycle scenario covers an unstarted prepared rename only; post-start edit locking remains Slice 4.3."],
       "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_lifecycle_report"],
       "pi_safety_evidence": []
     }
@@ -432,7 +432,7 @@
       "status": "active",
       "kind": "lifecycle",
       "platform": "windows_sil",
-      "scenario_ids": ["experiment_editor_create_finalize_v1"],
+      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1"],
       "requires_pi_safety_evidence": []
     },
     {
