@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 import Model as model_module
+from AuthoritativeExecutionLoad import inspect_authoritative_execution
 from ExecutionPlan import ExecutionPlanState, canonical_sha256, load_execution_plan
 from ExecutionProgressStore import (
     decode_execution_progress,
@@ -58,6 +59,14 @@ def _well_targets(plan):
             dispense.stock_id: dispense.target_dispenses for dispense in well.dispenses
         }
         for well in plan.wells
+    }
+
+
+def _directory_bytes(directory):
+    return {
+        path.relative_to(directory).as_posix(): path.read_bytes()
+        for path in directory.rglob("*")
+        if path.is_file()
     }
 
 
@@ -116,6 +125,147 @@ def test_fresh_finalization_writes_prepared_plan_before_linked_progress(
     assert details["execution_plan_id"] == plan.plan_id
     assert details["execution_plan_revision"] == 1
     assert details["execution_plan_status"] == "created"
+
+
+def test_prepared_name_only_rename_replaces_and_reloads_authoritative_bundle(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    original_dir = Path(em.experiment_dir_path)
+    original_plan = load_execution_plan(em.execution_plan_file_path)
+
+    em.metadata["name"] = "prepared-renamed"
+    assert em.rename_experiment("prepared-renamed")
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+
+    renamed_dir = original_dir.parent / "prepared-renamed"
+    design = json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8"))
+    plan = load_execution_plan(em.execution_plan_file_path)
+    bundle = inspect_authoritative_execution(renamed_dir, design)
+    progress = json.loads(Path(em.progress_file_path).read_text(encoding="utf-8"))
+    archived = (
+        renamed_dir
+        / "superseded_prepared_execution_plans"
+        / original_plan.plan_id
+    )
+
+    assert not original_dir.exists()
+    assert em.experiment_dir_path == str(renamed_dir)
+    assert design["metadata"]["name"] == "prepared-renamed"
+    assert plan.plan_id != original_plan.plan_id
+    assert plan.state is ExecutionPlanState.PREPARED
+    assert plan.design_sha256 == canonical_sha256(design)
+    assert plan.stocks == original_plan.stocks
+    assert plan.wells == original_plan.wells
+    assert progress["plan_id"] == plan.plan_id
+    assert progress["plan_revision"] == plan.plan_revision
+    assert bundle.valid
+    assert bundle.eligibility.status == "ready_to_start"
+    assert bundle.history == (plan,)
+    assert (
+        load_execution_plan(archived / "prepared_plan_at_replacement.json")
+        == original_plan
+    )
+    assert validate_revision_history(
+        archived / "execution_plan_revisions",
+        latest_plan=original_plan,
+    ) == (original_plan,)
+    assert not list(original_dir.parent.glob(".*.staging-*"))
+    assert not list(original_dir.parent.glob(".*.rollback-*"))
+
+    reloaded = ExperimentModel(prof=CURRENT_PROFILE)
+    reloaded_bundle = reloaded.load_experiment(
+        str(renamed_dir / "experiment_design.json"),
+        str(renamed_dir),
+    )
+    assert reloaded_bundle.valid
+    assert reloaded_bundle.plan == plan
+    assert reloaded_bundle.eligibility.status == "ready_to_start"
+
+
+@pytest.mark.parametrize("start_reason", ["calibration_started", "printing_started"])
+def test_prepared_rename_rejects_started_execution_without_mutation(
+    experiment_model_factory,
+    start_reason,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    em.lock_execution_plan(start_reason)
+    original_dir = Path(em.experiment_dir_path)
+    before = _directory_bytes(original_dir)
+    original_name = json.loads(
+        Path(em.experiment_file_path).read_text(encoding="utf-8")
+    )["metadata"]["name"]
+
+    em.metadata["name"] = f"rejected-{start_reason}"
+    with pytest.raises(RuntimeError, match="untouched PREPARED"):
+        em.rename_experiment(f"rejected-{start_reason}")
+
+    assert em.metadata["name"] == original_name
+    assert Path(em.experiment_dir_path) == original_dir
+    assert _directory_bytes(original_dir) == before
+    assert not (original_dir.parent / f"rejected-{start_reason}").exists()
+    assert not list(original_dir.parent.glob(".*.staging-*"))
+    assert not list(original_dir.parent.glob(".*.rollback-*"))
+
+
+def test_prepared_rename_rejects_progress_and_rolls_back_reconciliation_failure(
+    experiment_model_factory,
+    monkeypatch,
+):
+    progress_model = experiment_model_factory()
+    progress_em = progress_model.experiment_model
+    _configure_design(progress_em)
+    Model.load_experiment_from_model(progress_model, finalize_execution_plan=True)
+    progress_path = Path(progress_em.progress_file_path)
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    stock_values = next(iter(progress["added_droplets"].values()))
+    target_index = next(index for index, value in enumerate(stock_values) if value is not None)
+    stock_values[target_index] = 1
+    progress_path.write_text(serialize_execution_progress(progress), encoding="utf-8")
+    progress_dir = Path(progress_em.experiment_dir_path)
+    progress_before = _directory_bytes(progress_dir)
+
+    progress_em.metadata["name"] = "rejected-progress"
+    with pytest.raises(
+        RuntimeError,
+        match="untouched PREPARED|cannot be renamed|printing progress",
+    ):
+        progress_em.rename_experiment("rejected-progress")
+
+    assert _directory_bytes(progress_dir) == progress_before
+    assert not (progress_dir.parent / "rejected-progress").exists()
+
+    rollback_model = experiment_model_factory()
+    rollback_em = rollback_model.experiment_model
+    _configure_design(rollback_em)
+    Model.load_experiment_from_model(rollback_model, finalize_execution_plan=True)
+    rollback_dir = Path(rollback_em.experiment_dir_path)
+    rollback_before = _directory_bytes(rollback_dir)
+    rollback_name = json.loads(
+        Path(rollback_em.experiment_file_path).read_text(encoding="utf-8")
+    )["metadata"]["name"]
+    monkeypatch.setattr(
+        rollback_em,
+        "_write_execution_plan_exports",
+        Mock(side_effect=OSError("injected key reconciliation failure")),
+    )
+
+    rollback_em.metadata["name"] = "failed-reconciliation"
+    with pytest.raises(OSError, match="injected key reconciliation failure"):
+        rollback_em.rename_experiment("failed-reconciliation")
+
+    assert rollback_em.metadata["name"] == rollback_name
+    assert Path(rollback_em.experiment_dir_path) == rollback_dir
+    assert _directory_bytes(rollback_dir) == rollback_before
+    assert not (rollback_dir.parent / "failed-reconciliation").exists()
+    assert not list(rollback_dir.parent.glob(".*.staging-*"))
+    assert not list(rollback_dir.parent.glob(".*.rollback-*"))
 
 
 def test_lock_and_calibration_revision_preserve_design_and_allow_tolerance_overrun(
