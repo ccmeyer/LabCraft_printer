@@ -48,6 +48,27 @@ Unknown top-level fields are rejected. Scenario-specific values belong inside
 workload and durability invariants completed, not that performance is
 acceptable. `classification.reasons` is always a list of strings.
 
+## Qt Font Evidence
+
+New SIL reports add an optional `environment.qt.font` object. Its absence
+remains valid for retained report-v1 evidence. When present, it records:
+
+- `status`, which must be `pass` for a successful composed SIL run;
+- `directory_source`: `windows_system`, `caller`, or `native`;
+- `configured_directory`, when offscreen Qt uses an explicit font directory;
+- requested/resolved family and point size;
+- available-family count and raw-font validity;
+- the fixed sample string, glyph indexes, and sample-glyph result;
+- whether a Windows run matches the normal application font, Segoe UI at
+  9 points; and
+- the effective Qt platform.
+
+The font directory is configured before `QApplication` construction. Windows
+offscreen runs use `%WINDIR%\Fonts`; visible Windows runs and non-Windows runs
+retain their native Qt font. Zero families, an invalid font directory, an
+unresolved family, or a missing sample glyph is an environment failure rather
+than acceptable screenshot evidence.
+
 ## Safety Contract
 
 `safety.simulation` must be `true`, and `safety.hardware_access_allowed` must be

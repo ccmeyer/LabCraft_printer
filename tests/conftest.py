@@ -7,8 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 from tests.fakes import FakeSerialFactory, FakeSerialMain, FakeSignal
+from tools.virtual_workflows.qt_font_environment import (
+    apply_and_validate_sil_application_font,
+    configure_sil_qt_font_environment,
+)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+configure_sil_qt_font_environment()
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_DIR = REPO_ROOT / "FreeRTOS-interface"
@@ -209,6 +214,7 @@ def qapp():
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
+    apply_and_validate_sil_application_font(app)
     return app
 
 

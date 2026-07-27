@@ -65,6 +65,7 @@ if str(UI_DIR) not in sys.path:
     sys.path.insert(0, str(UI_DIR))
 
 from tools.virtual_workflows.actions import (  # noqa: E402
+    ScenarioActionError,
     ScenarioContext,
     capture_failure_screenshot,
     capture_milestone,
@@ -83,6 +84,10 @@ from tools.virtual_workflows.report import (  # noqa: E402
     collect_environment_identity,
     validate_report_v1,
     write_report_atomic,
+)
+from tools.virtual_workflows.qt_font_environment import (  # noqa: E402
+    SilQtFontEnvironmentError,
+    apply_and_validate_sil_application_font,
 )
 from tools.virtual_workflows.scenarios import (  # noqa: E402
     VirtualWorkflowScenarioError,
@@ -547,6 +552,7 @@ def _run_editor_lifecycle_scenario(
         app.setQuitOnLastWindowClosed(False)
         context.app = app
         context.qt_core = QtCore
+        font_evidence: dict[str, Any] = {}
 
         dependencies = composition.simulation_dependencies(
             scenario_root,
@@ -568,6 +574,21 @@ def _run_editor_lifecycle_scenario(
             raise RuntimeError("one or more simulation roots escaped the scenario root")
 
         def launch() -> Mapping[str, Any]:
+            nonlocal font_evidence
+            try:
+                font_evidence = apply_and_validate_sil_application_font(app)
+            except SilQtFontEnvironmentError as exc:
+                qt_identity["font"] = dict(exc.evidence)
+                assertion_failures["ui.real_app_constructed"] = {
+                    "font_rendering": dict(exc.evidence),
+                }
+                raise ScenarioActionError(
+                    "app.launch_simulated",
+                    str(exc),
+                    stage="precondition",
+                    evidence={"font_rendering": dict(exc.evidence)},
+                ) from exc
+            qt_identity["font"] = font_evidence
             context.components = composition.build_application_components(
                 CURRENT_PROFILE,
                 dependencies,
@@ -594,6 +615,7 @@ def _run_editor_lifecycle_scenario(
         assertion_evidence["ui.real_app_constructed"] = {
             "component_type": type(context.components).__name__,
             "view_type": type(context.view).__name__,
+            "font_rendering": font_evidence,
         }
         assertion_evidence["sil.host_hardware_disabled"] = {
             "runtime_mode": dependencies.runtime_context.mode.value,

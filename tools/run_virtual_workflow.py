@@ -292,6 +292,13 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["QT_QPA_PLATFORM"] = args.qt_platform
 
     try:
+        from tools.virtual_workflows.qt_font_environment import (
+            configure_sil_qt_font_environment,
+        )
+
+        configure_sil_qt_font_environment(
+            qt_platform=(None if args.visible else args.qt_platform),
+        )
         if args.target_pi:
             from tools.virtual_workflows.pi_sil import (
                 load_and_validate_pi_evidence,

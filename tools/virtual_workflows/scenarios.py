@@ -68,6 +68,7 @@ from tools.virtual_workflows.metrics import (  # noqa: E402
     summarize_samples,
 )
 from tools.virtual_workflows.actions import (  # noqa: E402
+    ScenarioActionError,
     ScenarioContext,
     capture_failure_screenshot,
     capture_milestone,
@@ -95,6 +96,10 @@ from tools.virtual_workflows.report import (  # noqa: E402
     collect_environment_identity,
     validate_report_v1,
     write_report_atomic,
+)
+from tools.virtual_workflows.qt_font_environment import (  # noqa: E402
+    SilQtFontEnvironmentError,
+    apply_and_validate_sil_application_font,
 )
 
 
@@ -1660,6 +1665,7 @@ def run_virtual_print_array_scenario(
         app.setQuitOnLastWindowClosed(False)
         context.app = app
         context.qt_core = QtCore
+        font_evidence: dict[str, Any] = {}
 
         def prepare_fixture() -> dict[str, Any]:
             simulation_config = SimulationConfig(
@@ -1695,6 +1701,18 @@ def run_virtual_print_array_scenario(
         assert fixture_info is not None
 
         def launch_application() -> dict[str, Any]:
+            nonlocal font_evidence
+            try:
+                font_evidence = apply_and_validate_sil_application_font(app)
+            except SilQtFontEnvironmentError as exc:
+                qt_identity["font"] = dict(exc.evidence)
+                raise ScenarioActionError(
+                    "app.launch_simulated",
+                    str(exc),
+                    stage="precondition",
+                    evidence={"font_rendering": dict(exc.evidence)},
+                ) from exc
+            qt_identity["font"] = font_evidence
             context.components = composition.build_application_components(
                 CURRENT_PROFILE,
                 dependencies,
@@ -1726,6 +1744,7 @@ def run_virtual_print_array_scenario(
             return {
                 "eligibility": eligibility["status"],
                 "visible": bool(config.visible),
+                "font_rendering": font_evidence,
                 "simulation_banner": {
                     "present": banner is not None,
                     "visible": bool(banner is not None and banner.isVisible()),

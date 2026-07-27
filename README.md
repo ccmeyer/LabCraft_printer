@@ -602,9 +602,13 @@ repository-local output root, for example:
 ```
 
 Do not disable atomic replacement or `fsync` to work around host filesystem
-contention. Some minimal PySide6 installations also lack bundled fonts; the
-offscreen screenshots remain diagnostic but may render text as placeholder
-glyphs until system fonts or fontconfig are available.
+contention. Windows offscreen SIL runs use the normal application font,
+`Segoe UI` at 9 points, from `%WINDIR%\Fonts`. Font discovery and sample-glyph
+rendering are fail-closed: a missing `segoeui.ttf`, an empty or invalid
+caller-provided `QT_QPA_FONTDIR`, or an unresolved Qt font stops the run instead
+of accepting unreadable screenshots. Visible runs retain Qt's native font, and
+non-Windows headless runs retain the font supplied by their native fontconfig
+environment.
 
 Exit code `0` means the functional workflow passed, `2` means a workflow,
 safety, persistence, timeout, teardown, or required-artifact failure, and `3`

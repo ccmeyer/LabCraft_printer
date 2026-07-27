@@ -91,6 +91,11 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
     )
     assert report["run"]["scenario_name"] == "virtual_print_array"
     assert report["run"]["scenario_version"] == "1"
+    font = report["environment"]["qt"]["font"]
+    assert font["status"] == "pass"
+    assert font["raw_font_valid"] is True
+    assert font["sample_glyphs_renderable"] is True
+    assert font["available_family_count"] > 0
 
     expected_wells = [f"A{column}" for column in range(1, 25)]
     workload = report["workload"]
@@ -112,6 +117,12 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
     )
 
     workflow = report["metrics"]["workflow"]["values"]
+    launch = next(
+        item
+        for item in workflow["action_results"]
+        if item["action_id"] == "app.launch_simulated"
+    )
+    assert launch["evidence"]["font_rendering"] == font
     assert workflow["completed_well_count"] == 24
     assert workflow["completed_stock_well_count"] == 24
     assert workflow["completed_well_ids"] == expected_wells

@@ -109,6 +109,13 @@ def test_editor_create_finalize_lifecycle_report(qapp, tmp_path):
     assert report["run"]["duration_ms"] < 60_000
     assert report["run"]["scenario_name"] == "experiment_editor_create_finalize"
     assert report["run"]["scenario_version"] == "1"
+    font = report["environment"]["qt"]["font"]
+    assert font["status"] == "pass"
+    assert font["resolved_family"] == "Segoe UI"
+    assert font["point_size"] == 9.0
+    assert font["raw_font_valid"] is True
+    assert font["sample_glyphs_renderable"] is True
+    assert font["matches_native_windows_app"] is True
     assert report["classification"] == {
         "status": "pass",
         "threshold_maturity": "informational",
@@ -153,6 +160,10 @@ def test_editor_create_finalize_lifecycle_report(qapp, tmp_path):
     }
     assert set(assertions) == set(ASSERTION_IDS)
     assert {item["decision"] for item in assertions.values()} == {"pass"}
+    assert (
+        assertions["ui.real_app_constructed"]["evidence"]["font_rendering"]
+        == font
+    )
 
     persistence = report["metrics"]["persistence"]["values"]
     prepared = persistence["prepared_bundle"]
