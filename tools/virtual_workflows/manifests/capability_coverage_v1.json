@@ -115,12 +115,12 @@
       "id": "experiment.prepared_rename_refinalize",
       "risk": "A prepared experiment rename may fail or leave conflicting authoritative files.",
       "owner_role": "experiment lifecycle maintainers",
-      "status": "partial",
+      "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["experiment_editor_prestart_rename_refinalize_v1"],
+      "active_scenario_ids": ["experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1"],
       "required_assertion_ids": ["experiment.prepared_rename_refinalize", "experiment.renamed_artifacts_unique", "experiment.refinalized_bundle_valid", "experiment.prepared_reload_ready", "experiment.runtime_assignments_match", "experiment.key_files_consistent"],
       "related_source_areas": ["FreeRTOS-interface/View.py", "FreeRTOS-interface/Model.py"],
-      "limitations": ["Coverage is limited to name-only refinalization of an untouched prepared execution; the composed post-start edit-lock boundary remains Slice 4.3."],
+      "limitations": ["Coverage proves name-only refinalization before start and the active zero-progress lock boundary; later lifecycle transitions remain separate scenarios."],
       "max_evidence_age_days": 2
     },
     {
@@ -139,25 +139,25 @@
       "id": "experiment.active_edit_lock",
       "risk": "An experiment with calibration or print history may remain editable in place.",
       "owner_role": "experiment lifecycle maintainers",
-      "status": "planned",
+      "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": [],
-      "required_assertion_ids": [],
+      "active_scenario_ids": ["experiment_editor_post_start_lock_v1"],
+      "required_assertion_ids": ["experiment.active_edit_lock", "experiment.in_place_edit_rejected", "experiment.source_bundle_immutable"],
       "related_source_areas": ["FreeRTOS-interface/View.py", "FreeRTOS-interface/Controller.py"],
-      "limitations": ["No composed post-start lock-boundary scenario exists yet."],
-      "max_evidence_age_days": null
+      "limitations": ["Coverage crosses the earliest durable ACTIVE boundary without executing a print command; later progress-bearing locks remain separate lifecycle coverage."],
+      "max_evidence_age_days": 2
     },
     {
       "id": "experiment.editable_copy",
       "risk": "A locked experiment may not produce a safe editable copy.",
       "owner_role": "experiment lifecycle maintainers",
-      "status": "partial",
+      "status": "covered",
       "required_verification_layers": ["contract", "host_sil"],
-      "active_scenario_ids": [],
-      "required_assertion_ids": [],
+      "active_scenario_ids": ["experiment_editor_post_start_lock_v1"],
+      "required_assertion_ids": ["experiment.source_bundle_immutable", "experiment.editable_copy_created", "experiment.editable_copy_fresh_execution", "experiment.editable_copy_editable"],
       "related_source_areas": ["FreeRTOS-interface/View.py", "FreeRTOS-interface/Model.py"],
-      "limitations": ["Existing unit coverage is not yet backed by a composed editor scenario."],
-      "max_evidence_age_days": null
+      "limitations": ["Coverage proves one minimal A1/A2 copy with a tolerance-only edit; broader design variants remain outside this scenario."],
+      "max_evidence_age_days": 2
     },
     {
       "id": "execution.soft_stop_resume",
@@ -416,6 +416,26 @@
       "limitations": ["The lifecycle scenario covers an unstarted prepared rename only; post-start edit locking remains Slice 4.3."],
       "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_lifecycle_report"],
       "pi_safety_evidence": []
+    },
+    {
+      "id": "experiment_editor_post_start_lock_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "experiment_editor_post_start_lock_v1",
+      "workload_fixture_id": "experiment_editor_post_start_lock_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/experiment_editor_post_start_lock_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 60,
+      "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "experiment.activate_authoritative", "execution.lock_for_printing", "editor.inspect_active_lock_via_ui", "editor.reject_in_place_edit_via_ui", "editor.create_editable_copy_via_ui", "editor.edit_copy_via_ui", "editor.finalize_copy_via_ui", "artifact.capture_milestone", "validation.prepared_bundle", "experiment.reload_authoritative", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "experiment.active_edit_lock", "experiment.in_place_edit_rejected", "experiment.source_bundle_immutable", "experiment.editable_copy_created", "experiment.editable_copy_fresh_execution", "experiment.editable_copy_editable", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "experiment.prepared_rename_refinalize", "experiment.active_edit_lock", "experiment.editable_copy"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The scenario crosses the ACTIVE lock boundary without connecting a simulated machine or issuing a print command."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"],
+      "pi_safety_evidence": []
     }
   ],
   "suites": [
@@ -432,7 +452,7 @@
       "status": "active",
       "kind": "lifecycle",
       "platform": "windows_sil",
-      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1"],
+      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -602,6 +622,41 @@
         "source_path": "tools/virtual_workflows/actions.py"
       },
       {
+        "id": "experiment.activate_authoritative",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "execution.lock_for_printing",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "editor.inspect_active_lock_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "editor.reject_in_place_edit_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "editor.create_editable_copy_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "editor.edit_copy_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "editor.finalize_copy_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
         "id": "artifact.capture_milestone",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py"
@@ -752,6 +807,42 @@
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.refinalized_bundle",
         "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_lifecycle_report"]
+      },
+      {
+        "id": "experiment.active_edit_lock",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.post_start_edit_boundary.source_locked",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+      },
+      {
+        "id": "experiment.in_place_edit_rejected",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+      },
+      {
+        "id": "experiment.source_bundle_immutable",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.post_start_edit_boundary.source_after_copy",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+      },
+      {
+        "id": "experiment.editable_copy_created",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.post_start_edit_boundary.editable_copy_before_finalize",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+      },
+      {
+        "id": "experiment.editable_copy_fresh_execution",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.post_start_edit_boundary.editable_copy_after_finalize",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+      },
+      {
+        "id": "experiment.editable_copy_editable",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
       }
     ]
   }

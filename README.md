@@ -194,9 +194,10 @@ identity `labcraft.sil_capability_coverage` version 1. It records capabilities,
 registered scenarios, planned/active suites, intended schedules, embedded
 action/assertion IDs, limitations, and freshness policy. Generated reports do
 not rewrite it. The `standard` suite is active and selects only
-`print_array_smoke_24_v1`. The `lifecycle` suite remains planned and empty
-until its scenarios are implemented; suite/capability CLI selection is not
-available yet.
+`print_array_smoke_24_v1`. The active `lifecycle` suite contains the verified
+editor create/finalize and prepared rename/refinalize scenarios. Candidate
+gates remain executable directly but do not join the suite until they pass;
+suite/capability CLI selection is not available yet.
 
 Validate registry/fixture drift, manifest references, portable paths, test
 nodes, Pi safety requirements, and current capability claims with:
@@ -260,10 +261,10 @@ Longer composed SIL tiers are opt-in:
 .\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle
 ```
 
-The lifecycle command runs the editor create/finalize scenario and any
-candidate lifecycle gates, including the planned prepared rename/refinalize
-regression. Without these flags, tests marked `sil_lifecycle`,
-`sil_regression`, or `sil_stress` are collected but skipped; both editor
+The lifecycle command runs the three active editor scenarios: create/finalize,
+prepared rename/refinalize, and post-start lock/editable-copy. Without these
+flags, tests marked `sil_lifecycle`,
+`sil_regression`, or `sil_stress` are collected but skipped; all editor
 fixture contracts are still checked.
 Fast registry, manifest, report, comparison, and local Pi safety-contract
 tests continue to run normally.
@@ -300,13 +301,28 @@ This scenario first creates the same minimal A1/A2 prepared experiment, then
 reopens the real editor, changes only the experiment name, and presses Finish
 again. Its target contract requires a single renamed directory, a consistent
 prepared authoritative bundle, zero progress, and a `ready_to_start` reload.
-The current implementation reproduces the tracked regression: the second
-Finish displays `Could not apply experiment design` because the retained
-prepared plan does not match the renamed design hash. The report is retained
-with the warning text, failed action, modal screenshot, pre-rename bundle,
-post-rename filesystem state, and cleanup evidence. The command remains a
-failing lifecycle gate until a separately scoped MVC fix lands; it is not an
-expected-success exception or `xfail`.
+The prepared rename reconciliation now replaces the untouched revision-1
+prepared identity transactionally, while started, progressed, resumed,
+calibrated, invalid, or non-name-only executions remain fail-closed. The
+scenario passes with one renamed directory, a consistent zero-progress
+prepared bundle, and a `ready_to_start` persisted reload.
+
+Run the post-start editor boundary directly with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario experiment_editor_post_start_lock_v1 `
+  --timeout-seconds 60
+```
+
+This scenario creates and activates the minimal experiment, durably advances
+its plan to revision 2 with `lock_reason=printing_started`, and opens the real
+editor without issuing a print command. It requires every in-place mutation
+surface to be read-only, explicit copy guidance, and an enabled
+`Create Editable Copy...` path before it attempts the copy. The active source
+remains byte-identical, while the copy accepts a tolerance-only edit and
+finalizes as a distinct revision-1 `PREPARED` execution that is
+`ready_to_start`. The scenario is active in the lifecycle suite.
 
 Lifecycle scenarios are single-run functional evidence. They reject Pi
 evidence, injected-stall controls, report-set repetition, and baseline

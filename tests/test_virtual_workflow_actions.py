@@ -14,9 +14,11 @@ from tools.virtual_workflows.actions import (
     ScenarioContext,
     capture_milestone,
     drive_editor_create_finalize,
+    drive_editor_post_start_lock_and_copy,
     drive_editor_prestart_rename_refinalize,
     execute_action,
     install_dialog_handler,
+    inspect_editor_lock_controls,
     stage_virtual_head,
     teardown_scenario,
     wait_for_completions,
@@ -383,6 +385,147 @@ def test_editor_rename_driver_propagates_global_deadline_and_rejects_dialog(
     assert caught.value.action_id == "editor.open_via_ui"
     assert caught.value.stage == "timeout"
     assert context.action_results[0]["failure_stage"] == "timeout"
+    assert dialog.isVisible() is False
+    dialog.deleteLater()
+    button.deleteLater()
+    qapp.processEvents()
+
+
+def test_post_start_lock_control_matrix_requires_every_mutating_surface(
+    qapp,
+):
+    from PySide6 import QtWidgets
+
+    dialog = QtWidgets.QDialog()
+    for name, widget in {
+        "exp_name_edit": QtWidgets.QLineEdit(),
+        "rep_spin": QtWidgets.QSpinBox(),
+        "v_spin": QtWidgets.QDoubleSpinBox(),
+        "final_v_spin": QtWidgets.QDoubleSpinBox(),
+        "volume_tolerance_spin": QtWidgets.QDoubleSpinBox(),
+        "plate_format_combo": QtWidgets.QComboBox(),
+        "well_selection_btn": QtWidgets.QPushButton(),
+        "add_reagent_btn": QtWidgets.QPushButton(),
+        "run_btn": QtWidgets.QPushButton(),
+        "save_btn": QtWidgets.QPushButton(),
+        "finish_btn": QtWidgets.QPushButton(),
+        "duplicate_btn": QtWidgets.QPushButton(),
+        "status_lbl": QtWidgets.QLabel(
+            "Execution is locked and read-only; create an editable copy."
+        ),
+        "reagent_table": QtWidgets.QTableWidget(1, 1),
+    }.items():
+        setattr(dialog, name, widget)
+    reagent = QtWidgets.QLineEdit()
+    dialog.reagent_table.setCellWidget(0, 0, reagent)
+
+    for name in (
+        "exp_name_edit",
+        "rep_spin",
+        "v_spin",
+        "final_v_spin",
+        "volume_tolerance_spin",
+        "plate_format_combo",
+        "well_selection_btn",
+        "add_reagent_btn",
+        "run_btn",
+        "save_btn",
+        "finish_btn",
+    ):
+        getattr(dialog, name).setEnabled(False)
+    reagent.setReadOnly(True)
+
+    matrix = inspect_editor_lock_controls(dialog)
+    assert matrix["all_mutating_controls_locked"] is True
+    assert matrix["editable_copy_enabled"] is True
+    assert matrix["actionable_lock_guidance"] is True
+
+    dialog.exp_name_edit.setEnabled(True)
+    matrix = inspect_editor_lock_controls(dialog)
+    assert matrix["all_mutating_controls_locked"] is False
+    dialog.deleteLater()
+    qapp.processEvents()
+
+
+def test_post_start_driver_rejects_wrong_modal_and_captures_failure(
+    qapp,
+    tmp_path,
+):
+    from PySide6 import QtCore, QtWidgets
+
+    context, _, _ = _context(tmp_path)
+    context.app = qapp
+    context.qt_core = QtCore
+    button = QtWidgets.QPushButton("Experiment Editor")
+    wrong = QtWidgets.QDialog()
+    wrong.setWindowTitle("Wrong post-start modal")
+    button.clicked.connect(wrong.exec)
+    context.view = SimpleNamespace(
+        well_plate_widget=SimpleNamespace(
+            design_experiment_button=button
+        )
+    )
+
+    with pytest.raises(
+        ScenarioActionError,
+        match="unexpected active modal",
+    ) as caught:
+        drive_editor_post_start_lock_and_copy(
+            context,
+            source_dir=tmp_path / "source",
+            source_name="source",
+            copy_name="copy",
+            copy_tolerance_nl=1.0,
+        )
+
+    assert caught.value.action_id == "editor.inspect_active_lock_via_ui"
+    assert caught.value.evidence["modal_title"] == "Wrong post-start modal"
+    assert wrong.isVisible() is False
+    assert (context.screenshots_dir / "failure.png").is_file()
+    wrong.deleteLater()
+    button.deleteLater()
+    qapp.processEvents()
+
+
+def test_post_start_driver_propagates_deadline_and_rejects_dialog(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    from PySide6 import QtCore, QtWidgets
+    import View
+
+    clock = FakeClock()
+    context, _, _ = _context(
+        tmp_path,
+        timeout_seconds=0.01,
+        clock=clock,
+    )
+    context.app = qapp
+    context.qt_core = QtCore
+    button = QtWidgets.QPushButton("Experiment Editor")
+    dialog = QtWidgets.QDialog()
+    dialog.setWindowTitle("Synthetic locked editor")
+    button.clicked.connect(dialog.exec)
+    context.view = SimpleNamespace(
+        well_plate_widget=SimpleNamespace(
+            design_experiment_button=button
+        )
+    )
+    monkeypatch.setattr(View, "ExperimentDesignDialog", QtWidgets.QDialog)
+    clock.value += 1.0
+
+    with pytest.raises(ScenarioActionError) as caught:
+        drive_editor_post_start_lock_and_copy(
+            context,
+            source_dir=tmp_path / "source",
+            source_name="source",
+            copy_name="copy",
+            copy_tolerance_nl=1.0,
+        )
+
+    assert caught.value.action_id == "editor.inspect_active_lock_via_ui"
+    assert caught.value.stage == "timeout"
     assert dialog.isVisible() is False
     dialog.deleteLater()
     button.deleteLater()

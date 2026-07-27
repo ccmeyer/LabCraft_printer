@@ -378,6 +378,32 @@ second Finish instead retains all milestones reached before failure plus
 post-rename filesystem evidence, and complete teardown results. It remains a
 functional failure; the report schema does not mark the regression expected.
 
+`experiment_editor_post_start_lock_v1` adds a compatible
+`metrics.persistence.values.post_start_edit_boundary` object:
+
+- `source_locked` records authoritative activation, the revision-2 `ACTIVE`
+  plan and `printing_started` lock, clean zero-intent resume, zero progress,
+  immutable history, runtime assignments, audit rows, file inventory, and
+  SHA-256 hashes;
+- `locked_editor` records the real editor control matrix, status guidance,
+  and availability of `Create Editable Copy...`;
+- `editable_copy_before_finalize` records the distinct copy directory and
+  unlocked controls after the real file/name dialogs complete;
+- `editable_copy_after_finalize` records the copy's distinct revision-1
+  `PREPARED` plan, fresh history, zero progress, key files, runtime
+  assignments, and pre-activation resume absence; and
+- `source_after_copy` compares the source inventory and file hashes against
+  the post-lock snapshot.
+
+A passing report requires the ten ordered milestones `editor_opened`,
+`generated`, `initial_finalized`, `source_locked`, `locked_editor_opened`,
+`in_place_edit_rejected`, `editable_copy_created`, `copy_edited`,
+`copy_finalized`, and `validated`. If the locked-editor gate fails, the
+scenario stops before copy creation and retains the control matrix,
+authoritative source snapshot, `failure.png`, traceback, and teardown results.
+Later assertions remain `incomplete`; the failure is not weakened or treated
+as expected success.
+
 `metrics.persistence.values.authoritative_io` adds compatible diagnostic
 evidence for the guarded active-runtime checkpoint:
 

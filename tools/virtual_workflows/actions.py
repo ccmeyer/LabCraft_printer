@@ -38,6 +38,13 @@ EDITOR_LIFECYCLE_ACTION_IDS = frozenset(
         "editor.finish_via_ui",
         "editor.rename_prepared_via_ui",
         "editor.refinalize_prepared_via_ui",
+        "experiment.activate_authoritative",
+        "execution.lock_for_printing",
+        "editor.inspect_active_lock_via_ui",
+        "editor.reject_in_place_edit_via_ui",
+        "editor.create_editable_copy_via_ui",
+        "editor.edit_copy_via_ui",
+        "editor.finalize_copy_via_ui",
         "artifact.capture_milestone",
         "validation.prepared_bundle",
         "validation.refinalized_bundle",
@@ -1545,6 +1552,472 @@ def drive_editor_prestart_rename_refinalize(
     }
 
 
+def activate_authoritative_execution(
+    context: ScenarioContext,
+    operation: Callable[[], Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Activate a prepared authoritative execution without starting printing."""
+
+    return execute_action(
+        context,
+        "experiment.activate_authoritative",
+        operation,
+    )
+
+
+def lock_execution_for_printing(
+    context: ScenarioContext,
+    operation: Callable[[], Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Cross the durable printing-start lock boundary without a print command."""
+
+    return execute_action(
+        context,
+        "execution.lock_for_printing",
+        operation,
+    )
+
+
+def inspect_editor_lock_controls(dialog: Any) -> dict[str, Any]:
+    """Return the post-start editor control matrix used by the SIL boundary."""
+
+    from PySide6 import QtWidgets
+
+    def state(widget: Any) -> dict[str, Any]:
+        return {
+            "enabled": bool(widget.isEnabled()),
+            "read_only": (
+                bool(widget.isReadOnly())
+                if hasattr(widget, "isReadOnly")
+                else None
+            ),
+        }
+
+    controls = {
+        name: state(getattr(dialog, name))
+        for name in (
+            "exp_name_edit",
+            "rep_spin",
+            "v_spin",
+            "final_v_spin",
+            "volume_tolerance_spin",
+            "plate_format_combo",
+            "well_selection_btn",
+            "add_reagent_btn",
+            "run_btn",
+            "save_btn",
+            "finish_btn",
+        )
+    }
+    reagent_controls: list[dict[str, Any]] = []
+    for row in range(dialog.reagent_table.rowCount()):
+        for column in range(dialog.reagent_table.columnCount()):
+            widget = dialog.reagent_table.cellWidget(row, column)
+            if widget is None or isinstance(widget, QtWidgets.QLabel):
+                continue
+            reagent_controls.append(
+                {
+                    "row": row,
+                    "column": column,
+                    **state(widget),
+                }
+            )
+    controls["reagent_table"] = {
+        "enabled": bool(dialog.reagent_table.isEnabled()),
+        "read_only": None,
+        "all_items_locked": all(
+            (not item["enabled"]) or item["read_only"] is True
+            for item in reagent_controls
+        ),
+        "items": reagent_controls,
+    }
+    locked = all(
+        (not item["enabled"]) or item["read_only"] is True
+        for name, item in controls.items()
+        if name != "reagent_table"
+    ) and all(
+        (not item["enabled"]) or item["read_only"] is True
+        for item in reagent_controls
+    )
+    status_text = str(dialog.status_lbl.text() or "")
+    guidance = (
+        any(word in status_text.casefold() for word in ("locked", "read-only"))
+        and "copy" in status_text.casefold()
+    )
+    return {
+        "controls": controls,
+        "all_mutating_controls_locked": locked,
+        "editable_copy_enabled": bool(dialog.duplicate_btn.isEnabled()),
+        "status_text": status_text,
+        "actionable_lock_guidance": guidance,
+    }
+
+
+def drive_editor_post_start_lock_and_copy(
+    context: ScenarioContext,
+    *,
+    source_dir: Path,
+    source_name: str,
+    copy_name: str,
+    copy_tolerance_nl: float,
+) -> dict[str, Any]:
+    """Prove the active editor is locked, then create and finalize a copy."""
+
+    if context.app is None or context.qt_core is None or context.view is None:
+        raise RuntimeError("editor automation requires a launched Qt application")
+
+    from PySide6 import QtTest, QtWidgets
+    from View import ExperimentDesignDialog
+
+    QtCore = context.qt_core
+    button = context.view.well_plate_widget.design_experiment_button
+    if not button.isEnabled():
+        raise ScenarioActionError(
+            "editor.inspect_active_lock_via_ui",
+            "Experiment Editor button is disabled",
+            stage="precondition",
+        )
+
+    state: dict[str, Any] = {
+        "entered": False,
+        "finished": False,
+        "error": None,
+        "dialog": None,
+        "lock_matrix": {},
+        "copy_before_finalize": {},
+    }
+    driver_timer = QtCore.QTimer(context.app)
+    driver_timer.setInterval(5)
+
+    def click(widget: Any) -> None:
+        QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
+        context.app.processEvents()
+
+    def drive_copy_modals() -> None:
+        modal = context.app.activeModalWidget()
+        try:
+            if modal is None or modal is state["dialog"]:
+                return
+            if isinstance(modal, QtWidgets.QFileDialog):
+                if modal.windowTitle() != "Select Experiment to Duplicate":
+                    raise RuntimeError(
+                        f"unexpected file dialog title: {modal.windowTitle()!r}"
+                    )
+                modal.setDirectory(str(source_dir))
+                context.app.processEvents()
+                button_box = modal.findChild(QtWidgets.QDialogButtonBox)
+                accept = (
+                    button_box.button(QtWidgets.QDialogButtonBox.Open)
+                    if button_box is not None
+                    else None
+                )
+                if accept is None and button_box is not None:
+                    accept = button_box.button(
+                        QtWidgets.QDialogButtonBox.Ok
+                    )
+                if accept is None:
+                    raise RuntimeError("file dialog has no accept button")
+                click(accept)
+                return
+            if isinstance(modal, QtWidgets.QInputDialog):
+                if modal.windowTitle() != "Duplicate Experiment Design":
+                    raise RuntimeError(
+                        f"unexpected input dialog title: {modal.windowTitle()!r}"
+                    )
+                line_edit = modal.findChild(QtWidgets.QLineEdit)
+                if line_edit is None:
+                    raise RuntimeError("copy-name dialog has no text control")
+                _qt_replace_text(QtCore, QtTest, line_edit, copy_name)
+                button_box = modal.findChild(QtWidgets.QDialogButtonBox)
+                accept = (
+                    button_box.button(QtWidgets.QDialogButtonBox.Ok)
+                    if button_box is not None
+                    else None
+                )
+                if accept is None:
+                    raise RuntimeError("copy-name dialog has no OK button")
+                click(accept)
+                return
+            title = modal.windowTitle() if modal is not None else None
+            raise RuntimeError(
+                "unexpected modal while creating editable copy: "
+                f"{type(modal).__name__ if modal is not None else None} "
+                f"{title!r}"
+            )
+        except BaseException as exc:
+            state["error"] = exc
+            if isinstance(modal, QtWidgets.QDialog) and modal.isVisible():
+                modal.reject()
+
+    def run_driver() -> None:
+        if state["entered"]:
+            return
+        state["entered"] = True
+        driver_timer.stop()
+        active = context.app.activeModalWidget()
+        try:
+            if not isinstance(active, ExperimentDesignDialog):
+                title = active.windowTitle() if active is not None else None
+                if isinstance(active, QtWidgets.QDialog):
+                    active.reject()
+                execute_action(
+                    context,
+                    "editor.inspect_active_lock_via_ui",
+                    lambda: {},
+                    precondition=lambda: (
+                        False,
+                        "unexpected active modal while opening locked editor",
+                        {
+                            "modal_type": (
+                                type(active).__name__
+                                if active is not None
+                                else None
+                            ),
+                            "modal_title": title,
+                        },
+                    ),
+                )
+            dialog = active
+            state["dialog"] = dialog
+
+            def inspect_lock() -> Mapping[str, Any]:
+                _ensure_editor_deadline(
+                    context,
+                    "editor.inspect_active_lock_via_ui",
+                    "locked editor inspection",
+                )
+                matrix = inspect_editor_lock_controls(dialog)
+                state["lock_matrix"] = matrix
+                if dialog.exp_name_edit.text() != source_name:
+                    raise RuntimeError(
+                        "locked editor did not load the source experiment"
+                    )
+                failed = [
+                    name
+                    for name, passed in (
+                        (
+                            "all_mutating_controls_locked",
+                            matrix["all_mutating_controls_locked"],
+                        ),
+                        (
+                            "editable_copy_enabled",
+                            matrix["editable_copy_enabled"],
+                        ),
+                        (
+                            "actionable_lock_guidance",
+                            matrix["actionable_lock_guidance"],
+                        ),
+                    )
+                    if not passed
+                ]
+                if failed:
+                    raise ScenarioActionError(
+                        "editor.inspect_active_lock_via_ui",
+                        "active zero-progress editor lock boundary failed: "
+                        + ", ".join(failed),
+                        stage="operation",
+                        evidence={
+                            "failed_checks": failed,
+                            "control_matrix": matrix,
+                        },
+                    )
+                return matrix
+
+            execute_action(
+                context,
+                "editor.inspect_active_lock_via_ui",
+                inspect_lock,
+            )
+            capture_milestone(
+                context,
+                "locked_editor_opened",
+                evidence=state["lock_matrix"],
+                widget=dialog,
+            )
+
+            def reject_in_place() -> Mapping[str, Any]:
+                name_before = dialog.exp_name_edit.text()
+                result_before = int(dialog.result())
+                _qt_replace_text(
+                    QtCore,
+                    QtTest,
+                    dialog.exp_name_edit,
+                    f"{source_name}-forbidden",
+                )
+                click(dialog.finish_btn)
+                if dialog.exp_name_edit.text() != name_before:
+                    raise RuntimeError("locked name control accepted an edit")
+                if int(dialog.result()) != result_before or not dialog.isVisible():
+                    raise RuntimeError("disabled Finish closed the locked editor")
+                return {
+                    "name_unchanged": True,
+                    "finish_rejected": True,
+                }
+
+            execute_action(
+                context,
+                "editor.reject_in_place_edit_via_ui",
+                reject_in_place,
+            )
+            capture_milestone(
+                context,
+                "in_place_edit_rejected",
+                evidence={"experiment_name": source_name},
+                widget=dialog,
+            )
+
+            copy_modal_timer = QtCore.QTimer(dialog)
+            copy_modal_timer.setInterval(5)
+            copy_modal_timer.timeout.connect(drive_copy_modals)
+
+            def create_copy() -> Mapping[str, Any]:
+                copy_modal_timer.start()
+                try:
+                    click(dialog.duplicate_btn)
+                finally:
+                    copy_modal_timer.stop()
+                    copy_modal_timer.deleteLater()
+                if state["error"] is not None:
+                    raise state["error"]
+                expected_dir = (source_dir.parent / copy_name).resolve()
+                current_dir = Path(
+                    dialog.model.experiment_dir_path
+                ).resolve()
+                if current_dir != expected_dir:
+                    raise ScenarioActionError(
+                        "editor.create_editable_copy_via_ui",
+                        f"editable copy loaded {current_dir}; "
+                        f"expected {expected_dir}",
+                        stage="operation",
+                        evidence={
+                            "current_dir": str(current_dir),
+                            "expected_dir": str(expected_dir),
+                            "expected_dir_exists": expected_dir.is_dir(),
+                            "dialog_status": dialog.status_lbl.text(),
+                        },
+                    )
+                matrix = inspect_editor_lock_controls(dialog)
+                editable = (
+                    dialog.exp_name_edit.isEnabled()
+                    and not dialog.exp_name_edit.isReadOnly()
+                    and dialog.volume_tolerance_spin.isEnabled()
+                    and dialog.run_btn.isEnabled()
+                    and dialog.finish_btn.isEnabled()
+                )
+                if not editable:
+                    raise RuntimeError("editable copy controls remained locked")
+                state["copy_before_finalize"] = {
+                    "experiment_dir": str(current_dir),
+                    "experiment_name": dialog.exp_name_edit.text(),
+                    "controls_editable": editable,
+                    "control_matrix": matrix,
+                }
+                return state["copy_before_finalize"]
+
+            execute_action(
+                context,
+                "editor.create_editable_copy_via_ui",
+                create_copy,
+            )
+            capture_milestone(
+                context,
+                "editable_copy_created",
+                evidence=state["copy_before_finalize"],
+                widget=dialog,
+            )
+
+            def edit_copy() -> Mapping[str, Any]:
+                _qt_set_spin_value(
+                    QtCore,
+                    QtTest,
+                    dialog.volume_tolerance_spin,
+                    copy_tolerance_nl,
+                )
+                if not math.isclose(
+                    float(dialog.volume_tolerance_spin.value()),
+                    float(copy_tolerance_nl),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                ):
+                    raise RuntimeError("copy tolerance edit was not retained")
+                click(dialog.run_btn)
+                if dialog._design_optimization_dirty:
+                    raise RuntimeError("copy design remained dirty")
+                return {
+                    "printed_volume_tolerance_nL": (
+                        dialog.volume_tolerance_spin.value()
+                    ),
+                }
+
+            execute_action(context, "editor.edit_copy_via_ui", edit_copy)
+            capture_milestone(
+                context,
+                "copy_edited",
+                evidence={
+                    "printed_volume_tolerance_nL": copy_tolerance_nl
+                },
+                widget=dialog,
+            )
+
+            def finalize_copy() -> Mapping[str, Any]:
+                click(dialog.finish_btn)
+                if dialog.result() != QtWidgets.QDialog.DialogCode.Accepted:
+                    raise RuntimeError("copy editor did not accept after Finish")
+                return {
+                    "dialog_result": int(dialog.result()),
+                    "apply_requested": bool(dialog._apply_requested),
+                }
+
+            execute_action(
+                context,
+                "editor.finalize_copy_via_ui",
+                finalize_copy,
+            )
+            capture_milestone(
+                context,
+                "copy_finalized",
+                evidence={"experiment_name": copy_name},
+                widget=dialog,
+            )
+            state["finished"] = True
+        except BaseException as exc:
+            state["error"] = exc
+            try:
+                if "failure" not in context.screenshots:
+                    capture_failure_screenshot(context, widget=active)
+            except Exception:
+                pass
+            if isinstance(active, QtWidgets.QDialog) and active.isVisible():
+                active.reject()
+
+    driver_timer.timeout.connect(run_driver)
+    driver_timer.start()
+    try:
+        QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+    finally:
+        driver_timer.stop()
+        driver_timer.deleteLater()
+    if state["error"] is not None:
+        raise state["error"]
+    if not state["entered"]:
+        raise ScenarioActionError(
+            "editor.inspect_active_lock_via_ui",
+            "the locked editor did not open",
+            stage="timeout",
+        )
+    if not state["finished"]:
+        raise ScenarioActionError(
+            "editor.finalize_copy_via_ui",
+            "the editable copy did not finish",
+            stage="operation",
+        )
+    return {
+        "lock_matrix": state["lock_matrix"],
+        "copy_before_finalize": state["copy_before_finalize"],
+        "copy_finalized": True,
+    }
+
+
 def validate_prepared_bundle(
     context: ScenarioContext,
     validator: Callable[[], Mapping[str, Any]],
@@ -1819,14 +2292,18 @@ __all__ = [
     "capture_failure_screenshot",
     "capture_milestone",
     "connect_machine_ready",
+    "activate_authoritative_execution",
     "drive_editor_create_finalize",
+    "drive_editor_post_start_lock_and_copy",
     "drive_editor_prestart_rename_refinalize",
     "enable_pressure_regulation",
     "execute_action",
     "install_dialog_handler",
+    "inspect_editor_lock_controls",
     "launch_simulated_application",
     "prepare_authoritative_fixture",
     "reload_authoritative_experiment",
+    "lock_execution_for_printing",
     "stage_virtual_head",
     "start_array_via_ui",
     "teardown_scenario",

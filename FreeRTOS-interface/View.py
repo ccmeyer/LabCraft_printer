@@ -11777,6 +11777,11 @@ class ExperimentDesignDialog(QDialog):
                 return True
         return False
 
+    @staticmethod
+    def _model_authoritative_runtime_is_active(model) -> bool:
+        getter = getattr(model, "is_authoritative_execution_runtime_active", None)
+        return bool(callable(getter) and getter())
+
     def _load_factors_into_table(self):
         """Populate the reagent table from the model's current factors (if any)."""
         previous_suspended = getattr(self, "_auto_update_suspended", False)
@@ -12472,6 +12477,7 @@ class ExperimentDesignDialog(QDialog):
         self._apply_uploaded_design_mode_to_ui(active=self._uploaded_design_active)
         self._apply_manual_assignment_lock_state()
         self._apply_progress_edit_lock_state()
+        self._apply_execution_edit_lock_state()
         self._apply_gripper_edit_lock_state()
         eligibility_getter = getattr(
             self.model, "get_execution_resume_eligibility", None
@@ -12479,9 +12485,14 @@ class ExperimentDesignDialog(QDialog):
         eligibility = eligibility_getter() if callable(eligibility_getter) else None
         if eligibility is not None:
             self.finish_btn.setText("Activate Execution")
+            execution_is_active = (
+                self._model_execution_is_read_only(self.model)
+                and self._model_authoritative_runtime_is_active(self.model)
+            )
             self.finish_btn.setEnabled(
                 bool(eligibility.get("can_activate_runtime"))
                 and not getattr(self, "_editing_locked_by_gripper", False)
+                and not execution_is_active
             )
         elif self.finish_btn.text() == "Activate Execution":
             self.finish_btn.setText("Finish")
@@ -12539,6 +12550,7 @@ class ExperimentDesignDialog(QDialog):
             "new_btn",
             "save_btn",
             "load_btn",
+            "duplicate_btn",
             "finish_btn",
             "rep_spin",
             "v_spin",
@@ -12578,6 +12590,7 @@ class ExperimentDesignDialog(QDialog):
 
     def _apply_default_edit_state(self):
         baseline_controls = [
+            "exp_name_edit",
             "add_reagent_btn",
             "upload_design_btn",
             "reset_upload_btn",
@@ -12588,7 +12601,9 @@ class ExperimentDesignDialog(QDialog):
             "new_btn",
             "save_btn",
             "load_btn",
+            "duplicate_btn",
             "finish_btn",
+            "auto_update_chk",
             "rep_spin",
             "v_spin",
             "final_v_spin",
@@ -12610,6 +12625,9 @@ class ExperimentDesignDialog(QDialog):
             if widget is not None:
                 widget.setEnabled(True)
 
+        if hasattr(self, "exp_name_edit") and self.exp_name_edit is not None:
+            self.exp_name_edit.setReadOnly(False)
+
         if hasattr(self, "random_seed_spin") and hasattr(self, "randomize_chk"):
             self.random_seed_spin.setEnabled(self.randomize_chk.isChecked())
         if hasattr(self, "reduction_spin") and hasattr(self, "subset_chk"):
@@ -12621,6 +12639,71 @@ class ExperimentDesignDialog(QDialog):
                     w.setReadOnly(False)
                 else:
                     w.setEnabled(True)
+
+    def _apply_execution_edit_lock_state(self):
+        locked = self._model_execution_is_read_only(self.model)
+        runtime_active = self._model_authoritative_runtime_is_active(self.model)
+        message = (
+            "This execution has started. Its design is locked and read-only; "
+            "create an editable copy to make changes."
+        )
+        self._execution_lock_status_message = message if locked and runtime_active else ""
+
+        if not locked:
+            if (
+                hasattr(self, "status_lbl")
+                and self.status_lbl is not None
+                and self.status_lbl.text() == message
+            ):
+                self._set_status("")
+            return
+
+        mutating_controls = [
+            "exp_name_edit",
+            "add_reagent_btn",
+            "upload_design_btn",
+            "reset_upload_btn",
+            "unique_conditions_btn",
+            "preview_reactions_btn",
+            "export_reaction_preview_btn",
+            "run_btn",
+            "save_btn",
+            "finish_btn",
+            "auto_update_chk",
+            "rep_spin",
+            "v_spin",
+            "final_v_spin",
+            "volume_tolerance_spin",
+            "fill_name_edit",
+            "fill_mode_combo",
+            "fill_dv_spin",
+            "allow_two_chk",
+            "randomize_chk",
+            "random_seed_spin",
+            "subset_chk",
+            "reduction_spin",
+            "start_col_spin",
+            "start_row_spin",
+            "plate_format_combo",
+            "well_selection_btn",
+        ]
+        for attr_name in mutating_controls:
+            widget = getattr(self, attr_name, None)
+            if widget is not None:
+                widget.setEnabled(False)
+
+        if hasattr(self, "exp_name_edit") and self.exp_name_edit is not None:
+            self.exp_name_edit.setReadOnly(True)
+
+        if hasattr(self, "reagent_table") and self.reagent_table is not None:
+            for _row, _col, widget in self._iter_reagent_widgets():
+                if isinstance(widget, QLineEdit):
+                    widget.setReadOnly(True)
+                else:
+                    widget.setEnabled(False)
+
+        if runtime_active:
+            self._set_status(message)
 
     def _progress_status_message(self, status: Mapping[str, Any]) -> str:
         wells = int(status.get("wells_with_progress", 0) or 0)
@@ -14225,6 +14308,15 @@ class ExperimentDesignDialog(QDialog):
         Optimize & generate, save the design (creating/renaming the folder if needed),
         then close the dialog. Applying to the main app is explicit in this path only.
         """
+        if (
+            self._model_execution_is_read_only(self.model)
+            and self._model_authoritative_runtime_is_active(self.model)
+        ):
+            self._set_status(
+                "This execution has started. Its design is locked and read-only; "
+                "create an editable copy to make changes."
+            )
+            return
         bundle_getter = getattr(self.model, "get_authoritative_execution_bundle", None)
         bundle = bundle_getter() if callable(bundle_getter) else None
         if bundle is not None:

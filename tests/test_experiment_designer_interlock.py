@@ -19,24 +19,40 @@ from PySide6.QtWidgets import (
 from View import ExperimentDesignDialog
 
 
-def _build_dialog_stub(gripper_loaded: bool, *, manual_assignments: bool = False):
+def _build_dialog_stub(
+    gripper_loaded: bool,
+    *,
+    manual_assignments: bool = False,
+    execution_locked: bool = False,
+    runtime_active: bool = False,
+    resume_eligibility=None,
+):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog._uploaded_design_active = False
     dialog._editing_locked_by_gripper = False
     dialog.status_lbl = QLabel("")
 
+    dialog.exp_name_edit = QLineEdit()
     dialog.add_reagent_btn = QPushButton()
     dialog.upload_design_btn = QPushButton()
     dialog.reset_upload_btn = QPushButton()
+    dialog.unique_conditions_btn = QPushButton()
+    dialog.preview_reactions_btn = QPushButton()
+    dialog.export_reaction_preview_btn = QPushButton()
     dialog.run_btn = QPushButton()
     dialog.new_btn = QPushButton()
     dialog.save_btn = QPushButton()
     dialog.load_btn = QPushButton()
+    dialog.duplicate_btn = QPushButton()
     dialog.finish_btn = QPushButton()
+    dialog.finish_btn.setText("Finish")
+    dialog.auto_update_chk = QCheckBox()
     dialog.rep_spin = QSpinBox()
     dialog.v_spin = QDoubleSpinBox()
     dialog.final_v_spin = QDoubleSpinBox()
+    dialog.volume_tolerance_spin = QDoubleSpinBox()
     dialog.fill_name_edit = QLineEdit()
+    dialog.fill_mode_combo = QComboBox()
     dialog.fill_dv_spin = QDoubleSpinBox()
     dialog.allow_two_chk = QCheckBox()
     dialog.randomize_chk = QCheckBox()
@@ -70,6 +86,10 @@ def _build_dialog_stub(gripper_loaded: bool, *, manual_assignments: bool = False
     )
     dialog.model = SimpleNamespace(
         has_explicit_well_assignments=lambda: manual_assignments,
+        is_execution_design_locked=lambda: execution_locked,
+        is_authoritative_execution_runtime_active=lambda: runtime_active,
+        is_read_only_legacy_execution=lambda: False,
+        get_execution_resume_eligibility=lambda: resume_eligibility,
         save_experiment=Mock(),
     )
     return dialog
@@ -275,3 +295,123 @@ def test_experiment_designer_gripper_lock_dominates_uploaded_manual_modes(qapp):
     assert dialog._editing_locked_by_gripper is True
     _assert_mutating_controls_disabled(dialog)
     assert "view-only" in dialog.status_lbl.text()
+
+
+def test_active_execution_is_read_only_with_editable_copy_guidance(qapp):
+    dialog = _build_dialog_stub(
+        gripper_loaded=False,
+        execution_locked=True,
+        runtime_active=True,
+        resume_eligibility={"can_activate_runtime": True},
+    )
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert dialog.exp_name_edit.isEnabled() is False
+    assert dialog.exp_name_edit.isReadOnly() is True
+    assert dialog.volume_tolerance_spin.isEnabled() is False
+    assert dialog.run_btn.isEnabled() is False
+    assert dialog.save_btn.isEnabled() is False
+    assert dialog.finish_btn.isEnabled() is False
+    assert dialog.auto_update_chk.isEnabled() is False
+    assert dialog.duplicate_btn.isEnabled() is True
+    assert dialog.new_btn.isEnabled() is True
+    assert dialog.load_btn.isEnabled() is True
+    assert dialog.status_lbl.text() == (
+        "This execution has started. Its design is locked and read-only; "
+        "create an editable copy to make changes."
+    )
+
+
+def test_active_execution_finish_handler_cannot_activate_or_close(qapp):
+    dialog = _build_dialog_stub(
+        gripper_loaded=False,
+        execution_locked=True,
+        runtime_active=True,
+        resume_eligibility={"can_activate_runtime": True},
+    )
+    dialog.main_window.activate_authoritative_execution = Mock()
+    dialog.accept = Mock()
+    dialog._apply_requested = False
+    dialog.model.get_authoritative_execution_bundle = lambda: {"plan": {}}
+
+    ExperimentDesignDialog._on_finish(dialog)
+
+    dialog.main_window.activate_authoritative_execution.assert_not_called()
+    dialog.accept.assert_not_called()
+    assert dialog._apply_requested is False
+    assert "create an editable copy" in dialog.status_lbl.text()
+
+
+def test_inactive_persisted_execution_keeps_eligible_activation(qapp):
+    dialog = _build_dialog_stub(
+        gripper_loaded=False,
+        execution_locked=True,
+        runtime_active=False,
+        resume_eligibility={"can_activate_runtime": True},
+    )
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert dialog.exp_name_edit.isEnabled() is False
+    assert dialog.run_btn.isEnabled() is False
+    assert dialog.finish_btn.text() == "Activate Execution"
+    assert dialog.finish_btn.isEnabled() is True
+    assert dialog.duplicate_btn.isEnabled() is True
+
+
+def test_prepared_execution_remains_editable(qapp):
+    dialog = _build_dialog_stub(
+        gripper_loaded=False,
+        execution_locked=False,
+        runtime_active=False,
+    )
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert dialog.exp_name_edit.isEnabled() is True
+    assert dialog.exp_name_edit.isReadOnly() is False
+    assert dialog.volume_tolerance_spin.isEnabled() is True
+    assert dialog.run_btn.isEnabled() is True
+    assert dialog.finish_btn.isEnabled() is True
+    assert dialog.duplicate_btn.isEnabled() is True
+
+
+def test_leaving_execution_lock_restores_editable_controls(qapp):
+    state = {"locked": True, "active": True}
+    dialog = _build_dialog_stub(gripper_loaded=False)
+    dialog.model.is_execution_design_locked = lambda: state["locked"]
+    dialog.model.is_authoritative_execution_runtime_active = lambda: state["active"]
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+    assert dialog.exp_name_edit.isReadOnly() is True
+    assert dialog.finish_btn.isEnabled() is False
+
+    state.update(locked=False, active=False)
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert dialog.exp_name_edit.isEnabled() is True
+    assert dialog.exp_name_edit.isReadOnly() is False
+    assert dialog.volume_tolerance_spin.isEnabled() is True
+    assert dialog.run_btn.isEnabled() is True
+    assert dialog.finish_btn.isEnabled() is True
+    assert dialog.duplicate_btn.isEnabled() is True
+    assert dialog.auto_update_chk.isEnabled() is True
+    assert dialog.status_lbl.text() == ""
+
+
+def test_gripper_lock_overrides_active_execution_editable_copy(qapp):
+    dialog = _build_dialog_stub(
+        gripper_loaded=True,
+        execution_locked=True,
+        runtime_active=True,
+        resume_eligibility={"can_activate_runtime": True},
+    )
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert dialog.duplicate_btn.isEnabled() is False
+    assert dialog.finish_btn.isEnabled() is False
+    assert dialog.status_lbl.text() == (
+        "Design is view-only while a printer head is loaded in the gripper."
+    )

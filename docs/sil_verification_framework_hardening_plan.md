@@ -1599,6 +1599,181 @@ Next permitted action:
   disconnect, scheduled automation, performance remediation, firmware,
   protocol, Pi, and hardware behavior out of that milestone.
 
+#### Slice 4.3: Post-start editor lock and editable copy
+
+Status: `verified`
+
+Call path:
+
+`QTest -> real editor finalization -> authoritative runtime activation -> ExperimentModel.lock_execution_plan("printing_started") -> reopen ExperimentDesignDialog -> inspect/reject in-place editing -> Create Editable Copy -> edit/finalize copy -> source/copy authoritative inspection`
+
+Implementation:
+
+- Added strict fixture `experiment_editor_post_start_lock_v1` for the minimal
+  A1/A2 design, source/copy names, tolerance-only copy edit, two
+  finalizations, one activation, one printing-start lock, and one editable
+  copy.
+- Added reusable actions for activation, the durable printing-start
+  transition, locked-control inspection, rejected QTest edits, real
+  `QFileDialog`/`QInputDialog` copy creation, copy editing, and copy
+  finalization. All actions share the existing 60-second deadline and
+  fail-closed dialog/cleanup handling.
+- Replaced binary editor workload selection with an additive internal
+  definition mapping while preserving the Slice 4.1/4.2 exports, defaults,
+  registry order, and CLI restrictions.
+- Added report-v1 evidence beneath
+  `metrics.persistence.values.post_start_edit_boundary` for the locked source,
+  editor control matrix, copy before/after finalization, and source
+  immutability comparison.
+- Registered the scenario for direct execution but left it `planned`, absent
+  from the active lifecycle suite, and disconnected from capability claims
+  until the strict composed gate passes.
+- Added exact-fixture, action/control-matrix, registry/CLI, report,
+  expected-success, and retained-failure tests. The initial framework
+  implementation did not change a production MVC file.
+
+Verification record (2026-07-27):
+
+- Started at commit `d8d20769e757344802d45e5bed1f9c4800b5c347`
+  with a clean tracked worktree. `.worktrees/` and the six pre-existing
+  inaccessible execution-cache directories remained untouched.
+- The expanded pre-edit focused lifecycle selection passed 139 tests with 50
+  existing Qt chart deprecation warnings in 11.71 seconds.
+- The final fast post-change action, manifest, compatibility, and default-tier
+  selection passed 84 tests and skipped the three opt-in Slice 4.3 composed
+  tests in 3.26 seconds.
+- The strict composed gate crossed the intended durable boundary successfully:
+  the source was valid, revision 2, `ACTIVE`, locked for
+  `printing_started`, zero-progress, and backed by a clean zero-intent resume
+  checkpoint and two-revision immutable history.
+- Reopening the real editor then failed
+  `editor.inspect_active_lock_via_ui`. The name, volume, tolerance, plate,
+  reagent, optimization, save, and Finish surfaces were enabled (the name
+  control was not read-only), and the status text was empty. The editable-copy
+  button was enabled, but there was no lock/read-only guidance.
+- In accordance with the failure policy, the scenario stopped before the
+  in-place edit attempt and editable-copy workflow. It retained the complete
+  control matrix, source inventory and SHA-256 hashes, plan/history/resume and
+  audit evidence, five screenshots including `failure.png`, traceback, and
+  cleanup results. The final direct diagnostic classified `fail` in
+  2,073.339 ms:
+  `verification_reports/virtual_workflows/experiment_editor_post_start_lock_v1/20260727T050609503744Z_d8d20769e757/report.json`.
+- The focused failure-policy rerun passed the fixture and synthetic evidence
+  checks while leaving the strict expected-success gate failing (`2 passed,
+  1 failed`) in 3.74 seconds. The gate was not converted to `xfail`, and no
+  assertion or boundary was weakened.
+- A test-only lock-policy shim exercised the otherwise unreachable downstream
+  path through the real file/name dialogs, editable tolerance change,
+  optimization/finalization, source byte-identity comparison, and fresh copy
+  validation. That copy-path scenario passed in 3.27 seconds; the shim does
+  not alter or excuse the strict production-UI gate.
+- The final complete requested focused lifecycle selection passed 153 tests
+  and reported only the same strict Slice 4.3 expected-success failure, with
+  80 existing Qt chart deprecation warnings in 14.91 seconds.
+- Default Slice 4.3 collection passed its fixture contract and skipped the
+  three opt-in composed tests (`1 passed, 3 skipped`). The unaffected 96-well,
+  comparison, and local Pi-contract selection passed 40 tests and skipped 3.
+- All three retained reports remained report-v1 valid with classifications
+  Windows 96-well `pass`, Windows 384x10 `fail`, and Pi 384x10 `fail`. Both
+  tracked baselines loaded with distinct `offscreen_windows_sil` and
+  `offscreen_pi_sil` identities.
+- The first full-suite invocation encountered only the six known inaccessible
+  cache directories during collection. Repeating with exactly those six paths
+  ignored passed 3,586 tests, skipped 34, and reported 118 existing warnings
+  in 417.41 seconds. This run preceded the final opt-in copy-path test; that
+  test subsequently passed directly and is skipped by default.
+- After the full run, all 312 restored `frames.jsonl`/`events.jsonl` files
+  referenced by the 156-run gravimetric manifest remained present and
+  nonempty. The two restored files in
+  `run_20260408_104206_ffe2616e` also remained nonempty.
+
+Disposition, risks, and rollback:
+
+- Slice 4.3 remains `in_progress`.
+  `experiment_editor_post_start_lock_v1` remains `planned` and outside the
+  lifecycle suite. `experiment.active_edit_lock` remains `planned`,
+  `experiment.editable_copy` remains `partial`, and
+  `experiment.prepared_rename_refinalize` remains `partial`.
+- The failure is a production UI-policy defect around
+  `WellPlateWidget.open_experiment_designer ->
+  ExperimentDesignDialog.prepare_progress_policy_for_current_design ->
+  _refresh_all_lock_states -> _apply_progress_edit_lock_state`: the existing
+  policy protects printed-progress designs but does not surface the already
+  durable active-plan lock at zero progress.
+- Rollback removes the Slice 4.3 fixture, actions, runner/registry/manifest
+  entries, tests, and this documentation while preserving verified Slices
+  0-4.2. No production, application-data, firmware, protocol, hardware,
+  baseline, performance, or Pi rollback is required.
+
+MVC defect resolution record (2026-07-27):
+
+- Corrected the effective `ExperimentDesignDialog` lock-state path in
+  `FreeRTOS-interface/View.py`. The editor now layers the authoritative
+  execution lock after uploaded/manual and printed-progress restrictions and
+  before the gripper interlock.
+- A locked active runtime disables the name, design, reagent, optimization,
+  auto-update, Save, and Finish surfaces; keeps New Experiment, Load Design,
+  and `Create Editable Copy...` available; and displays actionable read-only
+  guidance. The gripper interlock remains highest precedence.
+- The Finish handler now rejects an indirectly invoked Finish for an
+  already-active locked runtime before the authoritative activation path.
+  An inactive persisted `ACTIVE` execution remains read-only while retaining
+  an eligible `Activate Execution` path.
+- The default edit-state reset restores the name, duplicate, auto-update, and
+  reagent controls after a fresh editable copy loads. The test-only lock shim
+  was removed before final verification.
+- Focused production editor tests passed 39 tests. The promoted manifest and
+  strict Slice 4.3 selection passed 62 tests with 20 existing Qt chart
+  deprecation warnings. The complete focused lifecycle portfolio passed 159
+  tests with 70 existing warnings in 13.43 seconds.
+- A direct CLI execution classified `pass` in 2,643.204 ms with all nine
+  assertions passing, no dialogs or errors, and ten nonempty readable
+  screenshots:
+  `verification_reports/virtual_workflows/experiment_editor_post_start_lock_v1/20260727T054314253824Z_d8d20769e757/report.json`.
+  The source remained byte-identical at revision 2 `ACTIVE`; the editable copy
+  finalized as a distinct revision-1 `PREPARED` execution with a different
+  plan ID.
+- Default collection passed the fixture contract and skipped the two opt-in
+  composed tests (`1 passed, 2 skipped`). The unaffected 96-well,
+  comparison, and local Pi-contract selection passed 40 tests and skipped 3.
+- All three retained reports remained report-v1 valid with classifications
+  Windows 96-well `pass`, Windows 384x10 `fail`, and Pi 384x10 `fail`. Both
+  tracked baselines loaded with distinct `offscreen_windows_sil` and
+  `offscreen_pi_sil` identities.
+- With exactly the six known inaccessible execution-cache directories
+  ignored, the full default Python suite passed 3,592 tests, skipped 34, and
+  reported 118 existing warnings in 417.96 seconds.
+- After the full run, all 312 restored `frames.jsonl`/`events.jsonl` files
+  referenced by the 156-run gravimetric manifest remained present and
+  nonempty. The restored `run_20260408_104206_ffe2616e` files were also
+  nonempty (167,458-byte events and 45,968-byte frames).
+- `experiment_editor_post_start_lock_v1` is now active in the lifecycle suite.
+  `experiment.active_edit_lock`, `experiment.editable_copy`, and
+  `experiment.prepared_rename_refinalize` are `covered`, with a two-day
+  evidence age.
+- No simulated-machine connection, print command, remote Pi operation, stress
+  workload, performance collection, baseline regeneration, firmware/protocol
+  change, or hardware access occurred.
+
+Final disposition, risks, and rollback:
+
+- Slice 4.3 is `verified`. The initial failed report remains retained as
+  regression evidence; the passing report above is the promotion evidence.
+- The lock deliberately keys off the existing authoritative model APIs and
+  does not change execution-plan, persistence, simulator, or copy semantics.
+- Rollback reverts the effective editor lock layer and focused tests, removes
+  the Slice 4.3 manifest promotion, and returns the scenario/capabilities to
+  their pre-fix planned/partial states. The Slice 4.3 framework and retained
+  defect evidence remain. No application-data, firmware, protocol, hardware,
+  baseline, performance, or Pi rollback is required.
+
+Next permitted action:
+
+- Slice 4.4, `print_array_soft_stop_resume_24_v1`. Keep refill-required resume
+  deferred while volume tracking is disabled, and keep performance
+  remediation, firmware, protocol, Pi, and hardware behavior out of that
+  milestone.
+
 ### Slice 5: Suites and scheduling contracts
 
 Goal:
@@ -1971,13 +2146,16 @@ The effort is complete when:
   troubleshooting commands;
 - final diff, ignore, artifact, and worktree checks pass;
 - no production MVC, machine, firmware, protocol, motion, pressure, timing, or
-  persistence behavior was changed.
+  persistence behavior was changed by a framework slice; separately scoped
+  MVC defect corrections required by a strict lifecycle gate are recorded
+  independently with their own verification and rollback.
 
 ## Current Next Action
 
-Begin Slice 2 only as a separately reviewed action/context-extraction
-milestone. Preserve the public config/runner adapter, registered legacy IDs,
-manifest identity, report-v1 envelope, comparison policy, fixture mappings,
-failure artifacts, and Pi proof linkage. Do not combine the extraction with a
-new smoke fixture, lifecycle scenario, suite selector, coverage summary,
-performance remediation, or production behavior change.
+Begin Slice 4.4, `print_array_soft_stop_resume_24_v1`, only as a separately
+reviewed lifecycle milestone. Preserve the active editor portfolio, public
+config/runner adapters, registry and manifest identities, report-v1 envelope,
+comparison policy, fixture mappings, failure artifacts, and Pi proof linkage.
+Keep refill-required resume deferred while volume tracking is disabled, and do
+not combine Slice 4.4 with performance remediation, firmware, protocol, remote
+Pi, or hardware behavior changes.

@@ -33,6 +33,7 @@ from tools.virtual_workflows.scenarios import (
     load_virtual_print_array_fixture,
 )
 from tools.virtual_workflows.editor_scenarios import (
+    POST_START_LOCK_WORKLOAD_ID as EDITOR_POST_START_WORKLOAD_ID,
     RENAME_WORKLOAD_ID as EDITOR_RENAME_WORKLOAD_ID,
     WORKLOAD_ID as EDITOR_WORKLOAD_ID,
     EditorLifecycleScenarioConfig,
@@ -62,6 +63,7 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         SMOKE_WORKLOAD_ID,
         EDITOR_WORKLOAD_ID,
         EDITOR_RENAME_WORKLOAD_ID,
+        EDITOR_POST_START_WORKLOAD_ID,
     )
 
     for scenario_id in (WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID):
@@ -101,6 +103,7 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert lifecycle["scenario_ids"] == [
         "experiment_editor_create_finalize_v1",
         "experiment_editor_prestart_rename_refinalize_v1",
+        "experiment_editor_post_start_lock_v1",
     ]
     rename_scenario = _row(
         payload,
@@ -110,6 +113,14 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert rename_scenario["status"] == "active"
     assert rename_scenario["suite_ids"] == ["lifecycle"]
     assert rename_scenario["registry_id"] == EDITOR_RENAME_WORKLOAD_ID
+    post_start = _row(
+        payload,
+        "scenarios",
+        EDITOR_POST_START_WORKLOAD_ID,
+    )
+    assert post_start["status"] == "active"
+    assert post_start["suite_ids"] == ["lifecycle"]
+    assert post_start["registry_id"] == EDITOR_POST_START_WORKLOAD_ID
 
     smoke = _row(payload, "scenarios", "print_array_smoke_24_v1")
     assert smoke["registry_id"] == SMOKE_WORKLOAD_ID
@@ -127,7 +138,17 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert capabilities["experiment.design_plan_consistency"]["status"] == "covered"
     assert (
         capabilities["experiment.prepared_rename_refinalize"]["status"]
-        == "partial"
+        == "covered"
+    )
+    assert capabilities["experiment.active_edit_lock"]["status"] == "covered"
+    assert capabilities["experiment.editable_copy"]["status"] == "covered"
+    assert (
+        capabilities["experiment.active_edit_lock"]["max_evidence_age_days"]
+        == 2
+    )
+    assert (
+        capabilities["experiment.editable_copy"]["max_evidence_age_days"]
+        == 2
     )
     assert (
         capabilities["execution.multi_stock_head_exchange"]["status"]
@@ -158,6 +179,9 @@ def test_cli_scenario_surface_is_registry_driven_and_legacy_compatible():
     assert parser.parse_args(
         ["--scenario", EDITOR_RENAME_WORKLOAD_ID]
     ).scenario == EDITOR_RENAME_WORKLOAD_ID
+    assert parser.parse_args(
+        ["--scenario", EDITOR_POST_START_WORKLOAD_ID]
+    ).scenario == EDITOR_POST_START_WORKLOAD_ID
 
 
 @pytest.mark.parametrize(
@@ -205,6 +229,10 @@ def test_registry_dispatch_uses_existing_config_and_runner(
             EDITOR_RENAME_WORKLOAD_ID,
             "run_editor_prestart_rename_refinalize_scenario",
         ),
+        (
+            EDITOR_POST_START_WORKLOAD_ID,
+            "run_editor_post_start_lock_scenario",
+        ),
     ],
 )
 def test_registry_dispatches_editor_family_without_importing_it_for_inspection(
@@ -242,7 +270,11 @@ def test_registry_dispatches_editor_family_without_importing_it_for_inspection(
 
 @pytest.mark.parametrize(
     "scenario_id",
-    [EDITOR_WORKLOAD_ID, EDITOR_RENAME_WORKLOAD_ID],
+    [
+        EDITOR_WORKLOAD_ID,
+        EDITOR_RENAME_WORKLOAD_ID,
+        EDITOR_POST_START_WORKLOAD_ID,
+    ],
 )
 @pytest.mark.parametrize(
     "extra_args",

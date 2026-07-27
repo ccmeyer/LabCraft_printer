@@ -27,15 +27,23 @@ SCENARIO_NAME = "experiment_editor_create_finalize"
 SCENARIO_VERSION = "1"
 RENAME_WORKLOAD_ID = "experiment_editor_prestart_rename_refinalize_v1"
 RENAME_SCENARIO_NAME = "experiment_editor_prestart_rename_refinalize"
+POST_START_LOCK_WORKLOAD_ID = "experiment_editor_post_start_lock_v1"
+POST_START_LOCK_SCENARIO_NAME = "experiment_editor_post_start_lock"
 FIXTURE_PATH = (
     Path(__file__).resolve().parent / "fixtures" / f"{WORKLOAD_ID}.json"
 )
 RENAME_FIXTURE_PATH = (
     Path(__file__).resolve().parent / "fixtures" / f"{RENAME_WORKLOAD_ID}.json"
 )
+POST_START_LOCK_FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / f"{POST_START_LOCK_WORKLOAD_ID}.json"
+)
 EDITOR_FIXTURE_PATHS = {
     WORKLOAD_ID: FIXTURE_PATH,
     RENAME_WORKLOAD_ID: RENAME_FIXTURE_PATH,
+    POST_START_LOCK_WORKLOAD_ID: POST_START_LOCK_FIXTURE_PATH,
 }
 ASSERTION_IDS = (
     "sil.host_hardware_disabled",
@@ -58,6 +66,17 @@ RENAME_ASSERTION_IDS = (
     "experiment.key_files_consistent",
     "artifacts.required_present",
 )
+POST_START_LOCK_ASSERTION_IDS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "experiment.active_edit_lock",
+    "experiment.in_place_edit_rejected",
+    "experiment.source_bundle_immutable",
+    "experiment.editable_copy_created",
+    "experiment.editable_copy_fresh_execution",
+    "experiment.editable_copy_editable",
+    "artifacts.required_present",
+)
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -67,12 +86,15 @@ if str(UI_DIR) not in sys.path:
 from tools.virtual_workflows.actions import (  # noqa: E402
     ScenarioActionError,
     ScenarioContext,
+    activate_authoritative_execution,
     capture_failure_screenshot,
     capture_milestone,
     drive_editor_create_finalize,
+    drive_editor_post_start_lock_and_copy,
     drive_editor_prestart_rename_refinalize,
     install_dialog_handler,
     launch_simulated_application,
+    lock_execution_for_printing,
     reload_authoritative_experiment,
     teardown_scenario,
     validate_prepared_bundle,
@@ -315,14 +337,182 @@ def load_editor_prestart_rename_refinalize_fixture(
     return normalized
 
 
+def load_editor_post_start_lock_fixture(
+    path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Load the exact tracked post-start lock/editable-copy fixture."""
+
+    fixture_path = Path(path or POST_START_LOCK_FIXTURE_PATH).resolve()
+    try:
+        payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise VirtualWorkflowScenarioError(
+            f"could not load editor post-start lifecycle fixture: {exc}"
+        ) from exc
+    top = _exact_fields(
+        payload,
+        {"fixture_id", "schema_version", "experiment", "reagent", "workload"},
+        "fixture",
+    )
+    experiment = _exact_fields(
+        top["experiment"],
+        {
+            "source_name",
+            "copy_name",
+            "plate_name",
+            "replicates",
+            "expected_well_ids",
+            "printed_volume_nL",
+            "final_volume_nL",
+            "printed_volume_tolerance_nL",
+            "copy_printed_volume_tolerance_nL",
+            "randomize_assignments",
+            "allow_two_stock_solutions",
+        },
+        "fixture.experiment",
+    )
+    reagent = _exact_fields(
+        top["reagent"],
+        {
+            "stock_label",
+            "group",
+            "printing_mode",
+            "starting_concentration",
+            "targets",
+            "units",
+            "fixed_stock_concentration",
+            "droplet_volume_nL",
+        },
+        "fixture.reagent",
+    )
+    workload = _exact_fields(
+        top["workload"],
+        {
+            "completion_count",
+            "expected_editor_finalization_operations",
+            "expected_authoritative_activations",
+            "expected_printing_start_locks",
+            "expected_editable_copy_operations",
+        },
+        "fixture.workload",
+    )
+    expected = {
+        "fixture_id": POST_START_LOCK_WORKLOAD_ID,
+        "schema_version": 1,
+        "experiment": {
+            "source_name": "sil-editor-post-start-lock-v1",
+            "copy_name": "sil-editor-post-start-copy-v1",
+            "plate_name": "shallow-384_well_plate",
+            "replicates": 2,
+            "expected_well_ids": ["A1", "A2"],
+            "printed_volume_nL": 10.0,
+            "final_volume_nL": 10.0,
+            "printed_volume_tolerance_nL": 0.0,
+            "copy_printed_volume_tolerance_nL": 1.0,
+            "randomize_assignments": False,
+            "allow_two_stock_solutions": False,
+        },
+        "reagent": {
+            "stock_label": "Editor Stock",
+            "group": "Additive",
+            "printing_mode": "droplet",
+            "starting_concentration": 0.0,
+            "targets": [1.0],
+            "units": "x",
+            "fixed_stock_concentration": 1.0,
+            "droplet_volume_nL": 10.0,
+        },
+        "workload": {
+            "completion_count": 2,
+            "expected_editor_finalization_operations": 2,
+            "expected_authoritative_activations": 1,
+            "expected_printing_start_locks": 1,
+            "expected_editable_copy_operations": 1,
+        },
+    }
+    normalized = {
+        "fixture_id": str(top["fixture_id"]),
+        "schema_version": top["schema_version"],
+        "experiment": dict(experiment),
+        "reagent": dict(reagent),
+        "workload": dict(workload),
+    }
+    if normalized != expected:
+        raise VirtualWorkflowScenarioError(
+            "editor post-start fixture differs from the frozen Slice 4.3 contract"
+        )
+    return normalized
+
+
 def _initial_design_fixture(fixture: Mapping[str, Any]) -> dict[str, Any]:
     if fixture["fixture_id"] == WORKLOAD_ID:
         return json.loads(json.dumps(fixture))
     initial = json.loads(json.dumps(fixture))
     experiment = initial["experiment"]
-    experiment["name"] = experiment.pop("initial_name")
-    experiment.pop("renamed_name")
+    if fixture["fixture_id"] == RENAME_WORKLOAD_ID:
+        experiment["name"] = experiment.pop("initial_name")
+        experiment.pop("renamed_name")
+    else:
+        experiment["name"] = experiment.pop("source_name")
+        experiment.pop("copy_name")
+        experiment.pop("copy_printed_volume_tolerance_nL")
     return initial
+
+
+@dataclass(frozen=True)
+class _EditorScenarioDefinition:
+    scenario_name: str
+    fixture_loader: Any
+    assertion_ids: tuple[str, ...]
+    required_screenshots: frozenset[str]
+
+
+EDITOR_SCENARIO_DEFINITIONS = {
+    WORKLOAD_ID: _EditorScenarioDefinition(
+        SCENARIO_NAME,
+        load_editor_create_finalize_fixture,
+        ASSERTION_IDS,
+        frozenset(
+            {"editor_opened", "generated", "finalized", "validated", "reloaded"}
+        ),
+    ),
+    RENAME_WORKLOAD_ID: _EditorScenarioDefinition(
+        RENAME_SCENARIO_NAME,
+        load_editor_prestart_rename_refinalize_fixture,
+        RENAME_ASSERTION_IDS,
+        frozenset(
+            {
+                "editor_opened",
+                "generated",
+                "initial_finalized",
+                "rename_editor_opened",
+                "renamed",
+                "refinalized",
+                "reloaded",
+                "validated",
+            }
+        ),
+    ),
+    POST_START_LOCK_WORKLOAD_ID: _EditorScenarioDefinition(
+        POST_START_LOCK_SCENARIO_NAME,
+        load_editor_post_start_lock_fixture,
+        POST_START_LOCK_ASSERTION_IDS,
+        frozenset(
+            {
+                "editor_opened",
+                "generated",
+                "initial_finalized",
+                "source_locked",
+                "locked_editor_opened",
+                "in_place_edit_rejected",
+                "editable_copy_created",
+                "copy_edited",
+                "copy_finalized",
+                "validated",
+            }
+        ),
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -426,6 +616,26 @@ def _design_without_name(payload: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _directory_file_snapshot(directory: Path) -> dict[str, Any]:
+    files = sorted(path for path in directory.rglob("*") if path.is_file())
+    return {
+        "inventory": [path.relative_to(directory).as_posix() for path in files],
+        "sha256": {
+            path.relative_to(directory).as_posix(): _file_sha256(path)
+            for path in files
+        },
+    }
+
+
+def _copy_semantic_design(payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = json.loads(json.dumps(payload))
+    metadata = normalized.get("metadata")
+    if isinstance(metadata, dict):
+        metadata.pop("name", None)
+        metadata.pop("printed_volume_tolerance_nL", None)
+    return normalized
+
+
 def _check_evidence(
     checks: Mapping[str, bool],
     **values: Any,
@@ -460,34 +670,15 @@ def _run_editor_lifecycle_scenario(
         raise VirtualWorkflowScenarioError(
             "the editor lifecycle scenario requires an installed real PySide6 binding"
         )
+    definition = EDITOR_SCENARIO_DEFINITIONS[config.scenario_id]
     rename_refinalize = config.scenario_id == RENAME_WORKLOAD_ID
-    fixture = (
-        load_editor_prestart_rename_refinalize_fixture(config.fixture_path)
-        if rename_refinalize
-        else load_editor_create_finalize_fixture(config.fixture_path)
-    )
+    post_start_lock = config.scenario_id == POST_START_LOCK_WORKLOAD_ID
+    fixture = definition.fixture_loader(config.fixture_path)
     initial_fixture = _initial_design_fixture(fixture)
     workload_id = fixture["fixture_id"]
-    scenario_name = (
-        RENAME_SCENARIO_NAME if rename_refinalize else SCENARIO_NAME
-    )
-    assertion_ids = (
-        RENAME_ASSERTION_IDS if rename_refinalize else ASSERTION_IDS
-    )
-    required_screenshots = (
-        {
-            "editor_opened",
-            "generated",
-            "initial_finalized",
-            "rename_editor_opened",
-            "renamed",
-            "refinalized",
-            "reloaded",
-            "validated",
-        }
-        if rename_refinalize
-        else {"editor_opened", "generated", "finalized", "validated", "reloaded"}
-    )
+    scenario_name = definition.scenario_name
+    assertion_ids = definition.assertion_ids
+    required_screenshots = definition.required_screenshots
     stamp = _run_stamp()
     short_commit = identity["source"].get("git_short_commit") or "unknown"
     report_dir = (
@@ -524,6 +715,7 @@ def _run_editor_lifecycle_scenario(
     refinalized_evidence: dict[str, Any] = {}
     reload_evidence: dict[str, Any] = {}
     rename_evidence: dict[str, Any] = {}
+    post_start_evidence: dict[str, Any] = {}
     assertion_evidence: dict[str, dict[str, Any]] = {}
     assertion_failures: dict[str, dict[str, Any]] = {}
 
@@ -628,12 +820,16 @@ def _run_editor_lifecycle_scenario(
         drive_editor_create_finalize(context, initial_fixture)
         capture_milestone(
             context,
-            "initial_finalized" if rename_refinalize else "finalized",
+            (
+                "initial_finalized"
+                if rename_refinalize or post_start_lock
+                else "finalized"
+            ),
             evidence={
                 "experiment_name": initial_fixture["experiment"]["name"]
             },
         )
-        if not rename_refinalize:
+        if not rename_refinalize and not post_start_lock:
             assertion_evidence["experiment.editor_create_finalize"] = {
                 "experiment_name": initial_fixture["experiment"]["name"],
                 "editor_action_ids": [
@@ -1104,6 +1300,328 @@ def _run_editor_lifecycle_scenario(
                 }
             )
 
+        if post_start_lock:
+            source_dir = experiment_dir
+            source_design_path = design_path
+            source_design = json.loads(
+                source_design_path.read_text(encoding="utf-8")
+            )
+
+            def activate_source() -> Mapping[str, Any]:
+                eligibility = (
+                    context.model.load_authoritative_execution_runtime()
+                )
+                resume = load_execution_resume(
+                    experiment_model.execution_resume_file_path
+                )
+                checks = {
+                    "ready_to_start": eligibility["status"]
+                    == "ready_to_start",
+                    "resume_clean": resume.state == "clean",
+                    "resume_zero_intents": not resume.intents,
+                }
+                if not all(checks.values()):
+                    raise RuntimeError(
+                        "source activation failed: "
+                        + ", ".join(
+                            name
+                            for name, passed in checks.items()
+                            if not passed
+                        )
+                    )
+                return {
+                    "checks": checks,
+                    "eligibility_status": eligibility["status"],
+                    "resume_state": resume.state,
+                    "resume_intent_count": len(resume.intents),
+                }
+
+            activation = activate_authoritative_execution(
+                context,
+                activate_source,
+            )
+
+            def lock_source() -> Mapping[str, Any]:
+                plan = experiment_model.lock_execution_plan(
+                    "printing_started"
+                )
+                if plan is None:
+                    raise RuntimeError(
+                        "printing-start lock returned no execution plan"
+                    )
+                return {
+                    "plan_id": plan.plan_id,
+                    "plan_revision": plan.plan_revision,
+                    "plan_state": plan.state.value,
+                    "lock_reason": plan.lock_reason,
+                }
+
+            locked = lock_execution_for_printing(context, lock_source)
+            locked_design = json.loads(
+                source_design_path.read_text(encoding="utf-8")
+            )
+            locked_bundle = inspect_authoritative_execution(
+                source_dir,
+                locked_design,
+            )
+            locked_plan = load_execution_plan(
+                experiment_model.execution_plan_file_path
+            )
+            locked_resume = load_execution_resume(
+                experiment_model.execution_resume_file_path
+            )
+            locked_decoded = decode_execution_progress(
+                locked_plan,
+                locked_bundle.progress_payload,
+            )
+            locked_total_added = sum(
+                int(details["added_droplets"])
+                for well in locked_decoded.progress_wells.values()
+                for details in well["reagents"].values()
+            )
+            locked_snapshot = _directory_file_snapshot(source_dir)
+            locked_checks = {
+                "bundle_valid": bool(locked_bundle.valid),
+                "active": locked_plan.state is ExecutionPlanState.ACTIVE,
+                "revision_two": locked_plan.plan_revision == 2,
+                "printing_started": locked_plan.lock_reason
+                == "printing_started",
+                "history_two": len(locked_bundle.history) == 2
+                and locked_bundle.history[-1] == locked_plan,
+                "resume_clean": locked_resume.state == "clean",
+                "resume_zero_intents": not locked_resume.intents,
+                "resume_reference_matches": locked_resume.plan_id
+                == locked_plan.plan_id
+                and locked_resume.plan_revision
+                == locked_plan.plan_revision,
+                "zero_progress": locked_total_added == 0,
+                "design_unchanged": locked_design == source_design,
+            }
+            post_start_evidence["source_locked"] = _check_evidence(
+                locked_checks,
+                activation=activation,
+                lock=locked,
+                experiment_dir=str(source_dir),
+                plan_id=locked_plan.plan_id,
+                plan_revision=locked_plan.plan_revision,
+                plan_state=locked_plan.state.value,
+                lock_reason=locked_plan.lock_reason,
+                history_count=len(locked_bundle.history),
+                total_added_droplets=locked_total_added,
+                resume_state=locked_resume.state,
+                resume_intent_count=len(locked_resume.intents),
+                runtime_assignments=_runtime_assignments(context.model),
+                directory_snapshot=locked_snapshot,
+                audit_rows=_audit_rows(
+                    Path(experiment_model.experiment_audit_file_path)
+                ),
+            )
+            if post_start_evidence["source_locked"]["failed_checks"]:
+                raise RuntimeError(
+                    "post-start source lock checks failed: "
+                    + ", ".join(
+                        post_start_evidence["source_locked"][
+                            "failed_checks"
+                        ]
+                    )
+                )
+            assertion_evidence["experiment.active_edit_lock"] = {
+                "plan_state": locked_plan.state.value,
+                "plan_revision": locked_plan.plan_revision,
+                "lock_reason": locked_plan.lock_reason,
+            }
+            capture_milestone(
+                context,
+                "source_locked",
+                evidence={
+                    "plan_state": locked_plan.state.value,
+                    "plan_revision": locked_plan.plan_revision,
+                    "lock_reason": locked_plan.lock_reason,
+                },
+            )
+
+            editor_boundary = drive_editor_post_start_lock_and_copy(
+                context,
+                source_dir=source_dir,
+                source_name=fixture["experiment"]["source_name"],
+                copy_name=fixture["experiment"]["copy_name"],
+                copy_tolerance_nl=fixture["experiment"][
+                    "copy_printed_volume_tolerance_nL"
+                ],
+            )
+            post_start_evidence["locked_editor"] = editor_boundary[
+                "lock_matrix"
+            ]
+            post_start_evidence["editable_copy_before_finalize"] = (
+                editor_boundary["copy_before_finalize"]
+            )
+            assertion_evidence["experiment.in_place_edit_rejected"] = {
+                "source_name": fixture["experiment"]["source_name"],
+                "control_matrix": editor_boundary["lock_matrix"],
+            }
+            assertion_evidence["experiment.editable_copy_created"] = {
+                "copy_name": fixture["experiment"]["copy_name"],
+                "copy_before_finalize": editor_boundary[
+                    "copy_before_finalize"
+                ],
+            }
+            assertion_evidence["experiment.editable_copy_editable"] = {
+                "copy_tolerance_nL": fixture["experiment"][
+                    "copy_printed_volume_tolerance_nL"
+                ],
+                "controls_editable": True,
+            }
+
+            copy_dir = Path(
+                experiment_model.experiment_dir_path
+            ).resolve()
+            copy_design_path = Path(
+                experiment_model.experiment_file_path
+            ).resolve()
+            copy_resume_path = Path(
+                experiment_model.execution_resume_file_path
+            ).resolve()
+            copy_design = json.loads(
+                copy_design_path.read_text(encoding="utf-8")
+            )
+            copy_plan = load_execution_plan(
+                experiment_model.execution_plan_file_path
+            )
+            copy_bundle = inspect_authoritative_execution(
+                copy_dir,
+                copy_design,
+            )
+            copy_decoded = decode_execution_progress(
+                copy_plan,
+                copy_bundle.progress_payload,
+            )
+            copy_total_added = sum(
+                int(details["added_droplets"])
+                for well in copy_decoded.progress_wells.values()
+                for details in well["reagents"].values()
+            )
+            copy_key_rows = _csv_rows(
+                Path(experiment_model.key_file_path)
+            )
+            copy_concentration_rows = _csv_rows(
+                Path(experiment_model.concentration_key_file_path)
+            )
+            copy_calibration_path = (
+                copy_dir / "execution_calibrations.json"
+            )
+            copy_calibration_absent = not copy_calibration_path.exists()
+            source_after_snapshot = _directory_file_snapshot(source_dir)
+            copy_checks = {
+                "copy_directory_distinct": copy_dir != source_dir,
+                "copy_directory_name": copy_dir.name
+                == fixture["experiment"]["copy_name"],
+                "copy_metadata_name": copy_design.get(
+                    "metadata", {}
+                ).get("name")
+                == fixture["experiment"]["copy_name"],
+                "copy_semantics_match_source": _copy_semantic_design(
+                    copy_design
+                )
+                == _copy_semantic_design(source_design),
+                "copy_tolerance_changed": math.isclose(
+                    float(
+                        copy_design.get("metadata", {}).get(
+                            "printed_volume_tolerance_nL", -1
+                        )
+                    ),
+                    float(
+                        fixture["experiment"][
+                            "copy_printed_volume_tolerance_nL"
+                        ]
+                    ),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                ),
+                "copy_bundle_valid": bool(copy_bundle.valid),
+                "copy_prepared": copy_plan.state
+                is ExecutionPlanState.PREPARED,
+                "copy_revision_one": copy_plan.plan_revision == 1,
+                "copy_ready_to_start": copy_bundle.eligibility.status
+                == "ready_to_start",
+                "copy_plan_distinct": copy_plan.plan_id
+                != locked_plan.plan_id,
+                "copy_history_fresh": len(copy_bundle.history) == 1
+                and copy_bundle.history[0] == copy_plan,
+                "copy_zero_progress": copy_total_added == 0,
+                "copy_resume_absent": not copy_resume_path.exists(),
+                "copy_calibration_absent": copy_calibration_absent,
+                "copy_wells_exact": [
+                    well.well_id for well in copy_plan.wells
+                ]
+                == fixture["experiment"]["expected_well_ids"],
+                "copy_key_wells_exact": list(copy_key_rows)
+                == fixture["experiment"]["expected_well_ids"],
+                "copy_concentration_wells_exact": list(
+                    copy_concentration_rows
+                )
+                == fixture["experiment"]["expected_well_ids"],
+                "source_inventory_unchanged": (
+                    source_after_snapshot["inventory"]
+                    == locked_snapshot["inventory"]
+                ),
+                "source_files_byte_identical": (
+                    source_after_snapshot["sha256"]
+                    == locked_snapshot["sha256"]
+                ),
+            }
+            copy_evidence = _check_evidence(
+                copy_checks,
+                experiment_dir=str(copy_dir),
+                design_path=str(copy_design_path),
+                plan_id=copy_plan.plan_id,
+                plan_revision=copy_plan.plan_revision,
+                plan_state=copy_plan.state.value,
+                eligibility_status=copy_bundle.eligibility.status,
+                history_count=len(copy_bundle.history),
+                total_added_droplets=copy_total_added,
+                resume_present=copy_resume_path.exists(),
+                runtime_assignments=_runtime_assignments(context.model),
+                key_rows=copy_key_rows,
+                concentration_rows=copy_concentration_rows,
+                directory_snapshot=_directory_file_snapshot(copy_dir),
+            )
+            post_start_evidence["editable_copy_after_finalize"] = (
+                copy_evidence
+            )
+            post_start_evidence["source_after_copy"] = {
+                "directory_snapshot": source_after_snapshot,
+                "inventory_unchanged": copy_checks[
+                    "source_inventory_unchanged"
+                ],
+                "files_byte_identical": copy_checks[
+                    "source_files_byte_identical"
+                ],
+            }
+            refinalized_evidence.update(copy_evidence)
+            if copy_evidence["failed_checks"]:
+                raise RuntimeError(
+                    "editable-copy lifecycle checks failed: "
+                    + ", ".join(copy_evidence["failed_checks"])
+                )
+            assertion_evidence["experiment.source_bundle_immutable"] = {
+                "inventory_unchanged": True,
+                "files_byte_identical": True,
+                "file_count": len(locked_snapshot["inventory"]),
+            }
+            assertion_evidence[
+                "experiment.editable_copy_fresh_execution"
+            ] = {
+                "source_plan_id": locked_plan.plan_id,
+                "copy_plan_id": copy_plan.plan_id,
+                "copy_plan_revision": copy_plan.plan_revision,
+                "copy_plan_state": copy_plan.state.value,
+                "copy_resume_absent_before_activation": True,
+                "copy_history_count": len(copy_bundle.history),
+            }
+            experiment_dir = copy_dir
+            design_path = copy_design_path
+            resume_path = copy_resume_path
+
         design_payload = json.loads(design_path.read_text(encoding="utf-8"))
         prepared_plan = load_execution_plan(
             experiment_model.execution_plan_file_path
@@ -1111,7 +1629,7 @@ def _run_editor_lifecycle_scenario(
         assignments_before = dict(
             (
                 refinalized_evidence
-                if rename_refinalize
+                if rename_refinalize or post_start_lock
                 else prepared_evidence
             )["runtime_assignments"]
         )
@@ -1170,27 +1688,38 @@ def _run_editor_lifecycle_scenario(
         reload_authoritative_experiment(context, reload)
         capture_milestone(
             context,
-            "reloaded",
-            evidence={
-                "eligibility_status": reload_evidence["eligibility_status"],
-                "resume_state": reload_evidence["resume_state"],
-            },
+            "reloaded" if not post_start_lock else "validated",
+            evidence=(
+                {
+                    "eligibility_status": reload_evidence[
+                        "eligibility_status"
+                    ],
+                    "resume_state": reload_evidence["resume_state"],
+                }
+                if not post_start_lock
+                else {
+                    "source_plan_state": "ACTIVE",
+                    "copy_plan_state": refinalized_evidence["plan_state"],
+                    "assertion_count": len(assertion_ids),
+                }
+            ),
         )
-        capture_milestone(
-            context,
-            "validated",
-            evidence={
-                "plan_state": (
-                    refinalized_evidence
-                    if rename_refinalize
-                    else prepared_evidence
-                )["plan_state"],
-                "eligibility_status": reload_evidence[
-                    "eligibility_status"
-                ],
-                "assertion_count": len(assertion_ids),
-            },
-        )
+        if not post_start_lock:
+            capture_milestone(
+                context,
+                "validated",
+                evidence={
+                    "plan_state": (
+                        refinalized_evidence
+                        if rename_refinalize
+                        else prepared_evidence
+                    )["plan_state"],
+                    "eligibility_status": reload_evidence[
+                        "eligibility_status"
+                    ],
+                    "assertion_count": len(assertion_ids),
+                },
+            )
 
         assertion_evidence.update(
             {
@@ -1211,6 +1740,31 @@ def _run_editor_lifecycle_scenario(
         )
     except BaseException as exc:
         failure_text = traceback.format_exc()
+        if post_start_lock:
+            action_evidence = dict(getattr(exc, "evidence", {}) or {})
+            control_matrix = action_evidence.get("control_matrix")
+            if isinstance(control_matrix, Mapping):
+                post_start_evidence["locked_editor"] = dict(
+                    control_matrix
+                )
+        if post_start_lock and post_start_evidence.get("source_locked"):
+            try:
+                source_path = Path(
+                    post_start_evidence["source_locked"]["experiment_dir"]
+                ).resolve()
+                post_start_evidence["source_after_copy"] = {
+                    "directory_snapshot": _directory_file_snapshot(
+                        source_path
+                    ),
+                    "diagnostic_only": True,
+                }
+            except Exception as diagnostic_exc:
+                post_start_evidence["source_after_copy"] = {
+                    "diagnostic_error": (
+                        f"{type(diagnostic_exc).__name__}: "
+                        f"{diagnostic_exc}"
+                    )[:2000]
+                }
         if rename_refinalize and rename_evidence.get("before"):
             try:
                 current_dir = Path(
@@ -1293,8 +1847,40 @@ def _run_editor_lifecycle_scenario(
             "action_id": action_id,
             "failure_type": type(exc).__name__,
             "failure_message": str(exc)[:2000],
+            "action_evidence": dict(getattr(exc, "evidence", {}) or {}),
         }
-        if isinstance(action_id, str) and action_id.startswith("editor."):
+        if post_start_lock and action_id in {
+            "editor.inspect_active_lock_via_ui",
+            "editor.reject_in_place_edit_via_ui",
+        }:
+            assertion_failures[
+                (
+                    "experiment.active_edit_lock"
+                    if action_id == "editor.inspect_active_lock_via_ui"
+                    else "experiment.in_place_edit_rejected"
+                )
+            ] = {
+                **failure_evidence,
+                "locked_editor": post_start_evidence.get(
+                    "locked_editor", {}
+                ),
+            }
+        elif post_start_lock and action_id in {
+            "editor.create_editable_copy_via_ui",
+            "editor.edit_copy_via_ui",
+            "editor.finalize_copy_via_ui",
+        }:
+            assertion_failures["experiment.editable_copy_created"] = (
+                failure_evidence
+            )
+        elif post_start_lock and action_id in {
+            "experiment.activate_authoritative",
+            "execution.lock_for_printing",
+        }:
+            assertion_failures["experiment.active_edit_lock"] = (
+                failure_evidence
+            )
+        elif isinstance(action_id, str) and action_id.startswith("editor."):
             assertion_failures[
                 (
                     "experiment.prepared_rename_refinalize"
@@ -1529,7 +2115,11 @@ def _run_editor_lifecycle_scenario(
             "experiment_name": (
                 fixture["experiment"]["initial_name"]
                 if rename_refinalize
-                else fixture["experiment"]["name"]
+                else (
+                    fixture["experiment"]["source_name"]
+                    if post_start_lock
+                    else fixture["experiment"]["name"]
+                )
             ),
             **(
                 {
@@ -1541,6 +2131,21 @@ def _run_editor_lifecycle_scenario(
                     ],
                 }
                 if rename_refinalize
+                else {}
+            ),
+            **(
+                {
+                    "copy_experiment_name": fixture["experiment"][
+                        "copy_name"
+                    ],
+                    "expected_editable_copy_operations": fixture[
+                        "workload"
+                    ]["expected_editable_copy_operations"],
+                    "expected_printing_start_locks": fixture["workload"][
+                        "expected_printing_start_locks"
+                    ],
+                }
+                if post_start_lock
                 else {}
             ),
             "plate_name": fixture["experiment"]["plate_name"],
@@ -1580,6 +2185,15 @@ def _run_editor_lifecycle_scenario(
                             "refinalized_bundle": refinalized_evidence,
                         }
                         if rename_refinalize
+                        else {}
+                    ),
+                    **(
+                        {
+                            "post_start_edit_boundary": (
+                                post_start_evidence
+                            )
+                        }
+                        if post_start_lock
                         else {}
                     ),
                     "reload_activation": reload_evidence,
@@ -1645,11 +2259,28 @@ def run_editor_prestart_rename_refinalize_scenario(
     return _run_editor_lifecycle_scenario(config)
 
 
+def run_editor_post_start_lock_scenario(
+    config: EditorLifecycleScenarioConfig,
+) -> dict[str, Any]:
+    """Prove an active source is immutable and its copy is fresh/editable."""
+
+    if config.scenario_id != POST_START_LOCK_WORKLOAD_ID:
+        raise ValueError(
+            "run_editor_post_start_lock_scenario requires "
+            f"scenario_id={POST_START_LOCK_WORKLOAD_ID!r}"
+        )
+    return _run_editor_lifecycle_scenario(config)
+
+
 __all__ = [
     "ASSERTION_IDS",
     "EDITOR_FIXTURE_PATHS",
     "EditorLifecycleScenarioConfig",
     "FIXTURE_PATH",
+    "POST_START_LOCK_ASSERTION_IDS",
+    "POST_START_LOCK_FIXTURE_PATH",
+    "POST_START_LOCK_SCENARIO_NAME",
+    "POST_START_LOCK_WORKLOAD_ID",
     "RENAME_ASSERTION_IDS",
     "RENAME_FIXTURE_PATH",
     "RENAME_SCENARIO_NAME",
@@ -1658,7 +2289,9 @@ __all__ = [
     "SCENARIO_VERSION",
     "WORKLOAD_ID",
     "load_editor_create_finalize_fixture",
+    "load_editor_post_start_lock_fixture",
     "load_editor_prestart_rename_refinalize_fixture",
     "run_editor_create_finalize_scenario",
+    "run_editor_post_start_lock_scenario",
     "run_editor_prestart_rename_refinalize_scenario",
 ]

@@ -124,6 +124,19 @@ _SCENARIO_DEFINITIONS = {
         supports_injected_stall=False,
         supports_report_sets=False,
     ),
+    "experiment_editor_post_start_lock_v1": ScenarioDefinition(
+        registry_id="experiment_editor_post_start_lock_v1",
+        workload_id="experiment_editor_post_start_lock_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "experiment_editor_post_start_lock_v1.json"
+        ),
+        expected_completion_count=2,
+        scenario_name="experiment_editor_post_start_lock",
+        runner_family="experiment_editor",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
 }
 REGISTERED_SCENARIOS: Mapping[str, ScenarioDefinition] = MappingProxyType(
     _SCENARIO_DEFINITIONS
@@ -187,8 +200,10 @@ def run_registered_scenario(
             )
         from tools.virtual_workflows.editor_scenarios import (
             EditorLifecycleScenarioConfig,
+            POST_START_LOCK_WORKLOAD_ID,
             RENAME_WORKLOAD_ID,
             run_editor_create_finalize_scenario,
+            run_editor_post_start_lock_scenario,
             run_editor_prestart_rename_refinalize_scenario,
         )
 
@@ -198,6 +213,8 @@ def run_registered_scenario(
         )
         if definition.workload_id == RENAME_WORKLOAD_ID:
             return run_editor_prestart_rename_refinalize_scenario(config)
+        if definition.workload_id == POST_START_LOCK_WORKLOAD_ID:
+            return run_editor_post_start_lock_scenario(config)
         return run_editor_create_finalize_scenario(config)
     raise RegistryError(
         f"unsupported runner family: {definition.runner_family!r}"

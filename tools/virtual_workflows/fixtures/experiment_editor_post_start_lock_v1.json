@@ -1,0 +1,39 @@
+{
+  "fixture_id": "experiment_editor_post_start_lock_v1",
+  "schema_version": 1,
+  "experiment": {
+    "source_name": "sil-editor-post-start-lock-v1",
+    "copy_name": "sil-editor-post-start-copy-v1",
+    "plate_name": "shallow-384_well_plate",
+    "replicates": 2,
+    "expected_well_ids": [
+      "A1",
+      "A2"
+    ],
+    "printed_volume_nL": 10.0,
+    "final_volume_nL": 10.0,
+    "printed_volume_tolerance_nL": 0.0,
+    "copy_printed_volume_tolerance_nL": 1.0,
+    "randomize_assignments": false,
+    "allow_two_stock_solutions": false
+  },
+  "reagent": {
+    "stock_label": "Editor Stock",
+    "group": "Additive",
+    "printing_mode": "droplet",
+    "starting_concentration": 0.0,
+    "targets": [
+      1.0
+    ],
+    "units": "x",
+    "fixed_stock_concentration": 1.0,
+    "droplet_volume_nL": 10.0
+  },
+  "workload": {
+    "completion_count": 2,
+    "expected_editor_finalization_operations": 2,
+    "expected_authoritative_activations": 1,
+    "expected_printing_start_locks": 1,
+    "expected_editable_copy_operations": 1
+  }
+}
