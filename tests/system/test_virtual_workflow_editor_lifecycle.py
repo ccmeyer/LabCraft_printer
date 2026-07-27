@@ -1,0 +1,207 @@
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+import pytest
+
+from tools.virtual_workflows.editor_scenarios import (
+    ASSERTION_IDS,
+    WORKLOAD_ID,
+    EditorLifecycleScenarioConfig,
+    load_editor_create_finalize_fixture,
+    run_editor_create_finalize_scenario,
+)
+from tools.virtual_workflows.actions import ScenarioActionError
+from tools.virtual_workflows.report import validate_report_v1
+
+
+def test_editor_create_finalize_fixture_contract_is_exact():
+    fixture = load_editor_create_finalize_fixture()
+
+    assert fixture == {
+        "fixture_id": WORKLOAD_ID,
+        "schema_version": 1,
+        "experiment": {
+            "name": "sil-editor-create-finalize-v1",
+            "plate_name": "shallow-384_well_plate",
+            "replicates": 2,
+            "expected_well_ids": ["A1", "A2"],
+            "printed_volume_nL": 10.0,
+            "final_volume_nL": 10.0,
+            "printed_volume_tolerance_nL": 0.0,
+            "randomize_assignments": False,
+            "allow_two_stock_solutions": False,
+        },
+        "reagent": {
+            "stock_label": "Editor Stock",
+            "group": "Additive",
+            "printing_mode": "droplet",
+            "starting_concentration": 0.0,
+            "targets": [1.0],
+            "units": "x",
+            "fixed_stock_concentration": 1.0,
+            "droplet_volume_nL": 10.0,
+        },
+        "workload": {
+            "completion_count": 1,
+            "expected_editor_finalization_operations": 1,
+        },
+    }
+
+
+@pytest.mark.sil_lifecycle
+def test_editor_create_finalize_lifecycle_report(qapp, tmp_path):
+    started = time.perf_counter()
+    report = run_editor_create_finalize_scenario(
+        EditorLifecycleScenarioConfig(
+            output_root=tmp_path,
+            speed_multiplier=1000.0,
+            timeout_seconds=60.0,
+            run_id="editor-create-finalize",
+        )
+    )
+    elapsed = time.perf_counter() - started
+    validate_report_v1(report)
+
+    assert elapsed < 60
+    assert report["run"]["duration_ms"] < 60_000
+    assert report["run"]["scenario_name"] == "experiment_editor_create_finalize"
+    assert report["run"]["scenario_version"] == "1"
+    assert report["classification"] == {
+        "status": "pass",
+        "threshold_maturity": "informational",
+        "reasons": [],
+    }
+    assert report["workload"]["well_ids"] == ["A1", "A2"]
+    assert report["safety"]["simulation"] is True
+    assert report["safety"]["hardware_access_allowed"] is False
+    assert not any(report["safety"]["hardware_interfaces"].values())
+
+    workflow = report["metrics"]["workflow"]["values"]
+    assert workflow["dialogs"] == []
+    assert workflow["unexpected_dialogs"] == []
+    assert workflow["errors"] == []
+    assert [item["name"] for item in workflow["lifecycle_milestones"]] == [
+        "editor_opened",
+        "generated",
+        "finalized",
+        "reloaded",
+        "validated",
+    ]
+    assert [item["action_id"] for item in workflow["action_results"]] == [
+        "app.launch_simulated",
+        "editor.open_via_ui",
+        "artifact.capture_milestone",
+        "editor.new_experiment_via_ui",
+        "editor.configure_design_via_ui",
+        "editor.optimize_generate_via_ui",
+        "artifact.capture_milestone",
+        "editor.finish_via_ui",
+        "artifact.capture_milestone",
+        "validation.prepared_bundle",
+        "experiment.reload_authoritative",
+        "artifact.capture_milestone",
+        "artifact.capture_milestone",
+        "scenario.teardown",
+    ]
+    assert {item["status"] for item in workflow["action_results"]} == {"pass"}
+    assert {item["status"] for item in workflow["cleanup_results"]} == {"pass"}
+    assertions = {
+        item["assertion_id"]: item for item in workflow["assertion_results"]
+    }
+    assert set(assertions) == set(ASSERTION_IDS)
+    assert {item["decision"] for item in assertions.values()} == {"pass"}
+
+    persistence = report["metrics"]["persistence"]["values"]
+    prepared = persistence["prepared_bundle"]
+    reloaded = persistence["reload_activation"]
+    assert prepared["plan_revision"] == 1
+    assert prepared["plan_state"] == "prepared"
+    assert prepared["eligibility_status"] == "ready_to_start"
+    assert prepared["well_ids"] == ["A1", "A2"]
+    assert prepared["total_added_droplets"] == 0
+    assert prepared["runtime_assignments"] == reloaded["runtime_assignments"]
+    assert reloaded["eligibility_status"] == "ready_to_start"
+    assert reloaded["resume_state"] == "clean"
+    assert reloaded["resume_intent_count"] == 0
+
+    assert report["metrics"]["responsiveness"] == {
+        "status": "not_applicable",
+        "values": {},
+    }
+    assert report["metrics"]["resources"] == {
+        "status": "not_applicable",
+        "values": {},
+    }
+    assert report["metrics"]["queue"]["status"] == "not_applicable"
+    assert report["metrics"]["queue"]["values"]["print_commands_executed"] == 0
+
+    report_dir = Path(report["safety"]["scenario_root"]).parent
+    assert json.loads(
+        (report_dir / "report.json").read_text(encoding="utf-8")
+    ) == report
+    assert set(report["artifacts"]["screenshots"]) == {
+        "editor_opened",
+        "generated",
+        "finalized",
+        "validated",
+        "reloaded",
+    }
+    for relative in report["artifacts"]["screenshots"].values():
+        path = report_dir / relative
+        assert path.is_file()
+        assert path.stat().st_size > 0
+    for name in (
+        "report.json",
+        "summary.txt",
+        "events.jsonl",
+        "stall_stacks.txt",
+        "application_stdout.log",
+    ):
+        assert (report_dir / name).is_file()
+    assert not (report_dir / "failure_traceback.txt").exists()
+
+
+@pytest.mark.sil_lifecycle
+def test_editor_lifecycle_failure_reports_failed_and_incomplete_assertions(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    import tools.virtual_workflows.editor_scenarios as scenarios
+
+    def fail_editor(_context, _fixture):
+        raise ScenarioActionError(
+            "editor.configure_design_via_ui",
+            "synthetic editor failure",
+            stage="operation",
+            evidence={"step": "control_entry"},
+        )
+
+    monkeypatch.setattr(scenarios, "drive_editor_create_finalize", fail_editor)
+    report = run_editor_create_finalize_scenario(
+        EditorLifecycleScenarioConfig(
+            output_root=tmp_path,
+            timeout_seconds=60,
+            run_id="editor-failure",
+        )
+    )
+
+    assert report["classification"]["status"] == "fail"
+    assertions = {
+        item["assertion_id"]: item["decision"]
+        for item in report["metrics"]["workflow"]["values"][
+            "assertion_results"
+        ]
+    }
+    assert assertions["experiment.editor_create_finalize"] == "fail"
+    assert assertions["artifacts.required_present"] == "fail"
+    assert assertions["experiment.prepared_bundle_valid"] == "incomplete"
+    assert assertions["experiment.prepared_reload_ready"] == "incomplete"
+    cleanup = report["metrics"]["workflow"]["values"]["cleanup_results"]
+    assert cleanup
+    assert {item["status"] for item in cleanup} == {"pass"}
+    report_dir = Path(report["safety"]["scenario_root"]).parent
+    assert (report_dir / "failure_traceback.txt").is_file()

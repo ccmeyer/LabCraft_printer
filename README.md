@@ -260,12 +260,37 @@ Longer composed SIL tiers are opt-in:
 .\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle
 ```
 
-The last command becomes operative as lifecycle scenarios are added. Without
+The lifecycle command runs the active editor create/finalize scenario. Without
 these flags, tests marked `sil_lifecycle`, `sil_regression`, or `sil_stress`
-are collected but skipped. Fast fixture, registry, manifest, report,
-comparison, and local Pi safety-contract tests continue to run normally.
+are collected but skipped; the editor fixture contract is still checked.
+Fast registry, manifest, report, comparison, and local Pi safety-contract
+tests continue to run normally.
 The `sil_pi_contract` marker never launches a remote Pi operation; remote Pi
 execution remains an explicit, separately authorized command.
+
+Run the editor create/finalize lifecycle directly with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario experiment_editor_create_finalize_v1 `
+  --timeout-seconds 60
+```
+
+This scenario clicks the real Experiment Editor button, creates a fresh design,
+selects A1 and A2 through the Printable Wells dialog, enters one fixed 1x
+droplet stock, optimizes and generates, and presses Finish. It validates the
+prepared execution plan, immutable revision, compact progress, both key CSVs,
+and the absence of calibration/printing history. It then reloads the saved
+design and activates the authoritative runtime without rebuilding the design.
+A passing report retains `editor_opened`, `generated`, `finalized`,
+`reloaded`, and `validated` screenshots and reports every declared lifecycle
+assertion as `pass`.
+
+Lifecycle scenarios are single-run functional evidence. They reject Pi
+evidence, injected-stall controls, report-set repetition, and baseline
+creation. `--visible`, `--qt-platform`, `--output-root`,
+`--timeout-seconds`, and `--speed-multiplier` remain accepted; speed changes
+only the isolated simulator configuration and is not performance evidence.
 
 Run the normal one-timescale characterization:
 

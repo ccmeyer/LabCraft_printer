@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.virtual_workflows.registry import (  # noqa: E402
     DEFAULT_SCENARIO_ID,
+    get_registered_scenario,
     registered_scenario_ids,
     run_registered_scenario,
 )
@@ -221,6 +222,7 @@ def _compare_existing(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    scenario_definition = get_registered_scenario(args.scenario)
     if args.warmup_runs < 0 or args.measured_runs < 1:
         parser.error("--warmup-runs must be >= 0 and --measured-runs must be >= 1")
     if args.replace_accepted_baseline and args.accept_baseline is None:
@@ -256,6 +258,26 @@ def main(argv: list[str] | None = None) -> int:
         or args.warmup_runs > 0
         or args.measured_runs > 1
     )
+    if not scenario_definition.supports_pi_evidence and (
+        args.target_pi or any(value is not None for value in pi_evidence)
+    ):
+        parser.error(
+            f"--scenario {args.scenario} does not support Pi evidence"
+        )
+    if not scenario_definition.supports_injected_stall and (
+        args.inject_ui_stall_ms != 0
+        or args.inject_after_completion != 48
+    ):
+        parser.error(
+            f"--scenario {args.scenario} does not support injected-stall controls"
+        )
+    if not scenario_definition.supports_report_sets and (
+        repeated or args.accept_baseline is not None
+    ):
+        parser.error(
+            f"--scenario {args.scenario} supports one direct run only; "
+            "report sets, repetition, and baseline creation are unavailable"
+        )
     if (repeated or args.accept_baseline is not None) and not args.host_label:
         parser.error(
             "--host-label is required for repeated runs or baseline creation"

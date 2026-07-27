@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.virtual_workflows.actions import ACTION_IDS
+from tools.virtual_workflows.actions import PRINT_ARRAY_ACTION_IDS
 from tools.virtual_workflows.report import validate_report_v1
 from tools.virtual_workflows.scenarios import (
     WORKLOAD_ID,
@@ -92,7 +92,7 @@ def test_real_ui_print_array_completes_and_writes_inspectable_report(qapp, tmp_p
     assert report["metrics"]["workflow"]["values"]["unexpected_dialogs"] == []
     assert report["metrics"]["workflow"]["values"]["errors"] == []
     actions = report["metrics"]["workflow"]["values"]["action_results"]
-    assert {item["action_id"] for item in actions} == ACTION_IDS
+    assert {item["action_id"] for item in actions} == PRINT_ARRAY_ACTION_IDS
     assert {item["status"] for item in actions} == {"pass"}
     assert [
         item["name"]

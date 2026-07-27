@@ -91,25 +91,25 @@
       "id": "experiment.editor_create_finalize",
       "risk": "A user may be unable to create and finalize an experiment through the editor.",
       "owner_role": "experiment lifecycle maintainers",
-      "status": "planned",
+      "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": [],
-      "required_assertion_ids": [],
+      "active_scenario_ids": ["experiment_editor_create_finalize_v1"],
+      "required_assertion_ids": ["experiment.editor_create_finalize"],
       "related_source_areas": ["FreeRTOS-interface/View.py", "FreeRTOS-interface/Controller.py"],
-      "limitations": ["No composed editor lifecycle scenario exists yet."],
-      "max_evidence_age_days": null
+      "limitations": ["Coverage is limited to the tracked minimal two-well design and does not include prepared rename/refinalize."],
+      "max_evidence_age_days": 2
     },
     {
       "id": "experiment.prepared_reopen",
       "risk": "A finalized but unstarted experiment may not reopen consistently.",
       "owner_role": "experiment lifecycle maintainers",
-      "status": "planned",
+      "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": [],
-      "required_assertion_ids": [],
+      "active_scenario_ids": ["experiment_editor_create_finalize_v1"],
+      "required_assertion_ids": ["experiment.prepared_reload_ready", "experiment.runtime_assignments_match"],
       "related_source_areas": ["FreeRTOS-interface/View.py", "FreeRTOS-interface/Model.py"],
-      "limitations": ["No composed reopen scenario exists yet."],
-      "max_evidence_age_days": null
+      "limitations": ["Coverage proves authoritative prepared reload in one isolated application composition, not process restart or resume after printing."],
+      "max_evidence_age_days": 2
     },
     {
       "id": "experiment.prepared_rename_refinalize",
@@ -127,13 +127,13 @@
       "id": "experiment.design_plan_consistency",
       "risk": "Experiment design and execution-plan identities may diverge after finalization.",
       "owner_role": "experiment lifecycle maintainers",
-      "status": "planned",
+      "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": [],
-      "required_assertion_ids": [],
+      "active_scenario_ids": ["experiment_editor_create_finalize_v1"],
+      "required_assertion_ids": ["experiment.prepared_bundle_valid", "experiment.key_files_consistent"],
       "related_source_areas": ["FreeRTOS-interface/Model.py", "FreeRTOS-interface/ExecutionPlan.py"],
-      "limitations": ["No editor-driven close-and-reload consistency scenario exists yet."],
-      "max_evidence_age_days": null
+      "limitations": ["Coverage checks the tracked minimal design and its v1 prepared execution plan only."],
+      "max_evidence_age_days": 2
     },
     {
       "id": "experiment.active_edit_lock",
@@ -376,6 +376,26 @@
       "limitations": ["The standard smoke proves application-facing SIL correctness, not sustained performance, firmware, or physical printing."],
       "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_smoke_fixture_contract_is_exact", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"],
       "pi_safety_evidence": []
+    },
+    {
+      "id": "experiment_editor_create_finalize_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "experiment_editor_create_finalize_v1",
+      "workload_fixture_id": "experiment_editor_create_finalize_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/experiment_editor_create_finalize_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 60,
+      "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "artifact.capture_milestone", "validation.prepared_bundle", "experiment.reload_authoritative", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "experiment.editor_create_finalize", "experiment.prepared_bundle_valid", "experiment.prepared_reload_ready", "experiment.runtime_assignments_match", "experiment.key_files_consistent", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "experiment.editor_create_finalize", "experiment.prepared_reopen", "experiment.design_plan_consistency"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The lifecycle scenario creates and reloads a minimal prepared design without connecting or executing print commands."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_create_finalize_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_create_finalize_lifecycle_report"],
+      "pi_safety_evidence": []
     }
   ],
   "suites": [
@@ -389,10 +409,10 @@
     },
     {
       "id": "lifecycle",
-      "status": "planned",
+      "status": "active",
       "kind": "lifecycle",
       "platform": "windows_sil",
-      "scenario_ids": [],
+      "scenario_ids": ["experiment_editor_create_finalize_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -527,7 +547,42 @@
         "source_path": "tools/virtual_workflows/actions.py"
       },
       {
+        "id": "editor.open_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "editor.new_experiment_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "editor.configure_design_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "editor.optimize_generate_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "editor.finish_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
         "id": "artifact.capture_milestone",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "validation.prepared_bundle",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "experiment.reload_authoritative",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py"
       },
@@ -614,6 +669,36 @@
         "evidence_kind": "report_path",
         "evidence_path": "metrics.resources",
         "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+      },
+      {
+        "id": "experiment.editor_create_finalize",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_create_finalize_lifecycle_report"]
+      },
+      {
+        "id": "experiment.prepared_bundle_valid",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.prepared_bundle",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_create_finalize_lifecycle_report"]
+      },
+      {
+        "id": "experiment.prepared_reload_ready",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.reload_activation",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_create_finalize_lifecycle_report"]
+      },
+      {
+        "id": "experiment.runtime_assignments_match",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.reload_activation.runtime_assignments",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_create_finalize_lifecycle_report"]
+      },
+      {
+        "id": "experiment.key_files_consistent",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.prepared_bundle.key_rows",
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_create_finalize_lifecycle_report"]
       }
     ]
   }

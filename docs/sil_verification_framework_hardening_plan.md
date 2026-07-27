@@ -599,7 +599,7 @@ Each capability records:
 - explicit limitations;
 - maximum evidence age when freshness matters.
 
-Initial capability IDs:
+Capability IDs and current hardening status:
 
 | Capability ID | Initial status | Primary evidence |
 | --- | --- | --- |
@@ -610,10 +610,10 @@ Initial capability IDs:
 | `execution.lookahead_no_starvation` | `covered` | Standard smoke, 96, multi-stock |
 | `execution.intent_durability` | `covered` | Standard smoke, 96, multi-stock |
 | `execution.terminal_bundle` | `covered` | Standard smoke, 96, multi-stock |
-| `experiment.editor_create_finalize` | `planned` | Editor create/finalize lifecycle scenario |
-| `experiment.prepared_reopen` | `planned` | Editor create/finalize and pre-start rename scenarios |
+| `experiment.editor_create_finalize` | `covered` | `experiment_editor_create_finalize_v1` |
+| `experiment.prepared_reopen` | `covered` | `experiment_editor_create_finalize_v1` |
 | `experiment.prepared_rename_refinalize` | `planned` | Direct pre-start rename regression scenario |
-| `experiment.design_plan_consistency` | `planned` | Editor finalization/refinalization authoritative validation |
+| `experiment.design_plan_consistency` | `covered` | `experiment_editor_create_finalize_v1` |
 | `experiment.active_edit_lock` | `planned` | Post-start editor lock scenario |
 | `experiment.editable_copy` | `partial` | Existing unit coverage; composed post-start scenario pending |
 | `execution.soft_stop_resume` | `planned` | Soft-stop lifecycle scenario |
@@ -630,7 +630,7 @@ Initial capability IDs:
 | `protocol.reset_mid_array` | `deferred` | Future virtual MCU or HIL |
 | `hardware.motion_pressure_droplet` | `deferred` | HIL only |
 
-The initial manifest must describe current truth. Do not mark planned lifecycle
+The manifest must describe current truth. Do not mark planned lifecycle
 capabilities covered until their scenario reports contain every required
 assertion result. Keep `execution.refill_resume` deferred until volume tracking
 is restored and independently validated.
@@ -1343,6 +1343,122 @@ Gate per scenario:
 - the standard smoke remains unchanged;
 - existing 96 and reduced/full stress contracts remain compatible;
 - full Python suite passes.
+
+#### Slice 4.1: Editor create and finalize
+
+Status: `verified`
+
+Call path:
+
+`QTest -> Experiment Editor button -> ExperimentDesignDialog.exec -> New Experiment -> real editor controls and Printable Wells dialog -> Optimize and Generate -> Finish -> MainWindow.complete_experiment_design -> Model.load_experiment_from_model -> authoritative prepared files -> persisted reload -> Model.load_authoritative_execution_runtime`
+
+Files:
+
+- `tools/virtual_workflows/fixtures/experiment_editor_create_finalize_v1.json`;
+- `tools/virtual_workflows/editor_scenarios.py`;
+- `tools/virtual_workflows/actions.py`;
+- `tools/virtual_workflows/registry.py`;
+- `tools/run_virtual_workflow.py`;
+- `tools/virtual_workflows/manifests/capability_coverage_v1.json`;
+- `tests/system/test_virtual_workflow_editor_lifecycle.py`;
+- `tests/test_virtual_workflow_actions.py`;
+- `tests/test_virtual_workflow_manifest.py`;
+- `README.md`;
+- `docs/virtual_workflow_report_schema.md`;
+- this document.
+
+Implementation:
+
+- Added a strict minimal editor fixture with experiment name
+  `sil-editor-create-finalize-v1`, the real shallow 384-well plate, two
+  deterministic reactions at A1/A2, 10 nL printed/final volume, zero
+  tolerance, and one fixed 1x `Editor Stock` droplet reagent.
+- Added a bounded modal QTest state machine. It opens the real editor button,
+  creates a new session, disables auto-update through the checkbox, enters
+  values with keyboard/mouse events, selects A1/A2 through the real Printable
+  Wells modal, optimizes/generates, and presses Finish. It does not call
+  `_on_*` handlers directly.
+- Added reusable editor action IDs, explicit-widget milestone capture,
+  wrong-modal rejection, deadline/failure propagation, unexpected-message
+  rejection, prepared-bundle validation, and authoritative reload actions.
+- Added an editor lifecycle runner using existing isolated simulation
+  dependencies without connecting the simulated machine or executing print
+  commands. It always runs the existing full teardown contract.
+- Added report-v1 lifecycle evidence for the five required screenshots, all
+  action/assertion/cleanup results, prepared artifacts, reload activation,
+  dialogs/errors, and explicit `not_applicable` queue, responsiveness, and
+  resource measurements.
+- Appended the lifecycle registry ID without changing the three existing IDs,
+  their order, or the 96-well default. Registry/CLI inspection remains free of
+  Qt/application imports.
+- Limited lifecycle CLI execution to one direct local run. Pi evidence,
+  injected-stall controls, report sets, repetition, and baseline creation are
+  rejected before scenario construction.
+- Activated the lifecycle suite with this scenario as its sole member and
+  promoted only `experiment.editor_create_finalize`,
+  `experiment.prepared_reopen`, and
+  `experiment.design_plan_consistency`. Prepared rename/refinalize,
+  post-start locking, and all later lifecycle capabilities remain unchanged.
+
+Verification record (2026-07-26):
+
+- Started at commit `c6eb7d1ff83d2983782a999ce43e03565d2c5b6b`
+  with a clean tracked worktree and the six pre-existing inaccessible
+  execution-cache directories left untouched.
+- The first action probe retained a valid failure report after an offscreen
+  checkbox mouse click did not toggle. The driver now uses a focused Space-key
+  QTest event for checkbox state.
+- A diagnostic retry showed that Enter on a spin control activated the
+  dialog's default Printable Wells button. Spin and combo controls now commit
+  through focus traversal, and the intended Printable Wells modal is driven
+  explicitly.
+- The first fully finalized report correctly showed the production default
+  column-fill layout A1/B1. The scenario was amended through the real
+  Printable Wells UI to select the fixture-required A1/A2; no production
+  assignment behavior changed.
+- The exact documented direct CLI scenario passed in 1,984.421 ms with all eight
+  assertions, every action and cleanup phase, no dialogs/errors, no print
+  commands, a revision-1 `PREPARED` plan, `ready_to_start` reload eligibility,
+  a clean zero-intent activation checkpoint, and five nonempty screenshots:
+  `verification_reports/virtual_workflows/experiment_editor_create_finalize_v1/20260727T021051247383Z_c6eb7d1ff83d/report.json`.
+- Default lifecycle-file selection passed the fixture test and skipped the
+  composed scenario (`1 passed, 1 skipped` in 0.04 seconds).
+- The final focused lifecycle/framework selection passed 109 tests with 30
+  existing Qt chart deprecation warnings in 7.65 seconds.
+- The opt-in 96-well regression plus comparison and local Pi-contract
+  selection passed 43 tests with 30 existing warnings in 13.78 seconds.
+- All three retained reports passed report-v1 validation without rerunning
+  their workflows; their classifications remained Windows 96-well `pass`,
+  Windows 384x10 `fail`, and Pi 384x10 `fail`. Both tracked baseline summaries
+  loaded successfully and retained distinct `offscreen_windows_sil` and
+  `offscreen_pi_sil` identities.
+- With only the six pre-existing inaccessible cache directories ignored, the
+  full default Python suite passed 3,549 tests, skipped 30, and reported 118
+  existing warnings in 692.48 seconds.
+- No remote Pi operation, full stress workload, performance collection,
+  production behavior change, simulator behavior change, firmware/protocol
+  change, baseline change, or Pi orchestration change was made.
+
+Risks and rollback:
+
+- The driver intentionally depends on real editor widget contracts and will
+  fail with retained stage evidence if those controls or modal sequencing
+  change.
+- This scenario proves one minimal prepared-state design and one in-process
+  persisted reload. It does not cover prepared rename/refinalize, process
+  restart, post-start locking, resume after printing, performance, firmware,
+  protocol, or physical hardware.
+- Rollback removes the editor fixture, runner, reusable editor actions, tests,
+  registry/manifest additions, and documentation above while preserving
+  verified Slices 0-3. No application data, production, simulator, firmware,
+  protocol, hardware, baseline, or Pi rollback is required.
+
+Next permitted action:
+
+- Slice 4.2, prepared rename/refinalize. Keep post-start locking,
+  pause/resume, authoritative partial reload/resume, head exchange,
+  disconnect, scheduled automation, performance remediation, and production
+  behavior changes out of that milestone.
 
 ### Slice 5: Suites and scheduling contracts
 

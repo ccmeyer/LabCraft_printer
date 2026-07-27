@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.virtual_workflows.actions import ACTION_IDS
+from tools.virtual_workflows.actions import PRINT_ARRAY_ACTION_IDS
 from tools.virtual_workflows.report import validate_report_v1
 from tools.virtual_workflows.scenarios import (
     SMOKE_WORKLOAD_ID,
@@ -123,7 +123,9 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
         "Start Print Array",
         "Evaporation Plate Dock Check",
     ]
-    assert {item["action_id"] for item in workflow["action_results"]} == ACTION_IDS
+    assert {
+        item["action_id"] for item in workflow["action_results"]
+    } == PRINT_ARRAY_ACTION_IDS
     assert {item["status"] for item in workflow["action_results"]} == {"pass"}
     assert [item["name"] for item in workflow["lifecycle_milestones"]] == [
         "ready",

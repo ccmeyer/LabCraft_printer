@@ -72,6 +72,9 @@ class ScenarioDefinition:
     scenario_name: str = "virtual_print_array"
     scenario_version: str = "1"
     runner_family: str = "virtual_print_array"
+    supports_pi_evidence: bool = True
+    supports_injected_stall: bool = True
+    supports_report_sets: bool = True
 
 
 _FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures"
@@ -93,6 +96,19 @@ _SCENARIO_DEFINITIONS = {
         workload_id="virtual_print_array_24_v1",
         fixture_path=_FIXTURE_ROOT / "virtual_print_array_24_v1.json",
         expected_completion_count=24,
+    ),
+    "experiment_editor_create_finalize_v1": ScenarioDefinition(
+        registry_id="experiment_editor_create_finalize_v1",
+        workload_id="experiment_editor_create_finalize_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "experiment_editor_create_finalize_v1.json"
+        ),
+        expected_completion_count=1,
+        scenario_name="experiment_editor_create_finalize",
+        runner_family="experiment_editor",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
     ),
 }
 REGISTERED_SCENARIOS: Mapping[str, ScenarioDefinition] = MappingProxyType(
@@ -131,16 +147,43 @@ def run_registered_scenario(
         )
 
     # Keep CLI help and registry inspection independent of Qt/application imports.
-    from tools.virtual_workflows.scenarios import (
-        VirtualPrintArrayScenarioConfig,
-        run_virtual_print_array_scenario,
-    )
+    if definition.runner_family == "virtual_print_array":
+        from tools.virtual_workflows.scenarios import (
+            VirtualPrintArrayScenarioConfig,
+            run_virtual_print_array_scenario,
+        )
 
-    config = VirtualPrintArrayScenarioConfig(
-        scenario_id=definition.workload_id,
-        **config_values,
+        config = VirtualPrintArrayScenarioConfig(
+            scenario_id=definition.workload_id,
+            **config_values,
+        )
+        return run_virtual_print_array_scenario(config)
+    if definition.runner_family == "experiment_editor":
+        injected_ms = config_values.pop("inject_ui_stall_ms", 0)
+        injected_after = config_values.pop("inject_after_completion", 48)
+        pi_preflight = config_values.pop("pi_preflight_path", None)
+        pi_proof = config_values.pop("pi_hardware_proof_path", None)
+        if int(injected_ms) != 0 or int(injected_after) != 48:
+            raise RegistryError(
+                "editor lifecycle scenarios do not support injected-stall controls"
+            )
+        if pi_preflight is not None or pi_proof is not None:
+            raise RegistryError(
+                "editor lifecycle scenarios do not support Pi evidence"
+            )
+        from tools.virtual_workflows.editor_scenarios import (
+            EditorLifecycleScenarioConfig,
+            run_editor_create_finalize_scenario,
+        )
+
+        config = EditorLifecycleScenarioConfig(
+            scenario_id=definition.workload_id,
+            **config_values,
+        )
+        return run_editor_create_finalize_scenario(config)
+    raise RegistryError(
+        f"unsupported runner family: {definition.runner_family!r}"
     )
-    return run_virtual_print_array_scenario(config)
 
 
 def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:

@@ -303,6 +303,34 @@ extend it. Teardown is deadline-independent, attempts every cleanup phase, and
 records one `scenario.teardown` action result. These additions are diagnostic;
 existing classification and comparison-policy meanings are unchanged.
 
+### Editor lifecycle nested evidence
+
+`experiment_editor_create_finalize_v1` uses the same report-v1 envelope and
+adds only nested scenario evidence:
+
+- `metrics.workflow.values.action_results` records editor open, new-session,
+  control-entry, optimize/generate, Finish, prepared validation, authoritative
+  reload, milestone capture, and teardown actions;
+- `metrics.workflow.values.lifecycle_milestones` contains
+  `editor_opened`, `generated`, `finalized`, `reloaded`, and `validated`;
+- `metrics.workflow.values.assertion_results` contains every declared
+  assertion ID with decision `pass`, `fail`, or `incomplete` and bounded
+  evidence. A failed run keeps unevaluated assertions as `incomplete`;
+- `metrics.persistence.values.prepared_bundle` records design/plan identity,
+  revision/history, compact progress, key-file, runtime-assignment,
+  calibration/printing-history, and pre-activation eligibility evidence; and
+- `metrics.persistence.values.reload_activation` records the persisted reload,
+  clean zero-intent resume checkpoint, unchanged prepared plan, and runtime
+  assignments.
+
+The queue, responsiveness, and resource groups are `not_applicable`. The queue
+group may retain simulator teardown diagnostics and the explicit zero print
+command count. Speed multiplier configures only the isolated simulator and
+does not make this lifecycle report performance evidence. The five screenshots
+are required and nonempty on a passing run; failures retain the failed action,
+dialogs/errors, authoritative files, traceback, and a best-effort failure
+screenshot.
+
 `metrics.persistence.values.authoritative_io` adds compatible diagnostic
 evidence for the guarded active-runtime checkpoint:
 

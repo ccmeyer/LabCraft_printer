@@ -32,6 +32,10 @@ from tools.virtual_workflows.scenarios import (
     VirtualPrintArrayScenarioConfig,
     load_virtual_print_array_fixture,
 )
+from tools.virtual_workflows.editor_scenarios import (
+    WORKLOAD_ID as EDITOR_WORKLOAD_ID,
+    EditorLifecycleScenarioConfig,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +59,7 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         WORKLOAD_ID,
         STRESS_WORKLOAD_ID,
         SMOKE_WORKLOAD_ID,
+        EDITOR_WORKLOAD_ID,
     )
 
     for scenario_id in (WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID):
@@ -90,8 +95,10 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     lifecycle = _row(payload, "suites", "lifecycle")
     assert standard["status"] == "active"
     assert standard["scenario_ids"] == ["print_array_smoke_24_v1"]
-    assert lifecycle["status"] == "planned"
-    assert lifecycle["scenario_ids"] == []
+    assert lifecycle["status"] == "active"
+    assert lifecycle["scenario_ids"] == [
+        "experiment_editor_create_finalize_v1"
+    ]
 
     smoke = _row(payload, "scenarios", "print_array_smoke_24_v1")
     assert smoke["registry_id"] == SMOKE_WORKLOAD_ID
@@ -104,7 +111,9 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         capability["id"]: capability for capability in payload["capabilities"]
     }
     assert capabilities["execution.refill_resume"]["status"] == "deferred"
-    assert capabilities["experiment.editor_create_finalize"]["status"] == "planned"
+    assert capabilities["experiment.editor_create_finalize"]["status"] == "covered"
+    assert capabilities["experiment.prepared_reopen"]["status"] == "covered"
+    assert capabilities["experiment.design_plan_consistency"]["status"] == "covered"
     assert (
         capabilities["experiment.prepared_rename_refinalize"]["status"]
         == "planned"
@@ -132,6 +141,9 @@ def test_cli_scenario_surface_is_registry_driven_and_legacy_compatible():
     assert parser.parse_args(
         ["--scenario", SMOKE_WORKLOAD_ID]
     ).scenario == SMOKE_WORKLOAD_ID
+    assert parser.parse_args(
+        ["--scenario", EDITOR_WORKLOAD_ID]
+    ).scenario == EDITOR_WORKLOAD_ID
 
 
 @pytest.mark.parametrize(
@@ -169,6 +181,68 @@ def test_registry_dispatch_uses_existing_config_and_runner(
     assert config.output_root == tmp_path.resolve()
     assert config.speed_multiplier == 25
     assert config.timeout_seconds == 90
+
+
+def test_registry_dispatches_editor_family_without_importing_it_for_inspection(
+    tmp_path,
+    monkeypatch,
+):
+    from tools.virtual_workflows import editor_scenarios
+
+    captured = []
+
+    def fake_run(config):
+        captured.append(config)
+        return {"scenario_id": config.scenario_id}
+
+    monkeypatch.setattr(
+        editor_scenarios,
+        "run_editor_create_finalize_scenario",
+        fake_run,
+    )
+    result = run_registered_scenario(
+        EDITOR_WORKLOAD_ID,
+        output_root=tmp_path,
+        speed_multiplier=25,
+        timeout_seconds=60,
+    )
+
+    assert result == {"scenario_id": EDITOR_WORKLOAD_ID}
+    assert len(captured) == 1
+    assert isinstance(captured[0], EditorLifecycleScenarioConfig)
+    assert captured[0].output_root == tmp_path.resolve()
+    assert captured[0].timeout_seconds == 60
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["--target-pi"],
+        ["--inject-ui-stall-ms", "10"],
+        ["--inject-after-completion", "1"],
+        ["--warmup-runs", "1", "--host-label", "local"],
+        ["--measured-runs", "2", "--host-label", "local"],
+        ["--emit-report-set", "--host-label", "local"],
+        ["--accept-baseline", "baseline.json", "--host-label", "local"],
+    ],
+)
+def test_editor_lifecycle_cli_rejects_unsupported_evidence_modes(
+    extra_args,
+    capsys,
+):
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "--scenario",
+                EDITOR_WORKLOAD_ID,
+                "--timeout-seconds",
+                "60",
+                *extra_args,
+            ]
+        )
+
+    assert caught.value.code == 2
+    assert "error:" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
