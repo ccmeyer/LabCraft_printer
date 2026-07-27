@@ -20,6 +20,7 @@ from tools.virtual_workflows.report import (
     REQUIRED_TOP_LEVEL_FIELDS,
 )
 from tools.virtual_workflows.scenarios import (
+    AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
     SCENARIO_COMPLETION_COUNTS,
     SCENARIO_FIXTURES,
     SCENARIO_NAME,
@@ -163,6 +164,18 @@ def test_legacy_scenario_api_remains_additively_compatible():
     assert {WORKLOAD_ID, STRESS_WORKLOAD_ID} <= set(SCENARIO_FIXTURES)
     assert SCENARIO_COMPLETION_COUNTS[WORKLOAD_ID] == 96
     assert SCENARIO_COMPLETION_COUNTS[STRESS_WORKLOAD_ID] == 3840
+    assert (
+        SCENARIO_COMPLETION_COUNTS[
+            AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID
+        ]
+        == 24
+    )
+    assert (
+        SCENARIO_FIXTURES[
+            AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID
+        ].name
+        == "authoritative_reload_resume_24_v1.json"
+    )
     assert SCENARIO_NAME == "virtual_print_array"
     assert SCENARIO_VERSION == "1"
 

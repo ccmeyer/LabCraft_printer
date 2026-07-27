@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import math
 import os
@@ -35,25 +36,51 @@ STRESS_FIXTURE_PATH = (
     / "fixtures"
     / "virtual_print_array_384x10_v1.json"
 )
+SOFT_STOP_RESUME_FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "print_array_soft_stop_resume_24_v1.json"
+)
+AUTHORITATIVE_RELOAD_RESUME_FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "authoritative_reload_resume_24_v1.json"
+)
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "verification_reports" / "virtual_workflows"
 WORKLOAD_ID = "virtual_print_array_96_v1"
 SMOKE_WORKLOAD_ID = "virtual_print_array_24_v1"
 STRESS_WORKLOAD_ID = "virtual_print_array_384x10_v1"
+SOFT_STOP_RESUME_WORKLOAD_ID = "print_array_soft_stop_resume_24_v1"
+AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID = "authoritative_reload_resume_24_v1"
 SCENARIO_FIXTURES = {
     WORKLOAD_ID: FIXTURE_PATH,
     STRESS_WORKLOAD_ID: STRESS_FIXTURE_PATH,
     SMOKE_WORKLOAD_ID: SMOKE_FIXTURE_PATH,
+    SOFT_STOP_RESUME_WORKLOAD_ID: SOFT_STOP_RESUME_FIXTURE_PATH,
+    AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: AUTHORITATIVE_RELOAD_RESUME_FIXTURE_PATH,
 }
 SCENARIO_COMPLETION_COUNTS = {
     WORKLOAD_ID: 96,
     STRESS_WORKLOAD_ID: 3840,
     SMOKE_WORKLOAD_ID: 24,
+    SOFT_STOP_RESUME_WORKLOAD_ID: 24,
+    AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: 24,
+}
+SCENARIO_WORKFLOW_STRATEGIES = {
+    WORKLOAD_ID: "uninterrupted",
+    STRESS_WORKLOAD_ID: "uninterrupted",
+    SMOKE_WORKLOAD_ID: "uninterrupted",
+    SOFT_STOP_RESUME_WORKLOAD_ID: "soft_stop_resume",
+    AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: "authoritative_reload_resume",
 }
 SCENARIO_NAME = "virtual_print_array"
 SCENARIO_VERSION = "1"
 EXPECTED_START_DIALOGS = (
     "Start Print Array",
     "Evaporation Plate Dock Check",
+)
+EXPECTED_SOFT_STOP_RESUME_DIALOGS = EXPECTED_START_DIALOGS + (
+    "Resume Print Array",
 )
 
 if str(REPO_ROOT) not in sys.path:
@@ -72,15 +99,21 @@ from tools.virtual_workflows.actions import (  # noqa: E402
     ScenarioContext,
     capture_failure_screenshot,
     capture_milestone,
+    close_simulated_session,
     connect_machine_ready,
+    drive_authoritative_reload_via_editor,
     enable_pressure_regulation,
     install_dialog_handler,
     launch_simulated_application,
     prepare_authoritative_fixture,
+    request_soft_stop_via_ui,
     stage_virtual_head,
     start_array_via_ui,
     teardown_scenario,
     validate_terminal_bundle,
+    validate_paused_bundle,
+    validate_reload_boundary,
+    observe_stopped_quiescence,
     wait_for_array_state,
     wait_for_completions,
     wait_until,
@@ -115,6 +148,108 @@ def _resolved_beneath(path: str | Path, root: str | Path) -> bool:
     candidate = Path(path).resolve()
     parent = Path(root).resolve()
     return candidate == parent or parent in candidate.parents
+
+
+def _file_inventory(root: str | Path) -> dict[str, dict[str, Any]]:
+    directory = Path(root).resolve()
+    return {
+        path.relative_to(directory).as_posix(): {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "size_bytes": path.stat().st_size,
+        }
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _merge_session_lifecycles(
+    sessions: tuple[tuple[str, dict[str, Any]], ...],
+) -> dict[str, list[dict[str, Any]]]:
+    keys = {
+        key
+        for _session_id, snapshot in sessions
+        for key in snapshot
+    }
+
+
+def _merge_progress_snapshots(
+    first: dict[str, Any],
+    second: dict[str, Any],
+) -> dict[str, Any]:
+    duration_keys = set(first.get("duration_samples_ms", {})) | set(
+        second.get("duration_samples_ms", {})
+    )
+    durations = {
+        key: [
+            *first.get("duration_samples_ms", {}).get(key, ()),
+            *second.get("duration_samples_ms", {}).get(key, ()),
+        ]
+        for key in sorted(duration_keys)
+    }
+    sizes = [
+        *first.get("serialized_size_bytes", ()),
+        *second.get("serialized_size_bytes", ()),
+    ]
+    non_durable = [
+        *first.get("non_durable_write_samples_ms", ()),
+        *second.get("non_durable_write_samples_ms", ()),
+    ]
+    return {
+        "mode_counts": {
+            key: int(first.get("mode_counts", {}).get(key, 0))
+            + int(second.get("mode_counts", {}).get(key, 0))
+            for key in {"cached_update", "full_rebuild"}
+        },
+        "duration_samples_ms": durations,
+        "duration_statistics_ms": {
+            key: summarize_samples(values)
+            for key, values in durations.items()
+        },
+        "serialized_size_bytes": sizes,
+        "serialized_size_statistics_bytes": summarize_samples(
+            sizes,
+            bands_ms=(),
+        ),
+        "non_durable_write_samples_ms": non_durable,
+        "non_durable_write_ms": summarize_samples(
+            non_durable,
+            bands_ms=(),
+        ),
+        "observer_restored": bool(first.get("observer_restored"))
+        and bool(second.get("observer_restored")),
+    }
+
+
+def _merge_durable_io_snapshots(
+    first: dict[str, Any],
+    second: dict[str, Any],
+) -> dict[str, dict[str, list[float]]]:
+    operations = set(first) | set(second)
+    return {
+        operation: {
+            phase: [
+                *first.get(operation, {}).get(phase, ()),
+                *second.get(operation, {}).get(phase, ()),
+            ]
+            for phase in sorted(
+                set(first.get(operation, {}))
+                | set(second.get(operation, {}))
+            )
+        }
+        for operation in sorted(operations)
+    }
+    return {
+        key: [
+            (
+                {**dict(item), "application_session_id": session_id}
+                if isinstance(item, dict)
+                else item
+            )
+            for session_id, snapshot in sessions
+            for item in snapshot.get(key, ())
+        ]
+        for key in sorted(keys)
+    }
 
 
 def _progress_format_evidence(experiment_dir: Path) -> dict[str, Any]:
@@ -214,7 +349,11 @@ class VirtualPrintArrayScenarioConfig:
         if stall < 0:
             raise ValueError("inject_ui_stall_ms must be non-negative")
         maximum_completion = SCENARIO_COMPLETION_COUNTS[scenario_id]
-        if scenario_id == SMOKE_WORKLOAD_ID and inject_after == 48:
+        if scenario_id in {
+            SMOKE_WORKLOAD_ID,
+            SOFT_STOP_RESUME_WORKLOAD_ID,
+            AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+        } and inject_after == 48:
             inject_after = maximum_completion // 2
         if not 1 <= inject_after <= maximum_completion:
             raise ValueError(
@@ -294,9 +433,10 @@ def load_virtual_print_array_fixture(
             "stocks",
             "fill_stock",
             "simulation",
+            *({"lifecycle"} if schema_version == 3 else set()),
         }
     )
-    if set(payload) != expected_top or schema_version not in {1, 2}:
+    if set(payload) != expected_top or schema_version not in {1, 2, 3}:
         raise VirtualWorkflowScenarioError(
             "virtual print-array fixture has an invalid top-level contract"
         )
@@ -373,8 +513,29 @@ def load_virtual_print_array_fixture(
         workload.get("stock_count", 1)
     ):
         raise VirtualWorkflowScenarioError("fixture stock count is invalid")
-    if schema_version == 2 and int(simulation.get("staging_slot", -1)) != 0:
+    if schema_version in {2, 3} and int(simulation.get("staging_slot", -1)) != 0:
         raise VirtualWorkflowScenarioError("fixture staging-slot contract is invalid")
+    if schema_version == 3:
+        lifecycle = payload.get("lifecycle")
+        expected_lifecycle = {
+            SOFT_STOP_RESUME_WORKLOAD_ID: {
+                "kind": "soft_stop_resume",
+                "request_after_completion_count": 6,
+                "maximum_completion_catchup": 2,
+                "quiescence_observation_ms": 250,
+            },
+            AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: {
+                "kind": "authoritative_reload_resume",
+                "request_after_completion_count": 6,
+                "maximum_completion_catchup": 2,
+                "quiescence_observation_ms": 250,
+                "expected_application_session_count": 2,
+            },
+        }.get(str(payload.get("fixture_id")))
+        if expected_lifecycle is None or lifecycle != expected_lifecycle:
+            raise VirtualWorkflowScenarioError(
+                "fixture lifecycle contract is invalid"
+            )
     return payload
 
 
@@ -613,6 +774,8 @@ class _InstanceInstrumentation:
         self.intent_begins: list[dict[str, Any]] = []
         self.intent_attachments: list[dict[str, Any]] = []
         self.intent_completions: list[str] = []
+        self.intent_discard_batches: list[dict[str, Any]] = []
+        self.soft_stop_events: list[dict[str, Any]] = []
         self.checkpoint_observations: list[dict[str, Any]] = []
         self.pass_starts: list[dict[str, Any]] = []
         self.terminal_transitions: list[dict[str, Any]] = []
@@ -805,6 +968,7 @@ class _InstanceInstrumentation:
         method_name: str,
         phase_name: str,
         *,
+        before: Callable[[], None] | None = None,
         after: Callable[[], None] | None = None,
         observe: Callable[[tuple[Any, ...], dict[str, Any], Any], None] | None = None,
     ) -> None:
@@ -813,6 +977,8 @@ class _InstanceInstrumentation:
         def measured(*args, **kwargs):
             if phase_name in self._suppressed_phases:
                 return original(*args, **kwargs)
+            if before is not None:
+                before()
             metadata = (
                 self._pass_metadata()
                 if phase_name.startswith("pass_start.")
@@ -862,6 +1028,8 @@ class _InstanceInstrumentation:
             "begins": list(self.intent_begins),
             "attachments": list(self.intent_attachments),
             "completions": list(self.intent_completions),
+            "discard_batches": list(self.intent_discard_batches),
+            "soft_stop_events": list(self.soft_stop_events),
             "checkpoint_observations": list(self.checkpoint_observations),
             "pass_starts": list(self.pass_starts),
             "terminal_transitions": list(self.terminal_transitions),
@@ -997,6 +1165,24 @@ def _install_instrumentation(
         )
         instrumentation.capture_checkpoint(experiment_model, "after_complete")
 
+    def observe_discard(args, kwargs, _result) -> None:
+        intent_ids = list(argument(args, kwargs, "intent_ids", 0))
+        begin_by_id = {
+            item["intent_id"]: item
+            for item in instrumentation.intent_begins
+        }
+        instrumentation.intent_discard_batches.append(
+            {
+                "intent_ids": intent_ids,
+                "intents": [
+                    dict(begin_by_id[intent_id])
+                    for intent_id in intent_ids
+                    if intent_id in begin_by_id
+                ],
+            }
+        )
+        instrumentation.capture_checkpoint(experiment_model, "after_discard")
+
     instrumentation.wrap(
         experiment_model,
         "begin_execution_print_intent",
@@ -1019,6 +1205,12 @@ def _install_instrumentation(
         "complete_execution_print_intent",
         "persistence.complete_intent",
         observe=observe_complete,
+    )
+    instrumentation.wrap(
+        experiment_model,
+        "discard_execution_print_intents",
+        "persistence.discard_intents",
+        observe=observe_discard,
     )
     for method, phase in (
         ("_save_active_execution_resume", "persistence.save_resume"),
@@ -1143,6 +1335,53 @@ def _install_instrumentation(
         controller,
         "_finish_array_finalize",
         "terminal_finalize.total",
+    )
+
+    def observe_watermark(_args, _kwargs, _result) -> None:
+        context = dict(getattr(controller, "_array_context", {}) or {})
+        machine_model = controller.model.machine_model
+        instrumentation.soft_stop_events.append(
+            {
+                "event": "watermark_observed",
+                "barrier_seq32": context.get("soft_stop_barrier_seq32"),
+                "pause_watermark_reached": bool(
+                    getattr(machine_model, "pause_watermark_reached", False)
+                ),
+                "transport_paused": bool(
+                    getattr(machine_model, "transport_paused", False)
+                ),
+                "soft_stop_phase": context.get("soft_stop_phase"),
+            }
+        )
+
+    def observe_clear(args, kwargs, _result) -> None:
+        clear_result = dict(
+            kwargs.get("clear_result")
+            if "clear_result" in kwargs
+            else (args[0] if args else {})
+            or {}
+        )
+        instrumentation.soft_stop_events.append(
+            {
+                "event": "queue_clear_completed",
+                "clear_result": clear_result,
+                "soft_stop_uncertain": bool(
+                    getattr(controller, "_soft_stop_clear_uncertain", False)
+                ),
+            }
+        )
+
+    instrumentation.wrap(
+        controller,
+        "_begin_soft_stop_clear_and_park",
+        "soft_stop.watermark",
+        before=lambda: observe_watermark((), {}, None),
+    )
+    instrumentation.wrap(
+        controller,
+        "_on_soft_stop_queue_cleared",
+        "soft_stop.queue_clear",
+        observe=observe_clear,
     )
     instrumentation.wrap(
         experiment_model,
@@ -1381,6 +1620,328 @@ def _validate_completed_scenario(
     }
 
 
+def _progress_added_count(experiment_model: Any) -> int:
+    total = 0
+    for entry in (experiment_model.progress_data or {}).values():
+        for reagent in (entry.get("reagents") or {}).values():
+            total += int(reagent.get("added_droplets", 0))
+    return total
+
+
+def _read_audit_rows(experiment_model: Any) -> list[dict[str, Any]]:
+    path_value = getattr(experiment_model, "experiment_audit_file_path", None)
+    path = Path(path_value) if path_value else None
+    if path is None or not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            rows.append(json.loads(line))
+    return rows
+
+
+def _contains_ordered_subsequence(
+    values: list[str],
+    expected: tuple[str, ...],
+) -> bool:
+    iterator = iter(values)
+    return all(any(value == target for value in iterator) for target in expected)
+
+
+def _validate_soft_stop_paused_scenario(
+    *,
+    experiment_model: Any,
+    fixture_info: dict[str, Any],
+    controller: Any,
+    machine: Any,
+    request_evidence: dict[str, Any],
+    completed_count: int,
+    errors: list[dict[str, Any]],
+    unexpected_dialogs: list[dict[str, Any]],
+    intent_lifecycle: dict[str, Any],
+) -> dict[str, Any]:
+    from AuthoritativeExecutionLoad import inspect_authoritative_execution
+    from ExecutionPlan import ExecutionPlanState, load_execution_plan
+    from ExecutionResumeStore import load_execution_resume
+
+    experiment_dir = Path(fixture_info["experiment_dir"])
+    design = json.loads(
+        Path(experiment_model.experiment_file_path).read_text(encoding="utf-8")
+    )
+    bundle = inspect_authoritative_execution(experiment_dir, design)
+    plan = load_execution_plan(experiment_model.execution_plan_file_path)
+    checkpoint = load_execution_resume(experiment_model.execution_resume_file_path)
+    eligibility = experiment_model.get_execution_resume_eligibility() or {}
+    trigger_count = int(request_evidence["trigger_count"])
+    maximum_catchup = int(
+        request_evidence.get("maximum_completion_catchup", 0)
+    )
+    catchup = int(completed_count) - trigger_count
+    soft_stop_events = list(intent_lifecycle.get("soft_stop_events", ()))
+    watermark = next(
+        (
+            item
+            for item in soft_stop_events
+            if item.get("event") == "watermark_observed"
+        ),
+        {},
+    )
+    clear = next(
+        (
+            item
+            for item in soft_stop_events
+            if item.get("event") == "queue_clear_completed"
+        ),
+        {},
+    )
+    clear_result = dict(clear.get("clear_result") or {})
+    audit_rows = _read_audit_rows(experiment_model)
+    audit_types = [str(row.get("event_type")) for row in audit_rows]
+    checks = {
+        "request_trigger_exact": request_evidence.get("clicked_count")
+        == trigger_count,
+        "completion_catchup_bounded": 1 <= catchup <= maximum_catchup,
+        "plan_remains_active": plan.state is ExecutionPlanState.ACTIVE,
+        "plan_identity_unchanged": plan.plan_id == fixture_info["plan_id"],
+        "authoritative_bundle_valid": bool(bundle.valid),
+        "checkpoint_paused": checkpoint.state == "paused",
+        "checkpoint_empty": not checkpoint.intents,
+        "eligibility_ready_to_resume": eligibility.get("status")
+        == "ready_to_resume",
+        "watermark_confirmed": bool(watermark.get("pause_watermark_reached"))
+        and bool(watermark.get("transport_paused")),
+        "clear_confirmed": bool(clear_result.get("status_confirmed")),
+        "clear_certain": not bool(clear.get("soft_stop_uncertain")),
+        "resume_ready": controller.get_array_run_state() == "resume_ready",
+        "simulator_queue_empty": bool(machine.check_if_all_completed()),
+        "audit_boundary_ordered": _contains_ordered_subsequence(
+            audit_types,
+            (
+                "print_array_requested",
+                "print_array_started",
+                "print_array_soft_stop_requested",
+                "print_array_paused",
+            ),
+        ),
+        "no_errors": not errors,
+        "no_unexpected_dialogs": not unexpected_dialogs,
+    }
+    if not all(checks.values()):
+        failed = [name for name, passed in checks.items() if not passed]
+        raise RuntimeError(
+            "paused soft-stop invariants failed: " + ", ".join(failed)
+        )
+    return {
+        "checks": checks,
+        "plan_state": plan.state.value,
+        "plan_id": plan.plan_id,
+        "plan_revision": plan.plan_revision,
+        "checkpoint_state": checkpoint.state,
+        "checkpoint_intent_count": len(checkpoint.intents),
+        "eligibility_status": eligibility.get("status"),
+        "completed_count": int(completed_count),
+        "request_completion_count": trigger_count,
+        "completion_catchup": catchup,
+        "watermark": watermark,
+        "clear": clear,
+        "audit_rows": audit_rows,
+    }
+
+
+def _validate_soft_stop_completed_scenario(
+    *,
+    experiment_model: Any,
+    fixture_info: dict[str, Any],
+    well_updates: list[str],
+    array_states: list[str],
+    array_complete_count: int,
+    errors: list[dict[str, Any]],
+    unexpected_dialogs: list[dict[str, Any]],
+    starvation_events: list[dict[str, Any]],
+    intent_lifecycle: dict[str, Any],
+    paused_validation: dict[str, Any],
+    quiescence: dict[str, Any],
+) -> dict[str, Any]:
+    from AuthoritativeExecutionLoad import inspect_authoritative_execution
+    from ExecutionPlan import ExecutionPlanState, load_execution_plan
+    from ExecutionResumeStore import load_execution_resume
+
+    experiment_dir = Path(fixture_info["experiment_dir"])
+    expected_wells = tuple(fixture_info["well_ids"])
+    stock_ids = tuple(fixture_info["stock_ids"])
+    expected_pairs = {
+        (stock_id, well_id)
+        for stock_id in stock_ids
+        for well_id in expected_wells
+    }
+    begins = list(intent_lifecycle.get("begins", ()))
+    attachments = list(intent_lifecycle.get("attachments", ()))
+    completions = list(intent_lifecycle.get("completions", ()))
+    discard_batches = list(intent_lifecycle.get("discard_batches", ()))
+    discarded_ids = [
+        intent_id
+        for batch in discard_batches
+        for intent_id in batch.get("intent_ids", ())
+    ]
+    begin_by_id = {item.get("intent_id"): item for item in begins}
+    begun_ids = [item.get("intent_id") for item in begins]
+    completed_ids = list(completions)
+    attached_ids = [item.get("intent_id") for item in attachments]
+    sequences = [item.get("command_seq32") for item in attachments]
+    completed_pairs = [
+        (
+            str(begin_by_id[intent_id].get("stock_id")),
+            str(begin_by_id[intent_id].get("well_id")),
+        )
+        for intent_id in completed_ids
+        if intent_id in begin_by_id
+    ]
+    discarded_pairs = [
+        (
+            str(begin_by_id[intent_id].get("stock_id")),
+            str(begin_by_id[intent_id].get("well_id")),
+        )
+        for intent_id in discarded_ids
+        if intent_id in begin_by_id
+    ]
+    checkpoint = load_execution_resume(experiment_model.execution_resume_file_path)
+    design = json.loads(
+        Path(experiment_model.experiment_file_path).read_text(encoding="utf-8")
+    )
+    bundle = inspect_authoritative_execution(experiment_dir, design)
+    terminal_plan = load_execution_plan(experiment_model.execution_plan_file_path)
+    eligibility = experiment_model.get_execution_resume_eligibility() or {}
+    completed_updates = [
+        well_id for well_id in well_updates if well_id in set(expected_wells)
+    ]
+    target = int(fixture_info["target_dispenses_per_stock"])
+    targets_match = all(
+        int(
+            ((bundle.progress_wells.get(well_id, {}).get("reagents") or {})
+             .get(stock_id, {}))
+            .get("target_droplets", -1)
+        )
+        == target
+        and int(
+            ((bundle.progress_wells.get(well_id, {}).get("reagents") or {})
+             .get(stock_id, {}))
+            .get("added_droplets", -1)
+        )
+        == target
+        for stock_id, well_id in expected_pairs
+    )
+    retired = completed_ids + discarded_ids
+    reissued_pairs = all(
+        Counter(completed_pairs)[pair] == 1
+        and sum(
+            1
+            for item in begins
+            if (str(item.get("stock_id")), str(item.get("well_id"))) == pair
+        )
+        >= 2
+        for pair in discarded_pairs
+    )
+    audit_rows = _read_audit_rows(experiment_model)
+    audit_types = [str(row.get("event_type")) for row in audit_rows]
+    checks = {
+        "checkpoint_clean": checkpoint.state == "clean",
+        "checkpoint_empty": not checkpoint.intents,
+        "begun_intent_occurrences_reconcilable": (
+            Counter(begun_ids) == Counter(retired)
+            and all(
+                count == 1
+                or (
+                    count == 2
+                    and intent_id in discarded_ids
+                    and intent_id in completed_ids
+                )
+                for intent_id, count in Counter(begun_ids).items()
+            )
+        ),
+        "attachments_exact": Counter(attached_ids) == Counter(begun_ids),
+        "sequences_unique_monotonic": sequences == sorted(set(sequences)),
+        "terminal_intent_partition_exact": (
+            Counter(retired) == Counter(begun_ids)
+            and all(
+                Counter(completed_ids)[intent_id] == 1
+                and Counter(discarded_ids)[intent_id] == 1
+                for intent_id in set(completed_ids) & set(discarded_ids)
+            )
+        ),
+        "discarded_pairs_reissued": bool(discarded_ids) and reissued_pairs,
+        "completed_pairs_exactly_once": Counter(completed_pairs)
+        == Counter(expected_pairs),
+        "completion_count_exact": len(completed_ids) == len(expected_pairs),
+        "well_updates_exact": Counter(completed_updates)
+        == Counter(expected_wells),
+        "progress_targets_exact": targets_match,
+        "authoritative_bundle_valid": bool(bundle.valid),
+        "terminal_plan_completed": terminal_plan.state
+        is ExecutionPlanState.COMPLETED,
+        "terminal_intents_unambiguous": (
+            not eligibility.get("ambiguous_intent_ids")
+            and not eligibility.get("repairable_intent_ids")
+        ),
+        "plan_identity_unchanged": terminal_plan.plan_id
+        == fixture_info["plan_id"],
+        "array_completed_once": array_complete_count == 1,
+        "ui_resumed_once": array_states.count("running") == 2,
+        "audit_lifecycle_ordered": _contains_ordered_subsequence(
+            audit_types,
+            (
+                "print_array_requested",
+                "print_array_started",
+                "print_array_soft_stop_requested",
+                "print_array_paused",
+                "print_array_requested",
+                "print_array_resumed",
+                "print_array_started",
+                "print_array_completed",
+            ),
+        ),
+        "paused_boundary_valid": all(
+            paused_validation.get("checks", {}).values()
+        ),
+        "quiescence_valid": (
+            quiescence.get("starting_completion_count")
+            == quiescence.get("ending_completion_count")
+            and quiescence.get("starting_progress_count")
+            == quiescence.get("ending_progress_count")
+            and quiescence.get("simulator_queue_empty") is True
+        ),
+        "no_errors": not errors,
+        "no_unexpected_dialogs": not unexpected_dialogs,
+        "no_lookahead_starvation": not starvation_events,
+    }
+    if not all(checks.values()):
+        failed = [name for name, passed in checks.items() if not passed]
+        raise RuntimeError(
+            "soft-stop/resume terminal invariants failed: "
+            + ", ".join(failed)
+        )
+    return {
+        "checks": checks,
+        "checkpoint_state": checkpoint.state,
+        "intent_count": len(completed_ids),
+        "begin_intent_count": len(begun_ids),
+        "discarded_intent_count": len(discarded_ids),
+        "discard_batch_count": len(discard_batches),
+        "discarded_intent_ids": discarded_ids,
+        "discarded_stock_well_pairs": [
+            {"stock_id": stock_id, "well_id": well_id}
+            for stock_id, well_id in discarded_pairs
+        ],
+        "stock_well_completion_count": len(completed_pairs),
+        "observed_completed_intent_count": len(completed_ids),
+        "terminal_plan_state": terminal_plan.state.value,
+        "terminal_plan_revision": terminal_plan.plan_revision,
+        "audit_rows": audit_rows,
+        "paused_boundary": paused_validation,
+        "quiescence": quiescence,
+        "intent_command_sequences": sequences,
+    }
+
+
 def _summary_text(report: dict[str, Any]) -> str:
     workflow = report["metrics"]["workflow"]["values"]
     responsiveness = report["metrics"]["responsiveness"]["values"]
@@ -1566,6 +2127,14 @@ def run_virtual_print_array_scenario(
     workload_id = str(fixture["fixture_id"])
     expected_wells = fixture_well_ids(fixture)
     stock_specs = _fixture_stock_specs(fixture)
+    workflow_strategy = SCENARIO_WORKFLOW_STRATEGIES[workload_id]
+    is_soft_stop_resume = workflow_strategy == "soft_stop_resume"
+    is_authoritative_reload_resume = (
+        workflow_strategy == "authoritative_reload_resume"
+    )
+    is_pause_resume_lifecycle = (
+        is_soft_stop_resume or is_authoritative_reload_resume
+    )
     expected_stock_count = len(stock_specs)
     expected_completions = len(expected_wells) * expected_stock_count
     stamp = _run_stamp()
@@ -1596,6 +2165,8 @@ def run_virtual_print_array_scenario(
         timeout_seconds=config.timeout_seconds,
         record_event=event_log.record,
     )
+    if is_authoritative_reload_resume:
+        context.application_session_id = "session_1"
     errors = context.errors
     dialogs = context.dialogs
     unexpected_dialogs = context.unexpected_dialogs
@@ -1618,6 +2189,14 @@ def run_virtual_print_array_scenario(
     current_pass_index = -1
     fixture_info: dict[str, Any] | None = None
     validation: dict[str, Any] = {}
+    paused_validation: dict[str, Any] = {}
+    quiescence_evidence: dict[str, Any] = {}
+    authoritative_reload_evidence: dict[str, Any] = {}
+    terminal_lifecycle: dict[str, Any] = {}
+    session_1_lifecycle: dict[str, Any] = {}
+    session_1_progress_snapshot: dict[str, Any] = {}
+    session_1_durable_io_snapshot: dict[str, Any] = {}
+    session_1_read_snapshot: dict[str, Any] = {}
     failure_text: str | None = None
     phases = NamedPhaseRecorder(
         max_records=max(50_000, expected_completions * 24)
@@ -1929,7 +2508,14 @@ def run_virtual_print_array_scenario(
         paint_filter = PaintFilter(app)
         app.installEventFilter(paint_filter)
         context.paint_filter = paint_filter
-        install_dialog_handler(context, EXPECTED_START_DIALOGS)
+        install_dialog_handler(
+            context,
+            (
+                EXPECTED_SOFT_STOP_RESUME_DIALOGS
+                if is_pause_resume_lifecycle
+                else EXPECTED_START_DIALOGS
+            ),
+        )
 
         completed_count = lambda: len(
             [well for well in well_updates if well in set(expected_wells)]
@@ -1998,7 +2584,11 @@ def run_virtual_print_array_scenario(
         enable_pressure_regulation(context)
         capture_milestone(
             context,
-            "ready",
+            (
+                "session_1_ready"
+                if is_authoritative_reload_resume
+                else "ready"
+            ),
             evidence={"stock_id": first_stock_id},
         )
 
@@ -2050,9 +2640,459 @@ def run_virtual_print_array_scenario(
             if stock_index == 0:
                 capture_milestone(
                     context,
-                    "printing",
+                    (
+                        "session_1_printing"
+                        if is_authoritative_reload_resume
+                        else "printing"
+                    ),
                     evidence={"stock_id": stock_id},
                 )
+
+            if is_pause_resume_lifecycle:
+                lifecycle = fixture["lifecycle"]
+                request_result = request_soft_stop_via_ui(
+                    context,
+                    completed_count=completed_count,
+                    trigger_count=int(
+                        lifecycle["request_after_completion_count"]
+                    ),
+                    timeout_seconds=config.timeout_seconds,
+                )
+                request_evidence = dict(request_result["evidence"])
+                request_evidence["maximum_completion_catchup"] = int(
+                    lifecycle["maximum_completion_catchup"]
+                )
+                capture_milestone(
+                    context,
+                    (
+                        "session_1_stop_requested"
+                        if is_authoritative_reload_resume
+                        else "stop_requested"
+                    ),
+                    evidence=request_evidence,
+                )
+                wait_for_array_state(
+                    context,
+                    state="resume_ready",
+                    timeout_seconds=10.0,
+                    label="soft-stop resume-ready state",
+                )
+                paused_validation = validate_paused_bundle(
+                    context,
+                    lambda: _validate_soft_stop_paused_scenario(
+                        experiment_model=experiment_model,
+                        fixture_info=fixture_info,
+                        controller=controller,
+                        machine=machine,
+                        request_evidence=request_evidence,
+                        completed_count=completed_count(),
+                        errors=errors,
+                        unexpected_dialogs=unexpected_dialogs,
+                        intent_lifecycle=instrumentation.lifecycle_snapshot(),
+                    ),
+                )
+                capture_milestone(
+                    context,
+                    (
+                        "session_1_stopped"
+                        if is_authoritative_reload_resume
+                        else "stopped"
+                    ),
+                    evidence={
+                        "completed": completed_count(),
+                        "checkpoint_state": paused_validation[
+                            "checkpoint_state"
+                        ],
+                        "eligibility_status": paused_validation[
+                            "eligibility_status"
+                        ],
+                    },
+                )
+                quiescence_result = observe_stopped_quiescence(
+                    context,
+                    completed_count=completed_count,
+                    progress_count=lambda: _progress_added_count(
+                        experiment_model
+                    ),
+                    observation_ms=int(
+                        lifecycle["quiescence_observation_ms"]
+                    ),
+                )
+                quiescence_evidence = dict(quiescence_result["evidence"])
+                if is_authoritative_reload_resume:
+                    paused_inventory = _file_inventory(
+                        fixture_info["experiment_dir"]
+                    )
+                    session_1_lifecycle = instrumentation.lifecycle_snapshot()
+                    first_instrumentation = instrumentation
+                    first_progress_observer = progress_observer
+                    first_io_observer = io_observer
+                    session_1_audit_rows = _read_audit_rows(experiment_model)
+                    session_1_plan_id = str(fixture_info["plan_id"])
+                    session_1_completed_intent_ids = set(
+                        session_1_lifecycle.get("completions", ())
+                    )
+                    session_1_completed_pairs = {
+                        (
+                            str(item["stock_id"]),
+                            str(item["well_id"]),
+                        )
+                        for item in session_1_lifecycle.get("begins", ())
+                        if item.get("intent_id")
+                        in session_1_completed_intent_ids
+                    }
+                    session_1_cleanup_result = close_simulated_session(
+                        context,
+                        session_id="session_1",
+                    )
+                    stdout_redirect = None
+                    session_1_progress_snapshot = (
+                        first_progress_observer.snapshot()
+                    )
+                    session_1_durable_io_snapshot = (
+                        first_io_observer.snapshot()
+                    )
+                    session_1_read_snapshot = (
+                        first_io_observer.read_snapshot()
+                    )
+                    inventory_after_close = _file_inventory(
+                        fixture_info["experiment_dir"]
+                    )
+                    if inventory_after_close != paused_inventory:
+                        raise RuntimeError(
+                            "first-session teardown mutated authoritative files"
+                        )
+
+                    context.application_session_id = "session_2"
+                    simulation_config = SimulationConfig(
+                        timing=SimulationTimingPolicy(
+                            speed_multiplier=config.speed_multiplier,
+                        ),
+                        completed_history_limit=512,
+                        event_history_limit=4096,
+                    )
+                    context.dependencies = composition.simulation_dependencies(
+                        scenario_root,
+                        machine_factory=make_simulated_machine_factory(
+                            simulation_config
+                        ),
+                    )
+                    dependencies = context.dependencies
+
+                    def launch_second_application() -> dict[str, Any]:
+                        context.components = (
+                            composition.build_application_components(
+                                CURRENT_PROFILE,
+                                dependencies,
+                            )
+                        )
+                        context.model = context.components.model
+                        context.machine = context.components.machine
+                        context.controller = context.components.controller
+                        context.view = context.components.view
+                        context.experiment_model = (
+                            context.model.experiment_model
+                        )
+                        context.view.show()
+                        app.processEvents()
+                        return {
+                            "fresh_components": True,
+                            "runtime_active": bool(
+                                context.experiment_model
+                                .is_authoritative_execution_runtime_active()
+                            ),
+                            "scenario_root": str(scenario_root),
+                        }
+
+                    launch_simulated_application(
+                        context,
+                        launch_second_application,
+                    )
+                    components = context.components
+                    model = context.model
+                    machine = context.machine
+                    controller = context.controller
+                    view = context.view
+                    experiment_model = context.experiment_model
+
+                    model.well_plate.well_state_changed_signal.connect(
+                        on_well_update
+                    )
+                    model.machine_model.pressure_updated.connect(
+                        on_pressure_update
+                    )
+                    controller.array_state_changed.connect(on_array_state)
+                    controller.array_complete.connect(on_array_complete)
+                    controller.error_occurred_signal.connect(
+                        lambda *args: on_error("controller", *args)
+                    )
+                    machine.error_occurred.connect(
+                        lambda *args: on_error("machine", *args)
+                    )
+                    machine.simulation_faulted.connect(
+                        lambda *args: on_error(
+                            "simulation_fault", *args
+                        )
+                    )
+                    machine.command_lifecycle_changed.connect(on_command)
+                    machine.command_queue.commands_completed.connect(
+                        on_queue_drained
+                    )
+
+                    paint_filter = PaintFilter(app)
+                    app.installEventFilter(paint_filter)
+                    context.paint_filter = paint_filter
+                    install_dialog_handler(
+                        context,
+                        ("Resume Print Array",),
+                    )
+                    instrumentation = _install_instrumentation(
+                        phases,
+                        experiment_model=experiment_model,
+                        controller=controller,
+                        well_plate_widget=view.well_plate_widget,
+                        pressure_plot_widget=view.pressure_box,
+                        experiment_task_list=view.experiment_task_list,
+                        inject_ms=0,
+                        inject_after_completion=48,
+                        completed_count=completed_count,
+                        io_observer=PersistenceIoObserver(
+                            fixture_info["experiment_dir"]
+                        ),
+                        pressure_rendered=on_pressure_rendered,
+                        pass_context=current_pass_context,
+                    )
+                    io_observer = instrumentation.io_observer
+                    progress_observer = ProgressSnapshotObserver(
+                        experiment_model
+                    )
+                    progress_observer.install()
+                    io_observer.install()
+                    context.instrumentation = instrumentation
+                    context.io_observer = io_observer
+                    context.progress_observer = progress_observer
+                    probe.start(app)
+                    probe_started = True
+                    context.probe_started = True
+                    stdout_redirect = redirect_stdout(application_stdout)
+                    stdout_redirect.__enter__()
+                    context.stdout_redirect = stdout_redirect
+
+                    loaded_boundary: dict[str, Any] = {}
+                    activated_boundary: dict[str, Any] = {}
+
+                    def validate_loaded_boundary() -> Mapping[str, Any]:
+                        current = _file_inventory(
+                            fixture_info["experiment_dir"]
+                        )
+                        eligibility = (
+                            experiment_model
+                            .get_execution_resume_eligibility()
+                        )
+                        checks = {
+                            "authoritative_files_byte_identical": (
+                                current == paused_inventory
+                            ),
+                            "runtime_inactive": not (
+                                experiment_model
+                                .is_authoritative_execution_runtime_active()
+                            ),
+                            "eligibility_ready_to_resume": (
+                                eligibility.get("status")
+                                == "ready_to_resume"
+                            ),
+                        }
+                        if not all(checks.values()):
+                            raise RuntimeError(
+                                "authoritative reload boundary is invalid"
+                            )
+                        loaded_boundary.update(
+                            {
+                                "checks": checks,
+                                "inventory": current,
+                                "eligibility": eligibility,
+                            }
+                        )
+                        return loaded_boundary
+
+                    def validate_activated_boundary() -> Mapping[str, Any]:
+                        current = _file_inventory(
+                            fixture_info["experiment_dir"]
+                        )
+                        all_paths = set(paused_inventory) | set(current)
+                        changed = sorted(
+                            path
+                            for path in all_paths
+                            if paused_inventory.get(path)
+                            != current.get(path)
+                        )
+                        allowed = {
+                            "execution_resume.json",
+                            "execution_plan.json",
+                            "key.csv",
+                            "concentration_key.csv",
+                            "experiment_audit.jsonl",
+                        }
+                        disallowed = sorted(set(changed) - allowed)
+                        audit_rows = _read_audit_rows(experiment_model)
+                        activation_rows = [
+                            row
+                            for row in audit_rows[
+                                len(session_1_audit_rows):
+                            ]
+                            if row.get("event_type")
+                            == "authoritative_execution_activated"
+                        ]
+                        snapshot = (
+                            experiment_model.get_execution_plan_snapshot()
+                        )
+                        eligibility = (
+                            experiment_model
+                            .get_execution_resume_eligibility()
+                        )
+                        checks = {
+                            "only_allowlisted_files_changed": not disallowed,
+                            "plan_identity_unchanged": (
+                                str(snapshot.plan_id)
+                                == session_1_plan_id
+                            ),
+                            "eligibility_ready_to_resume": (
+                                eligibility.get("status")
+                                == "ready_to_resume"
+                            ),
+                            "one_activation_audit_event": (
+                                len(activation_rows) == 1
+                            ),
+                            "partial_progress_rehydrated": (
+                                _progress_added_count(experiment_model)
+                                == len(session_1_completed_pairs)
+                            ),
+                        }
+                        if not all(checks.values()):
+                            raise RuntimeError(
+                                "authoritative activation boundary is invalid"
+                            )
+                        activated_boundary.update(
+                            {
+                                "checks": checks,
+                                "changed_paths": changed,
+                                "disallowed_changed_paths": disallowed,
+                                "inventory": current,
+                                "eligibility": eligibility,
+                                "activation_audit_rows": activation_rows,
+                            }
+                        )
+                        return activated_boundary
+
+                    validate_reload_boundary(
+                        context,
+                        lambda: {
+                            "between_sessions": {
+                                "inventory_unchanged": (
+                                    inventory_after_close
+                                    == paused_inventory
+                                ),
+                                "first_session_cleanup": (
+                                    session_1_cleanup_result["evidence"]
+                                ),
+                            }
+                        },
+                    )
+                    editor_reload = drive_authoritative_reload_via_editor(
+                        context,
+                        experiment_dir=Path(
+                            fixture_info["experiment_dir"]
+                        ),
+                        expected_name=workload_id,
+                        before_activation=lambda: validate_reload_boundary(
+                            context,
+                            validate_loaded_boundary,
+                        )["evidence"],
+                        after_activation=lambda: validate_reload_boundary(
+                            context,
+                            validate_activated_boundary,
+                        )["evidence"],
+                    )
+                    capture_milestone(
+                        context,
+                        "session_2_activated",
+                        evidence=editor_reload["activated"],
+                    )
+                    connect_machine_ready(
+                        context,
+                        simulated_port=SIMULATED_PORT,
+                        dispense_frequency_hz=int(
+                            fixture["simulation"][
+                                "dispense_frequency_hz"
+                            ]
+                        ),
+                    )
+                    calibrated_heads = {
+                        head.get_stock_id(): head
+                        for head in (
+                            model.printer_head_manager.printer_heads
+                        )
+                        if not getattr(head, "calibration_chip", False)
+                    }
+                    stage_stock_head(0)
+                    enable_pressure_regulation(context)
+                    start_array_via_ui(
+                        context,
+                        expected_running_count=2,
+                    )
+                    capture_milestone(
+                        context,
+                        "session_2_resumed",
+                        evidence={
+                            "completed_before_resume": len(
+                                session_1_completed_pairs
+                            ),
+                            "array_state": (
+                                controller.get_array_run_state()
+                            ),
+                        },
+                    )
+                    authoritative_reload_evidence.update(
+                        {
+                            "session_1_paused": paused_validation,
+                            "session_1_cleanup": (
+                                session_1_cleanup_result["evidence"]
+                            ),
+                            "between_sessions": {
+                                "inventory_before_close": paused_inventory,
+                                "inventory_after_close": (
+                                    inventory_after_close
+                                ),
+                                "byte_identical": (
+                                    inventory_after_close
+                                    == paused_inventory
+                                ),
+                            },
+                            "session_2_loaded": loaded_boundary,
+                            "session_2_activation": activated_boundary,
+                            "session_1_completed_pairs": [
+                                list(pair)
+                                for pair in sorted(
+                                    session_1_completed_pairs
+                                )
+                            ],
+                        }
+                    )
+                else:
+                    start_array_via_ui(
+                        context,
+                        expected_running_count=2,
+                    )
+                    capture_milestone(
+                        context,
+                        "resumed",
+                        evidence={
+                            "completed": completed_count(),
+                            "array_state": (
+                                controller.get_array_run_state()
+                            ),
+                        },
+                    )
 
             elapsed_seconds = (
                 time.perf_counter_ns() - started_ns
@@ -2062,6 +3102,8 @@ def run_virtual_print_array_scenario(
                 config.timeout_seconds - elapsed_seconds,
             )
             if (
+                not is_pause_resume_lifecycle
+                and
                 not midpoint_captured
                 and (stock_index + 1) * len(expected_wells)
                 >= midpoint_completion
@@ -2137,9 +3179,39 @@ def run_virtual_print_array_scenario(
         app.processEvents()
         capture_milestone(context, "completed")
 
+        terminal_lifecycle = (
+            _merge_session_lifecycles(
+                (
+                    ("session_1", session_1_lifecycle),
+                    (
+                        "session_2",
+                        instrumentation.lifecycle_snapshot(),
+                    ),
+                )
+            )
+            if is_authoritative_reload_resume
+            else instrumentation.lifecycle_snapshot()
+            if instrumentation is not None
+            else {}
+        )
         validation = validate_terminal_bundle(
             context,
-            lambda: _validate_completed_scenario(
+            lambda: (
+                _validate_soft_stop_completed_scenario(
+                    experiment_model=experiment_model,
+                    fixture_info=fixture_info,
+                    well_updates=well_updates,
+                    array_states=array_states,
+                    array_complete_count=array_complete_count,
+                    errors=errors,
+                    unexpected_dialogs=unexpected_dialogs,
+                    starvation_events=starvation_events,
+                    intent_lifecycle=terminal_lifecycle,
+                    paused_validation=paused_validation,
+                    quiescence=quiescence_evidence,
+                )
+                if is_pause_resume_lifecycle
+                else _validate_completed_scenario(
                 experiment_model=experiment_model,
                 fixture_info=fixture_info,
                 well_updates=well_updates,
@@ -2149,13 +3221,66 @@ def run_virtual_print_array_scenario(
                 unexpected_dialogs=unexpected_dialogs,
                 starvation_events=starvation_events,
                 intent_lifecycle=(
-                    instrumentation.lifecycle_snapshot()
-                    if instrumentation is not None
-                    else {}
+                    terminal_lifecycle
                 ),
                 pass_terminal_states=pass_terminal_states,
+                )
             ),
         )
+        if is_authoritative_reload_resume:
+            session_2_lifecycle = instrumentation.lifecycle_snapshot()
+            session_2_begin_pairs = {
+                (str(item["stock_id"]), str(item["well_id"]))
+                for item in session_2_lifecycle.get("begins", ())
+            }
+            session_1_completed_pairs = {
+                tuple(pair)
+                for pair in authoritative_reload_evidence.get(
+                    "session_1_completed_pairs", ()
+                )
+            }
+            no_replay = not (
+                session_1_completed_pairs & session_2_begin_pairs
+            )
+            validation.setdefault("checks", {})[
+                "session_1_completed_pairs_not_replayed"
+            ] = no_replay
+            validation["checks"][
+                "fresh_application_session_count_exact"
+            ] = len(
+                {
+                    item.get("application_session_id")
+                    for item in context.action_results
+                    if item.get("action_id") == "app.launch_simulated"
+                }
+            ) == int(
+                fixture["lifecycle"][
+                    "expected_application_session_count"
+                ]
+            )
+            authoritative_reload_evidence["resume_reconciliation"] = {
+                "session_1_lifecycle": session_1_lifecycle,
+                "session_2_lifecycle": session_2_lifecycle,
+                "combined_lifecycle": terminal_lifecycle,
+                "session_1_completed_pairs_not_replayed": no_replay,
+                "session_2_begin_pairs": [
+                    list(pair) for pair in sorted(session_2_begin_pairs)
+                ],
+            }
+            authoritative_reload_evidence["audit"] = validation.get(
+                "audit_rows", []
+            )
+            authoritative_reload_evidence["terminal"] = {
+                "plan_state": validation.get("terminal_plan_state"),
+                "completion_count": validation.get(
+                    "stock_well_completion_count"
+                ),
+                "checks": validation.get("checks", {}),
+            }
+            if not no_replay:
+                raise RuntimeError(
+                    "the fresh application replayed completed stock/well pairs"
+                )
     except Exception:
         failure_text = traceback.format_exc()
         if context.view is not None and context.app is not None:
@@ -2214,6 +3339,15 @@ def run_virtual_print_array_scenario(
             "observer_restored": True,
         }
     )
+    if is_authoritative_reload_resume:
+        durable_io_snapshot = _merge_durable_io_snapshots(
+            session_1_durable_io_snapshot,
+            durable_io_snapshot,
+        )
+        progress_snapshot = _merge_progress_snapshots(
+            session_1_progress_snapshot,
+            progress_snapshot,
+        )
     authoritative_read_snapshot = (
         io_observer.read_snapshot()
         if io_observer is not None
@@ -2229,6 +3363,7 @@ def run_virtual_print_array_scenario(
         "persistence.attach_sequence",
         "persistence.write_progress",
         "persistence.complete_intent",
+        "persistence.discard_intents",
         "persistence.guard_bundle",
         "persistence.save_resume",
         "persistence.reconcile_cache",
@@ -2586,6 +3721,45 @@ def run_virtual_print_array_scenario(
         if (record.get("preparation") or {}).get("cache_path")
         == "cached_completion"
     )
+    lifecycle_snapshot = (
+        terminal_lifecycle
+        if terminal_lifecycle
+        else instrumentation.lifecycle_snapshot()
+        if instrumentation is not None
+        else {}
+    )
+    lifecycle_begin_count = len(lifecycle_snapshot.get("begins", ()))
+    lifecycle_attachment_count = len(
+        lifecycle_snapshot.get("attachments", ())
+    )
+    lifecycle_completion_count = len(
+        lifecycle_snapshot.get("completions", ())
+    )
+    lifecycle_discard_batch_count = len(
+        lifecycle_snapshot.get("discard_batches", ())
+    )
+    lifecycle_discarded_count = sum(
+        len(batch.get("intent_ids", ()))
+        for batch in lifecycle_snapshot.get("discard_batches", ())
+    )
+    expected_resume_saves = (
+        lifecycle_begin_count
+        + lifecycle_attachment_count
+        + lifecycle_completion_count
+        + lifecycle_discard_batch_count
+        + (1 if is_authoritative_reload_resume else 0)
+    )
+    expected_guard_count = (
+        expected_completions * 4
+        + expected_pass_start_guards
+        + expected_terminal_guards
+        + (
+            lifecycle_discarded_count * 2
+            + lifecycle_discard_batch_count
+            if is_pause_resume_lifecycle
+            else 0
+        )
+    )
     if failure_text is None and (
         progress_modes.get("cached_update") != expected_completions
         or progress_modes.get("full_rebuild") != 0
@@ -2606,14 +3780,9 @@ def run_virtual_print_array_scenario(
     if failure_text is None and (
         authoritative_io["hot_path_read_count"] != 0
         or authoritative_io["execution_resume_hot_path_disk_load_count"] != 0
-        or authoritative_io["guard_count"]
-        != (
-            expected_completions * 4
-            + expected_pass_start_guards
-            + expected_terminal_guards
-        )
-        or authoritative_io["resume_save_fsync_count"] != expected_completions * 3
-        or authoritative_io["resume_save_replace_count"] != expected_completions * 3
+        or authoritative_io["guard_count"] != expected_guard_count
+        or authoritative_io["resume_save_fsync_count"] != expected_resume_saves
+        or authoritative_io["resume_save_replace_count"] != expected_resume_saves
         or authoritative_io["progress_write_fsync_count"] != expected_completions
         or authoritative_io["progress_write_replace_count"] != expected_completions
         or not authoritative_io["observer_restored"]
@@ -2680,6 +3849,258 @@ def run_virtual_print_array_scenario(
         if resource_growth_warning
         else ["All functional, persistence, UI, and simulation-safety invariants passed."]
     )
+    lifecycle_assertion_ids = (
+        (
+            "sil.host_hardware_disabled",
+            "ui.real_app_constructed",
+            "ui.fresh_application_session_constructed",
+            "execution.first_session_paused",
+            "execution.first_session_teardown_clean",
+            "execution.authoritative_reload_valid",
+            "execution.authoritative_runtime_rehydrated",
+            "execution.reload_resume_exactly_once",
+            "execution.expected_completions",
+            "execution.intent_durability_exact",
+            "execution.terminal_bundle_valid",
+            "artifacts.required_present",
+        )
+        if is_authoritative_reload_resume
+        else (
+            "sil.host_hardware_disabled",
+            "ui.real_app_constructed",
+            "execution.soft_stop_requested",
+            "execution.soft_stop_boundary_valid",
+            "execution.stopped_boundary_quiescent",
+            "execution.resume_exactly_once",
+            "execution.expected_completions",
+            "execution.intent_durability_exact",
+            "execution.terminal_bundle_valid",
+            "artifacts.required_present",
+        )
+    )
+    assertion_results: list[dict[str, Any]] = []
+    if is_pause_resume_lifecycle:
+        action_by_id = {
+            item["action_id"]: item
+            for item in context.action_results
+        }
+        actions_by_id: dict[str, list[dict[str, Any]]] = {}
+        for item in context.action_results:
+            actions_by_id.setdefault(item["action_id"], []).append(item)
+        terminal_checks = validation.get("checks", {})
+        paused_checks = paused_validation.get("checks", {})
+        shared_outcomes: dict[str, bool | None] = {
+            "sil.host_hardware_disabled": True,
+            "ui.real_app_constructed": (
+                bool(actions_by_id.get("app.launch_simulated"))
+                and all(
+                    item.get("status") == "pass"
+                    for item in actions_by_id["app.launch_simulated"]
+                )
+            ),
+            "execution.expected_completions": (
+                bool(terminal_checks.get("completion_count_exact"))
+                if terminal_checks
+                else None
+            ),
+            "execution.intent_durability_exact": (
+                all(
+                    terminal_checks.get(name) is True
+                    for name in (
+                        "terminal_intent_partition_exact",
+                        "discarded_pairs_reissued",
+                        "completed_pairs_exactly_once",
+                    )
+                )
+                if terminal_checks
+                else None
+            ),
+            "execution.terminal_bundle_valid": (
+                all(
+                    terminal_checks.get(name) is True
+                    for name in (
+                        "checkpoint_clean",
+                        "checkpoint_empty",
+                        "authoritative_bundle_valid",
+                        "terminal_plan_completed",
+                    )
+                )
+                if terminal_checks
+                else None
+            ),
+            "artifacts.required_present": (
+                set(screenshots)
+                == {
+                    "ready",
+                    "printing",
+                    "stop_requested",
+                    "stopped",
+                    "resumed",
+                    "completed",
+                }
+                and all(
+                    path.is_file() and path.stat().st_size > 0
+                    for path in screenshots.values()
+                )
+            ),
+        }
+        if is_authoritative_reload_resume:
+            loaded_checks = authoritative_reload_evidence.get(
+                "session_2_loaded", {}
+            ).get("checks", {})
+            activated_checks = authoritative_reload_evidence.get(
+                "session_2_activation", {}
+            ).get("checks", {})
+            outcomes: dict[str, bool | None] = {
+                **shared_outcomes,
+                "ui.fresh_application_session_constructed": (
+                    len(actions_by_id.get("app.launch_simulated", ())) == 2
+                    and all(
+                        item.get("status") == "pass"
+                        for item in actions_by_id.get(
+                            "app.launch_simulated", ()
+                        )
+                    )
+                ),
+                "execution.first_session_paused": (
+                    all(paused_checks.values()) if paused_checks else None
+                ),
+                "execution.first_session_teardown_clean": (
+                    action_by_id.get(
+                        "app.close_simulated_session", {}
+                    ).get("status")
+                    == "pass"
+                    if "app.close_simulated_session" in action_by_id
+                    else None
+                ),
+                "execution.authoritative_reload_valid": (
+                    all(loaded_checks.values()) if loaded_checks else None
+                    if action_by_id.get(
+                        "experiment.load_authoritative_via_ui", {}
+                    ).get("status")
+                    != "fail"
+                    else False
+                ),
+                "execution.authoritative_runtime_rehydrated": (
+                    all(activated_checks.values())
+                    if activated_checks
+                    else None
+                ),
+                "execution.reload_resume_exactly_once": (
+                    all(
+                        terminal_checks.get(name) is True
+                        for name in (
+                            "ui_resumed_once",
+                            "terminal_intent_partition_exact",
+                            "discarded_pairs_reissued",
+                            "completed_pairs_exactly_once",
+                            "session_1_completed_pairs_not_replayed",
+                            "audit_lifecycle_ordered",
+                        )
+                    )
+                    if terminal_checks
+                    else None
+                ),
+                "artifacts.required_present": (
+                    set(screenshots)
+                    == {
+                        "session_1_ready",
+                        "session_1_printing",
+                        "session_1_stop_requested",
+                        "session_1_stopped",
+                        "session_2_loaded",
+                        "session_2_activated",
+                        "session_2_resumed",
+                        "completed",
+                    }
+                    and all(
+                        path.is_file() and path.stat().st_size > 0
+                        for path in screenshots.values()
+                    )
+                ),
+            }
+        else:
+            outcomes = {
+                **shared_outcomes,
+                "execution.soft_stop_requested": (
+                    action_by_id.get(
+                        "array.request_soft_stop_via_ui", {}
+                    ).get("status")
+                    == "pass"
+                    if "array.request_soft_stop_via_ui" in action_by_id
+                    else None
+                ),
+                "execution.soft_stop_boundary_valid": (
+                    all(paused_checks.values())
+                    if paused_checks
+                    else False
+                    if action_by_id.get(
+                        "validation.paused_bundle", {}
+                    ).get("status")
+                    == "fail"
+                    else None
+                ),
+                "execution.stopped_boundary_quiescent": (
+                    action_by_id.get(
+                        "array.observe_stopped_quiescence", {}
+                    ).get("status")
+                    == "pass"
+                    if "array.observe_stopped_quiescence" in action_by_id
+                    else None
+                ),
+                "execution.resume_exactly_once": (
+                    all(
+                        terminal_checks.get(name) is True
+                        for name in (
+                            "ui_resumed_once",
+                            "terminal_intent_partition_exact",
+                            "discarded_pairs_reissued",
+                            "completed_pairs_exactly_once",
+                            "audit_lifecycle_ordered",
+                        )
+                    )
+                    if terminal_checks
+                    else None
+                ),
+                "artifacts.required_present": (
+                    set(screenshots)
+                    == {
+                        "ready",
+                        "printing",
+                        "stop_requested",
+                        "stopped",
+                        "resumed",
+                        "completed",
+                    }
+                    and all(
+                        path.is_file() and path.stat().st_size > 0
+                        for path in screenshots.values()
+                    )
+                ),
+            }
+        assertion_results = [
+            {
+                "assertion_id": assertion_id,
+                "decision": (
+                    "pass"
+                    if outcomes[assertion_id] is True
+                    else "fail"
+                    if outcomes[assertion_id] is False
+                    else "incomplete"
+                ),
+            }
+            for assertion_id in lifecycle_assertion_ids
+        ]
+        if failure_text is None and any(
+            item["decision"] != "pass" for item in assertion_results
+        ):
+            failure_text = (
+                "authoritative reload lifecycle assertion evidence was incomplete"
+                if is_authoritative_reload_resume
+                else "soft-stop lifecycle assertion evidence was incomplete"
+            )
+            status = "fail"
+            reasons = [failure_text]
     response_values = {
         **probe_snapshot,
         "well_plate_paint_event_count": paint_event_count,
@@ -2768,7 +4189,13 @@ def run_virtual_print_array_scenario(
         "schema_version": REPORT_SCHEMA_VERSION,
         "run": {
             "run_id": run_id,
-            "scenario_name": SCENARIO_NAME,
+            "scenario_name": (
+                "authoritative_reload_resume"
+                if is_authoritative_reload_resume
+                else "print_array_soft_stop_resume"
+                if is_soft_stop_resume
+                else SCENARIO_NAME
+            ),
             "scenario_version": SCENARIO_VERSION,
             "run_mode": run_mode,
             "timing_policy": (
@@ -2809,7 +4236,13 @@ def run_virtual_print_array_scenario(
         },
         "metrics": {
             "responsiveness": {
-                "status": "measured" if probe_started else "not_available",
+                "status": (
+                    "not_applicable"
+                    if is_pause_resume_lifecycle
+                    else "measured"
+                    if probe_started
+                    else "not_available"
+                ),
                 "values": response_values if probe_started else {},
             },
             "workflow": {
@@ -2832,6 +4265,11 @@ def run_virtual_print_array_scenario(
                     "action_results": list(context.action_results),
                     "lifecycle_milestones": list(context.milestones),
                     "cleanup_results": list(context.cleanup_results),
+                    **(
+                        {"assertion_results": assertion_results}
+                        if is_pause_resume_lifecycle
+                        else {}
+                    ),
                 },
             },
             "queue": {
@@ -2853,6 +4291,85 @@ def run_virtual_print_array_scenario(
                 "status": "measured" if validation else "partial",
                 "values": {
                     **validation,
+                    **(
+                        {
+                            "soft_stop_resume": {
+                                "request": next(
+                                    (
+                                        item.get("evidence", {})
+                                        for item in context.action_results
+                                        if item.get("action_id")
+                                        == "array.request_soft_stop_via_ui"
+                                    ),
+                                    {},
+                                ),
+                                "watermark": paused_validation.get(
+                                    "watermark", {}
+                                ),
+                                "clear": paused_validation.get("clear", {}),
+                                "stopped_checkpoint": paused_validation,
+                                "quiescence": quiescence_evidence,
+                                "resume": {
+                                    "running_state_count": array_states.count(
+                                        "running"
+                                    ),
+                                    "dialog_seen": any(
+                                        item.get("title")
+                                        == "Resume Print Array"
+                                        for item in dialogs
+                                    ),
+                                },
+                                "intent_reconciliation": {
+                                    "begin_count": validation.get(
+                                        "begin_intent_count"
+                                    ),
+                                    "completed_count": validation.get(
+                                        "observed_completed_intent_count"
+                                    ),
+                                    "discarded_count": validation.get(
+                                        "discarded_intent_count"
+                                    ),
+                                    "discard_batch_count": validation.get(
+                                        "discard_batch_count"
+                                    ),
+                                    "discarded_intent_ids": validation.get(
+                                        "discarded_intent_ids", []
+                                    ),
+                                    "lifecycle": lifecycle_snapshot,
+                                },
+                                "audit": validation.get("audit_rows", []),
+                                "terminal": {
+                                    "plan_state": validation.get(
+                                        "terminal_plan_state"
+                                    ),
+                                    "completion_count": validation.get(
+                                        "stock_well_completion_count"
+                                    ),
+                                },
+                            }
+                        }
+                        if is_soft_stop_resume
+                        else {}
+                    ),
+                    **(
+                        {
+                            "authoritative_reload_resume": {
+                                **authoritative_reload_evidence,
+                                "request": next(
+                                    (
+                                        item.get("evidence", {})
+                                        for item in context.action_results
+                                        if item.get("action_id")
+                                        == "array.request_soft_stop_via_ui"
+                                    ),
+                                    {},
+                                ),
+                                "quiescence": quiescence_evidence,
+                            }
+                        }
+                        if is_authoritative_reload_resume
+                        else {}
+                    ),
                     "phase_timings": phases.snapshot(),
                     "pass_start": pass_start_evidence,
                     "terminal_transition": terminal_transition_evidence,
@@ -2874,7 +4391,14 @@ def run_virtual_print_array_scenario(
                     ),
                 },
             },
-            "resources": resource_snapshot,
+            "resources": (
+                {
+                    **resource_snapshot,
+                    "status": "not_applicable",
+                }
+                if is_pause_resume_lifecycle
+                else resource_snapshot
+            ),
         },
         "artifacts": {
             "report_json": "report.json",
@@ -2931,10 +4455,12 @@ def run_virtual_print_array_scenario(
 
 
 __all__ = [
+    "AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID",
     "SCENARIO_NAME",
     "SCENARIO_VERSION",
     "SCENARIO_FIXTURES",
     "SMOKE_WORKLOAD_ID",
+    "SOFT_STOP_RESUME_WORKLOAD_ID",
     "STRESS_WORKLOAD_ID",
     "WORKLOAD_ID",
     "VirtualPrintArrayScenarioConfig",

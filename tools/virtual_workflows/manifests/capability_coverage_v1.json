@@ -9,7 +9,7 @@
       "owner_role": "verification maintainers",
       "status": "covered",
       "required_verification_layers": ["contract", "host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1"],
       "required_assertion_ids": ["sil.host_hardware_disabled"],
       "related_source_areas": ["tools/virtual_workflows/scenarios.py", "FreeRTOS-interface/App.py"],
       "limitations": ["In-process isolation does not prove firmware or physical-device behavior."],
@@ -33,7 +33,7 @@
       "owner_role": "application verification maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_smoke_24_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1"],
       "required_assertion_ids": ["ui.real_app_constructed"],
       "related_source_areas": ["FreeRTOS-interface/App.py", "FreeRTOS-interface/View.py"],
       "limitations": ["Offscreen Qt composition does not validate a native compositor."],
@@ -45,7 +45,7 @@
       "owner_role": "execution verification maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1"],
       "required_assertion_ids": ["execution.expected_completions"],
       "related_source_areas": ["FreeRTOS-interface/Controller.py", "FreeRTOS-interface/Model.py"],
       "limitations": ["Completion is simulated and does not prove physical dispensing."],
@@ -69,7 +69,7 @@
       "owner_role": "execution persistence maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1"],
       "required_assertion_ids": ["execution.intent_durability_exact"],
       "related_source_areas": ["FreeRTOS-interface/Model.py", "tools/virtual_workflows/persistence_io.py"],
       "limitations": ["Host filesystem durability evidence does not characterize power-loss hardware."],
@@ -81,7 +81,7 @@
       "owner_role": "execution persistence maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1"],
       "required_assertion_ids": ["execution.terminal_bundle_valid"],
       "related_source_areas": ["FreeRTOS-interface/Model.py", "FreeRTOS-interface/Controller.py"],
       "limitations": ["Terminal validation covers isolated scenario data only."],
@@ -163,13 +163,13 @@
       "id": "execution.soft_stop_resume",
       "risk": "A user soft stop may lose progress or resume with duplicates.",
       "owner_role": "execution lifecycle maintainers",
-      "status": "planned",
+      "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": [],
-      "required_assertion_ids": [],
+      "active_scenario_ids": ["print_array_soft_stop_resume_24_v1"],
+      "required_assertion_ids": ["execution.soft_stop_requested", "execution.soft_stop_boundary_valid", "execution.stopped_boundary_quiescent", "execution.resume_exactly_once"],
       "related_source_areas": ["FreeRTOS-interface/Controller.py", "tools/virtual_workflows/scenarios.py"],
-      "limitations": ["Simulator lifecycle tests exist below the composed workflow level."],
-      "max_evidence_age_days": null
+      "limitations": ["The composed scenario uses the in-process simulator and does not prove firmware or physical motion behavior."],
+      "max_evidence_age_days": 2
     },
     {
       "id": "execution.refill_resume",
@@ -192,7 +192,7 @@
       "active_scenario_ids": [],
       "required_assertion_ids": [],
       "related_source_areas": ["FreeRTOS-interface/Model.py", "FreeRTOS-interface/Controller.py"],
-      "limitations": ["No composed two-application reload scenario exists yet."],
+      "limitations": ["The strict two-session scenario is implemented but currently exposes a blocked editor-load bundle caused by an in-memory design hash mismatch; coverage is not promoted."],
       "max_evidence_age_days": null
     },
     {
@@ -436,6 +436,46 @@
       "limitations": ["The scenario crosses the ACTIVE lock boundary without connecting a simulated machine or issuing a print command."],
       "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"],
       "pi_safety_evidence": []
+    },
+    {
+      "id": "print_array_soft_stop_resume_24_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "print_array_soft_stop_resume_24_v1",
+      "workload_fixture_id": "print_array_soft_stop_resume_24_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/print_array_soft_stop_resume_24_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 60,
+      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.request_soft_stop_via_ui", "array.wait_for_state", "validation.paused_bundle", "array.observe_stopped_quiescence", "array.wait_for_completions", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "execution.soft_stop_requested", "execution.soft_stop_boundary_valid", "execution.stopped_boundary_quiescent", "execution.resume_exactly_once", "execution.expected_completions", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.intent_durability", "execution.terminal_bundle", "execution.soft_stop_resume"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The scenario proves application-facing pause and resume semantics with the in-process simulator, not firmware or physical dispensing."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_lifecycle.py::test_soft_stop_resume_fixture_contract_is_exact", "tests/system/test_virtual_workflow_lifecycle.py::test_soft_stop_resume_lifecycle_report"],
+      "pi_safety_evidence": []
+    },
+    {
+      "id": "authoritative_reload_resume_24_v1",
+      "version": 1,
+      "status": "planned",
+      "registry_id": "authoritative_reload_resume_24_v1",
+      "workload_fixture_id": "authoritative_reload_resume_24_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/authoritative_reload_resume_24_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": [],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 60,
+      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.request_soft_stop_via_ui", "array.wait_for_state", "validation.paused_bundle", "array.observe_stopped_quiescence", "app.close_simulated_session", "validation.reload_boundary", "experiment.load_authoritative_via_ui", "experiment.activate_authoritative_via_ui", "array.wait_for_completions", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "ui.fresh_application_session_constructed", "execution.first_session_paused", "execution.first_session_teardown_clean", "execution.authoritative_reload_valid", "execution.authoritative_runtime_rehydrated", "execution.reload_resume_exactly_once", "execution.expected_completions", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.intent_durability", "execution.terminal_bundle", "execution.authoritative_reload_resume"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The target is a fresh MVC/simulator composition in one QApplication process. The current strict run stops at the real editor load because its in-memory design hash diverges from the byte-identical authoritative design and plan."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_fixture_contract_is_exact", "tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_retains_strict_editor_failure_evidence"],
+      "pi_safety_evidence": []
     }
   ],
   "suites": [
@@ -452,7 +492,7 @@
       "status": "active",
       "kind": "lifecycle",
       "platform": "windows_sil",
-      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1"],
+      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "print_array_soft_stop_resume_24_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -682,6 +722,41 @@
         "source_path": "tools/virtual_workflows/actions.py"
       },
       {
+        "id": "array.request_soft_stop_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "array.observe_stopped_quiescence",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "validation.paused_bundle",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "app.close_simulated_session",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "experiment.load_authoritative_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "experiment.activate_authoritative_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "validation.reload_boundary",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
         "id": "scenario.teardown",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py"
@@ -843,6 +918,66 @@
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.assertion_results",
         "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+      },
+      {
+        "id": "execution.soft_stop_requested",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.soft_stop_resume.request",
+        "test_node_ids": ["tests/system/test_virtual_workflow_lifecycle.py::test_soft_stop_resume_lifecycle_report"]
+      },
+      {
+        "id": "execution.soft_stop_boundary_valid",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.soft_stop_resume.stopped_checkpoint",
+        "test_node_ids": ["tests/system/test_virtual_workflow_lifecycle.py::test_soft_stop_resume_lifecycle_report"]
+      },
+      {
+        "id": "execution.stopped_boundary_quiescent",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.soft_stop_resume.quiescence",
+        "test_node_ids": ["tests/system/test_virtual_workflow_lifecycle.py::test_soft_stop_resume_lifecycle_report"]
+      },
+      {
+        "id": "execution.resume_exactly_once",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.soft_stop_resume.intent_reconciliation",
+        "test_node_ids": ["tests/system/test_virtual_workflow_lifecycle.py::test_soft_stop_resume_lifecycle_report"]
+      },
+      {
+        "id": "ui.fresh_application_session_constructed",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.action_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_retains_strict_editor_failure_evidence"]
+      },
+      {
+        "id": "execution.first_session_paused",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.authoritative_reload_resume.session_1_paused",
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_retains_strict_editor_failure_evidence"]
+      },
+      {
+        "id": "execution.first_session_teardown_clean",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.cleanup_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_retains_strict_editor_failure_evidence"]
+      },
+      {
+        "id": "execution.authoritative_reload_valid",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_retains_strict_editor_failure_evidence"]
+      },
+      {
+        "id": "execution.authoritative_runtime_rehydrated",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.authoritative_reload_resume.session_2_activation",
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_retains_strict_editor_failure_evidence"]
+      },
+      {
+        "id": "execution.reload_resume_exactly_once",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.authoritative_reload_resume.resume_reconciliation",
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_retains_strict_editor_failure_evidence"]
       }
     ]
   }

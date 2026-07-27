@@ -194,10 +194,10 @@ identity `labcraft.sil_capability_coverage` version 1. It records capabilities,
 registered scenarios, planned/active suites, intended schedules, embedded
 action/assertion IDs, limitations, and freshness policy. Generated reports do
 not rewrite it. The `standard` suite is active and selects only
-`print_array_smoke_24_v1`. The active `lifecycle` suite contains the verified
-editor create/finalize and prepared rename/refinalize scenarios. Candidate
-gates remain executable directly but do not join the suite until they pass;
-suite/capability CLI selection is not available yet.
+`print_array_smoke_24_v1`. The active `lifecycle` suite contains the three
+verified editor scenarios plus the verified 24-well soft-stop/resume
+scenario. Candidate gates remain executable directly but do not join the
+suite until they pass; suite/capability CLI selection is not available yet.
 
 Validate registry/fixture drift, manifest references, portable paths, test
 nodes, Pi safety requirements, and current capability claims with:
@@ -261,9 +261,9 @@ Longer composed SIL tiers are opt-in:
 .\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle
 ```
 
-The lifecycle command runs the three active editor scenarios: create/finalize,
-prepared rename/refinalize, and post-start lock/editable-copy. Without these
-flags, tests marked `sil_lifecycle`,
+The lifecycle command runs create/finalize, prepared rename/refinalize,
+post-start lock/editable-copy, and the 24-well soft-stop/resume workflow.
+Without these flags, tests marked `sil_lifecycle`,
 `sil_regression`, or `sil_stress` are collected but skipped; all editor
 fixture contracts are still checked.
 Fast registry, manifest, report, comparison, and local Pi safety-contract
@@ -323,6 +323,48 @@ surface to be read-only, explicit copy guidance, and an enabled
 remains byte-identical, while the copy accepts a tolerance-only edit and
 finalizes as a distinct revision-1 `PREPARED` execution that is
 `ready_to_start`. The scenario is active in the lifecycle suite.
+
+Run the print-array soft-stop/resume lifecycle directly with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_soft_stop_resume_24_v1 `
+  --timeout-seconds 60
+```
+
+This scenario starts A1-A24 through the real UI, queues the real
+`Stop After Well` click when completion 6 is observed, and requires the
+confirmed watermark/clear/park path to reach an empty paused checkpoint with
+`ready_to_resume`. It observes 250 ms of stopped quiescence, clicks
+`Resume Print` through the real UI, and requires 24 exact terminal
+stock/well completions. A passing report contains `ready`, `printing`,
+`stop_requested`, `stopped`, `resumed`, and `completed` screenshots and
+reconciles every begun, discarded, reissued, and completed intent. This is
+functional lifecycle evidence; responsiveness, resources, and performance
+are `not_applicable`.
+
+Run the strict authoritative reload scenario directly with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario authoritative_reload_resume_24_v1 `
+  --timeout-seconds 60
+```
+
+This scenario uses one `QApplication` but constructs two independent
+Model/Controller/MainWindow/simulator sessions over the same isolated
+scenario root. The first session reaches a clean paused checkpoint and tears
+down. The second opens the real Experiment Editor, selects the persisted
+folder, and attempts `Activate Execution` before a real UI resume.
+
+The scenario is currently registered as `planned`, not active in the
+lifecycle suite. Its strict run exposes a production editor-load defect:
+the disk design hash still matches the execution plan and validates as
+`ready_to_resume`, but the editor-loaded in-memory design hash differs and
+activation is blocked. The failed report retains both session identities,
+the passing first-session cleanup, disk/model/plan hashes, exact status text,
+traceback, and editor screenshot. Do not treat this expected investigation
+state as capability coverage or bypass the editor with a direct model call.
 
 Lifecycle scenarios are single-run functional evidence. They reject Pi
 evidence, injected-stall controls, report-set repetition, and baseline

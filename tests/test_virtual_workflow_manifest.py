@@ -24,8 +24,10 @@ from tools.virtual_workflows.registry import (
     validate_capability_manifest,
 )
 from tools.virtual_workflows.scenarios import (
+    AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
     SCENARIO_COMPLETION_COUNTS,
     SCENARIO_FIXTURES,
+    SOFT_STOP_RESUME_WORKLOAD_ID,
     SMOKE_WORKLOAD_ID,
     STRESS_WORKLOAD_ID,
     WORKLOAD_ID,
@@ -64,6 +66,8 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         EDITOR_WORKLOAD_ID,
         EDITOR_RENAME_WORKLOAD_ID,
         EDITOR_POST_START_WORKLOAD_ID,
+        SOFT_STOP_RESUME_WORKLOAD_ID,
+        AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
     )
 
     for scenario_id in (WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID):
@@ -104,6 +108,7 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         "experiment_editor_create_finalize_v1",
         "experiment_editor_prestart_rename_refinalize_v1",
         "experiment_editor_post_start_lock_v1",
+        "print_array_soft_stop_resume_24_v1",
     ]
     rename_scenario = _row(
         payload,
@@ -121,6 +126,24 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert post_start["status"] == "active"
     assert post_start["suite_ids"] == ["lifecycle"]
     assert post_start["registry_id"] == EDITOR_POST_START_WORKLOAD_ID
+    soft_stop = _row(
+        payload,
+        "scenarios",
+        SOFT_STOP_RESUME_WORKLOAD_ID,
+    )
+    assert soft_stop["status"] == "active"
+    assert soft_stop["suite_ids"] == ["lifecycle"]
+    assert soft_stop["registry_id"] == SOFT_STOP_RESUME_WORKLOAD_ID
+    authoritative_reload = _row(
+        payload,
+        "scenarios",
+        AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+    )
+    assert authoritative_reload["status"] == "planned"
+    assert authoritative_reload["suite_ids"] == []
+    assert authoritative_reload["registry_id"] == (
+        AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID
+    )
 
     smoke = _row(payload, "scenarios", "print_array_smoke_24_v1")
     assert smoke["registry_id"] == SMOKE_WORKLOAD_ID
@@ -142,6 +165,21 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     )
     assert capabilities["experiment.active_edit_lock"]["status"] == "covered"
     assert capabilities["experiment.editable_copy"]["status"] == "covered"
+    assert capabilities["execution.soft_stop_resume"]["status"] == "covered"
+    assert (
+        capabilities["execution.authoritative_reload_resume"]["status"]
+        == "planned"
+    )
+    assert (
+        capabilities["execution.authoritative_reload_resume"][
+            "active_scenario_ids"
+        ]
+        == []
+    )
+    assert (
+        capabilities["execution.soft_stop_resume"]["max_evidence_age_days"]
+        == 2
+    )
     assert (
         capabilities["experiment.active_edit_lock"]["max_evidence_age_days"]
         == 2
@@ -182,11 +220,20 @@ def test_cli_scenario_surface_is_registry_driven_and_legacy_compatible():
     assert parser.parse_args(
         ["--scenario", EDITOR_POST_START_WORKLOAD_ID]
     ).scenario == EDITOR_POST_START_WORKLOAD_ID
+    assert parser.parse_args(
+        ["--scenario", SOFT_STOP_RESUME_WORKLOAD_ID]
+    ).scenario == SOFT_STOP_RESUME_WORKLOAD_ID
 
 
 @pytest.mark.parametrize(
     "scenario_id",
-    [WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID],
+    [
+        WORKLOAD_ID,
+        STRESS_WORKLOAD_ID,
+        SMOKE_WORKLOAD_ID,
+        SOFT_STOP_RESUME_WORKLOAD_ID,
+        AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+    ],
 )
 def test_registry_dispatch_uses_existing_config_and_runner(
     scenario_id,
@@ -274,6 +321,8 @@ def test_registry_dispatches_editor_family_without_importing_it_for_inspection(
         EDITOR_WORKLOAD_ID,
         EDITOR_RENAME_WORKLOAD_ID,
         EDITOR_POST_START_WORKLOAD_ID,
+        SOFT_STOP_RESUME_WORKLOAD_ID,
+        AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
     ],
 )
 @pytest.mark.parametrize(
@@ -310,7 +359,12 @@ def test_editor_lifecycle_cli_rejects_unsupported_evidence_modes(
 
 @pytest.mark.parametrize(
     "scenario_id",
-    [WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID],
+    [
+        WORKLOAD_ID,
+        STRESS_WORKLOAD_ID,
+        SMOKE_WORKLOAD_ID,
+        SOFT_STOP_RESUME_WORKLOAD_ID,
+    ],
 )
 def test_cli_dispatches_each_registered_id_through_registry(
     scenario_id,

@@ -28,6 +28,26 @@ PRINT_ARRAY_ACTION_IDS = frozenset(
     }
 )
 
+PRINT_ARRAY_LIFECYCLE_ACTION_IDS = PRINT_ARRAY_ACTION_IDS | frozenset(
+    {
+        "array.request_soft_stop_via_ui",
+        "array.observe_stopped_quiescence",
+        "validation.paused_bundle",
+    }
+)
+
+AUTHORITATIVE_RELOAD_ACTION_IDS = (
+    PRINT_ARRAY_LIFECYCLE_ACTION_IDS
+    | frozenset(
+        {
+            "app.close_simulated_session",
+            "experiment.load_authoritative_via_ui",
+            "experiment.activate_authoritative_via_ui",
+            "validation.reload_boundary",
+        }
+    )
+)
+
 EDITOR_LIFECYCLE_ACTION_IDS = frozenset(
     {
         "app.launch_simulated",
@@ -52,7 +72,7 @@ EDITOR_LIFECYCLE_ACTION_IDS = frozenset(
         "scenario.teardown",
     }
 )
-ACTION_IDS = PRINT_ARRAY_ACTION_IDS | EDITOR_LIFECYCLE_ACTION_IDS
+ACTION_IDS = AUTHORITATIVE_RELOAD_ACTION_IDS | EDITOR_LIFECYCLE_ACTION_IDS
 
 
 def _bounded_json_value(value: Any, *, depth: int = 0) -> Any:
@@ -226,6 +246,7 @@ class ScenarioContext:
     paint_filter: Any = None
     stdout_redirect: Any = None
     pressure_timer_active_after_teardown: bool | None = None
+    application_session_id: str | None = None
     machine_cleanup: dict[str, Any] = field(
         default_factory=lambda: {
             "command_timer_active": None,
@@ -277,6 +298,8 @@ def _record_action(
         failure_type=type(failure).__name__ if failure is not None else None,
         failure_message=str(failure)[:2000] if failure is not None else None,
     ).to_dict()
+    if context.application_session_id is not None:
+        result["application_session_id"] = context.application_session_id
     context.action_results.append(result)
     context.record_event(
         "action_completed",
@@ -284,6 +307,11 @@ def _record_action(
         status=status,
         duration_ms=result["duration_ms"],
         failure_stage=failure_stage,
+        **(
+            {"application_session_id": context.application_session_id}
+            if context.application_session_id is not None
+            else {}
+        ),
     )
     return result
 
@@ -308,7 +336,15 @@ def execute_action(
             stage="precondition",
         )
     started_ns = time.perf_counter_ns()
-    context.record_event("action_started", action_id=action_id)
+    context.record_event(
+        "action_started",
+        action_id=action_id,
+        **(
+            {"application_session_id": context.application_session_id}
+            if context.application_session_id is not None
+            else {}
+        ),
+    )
     try:
         if enforce_deadline and context.deadline.remaining_seconds() <= 0:
             raise ScenarioActionError(
@@ -562,8 +598,9 @@ def stage_virtual_head(
         state = context.controller.get_array_run_state()
         drained = bool(context.machine.check_if_all_completed())
         return (
-            state == "idle" and drained,
-            "virtual head exchange requires an idle array and empty command queue",
+            state in {"idle", "resume_ready"} and drained,
+            "virtual head exchange requires an idle array or resume-ready "
+            "array and empty command queue",
             {"array_state": state, "queue_drained": drained},
         )
 
@@ -791,6 +828,197 @@ def wait_for_array_state(
     return execute_action(
         context,
         "array.wait_for_state",
+        run,
+        precondition=precondition,
+    )
+
+
+def request_soft_stop_via_ui(
+    context: ScenarioContext,
+    *,
+    completed_count: Callable[[], int],
+    trigger_count: int,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """Queue the real soft-stop click on the exact observed completion."""
+
+    def precondition():
+        state = (
+            context.controller.get_array_run_state()
+            if context.controller is not None
+            else None
+        )
+        return (
+            context.view is not None
+            and context.controller is not None
+            and context.model is not None
+            and context.app is not None
+            and context.qt_core is not None
+            and state == "running",
+            "soft stop requires a running real UI workflow"
+            if state == "running"
+            else "soft stop requires array state running",
+            {"array_state": state},
+        )
+
+    def run() -> Mapping[str, Any]:
+        from PySide6 import QtTest
+
+        button = context.view.well_plate_widget.start_print_array_button
+        observed: dict[str, Any] = {
+            "trigger_count": int(trigger_count),
+            "click_queued": False,
+            "clicked_count": None,
+            "button_text_before": None,
+        }
+
+        def queue_click(*_args: Any) -> None:
+            count = int(completed_count())
+            if observed["click_queued"] or count < int(trigger_count):
+                return
+            if count != int(trigger_count):
+                observed["overshoot_count"] = count
+                return
+            observed["click_queued"] = True
+
+            def click() -> None:
+                observed["clicked_count"] = int(completed_count())
+                observed["button_text_before"] = button.text()
+                if button.text() != "Stop After Well" or not button.isEnabled():
+                    observed["invalid_control"] = {
+                        "text": button.text(),
+                        "enabled": bool(button.isEnabled()),
+                    }
+                    return
+                QtTest.QTest.mouseClick(
+                    button,
+                    context.qt_core.Qt.MouseButton.LeftButton,
+                )
+
+            context.qt_core.QTimer.singleShot(0, click)
+
+        signal = context.model.well_plate.well_state_changed_signal
+        signal.connect(queue_click)
+        try:
+            queue_click()
+            wait_until(
+                context,
+                lambda: (
+                    context.controller.get_array_run_state() == "stop_requested"
+                    or bool(context.errors)
+                    or "overshoot_count" in observed
+                    or "invalid_control" in observed
+                ),
+                timeout_seconds,
+                f"soft-stop request at completion {int(trigger_count)}",
+                action_id="array.request_soft_stop_via_ui",
+                evidence=lambda: {
+                    **observed,
+                    "observed_count": int(completed_count()),
+                    "array_state": context.controller.get_array_run_state(),
+                    "button_text": button.text(),
+                    "button_enabled": bool(button.isEnabled()),
+                },
+            )
+        finally:
+            try:
+                signal.disconnect(queue_click)
+            except (RuntimeError, TypeError):
+                pass
+        if context.errors:
+            raise RuntimeError(f"soft stop emitted an error: {context.errors[-1]}")
+        if "overshoot_count" in observed:
+            raise RuntimeError(
+                "soft-stop trigger was not serviced at the exact completion"
+            )
+        if "invalid_control" in observed:
+            raise RuntimeError("soft-stop control was not in its running state")
+        array_context = dict(getattr(context.controller, "_array_context", {}) or {})
+        barrier = int(array_context.get("soft_stop_barrier_seq32") or 0)
+        if (
+            observed["clicked_count"] != int(trigger_count)
+            or button.text() != "Stop Pending"
+            or button.isEnabled()
+            or barrier <= 0
+        ):
+            raise RuntimeError("soft-stop request did not establish its UI/barrier state")
+        return {
+            **observed,
+            "observed_count": int(completed_count()),
+            "array_state": context.controller.get_array_run_state(),
+            "button_text_after": button.text(),
+            "button_enabled_after": bool(button.isEnabled()),
+            "pause_barrier_seq32": barrier,
+        }
+
+    return execute_action(
+        context,
+        "array.request_soft_stop_via_ui",
+        run,
+        precondition=precondition,
+    )
+
+
+def observe_stopped_quiescence(
+    context: ScenarioContext,
+    *,
+    completed_count: Callable[[], int],
+    progress_count: Callable[[], int],
+    observation_ms: int,
+) -> dict[str, Any]:
+    """Pump Qt for a bounded paused window and prove no work advances."""
+
+    def precondition():
+        state = (
+            context.controller.get_array_run_state()
+            if context.controller is not None
+            else None
+        )
+        return (
+            context.controller is not None
+            and context.machine is not None
+            and state == "resume_ready",
+            "quiescence observation requires resume_ready",
+            {"array_state": state},
+        )
+
+    def run() -> Mapping[str, Any]:
+        starting_completions = int(completed_count())
+        starting_progress = int(progress_count())
+        duration_seconds = int(observation_ms) / 1000.0
+        if duration_seconds <= 0:
+            raise RuntimeError("quiescence observation must be positive")
+        allowed = context.deadline.remaining_seconds(duration_seconds + 1.0)
+        if allowed < duration_seconds:
+            raise ScenarioActionError(
+                "array.observe_stopped_quiescence",
+                "scenario deadline cannot contain the quiescence window",
+                stage="timeout",
+            )
+        started = context.clock()
+        while context.clock() - started < duration_seconds:
+            context.pump_events()
+            if (
+                int(completed_count()) != starting_completions
+                or int(progress_count()) != starting_progress
+                or context.controller.get_array_run_state() != "resume_ready"
+                or not context.machine.check_if_all_completed()
+            ):
+                raise RuntimeError("paused workflow advanced during quiescence")
+            context.sleep(0.001)
+        return {
+            "observation_ms": int(observation_ms),
+            "starting_completion_count": starting_completions,
+            "ending_completion_count": int(completed_count()),
+            "starting_progress_count": starting_progress,
+            "ending_progress_count": int(progress_count()),
+            "array_state": context.controller.get_array_run_state(),
+            "simulator_queue_empty": bool(context.machine.check_if_all_completed()),
+        }
+
+    return execute_action(
+        context,
+        "array.observe_stopped_quiescence",
         run,
         precondition=precondition,
     )
@@ -1565,6 +1793,308 @@ def activate_authoritative_execution(
     )
 
 
+def drive_authoritative_reload_via_editor(
+    context: ScenarioContext,
+    *,
+    experiment_dir: Path,
+    expected_name: str,
+    before_activation: Callable[[], Mapping[str, Any]] | None = None,
+    after_activation: Callable[[], Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Load and activate a paused execution through the real modal editor."""
+
+    if context.app is None or context.qt_core is None or context.view is None:
+        raise RuntimeError("authoritative reload requires a launched Qt application")
+
+    from PySide6 import QtTest, QtWidgets
+    from View import ExperimentDesignDialog
+
+    QtCore = context.qt_core
+    button = context.view.well_plate_widget.design_experiment_button
+    state: dict[str, Any] = {
+        "stage": "open_editor",
+        "dialog": None,
+        "error": None,
+        "loaded": None,
+        "activated": None,
+    }
+    driver_timer = QtCore.QTimer(context.app)
+    driver_timer.setInterval(5)
+
+    def click(widget: Any) -> None:
+        QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
+        context.app.processEvents()
+
+    def fail(exc: BaseException, modal: Any = None) -> None:
+        state["error"] = exc
+        state["stage"] = "failed"
+        driver_timer.stop()
+        dialog = state.get("dialog")
+        if (
+            isinstance(dialog, QtWidgets.QDialog)
+            and dialog.isVisible()
+            and "session_2_load_failed" not in context.screenshots
+        ):
+            try:
+                capture_milestone(
+                    context,
+                    "session_2_load_failed",
+                    evidence={
+                        "failure_type": type(exc).__name__,
+                        "failure_message": str(exc),
+                    },
+                    widget=dialog,
+                )
+            except Exception:
+                pass
+        if isinstance(modal, QtWidgets.QDialog) and modal.isVisible():
+            modal.reject()
+        if isinstance(dialog, QtWidgets.QDialog) and dialog.isVisible():
+            dialog.reject()
+
+    def drive_folder_modal() -> None:
+        modal = context.app.activeModalWidget()
+        try:
+            if modal is None or modal is state["dialog"]:
+                return
+            if not isinstance(modal, QtWidgets.QFileDialog):
+                raise RuntimeError(
+                    "unexpected modal while selecting authoritative folder: "
+                    f"{type(modal).__name__} {modal.windowTitle()!r}"
+                )
+            if modal.windowTitle() != "Select Experiment Folder":
+                raise RuntimeError(
+                    f"unexpected file dialog title: {modal.windowTitle()!r}"
+                )
+            modal.setDirectory(str(Path(experiment_dir).resolve()))
+            context.app.processEvents()
+            button_box = modal.findChild(QtWidgets.QDialogButtonBox)
+            accept = None
+            if button_box is not None:
+                accept = button_box.button(QtWidgets.QDialogButtonBox.Open)
+                if accept is None:
+                    accept = button_box.button(QtWidgets.QDialogButtonBox.Ok)
+            if accept is None:
+                raise RuntimeError("folder dialog has no accept button")
+            state["stage"] = "validate_loaded"
+            click(accept)
+        except BaseException as exc:
+            fail(exc, modal)
+
+    def inspect() -> None:
+        modal = context.app.activeModalWidget()
+        try:
+            if context.deadline.remaining_seconds() <= 0:
+                raise ScenarioActionError(
+                    "experiment.load_authoritative_via_ui",
+                    "scenario deadline expired during modal reload",
+                    stage="timeout",
+                    evidence={
+                        "stage": state["stage"],
+                        "modal_type": (
+                            type(modal).__name__
+                            if modal is not None
+                            else None
+                        ),
+                        "modal_title": (
+                            modal.windowTitle()
+                            if modal is not None
+                            else None
+                        ),
+                    },
+                )
+            if state["stage"] == "open_editor":
+                if not isinstance(modal, ExperimentDesignDialog):
+                    if modal is None:
+                        return
+                    raise RuntimeError(
+                        "unexpected modal while opening authoritative editor: "
+                        f"{type(modal).__name__} {modal.windowTitle()!r}"
+                    )
+                state["dialog"] = modal
+                state["stage"] = "select_folder"
+                folder_timer = QtCore.QTimer(modal)
+                folder_timer.setInterval(5)
+                folder_timer.timeout.connect(drive_folder_modal)
+                folder_timer.start()
+                try:
+                    click(modal.load_btn)
+                finally:
+                    folder_timer.stop()
+                    folder_timer.deleteLater()
+                if state["error"] is not None:
+                    raise state["error"]
+                return
+
+            if state["stage"] == "select_folder":
+                return
+
+            if state["stage"] == "validate_loaded":
+                dialog = state["dialog"]
+                if modal is not dialog or not dialog.isVisible():
+                    return
+
+                def validate_loaded() -> Mapping[str, Any]:
+                    import json
+                    from ExecutionPlan import canonical_sha256
+
+                    eligibility = (
+                        context.experiment_model.get_execution_resume_eligibility()
+                    )
+                    runtime_active = bool(
+                        context.experiment_model.is_authoritative_execution_runtime_active()
+                    )
+                    status_text = str(dialog.status_lbl.text() or "")
+                    checks = {
+                        "name_matches": dialog.exp_name_edit.text() == expected_name,
+                        "finish_is_activate": dialog.finish_btn.text()
+                        == "Activate Execution",
+                        "finish_enabled": bool(dialog.finish_btn.isEnabled()),
+                        "eligibility_ready_to_resume": eligibility.get("status")
+                        == "ready_to_resume",
+                        "runtime_inactive": not runtime_active,
+                        "read_only_guidance": (
+                            "execution plan validated" in status_text.casefold()
+                            and "activate execution" in status_text.casefold()
+                        ),
+                    }
+                    loaded_path = Path(
+                        context.experiment_model.experiment_file_path
+                    )
+                    with loaded_path.open("r", encoding="utf-8") as handle:
+                        disk_payload = json.load(handle)
+                    design_identity = {
+                        "experiment_dir_path": str(
+                            context.experiment_model.experiment_dir_path
+                        ),
+                        "experiment_file_path": str(loaded_path),
+                        "disk_design_sha256": canonical_sha256(disk_payload),
+                        "model_design_sha256": canonical_sha256(
+                            context.experiment_model.to_dict()
+                        ),
+                        "plan_design_sha256": (
+                            context.experiment_model
+                            .get_execution_plan_snapshot()
+                            .design_sha256
+                        ),
+                    }
+                    if not all(checks.values()):
+                        raise ScenarioActionError(
+                            "experiment.load_authoritative_via_ui",
+                            "loaded authoritative editor state is invalid",
+                            stage="operation",
+                            evidence={
+                                "checks": checks,
+                                "eligibility": eligibility,
+                                "status_text": status_text,
+                                "design_identity": design_identity,
+                            },
+                        )
+                    boundary = (
+                        dict(before_activation())
+                        if before_activation is not None
+                        else {}
+                    )
+                    return {
+                        "checks": checks,
+                        "eligibility": eligibility,
+                        "status_text": status_text,
+                        "design_identity": design_identity,
+                        "experiment_dir": str(Path(experiment_dir).resolve()),
+                        "reload_boundary": boundary,
+                    }
+
+                result = execute_action(
+                    context,
+                    "experiment.load_authoritative_via_ui",
+                    validate_loaded,
+                )
+                state["loaded"] = dict(result["evidence"])
+                capture_milestone(
+                    context,
+                    "session_2_loaded",
+                    evidence=state["loaded"],
+                    widget=dialog,
+                )
+                state["stage"] = "activate"
+                return
+
+            if state["stage"] == "activate":
+                dialog = state["dialog"]
+
+                def activate() -> Mapping[str, Any]:
+                    click(dialog.finish_btn)
+                    if dialog.isVisible():
+                        raise RuntimeError(
+                            "Activate Execution did not close the editor"
+                        )
+                    eligibility = (
+                        context.experiment_model.get_execution_resume_eligibility()
+                    )
+                    runtime_active = bool(
+                        context.experiment_model.is_authoritative_execution_runtime_active()
+                    )
+                    array_state = context.controller.get_array_run_state()
+                    if (
+                        not runtime_active
+                        or eligibility.get("status") != "ready_to_resume"
+                        or array_state != "resume_ready"
+                    ):
+                        raise RuntimeError(
+                            "authoritative activation did not restore resume_ready"
+                        )
+                    boundary = (
+                        dict(after_activation())
+                        if after_activation is not None
+                        else {}
+                    )
+                    return {
+                        "eligibility": eligibility,
+                        "runtime_active": runtime_active,
+                        "array_state": array_state,
+                        "reload_boundary": boundary,
+                    }
+
+                result = execute_action(
+                    context,
+                    "experiment.activate_authoritative_via_ui",
+                    activate,
+                )
+                state["activated"] = dict(result["evidence"])
+                state["stage"] = "finished"
+                driver_timer.stop()
+        except BaseException as exc:
+            fail(exc, modal)
+
+    driver_timer.timeout.connect(inspect)
+    driver_timer.start()
+    try:
+        click(button)
+    finally:
+        driver_timer.stop()
+        driver_timer.deleteLater()
+    if state["error"] is not None:
+        raise state["error"]
+    if state["stage"] != "finished":
+        raise ScenarioActionError(
+            "experiment.activate_authoritative_via_ui",
+            "authoritative editor workflow did not finish",
+            stage="timeout",
+            evidence={"stage": state["stage"]},
+        )
+    return {
+        "loaded": state["loaded"],
+        "activated": state["activated"],
+    }
+
+
+def validate_reload_boundary(
+    context: ScenarioContext,
+    operation: Callable[[], Mapping[str, Any]],
+) -> dict[str, Any]:
+    return execute_action(context, "validation.reload_boundary", operation)
+
+
 def lock_execution_for_printing(
     context: ScenarioContext,
     operation: Callable[[], Mapping[str, Any]],
@@ -2103,6 +2633,25 @@ def validate_terminal_bundle(
     return validation
 
 
+def validate_paused_bundle(
+    context: ScenarioContext,
+    validator: Callable[[], Mapping[str, Any]],
+) -> dict[str, Any]:
+    validation: dict[str, Any] = {}
+
+    def run() -> Mapping[str, Any]:
+        validation.update(dict(validator()))
+        return {
+            "plan_state": validation.get("plan_state"),
+            "checkpoint_state": validation.get("checkpoint_state"),
+            "eligibility_status": validation.get("eligibility_status"),
+            "completed_count": validation.get("completed_count"),
+        }
+
+    execute_action(context, "validation.paused_bundle", run)
+    return validation
+
+
 def _cleanup_step(
     context: ScenarioContext,
     name: str,
@@ -2122,6 +2671,215 @@ def _cleanup_step(
     context.cleanup_results.append(result)
 
 
+def _cleanup_application_resources(
+    context: ScenarioContext,
+    *,
+    prefix: str | None,
+) -> dict[str, Any]:
+    """Attempt every application-owned cleanup phase without closing the run."""
+
+    started_at = len(context.cleanup_results)
+
+    def phase(name: str) -> str:
+        return f"{prefix}.{name}" if prefix else name
+
+    if context.stdout_redirect is not None:
+        redirect = context.stdout_redirect
+        _cleanup_step(
+            context,
+            phase("stdout_redirect"),
+            lambda: redirect.__exit__(None, None, None),
+        )
+        context.stdout_redirect = None
+    else:
+        _cleanup_step(context, phase("stdout_redirect"), lambda: None)
+
+    _cleanup_step(
+        context,
+        phase("dialog_timer"),
+        lambda: context.dialog_timer.stop()
+        if context.dialog_timer is not None
+        else None,
+    )
+
+    def remove_filter() -> None:
+        if context.app is None or context.paint_filter is None:
+            return
+        try:
+            context.app.removeEventFilter(context.paint_filter)
+        except RuntimeError:
+            return
+
+    _cleanup_step(context, phase("paint_event_filter"), remove_filter)
+    _cleanup_step(
+        context,
+        phase("instrumentation"),
+        lambda: context.instrumentation.restore()
+        if context.instrumentation is not None
+        else None,
+    )
+    _cleanup_step(
+        context,
+        phase("progress_observer"),
+        lambda: context.progress_observer.restore()
+        if context.progress_observer is not None
+        else None,
+    )
+    _cleanup_step(
+        context,
+        phase("persistence_io_observer"),
+        lambda: context.io_observer.restore()
+        if context.io_observer is not None
+        else None,
+    )
+    _cleanup_step(
+        context,
+        phase("event_loop_probe"),
+        lambda: context.probe.stop()
+        if context.probe_started and context.probe is not None
+        else None,
+    )
+
+    machine = context.machine
+    _cleanup_step(
+        context,
+        phase("machine_disconnect"),
+        lambda: machine.disconnect_board() if machine is not None else None,
+    )
+    machine_cleanup = {
+        "command_timer_active": bool(
+            machine is not None
+            and getattr(machine, "_command_timer", None)
+            and machine._command_timer.isActive()
+        ),
+        "connection_timer_active": bool(
+            machine is not None
+            and getattr(machine, "_connection_timer", None)
+            and machine._connection_timer.isActive()
+        ),
+        "deferred_timer_count": len(
+            getattr(machine, "_deferred_timers", set())
+            if machine is not None
+            else set()
+        ),
+    }
+    context.machine_cleanup = machine_cleanup
+    components = context.components
+    _cleanup_step(
+        context,
+        phase("components"),
+        lambda: components.close() if components is not None else None,
+    )
+
+    def process_deferred_deletes() -> None:
+        if context.app is None:
+            return
+        context.app.processEvents()
+        if context.qt_core is None:
+            return
+        try:
+            context.app.sendPostedEvents(
+                None,
+                context.qt_core.QEvent.Type.DeferredDelete,
+            )
+            context.app.processEvents()
+        except (AttributeError, RuntimeError):
+            return
+
+    _cleanup_step(
+        context,
+        phase("deferred_qt_deletes"),
+        process_deferred_deletes,
+    )
+
+    pressure_timer_active = False
+
+    def inspect_pressure_timer() -> None:
+        nonlocal pressure_timer_active
+        if components is None:
+            return
+        try:
+            pressure_timer_active = bool(
+                components.view.pressure_box._pressure_render_timer.isActive()
+            )
+        except RuntimeError:
+            pressure_timer_active = False
+        if pressure_timer_active:
+            raise RuntimeError("pressure render timer remained active after teardown")
+
+    _cleanup_step(
+        context,
+        phase("pressure_render_timer"),
+        inspect_pressure_timer,
+    )
+    context.pressure_timer_active_after_teardown = pressure_timer_active
+    results = context.cleanup_results[started_at:]
+    failures = [result for result in results if result["status"] == "fail"]
+    evidence = {
+        "cleanup_phase_count": len(results),
+        "cleanup_results": list(results),
+        "machine_cleanup": machine_cleanup,
+        "pressure_timer_active": pressure_timer_active,
+    }
+    if failures:
+        raise ScenarioActionError(
+            "app.close_simulated_session" if prefix else "scenario.teardown",
+            f"{len(failures)} cleanup phase(s) failed",
+            stage="cleanup",
+            evidence={**evidence, "failures": failures},
+        )
+    return evidence
+
+
+def close_simulated_session(
+    context: ScenarioContext,
+    *,
+    session_id: str,
+) -> dict[str, Any]:
+    """Close one composed application while retaining the scenario context."""
+
+    if not session_id:
+        raise ValueError("session_id must be nonempty")
+
+    def run() -> Mapping[str, Any]:
+        evidence = _cleanup_application_resources(
+            context,
+            prefix=session_id,
+        )
+        for name in (
+            "components",
+            "dependencies",
+            "model",
+            "machine",
+            "controller",
+            "view",
+            "experiment_model",
+            "instrumentation",
+            "progress_observer",
+            "io_observer",
+            "dialog_timer",
+            "paint_filter",
+            "stdout_redirect",
+        ):
+            setattr(context, name, None)
+        context.probe_started = False
+        return evidence
+
+    def precondition():
+        return (
+            context.components is not None,
+            "application session is not active",
+            {"session_id": session_id},
+        )
+
+    return execute_action(
+        context,
+        "app.close_simulated_session",
+        run,
+        precondition=precondition,
+    )
+
+
 def teardown_scenario(context: ScenarioContext) -> dict[str, Any]:
     """Run the exact cleanup contract once, attempting every phase."""
 
@@ -2133,147 +2891,11 @@ def teardown_scenario(context: ScenarioContext) -> dict[str, Any]:
         ]
         return existing[-1] if existing else {}
 
-    def run() -> Mapping[str, Any]:
-        if context.stdout_redirect is not None:
-            redirect = context.stdout_redirect
-            _cleanup_step(
-                context,
-                "stdout_redirect",
-                lambda: redirect.__exit__(None, None, None),
-            )
-            context.stdout_redirect = None
-        else:
-            _cleanup_step(context, "stdout_redirect", lambda: None)
-
-        _cleanup_step(
-            context,
-            "dialog_timer",
-            lambda: context.dialog_timer.stop()
-            if context.dialog_timer is not None
-            else None,
-        )
-
-        def remove_filter() -> None:
-            if context.app is None or context.paint_filter is None:
-                return
-            try:
-                context.app.removeEventFilter(context.paint_filter)
-            except RuntimeError:
-                return
-
-        _cleanup_step(context, "paint_event_filter", remove_filter)
-        _cleanup_step(
-            context,
-            "instrumentation",
-            lambda: context.instrumentation.restore()
-            if context.instrumentation is not None
-            else None,
-        )
-        _cleanup_step(
-            context,
-            "progress_observer",
-            lambda: context.progress_observer.restore()
-            if context.progress_observer is not None
-            else None,
-        )
-        _cleanup_step(
-            context,
-            "persistence_io_observer",
-            lambda: context.io_observer.restore()
-            if context.io_observer is not None
-            else None,
-        )
-        _cleanup_step(
-            context,
-            "event_loop_probe",
-            lambda: context.probe.stop()
-            if context.probe_started and context.probe is not None
-            else None,
-        )
-
-        machine = context.machine
-        _cleanup_step(
-            context,
-            "machine_disconnect",
-            lambda: machine.disconnect_board() if machine is not None else None,
-        )
-        context.machine_cleanup = {
-            "command_timer_active": bool(
-                machine is not None
-                and getattr(machine, "_command_timer", None)
-                and machine._command_timer.isActive()
-            ),
-            "connection_timer_active": bool(
-                machine is not None
-                and getattr(machine, "_connection_timer", None)
-                and machine._connection_timer.isActive()
-            ),
-            "deferred_timer_count": len(
-                getattr(machine, "_deferred_timers", set())
-                if machine is not None
-                else set()
-            ),
-        }
-        _cleanup_step(
-            context,
-            "components",
-            lambda: context.components.close()
-            if context.components is not None
-            else None,
-        )
-
-        def process_deferred_deletes() -> None:
-            if context.app is None:
-                return
-            context.app.processEvents()
-            if context.qt_core is None:
-                return
-            try:
-                context.app.sendPostedEvents(
-                    None,
-                    context.qt_core.QEvent.Type.DeferredDelete,
-                )
-                context.app.processEvents()
-            except (AttributeError, RuntimeError):
-                return
-
-        _cleanup_step(context, "deferred_qt_deletes", process_deferred_deletes)
-
-        def inspect_pressure_timer() -> None:
-            if context.components is None:
-                context.pressure_timer_active_after_teardown = False
-                return
-            try:
-                context.pressure_timer_active_after_teardown = bool(
-                    context.components.view.pressure_box._pressure_render_timer.isActive()
-                )
-            except RuntimeError:
-                context.pressure_timer_active_after_teardown = False
-            if context.pressure_timer_active_after_teardown:
-                raise RuntimeError("pressure render timer remained active after teardown")
-
-        _cleanup_step(context, "pressure_render_timer", inspect_pressure_timer)
-        failures = [
-            result for result in context.cleanup_results if result["status"] == "fail"
-        ]
-        if failures:
-            raise ScenarioActionError(
-                "scenario.teardown",
-                f"{len(failures)} cleanup phase(s) failed",
-                stage="cleanup",
-                evidence={"failures": failures},
-            )
-        return {
-            "cleanup_phase_count": len(context.cleanup_results),
-            "machine_cleanup": context.machine_cleanup,
-            "pressure_timer_active": context.pressure_timer_active_after_teardown,
-        }
-
     try:
         return execute_action(
             context,
             "scenario.teardown",
-            run,
+            lambda: _cleanup_application_resources(context, prefix=None),
             enforce_deadline=False,
         )
     finally:
@@ -2282,8 +2904,10 @@ def teardown_scenario(context: ScenarioContext) -> dict[str, Any]:
 
 __all__ = [
     "ACTION_IDS",
+    "AUTHORITATIVE_RELOAD_ACTION_IDS",
     "EDITOR_LIFECYCLE_ACTION_IDS",
     "PRINT_ARRAY_ACTION_IDS",
+    "PRINT_ARRAY_LIFECYCLE_ACTION_IDS",
     "ActionResult",
     "CleanupResult",
     "ScenarioActionError",
@@ -2291,8 +2915,10 @@ __all__ = [
     "ScenarioDeadline",
     "capture_failure_screenshot",
     "capture_milestone",
+    "close_simulated_session",
     "connect_machine_ready",
     "activate_authoritative_execution",
+    "drive_authoritative_reload_via_editor",
     "drive_editor_create_finalize",
     "drive_editor_post_start_lock_and_copy",
     "drive_editor_prestart_rename_refinalize",
@@ -2302,12 +2928,16 @@ __all__ = [
     "inspect_editor_lock_controls",
     "launch_simulated_application",
     "prepare_authoritative_fixture",
+    "request_soft_stop_via_ui",
     "reload_authoritative_experiment",
     "lock_execution_for_printing",
     "stage_virtual_head",
     "start_array_via_ui",
+    "observe_stopped_quiescence",
     "teardown_scenario",
     "validate_prepared_bundle",
+    "validate_paused_bundle",
+    "validate_reload_boundary",
     "validate_refinalized_bundle",
     "validate_terminal_bundle",
     "wait_for_array_state",

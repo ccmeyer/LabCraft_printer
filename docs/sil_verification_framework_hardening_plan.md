@@ -616,7 +616,7 @@ Capability IDs and current hardening status:
 | `experiment.design_plan_consistency` | `covered` | `experiment_editor_create_finalize_v1` |
 | `experiment.active_edit_lock` | `planned` | Post-start editor lock scenario |
 | `experiment.editable_copy` | `partial` | Existing unit coverage; composed post-start scenario pending |
-| `execution.soft_stop_resume` | `planned` | Soft-stop lifecycle scenario |
+| `execution.soft_stop_resume` | `covered` | `print_array_soft_stop_resume_24_v1` |
 | `execution.refill_resume` | `deferred` | Volume tracking is disabled; prerequisite not met |
 | `execution.authoritative_reload_resume` | `planned` | Reload lifecycle scenario |
 | `execution.disconnect_fail_closed` | `planned` | Disconnect lifecycle scenario |
@@ -1769,10 +1769,204 @@ Final disposition, risks, and rollback:
 
 Next permitted action:
 
-- Slice 4.4, `print_array_soft_stop_resume_24_v1`. Keep refill-required resume
+- Slice 4.5, `authoritative_reload_resume_24_v1`. Keep refill-required resume
   deferred while volume tracking is disabled, and keep performance
   remediation, firmware, protocol, Pi, and hardware behavior out of that
   milestone.
+
+#### Slice 4.4: Print-array soft stop and resume
+
+Status: `verified`
+
+Call path:
+
+`QTest Start Print Array -> Controller.print_array -> simulated lookahead -> queued QTest Stop After Well -> Controller.request_array_soft_stop -> pause watermark -> confirmed clear/discard/park -> resume_ready -> paused validation/quiescence -> QTest Resume Print -> terminal completion`
+
+Implementation:
+
+- Added strict schema-v3 fixture `print_array_soft_stop_resume_24_v1` for
+  shallow-384 A1-A24, one unique virtual stock/head, lookahead 2, 20 Hz, the
+  completion-6 request boundary, at most two catch-up completions, and a
+  250 ms quiescence observation.
+- Added a separate reusable print lifecycle action set. The soft-stop action
+  arms after the real UI starts, listens to real well-state notifications,
+  queues a QTest click at exactly completion 6, and requires `Stop Pending`,
+  `stop_requested`, and a positive barrier. Paused validation and quiescence
+  are explicit actions; existing uninterrupted action IDs remain unchanged.
+- Extended the existing print scenario with an explicit soft-stop/resume
+  strategy while retaining common application construction, instrumentation,
+  teardown, and report assembly. The uninterrupted 24-, 96-, and 384x10
+  drivers and their legacy persistence formulas remain unchanged.
+- Instrumentation now records confirmed watermark/clear evidence and
+  discard batches. Terminal reconciliation partitions every begin occurrence
+  into completion or confirmed discard, proves discarded stock/well work is
+  reissued, and requires 24 exact progress writes and terminal completions.
+  Deterministic stock/well intent IDs may be reused for the reissue; occurrence
+  counters preserve the exactly-once proof.
+- Added report-v1 evidence beneath
+  `metrics.persistence.values.soft_stop_resume`, ten assertion results, and
+  the six `ready`, `printing`, `stop_requested`, `stopped`, `resumed`, and
+  `completed` screenshots. Responsiveness and resources remain diagnostic
+  with `not_applicable` status.
+- Appended the registry entry without changing the legacy order/default,
+  activated it in the lifecycle suite after the composed pass, and marked
+  `execution.soft_stop_resume` covered with a two-day evidence age. Pi
+  evidence, injected stalls, repetition/report sets, and baseline creation
+  remain rejected.
+- Added exact fixture, action/deadline/quiescence, registry/manifest/CLI,
+  composed-success, and retained-failure tests. No production MVC, simulator,
+  firmware, protocol, performance, baseline, Pi, or hardware behavior changed.
+
+Verification record (2026-07-27):
+
+- Started at commit `64363f4e86a0baf07b35037db49d79085f8e95f2`
+  with a clean tracked worktree. `.worktrees/` and the six pre-existing
+  inaccessible execution-cache directories remained untouched.
+- The pre-edit relevant baseline passed 233 tests with 10 existing Qt chart
+  deprecation warnings in 10.04 seconds.
+- The final strict direct scenario classified `pass` in 5,977.893 ms with all
+  ten declared assertions passing:
+  `verification_reports/virtual_workflows/print_array_soft_stop_resume_24_v1/20260727T063617161281Z_64363f4e86a0/report.json`.
+  The click occurred at completion 6; one catch-up completion finished the
+  watermark well; one lookahead intent was discarded, later reissued, and
+  completed; and all 24 stock/well targets finished exactly once.
+- The stopped bundle retained the original `ACTIVE` plan ID, a paused
+  zero-intent checkpoint, valid authoritative inspection, confirmed
+  watermark/clear, `ready_to_resume`, an empty simulator queue, and unchanged
+  completion/progress counts throughout the 250 ms quiescence window.
+- Resume was initiated through the real UI and ended in a valid `COMPLETED`
+  plan. The run recorded 24 cached progress writes and 75 resume writes:
+  25 begins, 25 sequence attachments, 24 completions, and one discard batch.
+- The focused lifecycle module, including the retained synthetic paused-gate
+  failure, passed three tests with 20 existing warnings in 8.72 seconds.
+- The complete requested focused lifecycle selection passed 257 tests with 90
+  existing Qt chart deprecation warnings in 21.08 seconds. Default collection
+  passed the schema-v3 fixture contract and skipped the two opt-in composed
+  tests (`1 passed, 2 skipped`).
+- The real 96-well regression, comparison, and local Pi-contract selection
+  passed 43 tests with 30 existing warnings in 12.31 seconds. No remote Pi
+  operation was launched.
+- The retained Windows 96-well report remained report-v1 valid with
+  classification `pass`; the retained Windows and Pi 384x10 reports remained
+  schema-valid with their existing `fail` classifications. Both tracked
+  baseline summaries loaded with distinct `offscreen_windows_sil` and
+  `offscreen_pi_sil` identities.
+- With exactly the six known inaccessible execution-cache directories
+  ignored, the full default Python suite passed 3,605 tests, skipped 36, and
+  reported 118 existing warnings in 413.53 seconds.
+- `git diff --check` passed. The only untracked paths outside this slice remain
+  `.worktrees/` and the six pre-existing cache directories; all remained
+  untouched. No zero-byte `frames.jsonl` or `events.jsonl` files were found
+  under the restored experiments root after the full run.
+
+Final disposition, risks, and rollback:
+
+- Slice 4.4 is `verified`; the scenario is active in `lifecycle`, all ten
+  declared assertions pass, and `execution.soft_stop_resume` is `covered`.
+- The evidence is application-facing SIL only. It does not prove firmware
+  pause/clear acknowledgements, physical parking, pressure behavior, or
+  droplet delivery.
+- Rollback removes the schema-v3 fixture, lifecycle actions/strategy,
+  instrumentation/report additions, tests, registry/manifest promotion, and
+  documentation while preserving verified Slices 0-4.3. No application-data,
+  production, firmware, protocol, hardware, baseline, performance, or Pi
+  rollback is required.
+
+#### Slice 4.5: Authoritative reload and resume
+
+Status: `in_progress`
+
+Call path:
+
+`QTest Start Print Array -> real soft stop -> paused authoritative bundle -> first application-session teardown -> fresh simulation dependencies and MVC composition -> Experiment Editor -> Load Design -> QFileDialog -> ExperimentModel.load_experiment -> Activate Execution -> Model.load_authoritative_execution_runtime -> resume_ready -> QTest Resume Print`
+
+Starting state:
+
+- HEAD remains `64363f4e86a0baf07b35037db49d79085f8e95f2`; the
+  verified Slice 4.4 changes are present as the uncommitted prerequisite.
+- The pre-edit focused selection passed 262 tests with 90 existing Qt chart
+  deprecation warnings in 21.36 seconds.
+- Slice 4.4 remains verified and unchanged. No production, simulator,
+  firmware, protocol, baseline, Pi, performance, or hardware behavior was
+  modified for this slice.
+
+Implemented verification framework:
+
+- Added strict schema-v3 fixture `authoritative_reload_resume_24_v1` for
+  A1-A24, one unique virtual stock/head, completion-6 soft stop, at most two
+  catch-up completions, 250 ms quiescence, and two application sessions.
+- Added session-attributed actions, a reusable intermediate application
+  cleanup primitive, and real modal editor folder-load/activation automation.
+  The parent report and one 60-second deadline survive the first application
+  teardown.
+- The first session uses the verified Slice 4.4 start/stop path, freezes the
+  complete authoritative inventory, and passes every prefixed cleanup phase
+  without changing an authoritative file.
+- The second session uses fresh simulation dependencies and a new
+  Model/Controller/MainWindow/SimulatedMachine composition inside the same
+  process-wide `QApplication`. It selects the persisted folder through the
+  real `QFileDialog`; no direct activation handler or test-built runtime is
+  used.
+- Added additive report-v1 session attribution and
+  `metrics.persistence.values.authoritative_reload_resume`, strict assertion
+  results, failure screenshot retention, registry/CLI coverage, and a planned
+  manifest scenario. The active lifecycle suite and capability were not
+  promoted.
+
+Strict scenario result and defect evidence:
+
+- Session 1 passes the real soft-stop boundary at completion 6 with bounded
+  catch-up, a valid `ACTIVE` plan, paused zero-intent checkpoint,
+  `ready_to_resume`, an empty simulator queue, and quiescent progress.
+- The frozen disk design remains byte-identical through teardown and its hash
+  matches the execution plan. Independent authoritative inspection remains
+  valid and `ready_to_resume`.
+- Session 2 reaches the real editor load, but the editor-loaded in-memory
+  `ExperimentModel.to_dict()` hash differs from the disk design and plan hash.
+  Eligibility is `blocked`, `Activate Execution` is disabled, and the editor
+  reports that the design does not match the execution-plan hash.
+- The run stops at that boundary and retains both session identities, the
+  passing first-session cleanup, disk/model/plan hashes, exact status text,
+  failed action, traceback, cleanup, and `session_2_load_failed.png`.
+  Downstream activation/resume assertions are `incomplete`.
+- The retained direct report is:
+  `verification_reports/virtual_workflows/authoritative_reload_resume_24_v1/20260727T071337559090Z_64363f4e86a0/report.json`.
+  It is report-v1 valid, classifies `fail` in 4,225.156 ms, and its readable
+  editor screenshot visibly shows the disabled activation state and hash
+  mismatch guidance.
+- The complete focused lifecycle selection passed 273 tests with 110 existing
+  Qt chart deprecation warnings in 24.95 seconds. Default collection passed
+  the strict fixture contract and skipped the opt-in composed scenario
+  (`1 passed, 1 skipped`).
+- The 96-well/comparison/local Pi-contract selection passed 40 tests and
+  skipped 3 remote-only cases. All three retained compatibility reports, the
+  new failure report, and both tracked baselines validate.
+- The full default Python suite passed 3,615 tests and skipped 37 with 118
+  existing warnings in 417.97 seconds after ignoring only the six known
+  inaccessible cache directories.
+
+Disposition, risk, and rollback:
+
+- Slice 4.5 remains `in_progress`; the registry entry is directly executable,
+  but its manifest scenario and
+  `execution.authoritative_reload_resume` capability remain `planned` and it
+  is absent from the active lifecycle suite.
+- The separately scoped MVC defect path is:
+  `ExperimentDesignDialog._on_load_design -> ExperimentModel.load_experiment/from_dict -> inspect_authoritative_execution`.
+  The fix must preserve the persisted design identity during authoritative
+  editor loading, then rerun this unchanged scenario through activation,
+  resume, and terminal reconciliation.
+- Rollback removes only the Slice 4.5 fixture, session/reload framework
+  additions, tests, registry/manifest entry, and documentation while
+  preserving verified Slices 0-4.4. No application-data, production,
+  firmware, protocol, hardware, baseline, performance, or Pi rollback is
+  required.
+
+Next permitted action:
+
+- Open a separately scoped MVC defect for the authoritative editor-load
+  in-memory design-hash divergence. Slice 4.6 must not begin until Slice 4.5
+  passes and is promoted.
 
 ### Slice 5: Suites and scheduling contracts
 
@@ -2152,10 +2346,12 @@ The effort is complete when:
 
 ## Current Next Action
 
-Begin Slice 4.4, `print_array_soft_stop_resume_24_v1`, only as a separately
-reviewed lifecycle milestone. Preserve the active editor portfolio, public
-config/runner adapters, registry and manifest identities, report-v1 envelope,
-comparison policy, fixture mappings, failure artifacts, and Pi proof linkage.
-Keep refill-required resume deferred while volume tracking is disabled, and do
-not combine Slice 4.4 with performance remediation, firmware, protocol, remote
-Pi, or hardware behavior changes.
+Open a separately scoped MVC defect for the authoritative editor-load
+in-memory design-hash divergence exposed by
+`authoritative_reload_resume_24_v1`. Preserve the strict two-session scenario
+and failure evidence unchanged while correcting
+`ExperimentDesignDialog._on_load_design -> ExperimentModel.load_experiment/from_dict`.
+After the fix, rerun and promote Slice 4.5 only if activation, no-replay
+resume, terminal reconciliation, focused tests, and the full suite pass. Do
+not begin Slice 4.6 or combine this work with refill resume, performance,
+firmware, protocol, Pi, or hardware changes.

@@ -137,6 +137,30 @@ _SCENARIO_DEFINITIONS = {
         supports_injected_stall=False,
         supports_report_sets=False,
     ),
+    "print_array_soft_stop_resume_24_v1": ScenarioDefinition(
+        registry_id="print_array_soft_stop_resume_24_v1",
+        workload_id="print_array_soft_stop_resume_24_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "print_array_soft_stop_resume_24_v1.json"
+        ),
+        expected_completion_count=24,
+        scenario_name="print_array_soft_stop_resume",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
+    "authoritative_reload_resume_24_v1": ScenarioDefinition(
+        registry_id="authoritative_reload_resume_24_v1",
+        workload_id="authoritative_reload_resume_24_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "authoritative_reload_resume_24_v1.json"
+        ),
+        expected_completion_count=24,
+        scenario_name="authoritative_reload_resume",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
 }
 REGISTERED_SCENARIOS: Mapping[str, ScenarioDefinition] = MappingProxyType(
     _SCENARIO_DEFINITIONS
@@ -175,6 +199,21 @@ def run_registered_scenario(
 
     # Keep CLI help and registry inspection independent of Qt/application imports.
     if definition.runner_family == "virtual_print_array":
+        if not definition.supports_injected_stall:
+            injected_ms = config_values.get("inject_ui_stall_ms", 0)
+            injected_after = config_values.get("inject_after_completion", 48)
+            if int(injected_ms) != 0 or int(injected_after) != 48:
+                raise RegistryError(
+                    "print-array lifecycle scenarios do not support "
+                    "injected-stall controls"
+                )
+        if not definition.supports_pi_evidence and (
+            config_values.get("pi_preflight_path") is not None
+            or config_values.get("pi_hardware_proof_path") is not None
+        ):
+            raise RegistryError(
+                "print-array lifecycle scenarios do not support Pi evidence"
+            )
         from tools.virtual_workflows.scenarios import (
             VirtualPrintArrayScenarioConfig,
             run_virtual_print_array_scenario,

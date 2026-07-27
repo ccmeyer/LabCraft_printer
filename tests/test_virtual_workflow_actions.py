@@ -13,12 +13,15 @@ from tools.virtual_workflows.actions import (
     ScenarioActionError,
     ScenarioContext,
     capture_milestone,
+    close_simulated_session,
     drive_editor_create_finalize,
     drive_editor_post_start_lock_and_copy,
     drive_editor_prestart_rename_refinalize,
     execute_action,
     install_dialog_handler,
     inspect_editor_lock_controls,
+    observe_stopped_quiescence,
+    request_soft_stop_via_ui,
     stage_virtual_head,
     teardown_scenario,
     wait_for_completions,
@@ -176,6 +179,84 @@ def test_wait_action_uses_one_global_deadline_and_records_timeout(tmp_path):
     assert len(context.action_results) == 1
     assert context.action_results[0]["action_id"] == "array.wait_for_completions"
     assert context.action_results[0]["failure_stage"] == "timeout"
+
+
+def test_soft_stop_action_rejects_incorrect_array_state(tmp_path):
+    context, _, _ = _context(tmp_path)
+    context.app = object()
+    context.qt_core = object()
+    context.model = object()
+    context.view = object()
+    context.controller = SimpleNamespace(
+        get_array_run_state=lambda: "resume_ready"
+    )
+
+    with pytest.raises(ScenarioActionError, match="state running"):
+        request_soft_stop_via_ui(
+            context,
+            completed_count=lambda: 6,
+            trigger_count=6,
+            timeout_seconds=1,
+        )
+
+    assert context.action_results[-1]["failure_stage"] == "precondition"
+    assert context.action_results[-1]["evidence"] == {
+        "array_state": "resume_ready"
+    }
+
+
+def test_stopped_quiescence_passes_without_progress(tmp_path):
+    context, _, _ = _context(tmp_path)
+    context.controller = SimpleNamespace(
+        get_array_run_state=lambda: "resume_ready"
+    )
+    context.machine = SimpleNamespace(check_if_all_completed=lambda: True)
+    completed = 7
+    progress = 7
+
+    result = observe_stopped_quiescence(
+        context,
+        completed_count=lambda: completed,
+        progress_count=lambda: progress,
+        observation_ms=250,
+    )
+
+    assert result["status"] == "pass"
+    assert result["evidence"]["starting_completion_count"] == 7
+    assert result["evidence"]["ending_completion_count"] == 7
+    assert result["evidence"]["simulator_queue_empty"] is True
+
+
+def test_stopped_quiescence_rejects_progress_and_deadline(tmp_path):
+    context, clock, _ = _context(tmp_path)
+    context.controller = SimpleNamespace(
+        get_array_run_state=lambda: "resume_ready"
+    )
+    context.machine = SimpleNamespace(check_if_all_completed=lambda: True)
+
+    with pytest.raises(ScenarioActionError, match="deadline"):
+        observe_stopped_quiescence(
+            context,
+            completed_count=lambda: 7,
+            progress_count=lambda: 7,
+            observation_ms=6000,
+        )
+    assert context.action_results[-1]["failure_stage"] == "timeout"
+
+    context, clock, _ = _context(tmp_path / "advances")
+    context.controller = SimpleNamespace(
+        get_array_run_state=lambda: "resume_ready"
+    )
+    context.machine = SimpleNamespace(check_if_all_completed=lambda: True)
+    starting = clock.value
+    with pytest.raises(ScenarioActionError, match="advanced"):
+        observe_stopped_quiescence(
+            context,
+            completed_count=lambda: 8 if clock.value > starting else 7,
+            progress_count=lambda: 7,
+            observation_ms=250,
+        )
+    assert context.action_results[-1]["failure_stage"] == "operation"
 
 
 def test_head_exchange_precondition_requires_idle_and_drained_queue(tmp_path):
@@ -709,6 +790,58 @@ def test_closed_context_rejects_new_actions(tmp_path):
             "fixture.prepare_authoritative",
             lambda: {},
         )
+
+
+def test_close_simulated_session_preserves_parent_deadline_and_context(
+    tmp_path,
+):
+    context, clock, events = _context(tmp_path)
+    started = context.deadline.started_monotonic
+
+    class Components:
+        view = SimpleNamespace(
+            pressure_box=SimpleNamespace(
+                _pressure_render_timer=SimpleNamespace(
+                    isActive=lambda: False
+                )
+            )
+        )
+
+        def close(self):
+            return None
+
+    context.components = Components()
+    context.application_session_id = "session_1"
+    result = close_simulated_session(context, session_id="session_1")
+
+    assert result["status"] == "pass"
+    assert result["application_session_id"] == "session_1"
+    assert context.deadline.started_monotonic == started
+    assert context.closed is False
+    assert context.components is None
+    assert [item["name"] for item in context.cleanup_results] == [
+        f"session_1.{name}"
+        for name in (
+            "stdout_redirect",
+            "dialog_timer",
+            "paint_event_filter",
+            "instrumentation",
+            "progress_observer",
+            "persistence_io_observer",
+            "event_loop_probe",
+            "machine_disconnect",
+            "components",
+            "deferred_qt_deletes",
+            "pressure_render_timer",
+        )
+    ]
+    assert any(
+        item.get("application_session_id") == "session_1"
+        for item in events
+    )
+    clock.value += 0.1
+    with pytest.raises(ScenarioActionError, match="not active"):
+        close_simulated_session(context, session_id="session_1")
 
 
 def test_action_module_import_is_qt_and_application_free():

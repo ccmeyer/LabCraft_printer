@@ -404,6 +404,73 @@ authoritative source snapshot, `failure.png`, traceback, and teardown results.
 Later assertions remain `incomplete`; the failure is not weakened or treated
 as expected success.
 
+### Print-array soft-stop/resume nested evidence
+
+`print_array_soft_stop_resume_24_v1` retains report-v1 and adds
+`metrics.persistence.values.soft_stop_resume`:
+
+- `request` records the exact observed completion count, real button text and
+  state, and positive pause barrier;
+- `watermark` and `clear` record the observed pause watermark, paused
+  transport, clear-confirmation payload, and uncertainty state;
+- `stopped_checkpoint` records the unchanged plan ID, `ACTIVE` plan, paused
+  zero-intent checkpoint, bounded catch-up, authoritative inspection, and
+  `ready_to_resume` eligibility;
+- `quiescence` records starting/ending completion and progress counts for the
+  250 ms stopped observation and the empty simulator queue;
+- `resume` records the second real-UI running transition and allowlisted
+  `Resume Print Array` dialog;
+- `intent_reconciliation` records begun, attached, completed, discarded, and
+  reissued intent evidence. Because intent identity is deterministic by
+  stock/well, a discarded intent ID is deliberately reused for its later
+  reissue; occurrence counters prove the discarded and completed instances
+  partition the begin operations exactly; and
+- `audit` and `terminal` retain execution lifecycle rows and final plan/count
+  evidence.
+
+`metrics.workflow.values.assertion_results` declares the soft-stop request,
+stopped boundary, quiescence, exact resume, hardware-isolation, real-UI,
+completion, durability, terminal-bundle, and artifact results. Evaluated
+failures are `fail`; downstream unevaluated assertions are `incomplete`.
+Passing evidence requires the six ordered milestones `ready`, `printing`,
+`stop_requested`, `stopped`, `resumed`, and `completed`.
+
+Queue and persistence groups are functional evidence. Responsiveness and
+resources retain diagnostics but have status `not_applicable`; the scenario
+does not create performance or baseline evidence.
+
+### Authoritative reload/resume nested evidence
+
+`authoritative_reload_resume_24_v1` retains report-v1 and adds
+`metrics.persistence.values.authoritative_reload_resume`:
+
+- `session_1_paused` records the real soft-stop watermark, clean paused
+  checkpoint, eligibility, and partial completion boundary;
+- `session_1_cleanup` records all session-prefixed cleanup phases without
+  closing the parent scenario;
+- `between_sessions` records the complete authoritative inventory and proves
+  first-session teardown did not change it;
+- `session_2_loaded` records the real editor selection, inactive runtime,
+  eligibility, status guidance, and disk/model/plan design hashes;
+- `session_2_activation` is populated only after a successful real
+  `Activate Execution` action;
+- `resume_reconciliation`, `audit`, and `terminal` are populated only after
+  activation and resume reach their corresponding gates.
+
+Action results, events, and cleanup evidence may add
+`application_session_id` with `session_1` or `session_2`. This is an additive
+field. The scenario uses one process-wide `QApplication`; application-session
+identity means a separately constructed Model/Controller/MainWindow/simulator
+composition, not an operating-system process restart.
+
+The current strict failure stops at `session_2_loaded`: the byte-identical
+disk design still matches the plan, while the editor-loaded in-memory design
+hash differs and eligibility is `blocked`. The report therefore marks the
+reload assertion `fail` and later activation/resume assertions `incomplete`,
+and retains `session_2_load_failed.png` plus the traceback. These fields
+remain compatible when the defect is fixed and the later evidence becomes
+populated.
+
 `metrics.persistence.values.authoritative_io` adds compatible diagnostic
 evidence for the guarded active-runtime checkpoint:
 
