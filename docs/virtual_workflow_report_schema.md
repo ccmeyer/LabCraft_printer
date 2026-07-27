@@ -356,24 +356,27 @@ screenshot.
 evidence for the second editor session:
 
 - `lifecycle_milestones` targets `editor_opened`, `generated`,
-  `initial_finalized`, `rename_editor_opened`, `renamed`, `refinalized`,
-  `reloaded`, and `validated` on a passing run;
+  `initial_finalized`, `rename_editor_opened`, `renamed`,
+  `prepared_design_edited`, `regenerated`, `refinalized`, `reloaded`, and
+  `validated` on a passing run;
 - `metrics.persistence.values.rename_refinalization.before` contains the
   initial prepared directory, metadata/plan identity, runtime assignments,
   audit rows, resume presence, and SHA-256 hashes for authoritative files;
 - `rename_refinalization.after` records the corresponding successful renamed
-  identity, hashes, and audit evidence;
+  identity, fresh plan identity, hashes, audit evidence, and changed runtime
+  assignments;
 - `rename_refinalization.failure_state` is present when the rename succeeds
   but the second Finish fails. It records old/new directory state, saved name
   and design hash, current-plan presence/hash, retained paths, and audit rows;
 - `metrics.persistence.values.refinalized_bundle` contains final design/plan,
-  immutable-history, progress, key, directory-uniqueness, and
+  immutable-history, progress, key, directory-uniqueness, material design
+  change, superseded prepared-plan archive, fresh plan identity, and
   `ready_to_start` checks; and
 - `reload_activation` retains the disk reload, clean zero-intent checkpoint,
   and runtime-assignment checks.
 
-The rename scenario requires eight nonempty success screenshots. A failed
-second Finish instead retains all milestones reached before failure plus
+The expanded rename/edit scenario requires ten nonempty success screenshots.
+A failed second Finish instead retains all milestones reached before failure plus
 `failure.png`, exact dialog/error text, traceback, initial prepared evidence,
 post-rename filesystem evidence, and complete teardown results. It remains a
 functional failure; the report schema does not mark the regression expected.

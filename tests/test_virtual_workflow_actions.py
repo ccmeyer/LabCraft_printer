@@ -559,6 +559,8 @@ def test_editor_rename_driver_rejects_the_wrong_modal(qapp, tmp_path):
             context,
             initial_name="before",
             renamed_name="after",
+            experiment={},
+            reagent={},
         )
 
     assert caught.value.action_id == "editor.open_via_ui"
@@ -603,6 +605,8 @@ def test_editor_rename_driver_propagates_global_deadline_and_rejects_dialog(
             context,
             initial_name="before",
             renamed_name="after",
+            experiment={},
+            reagent={},
         )
 
     assert caught.value.action_id == "editor.open_via_ui"

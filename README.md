@@ -297,15 +297,18 @@ Run the prepared rename/refinalize regression directly with:
   --timeout-seconds 60
 ```
 
-This scenario first creates the same minimal A1/A2 prepared experiment, then
-reopens the real editor, changes only the experiment name, and presses Finish
-again. Its target contract requires a single renamed directory, a consistent
-prepared authoritative bundle, zero progress, and a `ready_to_start` reload.
-The prepared rename reconciliation now replaces the untouched revision-1
-prepared identity transactionally, while started, progressed, resumed,
-calibrated, invalid, or non-name-only executions remain fail-closed. The
-scenario passes with one renamed directory, a consistent zero-progress
-prepared bundle, and a `ready_to_start` persisted reload.
+This scenario first creates the minimal A1/A2 prepared experiment, then
+reopens the real editor and changes the name, replicate count, selected wells,
+printed/final volumes, reagent targets, reagent mode, and fill mode. It
+optimizes again and presses Finish. Its target contract requires a single
+renamed directory, a fresh revision-1 prepared plan for A1-A6, archived
+superseded prepared artifacts, zero progress, consistent key files/runtime
+assignments, and a `ready_to_start` reload.
+
+An untouched `PREPARED` execution remains editable after disk reload. Both
+Save and Finish publish material pre-start edits through the same transactional
+replacement path. Started, progressed, resumed, calibrated, or invalid
+executions remain fail-closed and require the editable-copy workflow instead.
 
 Run the post-start editor boundary directly with:
 

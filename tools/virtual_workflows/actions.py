@@ -63,6 +63,8 @@ EDITOR_LIFECYCLE_ACTION_IDS = frozenset(
         "editor.optimize_generate_via_ui",
         "editor.finish_via_ui",
         "editor.rename_prepared_via_ui",
+        "editor.edit_prepared_design_via_ui",
+        "editor.regenerate_prepared_design_via_ui",
         "editor.refinalize_prepared_via_ui",
         "experiment.activate_authoritative",
         "execution.lock_for_printing",
@@ -1689,14 +1691,16 @@ def drive_editor_prestart_rename_refinalize(
     *,
     initial_name: str,
     renamed_name: str,
+    experiment: Mapping[str, Any],
+    reagent: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Reopen a prepared design, rename it, and Finish through real Qt controls."""
+    """Reopen and materially revise a prepared design through real Qt controls."""
 
     if context.app is None or context.qt_core is None or context.view is None:
         raise RuntimeError("editor automation requires a launched Qt application")
 
     from PySide6 import QtTest, QtWidgets
-    from View import ExperimentDesignDialog
+    from View import ExperimentDesignDialog, WellSelectionDialog
 
     QtCore = context.qt_core
     button = context.view.well_plate_widget.design_experiment_button
@@ -1763,6 +1767,74 @@ def drive_editor_prestart_rename_refinalize(
             ),
             "reagent_rows": reagent_rows,
         }
+
+    def select_printable_wells(dialog: Any, well_ids: list[str]) -> None:
+        selection_state: dict[str, Any] = {"entered": False, "error": None}
+
+        def drive_selection() -> None:
+            selection_state["entered"] = True
+            active = context.app.activeModalWidget()
+            try:
+                if not isinstance(active, WellSelectionDialog):
+                    title = active.windowTitle() if active is not None else None
+                    if isinstance(active, QtWidgets.QDialog):
+                        active.reject()
+                    raise RuntimeError(
+                        "unexpected printable-wells modal while editing prepared "
+                        f"design: {type(active).__name__ if active is not None else None} "
+                        f"{title!r}"
+                    )
+                click(active.clear_btn)
+                for well_id in well_ids:
+                    row_label = "".join(
+                        character
+                        for character in well_id
+                        if character.isalpha()
+                    ).upper()
+                    column_text = "".join(
+                        character
+                        for character in well_id
+                        if character.isdigit()
+                    )
+                    row = 0
+                    for character in row_label:
+                        row = row * 26 + (ord(character) - ord("A") + 1)
+                    row -= 1
+                    column = int(column_text) - 1
+                    QtTest.QTest.mouseClick(
+                        active.grid,
+                        QtCore.Qt.MouseButton.LeftButton,
+                        pos=active.grid._cell_rect(row, column).center(),
+                    )
+                observed = active.selected_well_ids()
+                if observed != well_ids:
+                    raise RuntimeError(
+                        f"printable wells retained {observed!r}; "
+                        f"expected {well_ids!r}"
+                    )
+                click(active.ok_btn)
+            except BaseException as exc:
+                selection_state["error"] = exc
+                if isinstance(active, QtWidgets.QDialog) and active.isVisible():
+                    active.reject()
+
+        QtCore.QTimer.singleShot(0, drive_selection)
+        QtTest.QTest.mouseClick(
+            dialog.well_selection_btn,
+            QtCore.Qt.MouseButton.LeftButton,
+        )
+        if selection_state["error"] is not None:
+            raise selection_state["error"]
+        if not selection_state["entered"]:
+            raise RuntimeError("Printable Wells dialog did not open")
+        observed = list(
+            dialog.model.get_auto_assignment_included_wells() or []
+        )
+        if observed != well_ids:
+            raise RuntimeError(
+                f"editor retained printable wells {observed!r}; "
+                f"expected {well_ids!r}"
+            )
 
     def run_driver() -> None:
         if state["entered"]:
@@ -1878,6 +1950,141 @@ def drive_editor_prestart_rename_refinalize(
                 widget=dialog,
             )
 
+            def edit_prepared_design() -> Mapping[str, Any]:
+                _ensure_editor_deadline(
+                    context,
+                    "editor.edit_prepared_design_via_ui",
+                    "prepared_design_edited",
+                )
+                _qt_set_spin_value(
+                    QtCore,
+                    QtTest,
+                    dialog.rep_spin,
+                    experiment["refinalized_replicates"],
+                )
+                _qt_set_spin_value(
+                    QtCore,
+                    QtTest,
+                    dialog.v_spin,
+                    experiment["refinalized_printed_volume_nL"],
+                )
+                _qt_set_spin_value(
+                    QtCore,
+                    QtTest,
+                    dialog.final_v_spin,
+                    experiment["refinalized_final_volume_nL"],
+                )
+                select_printable_wells(
+                    dialog,
+                    list(experiment["refinalized_expected_well_ids"]),
+                )
+                _qt_select_combo_text(
+                    QtCore,
+                    QtTest,
+                    dialog.fill_mode_combo,
+                    experiment["refinalized_fill_printing_mode"],
+                )
+                _qt_set_spin_value(
+                    QtCore,
+                    QtTest,
+                    dialog.fill_dv_spin,
+                    experiment["refinalized_fill_droplet_volume_nL"],
+                )
+                if dialog._reagent_row_count() != 1:
+                    raise RuntimeError(
+                        "prepared editor did not retain exactly one reagent"
+                    )
+                row = 0
+                _qt_select_combo_text(
+                    QtCore,
+                    QtTest,
+                    dialog._reagent_cell_widget(row, dialog.COL_MODE),
+                    reagent["refinalized_printing_mode"],
+                )
+                _qt_replace_text(
+                    QtCore,
+                    QtTest,
+                    dialog._reagent_cell_widget(row, dialog.COL_TARGETS),
+                    ", ".join(
+                        str(value)
+                        for value in reagent["refinalized_targets"]
+                    ),
+                )
+                _qt_set_spin_value(
+                    QtCore,
+                    QtTest,
+                    dialog._reagent_cell_widget(row, dialog.COL_DROPLET),
+                    reagent["refinalized_droplet_volume_nL"],
+                )
+                context.app.processEvents()
+                after = design_surface(dialog)
+                state["after_edit"] = after
+                return {
+                    "replicates": after["replicates"],
+                    "well_ids": after["well_ids"],
+                    "printed_volume_nL": after["printed_volume_nL"],
+                    "final_volume_nL": after["final_volume_nL"],
+                    "fill_printing_mode": dialog.fill_mode_combo.currentText(),
+                    "fill_droplet_volume_nL": dialog.fill_dv_spin.value(),
+                    "reagent_printing_mode": dialog._reagent_cell_widget(
+                        row, dialog.COL_MODE
+                    ).currentText(),
+                    "reagent_targets": dialog._reagent_cell_widget(
+                        row, dialog.COL_TARGETS
+                    ).text(),
+                    "reagent_droplet_volume_nL": dialog._reagent_cell_widget(
+                        row, dialog.COL_DROPLET
+                    ).value(),
+                }
+
+            edit_evidence = execute_action(
+                context,
+                "editor.edit_prepared_design_via_ui",
+                edit_prepared_design,
+            )
+            capture_milestone(
+                context,
+                "prepared_design_edited",
+                evidence=edit_evidence,
+                widget=dialog,
+            )
+
+            def regenerate() -> Mapping[str, Any]:
+                click(dialog.run_btn)
+                _ensure_editor_deadline(
+                    context,
+                    "editor.regenerate_prepared_design_via_ui",
+                    "regenerated",
+                )
+                if dialog._design_optimization_dirty:
+                    raise RuntimeError(
+                        "regenerated prepared design remained dirty"
+                    )
+                reaction_count = int(dialog.model.get_number_of_reactions())
+                if reaction_count != len(
+                    experiment["refinalized_expected_well_ids"]
+                ):
+                    raise RuntimeError(
+                        "regenerated reaction count did not match expected wells"
+                    )
+                return {
+                    "reaction_count": reaction_count,
+                    "stock_row_count": dialog.stock_table.rowCount(),
+                    "status": dialog.status_lbl.text(),
+                }
+
+            regeneration_evidence = execute_action(
+                context,
+                "editor.regenerate_prepared_design_via_ui",
+                regenerate,
+            )
+            capture_milestone(
+                context,
+                "regenerated",
+                evidence=regeneration_evidence,
+                widget=dialog,
+            )
+
             def refinalize() -> Mapping[str, Any]:
                 click(dialog.finish_btn)
                 _ensure_editor_deadline(
@@ -1945,6 +2152,7 @@ def drive_editor_prestart_rename_refinalize(
         "initial_name": initial_name,
         "renamed_name": renamed_name,
         "non_name_controls_unchanged": state["before"] == state["after"],
+        "prepared_design_changed": state.get("after_edit") != state["after"],
         "refinalized": True,
     }
 

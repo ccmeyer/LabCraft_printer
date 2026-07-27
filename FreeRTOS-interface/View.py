@@ -1625,11 +1625,26 @@ class MainWindow(QMainWindow):
     def disconnect_successful(self):
         self.disconnected = True
 
-    def complete_experiment_design(self, *, load_progress: bool = False):
+    def complete_experiment_design(
+        self,
+        *,
+        load_progress: bool = False,
+        requested_name: str | None = None,
+    ):
         """Handle completion of experiment design."""
         print("[MainWindow] Experiment design completed.")
+        experiment_model = self.model.experiment_model
+        if (
+            not load_progress
+            and requested_name is not None
+            and experiment_model.execution_plan_file_path
+            and os.path.isfile(experiment_model.execution_plan_file_path)
+        ):
+            return self.model.commit_prepared_experiment_design_from_editor(
+                requested_name=requested_name,
+            )
         plate_name = self.model.experiment_model.metadata.get("plate_name")
-        self.model.load_experiment_from_model(
+        return self.model.load_experiment_from_model(
             plate_name=plate_name,
             load_progress=load_progress,
             finalize_execution_plan=not load_progress,
@@ -14029,6 +14044,37 @@ class ExperimentDesignDialog(QDialog):
             return
         self._persist_design_identity_registry_entries()
 
+        has_prepared_plan = bool(
+            getattr(self.model, "execution_plan_file_path", None)
+            and os.path.isfile(self.model.execution_plan_file_path)
+        )
+        if has_prepared_plan:
+            try:
+                if self.main_window is None or not hasattr(
+                    self.main_window, "complete_experiment_design"
+                ):
+                    raise RuntimeError(
+                        "The prepared execution commit path is unavailable."
+                    )
+                result = self.main_window.complete_experiment_design(
+                    load_progress=False,
+                    requested_name=self.exp_name_edit.text().strip() or "Untitled",
+                )
+                self._apply_requested = True
+                status = str((result or {}).get("status") or "saved")
+                self._set_status(
+                    f"Prepared design {status}: {self.model.experiment_file_path}"
+                )
+            except Exception as exc:
+                message = str(exc) or "Could not save the prepared experiment."
+                self._set_status(message)
+                QMessageBox.warning(
+                    self,
+                    "Could not save prepared experiment",
+                    message,
+                )
+            return
+
         # Ensure folder exists / name is current, then save
         self._ensure_experiment_dir()
         self.model.save_experiment()
@@ -14319,7 +14365,7 @@ class ExperimentDesignDialog(QDialog):
             return
         bundle_getter = getattr(self.model, "get_authoritative_execution_bundle", None)
         bundle = bundle_getter() if callable(bundle_getter) else None
-        if bundle is not None:
+        if bundle is not None and self._model_execution_is_read_only(self.model):
             try:
                 if self.main_window is None or not hasattr(
                     self.main_window, "activate_authoritative_execution"
@@ -14375,19 +14421,31 @@ class ExperimentDesignDialog(QDialog):
             ):
                 return
 
-        # Ensure the folder exists and save the design itself
-        self._ensure_experiment_dir()
         self._persist_design_identity_registry_entries()
-        self.model.save_experiment()
+        has_prepared_plan = bool(
+            getattr(self.model, "execution_plan_file_path", None)
+            and os.path.isfile(self.model.execution_plan_file_path)
+        )
+        if not has_prepared_plan:
+            # Fresh finalization retains the existing create/save path.
+            self._ensure_experiment_dir()
+            self.model.save_experiment()
 
         self._set_status("Design finalized and saved. Closing...")
 
         # Propagate the experiment to the main window
         try:
             if self.main_window is not None and hasattr(self.main_window, "complete_experiment_design"):
-                self.main_window.complete_experiment_design(
-                    load_progress=getattr(self, "_preserve_progress_on_finish", False)
-                )
+                handoff = {
+                    "load_progress": getattr(
+                        self, "_preserve_progress_on_finish", False
+                    )
+                }
+                if has_prepared_plan:
+                    handoff["requested_name"] = (
+                        self.exp_name_edit.text().strip() or "Untitled"
+                    )
+                self.main_window.complete_experiment_design(**handoff)
                 self._apply_requested = True
         except Exception as e:
             message = str(e) or "Unknown error applying the experiment design."

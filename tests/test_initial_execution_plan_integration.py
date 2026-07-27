@@ -53,6 +53,54 @@ def _configure_design(em, *, randomize=False, seed=None):
     em.save_experiment()
 
 
+def _configure_minimal_editor_design(em):
+    em.factors = []
+    em.add_additive(
+        "Editor Stock",
+        [1.0],
+        "x",
+        10.0,
+        forced_stock_conc=1.0,
+        printing_mode="droplet",
+    )
+    em.set_metadata(
+        name="prepared-editor",
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=2,
+        target_reaction_volume_nL=10.0,
+        final_reaction_volume_nL=10.0,
+        printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Water",
+        fill_printing_mode="droplet",
+        fill_droplet_volume_nL=10.0,
+    )
+    em.set_well_selection(["A1", "A2"])
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    em.save_experiment()
+
+
+def _apply_stream_editor_revision(em):
+    option = em.factors[0].options[0]
+    option.targets = [0.5, 1.0]
+    option.printing_mode = "stream"
+    option.droplet_nL = 60.0
+    em.set_metadata(
+        name="prepared-editor-renamed",
+        replicates=3,
+        target_reaction_volume_nL=120.0,
+        final_reaction_volume_nL=120.0,
+        fill_printing_mode="stream",
+        fill_droplet_volume_nL=60.0,
+    )
+    em.set_well_selection(["A1", "A2", "A3", "A4", "A5", "A6"])
+    em._clear_design_derived_state()
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+
+
 def _well_targets(plan):
     return {
         well.well_id: {
@@ -184,6 +232,168 @@ def test_prepared_name_only_rename_replaces_and_reloads_authoritative_bundle(
     assert reloaded_bundle.valid
     assert reloaded_bundle.plan == plan
     assert reloaded_bundle.eligibility.status == "ready_to_start"
+
+
+def test_prepared_design_edit_replaces_plan_and_publishes_valid_bundle(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_minimal_editor_design(em)
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    source = Path(em.experiment_dir_path)
+    original_plan = load_execution_plan(em.execution_plan_file_path)
+
+    _apply_stream_editor_revision(em)
+    result = model.commit_prepared_experiment_design_from_editor(
+        requested_name="prepared-editor-renamed"
+    )
+
+    destination = source.parent / "prepared-editor-renamed"
+    design = json.loads(
+        (destination / "experiment_design.json").read_text(encoding="utf-8")
+    )
+    plan = load_execution_plan(destination / "execution_plan.json")
+    bundle = inspect_authoritative_execution(destination, design)
+    archived = (
+        destination
+        / "superseded_prepared_execution_plans"
+        / original_plan.plan_id
+    )
+
+    assert result["status"] == "replaced"
+    assert not source.exists()
+    assert plan.plan_id != original_plan.plan_id
+    assert plan.plan_revision == 1
+    assert plan.state is ExecutionPlanState.PREPARED
+    assert plan.design_sha256 == canonical_sha256(design)
+    assert [well.well_id for well in plan.wells] == [
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5",
+        "A6",
+    ]
+    assert {stock.printing_mode for stock in plan.stocks} == {"stream"}
+    assert bundle.valid
+    assert bundle.eligibility.status == "ready_to_start"
+    assert bundle.resume is None
+    assert all(
+        int(details["added_droplets"]) == 0
+        for well in bundle.progress_wells.values()
+        for details in well["reagents"].values()
+    )
+    assert load_execution_plan(
+        archived / "prepared_plan_at_replacement.json"
+    ) == original_plan
+    assert json.loads(
+        (archived / "experiment_design_at_replacement.json").read_text(
+            encoding="utf-8"
+        )
+    )["metadata"]["name"] == "prepared-editor"
+    assert not list(source.parent.glob(".*.staging-*"))
+    assert not list(source.parent.glob(".*.rollback-*"))
+
+
+def test_disk_loaded_untouched_prepared_design_is_editable_and_replaceable(
+    experiment_model_factory,
+):
+    source_model = experiment_model_factory()
+    source_em = source_model.experiment_model
+    _configure_minimal_editor_design(source_em)
+    Model.load_experiment_from_model(source_model, finalize_execution_plan=True)
+    original_plan = load_execution_plan(source_em.execution_plan_file_path)
+
+    loaded = experiment_model_factory()
+    loaded_em = loaded.experiment_model
+    bundle = loaded_em.load_experiment(
+        source_em.experiment_file_path,
+        source_em.experiment_dir_path,
+    )
+
+    assert bundle.valid
+    assert bundle.eligibility.status == "ready_to_start"
+    assert not loaded_em.is_execution_design_locked()
+    loaded_em.metadata["printed_volume_tolerance_nL"] = 1.0
+    loaded_em._clear_design_derived_state()
+    assert loaded_em.optimize_stock_solutions()["best"]
+    loaded_em.generate_experiment()
+
+    result = loaded.commit_prepared_experiment_design_from_editor(
+        requested_name="prepared-editor"
+    )
+    replacement = load_execution_plan(loaded_em.execution_plan_file_path)
+
+    assert result["status"] == "replaced"
+    assert replacement.plan_id != original_plan.plan_id
+    assert replacement.volume_basis.design_optimization_tolerance_nL == 1.0
+    assert not loaded_em.is_execution_design_locked()
+
+
+def test_prepared_replacement_failure_leaves_original_directory_byte_identical(
+    experiment_model_factory,
+    monkeypatch,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_minimal_editor_design(em)
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    source = Path(em.experiment_dir_path)
+    before = _directory_bytes(source)
+    original_save = model_module.save_execution_plan
+
+    em.metadata["printed_volume_tolerance_nL"] = 1.0
+    em._clear_design_derived_state()
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+
+    def fail_replacement(path, plan):
+        if plan.plan_id != em.get_execution_plan_snapshot().plan_id:
+            raise OSError("injected prepared replacement failure")
+        return original_save(path, plan)
+
+    monkeypatch.setattr(model_module, "save_execution_plan", fail_replacement)
+
+    with pytest.raises(
+        RuntimeError, match="injected prepared replacement failure"
+    ):
+        model.commit_prepared_experiment_design_from_editor(
+            requested_name="prepared-editor"
+        )
+
+    assert _directory_bytes(source) == before
+    assert Path(em.experiment_dir_path) == source
+    assert not list(source.parent.glob(".*.staging-*"))
+    assert not list(source.parent.glob(".*.rollback-*"))
+
+
+@pytest.mark.parametrize("start_reason", ["calibration_started", "printing_started"])
+def test_prepared_design_replacement_rejects_started_execution_without_mutation(
+    experiment_model_factory,
+    start_reason,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_minimal_editor_design(em)
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    em.lock_execution_plan(start_reason)
+    source = Path(em.experiment_dir_path)
+    before = _directory_bytes(source)
+
+    em.metadata["printed_volume_tolerance_nL"] = 1.0
+    with pytest.raises(
+        RuntimeError,
+        match="active authoritative execution|untouched PREPARED",
+    ):
+        model.commit_prepared_experiment_design_from_editor(
+            requested_name="prepared-editor"
+        )
+
+    assert _directory_bytes(source) == before
+    assert Path(em.experiment_dir_path) == source
+    assert not list(source.parent.glob(".*.staging-*"))
+    assert not list(source.parent.glob(".*.rollback-*"))
 
 
 @pytest.mark.parametrize("start_reason", ["calibration_started", "printing_started"])

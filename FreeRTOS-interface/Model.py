@@ -536,6 +536,7 @@ class ExperimentModel(QObject):
         self._last_authoritative_pass_preparation = None
         self._last_authoritative_terminal_transition = None
         self._progress_execution_reference: ProgressExecutionReference | None = None
+        self._prepared_execution_replacement_context: dict[str, Any] | None = None
 
         # optional dependency (if you have one); safe to ignore if None
         self._calibration_manager = None
@@ -7037,6 +7038,73 @@ class ExperimentModel(QObject):
         self._atomic_json_dump(self.experiment_file_path, data)
         self.unsaved_changes = False
 
+    @staticmethod
+    def _bundle_is_untouched_prepared(bundle) -> bool:
+        if (
+            bundle is None
+            or not bundle.valid
+            or bundle.plan is None
+            or bundle.plan.state is not ExecutionPlanState.PREPARED
+            or bundle.plan.plan_revision != 1
+            or bundle.eligibility.status != "ready_to_start"
+            or bundle.resume is not None
+        ):
+            return False
+        calibrations = bundle.calibrations
+        if calibrations is not None and (
+            calibrations.records or calibrations.manual_refuel_checks
+        ):
+            return False
+        return not any(
+            int(details.get("added_droplets", 0) or 0) != 0
+            or bool(well.get("completed"))
+            for well in bundle.progress_wells.values()
+            for details in (well.get("reagents") or {}).values()
+        )
+
+    def prepare_untouched_prepared_execution_replacement(self) -> dict[str, Any]:
+        """Validate and snapshot a replaceable PREPARED bundle before mutation."""
+        if self.is_authoritative_execution_runtime_active():
+            raise RuntimeError(
+                "An active authoritative execution cannot be replaced in place."
+            )
+        source = Path(self.experiment_dir_path or "").resolve()
+        if not source.is_dir():
+            raise RuntimeError("The current experiment folder is unavailable.")
+        design_path = source / "experiment_design.json"
+        plan_path = source / "execution_plan.json"
+        if not design_path.is_file() or not plan_path.is_file():
+            raise RuntimeError(
+                "A prepared execution replacement requires saved design and plan files."
+            )
+        with open(design_path, "r", encoding="utf-8") as handle:
+            original_design = json.load(handle)
+        if not isinstance(original_design, dict):
+            raise RuntimeError("The persisted experiment design is invalid.")
+        bundle = inspect_authoritative_execution(source, original_design)
+        if not self._bundle_is_untouched_prepared(bundle):
+            detail = "; ".join(issue.message for issue in bundle.issues)
+            raise RuntimeError(
+                "Only a valid untouched PREPARED execution with zero progress, "
+                "no resume checkpoint, and no calibration history may be replaced. "
+                + (detail or bundle.eligibility.reason)
+            )
+        history = validate_revision_history(
+            source / REVISION_DIRECTORY_NAME,
+            latest_plan=bundle.plan,
+        )
+        if history != (bundle.plan,):
+            raise RuntimeError(
+                "Prepared execution replacement requires exactly one immutable revision."
+            )
+        return {
+            "source": source,
+            "original_design": copy.deepcopy(original_design),
+            "bundle": bundle,
+            "plan": bundle.plan,
+            "progress": copy.deepcopy(bundle.progress_wells),
+        }
+
     def load_experiment(
         self,
         filename: str,
@@ -7069,13 +7137,16 @@ class ExperimentModel(QObject):
         self._last_authoritative_pass_preparation = None
         self._last_authoritative_terminal_transition = None
         self._progress_execution_reference = None
+        self._prepared_execution_replacement_context = None
         self.progress_data = {}
         
         if self.execution_plan_file_path and os.path.isfile(self.execution_plan_file_path):
-            self._execution_plan_reload_read_only = True
             self._execution_plan_source = "persisted_execution_plan"
             bundle = inspect_authoritative_execution(experiment_dir, data)
             self._authoritative_execution_bundle = bundle
+            self._execution_plan_reload_read_only = not (
+                self._bundle_is_untouched_prepared(bundle)
+            )
             if bundle.plan is not None:
                 self._execution_plan_snapshot = bundle.plan
                 self._reconstructed_execution_plan = bundle.plan
@@ -7159,6 +7230,7 @@ class ExperimentModel(QObject):
         self._last_authoritative_pass_preparation = None
         self._last_authoritative_terminal_transition = None
         self._progress_execution_reference = None
+        self._prepared_execution_replacement_context = None
 
     def is_read_only_legacy_execution(self) -> bool:
         return bool(getattr(self, "_legacy_execution_read_only", False))
@@ -8173,6 +8245,8 @@ class ExperimentModel(QObject):
             self, "_execution_plan_reload_read_only", False
         ):
             return True
+        if self.is_authoritative_execution_runtime_active():
+            return True
         plan = self.get_execution_plan_snapshot()
         return bool(plan is not None and plan.state is not ExecutionPlanState.PREPARED)
 
@@ -8294,11 +8368,74 @@ class ExperimentModel(QObject):
         if os.path.exists(self.execution_plan_file_path):
             existing = load_execution_plan(self.execution_plan_file_path)
             if not initial_execution_content_matches(existing, candidate):
-                raise RuntimeError(
-                    "An existing execution_plan.json does not match the finalized design and runtime assignments."
+                replacement = getattr(
+                    self, "_prepared_execution_replacement_context", None
                 )
-            plan = existing
-            status = "reused"
+                if (
+                    not isinstance(replacement, dict)
+                    or replacement.get("plan") != existing
+                ):
+                    raise RuntimeError(
+                        "An existing execution_plan.json does not match the finalized design and runtime assignments."
+                    )
+                archive = (
+                    Path(self.experiment_dir_path)
+                    / "superseded_prepared_execution_plans"
+                    / existing.plan_id
+                )
+                archive.mkdir(parents=True, exist_ok=False)
+                self._atomic_json_dump(
+                    str(archive / "experiment_design_at_replacement.json"),
+                    replacement["original_design"],
+                )
+                os.replace(
+                    self.execution_plan_file_path,
+                    archive / "prepared_plan_at_replacement.json",
+                )
+                os.replace(
+                    self.execution_plan_revisions_dir_path,
+                    archive / REVISION_DIRECTORY_NAME,
+                )
+                save_execution_plan(self.execution_plan_file_path, candidate)
+                if (
+                    self.execution_calibrations_file_path
+                    and os.path.isfile(self.execution_calibrations_file_path)
+                ):
+                    save_execution_calibrations(
+                        self.execution_calibrations_file_path,
+                        ExecutionCalibrationDocument(plan_id=candidate.plan_id),
+                    )
+                plan = candidate
+                status = "replaced"
+                self._audit_execution_plan_event(
+                    "prepared_execution_replaced",
+                    "Untouched prepared execution replaced after editor changes",
+                    details={
+                        "previous_plan_id": existing.plan_id,
+                        "replacement_plan_id": candidate.plan_id,
+                        "previous_design_sha256": existing.design_sha256,
+                        "replacement_design_sha256": candidate.design_sha256,
+                        "previous_name": str(
+                            (
+                                replacement["original_design"].get("metadata")
+                                or {}
+                            ).get("name")
+                            or ""
+                        ),
+                        "replacement_name": str(
+                            (self.metadata or {}).get("name") or ""
+                        ),
+                        "runtime_assignments_changed": bool(
+                            existing.plate != candidate.plate
+                            or existing.volume_basis != candidate.volume_basis
+                            or existing.stocks != candidate.stocks
+                            or existing.wells != candidate.wells
+                        ),
+                    },
+                )
+            else:
+                plan = existing
+                status = "reused"
         else:
             save_execution_plan(self.execution_plan_file_path, candidate)
             plan = candidate
@@ -11545,6 +11682,7 @@ class ExperimentModel(QObject):
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
         self._progress_execution_reference = None
+        self._prepared_execution_replacement_context = None
 
         # clear any uploaded/manual reaction list state
         self._uploaded_reactions = None
@@ -15214,11 +15352,159 @@ class Model(QObject):
 
         return ssm, rc
 
+    def commit_prepared_experiment_design_from_editor(
+        self,
+        *,
+        requested_name: str,
+    ) -> dict[str, Any]:
+        """Transactionally replace an untouched PREPARED editor design."""
+        experiment_model = self.experiment_model
+        replacement = (
+            experiment_model.prepare_untouched_prepared_execution_replacement()
+        )
+        source = Path(replacement["source"]).resolve()
+        normalized_name = experiment_model.sanitize_experiment_name(requested_name)
+        destination = source.parent / normalized_name
+        if destination != source and destination.exists():
+            raise FileExistsError(
+                f"Experiment folder already exists: {destination}"
+            )
+
+        requested_design = copy.deepcopy(experiment_model.to_dict())
+        requested_design.setdefault("metadata", {})["name"] = normalized_name
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".{normalized_name}.staging-",
+                dir=source.parent,
+            )
+        ).resolve()
+        if staging.parent != source.parent:
+            raise RuntimeError(
+                "Prepared replacement staging escaped the experiment parent."
+            )
+        shutil.copytree(source, staging, dirs_exist_ok=True)
+        rollback = source.parent / f".{source.name}.rollback-{time.time_ns()}"
+        published = False
+        try:
+            experiment_model.metadata["name"] = normalized_name
+            experiment_model.experiment_dir_path = str(staging)
+            experiment_model.update_all_paths()
+            experiment_model._prepared_execution_replacement_context = replacement
+            experiment_model.save_experiment()
+            self.load_experiment_from_model(
+                plate_name=experiment_model.metadata.get("plate_name"),
+                load_progress=False,
+                finalize_execution_plan=True,
+                emit_loaded=False,
+            )
+
+            staged_design = json.loads(
+                Path(experiment_model.experiment_file_path).read_text(
+                    encoding="utf-8"
+                )
+            )
+            staged_bundle = inspect_authoritative_execution(staging, staged_design)
+            if (
+                not staged_bundle.valid
+                or staged_bundle.plan is None
+                or staged_bundle.plan.state is not ExecutionPlanState.PREPARED
+                or staged_bundle.plan.plan_revision != 1
+                or staged_bundle.eligibility.status != "ready_to_start"
+                or staged_bundle.resume is not None
+            ):
+                detail = "; ".join(
+                    issue.message for issue in staged_bundle.issues
+                )
+                raise RuntimeError(
+                    "The staged prepared replacement did not validate: "
+                    + (detail or staged_bundle.eligibility.reason)
+                )
+
+            os.replace(source, rollback)
+            try:
+                os.replace(staging, destination)
+                published_design = json.loads(
+                    (destination / "experiment_design.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                published_bundle = inspect_authoritative_execution(
+                    destination,
+                    published_design,
+                )
+                if not published_bundle.valid:
+                    raise RuntimeError(
+                        "The published prepared replacement could not be reloaded."
+                    )
+            except Exception:
+                if destination.exists() and not staging.exists():
+                    os.replace(destination, staging)
+                os.replace(rollback, source)
+                raise
+            try:
+                shutil.rmtree(rollback)
+            except Exception:
+                os.replace(destination, staging)
+                os.replace(rollback, source)
+                raise
+
+            published = True
+            experiment_model.experiment_dir_path = str(destination)
+            experiment_model.update_all_paths()
+            experiment_model._authoritative_execution_bundle = published_bundle
+            experiment_model._execution_plan_snapshot = published_bundle.plan
+            experiment_model._reconstructed_execution_plan = published_bundle.plan
+            experiment_model._execution_plan_source = "new_finalization"
+            experiment_model._execution_plan_reload_read_only = False
+            experiment_model._authoritative_runtime_active = False
+            experiment_model._prepared_execution_replacement_context = None
+            self.experiment_loaded.emit()
+            return {
+                "status": (
+                    "reused"
+                    if published_bundle.plan.plan_id
+                    == replacement["plan"].plan_id
+                    else "replaced"
+                ),
+                "previous_plan_id": replacement["plan"].plan_id,
+                "plan_id": published_bundle.plan.plan_id,
+                "experiment_dir": str(destination),
+            }
+        finally:
+            experiment_model._prepared_execution_replacement_context = None
+            if not published:
+                try:
+                    self._clear_runtime_experiment_without_signal()
+                except Exception:
+                    pass
+                experiment_model.from_dict(requested_design)
+                experiment_model.experiment_dir_path = str(source)
+                experiment_model.update_all_paths()
+                experiment_model._execution_plan_snapshot = replacement["plan"]
+                experiment_model._reconstructed_execution_plan = replacement["plan"]
+                experiment_model._execution_plan_source = "new_finalization"
+                experiment_model._progress_execution_reference = (
+                    ProgressExecutionReference(
+                        plan_id=replacement["plan"].plan_id,
+                        plan_revision=replacement["plan"].plan_revision,
+                    )
+                )
+                experiment_model.progress_data = copy.deepcopy(
+                    replacement["progress"]
+                )
+                experiment_model._authoritative_execution_bundle = replacement[
+                    "bundle"
+                ]
+                experiment_model._execution_plan_reload_read_only = False
+                if staging.exists() and staging.parent == source.parent:
+                    shutil.rmtree(staging)
+
     def load_experiment_from_model(
         self,
         plate_name=None,
         load_progress=False,
         finalize_execution_plan=False,
+        emit_loaded=True,
     ):
         if finalize_execution_plan and load_progress:
             raise ValueError(
@@ -15407,7 +15693,8 @@ class Model(QObject):
                 ),
             },
         )
-        self.experiment_loaded.emit()
+        if emit_loaded:
+            self.experiment_loaded.emit()
 
     def get_well_stock_final_concentration(self, well_id: str, stock_id: str):
         """

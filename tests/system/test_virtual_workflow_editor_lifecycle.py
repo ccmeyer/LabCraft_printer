@@ -60,33 +60,47 @@ def test_editor_prestart_rename_refinalize_fixture_contract_is_exact():
 
     assert fixture == {
         "fixture_id": RENAME_WORKLOAD_ID,
-        "schema_version": 1,
+        "schema_version": 2,
         "experiment": {
             "initial_name": "sil-editor-prestart-rename-v1",
             "renamed_name": "sil-editor-prestart-renamed-v1",
             "plate_name": "shallow-384_well_plate",
-            "replicates": 2,
-            "expected_well_ids": ["A1", "A2"],
-            "printed_volume_nL": 10.0,
-            "final_volume_nL": 10.0,
+            "initial_replicates": 2,
+            "initial_expected_well_ids": ["A1", "A2"],
+            "initial_printed_volume_nL": 10.0,
+            "initial_final_volume_nL": 10.0,
+            "refinalized_replicates": 3,
+            "refinalized_expected_well_ids": [
+                "A1", "A2", "A3", "A4", "A5", "A6"
+            ],
+            "refinalized_printed_volume_nL": 120.0,
+            "refinalized_final_volume_nL": 120.0,
             "printed_volume_tolerance_nL": 0.0,
             "randomize_assignments": False,
             "allow_two_stock_solutions": False,
+            "initial_fill_printing_mode": "droplet",
+            "initial_fill_droplet_volume_nL": 10.0,
+            "refinalized_fill_printing_mode": "stream",
+            "refinalized_fill_droplet_volume_nL": 60.0,
         },
         "reagent": {
             "stock_label": "Editor Stock",
             "group": "Additive",
-            "printing_mode": "droplet",
+            "initial_printing_mode": "droplet",
+            "refinalized_printing_mode": "stream",
             "starting_concentration": 0.0,
-            "targets": [1.0],
+            "initial_targets": [1.0],
+            "refinalized_targets": [0.5, 1.0],
             "units": "x",
             "fixed_stock_concentration": 1.0,
-            "droplet_volume_nL": 10.0,
+            "initial_droplet_volume_nL": 10.0,
+            "refinalized_droplet_volume_nL": 60.0,
         },
         "workload": {
             "completion_count": 2,
             "expected_editor_finalization_operations": 2,
             "expected_rename_operations": 1,
+            "expected_prepared_design_edit_operations": 1,
         },
     }
 
@@ -302,6 +316,8 @@ def test_editor_prestart_rename_refinalize_lifecycle_report(qapp, tmp_path):
         "initial_finalized",
         "rename_editor_opened",
         "renamed",
+        "prepared_design_edited",
+        "regenerated",
         "refinalized",
         "reloaded",
         "validated",
@@ -320,6 +336,10 @@ def test_editor_prestart_rename_refinalize_lifecycle_report(qapp, tmp_path):
         "editor.open_via_ui",
         "artifact.capture_milestone",
         "editor.rename_prepared_via_ui",
+        "artifact.capture_milestone",
+        "editor.edit_prepared_design_via_ui",
+        "artifact.capture_milestone",
+        "editor.regenerate_prepared_design_via_ui",
         "artifact.capture_milestone",
         "editor.refinalize_prepared_via_ui",
         "artifact.capture_milestone",
@@ -348,6 +368,8 @@ def test_editor_prestart_rename_refinalize_lifecycle_report(qapp, tmp_path):
     assert refinalized["plan_state"] == "prepared"
     assert refinalized["eligibility_status"] == "ready_to_start"
     assert refinalized["total_added_droplets"] == 0
+    assert refinalized["well_ids"] == ["A1", "A2", "A3", "A4", "A5", "A6"]
+    assert before["plan_id"] != after["plan_id"]
     assert refinalized["experiment_directories"] == [
         "sil-editor-prestart-renamed-v1"
     ]
@@ -363,6 +385,8 @@ def test_editor_prestart_rename_refinalize_lifecycle_report(qapp, tmp_path):
         "initial_finalized",
         "rename_editor_opened",
         "renamed",
+        "prepared_design_edited",
+        "regenerated",
         "refinalized",
         "reloaded",
         "validated",
@@ -382,7 +406,14 @@ def test_editor_rename_failure_retains_evidence_and_incomplete_assertions(
 ):
     import tools.virtual_workflows.editor_scenarios as scenarios
 
-    def fail_refinalize(_context, *, initial_name, renamed_name):
+    def fail_refinalize(
+        _context,
+        *,
+        initial_name,
+        renamed_name,
+        experiment,
+        reagent,
+    ):
         raise ScenarioActionError(
             "editor.refinalize_prepared_via_ui",
             "synthetic prepared refinalization failure",

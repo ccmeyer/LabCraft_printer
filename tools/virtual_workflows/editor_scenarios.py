@@ -59,6 +59,7 @@ RENAME_ASSERTION_IDS = (
     "sil.host_hardware_disabled",
     "ui.real_app_constructed",
     "experiment.prepared_rename_refinalize",
+    "experiment.prepared_design_refinalize",
     "experiment.renamed_artifacts_unique",
     "experiment.refinalized_bundle_valid",
     "experiment.prepared_reload_ready",
@@ -239,7 +240,7 @@ def load_editor_create_finalize_fixture(
 def load_editor_prestart_rename_refinalize_fixture(
     path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Load the exact tracked prepared rename/refinalize fixture."""
+    """Load the exact tracked prepared edit/rename/refinalize fixture."""
 
     fixture_path = Path(path or RENAME_FIXTURE_PATH).resolve()
     try:
@@ -259,13 +260,21 @@ def load_editor_prestart_rename_refinalize_fixture(
             "initial_name",
             "renamed_name",
             "plate_name",
-            "replicates",
-            "expected_well_ids",
-            "printed_volume_nL",
-            "final_volume_nL",
+            "initial_replicates",
+            "initial_expected_well_ids",
+            "initial_printed_volume_nL",
+            "initial_final_volume_nL",
+            "refinalized_replicates",
+            "refinalized_expected_well_ids",
+            "refinalized_printed_volume_nL",
+            "refinalized_final_volume_nL",
             "printed_volume_tolerance_nL",
             "randomize_assignments",
             "allow_two_stock_solutions",
+            "initial_fill_printing_mode",
+            "initial_fill_droplet_volume_nL",
+            "refinalized_fill_printing_mode",
+            "refinalized_fill_droplet_volume_nL",
         },
         "fixture.experiment",
     )
@@ -274,12 +283,15 @@ def load_editor_prestart_rename_refinalize_fixture(
         {
             "stock_label",
             "group",
-            "printing_mode",
+            "initial_printing_mode",
+            "refinalized_printing_mode",
             "starting_concentration",
-            "targets",
+            "initial_targets",
+            "refinalized_targets",
             "units",
             "fixed_stock_concentration",
-            "droplet_volume_nL",
+            "initial_droplet_volume_nL",
+            "refinalized_droplet_volume_nL",
         },
         "fixture.reagent",
     )
@@ -289,38 +301,58 @@ def load_editor_prestart_rename_refinalize_fixture(
             "completion_count",
             "expected_editor_finalization_operations",
             "expected_rename_operations",
+            "expected_prepared_design_edit_operations",
         },
         "fixture.workload",
     )
     expected = {
         "fixture_id": RENAME_WORKLOAD_ID,
-        "schema_version": 1,
+        "schema_version": 2,
         "experiment": {
             "initial_name": "sil-editor-prestart-rename-v1",
             "renamed_name": "sil-editor-prestart-renamed-v1",
             "plate_name": "shallow-384_well_plate",
-            "replicates": 2,
-            "expected_well_ids": ["A1", "A2"],
-            "printed_volume_nL": 10.0,
-            "final_volume_nL": 10.0,
+            "initial_replicates": 2,
+            "initial_expected_well_ids": ["A1", "A2"],
+            "initial_printed_volume_nL": 10.0,
+            "initial_final_volume_nL": 10.0,
+            "refinalized_replicates": 3,
+            "refinalized_expected_well_ids": [
+                "A1",
+                "A2",
+                "A3",
+                "A4",
+                "A5",
+                "A6",
+            ],
+            "refinalized_printed_volume_nL": 120.0,
+            "refinalized_final_volume_nL": 120.0,
             "printed_volume_tolerance_nL": 0.0,
             "randomize_assignments": False,
             "allow_two_stock_solutions": False,
+            "initial_fill_printing_mode": "droplet",
+            "initial_fill_droplet_volume_nL": 10.0,
+            "refinalized_fill_printing_mode": "stream",
+            "refinalized_fill_droplet_volume_nL": 60.0,
         },
         "reagent": {
             "stock_label": "Editor Stock",
             "group": "Additive",
-            "printing_mode": "droplet",
+            "initial_printing_mode": "droplet",
+            "refinalized_printing_mode": "stream",
             "starting_concentration": 0.0,
-            "targets": [1.0],
+            "initial_targets": [1.0],
+            "refinalized_targets": [0.5, 1.0],
             "units": "x",
             "fixed_stock_concentration": 1.0,
-            "droplet_volume_nL": 10.0,
+            "initial_droplet_volume_nL": 10.0,
+            "refinalized_droplet_volume_nL": 60.0,
         },
         "workload": {
             "completion_count": 2,
             "expected_editor_finalization_operations": 2,
             "expected_rename_operations": 1,
+            "expected_prepared_design_edit_operations": 1,
         },
     }
     normalized = {
@@ -452,6 +484,40 @@ def _initial_design_fixture(fixture: Mapping[str, Any]) -> dict[str, Any]:
     if fixture["fixture_id"] == RENAME_WORKLOAD_ID:
         experiment["name"] = experiment.pop("initial_name")
         experiment.pop("renamed_name")
+        experiment["replicates"] = experiment.pop("initial_replicates")
+        experiment["expected_well_ids"] = experiment.pop(
+            "initial_expected_well_ids"
+        )
+        experiment["printed_volume_nL"] = experiment.pop(
+            "initial_printed_volume_nL"
+        )
+        experiment["final_volume_nL"] = experiment.pop(
+            "initial_final_volume_nL"
+        )
+        experiment["fill_printing_mode"] = experiment.pop(
+            "initial_fill_printing_mode"
+        )
+        experiment["fill_droplet_volume_nL"] = experiment.pop(
+            "initial_fill_droplet_volume_nL"
+        )
+        for key in (
+            "refinalized_replicates",
+            "refinalized_expected_well_ids",
+            "refinalized_printed_volume_nL",
+            "refinalized_final_volume_nL",
+            "refinalized_fill_printing_mode",
+            "refinalized_fill_droplet_volume_nL",
+        ):
+            experiment.pop(key)
+        reagent = initial["reagent"]
+        reagent["printing_mode"] = reagent.pop("initial_printing_mode")
+        reagent["targets"] = reagent.pop("initial_targets")
+        reagent["droplet_volume_nL"] = reagent.pop(
+            "initial_droplet_volume_nL"
+        )
+        reagent.pop("refinalized_printing_mode")
+        reagent.pop("refinalized_targets")
+        reagent.pop("refinalized_droplet_volume_nL")
     else:
         experiment["name"] = experiment.pop("source_name")
         experiment.pop("copy_name")
@@ -487,6 +553,8 @@ EDITOR_SCENARIO_DEFINITIONS = {
                 "initial_finalized",
                 "rename_editor_opened",
                 "renamed",
+                "prepared_design_edited",
+                "regenerated",
                 "refinalized",
                 "reloaded",
                 "validated",
@@ -1024,12 +1092,31 @@ def _run_editor_lifecycle_scenario(
                 context,
                 initial_name=fixture["experiment"]["initial_name"],
                 renamed_name=fixture["experiment"]["renamed_name"],
+                experiment=fixture["experiment"],
+                reagent=fixture["reagent"],
             )
             assertion_evidence["experiment.prepared_rename_refinalize"] = {
                 "initial_name": fixture["experiment"]["initial_name"],
                 "renamed_name": fixture["experiment"]["renamed_name"],
                 "finalization_operations": fixture["workload"][
                     "expected_editor_finalization_operations"
+                ],
+            }
+            assertion_evidence["experiment.prepared_design_refinalize"] = {
+                "edit_operations": fixture["workload"][
+                    "expected_prepared_design_edit_operations"
+                ],
+                "refinalized_replicates": fixture["experiment"][
+                    "refinalized_replicates"
+                ],
+                "refinalized_well_ids": fixture["experiment"][
+                    "refinalized_expected_well_ids"
+                ],
+                "refinalized_reagent_mode": fixture["reagent"][
+                    "refinalized_printing_mode"
+                ],
+                "refinalized_fill_mode": fixture["experiment"][
+                    "refinalized_fill_printing_mode"
                 ],
             }
 
@@ -1057,7 +1144,7 @@ def _run_editor_lifecycle_scenario(
                     bundle.progress_payload,
                 )
                 expected_wells = fixture["experiment"][
-                    "expected_well_ids"
+                    "refinalized_expected_well_ids"
                 ]
                 plan_wells = [well.well_id for well in plan.wells]
                 expected_assignments = {
@@ -1093,9 +1180,32 @@ def _run_editor_lifecycle_scenario(
                     for well_id, row in key_rows.items()
                 }
                 concentration_values = {
-                    well_id: sum(float(value or 0) for value in row.values())
+                    well_id: sum(
+                        float(value or 0)
+                        for column, value in row.items()
+                        if column.startswith(
+                            f"{fixture['reagent']['stock_label']}_"
+                        )
+                    )
                     for well_id, row in concentration_rows.items()
                 }
+                expected_concentrations = sorted(
+                    float(target)
+                    for target in fixture["reagent"]["refinalized_targets"]
+                    for _ in range(
+                        fixture["experiment"]["refinalized_replicates"]
+                    )
+                )
+                observed_concentrations = sorted(
+                    concentration_values.values()
+                )
+                metadata = design.get("metadata", {})
+                factors = design.get("factors", [])
+                reagent_option = (
+                    factors[0].get("options", [{}])[0]
+                    if len(factors) == 1
+                    else {}
+                )
                 calibration_path = (
                     experiment_dir / "execution_calibrations.json"
                 )
@@ -1156,6 +1266,17 @@ def _run_editor_lifecycle_scenario(
                         for path in revision_paths
                     },
                 }
+                archived_root = (
+                    experiment_dir
+                    / "superseded_prepared_execution_plans"
+                    / initial_plan.plan_id
+                )
+                archived_plan_path = (
+                    archived_root / "prepared_plan_at_replacement.json"
+                )
+                archived_design_path = (
+                    archived_root / "experiment_design_at_replacement.json"
+                )
                 checks = {
                     "old_directory_absent": not initial_dir.exists(),
                     "renamed_directory_present": experiment_dir.is_dir(),
@@ -1165,13 +1286,80 @@ def _run_editor_lifecycle_scenario(
                         "metadata", {}
                     ).get("name")
                     == fixture["experiment"]["renamed_name"],
-                    "only_name_changed": _design_without_name(design)
-                    == _design_without_name(initial_design),
+                    "replicates_updated": metadata.get("replicates")
+                    == fixture["experiment"]["refinalized_replicates"],
+                    "printed_volume_updated": math.isclose(
+                        float(metadata.get("target_reaction_volume_nL", -1)),
+                        fixture["experiment"][
+                            "refinalized_printed_volume_nL"
+                        ],
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    ),
+                    "final_volume_updated": math.isclose(
+                        float(metadata.get("final_reaction_volume_nL", -1)),
+                        fixture["experiment"][
+                            "refinalized_final_volume_nL"
+                        ],
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    ),
+                    "fill_mode_updated": metadata.get("fill_printing_mode")
+                    == fixture["experiment"][
+                        "refinalized_fill_printing_mode"
+                    ],
+                    "fill_droplet_updated": math.isclose(
+                        float(metadata.get("fill_droplet_volume_nL", -1)),
+                        fixture["experiment"][
+                            "refinalized_fill_droplet_volume_nL"
+                        ],
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    ),
+                    "reagent_mode_updated": reagent_option.get(
+                        "printing_mode"
+                    )
+                    == fixture["reagent"]["refinalized_printing_mode"],
+                    "reagent_targets_updated": reagent_option.get("targets")
+                    == fixture["reagent"]["refinalized_targets"],
+                    "reagent_droplet_updated": math.isclose(
+                        float(reagent_option.get("droplet_nL", -1)),
+                        fixture["reagent"][
+                            "refinalized_droplet_volume_nL"
+                        ],
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    ),
                     "bundle_valid": bool(bundle.valid),
                     "design_hash_matches": plan.design_sha256
                     == canonical_sha256(design),
+                    "fresh_plan_identity": plan.plan_id
+                    != initial_plan.plan_id,
+                    "plan_revision_one": plan.plan_revision == 1,
                     "plan_prepared": plan.state
                     is ExecutionPlanState.PREPARED,
+                    "plan_volume_basis_updated": (
+                        math.isclose(
+                            plan.volume_basis.target_printed_volume_nL,
+                            fixture["experiment"][
+                                "refinalized_printed_volume_nL"
+                            ],
+                            rel_tol=0.0,
+                            abs_tol=1e-9,
+                        )
+                        and math.isclose(
+                            plan.volume_basis.final_reaction_volume_nL,
+                            fixture["experiment"][
+                                "refinalized_final_volume_nL"
+                            ],
+                            rel_tol=0.0,
+                            abs_tol=1e-9,
+                        )
+                    ),
+                    "plan_modes_updated": {
+                        stock.printing_mode for stock in plan.stocks
+                    }
+                    == {fixture["reagent"]["refinalized_printing_mode"]},
                     "plan_wells_exact": plan_wells == expected_wells,
                     "history_current_matches": bool(bundle.history)
                     and bundle.history[-1] == plan,
@@ -1189,19 +1377,34 @@ def _run_editor_lifecycle_scenario(
                     )
                     == expected_wells,
                     "key_targets_match": key_totals == target_by_well,
-                    "concentration_targets_match": all(
+                    "concentration_targets_match": len(
+                        observed_concentrations
+                    )
+                    == len(expected_concentrations)
+                    and all(
                         math.isclose(
-                            value,
-                            1.0,
+                            observed,
+                            expected,
                             rel_tol=0.0,
                             abs_tol=1e-9,
                         )
-                        for value in concentration_values.values()
+                        for observed, expected in zip(
+                            observed_concentrations,
+                            expected_concentrations,
+                        )
                     ),
                     "runtime_assignments_match_plan": assignments
                     == expected_assignments,
-                    "runtime_assignments_unchanged": assignments
-                    == initial_assignments,
+                    "runtime_assignments_replaced": assignments
+                    != initial_assignments,
+                    "original_plan_archived": archived_plan_path.is_file()
+                    and load_execution_plan(archived_plan_path)
+                    == initial_plan,
+                    "original_design_archived": archived_design_path.is_file()
+                    and json.loads(
+                        archived_design_path.read_text(encoding="utf-8")
+                    )
+                    == initial_design,
                     "calibration_history_absent": calibration_empty,
                     "printing_history_absent": total_added == 0,
                     "single_experiment_directory": (
@@ -1225,6 +1428,7 @@ def _run_editor_lifecycle_scenario(
                     design_path=str(design_path),
                     initial_name=fixture["experiment"]["initial_name"],
                     renamed_name=fixture["experiment"]["renamed_name"],
+                    previous_plan_id=initial_plan.plan_id,
                     plan_id=plan.plan_id,
                     plan_revision=plan.plan_revision,
                     plan_state=plan.state.value,
@@ -1232,6 +1436,33 @@ def _run_editor_lifecycle_scenario(
                     history_count=len(bundle.history),
                     well_ids=plan_wells,
                     runtime_assignments=assignments,
+                    runtime_assignments_before=initial_assignments,
+                    expected_design_updates={
+                        "replicates": fixture["experiment"][
+                            "refinalized_replicates"
+                        ],
+                        "well_ids": expected_wells,
+                        "printed_volume_nL": fixture["experiment"][
+                            "refinalized_printed_volume_nL"
+                        ],
+                        "final_volume_nL": fixture["experiment"][
+                            "refinalized_final_volume_nL"
+                        ],
+                        "reagent_targets": fixture["reagent"][
+                            "refinalized_targets"
+                        ],
+                        "reagent_printing_mode": fixture["reagent"][
+                            "refinalized_printing_mode"
+                        ],
+                        "fill_printing_mode": fixture["experiment"][
+                            "refinalized_fill_printing_mode"
+                        ],
+                    },
+                    superseded_prepared_execution={
+                        "directory": str(archived_root),
+                        "plan_path": str(archived_plan_path),
+                        "design_path": str(archived_design_path),
+                    },
                     key_rows=key_rows,
                     concentration_rows=concentration_rows,
                     total_added_droplets=total_added,
@@ -1881,13 +2112,21 @@ def _run_editor_lifecycle_scenario(
                 failure_evidence
             )
         elif isinstance(action_id, str) and action_id.startswith("editor."):
-            assertion_failures[
-                (
-                    "experiment.prepared_rename_refinalize"
-                    if rename_refinalize
-                    else "experiment.editor_create_finalize"
-                )
-            ] = failure_evidence
+            if rename_refinalize and action_id in {
+                "editor.edit_prepared_design_via_ui",
+                "editor.regenerate_prepared_design_via_ui",
+            }:
+                assertion_failures[
+                    "experiment.prepared_design_refinalize"
+                ] = failure_evidence
+            else:
+                assertion_failures[
+                    (
+                        "experiment.prepared_rename_refinalize"
+                        if rename_refinalize
+                        else "experiment.editor_create_finalize"
+                    )
+                ] = failure_evidence
         elif action_id == "validation.prepared_bundle":
             assertion_failures[
                 "experiment.prepared_bundle_valid"
@@ -1906,6 +2145,29 @@ def _run_editor_lifecycle_scenario(
             }:
                 assertion_failures[
                     "experiment.key_files_consistent"
+                ] = {
+                    **failure_evidence,
+                    "failed_checks": sorted(failed_checks),
+                }
+            if failed_checks & {
+                "replicates_updated",
+                "printed_volume_updated",
+                "final_volume_updated",
+                "fill_mode_updated",
+                "fill_droplet_updated",
+                "reagent_mode_updated",
+                "reagent_targets_updated",
+                "reagent_droplet_updated",
+                "fresh_plan_identity",
+                "plan_revision_one",
+                "plan_volume_basis_updated",
+                "plan_modes_updated",
+                "runtime_assignments_replaced",
+                "original_plan_archived",
+                "original_design_archived",
+            }:
+                assertion_failures[
+                    "experiment.prepared_design_refinalize"
                 ] = {
                     **failure_evidence,
                     "failed_checks": sorted(failed_checks),
@@ -2149,8 +2411,16 @@ def _run_editor_lifecycle_scenario(
                 else {}
             ),
             "plate_name": fixture["experiment"]["plate_name"],
-            "expected_reaction_count": fixture["experiment"]["replicates"],
-            "well_ids": fixture["experiment"]["expected_well_ids"],
+            "expected_reaction_count": (
+                fixture["experiment"]["refinalized_replicates"]
+                if rename_refinalize
+                else fixture["experiment"]["replicates"]
+            ),
+            "well_ids": (
+                fixture["experiment"]["refinalized_expected_well_ids"]
+                if rename_refinalize
+                else fixture["experiment"]["expected_well_ids"]
+            ),
             "speed_multiplier": config.speed_multiplier,
             "timeout_seconds": config.timeout_seconds,
         },

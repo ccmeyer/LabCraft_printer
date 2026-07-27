@@ -38,6 +38,33 @@ def test_complete_experiment_design_can_preserve_progress_for_resume():
     )
 
 
+def test_complete_experiment_design_uses_transactional_prepared_commit(
+    tmp_path,
+):
+    main_window = MainWindow.__new__(MainWindow)
+    plan_path = tmp_path / "execution_plan.json"
+    plan_path.write_text("{}", encoding="utf-8")
+    commit_mock = Mock(return_value={"status": "replaced"})
+    load_mock = Mock()
+    main_window.model = SimpleNamespace(
+        commit_prepared_experiment_design_from_editor=commit_mock,
+        load_experiment_from_model=load_mock,
+        experiment_model=SimpleNamespace(
+            metadata={"plate_name": "96well-8x12"},
+            execution_plan_file_path=str(plan_path),
+        ),
+    )
+
+    result = MainWindow.complete_experiment_design(
+        main_window,
+        requested_name="prepared-edited",
+    )
+
+    assert result == {"status": "replaced"}
+    commit_mock.assert_called_once_with(requested_name="prepared-edited")
+    load_mock.assert_not_called()
+
+
 def _dialog_for_progress_policy(prompt_policy):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog.model = SimpleNamespace(

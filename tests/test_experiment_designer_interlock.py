@@ -201,6 +201,44 @@ def test_experiment_designer_finish_surfaces_apply_errors_and_stays_open(monkeyp
     assert "96well-8x12" in dialog.status_lbl.text()
 
 
+def test_experiment_designer_save_replaces_untouched_prepared_plan(
+    qapp,
+    tmp_path,
+):
+    plan_path = tmp_path / "execution_plan.json"
+    plan_path.write_text("{}", encoding="utf-8")
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog._apply_requested = False
+    dialog.exp_name_edit = QLineEdit("prepared-edited")
+    dialog.status_lbl = QLabel("")
+    dialog._set_status = ExperimentDesignDialog._set_status.__get__(
+        dialog, ExperimentDesignDialog
+    )
+    dialog._run_design_optimization_flow = Mock(return_value=(True, {}))
+    dialog._persist_design_identity_registry_entries = Mock()
+    complete_mock = Mock(return_value={"status": "replaced"})
+    dialog.main_window = SimpleNamespace(
+        complete_experiment_design=complete_mock
+    )
+    dialog.model = SimpleNamespace(
+        execution_plan_file_path=str(plan_path),
+        experiment_file_path=str(tmp_path / "experiment_design.json"),
+        is_execution_design_locked=lambda: False,
+        is_read_only_legacy_execution=lambda: False,
+        save_experiment=Mock(),
+    )
+
+    ExperimentDesignDialog._on_save_design(dialog)
+
+    complete_mock.assert_called_once_with(
+        load_progress=False,
+        requested_name="prepared-edited",
+    )
+    dialog.model.save_experiment.assert_not_called()
+    assert dialog._apply_requested is True
+    assert "replaced" in dialog.status_lbl.text()
+
+
 def test_experiment_designer_locks_edit_actions_when_gripper_loaded(qapp):
     dialog = _build_dialog_stub(gripper_loaded=True)
     dialog._on_optimize_and_generate = Mock()

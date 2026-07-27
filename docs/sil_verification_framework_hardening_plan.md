@@ -1492,10 +1492,11 @@ Implementation:
   zero-progress and exported key artifacts against the replacement identity,
   records the superseded prepared plan and audit event, validates the staged
   authoritative bundle, and publishes the renamed directory atomically.
-- The same implementation rejects a started, resumed, calibrated,
-  progressed, invalid, or non-name-only execution without mutating the
-  authoritative source bundle. Integration tests cover successful persisted
-  reload plus rejection and reconciliation rollback.
+- At this original milestone the implementation rejected started, resumed,
+  calibrated, progressed, invalid, and non-name-only executions without
+  mutating the authoritative source bundle. The prepared-plan replacement
+  follow-up recorded after Slice 4.6 supersedes only the non-name-only
+  limitation.
 - Activated the scenario in the registry and manifest, appended it to the
   active lifecycle suite, and advanced
   `experiment.prepared_rename_refinalize` to `partial`. It remains partial
@@ -1583,10 +1584,11 @@ Final disposition, risks, and rollback:
 - Slice 4.2 is `verified`; its scenario is active, the lifecycle suite contains
   both editor scenarios, and `experiment.prepared_rename_refinalize` is
   intentionally `partial` pending Slice 4.3.
-- The production correction is deliberately narrow: only a name-only change
-  to an untouched prepared execution is reconciled in place. Started,
-  progressed, resumed, calibrated, invalid, or otherwise edited executions
-  remain fail-closed.
+- The original production correction was deliberately narrow and reconciled
+  only a name change. The prepared-plan replacement follow-up recorded after
+  Slice 4.6 generalizes untouched prepared edits while preserving fail-closed
+  behavior for started, progressed, resumed, calibrated, or invalid
+  executions.
 - Rollback reverts merge commit `4bff994`, returns the scenario and capability
   manifest entries to their planned state, and restores the original Slice 4.2
   failure disposition. No firmware, protocol, hardware, baseline, or Pi
@@ -2099,6 +2101,86 @@ Disposition, risk, and rollback:
   Slices 0-4.5 and the existing 384x10 stress scenario. No application-data,
   production, firmware, protocol, hardware, baseline, performance, or Pi
   rollback is required.
+
+#### Prepared-plan replacement follow-up
+
+Status: `verified`
+
+Call path:
+
+`reopen untouched PREPARED design -> edit real editor controls -> Save or Finish -> MainWindow.complete_experiment_design -> Model.commit_prepared_experiment_design_from_editor -> staged design/plan generation -> authoritative validation -> atomic publish -> persisted reload`
+
+This follow-up broadens the Slice 4.2 contract without adding another
+scenario. The original name-only correction was insufficient: reagent or
+general experiment edits changed the canonical design/runtime assignments
+while the existing prepared plan remained in place, so finalization correctly
+rejected the resulting mismatch.
+
+Implementation and coverage:
+
+- A valid revision-1 `PREPARED`, `ready_to_start` bundle with zero progress,
+  no resume checkpoint, and no calibration/manual-refuel history remains
+  editable, including after disk reload.
+- Save and Finish share one transactional replacement path. It copies the
+  source into a sibling staging directory, saves the edited design, creates a
+  fresh prepared plan/progress/key bundle, archives the superseded design,
+  plan, and immutable revision beneath
+  `superseded_prepared_execution_plans/<plan-id>/`, validates the staged
+  bundle, and publishes it by a rollback-protected directory swap.
+- Any prevalidation, generation, validation, publish, or cleanup failure
+  leaves the original authoritative directory byte-identical. Active,
+  progressed, resumed, calibrated, invalid, or non-revision-1 executions
+  remain read-only/fail-closed and continue to use the Slice 4.3 editable-copy
+  boundary.
+- Existing Slice 4.2 scenario
+  `experiment_editor_prestart_rename_refinalize_v1` now changes the name,
+  replicate count, selected wells, printed/final volumes, reagent targets,
+  reagent mode, reagent dispense volume, fill mode, and fill dispense volume.
+  It regenerates through the real editor and requires a fresh A1-A6 plan,
+  changed runtime assignments, consistent key files, archived superseded
+  artifacts, zero progress, and a `ready_to_start` reload.
+- The same scenario remains the only registry/lifecycle entry. Capability
+  `experiment.prepared_design_refinalize` is covered by its dedicated
+  assertion, while `experiment.prepared_rename_refinalize` remains covered.
+
+Verification record (2026-07-27):
+
+- Starting HEAD was `ec0e2947c2503a7e566bdc72f903b07991118fb1`
+  with a clean tracked worktree.
+- The pre-edit focused model/editor baseline passed 66 tests.
+- Focused production model/editor/authoritative tests passed 73 tests.
+- Action, manifest, contract, and default editor-lifecycle selection passed
+  118 tests and skipped four opt-in composed runs.
+- The expanded real Slice 4.2 composed workflow passed in 2.94 seconds with
+  all ten assertions, ten screenshots, and cleanup phases passing. Manual
+  inspection of `prepared_design_edited.png` confirmed readable Segoe UI text
+  and the intended replicate, well, volume, target, reagent-mode, and
+  fill-mode edits.
+- A direct CLI execution classified `pass` in 2,522.610 ms with all ten
+  assertions:
+  `verification_reports/virtual_workflows/experiment_editor_prestart_rename_refinalize_v1/20260727T092850340803Z_ec0e2947c250/report.json`.
+- Module-isolated post-start lock, soft-stop/resume, authoritative
+  reload/resume, and multi-stock lifecycle selections all passed. The
+  96-well/comparison/local Pi-contract regression passed 43 tests with 30
+  existing warnings.
+- Four retained reports validated with classifications `pass`, `fail`, `fail`,
+  and `pass` as expected. Both tracked baseline summaries loaded with distinct
+  `offscreen_pi_sil` and `offscreen_windows_sil` identities.
+- The full default Python suite passed 3,637 tests, skipped 38, and reported
+  118 existing warnings in 444.53 seconds.
+- No simulator, firmware, protocol, performance, baseline, Pi, or hardware
+  behavior changed.
+
+Risk and rollback:
+
+- Replacement intentionally changes the plan identity because the prepared
+  execution has not started. Superseded artifacts are retained for diagnosis;
+  they are not active execution history.
+- Rollback reverts the transactional prepared-commit method, Save/Finish
+  handoff changes, expanded Slice 4.2 fixture/actions/assertions, manifest
+  capability, tests, and this documentation. Existing verified Slices 0-4.6,
+  started-execution locks, firmware, protocol, baselines, Pi behavior, and
+  hardware state require no rollback.
 
 Next permitted action:
 
