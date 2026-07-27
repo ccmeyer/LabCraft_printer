@@ -46,18 +46,25 @@ AUTHORITATIVE_RELOAD_RESUME_FIXTURE_PATH = (
     / "fixtures"
     / "authoritative_reload_resume_24_v1.json"
 )
+MULTI_STOCK_FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "print_array_multi_stock_24x2_v1.json"
+)
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "verification_reports" / "virtual_workflows"
 WORKLOAD_ID = "virtual_print_array_96_v1"
 SMOKE_WORKLOAD_ID = "virtual_print_array_24_v1"
 STRESS_WORKLOAD_ID = "virtual_print_array_384x10_v1"
 SOFT_STOP_RESUME_WORKLOAD_ID = "print_array_soft_stop_resume_24_v1"
 AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID = "authoritative_reload_resume_24_v1"
+MULTI_STOCK_WORKLOAD_ID = "print_array_multi_stock_24x2_v1"
 SCENARIO_FIXTURES = {
     WORKLOAD_ID: FIXTURE_PATH,
     STRESS_WORKLOAD_ID: STRESS_FIXTURE_PATH,
     SMOKE_WORKLOAD_ID: SMOKE_FIXTURE_PATH,
     SOFT_STOP_RESUME_WORKLOAD_ID: SOFT_STOP_RESUME_FIXTURE_PATH,
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: AUTHORITATIVE_RELOAD_RESUME_FIXTURE_PATH,
+    MULTI_STOCK_WORKLOAD_ID: MULTI_STOCK_FIXTURE_PATH,
 }
 SCENARIO_COMPLETION_COUNTS = {
     WORKLOAD_ID: 96,
@@ -65,6 +72,7 @@ SCENARIO_COMPLETION_COUNTS = {
     SMOKE_WORKLOAD_ID: 24,
     SOFT_STOP_RESUME_WORKLOAD_ID: 24,
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: 24,
+    MULTI_STOCK_WORKLOAD_ID: 48,
 }
 SCENARIO_WORKFLOW_STRATEGIES = {
     WORKLOAD_ID: "uninterrupted",
@@ -72,6 +80,7 @@ SCENARIO_WORKFLOW_STRATEGIES = {
     SMOKE_WORKLOAD_ID: "uninterrupted",
     SOFT_STOP_RESUME_WORKLOAD_ID: "soft_stop_resume",
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: "authoritative_reload_resume",
+    MULTI_STOCK_WORKLOAD_ID: "multi_stock_head_exchange",
 }
 SCENARIO_NAME = "virtual_print_array"
 SCENARIO_VERSION = "1"
@@ -113,6 +122,7 @@ from tools.virtual_workflows.actions import (  # noqa: E402
     validate_terminal_bundle,
     validate_paused_bundle,
     validate_reload_boundary,
+    validate_stock_pass_boundary,
     observe_stopped_quiescence,
     wait_for_array_state,
     wait_for_completions,
@@ -546,6 +556,12 @@ def load_virtual_print_array_fixture(
                 "maximum_completion_catchup": 2,
                 "quiescence_observation_ms": 250,
                 "expected_application_session_count": 2,
+            },
+            MULTI_STOCK_WORKLOAD_ID: {
+                "kind": "multi_stock_head_exchange",
+                "expected_stock_pass_count": 2,
+                "expected_head_stage_count": 2,
+                "expected_between_pass_exchange_count": 1,
             },
         }.get(str(payload.get("fixture_id")))
         if expected_lifecycle is None or lifecycle != expected_lifecycle:
@@ -1636,6 +1652,204 @@ def _validate_completed_scenario(
     }
 
 
+def _validate_multi_stock_completed_scenario(
+    *,
+    context: ScenarioContext,
+    machine: Any,
+    fixture: dict[str, Any],
+    stock_specs: tuple[dict[str, Any], ...],
+    event_retention: dict[str, Any],
+    experiment_model: Any,
+    fixture_info: dict[str, Any],
+    well_updates: list[str],
+    array_states: list[str],
+    array_complete_count: int,
+    errors: list[dict[str, Any]],
+    unexpected_dialogs: list[dict[str, Any]],
+    starvation_events: list[dict[str, Any]],
+    intent_lifecycle: dict[str, Any],
+    pass_terminal_states: list[str],
+) -> dict[str, Any]:
+    """Validate the named two-stock lifecycle and its exchange boundaries."""
+
+    result = _validate_completed_scenario(
+        experiment_model=experiment_model,
+        fixture_info=fixture_info,
+        well_updates=well_updates,
+        array_states=array_states,
+        array_complete_count=array_complete_count,
+        errors=errors,
+        unexpected_dialogs=unexpected_dialogs,
+        starvation_events=starvation_events,
+        intent_lifecycle=intent_lifecycle,
+        pass_terminal_states=pass_terminal_states,
+    )
+    stage_actions = [
+        dict(item)
+        for item in context.action_results
+        if item.get("action_id") == "head.stage_virtual"
+    ]
+    boundary_actions = [
+        dict(item)
+        for item in context.action_results
+        if item.get("action_id") == "validation.stock_pass_boundary"
+    ]
+    expected_stock_ids = [_stock_id(stock) for stock in stock_specs]
+    expected_well_count = int(fixture["workload"]["well_count"])
+    expected_completion_count = int(fixture["workload"]["completion_count"])
+    expected_head_ids = [
+        str(stock["printer_head"]["printer_head_id"])
+        for stock in stock_specs
+    ]
+    expected_settings = [
+        {
+            "print_pulse_width_us": int(
+                stock["printer_head"]["print_pulse_width_us"]
+            ),
+            "print_pressure_psi": float(
+                stock["printer_head"]["print_pressure_psi"]
+            ),
+        }
+        for stock in stock_specs
+    ]
+    stage_evidence = [dict(item.get("evidence") or {}) for item in stage_actions]
+    boundary_evidence = [
+        dict(item.get("evidence") or {}) for item in boundary_actions
+    ]
+    begins = list(intent_lifecycle.get("begins", ()))
+    attachments = list(intent_lifecycle.get("attachments", ()))
+    completions = list(intent_lifecycle.get("completions", ()))
+    discard_batches = list(intent_lifecycle.get("discard_batches", ()))
+    completed_history = getattr(machine.command_queue, "completed", ())
+    command_events = getattr(machine, "command_event_history", ())
+    completed_history_limit = getattr(completed_history, "maxlen", None)
+    event_history_limit = getattr(command_events, "maxlen", None)
+    history = {
+        "simulator_completed_history_count": len(completed_history),
+        "simulator_completed_history_limit": completed_history_limit,
+        "simulator_event_history_count": len(command_events),
+        "simulator_event_history_limit": event_history_limit,
+        "report_event_retention": dict(event_retention),
+    }
+    settings_match = len(stage_evidence) == 2 and all(
+        all(
+            (
+                evidence.get("pass_index") == index + 1,
+                evidence.get("stock_id") == expected_stock_ids[index],
+                evidence.get("printer_head_id") == expected_head_ids[index],
+                evidence.get("requested_print_pulse_width_us")
+                == expected_settings[index]["print_pulse_width_us"],
+                evidence.get("effective_print_pulse_width_us")
+                == expected_settings[index]["print_pulse_width_us"],
+                math.isclose(
+                    float(evidence.get("requested_print_pressure_psi", -1)),
+                    expected_settings[index]["print_pressure_psi"],
+                    rel_tol=0.0,
+                    abs_tol=0.01,
+                ),
+                math.isclose(
+                    float(evidence.get("effective_print_pressure_psi", -1)),
+                    expected_settings[index]["print_pressure_psi"],
+                    rel_tol=0.0,
+                    abs_tol=0.01,
+                ),
+            )
+        )
+        for index, evidence in enumerate(stage_evidence)
+    )
+    exchange_safe = (
+        len(stage_evidence) == 2
+        and all(
+            evidence.get("array_state_before") == "idle"
+            and evidence.get("queue_drained_before") is True
+            and evidence.get("queue_drained_after") is True
+            for evidence in stage_evidence
+        )
+        and stage_evidence[0].get("previous_printer_head_id") is None
+        and stage_evidence[0].get("returned_previous") is False
+        and stage_evidence[1].get("previous_stock_id") == expected_stock_ids[0]
+        and stage_evidence[1].get("previous_printer_head_id")
+        == expected_head_ids[0]
+        and stage_evidence[1].get("returned_previous") is True
+    )
+    boundaries_valid = (
+        len(boundary_evidence) == 2
+        and [item.get("pass_index") for item in boundary_evidence] == [1, 2]
+        and [item.get("observed_completed_count") for item in boundary_evidence]
+        == [expected_well_count, expected_completion_count]
+        and [item.get("plan_state") for item in boundary_evidence]
+        == ["active", "completed"]
+        and all(
+            item.get("controller_state") == "idle"
+            and item.get("queue_drained") is True
+            and item.get("checkpoint_state") == "clean"
+            and item.get("outstanding_intent_count") == 0
+            for item in boundary_evidence
+        )
+    )
+    history_bounded = (
+        isinstance(completed_history_limit, int)
+        and len(completed_history) <= completed_history_limit
+        and isinstance(event_history_limit, int)
+        and len(command_events) <= event_history_limit
+        and int(event_retention.get("retained_count", 0))
+        <= int(event_retention.get("limit", 0))
+    )
+    checks = result.setdefault("checks", {})
+    multi_checks = {
+        "two_distinct_stock_ids": len(set(expected_stock_ids)) == 2,
+        "two_distinct_printer_head_ids": len(set(expected_head_ids)) == 2,
+        "two_stock_passes_recorded": result.get("stock_pass_count") == 2,
+        "head_exchange_idle_and_drained": exchange_safe,
+        "stock_head_settings_match": settings_match,
+        "stock_pass_boundaries_valid": boundaries_valid,
+        "intent_lifecycle_exact_without_discards": (
+            len(begins)
+            == len(attachments)
+            == len(completions)
+            == expected_completion_count
+            and not discard_batches
+        ),
+        "event_history_bounded": history_bounded,
+        "virtual_head_exchange_events_exact": (
+            int(
+                event_retention.get("counts", {}).get(
+                    "virtual_head_exchange", 0
+                )
+            )
+            == 2
+        ),
+    }
+    checks.update(multi_checks)
+    evidence = {
+        "stock_identities": expected_stock_ids,
+        "head_identities": expected_head_ids,
+        "head_staging": stage_evidence,
+        "pass_boundaries": boundary_evidence,
+        "pass_settings": expected_settings,
+        "intent_reconciliation": {
+            "begin_count": len(begins),
+            "attachment_count": len(attachments),
+            "completion_count": len(completions),
+            "discard_batch_count": len(discard_batches),
+        },
+        "event_history": history,
+        "terminal": {
+            "plan_state": result.get("terminal_plan_state"),
+            "completion_count": result.get("stock_well_completion_count"),
+            "pass_terminal_states": result.get("pass_terminal_states"),
+        },
+        "checks": multi_checks,
+    }
+    result["multi_stock_head_exchange"] = evidence
+    if not all(multi_checks.values()):
+        failed = [name for name, passed in multi_checks.items() if not passed]
+        raise RuntimeError(
+            "multi-stock lifecycle invariants failed: " + ", ".join(failed)
+        )
+    return result
+
+
 def _progress_added_count(experiment_model: Any) -> int:
     total = 0
     for entry in (experiment_model.progress_data or {}).values():
@@ -2161,8 +2375,14 @@ def run_virtual_print_array_scenario(
     is_authoritative_reload_resume = (
         workflow_strategy == "authoritative_reload_resume"
     )
+    is_multi_stock_lifecycle = (
+        workflow_strategy == "multi_stock_head_exchange"
+    )
     is_pause_resume_lifecycle = (
         is_soft_stop_resume or is_authoritative_reload_resume
+    )
+    is_targeted_lifecycle = (
+        is_pause_resume_lifecycle or is_multi_stock_lifecycle
     )
     expected_stock_count = len(stock_specs)
     expected_completions = len(expected_wells) * expected_stock_count
@@ -2609,16 +2829,21 @@ def run_virtual_print_array_scenario(
                 stock_id_for=_stock_id,
             )
 
-        first_stock_id, _first_head = stage_stock_head(0)
+        first_stock_id, first_head = stage_stock_head(0)
         enable_pressure_regulation(context)
         capture_milestone(
             context,
             (
                 "session_1_ready"
                 if is_authoritative_reload_resume
+                else "stock_1_ready"
+                if is_multi_stock_lifecycle
                 else "ready"
             ),
-            evidence={"stock_id": first_stock_id},
+            evidence={
+                "stock_id": first_stock_id,
+                "printer_head_id": first_head["printer_head_id"],
+            },
         )
 
         midpoint_completion = max(1, expected_completions // 2)
@@ -2635,8 +2860,18 @@ def run_virtual_print_array_scenario(
             current_pass_index = stock_index
             if stock_index == 0:
                 stock_id = first_stock_id
+                head = first_head
             else:
-                stock_id, _head = stage_stock_head(stock_index)
+                stock_id, head = stage_stock_head(stock_index)
+                if is_multi_stock_lifecycle:
+                    capture_milestone(
+                        context,
+                        f"stock_{stock_index + 1}_staged",
+                        evidence={
+                            "stock_id": stock_id,
+                            "printer_head_id": head["printer_head_id"],
+                        },
+                    )
             preflight_suppression = (
                 instrumentation.suppress_phases("persistence.guard_bundle")
                 if instrumentation is not None
@@ -2672,9 +2907,20 @@ def run_virtual_print_array_scenario(
                     (
                         "session_1_printing"
                         if is_authoritative_reload_resume
+                        else "stock_1_printing"
+                        if is_multi_stock_lifecycle
                         else "printing"
                     ),
                     evidence={"stock_id": stock_id},
+                )
+            elif is_multi_stock_lifecycle:
+                capture_milestone(
+                    context,
+                    f"stock_{stock_index + 1}_printing",
+                    evidence={
+                        "stock_id": stock_id,
+                        "printer_head_id": head["printer_head_id"],
+                    },
                 )
 
             if is_pause_resume_lifecycle:
@@ -3131,7 +3377,7 @@ def run_virtual_print_array_scenario(
                 config.timeout_seconds - elapsed_seconds,
             )
             if (
-                not is_pause_resume_lifecycle
+                not is_targeted_lifecycle
                 and
                 not midpoint_captured
                 and (stock_index + 1) * len(expected_wells)
@@ -3189,6 +3435,32 @@ def run_virtual_print_array_scenario(
                 stock_id=stock_id,
                 plan_state=pass_state,
             )
+            if is_multi_stock_lifecycle:
+                validate_stock_pass_boundary(
+                    context,
+                    pass_index=stock_index + 1,
+                    stock_id=stock_id,
+                    printer_head_id=head["printer_head_id"],
+                    expected_completed_count=(
+                        (stock_index + 1) * len(expected_wells)
+                    ),
+                    observed_completed_count=completed_count,
+                    expected_plan_state=(
+                        "completed"
+                        if stock_index + 1 == expected_stock_count
+                        else "active"
+                    ),
+                )
+                if stock_index == 0:
+                    capture_milestone(
+                        context,
+                        "stock_1_completed",
+                        evidence={
+                            "stock_id": stock_id,
+                            "plan_state": pass_state,
+                            "completed": completed_count(),
+                        },
+                    )
             print(
                 f"Completed stock pass {stock_index + 1}/{expected_stock_count}",
                 file=sys.stderr,
@@ -3240,6 +3512,24 @@ def run_virtual_print_array_scenario(
                     quiescence=quiescence_evidence,
                 )
                 if is_pause_resume_lifecycle
+                else _validate_multi_stock_completed_scenario(
+                    context=context,
+                    machine=machine,
+                    fixture=fixture,
+                    stock_specs=stock_specs,
+                    event_retention=event_log.snapshot(),
+                    experiment_model=experiment_model,
+                    fixture_info=fixture_info,
+                    well_updates=well_updates,
+                    array_states=array_states,
+                    array_complete_count=array_complete_count,
+                    errors=errors,
+                    unexpected_dialogs=unexpected_dialogs,
+                    starvation_events=starvation_events,
+                    intent_lifecycle=terminal_lifecycle,
+                    pass_terminal_states=pass_terminal_states,
+                )
+                if is_multi_stock_lifecycle
                 else _validate_completed_scenario(
                 experiment_model=experiment_model,
                 fixture_info=fixture_info,
@@ -3919,6 +4209,20 @@ def run_virtual_print_array_scenario(
         else (
             "sil.host_hardware_disabled",
             "ui.real_app_constructed",
+            "execution.multi_stock_head_exchange",
+            "execution.stock_pass_boundaries_valid",
+            "execution.stock_head_settings_match",
+            "execution.expected_completions",
+            "execution.no_queue_starvation",
+            "execution.intent_durability_exact",
+            "execution.event_history_bounded",
+            "execution.terminal_bundle_valid",
+            "artifacts.required_present",
+        )
+        if is_multi_stock_lifecycle
+        else (
+            "sil.host_hardware_disabled",
+            "ui.real_app_constructed",
             "execution.soft_stop_requested",
             "execution.soft_stop_boundary_valid",
             "execution.stopped_boundary_quiescent",
@@ -3930,7 +4234,7 @@ def run_virtual_print_array_scenario(
         )
     )
     assertion_results: list[dict[str, Any]] = []
-    if is_pause_resume_lifecycle:
+    if is_targeted_lifecycle:
         action_by_id = {
             item["action_id"]: item
             for item in context.action_results
@@ -3995,7 +4299,110 @@ def run_virtual_print_array_scenario(
                 )
             ),
         }
-        if is_authoritative_reload_resume:
+        if is_multi_stock_lifecycle:
+            multi_checks = validation.get(
+                "multi_stock_head_exchange", {}
+            ).get("checks", {})
+            outcomes = {
+                "sil.host_hardware_disabled": True,
+                "ui.real_app_constructed": (
+                    bool(actions_by_id.get("app.launch_simulated"))
+                    and all(
+                        item.get("status") == "pass"
+                        for item in actions_by_id["app.launch_simulated"]
+                    )
+                ),
+                "execution.multi_stock_head_exchange": (
+                    all(
+                        multi_checks.get(name) is True
+                        for name in (
+                            "two_distinct_stock_ids",
+                            "two_distinct_printer_head_ids",
+                            "two_stock_passes_recorded",
+                            "head_exchange_idle_and_drained",
+                            "virtual_head_exchange_events_exact",
+                        )
+                    )
+                    if multi_checks
+                    else None
+                ),
+                "execution.stock_pass_boundaries_valid": (
+                    multi_checks.get("stock_pass_boundaries_valid")
+                    if multi_checks
+                    else None
+                ),
+                "execution.stock_head_settings_match": (
+                    multi_checks.get("stock_head_settings_match")
+                    if multi_checks
+                    else None
+                ),
+                "execution.expected_completions": (
+                    all(
+                        terminal_checks.get(name) is True
+                        for name in (
+                            "intent_count_exact",
+                            "intent_stock_well_pairs_exact",
+                            "well_updates_exact",
+                            "targets_match_progress",
+                        )
+                    )
+                    if terminal_checks
+                    else None
+                ),
+                "execution.no_queue_starvation": (
+                    terminal_checks.get("no_lookahead_starvation")
+                    if terminal_checks
+                    else None
+                ),
+                "execution.intent_durability_exact": (
+                    all(
+                        terminal_checks.get(name) is True
+                        for name in (
+                            "intent_ids_unique",
+                            "intent_attachments_exact",
+                            "all_intents_retired",
+                            "intent_lifecycle_exact_without_discards",
+                        )
+                    )
+                    if terminal_checks
+                    else None
+                ),
+                "execution.event_history_bounded": (
+                    multi_checks.get("event_history_bounded")
+                    if multi_checks
+                    else None
+                ),
+                "execution.terminal_bundle_valid": (
+                    all(
+                        terminal_checks.get(name) is True
+                        for name in (
+                            "checkpoint_clean",
+                            "checkpoint_empty",
+                            "authoritative_bundle_valid",
+                            "terminal_plan_completed",
+                            "plan_completes_only_after_last_stock",
+                        )
+                    )
+                    if terminal_checks
+                    else None
+                ),
+                "artifacts.required_present": (
+                    set(screenshots)
+                    == {
+                        "stock_1_ready",
+                        "stock_1_printing",
+                        "stock_1_completed",
+                        "stock_2_staged",
+                        "stock_2_printing",
+                        "completed",
+                    }
+                    and all(
+                        path.is_file() and path.stat().st_size > 0
+                        for path in screenshots.values()
+                    )
+                ),
+            }
+        elif is_authoritative_reload_resume:
             loaded_checks = authoritative_reload_evidence.get(
                 "session_2_loaded", {}
             ).get("checks", {})
@@ -4148,6 +4555,8 @@ def run_virtual_print_array_scenario(
             failure_text = (
                 "authoritative reload lifecycle assertion evidence was incomplete"
                 if is_authoritative_reload_resume
+                else "multi-stock lifecycle assertion evidence was incomplete"
+                if is_multi_stock_lifecycle
                 else "soft-stop lifecycle assertion evidence was incomplete"
             )
             status = "fail"
@@ -4245,6 +4654,8 @@ def run_virtual_print_array_scenario(
                 if is_authoritative_reload_resume
                 else "print_array_soft_stop_resume"
                 if is_soft_stop_resume
+                else "print_array_multi_stock_head_exchange"
+                if is_multi_stock_lifecycle
                 else SCENARIO_NAME
             ),
             "scenario_version": SCENARIO_VERSION,
@@ -4289,7 +4700,7 @@ def run_virtual_print_array_scenario(
             "responsiveness": {
                 "status": (
                     "not_applicable"
-                    if is_pause_resume_lifecycle
+                    if is_targeted_lifecycle
                     else "measured"
                     if probe_started
                     else "not_available"
@@ -4318,7 +4729,7 @@ def run_virtual_print_array_scenario(
                     "cleanup_results": list(context.cleanup_results),
                     **(
                         {"assertion_results": assertion_results}
-                        if is_pause_resume_lifecycle
+                        if is_targeted_lifecycle
                         else {}
                     ),
                 },
@@ -4447,7 +4858,7 @@ def run_virtual_print_array_scenario(
                     **resource_snapshot,
                     "status": "not_applicable",
                 }
-                if is_pause_resume_lifecycle
+                if is_targeted_lifecycle
                 else resource_snapshot
             ),
         },
@@ -4507,6 +4918,7 @@ def run_virtual_print_array_scenario(
 
 __all__ = [
     "AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID",
+    "MULTI_STOCK_WORKLOAD_ID",
     "SCENARIO_NAME",
     "SCENARIO_VERSION",
     "SCENARIO_FIXTURES",

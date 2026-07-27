@@ -618,9 +618,9 @@ Capability IDs and current hardening status:
 | `experiment.editable_copy` | `partial` | Existing unit coverage; composed post-start scenario pending |
 | `execution.soft_stop_resume` | `covered` | `print_array_soft_stop_resume_24_v1` |
 | `execution.refill_resume` | `deferred` | Volume tracking is disabled; prerequisite not met |
-| `execution.authoritative_reload_resume` | `planned` | Reload lifecycle scenario |
+| `execution.authoritative_reload_resume` | `covered` | `authoritative_reload_resume_24_v1` |
 | `execution.disconnect_fail_closed` | `planned` | Disconnect lifecycle scenario |
-| `execution.multi_stock_head_exchange` | `partial` | Existing reduced test; named scenario pending |
+| `execution.multi_stock_head_exchange` | `covered` | `print_array_multi_stock_24x2_v1` |
 | `ui.event_loop_stall_detection` | `covered` | Injected-stall probe test |
 | `ui.sustained_responsiveness.windows` | `partial` | Scheduled 96/384x10 evidence |
 | `ui.sustained_responsiveness.pi` | `partial` | Scheduled Pi evidence |
@@ -2005,6 +2005,105 @@ Next permitted action:
 
 - Slice 4.6, `print_array_multi_stock_24x2_v1`.
 
+#### Slice 4.6: Multi-stock head exchange
+
+Status: `verified`
+
+Call path:
+
+`strict A1-A24 by two-stock fixture -> simulation composition -> virtual head 1 stage -> real UI Start Print Array -> pass-1 completions -> idle/drained ACTIVE boundary -> return head 1 and stage head 2 -> apply distinct settings -> second real UI Start Print Array -> terminal authoritative validation`
+
+Starting state:
+
+- HEAD was `74496a6eb634ce7295c1def7304cc350fb0c8bcd`.
+- The tracked worktree was clean. `.worktrees/` and the six pre-existing
+  inaccessible execution-cache directories remained untouched.
+- The pre-edit reduced two-stock baseline passed 3 selected tests with 10
+  existing Qt chart deprecation warnings in 4.58 seconds.
+- Slice 4.5 remained verified. No production MVC, simulator, firmware,
+  protocol, baseline, Pi, performance, or hardware behavior was changed.
+
+Implemented verification framework:
+
+- Added strict schema-v3 fixture `print_array_multi_stock_24x2_v1` with
+  shallow-384 A1-A24, two distinct stocks and heads, distinct pulse-width and
+  pressure settings, lookahead 2, 20 Hz, two passes, and 48 expected
+  stock/well completions.
+- Promoted the former test-created reduction of the 384x10 fixture into a
+  named `multi_stock_head_exchange` strategy while preserving the
+  uninterrupted 24-, 96-, and 384x10 strategies.
+- Extended reusable `head.stage_virtual` evidence with pre/post queue state,
+  previous and new stock/head identities, returned-head evidence, origin and
+  staging slots, and requested/effective settings. Added
+  `validation.stock_pass_boundary` for the durable idle boundary after each
+  pass.
+- The first stage proves an initially empty gripper. The between-pass stage
+  proves head 1 was returned before head 2 was loaded, and both stages require
+  an idle Controller with a drained simulator queue.
+- Added `metrics.persistence.values.multi_stock_head_exchange`, 11 explicit
+  assertion decisions, bounded simulator/report history evidence, failure
+  retention, and six readable screenshots. Responsiveness, resources, and
+  performance are `not_applicable`.
+- Registered the new local-only lifecycle ID after Slice 4.5. Pi evidence,
+  injected stalls, repetition/report sets, and baseline creation remain
+  rejected. The 96-well default and all legacy order/contract anchors remain
+  unchanged.
+- Replaced the reduced stress-derived composed test with a dedicated lifecycle
+  module. The actual 384x10 fixture, scheduled stress identity, comparison,
+  and Pi contracts remain unchanged.
+- Activated the scenario in `lifecycle` and advanced
+  `execution.multi_stock_head_exchange` from `partial` to `covered` with a
+  two-day evidence age.
+
+Verification result:
+
+- The direct report is
+  `verification_reports/virtual_workflows/print_array_multi_stock_24x2_v1/20260727T081543770968Z_74496a6eb634/report.json`.
+  It is report-v1 valid, classifies `pass` in 8,406.974 ms, and passes all 11
+  assertions.
+- Pass 1 records 24 exact completions and leaves the original plan `ACTIVE`.
+  Pass 2 uses the second stock/head/settings, reaches 48 exact completions,
+  and leaves the same plan `COMPLETED`.
+- All 48 intent begins, attachments, completions, and progress writes
+  reconcile with zero discard batches, ambiguity, duplication, or outstanding
+  intents. Both head stages are idle/drained and the second records the
+  returned first head.
+- The six required screenshots are nonempty and readable with the configured
+  Segoe UI font. Manual inspection of `stock_2_staged.png` shows the second
+  stock loaded, first pass complete, 1500 us pulse width, 1.50 psi target, and
+  the simulation-only banner.
+- Default collection validates the fixture and skips the two opt-in composed
+  tests (`1 passed, 2 skipped`).
+- All 287 focused nodes passed using module-isolated Qt processes: 268
+  framework/controller/action/manifest/contract/384x10 nodes passed in 4.76
+  seconds, and all 19 composed lifecycle/system nodes passed in their
+  respective modules. This avoids a Windows native Qt shutdown termination
+  observed only when every composed UI scenario shares one long process; no
+  scenario assertion failed.
+- The 96-well/comparison/local Pi-contract selection passed 40 tests and
+  skipped 3 remote-only cases. Four retained reports, including the new
+  report, and both tracked baseline summaries validate.
+- The full default Python suite passed 3,630 tests and skipped 38 with 118
+  existing warnings in 443.23 seconds.
+
+Disposition, risk, and rollback:
+
+- Slice 4.6 is `verified`; `print_array_multi_stock_24x2_v1` is active in
+  `lifecycle`, all declared assertions pass, and
+  `execution.multi_stock_head_exchange` is `covered`.
+- Evidence proves application behavior using the in-process simulator and
+  virtual rack. It does not prove physical head handling, pressure response,
+  firmware transport, or droplet delivery.
+- Rollback removes the fixture, strategy-specific evidence/action, tests,
+  registry/manifest promotion, and documentation while preserving verified
+  Slices 0-4.5 and the existing 384x10 stress scenario. No application-data,
+  production, firmware, protocol, hardware, baseline, performance, or Pi
+  rollback is required.
+
+Next permitted action:
+
+- Slice 4.7, `print_array_disconnect_mid_array_24_v1`.
+
 ### Slice 5: Suites and scheduling contracts
 
 Goal:
@@ -2383,7 +2482,7 @@ The effort is complete when:
 
 ## Current Next Action
 
-Create the concrete implementation plan for Slice 4.6,
-`print_array_multi_stock_24x2_v1`. Preserve the verified Slice 4.5
-authoritative reload/resume scenario and do not combine the next slice with
+Create the concrete implementation plan for Slice 4.7,
+`print_array_disconnect_mid_array_24_v1`. Preserve the verified Slice 4.6
+multi-stock head-exchange scenario and do not combine the next slice with
 refill resume, performance, firmware, protocol, Pi, or hardware changes.

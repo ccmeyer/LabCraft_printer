@@ -25,6 +25,7 @@ from tools.virtual_workflows.registry import (
 )
 from tools.virtual_workflows.scenarios import (
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+    MULTI_STOCK_WORKLOAD_ID,
     SCENARIO_COMPLETION_COUNTS,
     SCENARIO_FIXTURES,
     SOFT_STOP_RESUME_WORKLOAD_ID,
@@ -68,6 +69,7 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         EDITOR_POST_START_WORKLOAD_ID,
         SOFT_STOP_RESUME_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+        MULTI_STOCK_WORKLOAD_ID,
     )
 
     for scenario_id in (WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID):
@@ -110,6 +112,7 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         "experiment_editor_post_start_lock_v1",
         "print_array_soft_stop_resume_24_v1",
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+        MULTI_STOCK_WORKLOAD_ID,
     ]
     rename_scenario = _row(
         payload,
@@ -145,6 +148,10 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert authoritative_reload["registry_id"] == (
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID
     )
+    multi_stock = _row(payload, "scenarios", MULTI_STOCK_WORKLOAD_ID)
+    assert multi_stock["status"] == "active"
+    assert multi_stock["suite_ids"] == ["lifecycle"]
+    assert multi_stock["registry_id"] == MULTI_STOCK_WORKLOAD_ID
 
     smoke = _row(payload, "scenarios", "print_array_smoke_24_v1")
     assert smoke["registry_id"] == SMOKE_WORKLOAD_ID
@@ -195,10 +202,15 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         capabilities["experiment.editable_copy"]["max_evidence_age_days"]
         == 2
     )
-    assert (
-        capabilities["execution.multi_stock_head_exchange"]["status"]
-        == "partial"
+    assert capabilities["execution.multi_stock_head_exchange"]["status"] == (
+        "covered"
     )
+    assert capabilities["execution.multi_stock_head_exchange"][
+        "active_scenario_ids"
+    ] == [MULTI_STOCK_WORKLOAD_ID]
+    assert capabilities["execution.multi_stock_head_exchange"][
+        "max_evidence_age_days"
+    ] == 2
     assert {
         schedule["automation_status"] for schedule in payload["schedules"]
     } == {"not_configured"}
@@ -230,6 +242,9 @@ def test_cli_scenario_surface_is_registry_driven_and_legacy_compatible():
     assert parser.parse_args(
         ["--scenario", SOFT_STOP_RESUME_WORKLOAD_ID]
     ).scenario == SOFT_STOP_RESUME_WORKLOAD_ID
+    assert parser.parse_args(
+        ["--scenario", MULTI_STOCK_WORKLOAD_ID]
+    ).scenario == MULTI_STOCK_WORKLOAD_ID
 
 
 @pytest.mark.parametrize(
@@ -240,6 +255,7 @@ def test_cli_scenario_surface_is_registry_driven_and_legacy_compatible():
         SMOKE_WORKLOAD_ID,
         SOFT_STOP_RESUME_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+        MULTI_STOCK_WORKLOAD_ID,
     ],
 )
 def test_registry_dispatch_uses_existing_config_and_runner(
@@ -330,6 +346,7 @@ def test_registry_dispatches_editor_family_without_importing_it_for_inspection(
         EDITOR_POST_START_WORKLOAD_ID,
         SOFT_STOP_RESUME_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+        MULTI_STOCK_WORKLOAD_ID,
     ],
 )
 @pytest.mark.parametrize(
@@ -371,6 +388,8 @@ def test_editor_lifecycle_cli_rejects_unsupported_evidence_modes(
         STRESS_WORKLOAD_ID,
         SMOKE_WORKLOAD_ID,
         SOFT_STOP_RESUME_WORKLOAD_ID,
+        AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+        MULTI_STOCK_WORKLOAD_ID,
     ],
 )
 def test_cli_dispatches_each_registered_id_through_registry(

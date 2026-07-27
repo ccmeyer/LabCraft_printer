@@ -211,13 +211,13 @@
       "id": "execution.multi_stock_head_exchange",
       "risk": "Stock passes may use the wrong virtual head or exchange while work is queued.",
       "owner_role": "execution lifecycle maintainers",
-      "status": "partial",
+      "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_stress_384x10_v1"],
-      "required_assertion_ids": ["execution.multi_stock_head_exchange"],
-      "related_source_areas": ["tools/virtual_workflows/scenarios.py", "tests/system/test_virtual_print_array_384x10_workflow.py"],
-      "limitations": ["The current reduced test is not yet a named lifecycle scenario."],
-      "max_evidence_age_days": 30
+      "active_scenario_ids": ["print_array_multi_stock_24x2_v1"],
+      "required_assertion_ids": ["execution.multi_stock_head_exchange", "execution.stock_pass_boundaries_valid", "execution.stock_head_settings_match", "execution.event_history_bounded"],
+      "related_source_areas": ["tools/virtual_workflows/scenarios.py", "tests/system/test_virtual_workflow_multi_stock_lifecycle.py"],
+      "limitations": ["Coverage uses the in-process simulator and virtual rack model; it does not validate physical head handling, pressure response, or droplet output."],
+      "max_evidence_age_days": 2
     },
     {
       "id": "ui.event_loop_stall_detection",
@@ -354,7 +354,7 @@
       "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "screenshots", "scenario_root"],
       "expected_outcome": "informational",
       "limitations": ["Stress findings are verification evidence and do not authorize production optimization."],
-      "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_tracked_384x10_fixture_is_exact_and_serpentine", "tests/system/test_virtual_print_array_384x10_workflow.py::test_cli_exposes_stress_scenario_and_single_report_set", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order", "tests/system/test_virtual_print_array_384x10_workflow.py::test_stress_scenario_source_stays_hardware_isolated"],
+      "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_tracked_384x10_fixture_is_exact_and_serpentine", "tests/system/test_virtual_print_array_384x10_workflow.py::test_cli_exposes_stress_scenario_and_single_report_set", "tests/system/test_virtual_print_array_384x10_workflow.py::test_stress_scenario_source_stays_hardware_isolated"],
       "pi_safety_evidence": ["preflight", "hardware_proof"]
     },
     {
@@ -476,6 +476,26 @@
       "limitations": ["The target is a fresh MVC/simulator composition in one QApplication process, not an operating-system process restart or physical hardware resume."],
       "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_fixture_contract_is_exact", "tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"],
       "pi_safety_evidence": []
+    },
+    {
+      "id": "print_array_multi_stock_24x2_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "print_array_multi_stock_24x2_v1",
+      "workload_fixture_id": "print_array_multi_stock_24x2_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/print_array_multi_stock_24x2_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 60,
+      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.wait_for_completions", "array.wait_for_state", "validation.stock_pass_boundary", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "execution.multi_stock_head_exchange", "execution.stock_pass_boundaries_valid", "execution.stock_head_settings_match", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.event_history_bounded", "execution.terminal_bundle_valid", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle", "execution.multi_stock_head_exchange"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The scenario validates virtual rack/head association and durable application behavior, not physical head handling, pressure response, or droplet output."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_fixture_contract_is_exact", "tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"],
+      "pi_safety_evidence": []
     }
   ],
   "suites": [
@@ -492,7 +512,7 @@
       "status": "active",
       "kind": "lifecycle",
       "platform": "windows_sil",
-      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1"],
+      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -757,6 +777,11 @@
         "source_path": "tools/virtual_workflows/actions.py"
       },
       {
+        "id": "validation.stock_pass_boundary",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
         "id": "scenario.teardown",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py"
@@ -785,31 +810,49 @@
         "id": "execution.expected_completions",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.completed_stock_well_count",
-        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {
         "id": "execution.no_queue_starvation",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.queue.values.unexpected_starvation_count",
-        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {
         "id": "execution.intent_durability_exact",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.authoritative_io",
-        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {
         "id": "execution.terminal_bundle_valid",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.terminal_plan_state",
-        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {
         "id": "execution.multi_stock_head_exchange",
         "evidence_kind": "report_path",
-        "evidence_path": "metrics.queue.values.event_trace_retention.counts.virtual_head_exchange",
-        "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+        "evidence_path": "metrics.persistence.values.multi_stock_head_exchange",
+        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"]
+      },
+      {
+        "id": "execution.stock_pass_boundaries_valid",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.multi_stock_head_exchange.pass_boundaries",
+        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"]
+      },
+      {
+        "id": "execution.stock_head_settings_match",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.multi_stock_head_exchange.pass_settings",
+        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"]
+      },
+      {
+        "id": "execution.event_history_bounded",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.multi_stock_head_exchange.event_history",
+        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"]
       },
       {
         "id": "artifacts.required_present",
@@ -827,13 +870,13 @@
         "id": "ui.responsiveness_metrics_present",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.responsiveness",
-        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+        "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report"]
       },
       {
         "id": "resources.metrics_present",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.resources",
-        "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_reduced_multi_stock_scenario_uses_real_ui_and_durable_order"]
+        "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_tracked_384x10_fixture_is_exact_and_serpentine"]
       },
       {
         "id": "experiment.editor_create_finalize",

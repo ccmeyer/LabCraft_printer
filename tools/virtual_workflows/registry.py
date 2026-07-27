@@ -161,6 +161,18 @@ _SCENARIO_DEFINITIONS = {
         supports_injected_stall=False,
         supports_report_sets=False,
     ),
+    "print_array_multi_stock_24x2_v1": ScenarioDefinition(
+        registry_id="print_array_multi_stock_24x2_v1",
+        workload_id="print_array_multi_stock_24x2_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "print_array_multi_stock_24x2_v1.json"
+        ),
+        expected_completion_count=48,
+        scenario_name="print_array_multi_stock_head_exchange",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
 }
 REGISTERED_SCENARIOS: Mapping[str, ScenarioDefinition] = MappingProxyType(
     _SCENARIO_DEFINITIONS

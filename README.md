@@ -367,6 +367,26 @@ command-sequence evidence, and exact combined intent reconciliation. This
 proves a fresh MVC/simulator composition within one SIL process; it is not an
 operating-system restart or physical-hardware resume.
 
+Run the multi-stock virtual-head lifecycle directly with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_multi_stock_24x2_v1 `
+  --timeout-seconds 60
+```
+
+This scenario promotes the former stress-derived reduced test into a strict
+tracked A1-A24 by two-stock fixture. It stages two distinct virtual heads,
+starts each stock pass through the real UI, and requires an idle, drained
+simulator queue before the initial stage and the between-pass replacement.
+The first pass must leave the original plan `ACTIVE`; the second must finish
+the same plan as `COMPLETED`. A passing report proves the stock/head identity,
+effective pulse width and pressure, two durable pass boundaries, and all 48
+stock/well pairs exactly once with no discarded or outstanding intents.
+It retains `stock_1_ready`, `stock_1_printing`, `stock_1_completed`,
+`stock_2_staged`, `stock_2_printing`, and `completed` screenshots.
+Responsiveness, resources, and performance are `not_applicable`.
+
 Lifecycle scenarios are single-run functional evidence. They reject Pi
 evidence, injected-stall controls, report-set repetition, and baseline
 creation. `--visible`, `--qt-platform`, `--output-root`,

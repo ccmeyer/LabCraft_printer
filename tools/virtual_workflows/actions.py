@@ -36,6 +36,12 @@ PRINT_ARRAY_LIFECYCLE_ACTION_IDS = PRINT_ARRAY_ACTION_IDS | frozenset(
     }
 )
 
+MULTI_STOCK_LIFECYCLE_ACTION_IDS = PRINT_ARRAY_ACTION_IDS | frozenset(
+    {
+        "validation.stock_pass_boundary",
+    }
+)
+
 AUTHORITATIVE_RELOAD_ACTION_IDS = (
     PRINT_ARRAY_LIFECYCLE_ACTION_IDS
     | frozenset(
@@ -72,7 +78,11 @@ EDITOR_LIFECYCLE_ACTION_IDS = frozenset(
         "scenario.teardown",
     }
 )
-ACTION_IDS = AUTHORITATIVE_RELOAD_ACTION_IDS | EDITOR_LIFECYCLE_ACTION_IDS
+ACTION_IDS = (
+    AUTHORITATIVE_RELOAD_ACTION_IDS
+    | MULTI_STOCK_LIFECYCLE_ACTION_IDS
+    | EDITOR_LIFECYCLE_ACTION_IDS
+)
 
 
 def _bounded_json_value(value: Any, *, depth: int = 0) -> Any:
@@ -609,6 +619,25 @@ def stage_virtual_head(
         stock_id = stock_id_for(stock)
         target_head = calibrated_heads[stock_id]
         rack = context.model.rack_model
+        array_state_before = context.controller.get_array_run_state()
+        queue_drained_before = bool(context.machine.check_if_all_completed())
+        if array_state_before not in {"idle", "resume_ready"} or not queue_drained_before:
+            raise RuntimeError(
+                "virtual head exchange lost its idle/drained precondition"
+            )
+        previous_head = rack.get_gripper_printer_head()
+        previous_head_id = (
+            str(getattr(previous_head, "printer_head_id", "") or "")
+            if previous_head is not None
+            else None
+        )
+        previous_stock_id = (
+            str(previous_head.get_stock_id())
+            if previous_head is not None
+            else None
+        )
+        previous_origin_slot = rack.gripper_slot_number
+        returned_previous = False
         suppression = (
             context.instrumentation.suppress_phases(
                 "ui.well_plate_update",
@@ -626,6 +655,7 @@ def stage_virtual_head(
                 rack.transfer_from_gripper(origin)
                 if rack.get_gripper_printer_head() is not None:
                     raise RuntimeError("could not return the previous virtual head")
+                returned_previous = True
             for slot_index, slot in enumerate(rack.slots):
                 if slot.printer_head is target_head:
                     rack.update_slot_with_printer_head(slot_index, None)
@@ -650,12 +680,39 @@ def stage_virtual_head(
             f"stock {int(stock_index) + 1} print settings",
             action_id="head.stage_virtual",
         )
+        queue_drained_after = bool(context.machine.check_if_all_completed())
+        effective_pulse_width = int(
+            context.model.machine_model.get_print_pulse_width()
+        )
+        effective_pressure = float(
+            context.model.machine_model.get_target_print_pressure()
+        )
+        requested_pulse_width = int(head["print_pulse_width_us"])
+        requested_pressure = float(head["print_pressure_psi"])
+        if (
+            effective_pulse_width != requested_pulse_width
+            or not math.isclose(
+                effective_pressure,
+                requested_pressure,
+                rel_tol=0.0,
+                abs_tol=0.01,
+            )
+            or not queue_drained_after
+        ):
+            raise RuntimeError(
+                "virtual head print settings or post-stage queue state did not "
+                f"match: pulse={effective_pulse_width}/{requested_pulse_width}, "
+                f"pressure={effective_pressure}/{requested_pressure}, "
+                f"queue_drained={queue_drained_after}"
+            )
         context.record_event(
             "virtual_head_exchange",
             pass_index=int(stock_index) + 1,
             stock_id=stock_id,
             printer_head_id=head["printer_head_id"],
             staging_slot=int(staging_slot),
+            previous_printer_head_id=previous_head_id,
+            returned_previous=returned_previous,
         )
         selected.update({"stock_id": stock_id, "head": head})
         return {
@@ -663,6 +720,17 @@ def stage_virtual_head(
             "stock_id": stock_id,
             "printer_head_id": head["printer_head_id"],
             "staging_slot": int(staging_slot),
+            "array_state_before": array_state_before,
+            "queue_drained_before": queue_drained_before,
+            "previous_stock_id": previous_stock_id,
+            "previous_printer_head_id": previous_head_id,
+            "previous_origin_slot": previous_origin_slot,
+            "returned_previous": returned_previous,
+            "requested_print_pulse_width_us": requested_pulse_width,
+            "effective_print_pulse_width_us": effective_pulse_width,
+            "requested_print_pressure_psi": requested_pressure,
+            "effective_print_pressure_psi": effective_pressure,
+            "queue_drained_after": queue_drained_after,
         }
 
     execute_action(
@@ -672,6 +740,95 @@ def stage_virtual_head(
         precondition=precondition,
     )
     return str(selected["stock_id"]), dict(selected["head"])
+
+
+def validate_stock_pass_boundary(
+    context: ScenarioContext,
+    *,
+    pass_index: int,
+    stock_id: str,
+    printer_head_id: str,
+    expected_completed_count: int,
+    observed_completed_count: Callable[[], int],
+    expected_plan_state: str,
+) -> dict[str, Any]:
+    """Validate one idle, durable stock-pass boundary before any exchange."""
+
+    def precondition():
+        return (
+            context.controller is not None
+            and context.machine is not None
+            and context.model is not None
+            and context.experiment_model is not None,
+            "stock-pass validation requires launched components",
+            None,
+        )
+
+    def run() -> Mapping[str, Any]:
+        from ExecutionResumeStore import load_execution_resume
+
+        controller_state = context.controller.get_array_run_state()
+        queue_drained = bool(context.machine.check_if_all_completed())
+        completed_count = int(observed_completed_count())
+        plan = context.experiment_model.get_execution_plan_snapshot()
+        plan_state = str(plan.state.value)
+        rack = context.model.rack_model
+        active_head = rack.get_gripper_printer_head()
+        active_stock_id = (
+            str(active_head.get_stock_id())
+            if active_head is not None
+            else None
+        )
+        active_head_id = (
+            str(getattr(active_head, "printer_head_id", "") or "")
+            if active_head is not None
+            else None
+        )
+        resume = load_execution_resume(
+            context.experiment_model.execution_resume_file_path
+        )
+        outstanding_intent_count = len(resume.intents)
+        evidence = {
+            "pass_index": int(pass_index),
+            "stock_id": str(stock_id),
+            "printer_head_id": str(printer_head_id),
+            "expected_completed_count": int(expected_completed_count),
+            "observed_completed_count": completed_count,
+            "controller_state": controller_state,
+            "queue_drained": queue_drained,
+            "expected_plan_state": str(expected_plan_state),
+            "plan_state": plan_state,
+            "active_stock_id": active_stock_id,
+            "active_printer_head_id": active_head_id,
+            "checkpoint_state": str(resume.state),
+            "outstanding_intent_count": outstanding_intent_count,
+        }
+        if not all(
+            (
+                controller_state == "idle",
+                queue_drained,
+                completed_count == int(expected_completed_count),
+                plan_state == str(expected_plan_state),
+                active_stock_id == str(stock_id),
+                active_head_id == str(printer_head_id),
+                str(resume.state) == "clean",
+                outstanding_intent_count == 0,
+            )
+        ):
+            raise ScenarioActionError(
+                "validation.stock_pass_boundary",
+                "stock pass boundary is not idle, durable, or correctly associated",
+                stage="operation",
+                evidence=evidence,
+            )
+        return evidence
+
+    return execute_action(
+        context,
+        "validation.stock_pass_boundary",
+        run,
+        precondition=precondition,
+    )
 
 
 def enable_pressure_regulation(context: ScenarioContext) -> dict[str, Any]:
@@ -2918,6 +3075,7 @@ __all__ = [
     "ACTION_IDS",
     "AUTHORITATIVE_RELOAD_ACTION_IDS",
     "EDITOR_LIFECYCLE_ACTION_IDS",
+    "MULTI_STOCK_LIFECYCLE_ACTION_IDS",
     "PRINT_ARRAY_ACTION_IDS",
     "PRINT_ARRAY_LIFECYCLE_ACTION_IDS",
     "ActionResult",
@@ -2952,6 +3110,7 @@ __all__ = [
     "validate_reload_boundary",
     "validate_refinalized_bundle",
     "validate_terminal_bundle",
+    "validate_stock_pass_boundary",
     "wait_for_array_state",
     "wait_for_completions",
     "wait_until",

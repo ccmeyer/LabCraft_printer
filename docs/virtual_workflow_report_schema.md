@@ -476,6 +476,36 @@ Session 1 pairs, an empty checkpoint, the original plan identity, and a
 `session_2_loaded`, `session_2_activated`, `session_2_resumed`, and
 `completed`.
 
+### Multi-stock head-exchange nested evidence
+
+`print_array_multi_stock_24x2_v1` retains report-v1 and adds
+`metrics.persistence.values.multi_stock_head_exchange`:
+
+- `stock_identities` and `head_identities` contain the two distinct frozen
+  plan identities;
+- `head_staging` records the idle/drained precondition, previous gripper
+  identity and origin, returned-head result, new association, requested and
+  effective pulse width/pressure, and post-stage queue state for both stages;
+- `pass_boundaries` records the two durable idle boundaries, cumulative
+  completion count, checkpoint intent count, active gripper association, and
+  `ACTIVE` then `COMPLETED` plan states;
+- `pass_settings` records the fixture settings expected for each stock pass;
+- `intent_reconciliation` records 48 begins, attachments, and completions
+  with zero discard batches;
+- `event_history` records simulator completed/event deque counts and limits
+  plus bounded report-event retention; and
+- `terminal` records the final completion count, pass-state sequence, and
+  terminal plan state.
+
+The scenario emits explicit assertion decisions for exchange safety,
+pass-boundary validity, stock/head settings, exact completion and intent
+durability, queue starvation, bounded history, terminal validity, hardware
+isolation, real-UI construction, and required artifacts. A passing report
+requires the six ordered screenshots `stock_1_ready`, `stock_1_printing`,
+`stock_1_completed`, `stock_2_staged`, `stock_2_printing`, and `completed`.
+Queue and persistence are functional evidence; responsiveness and resources
+are `not_applicable`.
+
 `metrics.persistence.values.authoritative_io` adds compatible diagnostic
 evidence for the guarded active-runtime checkpoint:
 

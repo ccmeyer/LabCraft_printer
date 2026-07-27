@@ -21,6 +21,7 @@ from tools.virtual_workflows.report import (
 )
 from tools.virtual_workflows.scenarios import (
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+    MULTI_STOCK_WORKLOAD_ID,
     SCENARIO_COMPLETION_COUNTS,
     SCENARIO_FIXTURES,
     SCENARIO_NAME,
@@ -175,6 +176,11 @@ def test_legacy_scenario_api_remains_additively_compatible():
             AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID
         ].name
         == "authoritative_reload_resume_24_v1.json"
+    )
+    assert SCENARIO_COMPLETION_COUNTS[MULTI_STOCK_WORKLOAD_ID] == 48
+    assert (
+        SCENARIO_FIXTURES[MULTI_STOCK_WORKLOAD_ID].name
+        == "print_array_multi_stock_24x2_v1.json"
     )
     assert SCENARIO_NAME == "virtual_print_array"
     assert SCENARIO_VERSION == "1"

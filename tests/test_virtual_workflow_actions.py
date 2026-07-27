@@ -24,6 +24,7 @@ from tools.virtual_workflows.actions import (
     request_soft_stop_via_ui,
     stage_virtual_head,
     teardown_scenario,
+    validate_stock_pass_boundary,
     wait_for_completions,
     wait_until,
 )
@@ -280,6 +281,147 @@ def test_head_exchange_precondition_requires_idle_and_drained_queue(tmp_path):
         "array_state": "running",
         "queue_drained": False,
     }
+
+
+def test_head_exchange_records_returned_head_and_effective_settings(tmp_path):
+    context, _, events = _context(tmp_path)
+
+    class Head:
+        def __init__(self, stock_id, head_id):
+            self.stock_id = stock_id
+            self.printer_head_id = head_id
+
+        def get_stock_id(self):
+            return self.stock_id
+
+    class Slot:
+        def __init__(self, printer_head=None):
+            self.printer_head = printer_head
+
+    previous = Head("stock-1", "head-1")
+    target = Head("stock-2", "head-2")
+
+    class Rack:
+        def __init__(self):
+            self.slots = [Slot(), Slot(target)]
+            self.gripper = previous
+            self.gripper_slot_number = 0
+
+        def get_gripper_printer_head(self):
+            return self.gripper
+
+        def transfer_from_gripper(self, slot):
+            self.slots[slot].printer_head = self.gripper
+            self.gripper = None
+
+        def update_slot_with_printer_head(self, slot, head):
+            self.slots[slot].printer_head = head
+
+        def confirm_slot(self, _slot):
+            return None
+
+        def transfer_to_gripper(self, slot):
+            self.gripper = self.slots[slot].printer_head
+            self.slots[slot].printer_head = None
+            self.gripper_slot_number = slot
+
+    machine_model = SimpleNamespace(
+        pulse=0,
+        pressure=0.0,
+        get_print_pulse_width=lambda: machine_model.pulse,
+        get_target_print_pressure=lambda: machine_model.pressure,
+    )
+    controller = SimpleNamespace(
+        get_array_run_state=lambda: "idle",
+        set_print_pulse_width=lambda value, update_model: setattr(
+            machine_model, "pulse", int(value)
+        ),
+        set_absolute_print_pressure=lambda value: setattr(
+            machine_model, "pressure", float(value)
+        ),
+    )
+    context.machine = SimpleNamespace(check_if_all_completed=lambda: True)
+    context.controller = controller
+    context.model = SimpleNamespace(rack_model=Rack(), machine_model=machine_model)
+
+    stock_id, head = stage_virtual_head(
+        context,
+        stock_index=0,
+        stock_specs=(
+            {
+                "factor_name": "stock-2",
+                "printer_head": {
+                    "printer_head_id": "head-2",
+                    "print_pulse_width_us": 1500,
+                    "print_pressure_psi": 1.5,
+                },
+            },
+        ),
+        calibrated_heads={"stock-2": target},
+        staging_slot=0,
+        stock_id_for=lambda stock: stock["factor_name"],
+    )
+
+    assert stock_id == "stock-2"
+    assert head["printer_head_id"] == "head-2"
+    evidence = context.action_results[-1]["evidence"]
+    assert evidence["previous_stock_id"] == "stock-1"
+    assert evidence["previous_printer_head_id"] == "head-1"
+    assert evidence["returned_previous"] is True
+    assert evidence["queue_drained_before"] is True
+    assert evidence["queue_drained_after"] is True
+    assert evidence["effective_print_pulse_width_us"] == 1500
+    assert evidence["effective_print_pressure_psi"] == 1.5
+    assert next(
+        event for event in events if event["kind"] == "virtual_head_exchange"
+    )["previous_printer_head_id"] == "head-1"
+
+
+def test_stock_pass_boundary_rejects_wrong_head_association(
+    tmp_path,
+    monkeypatch,
+):
+    import ExecutionResumeStore
+
+    context, _, _ = _context(tmp_path)
+    active_head = SimpleNamespace(
+        printer_head_id="wrong-head",
+        get_stock_id=lambda: "stock-1",
+    )
+    context.controller = SimpleNamespace(get_array_run_state=lambda: "idle")
+    context.machine = SimpleNamespace(check_if_all_completed=lambda: True)
+    context.model = SimpleNamespace(
+        rack_model=SimpleNamespace(
+            get_gripper_printer_head=lambda: active_head
+        )
+    )
+    context.experiment_model = SimpleNamespace(
+        execution_resume_file_path=tmp_path / "execution_resume.json",
+        get_execution_plan_snapshot=lambda: SimpleNamespace(
+            state=SimpleNamespace(value="active")
+        ),
+    )
+    monkeypatch.setattr(
+        ExecutionResumeStore,
+        "load_execution_resume",
+        lambda _path: SimpleNamespace(state="clean", intents=()),
+    )
+
+    with pytest.raises(ScenarioActionError, match="correctly associated"):
+        validate_stock_pass_boundary(
+            context,
+            pass_index=1,
+            stock_id="stock-1",
+            printer_head_id="head-1",
+            expected_completed_count=24,
+            observed_completed_count=lambda: 24,
+            expected_plan_state="active",
+        )
+
+    assert context.action_results[-1]["failure_stage"] == "operation"
+    assert context.action_results[-1]["evidence"][
+        "active_printer_head_id"
+    ] == "wrong-head"
 
 
 class FakeImage:
