@@ -281,7 +281,7 @@ Run the editor create/finalize lifecycle directly with:
 
 This scenario clicks the real Experiment Editor button, creates a fresh design,
 selects A1 and A2 through the Printable Wells dialog, enters one fixed 1x
-droplet stock, optimizes and generates, and presses Finish. It validates the
+droplet stock, optimizes and generates, and presses `Finalize Design`. It validates the
 prepared execution plan, immutable revision, compact progress, both key CSVs,
 and the absence of calibration/printing history. It then reloads the saved
 design and activates the authoritative runtime without rebuilding the design.
@@ -300,15 +300,31 @@ Run the prepared rename/refinalize regression directly with:
 This scenario first creates the minimal A1/A2 prepared experiment, then
 reopens the real editor and changes the name, replicate count, selected wells,
 printed/final volumes, reagent targets, reagent mode, and fill mode. It
-optimizes again and presses Finish. Its target contract requires a single
+optimizes again and presses `Finalize Design`. Its target contract requires a single
 renamed directory, a fresh revision-1 prepared plan for A1-A6, archived
 superseded prepared artifacts, zero progress, consistent key files/runtime
 assignments, and a `ready_to_start` reload.
 
 An untouched `PREPARED` execution remains editable after disk reload. Both
-Save and Finish publish material pre-start edits through the same transactional
+Save and `Finalize Design` publish material pre-start edits through the same transactional
 replacement path. Started, progressed, resumed, calibrated, or invalid
 executions remain fail-closed and require the editable-copy workflow instead.
+
+The Experiment Editor exposes four explicit lifecycle actions:
+
+- `Finalize Design` is enabled for a new draft or editable `PREPARED` design.
+  A `ready_to_start` eligibility result does not relabel an editable design.
+- `Load Execution` is enabled for a locked, inactive saved execution whose
+  authoritative runtime can be reconstructed.
+- `Execution Loaded` is disabled when that authoritative runtime is already
+  active.
+- `Execution Locked` is disabled for blocked, terminal, invalid, or otherwise
+  non-activatable saved executions.
+
+`Load Execution` only reconstructs the saved runtime. It does not start or
+resume printing; the operator must still use the applicable print/start or
+resume action. Locked executions show a full-width lifecycle banner while the
+lower status line remains available for transient details and errors.
 
 Run the post-start editor boundary directly with:
 
@@ -321,11 +337,23 @@ Run the post-start editor boundary directly with:
 This scenario creates and activates the minimal experiment, durably advances
 its plan to revision 2 with `lock_reason=printing_started`, and opens the real
 editor without issuing a print command. It requires every in-place mutation
-surface to be read-only, explicit copy guidance, and an enabled
+surface to be read-only, a visible lifecycle banner with explicit copy
+guidance, and an enabled
 `Create Editable Copy...` path before it attempts the copy. The active source
 remains byte-identical, while the copy accepts a tolerance-only edit and
 finalizes as a distinct revision-1 `PREPARED` execution that is
-`ready_to_start`. The scenario is active in the lifecycle suite.
+`ready_to_start`. `Create Editable Copy...` always uses the currently loaded
+`experiment_design.json`, asks only for a new name in a widened dialog, and
+publishes the fresh copy beside the source directory; it does not open a
+source-folder selector or inherit execution, progress, calibration, or
+printing history. The scenario is active in the lifecycle suite.
+
+Before the first pressure-sweep, stream-volume, droplet `Calibrate All`, or
+stream `Calibrate All` start while the authoritative plan is still
+`PREPARED`, the UI requires `Start Calibration` confirmation. `Cancel` is the
+safe default and occurs before calibration mode preflight, machine-setting
+changes, queue creation, or callbacks. The model remains authoritative for the
+durable `calibration_started` lock when a volume calibration is applied.
 
 Run the print-array soft-stop/resume lifecycle directly with:
 
@@ -358,11 +386,12 @@ This scenario uses one `QApplication` but constructs two independent
 Model/Controller/MainWindow/simulator sessions over the same isolated
 scenario root. The first session reaches a clean paused checkpoint and tears
 down. The second opens the real Experiment Editor, selects the persisted
-folder, and attempts `Activate Execution` before a real UI resume.
+folder, and selects `Load Execution` before a real UI resume.
 
 The scenario is active in the lifecycle suite. The persisted design is loaded
 through the real editor without changing its authoritative disk identity,
-`Activate Execution` reconstructs the exact partial runtime, and the real
+`Load Execution` reconstructs the exact partial runtime without starting or
+resuming printing, and the real
 `Resume Print` path completes A1-A24 without replaying any pair completed by
 the first session. A passing report contains eight ordered screenshots, both
 session cleanup records, disk/model/plan identity evidence, per-session

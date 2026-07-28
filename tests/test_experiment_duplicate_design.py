@@ -114,6 +114,9 @@ def test_duplicate_design_from_source_creates_fresh_run_state(tmp_path):
     assert json.loads((duplicate_dir / "progress.json").read_text(encoding="utf-8")) == {}
     assert json.loads((duplicate_dir / "calibration.json").read_text(encoding="utf-8")) == {}
     assert not (duplicate_dir / "calibration_recordings").exists()
+    assert not (duplicate_dir / "execution_plan.json").exists()
+    assert not (duplicate_dir / "execution_resume.json").exists()
+    assert not (duplicate_dir / "execution_calibrations.json").exists()
 
     status = duplicate_model.get_progress_status(str(duplicate_dir / "progress.json"))
     assert status["has_printed_progress"] is False
@@ -218,6 +221,51 @@ def test_duplicate_optimization_failure_is_transactional(tmp_path, monkeypatch):
         duplicate.duplicate_design_from(
             str(source_dir / "experiment_design.json"),
             "FailedCopy",
+            str(destination),
+        )
+
+    assert not destination.exists()
+    assert duplicate.experiment_dir_path is None
+
+
+def test_duplicate_existing_destination_does_not_mutate_source(tmp_path):
+    source = ExperimentModel(prof=CURRENT_PROFILE)
+    _configure_factor_design(source)
+    source_dir = tmp_path / "source_existing_destination"
+    _write_source_artifacts(source, source_dir)
+    source_before = {
+        path.relative_to(source_dir): path.read_bytes()
+        for path in source_dir.rglob("*")
+        if path.is_file()
+    }
+    destination = tmp_path / "existing"
+    destination.mkdir()
+    duplicate = ExperimentModel(prof=CURRENT_PROFILE)
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        duplicate.duplicate_design_from(
+            str(source_dir / "experiment_design.json"),
+            "Existing",
+            str(destination),
+        )
+
+    assert {
+        path.relative_to(source_dir): path.read_bytes()
+        for path in source_dir.rglob("*")
+        if path.is_file()
+    } == source_before
+    assert list(destination.iterdir()) == []
+    assert duplicate.experiment_dir_path is None
+
+
+def test_duplicate_missing_source_is_rejected_without_destination(tmp_path):
+    duplicate = ExperimentModel(prof=CURRENT_PROFILE)
+    destination = tmp_path / "must_not_exist"
+
+    with pytest.raises(FileNotFoundError):
+        duplicate.duplicate_design_from(
+            str(tmp_path / "missing" / "experiment_design.json"),
+            "Missing",
             str(destination),
         )
 

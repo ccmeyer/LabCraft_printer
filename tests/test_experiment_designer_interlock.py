@@ -1,13 +1,18 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import View
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QFileDialog,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -26,11 +31,14 @@ def _build_dialog_stub(
     execution_locked: bool = False,
     runtime_active: bool = False,
     resume_eligibility=None,
+    plan_state: str | None = None,
 ):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog._uploaded_design_active = False
     dialog._editing_locked_by_gripper = False
     dialog.status_lbl = QLabel("")
+    dialog.lifecycle_banner = QLabel("")
+    dialog.lifecycle_banner.hide()
 
     dialog.exp_name_edit = QLineEdit()
     dialog.add_reagent_btn = QPushButton()
@@ -45,7 +53,7 @@ def _build_dialog_stub(
     dialog.load_btn = QPushButton()
     dialog.duplicate_btn = QPushButton()
     dialog.finish_btn = QPushButton()
-    dialog.finish_btn.setText("Finish")
+    dialog.finish_btn.setText(ExperimentDesignDialog.ACTION_FINALIZE_DESIGN)
     dialog.auto_update_chk = QCheckBox()
     dialog.rep_spin = QSpinBox()
     dialog.v_spin = QDoubleSpinBox()
@@ -90,7 +98,17 @@ def _build_dialog_stub(
         is_authoritative_execution_runtime_active=lambda: runtime_active,
         is_read_only_legacy_execution=lambda: False,
         get_execution_resume_eligibility=lambda: resume_eligibility,
+        get_execution_plan_snapshot=lambda: (
+            SimpleNamespace(state=SimpleNamespace(value=plan_state))
+            if plan_state
+            else None
+        ),
         save_experiment=Mock(),
+    )
+    dialog._resolve_current_persisted_design_source = lambda: (
+        Path("experiment_design.json"),
+        Path("."),
+        None,
     )
     return dialog
 
@@ -340,7 +358,12 @@ def test_active_execution_is_read_only_with_editable_copy_guidance(qapp):
         gripper_loaded=False,
         execution_locked=True,
         runtime_active=True,
-        resume_eligibility={"can_activate_runtime": True},
+        resume_eligibility={
+            "status": "ready_to_resume",
+            "can_activate_runtime": True,
+            "reason": "Execution can resume.",
+        },
+        plan_state="active",
     )
 
     ExperimentDesignDialog._refresh_all_lock_states(dialog)
@@ -355,10 +378,13 @@ def test_active_execution_is_read_only_with_editable_copy_guidance(qapp):
     assert dialog.duplicate_btn.isEnabled() is True
     assert dialog.new_btn.isEnabled() is True
     assert dialog.load_btn.isEnabled() is True
-    assert dialog.status_lbl.text() == (
-        "This execution has started. Its design is locked and read-only; "
-        "create an editable copy to make changes."
+    assert dialog.finish_btn.text() == ExperimentDesignDialog.ACTION_EXECUTION_LOADED
+    assert dialog.lifecycle_banner.isVisible() is True
+    assert (
+        dialog.lifecycle_banner.text()
+        == ExperimentDesignDialog.ACTIVE_EXECUTION_BANNER
     )
+    assert dialog.status_lbl.text() == ""
 
 
 def test_active_execution_finish_handler_cannot_activate_or_close(qapp):
@@ -386,16 +412,23 @@ def test_inactive_persisted_execution_keeps_eligible_activation(qapp):
         gripper_loaded=False,
         execution_locked=True,
         runtime_active=False,
-        resume_eligibility={"can_activate_runtime": True},
+        resume_eligibility={
+            "status": "ready_to_resume",
+            "can_activate_runtime": True,
+            "reason": "Execution can resume.",
+        },
+        plan_state="active",
     )
 
     ExperimentDesignDialog._refresh_all_lock_states(dialog)
 
     assert dialog.exp_name_edit.isEnabled() is False
     assert dialog.run_btn.isEnabled() is False
-    assert dialog.finish_btn.text() == "Activate Execution"
+    assert dialog.finish_btn.text() == ExperimentDesignDialog.ACTION_LOAD_EXECUTION
     assert dialog.finish_btn.isEnabled() is True
     assert dialog.duplicate_btn.isEnabled() is True
+    assert dialog.lifecycle_banner.isVisible() is True
+    assert "without starting or resuming printing" in dialog.lifecycle_banner.text()
 
 
 def test_prepared_execution_remains_editable(qapp):
@@ -403,6 +436,12 @@ def test_prepared_execution_remains_editable(qapp):
         gripper_loaded=False,
         execution_locked=False,
         runtime_active=False,
+        resume_eligibility={
+            "status": "ready_to_start",
+            "can_activate_runtime": True,
+            "reason": "Execution is at a clean start boundary.",
+        },
+        plan_state="prepared",
     )
 
     ExperimentDesignDialog._refresh_all_lock_states(dialog)
@@ -412,7 +451,9 @@ def test_prepared_execution_remains_editable(qapp):
     assert dialog.volume_tolerance_spin.isEnabled() is True
     assert dialog.run_btn.isEnabled() is True
     assert dialog.finish_btn.isEnabled() is True
+    assert dialog.finish_btn.text() == ExperimentDesignDialog.ACTION_FINALIZE_DESIGN
     assert dialog.duplicate_btn.isEnabled() is True
+    assert dialog.lifecycle_banner.isVisible() is False
 
 
 def test_leaving_execution_lock_restores_editable_controls(qapp):
@@ -443,7 +484,12 @@ def test_gripper_lock_overrides_active_execution_editable_copy(qapp):
         gripper_loaded=True,
         execution_locked=True,
         runtime_active=True,
-        resume_eligibility={"can_activate_runtime": True},
+        resume_eligibility={
+            "status": "ready_to_resume",
+            "can_activate_runtime": True,
+            "reason": "Execution can resume.",
+        },
+        plan_state="active",
     )
 
     ExperimentDesignDialog._refresh_all_lock_states(dialog)
@@ -453,3 +499,181 @@ def test_gripper_lock_overrides_active_execution_editable_copy(qapp):
     assert dialog.status_lbl.text() == (
         "Design is view-only while a printer head is loaded in the gripper."
     )
+
+
+@pytest.mark.parametrize(
+    "plan_state,eligibility_status,reason",
+    [
+        ("active", "blocked", "A durable checkpoint is inconsistent."),
+        ("completed", "completed", "Execution is already complete."),
+        ("aborted", "aborted", "Execution was aborted."),
+    ],
+)
+def test_nonactivatable_execution_has_locked_action_and_reason_banner(
+    qapp,
+    plan_state,
+    eligibility_status,
+    reason,
+):
+    dialog = _build_dialog_stub(
+        gripper_loaded=False,
+        execution_locked=True,
+        runtime_active=False,
+        resume_eligibility={
+            "status": eligibility_status,
+            "can_activate_runtime": False,
+            "reason": reason,
+        },
+        plan_state=plan_state,
+    )
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert dialog.finish_btn.text() == ExperimentDesignDialog.ACTION_EXECUTION_LOCKED
+    assert dialog.finish_btn.isEnabled() is False
+    assert dialog.lifecycle_banner.isVisible() is True
+    assert "Hardware loading is unavailable" in dialog.lifecycle_banner.text()
+    assert reason in dialog.lifecycle_banner.text()
+
+
+def _build_duplicate_dialog(qapp, source_dir: Path):
+    source_path = source_dir / "experiment_design.json"
+    source_path.write_text(
+        json.dumps({"metadata": {"name": "Current Source"}, "factors": []}),
+        encoding="utf-8",
+    )
+
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    QDialog.__init__(dialog)
+    dialog.status_lbl = QLabel("")
+    dialog._set_status = ExperimentDesignDialog._set_status.__get__(
+        dialog, ExperimentDesignDialog
+    )
+    dialog._progress_reset_confirmed = False
+    duplicate = Mock(return_value=True)
+    dialog.model = SimpleNamespace(
+        experiment_file_path=str(source_path),
+        experiment_dir_path=str(source_dir),
+        default_duplicate_experiment_name=lambda name: f"{name}_copy",
+        sanitize_experiment_name=lambda name, fallback="": name.strip(),
+        duplicate_design_from=duplicate,
+        has_uploaded_design=lambda: False,
+        factors=[],
+    )
+    for method_name in (
+        "_set_progress_protection",
+        "_load_factors_into_table",
+        "_sync_controls_from_model",
+        "_refresh_stock_table",
+        "_update_summary_labels",
+        "_update_unique_conditions_button_label",
+        "_refresh_all_prior_availability",
+        "_refresh_all_lock_states",
+    ):
+        setattr(dialog, method_name, Mock())
+    return dialog, duplicate, source_path
+
+
+def test_create_editable_copy_uses_current_source_and_wide_name_dialog(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    dialog, duplicate, source_path = _build_duplicate_dialog(qapp, source_dir)
+    source_before = source_path.read_bytes()
+    observed = {}
+
+    def accept_name(input_dialog):
+        observed["minimum_width"] = input_dialog.minimumWidth()
+        observed["label"] = input_dialog.labelText()
+        name_field = input_dialog.findChild(QLineEdit)
+        observed["name_field_minimum_width"] = name_field.minimumWidth()
+        input_dialog.setTextValue("editable-copy")
+        return QDialog.Accepted
+
+    monkeypatch.setattr(QInputDialog, "exec", accept_name)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        lambda *args, **kwargs: pytest.fail(
+            "Create Editable Copy must not open a source-folder dialog"
+        ),
+    )
+
+    ExperimentDesignDialog._on_duplicate_design(dialog)
+
+    duplicate.assert_called_once_with(
+        str(source_path.resolve()),
+        "editable-copy",
+        str((tmp_path / "editable-copy").resolve()),
+    )
+    assert source_path.read_bytes() == source_before
+    assert observed["minimum_width"] >= 640
+    assert observed["name_field_minimum_width"] >= 480
+    assert "Current source: Current Source" in observed["label"]
+    assert "New experiment" in dialog.status_lbl.text()
+
+
+def test_create_editable_copy_cancel_is_side_effect_free(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    dialog, duplicate, source_path = _build_duplicate_dialog(qapp, source_dir)
+    source_before = source_path.read_bytes()
+    monkeypatch.setattr(QInputDialog, "exec", lambda _dialog: QDialog.Rejected)
+
+    ExperimentDesignDialog._on_duplicate_design(dialog)
+
+    duplicate.assert_not_called()
+    assert source_path.read_bytes() == source_before
+    assert "left unchanged" in dialog.status_lbl.text()
+
+
+def test_editable_copy_button_disabled_for_inconsistent_current_paths(
+    qapp,
+    tmp_path,
+):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    other_file = tmp_path / "other" / "experiment_design.json"
+    other_file.parent.mkdir()
+    other_file.write_text(
+        json.dumps({"metadata": {"name": "Other"}}),
+        encoding="utf-8",
+    )
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog.duplicate_btn = QPushButton()
+    dialog.model = SimpleNamespace(
+        experiment_file_path=str(other_file),
+        experiment_dir_path=str(source_dir),
+    )
+
+    ExperimentDesignDialog._refresh_editable_copy_availability(dialog)
+
+    assert dialog.duplicate_btn.isEnabled() is False
+    assert "do not identify the same design" in dialog.duplicate_btn.toolTip()
+
+
+def test_create_editable_copy_rejects_unwritable_parent_before_model_call(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    dialog, duplicate, source_path = _build_duplicate_dialog(qapp, source_dir)
+    source_before = source_path.read_bytes()
+    monkeypatch.setattr(QInputDialog, "exec", lambda _dialog: QDialog.Accepted)
+    monkeypatch.setattr(View.os, "access", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(QMessageBox, "warning", Mock())
+
+    ExperimentDesignDialog._on_duplicate_design(dialog)
+
+    duplicate.assert_not_called()
+    assert source_path.read_bytes() == source_before
+    assert "not writable" in dialog.status_lbl.text()

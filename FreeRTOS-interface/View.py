@@ -98,6 +98,26 @@ class LegacyExecutionMigrationWorker(QThread):
         self.succeeded.emit(result)
 
 
+class EditableCopyNameDialog(QInputDialog):
+    MINIMUM_DIALOG_WIDTH = 640
+    MINIMUM_NAME_FIELD_WIDTH = 480
+
+    def _enforce_minimum_widths(self):
+        self.setMinimumWidth(self.MINIMUM_DIALOG_WIDTH)
+        name_field = self.findChild(QLineEdit)
+        if name_field is not None:
+            name_field.setMinimumWidth(self.MINIMUM_NAME_FIELD_WIDTH)
+        self.resize(
+            max(self.MINIMUM_DIALOG_WIDTH, self.width(), self.sizeHint().width()),
+            max(self.height(), self.sizeHint().height()),
+        )
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._enforce_minimum_widths()
+        QTimer.singleShot(0, self._enforce_minimum_widths)
+
+
 def is_release_candidate_version(version):
     return "-rc" in str(version or "").lower()
 
@@ -10583,6 +10603,18 @@ class ExperimentDesignDialog(QDialog):
     PROGRESS_POLICY_COPY = "copy"
     PROGRESS_POLICY_CANCEL = "cancel"
 
+    ACTION_FINALIZE_DESIGN = "Finalize Design"
+    ACTION_LOAD_EXECUTION = "Load Execution"
+    ACTION_EXECUTION_LOADED = "Execution Loaded"
+    ACTION_EXECUTION_LOCKED = "Execution Locked"
+
+    ACTIVE_EXECUTION_BANNER = (
+        "This execution has started. The experiment design is locked and read-only. "
+        "Create an editable copy to change the design. Calibration may still update "
+        "the dispensing mode and effective ejection volume for a reagent that has "
+        "not yet dispensed."
+    )
+
     def __init__(self, model: ExperimentModel, main_window):
         super().__init__()
         self.main_window = main_window
@@ -10627,9 +10659,28 @@ class ExperimentDesignDialog(QDialog):
         self._auto_timer.timeout.connect(self._recompute_silent)
 
         # -------------------------
-        # Root layout: LEFT (narrow) | RIGHT (wide)
+        # Root layout: lifecycle banner over LEFT (narrow) | RIGHT (wide)
         # -------------------------
-        self.root = QHBoxLayout(self)
+        outer_root = QVBoxLayout(self)
+        self.lifecycle_banner = QLabel("")
+        self.lifecycle_banner.setObjectName("experiment_lifecycle_banner")
+        self.lifecycle_banner.setWordWrap(True)
+        self.lifecycle_banner.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lifecycle_banner.setStyleSheet(
+            "QLabel {"
+            " background-color:#fff4ce;"
+            " border:1px solid #c58a00;"
+            " border-radius:4px;"
+            " color:#4d3900;"
+            " font-weight:600;"
+            " padding:10px;"
+            "}"
+        )
+        self.lifecycle_banner.hide()
+        outer_root.addWidget(self.lifecycle_banner)
+
+        self.root = QHBoxLayout()
+        outer_root.addLayout(self.root, stretch=1)
 
         left = QVBoxLayout()                # single column for all controls/buttons
         self.root.addLayout(left, stretch=1)  # make left narrower
@@ -10889,7 +10940,7 @@ class ExperimentDesignDialog(QDialog):
         self.load_btn.clicked.connect(self._on_load_design)
         controls_col.addWidget(self.load_btn)
 
-        self.finish_btn = QPushButton("Finish")
+        self.finish_btn = QPushButton(self.ACTION_FINALIZE_DESIGN)
         self.finish_btn.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
         self.finish_btn.clicked.connect(self._on_finish)
         controls_col.addWidget(self.finish_btn)
@@ -11797,6 +11848,165 @@ class ExperimentDesignDialog(QDialog):
         getter = getattr(model, "is_authoritative_execution_runtime_active", None)
         return bool(callable(getter) and getter())
 
+    @staticmethod
+    def _execution_plan_state_text(model) -> str:
+        getter = getattr(model, "get_execution_plan_snapshot", None)
+        plan = getter() if callable(getter) else None
+        state = getattr(plan, "state", None)
+        return str(getattr(state, "value", state) or "").strip().casefold()
+
+    def _classify_editor_lifecycle(self) -> dict[str, Any]:
+        locked = self._model_execution_is_read_only(self.model)
+        runtime_active = self._model_authoritative_runtime_is_active(self.model)
+        eligibility_getter = getattr(
+            self.model, "get_execution_resume_eligibility", None
+        )
+        eligibility = (
+            eligibility_getter() if callable(eligibility_getter) else None
+        ) or {}
+        plan_state = self._execution_plan_state_text(self.model)
+
+        # Eligibility is intentionally secondary to the design lock. An editable
+        # PREPARED design may also be ready_to_start, but still needs finalization
+        # after any editor changes.
+        if not locked:
+            return {
+                "state": "editable",
+                "action_text": self.ACTION_FINALIZE_DESIGN,
+                "action_enabled": True,
+                "banner_text": "",
+                "plan_state": plan_state,
+                "eligibility": dict(eligibility),
+            }
+
+        if runtime_active:
+            return {
+                "state": "runtime_loaded",
+                "action_text": self.ACTION_EXECUTION_LOADED,
+                "action_enabled": False,
+                "banner_text": self.ACTIVE_EXECUTION_BANNER,
+                "plan_state": plan_state,
+                "eligibility": dict(eligibility),
+            }
+
+        can_activate = bool(eligibility.get("can_activate_runtime"))
+        reason = str(eligibility.get("reason") or "").strip()
+        if can_activate:
+            return {
+                "state": "saved_execution",
+                "action_text": self.ACTION_LOAD_EXECUTION,
+                "action_enabled": True,
+                "banner_text": (
+                    "This saved execution is locked and read-only. Select Load "
+                    "Execution to reconstruct the saved runtime without starting or "
+                    "resuming printing. Create an editable copy to change the design."
+                ),
+                "plan_state": plan_state,
+                "eligibility": dict(eligibility),
+            }
+
+        state_description = (
+            f"The execution is {plan_state}." if plan_state else
+            "The saved execution cannot be activated."
+        )
+        unavailable_reason = reason or state_description
+        return {
+            "state": "locked_execution",
+            "action_text": self.ACTION_EXECUTION_LOCKED,
+            "action_enabled": False,
+            "banner_text": (
+                "This saved execution is locked and read-only. Hardware loading is "
+                f"unavailable: {unavailable_reason} Create an editable copy to change "
+                "the design."
+            ),
+            "plan_state": plan_state,
+            "eligibility": dict(eligibility),
+        }
+
+    def _refresh_editor_lifecycle_state(self) -> dict[str, Any]:
+        lifecycle = self._classify_editor_lifecycle()
+        finish_btn = getattr(self, "finish_btn", None)
+        if finish_btn is not None:
+            finish_btn.setText(lifecycle["action_text"])
+            finish_btn.setEnabled(bool(lifecycle["action_enabled"]))
+            if lifecycle["state"] == "saved_execution":
+                finish_btn.setToolTip(
+                    "Reconstruct the saved runtime. This does not start or resume printing."
+                )
+            elif lifecycle["state"] == "editable":
+                finish_btn.setToolTip(
+                    "Finalize and load the current experiment design."
+                )
+            else:
+                finish_btn.setToolTip(lifecycle["banner_text"])
+
+        banner = getattr(self, "lifecycle_banner", None)
+        if banner is not None:
+            banner.setText(lifecycle["banner_text"])
+            banner.setVisible(bool(lifecycle["banner_text"]))
+            banner.setToolTip(lifecycle["banner_text"])
+        return lifecycle
+
+    def _resolve_current_persisted_design_source(
+        self,
+    ) -> tuple[Path | None, Path | None, str | None]:
+        source_file_raw = getattr(self.model, "experiment_file_path", None)
+        source_dir_raw = getattr(self.model, "experiment_dir_path", None)
+        if not source_file_raw or not source_dir_raw:
+            return (
+                None,
+                None,
+                "Create or load a persisted experiment design before making an editable copy.",
+            )
+        try:
+            source_file = Path(source_file_raw).resolve()
+            source_dir = Path(source_dir_raw).resolve()
+        except (OSError, TypeError, ValueError) as exc:
+            return None, None, f"The current experiment paths are invalid: {exc}"
+
+        expected_file = (source_dir / "experiment_design.json").resolve()
+        if source_file != expected_file:
+            return (
+                None,
+                None,
+                "The current experiment file and directory do not identify the same design.",
+            )
+        if not source_dir.is_dir() or not source_file.is_file():
+            return (
+                None,
+                None,
+                "The current experiment_design.json is not available on disk.",
+            )
+        try:
+            with source_file.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception as exc:
+            return None, None, f"The current experiment design cannot be read: {exc}"
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("metadata"), dict
+        ):
+            return (
+                None,
+                None,
+                "The current experiment_design.json is not a valid experiment design.",
+            )
+        return source_file, source_dir, None
+
+    def _refresh_editable_copy_availability(self) -> None:
+        button = getattr(self, "duplicate_btn", None)
+        if button is None:
+            return
+        _source_file, _source_dir, error = (
+            self._resolve_current_persisted_design_source()
+        )
+        available = error is None
+        button.setEnabled(available)
+        button.setToolTip(
+            "Create a fresh editable sibling of the currently loaded design."
+            if available
+            else str(error)
+        )
+
     def _load_factors_into_table(self):
         """Populate the reagent table from the model's current factors (if any)."""
         previous_suspended = getattr(self, "_auto_update_suspended", False)
@@ -12493,24 +12703,9 @@ class ExperimentDesignDialog(QDialog):
         self._apply_manual_assignment_lock_state()
         self._apply_progress_edit_lock_state()
         self._apply_execution_edit_lock_state()
+        self._refresh_editor_lifecycle_state()
+        self._refresh_editable_copy_availability()
         self._apply_gripper_edit_lock_state()
-        eligibility_getter = getattr(
-            self.model, "get_execution_resume_eligibility", None
-        )
-        eligibility = eligibility_getter() if callable(eligibility_getter) else None
-        if eligibility is not None:
-            self.finish_btn.setText("Activate Execution")
-            execution_is_active = (
-                self._model_execution_is_read_only(self.model)
-                and self._model_authoritative_runtime_is_active(self.model)
-            )
-            self.finish_btn.setEnabled(
-                bool(eligibility.get("can_activate_runtime"))
-                and not getattr(self, "_editing_locked_by_gripper", False)
-                and not execution_is_active
-            )
-        elif self.finish_btn.text() == "Activate Execution":
-            self.finish_btn.setText("Finish")
         migrate_button = getattr(self, "migrate_legacy_btn", None)
         if migrate_button is not None:
             legacy_getter = getattr(self.model, "is_read_only_legacy_execution", None)
@@ -12657,20 +12852,8 @@ class ExperimentDesignDialog(QDialog):
 
     def _apply_execution_edit_lock_state(self):
         locked = self._model_execution_is_read_only(self.model)
-        runtime_active = self._model_authoritative_runtime_is_active(self.model)
-        message = (
-            "This execution has started. Its design is locked and read-only; "
-            "create an editable copy to make changes."
-        )
-        self._execution_lock_status_message = message if locked and runtime_active else ""
 
         if not locked:
-            if (
-                hasattr(self, "status_lbl")
-                and self.status_lbl is not None
-                and self.status_lbl.text() == message
-            ):
-                self._set_status("")
             return
 
         mutating_controls = [
@@ -12716,9 +12899,6 @@ class ExperimentDesignDialog(QDialog):
                     widget.setReadOnly(True)
                 else:
                     widget.setEnabled(False)
-
-        if runtime_active:
-            self._set_status(message)
 
     def _progress_status_message(self, status: Mapping[str, Any]) -> str:
         wells = int(status.get("wells_with_progress", 0) or 0)
@@ -14023,6 +14203,8 @@ class ExperimentDesignDialog(QDialog):
         self._update_well_selection_summary()
         self._update_unique_conditions_button_label()
         self._refresh_all_prior_availability()
+        self._refresh_editor_lifecycle_state()
+        self._refresh_editable_copy_availability()
 
         self._set_status(f"New experiment created: {getattr(self.model, 'experiment_dir_path', '(unsaved yet)')}")
 
@@ -14081,66 +14263,98 @@ class ExperimentDesignDialog(QDialog):
         self._set_status(f"Design saved to: {self.model.experiment_file_path}")
 
     def _on_duplicate_design(self):
-        default_dir = None
-        try:
-            maybe = os.fspath(getattr(self.model, "experiments_root", "") or "")
-            default_dir = maybe if os.path.isdir(maybe) else None
-        except Exception:
-            pass
-
-        exp_dir = QFileDialog.getExistingDirectory(
-            self, "Select Experiment to Duplicate", default_dir or os.getcwd()
+        source_file, source_dir, source_error = (
+            self._resolve_current_persisted_design_source()
         )
-        if not exp_dir:
+        if source_error or source_file is None or source_dir is None:
+            message = source_error or "The current experiment design is unavailable."
+            QMessageBox.warning(self, "Editable copy unavailable", message)
+            self._set_status(message)
+            self._refresh_editable_copy_availability()
             return
 
-        self.finish_btn.setText("Finish")
-
-        path = os.path.join(exp_dir, "experiment_design.json")
-        if not os.path.exists(path):
-            self._set_status(f"No 'experiment_design.json' found in: {exp_dir}")
-            return
-
-        source_name = os.path.basename(os.path.normpath(exp_dir)) or "Experiment"
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
+            with source_file.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
             if isinstance(payload, dict):
                 metadata = payload.get("metadata") or {}
-                if isinstance(metadata, dict) and metadata.get("name"):
-                    source_name = str(metadata.get("name"))
-        except Exception:
-            pass
+            else:
+                metadata = {}
+        except Exception as exc:
+            message = f"The current experiment design cannot be read: {exc}"
+            QMessageBox.warning(self, "Editable copy unavailable", message)
+            self._set_status(message)
+            return
+
+        source_name = (
+            str(metadata.get("name") or "").strip()
+            if isinstance(metadata, dict)
+            else ""
+        ) or source_dir.name or "Experiment"
 
         default_name = self.model.default_duplicate_experiment_name(source_name)
-        new_name, ok = QInputDialog.getText(
-            self,
-            "Duplicate Experiment Design",
-            "New experiment name:",
-            text=default_name,
+        name_dialog = EditableCopyNameDialog(self)
+        name_dialog.setWindowTitle("Duplicate Experiment Design")
+        name_dialog.setInputMode(QInputDialog.TextInput)
+        name_dialog.setLabelText(
+            f"Current source: {source_name}\nNew experiment name:"
         )
-        if not ok:
+        name_dialog.setTextValue(default_name)
+        name_dialog.setOkButtonText("Create Copy")
+        name_dialog.setCancelButtonText("Cancel")
+        name_field = name_dialog.findChild(QLineEdit)
+        if name_field is not None:
+            name_field.selectAll()
+        name_dialog._enforce_minimum_widths()
+        if name_dialog.exec() != QDialog.Accepted:
             self._set_status("Duplicate canceled; current design was left unchanged.")
             return
 
-        new_name = self.model.sanitize_experiment_name(new_name, fallback="")
+        requested_name = name_dialog.textValue().strip()
+        if not requested_name:
+            self._set_status("Duplicate canceled; no experiment name was provided.")
+            return
+        new_name = self.model.sanitize_experiment_name(
+            requested_name, fallback=""
+        )
         if not new_name:
             self._set_status("Duplicate canceled; no experiment name was provided.")
             return
 
-        base_dir = default_dir or os.path.dirname(os.path.normpath(exp_dir)) or os.getcwd()
-        new_experiment_path = os.path.join(base_dir, new_name)
-        if os.path.exists(new_experiment_path):
+        destination_parent = source_dir.parent
+        if not destination_parent.is_dir() or not os.access(
+            destination_parent, os.W_OK
+        ):
+            message = (
+                f"The source parent folder is not writable: {destination_parent}"
+            )
+            QMessageBox.warning(self, "Duplicate failed", message)
+            self._set_status(f"Duplicate failed: {message}")
+            return
+
+        new_experiment_path = (destination_parent / new_name).resolve()
+        if new_experiment_path == source_dir or new_experiment_path.exists():
+            collision_detail = (
+                f" after sanitizing {requested_name!r}"
+                if requested_name != new_name
+                else ""
+            )
             QMessageBox.warning(
                 self,
                 "Duplicate failed",
-                f"A folder named '{new_name}' already exists.",
+                f"A folder named '{new_name}' already exists{collision_detail}.",
             )
-            self._set_status(f"Duplicate failed; folder already exists: {new_experiment_path}")
+            self._set_status(
+                f"Duplicate failed; folder already exists: {new_experiment_path}"
+            )
             return
 
         try:
-            self.model.duplicate_design_from(path, new_name, new_experiment_path)
+            self.model.duplicate_design_from(
+                str(source_file),
+                new_name,
+                str(new_experiment_path),
+            )
         except Exception as e:
             message = str(e) or "Unknown duplicate error."
             QMessageBox.warning(self, "Duplicate failed", message)
@@ -14163,7 +14377,10 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_all_prior_availability()
         self._refresh_all_lock_states()
 
-        self._set_status(f"Duplicated design from: {exp_dir}. New experiment: {new_experiment_path}")
+        self._set_status(
+            f"Duplicated current design from: {source_dir}. "
+            f"New experiment: {new_experiment_path}"
+        )
 
     def _on_migrate_legacy_copy(self):
         source = getattr(self.model, "experiment_dir_path", None)
@@ -14305,17 +14522,14 @@ class ExperimentDesignDialog(QDialog):
             eligibility = eligibility_getter() if callable(eligibility_getter) else None
             reason = str((eligibility or {}).get("reason") or "")
             status = str((eligibility or {}).get("status") or "")
-            can_activate = bool((eligibility or {}).get("can_activate_runtime"))
             base_message = (
-                "Execution plan validated. Press Activate Execution to reconstruct the exact saved runtime."
+                "Execution plan validated. Press Load Execution to reconstruct the exact saved runtime."
                 if status in {"ready_to_start", "ready_to_resume", "repairable_checkpoint"}
                 else "Execution plan loaded read-only for analysis; hardware activation is blocked."
             )
             self._progress_lock_status_message = (
                 "\n".join(item for item in (base_message, reason, sync_error) if item)
             )
-            self.finish_btn.setText("Activate Execution")
-            self.finish_btn.setEnabled(can_activate)
         elif progress_policy == self.PROGRESS_POLICY_RESUME:
             self._progress_reset_confirmed = False
             self._set_progress_protection(True, progress_status)

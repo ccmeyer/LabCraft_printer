@@ -330,7 +330,7 @@ existing classification and comparison-policy meanings are unchanged.
 adds only nested scenario evidence:
 
 - `metrics.workflow.values.action_results` records editor open, new-session,
-  control-entry, optimize/generate, Finish, prepared validation, authoritative
+  control-entry, optimize/generate, `Finalize Design`, prepared validation, authoritative
   reload, milestone capture, and teardown actions;
 - `metrics.workflow.values.lifecycle_milestones` contains
   `editor_opened`, `generated`, `finalized`, `reloaded`, and `validated`;
@@ -366,7 +366,7 @@ evidence for the second editor session:
   identity, fresh plan identity, hashes, audit evidence, and changed runtime
   assignments;
 - `rename_refinalization.failure_state` is present when the rename succeeds
-  but the second Finish fails. It records old/new directory state, saved name
+  but the second `Finalize Design` fails. It records old/new directory state, saved name
   and design hash, current-plan presence/hash, retained paths, and audit rows;
 - `metrics.persistence.values.refinalized_bundle` contains final design/plan,
   immutable-history, progress, key, directory-uniqueness, material design
@@ -376,7 +376,7 @@ evidence for the second editor session:
   and runtime-assignment checks.
 
 The expanded rename/edit scenario requires ten nonempty success screenshots.
-A failed second Finish instead retains all milestones reached before failure plus
+A failed second `Finalize Design` instead retains all milestones reached before failure plus
 `failure.png`, exact dialog/error text, traceback, initial prepared evidence,
 post-rename filesystem evidence, and complete teardown results. It remains a
 functional failure; the report schema does not mark the regression expected.
@@ -388,10 +388,14 @@ functional failure; the report schema does not mark the regression expected.
   plan and `printing_started` lock, clean zero-intent resume, zero progress,
   immutable history, runtime assignments, audit rows, file inventory, and
   SHA-256 hashes;
-- `locked_editor` records the real editor control matrix, status guidance,
-  and availability of `Create Editable Copy...`;
-- `editable_copy_before_finalize` records the distinct copy directory and
-  unlocked controls after the real file/name dialogs complete;
+- `locked_editor` records the real editor control matrix, transient status
+  text, visible lifecycle-banner text, lifecycle action label, and availability
+  of `Create Editable Copy...`;
+- `editable_copy_before_finalize` records the automatically selected current
+  source, copy-name dialog and name-field widths, destination directory,
+  `Finalize Design` label, and unlocked controls after the name dialog
+  completes. A source `QFileDialog` is an unexpected modal and fails the
+  action;
 - `editable_copy_after_finalize` records the copy's distinct revision-1
   `PREPARED` plan, fresh history, zero progress, key files, runtime
   assignments, and pre-activation resume absence; and
@@ -456,7 +460,8 @@ does not create performance or baseline evidence.
 - `session_2_loaded` records the real editor selection, inactive runtime,
   eligibility, status guidance, and disk/model/plan design hashes;
 - `session_2_activation` is populated only after a successful real
-  `Activate Execution` action;
+  `Load Execution` action. The retained internal action ID remains
+  `experiment.activate_authoritative_via_ui` for report compatibility;
 - `resume_reconciliation`, `audit`, and `terminal` are populated only after
   activation and resume reach their corresponding gates.
 
@@ -468,7 +473,8 @@ composition, not an operating-system process restart.
 
 A passing run retains the byte-identical disk design through Session 1
 teardown and the Session 2 editor load. `session_2_loaded` records
-`ready_to_resume` with an inactive runtime, `session_2_activation` records the
+`ready_to_resume` with an inactive runtime, the visible lock banner and
+`Load Execution` label, `session_2_activation` records the
 single activation audit event and any allowlisted persistence changes, and
 `resume_reconciliation` merges session-attributed intent evidence. Command
 sequences are checked for uniqueness and monotonicity within each fresh

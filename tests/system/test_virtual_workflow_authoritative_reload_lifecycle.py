@@ -109,13 +109,19 @@ def test_authoritative_reload_resume_composed_report_passes(
     assert evidence["checks"]["eligibility_ready_to_resume"]
     assert evidence["checks"]["finish_enabled"]
     assert evidence["checks"]["read_only_guidance"]
+    assert evidence["checks"]["action_is_load_execution"]
+    assert evidence["checks"]["visible_lock_banner"]
+    assert evidence["action_label"] == "Load Execution"
+    assert "without starting or resuming printing" in evidence["banner_text"]
     identity = evidence["design_identity"]
     assert identity["disk_design_sha256"] == identity["plan_design_sha256"]
-    assert next(
+    activation = next(
         item
         for item in actions
         if item["action_id"] == "experiment.activate_authoritative_via_ui"
-    )["status"] == "pass"
+    )
+    assert activation["status"] == "pass"
+    assert activation["evidence"]["action_label"] == "Load Execution"
 
     assertions = {
         item["assertion_id"]: item["decision"]

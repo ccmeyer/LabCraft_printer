@@ -8763,6 +8763,66 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_manual_control_lock_state()
         return True
 
+    def _authoritative_execution_plan_is_prepared(self):
+        experiment_model = getattr(
+            getattr(self, "model", None), "experiment_model", None
+        )
+        getter = getattr(experiment_model, "get_execution_plan_snapshot", None)
+        plan = getter() if callable(getter) else None
+        state = getattr(plan, "state", None)
+        return (
+            str(getattr(state, "value", state) or "").strip().casefold()
+            == "prepared"
+        )
+
+    def _confirm_first_volume_calibration_lock(self):
+        if not self._authoritative_execution_plan_is_prepared():
+            return True
+
+        message_box = QtWidgets.QMessageBox(self)
+        message_box.setIcon(QtWidgets.QMessageBox.Warning)
+        message_box.setWindowTitle("Start volume calibration?")
+        message_box.setText(
+            "Starting volume calibration will lock this experiment design."
+        )
+        message_box.setInformativeText(
+            "The finalized reagents, targets, wells, and design volumes will become "
+            "read-only. A reagent that has not yet dispensed may still receive "
+            "execution-time dispensing-mode and effective-ejection-volume calibration "
+            "revisions.\n\n"
+            "The durable execution-plan lock remains fail-closed if calibration cannot "
+            "be applied."
+        )
+        start_button = message_box.addButton(
+            "Start Calibration", QtWidgets.QMessageBox.AcceptRole
+        )
+        cancel_button = message_box.addButton(
+            "Cancel", QtWidgets.QMessageBox.RejectRole
+        )
+        message_box.setDefaultButton(cancel_button)
+        message_box.setEscapeButton(cancel_button)
+        message_box.exec()
+        return message_box.clickedButton() is start_button
+
+    def _start_volume_calibration(
+        self,
+        requested_mode,
+        action_key,
+        start_callback,
+    ):
+        # This is a UI consent boundary only. The authoritative model continues
+        # to perform the durable calibration_started transition when a selected
+        # volume calibration is applied.
+        if not self._confirm_first_volume_calibration_lock():
+            self._set_calibration_action_text(action_key, use_default=True)
+            self._refresh_manual_control_lock_state()
+            return False
+        return self._start_mode_guarded_calibration(
+            requested_mode,
+            action_key,
+            start_callback,
+        )
+
     def _sync_pressure_scan_start_pressure_from_profile(self, profile):
         if not isinstance(profile, dict) or "print_pressure" not in profile:
             return False
@@ -9115,7 +9175,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text("pressure_sweep_characterization", use_default=True)
             self.controller.stop_calibration()
         else:
-            self._start_mode_guarded_calibration(
+            self._start_volume_calibration(
                 "droplet",
                 "pressure_sweep_characterization",
                 self.controller.start_pressure_sweep_characterization,
@@ -9145,7 +9205,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text("online_stream_calibration", use_default=True)
             self.controller.stop_calibration()
         else:
-            self._start_mode_guarded_calibration(
+            self._start_volume_calibration(
                 "stream",
                 "online_stream_calibration",
                 self.controller.start_online_stream_calibration,
@@ -9169,7 +9229,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text("stream_calibrate_all", use_default=True)
             self.controller.stop_calibration()
         else:
-            self._start_mode_guarded_calibration(
+            self._start_volume_calibration(
                 "stream",
                 "stream_calibrate_all",
                 self.controller.start_stream_calibration_sequence,
@@ -9193,7 +9253,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text("calibrate_all", use_default=True)
             self.controller.stop_calibration()
         else:
-            self._start_mode_guarded_calibration(
+            self._start_volume_calibration(
                 "droplet",
                 "calibrate_all",
                 lambda: self.controller.start_droplet_calibration_sequence(
@@ -9516,7 +9576,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self,
             "Apply calibration as mode switch?",
             (
-                "Apply this selected calibration by switching the design mode?\n\n"
+                "Apply this selected calibration by switching this reagent's execution mode?\n\n"
                 f"{mode_text}\n"
                 f"Ejection volume: {_fmt_volume(old_volume_nL)} -> {_fmt_volume(new_volume_nL)}\n\n"
                 "Review the preview table before continuing. The target errors, ejection counts, "

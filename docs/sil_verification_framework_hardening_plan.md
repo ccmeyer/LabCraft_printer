@@ -2182,6 +2182,85 @@ Risk and rollback:
   started-execution locks, firmware, protocol, baselines, Pi behavior, and
   hardware state require no rollback.
 
+#### Editor lifecycle clarity and direct editable-copy follow-up
+
+Status: `verified`
+
+Call paths:
+
+`Experiment Editor -> ExperimentDesignDialog -> design-lock/runtime/plan-state classifier -> Finalize Design | Load Execution | Execution Loaded | Execution Locked`
+
+`Create Editable Copy... -> current experiment_file_path + experiment_dir_path -> widened copy-name QInputDialog -> sibling destination -> ExperimentModel.duplicate_design_from -> staged validation/publish -> editable copy in the same dialog`
+
+`volume-calibration start button -> PREPARED-plan confirmation -> existing mode preflight -> existing Controller/CalibrationManager -> selected calibration apply -> existing lock_execution_plan("calibration_started")`
+
+Implementation and coverage:
+
+- Editable drafts and `PREPARED` designs retain `Finalize Design` even when
+  authoritative eligibility is `ready_to_start`. Locked inactive executions
+  expose `Load Execution`; an active authoritative runtime shows disabled
+  `Execution Loaded`; blocked and terminal executions show disabled
+  `Execution Locked`.
+- `Load Execution` retains the existing runtime-reconstruction handler and
+  does not start or resume printing.
+- A full-width banner is hidden while editable and gives distinct active,
+  loadable-saved, and blocked/terminal guidance while preserving the lower
+  transient status line. The gripper lock remains the highest-precedence
+  control/status lock.
+- `Create Editable Copy...` resolves only the current persisted design,
+  rejects missing/inconsistent paths, empty or colliding names, existing
+  destinations, and unwritable parents, and creates a fresh sibling through
+  the existing transactional duplicate implementation. The source selector
+  was removed. The name dialog is at least 640 px wide with a name field
+  minimum of 480 px.
+- The first top-level pressure-sweep, online stream-volume, droplet
+  `Calibrate All`, or stream `Calibrate All` start while the authoritative
+  plan remains `PREPARED` requires explicit `Start Calibration`; `Cancel` is
+  the default and runs before mode preflight, controller callbacks, machine
+  settings, or queue changes. The UI does not move or duplicate the durable
+  model lock, which remains authoritative when a selected calibration is
+  applied.
+- Existing Slice 4.2, 4.3, and 4.5 scenario and action IDs remain unchanged.
+  Their nested report-v1 evidence additively records lifecycle labels/banner,
+  automatic copy source, name-dialog widths, and destination. Slice 4.3 now
+  treats any source `QFileDialog` as an unexpected modal.
+
+Verification record (2026-07-28):
+
+- Starting HEAD was `73d0045c94d7` with a clean tracked worktree. The
+  pre-edit editor/copy/calibration/action/authoritative baseline passed 96
+  tests.
+- Focused post-edit validation passed 114 tests, including lifecycle
+  classification/banner, direct-current copy behavior and fresh-copy model
+  semantics, calibration confirmation/cancellation, report actions, droplet
+  imaging summary, and authoritative loading.
+- The opt-in editor lifecycle selection passed 11 tests. Direct Slice 4.2,
+  4.3, and 4.5 CLI runs classified `pass` with 10/10, 9/9, and the complete
+  24/24 resume workflow respectively.
+- Manual inspection of retained `locked_editor_opened.png` and
+  `session_2_loaded.png` confirmed readable full-width banners plus visible
+  `Execution Loaded` and `Load Execution` actions.
+- The full default suite completed with 3,654 passed and 38 skipped. Its only
+  failure was a test-only `__new__` dialog stub exposed by an over-broad New
+  Experiment refresh. The refresh was narrowed to the two new lifecycle/copy
+  states, and that failure plus all affected focused suites then passed 73
+  tests. A clean full-suite rerun reached 21% without failures before an
+  external interruption; this record does not claim a complete post-fix full
+  run.
+- No Model execution semantics, Controller, simulator, firmware, protocol,
+  hardware, performance, baseline, or Pi behavior changed.
+
+Risk and rollback:
+
+- The visible labels and modal sequence are UI contracts; automation that
+  matched `Finish` or `Activate Execution` must use the new visible text while
+  retaining internal action IDs.
+- Copy publication remains staged and transactional. Cancel or any
+  path/name/filesystem failure leaves the source unchanged.
+- Rollback reverts this UI/test/documentation follow-up. It requires no
+  execution data, simulator, firmware, protocol, hardware, performance,
+  baseline, or Pi rollback.
+
 Next permitted action:
 
 - Slice 4.7, `print_array_disconnect_mid_array_24_v1`.

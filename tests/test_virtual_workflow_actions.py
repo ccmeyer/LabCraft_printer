@@ -635,16 +635,18 @@ def test_post_start_lock_control_matrix_requires_every_mutating_surface(
         "add_reagent_btn": QtWidgets.QPushButton(),
         "run_btn": QtWidgets.QPushButton(),
         "save_btn": QtWidgets.QPushButton(),
-        "finish_btn": QtWidgets.QPushButton(),
+        "finish_btn": QtWidgets.QPushButton("Execution Loaded"),
         "duplicate_btn": QtWidgets.QPushButton(),
-        "status_lbl": QtWidgets.QLabel(
-            "Execution is locked and read-only; create an editable copy."
+        "status_lbl": QtWidgets.QLabel("Transient status"),
+        "lifecycle_banner": QtWidgets.QLabel(
+            "This execution is locked and read-only; create an editable copy."
         ),
         "reagent_table": QtWidgets.QTableWidget(1, 1),
     }.items():
         setattr(dialog, name, widget)
     reagent = QtWidgets.QLineEdit()
     dialog.reagent_table.setCellWidget(0, 0, reagent)
+    dialog.lifecycle_banner.show()
 
     for name in (
         "exp_name_edit",
@@ -666,6 +668,8 @@ def test_post_start_lock_control_matrix_requires_every_mutating_surface(
     assert matrix["all_mutating_controls_locked"] is True
     assert matrix["editable_copy_enabled"] is True
     assert matrix["actionable_lock_guidance"] is True
+    assert matrix["banner_visible"] is True
+    assert matrix["action_label"] == "Execution Loaded"
 
     dialog.exp_name_edit.setEnabled(True)
     matrix = inspect_editor_lock_controls(dialog)

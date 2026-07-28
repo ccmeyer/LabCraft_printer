@@ -1641,15 +1641,24 @@ def drive_editor_create_finalize(
             )
 
             def finish() -> Mapping[str, Any]:
+                action_label = str(dialog.finish_btn.text() or "")
+                if action_label != "Finalize Design":
+                    raise RuntimeError(
+                        f"editable design exposed {action_label!r}; "
+                        "expected 'Finalize Design'"
+                    )
                 click(dialog.finish_btn)
                 _ensure_editor_deadline(
                     context, "editor.finish_via_ui", "finalized"
                 )
                 if dialog.result() != QtWidgets.QDialog.DialogCode.Accepted:
-                    raise RuntimeError("editor did not accept after Finish")
+                    raise RuntimeError(
+                        "editor did not accept after Finalize Design"
+                    )
                 return {
                     "dialog_result": int(dialog.result()),
                     "apply_requested": bool(dialog._apply_requested),
+                    "action_label": action_label,
                 }
 
             execute_action(context, "editor.finish_via_ui", finish)
@@ -1873,6 +1882,7 @@ def drive_editor_prestart_rename_refinalize(
                     "dialog_type": type(dialog).__name__,
                     "window_title": dialog.windowTitle(),
                     "prepared_reopen": True,
+                    "action_label": str(dialog.finish_btn.text() or ""),
                 },
             )
             capture_milestone(
@@ -1903,6 +1913,10 @@ def drive_editor_prestart_rename_refinalize(
                     raise RuntimeError(
                         "prepared editor did not reopen with the initial name"
                     )
+                if dialog.finish_btn.text() != "Finalize Design":
+                    raise RuntimeError(
+                        "prepared design did not expose Finalize Design before edits"
+                    )
                 if dialog.auto_update_chk.isChecked():
                     toggle_checkbox(dialog.auto_update_chk)
                 if dialog.auto_update_chk.isChecked():
@@ -1932,6 +1946,7 @@ def drive_editor_prestart_rename_refinalize(
                     "initial_name": initial_name,
                     "renamed_name": renamed_name,
                     "non_name_controls_unchanged": True,
+                    "action_label": str(dialog.finish_btn.text() or ""),
                 }
 
             execute_action(
@@ -2086,6 +2101,11 @@ def drive_editor_prestart_rename_refinalize(
             )
 
             def refinalize() -> Mapping[str, Any]:
+                action_label = str(dialog.finish_btn.text() or "")
+                if action_label != "Finalize Design":
+                    raise RuntimeError(
+                        "prepared design did not retain Finalize Design after edits"
+                    )
                 click(dialog.finish_btn)
                 _ensure_editor_deadline(
                     context,
@@ -2094,11 +2114,12 @@ def drive_editor_prestart_rename_refinalize(
                 )
                 if dialog.result() != QtWidgets.QDialog.DialogCode.Accepted:
                     raise RuntimeError(
-                        "prepared editor did not accept after second Finish"
+                        "prepared editor did not accept after Finalize Design"
                     )
                 return {
                     "dialog_result": int(dialog.result()),
                     "apply_requested": bool(dialog._apply_requested),
+                    "action_label": action_label,
                     "unexpected_dialog_count": len(
                         context.unexpected_dialogs
                     ),
@@ -2322,17 +2343,26 @@ def drive_authoritative_reload_via_editor(
                         context.experiment_model.is_authoritative_execution_runtime_active()
                     )
                     status_text = str(dialog.status_lbl.text() or "")
+                    banner_text = str(
+                        dialog.lifecycle_banner.text() or ""
+                    )
                     checks = {
                         "name_matches": dialog.exp_name_edit.text() == expected_name,
-                        "finish_is_activate": dialog.finish_btn.text()
-                        == "Activate Execution",
+                        "action_is_load_execution": dialog.finish_btn.text()
+                        == "Load Execution",
                         "finish_enabled": bool(dialog.finish_btn.isEnabled()),
                         "eligibility_ready_to_resume": eligibility.get("status")
                         == "ready_to_resume",
                         "runtime_inactive": not runtime_active,
                         "read_only_guidance": (
                             "execution plan validated" in status_text.casefold()
-                            and "activate execution" in status_text.casefold()
+                            and "load execution" in status_text.casefold()
+                        ),
+                        "visible_lock_banner": (
+                            not dialog.lifecycle_banner.isHidden()
+                            and "load execution" in banner_text.casefold()
+                            and "without starting or resuming printing"
+                            in banner_text.casefold()
                         ),
                     }
                     loaded_path = Path(
@@ -2364,6 +2394,8 @@ def drive_authoritative_reload_via_editor(
                                 "checks": checks,
                                 "eligibility": eligibility,
                                 "status_text": status_text,
+                                "banner_text": banner_text,
+                                "action_label": dialog.finish_btn.text(),
                                 "design_identity": design_identity,
                             },
                         )
@@ -2376,6 +2408,8 @@ def drive_authoritative_reload_via_editor(
                         "checks": checks,
                         "eligibility": eligibility,
                         "status_text": status_text,
+                        "banner_text": banner_text,
+                        "action_label": str(dialog.finish_btn.text() or ""),
                         "design_identity": design_identity,
                         "experiment_dir": str(Path(experiment_dir).resolve()),
                         "reload_boundary": boundary,
@@ -2400,10 +2434,14 @@ def drive_authoritative_reload_via_editor(
                 dialog = state["dialog"]
 
                 def activate() -> Mapping[str, Any]:
+                    if dialog.finish_btn.text() != "Load Execution":
+                        raise RuntimeError(
+                            "saved runtime did not expose Load Execution"
+                        )
                     click(dialog.finish_btn)
                     if dialog.isVisible():
                         raise RuntimeError(
-                            "Activate Execution did not close the editor"
+                            "Load Execution did not close the editor"
                         )
                     eligibility = (
                         context.experiment_model.get_execution_resume_eligibility()
@@ -2429,6 +2467,7 @@ def drive_authoritative_reload_via_editor(
                         "eligibility": eligibility,
                         "runtime_active": runtime_active,
                         "array_state": array_state,
+                        "action_label": "Load Execution",
                         "reload_boundary": boundary,
                     }
 
@@ -2547,15 +2586,24 @@ def inspect_editor_lock_controls(dialog: Any) -> dict[str, Any]:
         for item in reagent_controls
     )
     status_text = str(dialog.status_lbl.text() or "")
+    banner = getattr(dialog, "lifecycle_banner", None)
+    banner_text = str(banner.text() or "") if banner is not None else ""
+    banner_visible = bool(banner is not None and not banner.isHidden())
     guidance = (
-        any(word in status_text.casefold() for word in ("locked", "read-only"))
-        and "copy" in status_text.casefold()
+        banner_visible
+        and any(
+            word in banner_text.casefold() for word in ("locked", "read-only")
+        )
+        and "copy" in banner_text.casefold()
     )
     return {
         "controls": controls,
         "all_mutating_controls_locked": locked,
         "editable_copy_enabled": bool(dialog.duplicate_btn.isEnabled()),
         "status_text": status_text,
+        "banner_visible": banner_visible,
+        "banner_text": banner_text,
+        "action_label": str(dialog.finish_btn.text() or ""),
         "actionable_lock_guidance": guidance,
     }
 
@@ -2592,6 +2640,7 @@ def drive_editor_post_start_lock_and_copy(
         "dialog": None,
         "lock_matrix": {},
         "copy_before_finalize": {},
+        "copy_name_dialog": {},
     }
     driver_timer = QtCore.QTimer(context.app)
     driver_timer.setInterval(5)
@@ -2606,26 +2655,9 @@ def drive_editor_post_start_lock_and_copy(
             if modal is None or modal is state["dialog"]:
                 return
             if isinstance(modal, QtWidgets.QFileDialog):
-                if modal.windowTitle() != "Select Experiment to Duplicate":
-                    raise RuntimeError(
-                        f"unexpected file dialog title: {modal.windowTitle()!r}"
-                    )
-                modal.setDirectory(str(source_dir))
-                context.app.processEvents()
-                button_box = modal.findChild(QtWidgets.QDialogButtonBox)
-                accept = (
-                    button_box.button(QtWidgets.QDialogButtonBox.Open)
-                    if button_box is not None
-                    else None
+                raise RuntimeError(
+                    "unexpected source QFileDialog while creating editable copy"
                 )
-                if accept is None and button_box is not None:
-                    accept = button_box.button(
-                        QtWidgets.QDialogButtonBox.Ok
-                    )
-                if accept is None:
-                    raise RuntimeError("file dialog has no accept button")
-                click(accept)
-                return
             if isinstance(modal, QtWidgets.QInputDialog):
                 if modal.windowTitle() != "Duplicate Experiment Design":
                     raise RuntimeError(
@@ -2634,6 +2666,29 @@ def drive_editor_post_start_lock_and_copy(
                 line_edit = modal.findChild(QtWidgets.QLineEdit)
                 if line_edit is None:
                     raise RuntimeError("copy-name dialog has no text control")
+                state["copy_name_dialog"] = {
+                    "source_auto_selected": str(
+                        Path(
+                            state["dialog"].model.experiment_dir_path
+                        ).resolve()
+                    ),
+                    "source_label": str(modal.labelText() or ""),
+                    "dialog_width_px": int(modal.width()),
+                    "dialog_minimum_width_px": int(modal.minimumWidth()),
+                    "name_field_width_px": int(line_edit.width()),
+                    "name_field_minimum_width_px": int(
+                        line_edit.minimumWidth()
+                    ),
+                }
+                if (
+                    int(modal.width()) < 640
+                    or int(modal.minimumWidth()) < 640
+                    or int(line_edit.minimumWidth()) < 480
+                ):
+                    raise RuntimeError(
+                        "copy-name dialog did not meet the required width: "
+                        f"{state['copy_name_dialog']}"
+                    )
                 _qt_replace_text(QtCore, QtTest, line_edit, copy_name)
                 button_box = modal.findChild(QtWidgets.QDialogButtonBox)
                 accept = (
@@ -2714,6 +2769,14 @@ def drive_editor_post_start_lock_and_copy(
                             "actionable_lock_guidance",
                             matrix["actionable_lock_guidance"],
                         ),
+                        (
+                            "visible_lock_banner",
+                            matrix["banner_visible"],
+                        ),
+                        (
+                            "execution_loaded_label",
+                            matrix["action_label"] == "Execution Loaded",
+                        ),
                     )
                     if not passed
                 ]
@@ -2755,7 +2818,9 @@ def drive_editor_post_start_lock_and_copy(
                 if dialog.exp_name_edit.text() != name_before:
                     raise RuntimeError("locked name control accepted an edit")
                 if int(dialog.result()) != result_before or not dialog.isVisible():
-                    raise RuntimeError("disabled Finish closed the locked editor")
+                    raise RuntimeError(
+                        "disabled Execution Loaded action closed the locked editor"
+                    )
                 return {
                     "name_unchanged": True,
                     "finish_rejected": True,
@@ -2786,6 +2851,17 @@ def drive_editor_post_start_lock_and_copy(
                     copy_modal_timer.deleteLater()
                 if state["error"] is not None:
                     raise state["error"]
+                name_dialog_evidence = dict(state["copy_name_dialog"])
+                if not name_dialog_evidence:
+                    raise RuntimeError("copy-name dialog evidence was not captured")
+                if (
+                    Path(name_dialog_evidence["source_auto_selected"]).resolve()
+                    != source_dir.resolve()
+                    or source_name not in name_dialog_evidence["source_label"]
+                ):
+                    raise RuntimeError(
+                        "copy-name dialog did not identify the current source"
+                    )
                 expected_dir = (source_dir.parent / copy_name).resolve()
                 current_dir = Path(
                     dialog.model.experiment_dir_path
@@ -2810,12 +2886,17 @@ def drive_editor_post_start_lock_and_copy(
                     and dialog.volume_tolerance_spin.isEnabled()
                     and dialog.run_btn.isEnabled()
                     and dialog.finish_btn.isEnabled()
+                    and dialog.finish_btn.text() == "Finalize Design"
                 )
                 if not editable:
                     raise RuntimeError("editable copy controls remained locked")
                 state["copy_before_finalize"] = {
                     "experiment_dir": str(current_dir),
                     "experiment_name": dialog.exp_name_edit.text(),
+                    "destination": str(expected_dir),
+                    "source_auto_selected": str(source_dir.resolve()),
+                    "copy_name_dialog": dict(state["copy_name_dialog"]),
+                    "action_label": str(dialog.finish_btn.text() or ""),
                     "controls_editable": editable,
                     "control_matrix": matrix,
                 }
@@ -2867,12 +2948,19 @@ def drive_editor_post_start_lock_and_copy(
             )
 
             def finalize_copy() -> Mapping[str, Any]:
+                if dialog.finish_btn.text() != "Finalize Design":
+                    raise RuntimeError(
+                        "editable copy did not expose Finalize Design"
+                    )
                 click(dialog.finish_btn)
                 if dialog.result() != QtWidgets.QDialog.DialogCode.Accepted:
-                    raise RuntimeError("copy editor did not accept after Finish")
+                    raise RuntimeError(
+                        "copy editor did not accept after Finalize Design"
+                    )
                 return {
                     "dialog_result": int(dialog.result()),
                     "apply_requested": bool(dialog._apply_requested),
+                    "action_label": "Finalize Design",
                 }
 
             execute_action(
