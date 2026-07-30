@@ -24,6 +24,7 @@ import inspect
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
+from simulation import SIMULATED_PORT
 from CaptureCoordinator import CaptureCoordinator
 from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
 from ApplicationComposition import PRODUCTION_RUNTIME_CONTEXT
@@ -1178,6 +1179,18 @@ class Controller(QObject):
 
     @QtCore.Slot(str)
     def connect_machine(self, port: str):
+        runtime_context = getattr(
+            self,
+            "runtime_context",
+            PRODUCTION_RUNTIME_CONTEXT,
+        )
+        if runtime_context.is_simulation:
+            if port != SIMULATED_PORT:
+                self._reject_physical_action(
+                    f"machine connection to {port!r}; only {SIMULATED_PORT!r} is allowed"
+                )
+                return False
+            return self.machine.connect_board(SIMULATED_PORT)
         if self._reject_physical_action("machine connection") is not None:
             return
         kind = self._classify_port(port)
@@ -1190,6 +1203,13 @@ class Controller(QObject):
 
     def disconnect_machine(self):
         """Disconnect from the machine."""
+        runtime_context = getattr(
+            self,
+            "runtime_context",
+            PRODUCTION_RUNTIME_CONTEXT,
+        )
+        if runtime_context.is_simulation:
+            return self.machine.disconnect_board()
         if self._reject_physical_action("machine disconnection") is not None:
             return
         self.machine.disconnect_board()

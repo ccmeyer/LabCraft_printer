@@ -72,10 +72,10 @@ Slow, insulated offline analysis-pipeline tests are skipped by default. Run them
 
 ## Safe Application Construction
 
-Slice 3 exposes one programmatic composition seam for the real `Model`,
+`ApplicationComposition` exposes one programmatic composition seam for the real `Model`,
 `Controller`, and `MainWindow`. Production startup continues through
-`FreeRTOS-interface/App.py`; there is intentionally no simulation command-line
-flag until the dedicated runner is added in Slice 5.
+`FreeRTOS-interface/App.py`; simulation uses the separate interactive and
+verification launchers described below.
 
 `ApplicationComposition.production_dependencies()` selects the existing
 Machine, serial, camera, log-reader, and legacy balance implementations.
@@ -85,11 +85,12 @@ caller-supplied safe machine factory and creates `config/`, `experiments/`, and
 production hardware if construction fails.
 
 Simulation windows show a persistent
-`SIMULATION — NO HARDWARE CONNECTED` banner. Connection, firmware/DFU, MCU
-reset, physical camera, machine qualification/calibration, balance, and
-application update controls remain visible but disabled. The Controller also
-rejects direct calls to those entry points before port enumeration, worker
-construction, or peripheral access.
+`SIMULATION — NO HARDWARE CONNECTED` banner. The production connection,
+firmware/DFU, MCU reset, physical camera, machine qualification/calibration,
+balance, and application update controls remain visible but disabled. The
+dedicated simulator control accepts only `SIMULATED`. The Controller rejects
+direct physical calls before port enumeration, worker construction, or
+peripheral access.
 
 Prerequisites for offscreen construction tests:
 
@@ -142,8 +143,8 @@ motion/pressure dynamics are intentionally unsupported and fail visibly.
 
 This is an application-contract simulator. Passing its tests does not verify
 firmware behavior, collision safety, physical motion, pressure response,
-camera analysis, or droplet quality. There remains no simulation CLI or
-complete virtual print-array scenario in the Slice 4 API itself.
+camera analysis, or droplet quality. Synthetic calibration and physical
+response modeling remain outside the Milestone 1 launcher.
 
 Run the focused construction and safety tests:
 
@@ -161,6 +162,87 @@ Do not use this programmatic seam as a production launcher and do not pass a
 factory that can construct real hardware into `simulation_dependencies`.
 Application-owned configuration and experiment writes are isolated, but the
 API cannot prove that an arbitrary third-party machine factory is safe.
+
+### Interactive hardware-isolated simulator
+
+Milestone 1 adds a dedicated launcher for manually exercising the real
+application UI against `SimulatedMachine`:
+
+```powershell
+.\env\Scripts\python.exe tools\run_simulated_app.py
+```
+
+The window shows both persistent simulation identity surfaces. Connect only
+through the non-closable `SIMULATOR CONTROL` dock. The production connection
+widget remains disabled and does not enumerate ports.
+
+The normal UI may then be used to enable/home, regulate pressure, move,
+operate the gripper, create or edit experiments, and disconnect. These are
+application-contract simulations only; they do not validate collision safety,
+pressure response, camera output, firmware, or physical motion.
+
+Fresh sessions use a unique root under:
+
+```text
+%LOCALAPPDATA%\LabCraft\SIL\interactive-sessions\
+```
+
+A clean fresh session is removed on close. Retain it for inspection:
+
+```powershell
+.\env\Scripts\python.exe tools\run_simulated_app.py --keep-session
+```
+
+Reopen a retained root:
+
+```powershell
+.\env\Scripts\python.exe tools\run_simulated_app.py `
+  --session-root "C:\path\printed-by-the-previous-run"
+```
+
+The session ID is preserved and a new application-session record is added.
+Open a retained experiment manually through the normal Experiment Editor.
+The launcher does not auto-load or mutate an experiment.
+
+Choose deterministic timing when useful:
+
+```powershell
+.\env\Scripts\python.exe tools\run_simulated_app.py `
+  --seed 1 `
+  --speed-multiplier 2
+```
+
+The seed is instance-local and does not change Python's global random state.
+The speed multiplier changes only simulator wall-clock acceleration.
+
+Each retained root contains `session.json`, `logs\`, `artifacts\`, `config\`,
+`experiments\`, and `calibration-memory\`. Session metadata and launcher logs
+remain outside experiment directories. Application roots are passed directly
+to the real Model, so normal writers retain production file names and formats.
+
+Troubleshooting:
+
+- `session is already locked`: close the other simulator using that root.
+- `missing a valid session.json marker`: select an empty directory or a root
+  previously created by this launcher.
+- root-overlap rejection: do not select the repository, production data, the
+  user profile, or a drive root.
+- checkpoint access denial: the session is retained and fails closed. Inspect
+  the printed root and `logs\launcher.log`; do not overwrite production files.
+- disabled camera, updater, qualification, regulator-calibration, balance, or
+  firmware controls are expected in Milestone 1.
+
+Run the focused launcher/session tests:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_simulation_session.py `
+  tests\test_simulation_session_owned.py `
+  tests\test_simulator_control.py `
+  tests\test_simulated_app_launcher.py `
+  tests\test_safe_application_construction.py `
+  tests\test_mainwindow_closeevent.py
+```
 
 ## Real-UI Virtual Print-Array Workflow
 

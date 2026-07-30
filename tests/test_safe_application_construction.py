@@ -337,7 +337,7 @@ def test_official_simulator_constructs_real_components_and_controller_sequence(
     model = components.model
     callbacks = []
 
-    assert machine.connect_board(SIMULATED_PORT)
+    assert controller.connect_machine(SIMULATED_PORT)
     _wait_until(qapp, lambda: model.machine_model.is_connected())
 
     controller.toggle_motors()
@@ -491,7 +491,7 @@ def test_controller_rejects_physical_and_updater_actions_in_simulation(
     controller.start_droplet_camera()
     assert controller.capture_droplet_image() is False
 
-    assert machine.calls == []
+    assert machine.calls == [("disconnect_board", ())]
     assert messages
     assert all(title == "Simulation Mode" for title, _message in messages)
     assert all("no physical hardware" in message for _title, message in messages)
