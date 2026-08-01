@@ -3,6 +3,11 @@
 Date: 2026-07-28  
 Parent plan: `docs/sil_interactive_simulation_and_composable_workflows_plan.md`
 
+Status: `complete`
+Completed: 2026-07-31
+Completion record:
+`docs/sil_interactive_simulation_milestone_1_completion_record.md`
+
 ## Goal
 
 Launch and manually operate the real application MVC stack in a contained,
@@ -177,9 +182,11 @@ Automated implementation validation completed on 2026-07-28:
   deprecation warnings;
 - `git diff --check`: passed.
 
-The visible fresh/retained Windows exercise and Slice 0.1 repetition set remain
-pending. Do not create the Milestone 1 completion record or mark the milestone
-complete until those manual gates are recorded.
+The visible fresh/retained Windows exercise completed on 2026-07-30. The
+Slice 0.1 repetition set completed on 2026-07-31 with five clean 24-well smoke
+runs, three clean two-stock runs, and three clean reload/resume runs. Every run
+reconciled its terminal plan/progress/resume state without a checkpoint access
+failure. Milestone 1 is complete; see the completion record linked above.
 
 ## Risk And Rollback
 

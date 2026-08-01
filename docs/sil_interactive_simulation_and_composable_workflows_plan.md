@@ -595,7 +595,7 @@ Rollback:
 
 ### Milestone 1: Interactive SimulationSession and launcher
 
-Status: `implemented; visible Windows and repetition gates pending`
+Status: `complete`
 
 Goal:
 
@@ -639,8 +639,12 @@ Implementation status:
   implemented;
 - the clean automated regression completed with 3,675 passed and 38 skipped
   tests on 2026-07-28;
-- do not mark this milestone complete until the visible Windows exercise and
-  Slice 0.1 repetition gate are recorded.
+- the fresh/retained visible Windows exercise completed on 2026-07-30;
+- the Slice 0.1 repetition gate completed on 2026-07-31 with five clean
+  24-well smoke runs, three clean two-stock runs, and three clean
+  reload/resume runs; and
+- the authoritative completion evidence is recorded in
+  `docs/sil_interactive_simulation_milestone_1_completion_record.md`.
 
 Rollback:
 
