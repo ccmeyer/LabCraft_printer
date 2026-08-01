@@ -240,6 +240,30 @@ does not modify the prior trace. The schema contract is documented in
 the observer stops, the root is retained and marked failed, and the ambiguous
 write is not retried.
 
+Milestone 3 adds a pure deterministic synthetic-calibration developer API in
+`tools.sil`. It is not connected to the interactive launcher or calibration
+UI yet. A caller constructs `CalibrationGenerationRequestV1`, selects one of
+the seven versioned profiles, and calls
+`SyntheticCalibrationProvider.generate(request)`. The returned request and
+result fingerprints, virtual timestamp, calibration values, provenance, and
+limitations are byte-reproducible for the same request and seed.
+
+Valid results expose existing-compatible summary-row and calibration-step
+adapters. Negative profiles remain inspectable, but application validation and
+both adapters reject them before injection. The provider never writes files or
+uses Qt, Model, Controller, cameras, balances, serial ports, hardware factories,
+or process-global random state. It provides no evidence of camera processing,
+physical ejection, volume accuracy, pressure response, refuel behavior,
+collision safety, firmware, or protocol behavior. The exact schema is
+documented in `docs/sil_calibration_schema_v1.md`.
+
+Run its focused contract tests with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_sil_synthetic_calibration.py
+```
+
 Troubleshooting:
 
 - `session is already locked`: close the other simulator using that root.

@@ -701,7 +701,7 @@ Rollback:
 
 ### Milestone 3: Deterministic synthetic calibration engine
 
-Status: `planned`
+Status: `complete`
 
 Goal:
 
@@ -1388,13 +1388,12 @@ This effort is complete when:
 
 ## Current Next Action
 
-Review and implement only the concrete Milestone 2 plan in
-`docs/sil_interactive_simulation_milestone_2_implementation_plan.md`.
-Begin with the schema, pure projections, recorder, and focused unit tests;
-integrate the observer/session/inspector only after those contracts pass.
+Review and create the concrete Milestone 4A plan for safe application-owned
+presentation, selection, and Apply of synthetic droplet results through the
+real calibration UI. Do not edit the application-owned calibration surface
+until that plan is reviewed.
 
-If observation requires a new production MVC seam, stop before editing and
-present the exact gap, call path, a revised plan of no more than eight steps,
-and files to touch. Do not begin synthetic calibration, manual-refuel
-simulation, workflow migration, failure injection, performance remediation,
-firmware, protocol, Pi operations, or hardware changes as part of Milestone 2.
+Keep manual-refuel simulation, workflow migration, failure injection,
+performance remediation, firmware, protocol, Pi operations, and hardware
+changes outside Milestone 4A unless a later reviewed plan explicitly brings
+them into scope.
