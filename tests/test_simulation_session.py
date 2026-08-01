@@ -1,11 +1,13 @@
 import json
 from pathlib import Path
 import random
+import hashlib
 
 import pytest
 from PySide6 import QtCore, QtWidgets
 
 import ApplicationComposition as composition
+from tools.sil import state_recorder as recorder_module
 from tools.sil.session import (
     ArtifactRetentionPolicy,
     SESSION_FILENAME,
@@ -260,3 +262,111 @@ def test_clean_fresh_root_is_removed_and_failure_is_retained(
     assert metadata["terminal_status"] == "failed"
     assert metadata["cleanup"]["root_retained"] is True
 
+
+def test_state_trace_metadata_terminal_artifacts_and_reopen_are_isolated(
+    qapp,
+    tmp_path,
+):
+    root = tmp_path / "state-reopen"
+    first = SimulationSession.create(_retained_config(root))
+    first.launch()
+    first_app_id = first.application_session_id
+    first_events = first.recorder.events_path
+    first_artifact_dir = first.recorder.artifact_dir
+    snapshot = first.export_state_snapshot()
+    assert snapshot is not None
+    assert snapshot["reason"] == "manual_export"
+    assert first.close()
+
+    assert first_events.is_file()
+    assert (first_artifact_dir / "latest_snapshot.json").is_file()
+    assert (first_artifact_dir / "terminal_snapshot.json").is_file()
+    first_bytes = first_events.read_bytes()
+    first_hash = hashlib.sha256(first_bytes).hexdigest()
+    first_lines = [json.loads(line) for line in first_bytes.splitlines()]
+    assert first_lines[-2]["event_kind"] == "cleanup_completed"
+    assert first_lines[-1]["event_kind"] == "recorder_stopped"
+    terminal = json.loads(
+        (first_artifact_dir / "terminal_snapshot.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert terminal["schema_id"] == "labcraft.sil_state_snapshot"
+    assert terminal["schema_version"] == 1
+    assert terminal["reason"] == "cleanup"
+    assert terminal["projection"]["reconciliation"]["status"] == "ok"
+
+    metadata = json.loads((root / SESSION_FILENAME).read_text(encoding="utf-8"))
+    first_record = metadata["application_sessions"][0]
+    assert first_record["state_recorder"]["status"] == "closed"
+    assert first_record["state_recorder"]["artifacts"] == {
+        "events": f"artifacts/state/{first_app_id}/events.jsonl",
+        "latest_snapshot": (
+            f"artifacts/state/{first_app_id}/latest_snapshot.json"
+        ),
+        "terminal_snapshot": (
+            f"artifacts/state/{first_app_id}/terminal_snapshot.json"
+        ),
+    }
+    assert metadata["artifact_map"]["state_traces_root"] == "artifacts/state"
+    assert metadata["latest_snapshot"]["application_session_id"] == first_app_id
+
+    second = SimulationSession.create(_retained_config(root))
+    second_app_id = second.application_session_id
+    second_events = second.recorder.events_path
+    try:
+        assert second_app_id != first_app_id
+        assert second_events != first_events
+        assert first_events.read_bytes() == first_bytes
+        assert hashlib.sha256(first_events.read_bytes()).hexdigest() == first_hash
+    finally:
+        assert second.close()
+    assert first_events.read_bytes() == first_bytes
+    assert second_events.is_file()
+
+
+def test_state_snapshot_failure_fails_and_retains_session_without_app_mutation(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "state-writer-failure"
+    session = SimulationSession.create(_retained_config(root))
+    session.launch()
+    machine = session.components.machine
+    application_before = {
+        "connected": machine.state.connected,
+        "x": machine.state.x,
+        "target_x": machine.state.target_x,
+        "command_depth": machine.state.command_depth,
+    }
+    attempts = []
+
+    def fail_snapshot_once(path, payload):
+        attempts.append((path, payload))
+        raise PermissionError("simulated state snapshot failure")
+
+    monkeypatch.setattr(
+        recorder_module,
+        "_atomic_write_json_once",
+        fail_snapshot_once,
+    )
+    assert session.export_state_snapshot() is None
+    assert len(attempts) == 1
+    assert session.recorder.failed
+    assert session.observer.installed is False
+    assert {
+        "connected": machine.state.connected,
+        "x": machine.state.x,
+        "target_x": machine.state.target_x,
+        "command_depth": machine.state.command_depth,
+    } == application_before
+
+    assert not session.close()
+    assert root.is_dir()
+    assert len(attempts) == 1
+    metadata = json.loads((root / SESSION_FILENAME).read_text(encoding="utf-8"))
+    assert metadata["terminal_status"] == "failed"
+    assert metadata["cleanup"]["root_retained"] is True
+    assert metadata["state_recorder"]["status"] == "failed"
+    assert "snapshot" in metadata["state_recorder"]["failure"]

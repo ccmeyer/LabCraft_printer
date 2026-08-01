@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import json
@@ -39,6 +39,10 @@ from simulation import (  # noqa: E402
 )
 
 from .control import SimulatorControlDock
+from .inspector import StateInspectorDock
+from .state_observer import SimulationStateObserver
+from .state_projection import StateProjectionBuilder
+from .state_recorder import StateRecorder, StateRecorderError
 
 
 SESSION_SCHEMA_ID = "labcraft.sil_simulation_session"
@@ -235,6 +239,10 @@ class SimulationSession:
         self.app: QtWidgets.QApplication | None = None
         self.components = None
         self.control: SimulatorControlDock | None = None
+        self.inspector: StateInspectorDock | None = None
+        self.recorder: StateRecorder | None = None
+        self.projector: StateProjectionBuilder | None = None
+        self.observer: SimulationStateObserver | None = None
         self._lock: QtCore.QLockFile | None = None
         self._metadata: dict[str, Any] | None = None
         self._default_parent: Path | None = None
@@ -244,6 +252,7 @@ class SimulationSession:
         self._failure_reason: str | None = None
         self._machine_signal_connected = False
         self._root_removed = False
+        self._pending_connection_action: tuple[str, str] | None = None
 
     @classmethod
     def create(cls, config: SimulationSessionConfigV1) -> "SimulationSession":
@@ -298,6 +307,26 @@ class SimulationSession:
                 "constructed Controller is not in the canonical simulation runtime",
                 session_root=self.session_root,
             )
+
+        self.recorder = StateRecorder(
+            session_root=self.session_root,
+            session_id=self.session_id,
+            application_session_id=self.application_session_id,
+            on_failure=self._on_recorder_failure,
+        )
+        self.projector = StateProjectionBuilder(self)
+        self.observer = SimulationStateObserver(
+            recorder=self.recorder,
+            projector=self.projector,
+            machine=self.components.machine,
+            controller=self.components.controller,
+            model=self.components.model,
+            on_failure=self._on_recorder_failure,
+            action_id_provider=self._pending_action_id,
+        )
+        if self.recorder.healthy:
+            self.observer.install()
+        self._update_recorder_metadata()
 
         self.components.machine.machine_connected_signal.connect(
             self._on_machine_connection_changed
@@ -454,6 +483,46 @@ class SimulationSession:
     def _write_metadata(self) -> None:
         _atomic_write_json(self.session_root / SESSION_FILENAME, self._metadata)
 
+    def _pending_action_id(self) -> str | None:
+        pending = self._pending_connection_action
+        return pending[0] if pending is not None else None
+
+    def _on_recorder_failure(self, reason: str) -> None:
+        text = str(reason).strip() or "state recorder failed"
+        self.mark_failed(text)
+        if self.observer is not None:
+            try:
+                self.observer.dispose()
+            except Exception:
+                pass
+        try:
+            self._append_log(f"STATE RECORDER FAILED: {text}")
+        except OSError:
+            pass
+
+    def _update_recorder_metadata(self) -> None:
+        if self._metadata is None or self.recorder is None:
+            return
+        health = self.recorder.health_snapshot()
+        recorder_record = {
+            "schema_version": health["schema_version"],
+            "recorder_version": health["recorder_version"],
+            "status": health["status"],
+            "failure": health["failure"],
+            "artifacts": self.recorder.artifact_map(),
+            "last_event_sequence": health["last_event_sequence"],
+            "event_count": health["event_count"],
+            "retained_memory_count": health["retained_memory_count"],
+            "evicted_memory_count": health["evicted_memory_count"],
+        }
+        self._metadata["state_recorder"] = recorder_record
+        self._application_session_record()["state_recorder"] = dict(
+            recorder_record
+        )
+        self._metadata.setdefault("artifact_map", {})[
+            "state_traces_root"
+        ] = "artifacts/state"
+
     def _append_log(self, message: str) -> None:
         if self.session_root is None:
             return
@@ -493,6 +562,16 @@ class SimulationSession:
         self._require_open()
         if self._launched:
             return self.components.view
+        self.inspector = StateInspectorDock(
+            parent=self.components.view,
+            recorder=self.recorder,
+            export_snapshot_callback=self.export_state_snapshot,
+        )
+        self.components.view.addDockWidget(
+            QtCore.Qt.LeftDockWidgetArea,
+            self.inspector,
+        )
+        self.inspector.hide()
         self.control = SimulatorControlDock(
             parent=self.components.view,
             machine=self.components.machine,
@@ -502,6 +581,8 @@ class SimulationSession:
             speed_multiplier=self.config.speed_multiplier,
             connect_callback=self.connect_simulator,
             disconnect_callback=self.disconnect_simulator,
+            show_inspector_callback=self.show_state_inspector,
+            export_snapshot_callback=self.export_state_snapshot,
         )
         self.components.view.addDockWidget(
             QtCore.Qt.RightDockWidgetArea,
@@ -515,7 +596,8 @@ class SimulationSession:
         self._launched = True
         self._set_application_session_status("launched")
         self._append_log("application launched")
-        self.snapshot("launch")
+        if self.recorder.healthy:
+            self.snapshot("launch", include_persistence=True)
         return self.components.view
 
     def run(self) -> int:
@@ -536,32 +618,158 @@ class SimulationSession:
     def connect_simulator(self):
         self._require_open()
         self._append_log(f"requesting connection to {SIMULATED_PORT}")
-        return self.components.controller.connect_machine(SIMULATED_PORT)
+        action_id = self._begin_connection_action("connect_simulator")
+        result = self.components.controller.connect_machine(SIMULATED_PORT)
+        if result is False:
+            self._complete_connection_action(
+                connected=False,
+                outcome="rejected",
+                expected_action_id=action_id,
+            )
+        return result
 
     def disconnect_simulator(self):
         self._require_open()
         self._append_log("requesting simulator disconnect")
-        return self.components.controller.disconnect_machine()
+        action_id = self._begin_connection_action("disconnect_simulator")
+        result = self.components.controller.disconnect_machine()
+        if result is False:
+            self._complete_connection_action(
+                connected=bool(self.components.machine.state.connected),
+                outcome="rejected",
+                expected_action_id=action_id,
+            )
+        return result
+
+    def _begin_connection_action(self, action_kind: str) -> str | None:
+        if self.recorder is None or not self.recorder.healthy:
+            return None
+        try:
+            action_id = self.recorder.begin_action(
+                action_kind,
+                source_layer="session",
+            )
+            self._pending_connection_action = (action_id, str(action_kind))
+            return action_id
+        except Exception as exc:
+            self._on_recorder_failure(f"could not begin {action_kind}: {exc}")
+            return None
+
+    def _complete_connection_action(
+        self,
+        *,
+        connected: bool,
+        outcome: str = "completed",
+        expected_action_id: str | None = None,
+    ) -> str | None:
+        pending = self._pending_connection_action
+        if pending is None:
+            return None
+        action_id, action_kind = pending
+        if expected_action_id is not None and action_id != expected_action_id:
+            return None
+        self._pending_connection_action = None
+        if self.recorder is not None and self.recorder.healthy:
+            try:
+                self.recorder.complete_action(
+                    action_id,
+                    action_kind=action_kind,
+                    outcome=outcome,
+                    source_layer="session",
+                    payload={"connected": bool(connected)},
+                )
+            except Exception as exc:
+                self._on_recorder_failure(
+                    f"could not complete {action_kind}: {exc}"
+                )
+        return action_id
 
     def _on_machine_connection_changed(self, connected: bool):
         if self._closed:
             return
+        action_id = self._complete_connection_action(connected=bool(connected))
         try:
-            self.snapshot("connected" if connected else "disconnected")
+            if self.recorder is not None and self.recorder.healthy:
+                self.snapshot(
+                    "connected" if connected else "disconnected",
+                    correlation=(
+                        {"action_id": action_id} if action_id is not None else None
+                    ),
+                )
         except Exception as exc:
             self.mark_failed(f"could not persist connection snapshot: {exc}")
 
-    def snapshot(self, reason: str) -> dict[str, Any]:
+    def snapshot(
+        self,
+        reason: str,
+        *,
+        include_persistence: bool = False,
+        correlation: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         self._require_open()
-        snapshot = {
-            "captured_at": _utc_now(),
-            "reason": str(reason),
+        if self.recorder is None or self.projector is None:
+            raise StateRecorderError("state recorder is unavailable")
+        projection = self.projector.capture(
+            reason=str(reason),
+            include_persistence=include_persistence,
+        )
+        snapshot = self.recorder.record_snapshot(
+            projection,
+            reason=str(reason),
+            correlation=correlation,
+            simulated_elapsed_ms=self.components.machine.state.simulated_elapsed_ms,
+            persist=True,
+        )
+        self._metadata["latest_snapshot"] = {
+            "captured_at": snapshot["captured_at_utc"],
+            "reason": snapshot["reason"],
             "application_session_id": self.application_session_id,
-            "simulator_state": asdict(self.components.machine.state),
+            "snapshot_id": snapshot["snapshot_id"],
+            "event_sequence": snapshot["event_sequence"],
+            "artifact": self.recorder.relative_path(
+                self.recorder.latest_snapshot_path
+            ),
         }
-        self._metadata["latest_snapshot"] = snapshot
+        self._update_recorder_metadata()
         self._write_metadata()
         return snapshot
+
+    def export_state_snapshot(self) -> dict[str, Any] | None:
+        self._require_open()
+        if self.recorder is None or not self.recorder.healthy:
+            return None
+        action_id = None
+        try:
+            action_id = self.recorder.begin_action(
+                "export_state_snapshot",
+                source_layer="session",
+            )
+            snapshot = self.snapshot(
+                "manual_export",
+                include_persistence=True,
+                correlation={"action_id": action_id},
+            )
+            self.recorder.complete_action(
+                action_id,
+                action_kind="export_state_snapshot",
+                source_layer="session",
+                payload={"snapshot_id": snapshot["snapshot_id"]},
+            )
+            if self.inspector is not None:
+                self.inspector.refresh()
+            return snapshot
+        except Exception as exc:
+            self._on_recorder_failure(f"manual state snapshot failed: {exc}")
+            return None
+
+    def show_state_inspector(self) -> bool:
+        self._require_open()
+        if self.inspector is None:
+            return False
+        self.inspector.refresh()
+        self.inspector.show()
+        self.inspector.raise_()
+        return True
 
     def mark_failed(self, reason: str) -> None:
         text = str(reason).strip() or "unspecified session failure"
@@ -579,8 +787,39 @@ class SimulationSession:
             return bool(self._close_succeeded)
         if failure is not None:
             self.mark_failed(str(failure))
-        self._closed = True
         errors: list[str] = []
+
+        if (
+            self.recorder is not None
+            and self.recorder.healthy
+            and self.projector is not None
+        ):
+            try:
+                self.recorder.record_event(
+                    "teardown_started",
+                    source_layer="session",
+                    payload={"failure": self._failure_reason},
+                    simulated_elapsed_ms=(
+                        self.components.machine.state.simulated_elapsed_ms
+                        if self.components is not None
+                        else None
+                    ),
+                )
+                projection = self.projector.capture(
+                    reason="pre_cleanup",
+                    include_persistence=True,
+                )
+                self.recorder.record_snapshot(
+                    projection,
+                    reason="pre_cleanup",
+                    source_layer="session",
+                    simulated_elapsed_ms=self.components.machine.state.simulated_elapsed_ms,
+                    persist=True,
+                )
+            except Exception as exc:
+                self._on_recorder_failure(f"pre-cleanup state capture failed: {exc}")
+
+        self._closed = True
 
         if self.components is not None:
             if self._machine_signal_connected:
@@ -606,6 +845,18 @@ class SimulationSession:
             except Exception as exc:
                 errors.append(f"simulator disconnect failed: {exc}")
 
+            if self.app is not None:
+                try:
+                    self.app.processEvents()
+                except RuntimeError:
+                    pass
+
+            if self.observer is not None:
+                try:
+                    self.observer.dispose()
+                except Exception as exc:
+                    errors.append(f"state observer cleanup failed: {exc}")
+
             for timer in list(
                 getattr(self.components.machine, "_deferred_timers", set())
             ):
@@ -622,6 +873,11 @@ class SimulationSession:
                     self.control.dispose()
                 except Exception as exc:
                     errors.append(f"simulator control cleanup failed: {exc}")
+            if self.inspector is not None:
+                try:
+                    self.inspector.dispose()
+                except Exception as exc:
+                    errors.append(f"state inspector cleanup failed: {exc}")
             try:
                 self.components.close()
             except Exception as exc:
@@ -639,9 +895,50 @@ class SimulationSession:
             except RuntimeError:
                 pass
 
-        succeeded = self._failure_reason is None and not errors
         if errors and self._failure_reason is None:
             self._failure_reason = "; ".join(errors)
+
+        application_cleanup_succeeded = self._failure_reason is None and not errors
+        if self.recorder is not None:
+            if self.recorder.healthy:
+                try:
+                    latest = self.recorder.latest_snapshot() or {}
+                    cached_projection = latest.get("projection") or {
+                        "reason": "cleanup",
+                        "layers": {},
+                        "reconciliation": {
+                            "status": "unavailable",
+                            "compared_fields": 0,
+                            "mismatches": [],
+                        },
+                    }
+                    self.recorder.record_snapshot(
+                        cached_projection,
+                        reason="cleanup",
+                        event_kind=(
+                            "cleanup_completed"
+                            if application_cleanup_succeeded
+                            else "cleanup_failed"
+                        ),
+                        source_layer="session",
+                        persist=True,
+                        terminal=True,
+                        payload={
+                            "application_cleanup_succeeded": application_cleanup_succeeded,
+                            "errors": list(errors),
+                            "failure": self._failure_reason,
+                        },
+                    )
+                except Exception as exc:
+                    self._on_recorder_failure(f"terminal state capture failed: {exc}")
+            if not self.recorder.close():
+                self.mark_failed(
+                    self.recorder.health_snapshot().get("failure")
+                    or "state recorder close failed"
+                )
+            self._update_recorder_metadata()
+
+        succeeded = self._failure_reason is None and not errors
 
         if self._metadata is not None:
             record = self._application_session_record()
@@ -763,9 +1060,30 @@ class SimulationSession:
 
     def _abort_create(self, exc: Exception) -> None:
         self.mark_failed(f"construction failed: {exc}")
+        if self.observer is not None:
+            try:
+                self.observer.dispose()
+            except Exception:
+                pass
+        if self.inspector is not None:
+            try:
+                self.inspector.dispose()
+            except Exception:
+                pass
+        if self.control is not None:
+            try:
+                self.control.dispose()
+            except Exception:
+                pass
         if self.components is not None:
             try:
                 self.components.close()
+            except Exception:
+                pass
+        if self.recorder is not None:
+            try:
+                self.recorder.close()
+                self._update_recorder_metadata()
             except Exception:
                 pass
         if self._metadata is not None:

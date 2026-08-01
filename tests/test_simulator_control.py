@@ -54,7 +54,21 @@ def test_simulator_control_is_persistent_and_uses_only_session_callbacks(
         assert control.timing_label.text() == "1000x"
         assert control.connect_button.isEnabled()
         assert not control.disconnect_button.isEnabled()
+        assert control.show_inspector_button.isEnabled()
+        assert control.export_snapshot_button.isEnabled()
         assert not view.connection_widget.machine_connect_button.isEnabled()
+
+        session.inspector.hide()
+        control.show_inspector_button.click()
+        assert not session.inspector.isHidden()
+        snapshot_sequence = session.recorder.health_snapshot()[
+            "last_event_sequence"
+        ]
+        control.export_snapshot_button.click()
+        assert (
+            session.recorder.health_snapshot()["last_event_sequence"]
+            >= snapshot_sequence + 3
+        )
 
         control.connect_button.click()
         _wait_until(qapp, lambda: session.components.machine.state.connected)

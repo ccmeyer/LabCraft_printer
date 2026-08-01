@@ -220,6 +220,26 @@ Each retained root contains `session.json`, `logs\`, `artifacts\`, `config\`,
 remain outside experiment directories. Application roots are passed directly
 to the real Model, so normal writers retain production file names and formats.
 
+Milestone 2 adds simulation-owned, read-only state evidence. Use **Show State
+Inspector** in `SIMULATOR CONTROL` to open the hidden-by-default
+`SIL STATE INSPECTOR - READ ONLY` dock. **Export State Snapshot** records an
+explicit cross-layer snapshot without changing application state. Each launch
+uses its own contained artifact directory:
+
+```text
+artifacts\state\<application_session_id>\
+  events.jsonl
+  latest_snapshot.json
+  terminal_snapshot.json
+```
+
+The JSONL remains complete while the live inspector retains a bounded 512-event
+tail. Reopening a retained root creates a new application-session directory and
+does not modify the prior trace. The schema contract is documented in
+`docs/sil_state_trace_schema_v1.md`. If recorder or snapshot persistence fails,
+the observer stops, the root is retained and marked failed, and the ambiguous
+write is not retried.
+
 Troubleshooting:
 
 - `session is already locked`: close the other simulator using that root.
@@ -236,6 +256,10 @@ Run the focused launcher/session tests:
 
 ```powershell
 .\env\Scripts\python.exe -m pytest -q `
+  tests\test_sil_state_recorder.py `
+  tests\test_sil_state_projection.py `
+  tests\test_sil_state_observer.py `
+  tests\test_sil_state_inspector.py `
   tests\test_simulation_session.py `
   tests\test_simulation_session_owned.py `
   tests\test_simulator_control.py `

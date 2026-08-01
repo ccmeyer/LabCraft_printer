@@ -653,7 +653,13 @@ Rollback:
 
 ### Milestone 2: Cross-layer state recorder and inspector
 
-Status: `planned`
+Status: `complete`
+
+Concrete implementation plan:
+`docs/sil_interactive_simulation_milestone_2_implementation_plan.md`
+
+Completion record:
+`docs/sil_interactive_simulation_milestone_2_completion_record.md`
 
 Goal:
 
@@ -1382,17 +1388,13 @@ This effort is complete when:
 
 ## Current Next Action
 
-Complete the remaining Milestone 1 verification:
+Review and implement only the concrete Milestone 2 plan in
+`docs/sil_interactive_simulation_milestone_2_implementation_plan.md`.
+Begin with the schema, pure projections, recorder, and focused unit tests;
+integrate the observer/session/inspector only after those contracts pass.
 
-1. launch the visible application from a fresh root and manually verify
-   connect, enable/home, regulation, movement, gripper, disconnect, and close;
-2. retain and reopen one session root, then load an experiment through the
-   existing editor;
-3. complete the Slice 0.1 repetition gate: five 24-well smoke, three
-   two-stock, and three reload/resume runs without checkpoint access failures;
-4. add the Milestone 1 completion record and change its status to `complete`;
-5. create the concrete Milestone 2 implementation plan.
-
-Do not combine Milestone 1 implementation with synthetic calibration, workflow
-migration, disconnect injection, performance remediation, firmware, protocol,
-Pi operations, or hardware changes.
+If observation requires a new production MVC seam, stop before editing and
+present the exact gap, call path, a revised plan of no more than eight steps,
+and files to touch. Do not begin synthetic calibration, manual-refuel
+simulation, workflow migration, failure injection, performance remediation,
+firmware, protocol, Pi operations, or hardware changes as part of Milestone 2.

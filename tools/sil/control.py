@@ -21,6 +21,8 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
         speed_multiplier: float,
         connect_callback,
         disconnect_callback,
+        show_inspector_callback=None,
+        export_snapshot_callback=None,
     ):
         super().__init__(self.TITLE, parent)
         self.setObjectName("simulatorControlDock")
@@ -30,6 +32,8 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
         self._machine = machine
         self._connect_callback = connect_callback
         self._disconnect_callback = disconnect_callback
+        self._show_inspector_callback = show_inspector_callback
+        self._export_snapshot_callback = export_snapshot_callback
         self._connection_pending = False
         self._state_signal_connected = False
 
@@ -81,6 +85,29 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
         buttons.addWidget(self.connect_button)
         buttons.addWidget(self.disconnect_button)
         layout.addLayout(buttons)
+
+        evidence_buttons = QtWidgets.QHBoxLayout()
+        self.show_inspector_button = QtWidgets.QPushButton(
+            "Show State Inspector",
+            panel,
+        )
+        self.show_inspector_button.setObjectName("showSilStateInspectorButton")
+        self.export_snapshot_button = QtWidgets.QPushButton(
+            "Export State Snapshot",
+            panel,
+        )
+        self.export_snapshot_button.setObjectName("exportSilStateSnapshotButton")
+        self.show_inspector_button.clicked.connect(self._show_inspector)
+        self.export_snapshot_button.clicked.connect(self._export_snapshot)
+        self.show_inspector_button.setEnabled(
+            callable(self._show_inspector_callback)
+        )
+        self.export_snapshot_button.setEnabled(
+            callable(self._export_snapshot_callback)
+        )
+        evidence_buttons.addWidget(self.show_inspector_button)
+        evidence_buttons.addWidget(self.export_snapshot_button)
+        layout.addLayout(evidence_buttons)
         layout.addStretch(1)
 
         self.setWidget(panel)
@@ -109,6 +136,16 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
         self._connection_pending = False
         self._disconnect_callback()
         self._update_buttons(bool(self._machine.state.connected))
+
+    @QtCore.Slot()
+    def _show_inspector(self):
+        if callable(self._show_inspector_callback):
+            self._show_inspector_callback()
+
+    @QtCore.Slot()
+    def _export_snapshot(self):
+        if callable(self._export_snapshot_callback):
+            self._export_snapshot_callback()
 
     @QtCore.Slot(object)
     def _update_state(self, state):
@@ -153,4 +190,3 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
             except (RuntimeError, TypeError):
                 pass
             self._state_signal_connected = False
-
