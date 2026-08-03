@@ -241,8 +241,8 @@ the observer stops, the root is retained and marked failed, and the ambiguous
 write is not retried.
 
 Milestone 3 adds a pure deterministic synthetic-calibration developer API in
-`tools.sil`. It is not connected to the interactive launcher or calibration
-UI yet. A caller constructs `CalibrationGenerationRequestV1`, selects one of
+`tools.sil`. Its provider remains independent of the interactive launcher and
+calibration UI. A caller constructs `CalibrationGenerationRequestV1`, selects one of
 the seven versioned profiles, and calls
 `SyntheticCalibrationProvider.generate(request)`. The returned request and
 result fingerprints, virtual timestamp, calibration values, provenance, and
@@ -257,11 +257,58 @@ physical ejection, volume accuracy, pressure response, refuel behavior,
 collision safety, firmware, or protocol behavior. The exact schema is
 documented in `docs/sil_calibration_schema_v1.md`.
 
+Milestone 4A is complete. It connects the valid `nominal_droplet` profile to the interactive
+simulator without enabling the production camera/calibration launcher. After
+connecting, homing, regulating print pressure, finalizing an experiment, and
+loading its exact virtual droplet head, use **Generate / Open Synthetic
+Droplet Result** in `SIMULATOR CONTROL`. A camera-free presentation of the real
+calibration dialog shows an amber **Synthetic** row and an explicit no-physical-
+evidence banner. Select the row, inspect the normal design-impact preview, and
+use the existing Apply control.
+
+The candidate remains in memory only. Apply continues through the real Model
+calibration-revision path and normal Controller-driven simulated print
+settings. Canonical request/result evidence is retained outside experiment
+directories under:
+
+```text
+artifacts\synthetic-calibration\<application_session_id>\<result_fingerprint>\
+  request.json
+  result.json
+```
+
+The presentation mode never starts a camera/read stream, runs a physical
+calibration process, enables a print profile, or writes a synthetic run into
+`calibration.json`. It does not validate camera processing, physical ejection,
+volume accuracy, pressure response, collision safety, firmware, or protocol
+behavior. Stream calibration and manual refuel remain Milestone 4B.
+
+Retain and reopen the session to inspect the authoritative result:
+
+```powershell
+.\env\Scripts\python.exe tools\run_simulated_app.py --keep-session --seed 1
+.\env\Scripts\python.exe tools\run_simulated_app.py `
+  --session-root "C:\absolute\retained\session-root"
+```
+
+Load the experiment through the existing Experiment Editor after reopening;
+the launcher never auto-loads an experiment.
+
 Run its focused contract tests with:
 
 ```powershell
 .\env\Scripts\python.exe -m pytest -q `
   tests\test_sil_synthetic_calibration.py
+```
+
+Run the Milestone 4A focused tests with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_sil_calibration_application.py `
+  tests\test_sil_calibration_ui.py `
+  tests\test_sil_calibration_dialog_driver.py `
+  tests\system\test_sil_synthetic_calibration_lifecycle.py
 ```
 
 Troubleshooting:

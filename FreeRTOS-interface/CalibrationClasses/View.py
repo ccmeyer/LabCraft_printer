@@ -24,6 +24,7 @@ from utilities import ShortcutManager
 from CalibrationRecordExport import CalibrationRecordExportError, export_calibration_records
 from .Model import NozzlePositionChecklistStore
 from hardware.null_devices import NullCamera
+from ApplicationComposition import SIMULATION_RUNTIME_CONTEXT
 
 
 class _CalibrationRecordExportWorker(QtCore.QObject):
@@ -670,11 +671,12 @@ def _configure_characterization_table_view(table, model):
 
 
 class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
-    def __init__(self, parent=None, *, include_recorded=False, muted_brush=None, applied_brush=None):
+    def __init__(self, parent=None, *, include_recorded=False, muted_brush=None, applied_brush=None, synthetic_brush=None):
         super().__init__(parent)
         self._include_recorded = bool(include_recorded)
         self._muted_brush = muted_brush or QBrush(QColor(255, 255, 255, 150))
         self._applied_brush = applied_brush or QBrush(QColor(59, 130, 246, 64))
+        self._synthetic_brush = synthetic_brush or QBrush(QColor(245, 158, 11, 72))
         self._applied_row_fingerprint = None
         self._rows = []
         self._columns = self._build_columns()
@@ -859,15 +861,25 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
         if role == Qt.ToolTipRole:
             if key == "applied_marker" and self._is_applied_row(row):
                 return "Applied to design"
+            if row.get("synthetic") is True:
+                fingerprint = str(row.get("synthetic_result_fingerprint") or "")
+                limitations = ", ".join(row.get("synthetic_limitations") or [])
+                detail = f"Synthetic SIL result {fingerprint}"
+                return f"{detail}\nLimitations: {limitations}" if limitations else detail
             invalid_reason = row.get("invalid_reason")
             if row.get("valid") is False and invalid_reason:
                 return f"Invalid: {invalid_reason}"
             if key == "timestamp_display":
                 return str(row.get("timestamp_display") or "")
             return None
-        if role == Qt.BackgroundRole and self._applied_row_fingerprint is not None:
-            if _summary_row_fingerprint(row) == self._applied_row_fingerprint:
+        if role == Qt.BackgroundRole:
+            if (
+                self._applied_row_fingerprint is not None
+                and _summary_row_fingerprint(row) == self._applied_row_fingerprint
+            ):
                 return self._applied_brush
+            if row.get("synthetic") is True:
+                return self._synthetic_brush
         if role == Qt.ForegroundRole and row.get("valid") is False:
             return self._muted_brush
         if role == Qt.FontRole and row.get("valid") is False:
@@ -916,7 +928,7 @@ class CharacterizationSummaryProxyModel(QtCore.QSortFilterProxyModel):
 
     def setSourceFilter(self, source_key):
         normalized = str(source_key or "all").strip().lower()
-        if normalized not in ("all", "sweep", "search", "recheck", "stream"):
+        if normalized not in ("all", "sweep", "search", "recheck", "stream", "synthetic"):
             normalized = "all"
         if self._source_filter == normalized:
             return
@@ -932,7 +944,8 @@ class CharacterizationSummaryProxyModel(QtCore.QSortFilterProxyModel):
         if self._valid_only and row.get("valid") is not True:
             return False
         if self._source_filter != "all":
-            if str(row.get("phase") or "").strip().lower() != self._source_filter:
+            source_key = row.get("source_filter_key") or row.get("phase")
+            if str(source_key or "").strip().lower() != self._source_filter:
                 return False
         return True
 
@@ -963,6 +976,7 @@ class CharacterizationHistoryDialog(QtWidgets.QDialog):
         self.history_source_combo.addItem("Search", "search")
         self.history_source_combo.addItem("Recheck", "recheck")
         self.history_source_combo.addItem("Stream", "stream")
+        self.history_source_combo.addItem("Synthetic", "synthetic")
         self.history_showing_label = QtWidgets.QLabel("")
 
         toolbar.addWidget(self.history_current_run_only_checkbox)
@@ -1905,6 +1919,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         initial_tab=None,
         open_refuel_camera_callback=None,
         post_apply_manual_refuel_check_callback=None,
+        result_presentation_only=False,
+        transient_candidate_id=None,
     ):
         super().__init__()
         print('\n---Created new droplet imaging dialog---\n')
@@ -1914,6 +1930,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.droplet_camera_model = model.droplet_camera_model
         self.refuel_camera_model = getattr(model, "refuel_camera_model", None)
         self.controller = controller
+        self.result_presentation_only = bool(result_presentation_only)
+        self.transient_candidate_id = (
+            None if transient_candidate_id is None else str(transient_candidate_id)
+        )
+        if self.result_presentation_only:
+            runtime_context = getattr(self.main_window, "runtime_context", None)
+            if runtime_context is not SIMULATION_RUNTIME_CONTEXT:
+                raise RuntimeError(
+                    "Synthetic calibration presentation is available only in the canonical simulation runtime."
+                )
         self.service_mode = bool(service_mode)
         self.initial_tab = str(initial_tab or "").strip().lower()
         self.open_refuel_camera_callback = open_refuel_camera_callback if callable(open_refuel_camera_callback) else None
@@ -1931,15 +1957,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.shortcut_manager = ShortcutManager(self)
         self.manual_flash_shortcut = None
-        self.setup_shortcuts()
+        if not self.result_presentation_only:
+            self.setup_shortcuts()
 
         self.flash_active = False
         self.saving_active = False
         self.analysis_active = False
         self._read_camera_stream_armed = False
         self._read_camera_stream_reconciled = False
-        self.start_droplet_camera()
-        self._arm_read_camera_stream_on_open()
+        if not self.result_presentation_only:
+            self.start_droplet_camera()
+            self._arm_read_camera_stream_on_open()
 
         # Timer for periodic image capture
         self.camera_timer = QTimer(self)
@@ -2004,10 +2032,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._calibration_record_export_thread = None
         self._calibration_record_export_worker = None
         self._calibration_record_export_in_progress = False
-        try:
-            self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
-        except Exception:
-            pass
+        if not self.result_presentation_only:
+            try:
+                self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
+            except Exception:
+                pass
 
         self.setWindowTitle("Droplet Imaging")
         self.resize(1600, 1000)
@@ -2036,6 +2065,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
         info_panel_v = QtWidgets.QVBoxLayout(self.info_panel)
         info_panel_v.setContentsMargins(6, 6, 6, 6)
         info_panel_v.setSpacing(8)
+        self.synthetic_calibration_banner = None
+        if self.result_presentation_only:
+            self.synthetic_calibration_banner = QtWidgets.QLabel(
+                "SYNTHETIC CALIBRATION — NO CAMERA OR PHYSICAL EVIDENCE"
+            )
+            self.synthetic_calibration_banner.setObjectName("syntheticCalibrationBanner")
+            self.synthetic_calibration_banner.setWordWrap(True)
+            self.synthetic_calibration_banner.setStyleSheet(
+                "font-weight: bold; color: #1f2937; background: #f59e0b; padding: 8px;"
+            )
+            info_panel_v.addWidget(self.synthetic_calibration_banner)
         self.info_panel_scroll = QtWidgets.QScrollArea()
         self.info_panel_scroll.setWidgetResizable(True)
         self.info_panel_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -2696,6 +2736,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_source_combo.addItem("Search", "search")
         self.summary_source_combo.addItem("Recheck", "recheck")
         self.summary_source_combo.addItem("Stream", "stream")
+        self.summary_source_combo.addItem("Synthetic", "synthetic")
         self.summary_history_button = QtWidgets.QPushButton("History...")
         self.summary_history_button.setMinimumHeight(28)
         self.summary_count_label = QtWidgets.QLabel("Showing 0 of 0 results")
@@ -2728,6 +2769,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_table_proxy_model = CharacterizationSummaryProxyModel(self)
         self.summary_table_proxy_model.setSourceModel(self.summary_table_model)
         self.summary_table = QtWidgets.QTableView()
+        self.summary_table.setObjectName("characterizationSummaryTable")
         self.summary_table.setModel(self.summary_table_proxy_model)
         _configure_characterization_table_view(self.summary_table, self.summary_table_model)
         self._unused_summary_columns = []
@@ -2833,6 +2875,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.bridge_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
 
         self.bridge_apply_btn = QtWidgets.QPushButton("Apply new ejection volume to design")
+        self.bridge_apply_btn.setObjectName("applyCharacterizationResultButton")
         self.bridge_apply_btn.setMinimumHeight(32)
         self.bridge_apply_btn.setEnabled(False)
         self.bridge_apply_btn.clicked.connect(self._apply_previewed_droplet_volume)
@@ -3143,28 +3186,45 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model.calibration_manager.readinessChanged.connect(self.on_readiness_changed)
         self.model.calibration_manager._emit_readiness()
 
-        self.set_exposure_time(self.droplet_camera_model.exposure_time)
-        self.set_flash_delay(self.droplet_camera_model.flash_delay)
-        self.set_flash_duration(self.droplet_camera_model.flash_duration)
-        self.set_imaging_droplets(self.droplet_camera_model.num_droplets)
-        self.set_start_pressure(self.start_pressure_spin.value())
-        self.set_num_pressure_tests(self.num_pressure_tests_spin.value())
-        if self.initial_tab == "optics":
-            self.calibration_tabs.setCurrentWidget(self.optics_tab)
-        else:
-            self._apply_default_calibration_tab_from_printing_mode()
+        if not self.result_presentation_only:
+            self.set_exposure_time(self.droplet_camera_model.exposure_time)
+            self.set_flash_delay(self.droplet_camera_model.flash_delay)
+            self.set_flash_duration(self.droplet_camera_model.flash_duration)
+            self.set_imaging_droplets(self.droplet_camera_model.num_droplets)
+            self.set_start_pressure(self.start_pressure_spin.value())
+            self.set_num_pressure_tests(self.num_pressure_tests_spin.value())
+            if self.initial_tab == "optics":
+                self.calibration_tabs.setCurrentWidget(self.optics_tab)
+            else:
+                self._apply_default_calibration_tab_from_printing_mode()
         self.populate_summary_table()
-        self._install_droplet_capture_raw_attempt_filter()
-        self._refresh_manual_control_lock_state()
-        self._refresh_optics_controls()
-        self._apply_flash_safety_ui_state()
-        self._sync_stream_capture_panel_state()
-        self._schedule_refuel_level_panel_refresh(force=True)
-        if self._is_refuel_tracking_enabled():
-            self._start_refuel_monitor()
-        QTimer.singleShot(0, self._ensure_stream_capture_followup_state)
-        QTimer.singleShot(0, self._ensure_stream_calibration_sequence_followup_state)
-        QTimer.singleShot(0, self._ensure_droplet_calibration_sequence_followup_state)
+        if self.result_presentation_only:
+            self._apply_result_presentation_only_ui()
+        else:
+            self._install_droplet_capture_raw_attempt_filter()
+            self._refresh_manual_control_lock_state()
+            self._refresh_optics_controls()
+            self._apply_flash_safety_ui_state()
+            self._sync_stream_capture_panel_state()
+            self._schedule_refuel_level_panel_refresh(force=True)
+            if self._is_refuel_tracking_enabled():
+                self._start_refuel_monitor()
+            QTimer.singleShot(0, self._ensure_stream_capture_followup_state)
+            QTimer.singleShot(0, self._ensure_stream_calibration_sequence_followup_state)
+            QTimer.singleShot(0, self._ensure_droplet_calibration_sequence_followup_state)
+
+    def _apply_result_presentation_only_ui(self):
+        self.setWindowTitle("Synthetic Droplet Calibration Result — No Hardware")
+        self.resize(760, 900)
+        self.control_panel_scroll.hide()
+        self.analysis_panel.hide()
+        self.info_panel_scroll.setMinimumWidth(700)
+        self.summary_current_run_checkbox.setChecked(True)
+        self.summary_valid_only_checkbox.setChecked(True)
+        synthetic_index = self.summary_source_combo.findData("synthetic")
+        if synthetic_index >= 0:
+            self.summary_source_combo.setCurrentIndex(synthetic_index)
+        self.populate_summary_table()
 
     def _build_droplet_capture_performance_debug_group(self):
         group = QtWidgets.QGroupBox("Droplet Capture Performance Debug")
@@ -10246,6 +10306,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 _, raw = selected_row_getter()
             except Exception:
                 raw = None
+        candidate_validation = DropletImagingDialog._validate_selected_characterization_candidate(
+            self,
+            raw,
+            require_idle=True,
+        )
+        if not candidate_validation.get("ok"):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Apply failed",
+                candidate_validation.get("message") or "The selected calibration candidate is unavailable.",
+            )
+            return
         mode_pair_getter = getattr(self, "_bridge_result_mode_pair", None)
         if callable(mode_pair_getter):
             current_mode, result_mode = mode_pair_getter(raw)
@@ -10970,19 +11042,55 @@ class DropletImagingDialog(QtWidgets.QDialog):
         raw["_source_row"] = source_index.row()
         return proxy_index.row(), raw
 
+    def _validate_selected_characterization_candidate(self, raw, *, require_idle=False):
+        raw = dict(raw or {})
+        manager = getattr(self.model, "calibration_manager", None)
+        validator = getattr(
+            manager,
+            "validate_characterization_candidate_for_application",
+            None,
+        )
+        if callable(validator):
+            try:
+                result = dict(validator(raw) or {})
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "code": "candidate_validation_failed",
+                    "message": f"Could not validate the selected candidate: {exc}",
+                }
+            if not result.get("ok"):
+                return result
+        if require_idle and raw.get("_transient_candidate_id"):
+            state_getter = getattr(self.controller, "get_array_run_state", None)
+            state = str(state_getter() if callable(state_getter) else "idle")
+            queue_getter = getattr(getattr(self.controller, "machine", None), "check_if_all_completed", None)
+            queue_drained = bool(queue_getter()) if callable(queue_getter) else False
+            if state != "idle" or not queue_drained:
+                return {
+                    "ok": False,
+                    "code": "application_busy",
+                    "message": "Synthetic calibration Apply requires an idle array and empty simulator queue.",
+                }
+        return {"ok": True, "code": "ok", "message": ""}
+
     def _update_load_button_state(self):
         """Enable the Load button only when we have a usable selection."""
         _, raw = self._selected_summary_row()
         mismatch_message = self._summary_row_mode_mismatch_message(raw)
+        candidate_validation = self._validate_selected_characterization_candidate(raw)
         ok = bool(
             raw
+            and candidate_validation.get("ok")
             and mismatch_message is None
             and raw.get("pw_us") is not None
             and raw.get("pressure_psi") is not None
             and not DropletImagingDialog._is_calibration_busy(self)
         )
         self.load_selected_button.setEnabled(ok)
-        if mismatch_message:
+        if not candidate_validation.get("ok"):
+            self.load_selected_button.setToolTip(candidate_validation.get("message") or "Candidate unavailable.")
+        elif mismatch_message:
             self.load_selected_button.setToolTip(mismatch_message)
         else:
             self.load_selected_button.setToolTip(
@@ -11198,6 +11306,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         _, raw = self._selected_summary_row()
         if not raw:
             self._bridge_clear_preview_with_status()
+            return
+
+        candidate_validation = self._validate_selected_characterization_candidate(raw)
+        if not candidate_validation.get("ok"):
+            self._bridge_clear_preview_with_status(
+                candidate_validation.get("message") or "Selected candidate is unavailable."
+            )
             return
 
         mean_nL = raw.get("mean_nL")
@@ -11606,6 +11721,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
                             pass
                 event.ignore()
                 return
+
+        if bool(getattr(self, "result_presentation_only", False)):
+            for timer_name in ("camera_timer", "refuel_monitor_timer", "refuel_panel_refresh_timer"):
+                timer = getattr(self, timer_name, None)
+                if timer is not None:
+                    timer.stop()
+            event.accept()
+            return
 
         if self._imager_close_blocked_by_capture_or_calibration():
             self._request_imager_close_after_capture_stop(event)

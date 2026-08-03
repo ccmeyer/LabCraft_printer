@@ -48,7 +48,7 @@ import importlib
 from typing import Mapping, Sequence, Optional, Any, List, Dict, Tuple, Set
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from LegacyExecutionMigration import migrate_legacy_execution_copy as migrate_legacy_execution_directory
-from ApplicationComposition import PRODUCTION_RUNTIME_CONTEXT
+from ApplicationComposition import PRODUCTION_RUNTIME_CONTEXT, SIMULATION_RUNTIME_CONTEXT
 
 MassCalibrationDialog = None
 
@@ -3650,6 +3650,47 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             droplet_imaging_dialog.exec()
         finally:
             self._clear_droplet_imager_launch_state(droplet_imaging_dialog)
+
+    def open_simulated_calibration_result(self, candidate_id):
+        """Present one transient calibration result without a camera lifecycle."""
+
+        if getattr(self.main_window, "runtime_context", None) is not SIMULATION_RUNTIME_CONTEXT:
+            raise RuntimeError(
+                "Synthetic calibration results can be opened only in simulation."
+            )
+        if self._droplet_imager_launch_is_active():
+            self._reject_duplicate_droplet_imager_launch()
+            return self._droplet_imager_dialog
+        manager = getattr(self.model, "calibration_manager", None)
+        stored = getattr(manager, "_transient_characterization_candidate", None)
+        if (
+            not stored
+            or stored["candidate"].candidate_id != str(candidate_id)
+        ):
+            raise RuntimeError("The requested transient calibration candidate is unavailable.")
+
+        self._set_droplet_imager_launch_pending(True)
+        dialog = None
+        try:
+            dialog = CalibrationClasses.DropletImagingDialog(
+                self.main_window,
+                self.model,
+                self.controller,
+                result_presentation_only=True,
+                transient_candidate_id=str(candidate_id),
+            )
+            self._droplet_imager_dialog = dialog
+            self._droplet_imager_launch_pending = False
+            finished_signal = getattr(dialog, "finished", None)
+            if finished_signal is not None:
+                finished_signal.connect(
+                    lambda _result=None, active=dialog: self._clear_droplet_imager_launch_state(active)
+                )
+            dialog.open()
+            return dialog
+        except Exception:
+            self._clear_droplet_imager_launch_state(dialog)
+            raise
 
     def _launch_manual_optics_calibration_dialog(self):
         """Open the droplet imager directly to the manual optics-calibration tab."""

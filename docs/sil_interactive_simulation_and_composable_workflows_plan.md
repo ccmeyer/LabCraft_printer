@@ -741,7 +741,7 @@ Rollback:
 
 ### Milestone 4A: Droplet calibration UI application
 
-Status: `planned`
+Status: `complete`
 
 Goal:
 
@@ -1388,10 +1388,9 @@ This effort is complete when:
 
 ## Current Next Action
 
-Review and create the concrete Milestone 4A plan for safe application-owned
-presentation, selection, and Apply of synthetic droplet results through the
-real calibration UI. Do not edit the application-owned calibration surface
-until that plan is reviewed.
+Create and review the concrete Milestone 4B plan for stream-mode presentation,
+mode-switch application, and the existing manual-refuel lifecycle. Do not edit
+those surfaces until that plan is reviewed.
 
 Keep manual-refuel simulation, workflow migration, failure injection,
 performance remediation, firmware, protocol, Pi operations, and hardware

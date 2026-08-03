@@ -1,5 +1,7 @@
 """Interactive software-in-the-loop session support."""
 
+from .calibration_application import SyntheticCalibrationApplicationAdapter
+
 from .state_recorder import (
     EVENT_SCHEMA_ID,
     SNAPSHOT_SCHEMA_ID,
@@ -22,6 +24,7 @@ from .synthetic_calibration import (
 )
 
 __all__ = [
+    "SyntheticCalibrationApplicationAdapter",
     "EVENT_SCHEMA_ID",
     "SNAPSHOT_SCHEMA_ID",
     "STATE_SCHEMA_VERSION",

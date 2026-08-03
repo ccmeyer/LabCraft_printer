@@ -39,6 +39,7 @@ from simulation import (  # noqa: E402
 )
 
 from .control import SimulatorControlDock
+from .calibration_application import SyntheticCalibrationApplicationAdapter
 from .inspector import StateInspectorDock
 from .state_observer import SimulationStateObserver
 from .state_projection import StateProjectionBuilder
@@ -241,6 +242,7 @@ class SimulationSession:
         self.control: SimulatorControlDock | None = None
         self.inspector: StateInspectorDock | None = None
         self.recorder: StateRecorder | None = None
+        self.calibration_adapter: SyntheticCalibrationApplicationAdapter | None = None
         self.projector: StateProjectionBuilder | None = None
         self.observer: SimulationStateObserver | None = None
         self._lock: QtCore.QLockFile | None = None
@@ -326,6 +328,21 @@ class SimulationSession:
         )
         if self.recorder.healthy:
             self.observer.install()
+        self.calibration_adapter = SyntheticCalibrationApplicationAdapter(
+            session_root=self.session_root,
+            session_id=self.session_id,
+            application_session_id=self.application_session_id,
+            seed=self.config.seed,
+            model=self.components.model,
+            controller=self.components.controller,
+            machine=self.components.machine,
+            recorder=self.recorder,
+            open_dialog_callback=(
+                self.components.view.pressure_box.open_simulated_calibration_result
+            ),
+            snapshot_callback=self.snapshot,
+            failure_callback=self.mark_failed,
+        )
         self._update_recorder_metadata()
 
         self.components.machine.machine_connected_signal.connect(
@@ -522,6 +539,9 @@ class SimulationSession:
         self._metadata.setdefault("artifact_map", {})[
             "state_traces_root"
         ] = "artifacts/state"
+        self._metadata.setdefault("artifact_map", {})[
+            "synthetic_calibration_root"
+        ] = "artifacts/synthetic-calibration"
 
     def _append_log(self, message: str) -> None:
         if self.session_root is None:
@@ -583,10 +603,16 @@ class SimulationSession:
             disconnect_callback=self.disconnect_simulator,
             show_inspector_callback=self.show_state_inspector,
             export_snapshot_callback=self.export_state_snapshot,
+            generate_calibration_callback=(
+                self.calibration_adapter.generate_and_present_nominal_droplet
+            ),
         )
         self.components.view.addDockWidget(
             QtCore.Qt.RightDockWidgetArea,
             self.control,
+        )
+        self.calibration_adapter.set_status_changed_callback(
+            self.control.set_calibration_status
         )
         if self.config.visible:
             self.components.view.show()
@@ -857,6 +883,12 @@ class SimulationSession:
                 except Exception as exc:
                     errors.append(f"state observer cleanup failed: {exc}")
 
+            if self.calibration_adapter is not None:
+                try:
+                    self.calibration_adapter.dispose()
+                except Exception as exc:
+                    errors.append(f"synthetic calibration adapter cleanup failed: {exc}")
+
             for timer in list(
                 getattr(self.components.machine, "_deferred_timers", set())
             ):
@@ -1063,6 +1095,11 @@ class SimulationSession:
         if self.observer is not None:
             try:
                 self.observer.dispose()
+            except Exception:
+                pass
+        if self.calibration_adapter is not None:
+            try:
+                self.calibration_adapter.dispose()
             except Exception:
                 pass
         if self.inspector is not None:

@@ -23,6 +23,7 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
         disconnect_callback,
         show_inspector_callback=None,
         export_snapshot_callback=None,
+        generate_calibration_callback=None,
     ):
         super().__init__(self.TITLE, parent)
         self.setObjectName("simulatorControlDock")
@@ -34,6 +35,8 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
         self._disconnect_callback = disconnect_callback
         self._show_inspector_callback = show_inspector_callback
         self._export_snapshot_callback = export_snapshot_callback
+        self._generate_calibration_callback = generate_calibration_callback
+        self._calibration_pending = False
         self._connection_pending = False
         self._state_signal_connected = False
 
@@ -108,6 +111,31 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
         evidence_buttons.addWidget(self.show_inspector_button)
         evidence_buttons.addWidget(self.export_snapshot_button)
         layout.addLayout(evidence_buttons)
+
+        calibration_group = QtWidgets.QGroupBox("Synthetic calibration", panel)
+        calibration_layout = QtWidgets.QVBoxLayout(calibration_group)
+        self.generate_calibration_button = QtWidgets.QPushButton(
+            "Generate / Open Synthetic Droplet Result",
+            calibration_group,
+        )
+        self.generate_calibration_button.setObjectName(
+            "generateSyntheticDropletCalibrationButton"
+        )
+        self.calibration_status_label = QtWidgets.QLabel(
+            "Connect, home, regulate pressure, and load a finalized droplet stock.",
+            calibration_group,
+        )
+        self.calibration_status_label.setObjectName("syntheticCalibrationStatusLabel")
+        self.calibration_status_label.setWordWrap(True)
+        self.calibration_status_label.setTextInteractionFlags(
+            QtCore.Qt.TextSelectableByMouse
+        )
+        self.generate_calibration_button.clicked.connect(
+            self._generate_calibration
+        )
+        calibration_layout.addWidget(self.generate_calibration_button)
+        calibration_layout.addWidget(self.calibration_status_label)
+        layout.addWidget(calibration_group)
         layout.addStretch(1)
 
         self.setWidget(panel)
@@ -147,6 +175,35 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
         if callable(self._export_snapshot_callback):
             self._export_snapshot_callback()
 
+    @QtCore.Slot()
+    def _generate_calibration(self):
+        if not callable(self._generate_calibration_callback):
+            return
+        self._calibration_pending = True
+        generating_message = "Generating deterministic result..."
+        self.calibration_status_label.setText(generating_message)
+        self._update_buttons(bool(self._machine.state.connected))
+        try:
+            result = self._generate_calibration_callback()
+        except Exception as exc:
+            result = {"ok": False, "message": f"Generation failed: {exc}"}
+        finally:
+            self._calibration_pending = False
+        if self.calibration_status_label.text() == generating_message:
+            if isinstance(result, dict):
+                self.calibration_status_label.setText(
+                    str(result.get("message") or "Synthetic calibration request completed.")
+                )
+            else:
+                self.calibration_status_label.setText(
+                    "Synthetic calibration request completed."
+                )
+        self._update_buttons(bool(self._machine.state.connected))
+
+    @QtCore.Slot(str)
+    def set_calibration_status(self, status: str):
+        self.calibration_status_label.setText(str(status))
+
     @QtCore.Slot(object)
     def _update_state(self, state):
         connected = bool(getattr(state, "connected", False))
@@ -182,6 +239,11 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
     def _update_buttons(self, connected: bool):
         self.connect_button.setEnabled(not connected and not self._connection_pending)
         self.disconnect_button.setEnabled(connected)
+        self.generate_calibration_button.setEnabled(
+            connected
+            and not self._calibration_pending
+            and callable(self._generate_calibration_callback)
+        )
 
     def dispose(self):
         if self._state_signal_connected:

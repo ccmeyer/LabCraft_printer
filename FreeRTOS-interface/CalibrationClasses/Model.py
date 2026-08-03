@@ -31,6 +31,9 @@ import matplotlib.pyplot as plt
 from enum import Enum
 from collections import deque
 import queue
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Any, Mapping
 
 import os, json, time, uuid, tempfile, threading
 import numpy as np
@@ -46,6 +49,50 @@ from tools.stream_analysis import online_fit as online_fit_mod
 from tools.stream_analysis import online_runtime as online_runtime_mod
 from tools.stream_analysis import online_tail as online_tail_mod
 from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
+
+
+def _freeze_candidate_value(value):
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_candidate_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_candidate_value(item) for item in value)
+    return value
+
+
+def _thaw_candidate_value(value):
+    if isinstance(value, Mapping):
+        return {
+            str(key): _thaw_candidate_value(item) for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return [_thaw_candidate_value(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True)
+class TransientCharacterizationCandidate:
+    """In-memory characterization candidate presented by an external source."""
+
+    candidate_id: str
+    source_kind: str
+    summary_row: Mapping[str, Any]
+    request_fingerprint: str
+    result_fingerprint: str
+    printer_head_id: str
+    stock_id: str
+    factor_name: str
+    option_name: str | None
+    is_fill: bool
+    printing_mode: str
+
+    def __post_init__(self):
+        object.__setattr__(
+            self,
+            "summary_row",
+            _freeze_candidate_value(dict(self.summary_row or {})),
+        )
 
 # ---- numpy encoder helper (robust JSON) ----
 def numpy_encoder(obj):
@@ -1511,6 +1558,7 @@ class CalibrationManager(QObject):
         self._stream_calibration_sequence_state = {}
         self._droplet_calibration_sequence_state = {}
         self._capture_performance_process_instance_index = 0
+        self._transient_characterization_candidate = None
 
         self.calibration_queue = []
 
@@ -7605,10 +7653,205 @@ class CalibrationManager(QObject):
 
         return matching[-1][1].get("run_id")
 
+    @staticmethod
+    def _normalized_candidate_identity(payload):
+        payload = dict(payload or {})
+        return {
+            "printer_head_id": str(payload.get("printer_head_id") or ""),
+            "stock_id": str(payload.get("stock_id") or ""),
+            "factor_name": str(payload.get("factor_name") or ""),
+            "option_name": str(payload.get("option_name") or ""),
+            "is_fill": bool(payload.get("is_fill")),
+            "printing_mode": str(payload.get("printing_mode") or "").strip().lower(),
+        }
+
+    @staticmethod
+    def _candidate_row_fingerprint(row):
+        row = dict(row or {})
+
+        def _normalize(value):
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return bool(value)
+            if isinstance(value, (int, float)):
+                return round(float(value), 9)
+            return str(value)
+
+        return tuple(
+            _normalize(row.get(key))
+            for key in (
+                "run_id",
+                "phase",
+                "timestamp",
+                "pw_us",
+                "pressure_psi",
+                "mean_nL",
+            )
+        )
+
+    def get_characterization_application_context(self):
+        """Resolve the current loaded head to the existing experiment context."""
+
+        try:
+            printer_head = self.model.rack_model.get_gripper_printer_head()
+        except Exception:
+            printer_head = None
+        experiment_model = getattr(self.model, "experiment_model", None)
+        resolver = getattr(experiment_model, "_resolve_applied_imaging_context", None)
+        if printer_head is None or not callable(resolver):
+            return None
+        try:
+            context = resolver(printer_head=printer_head)
+        except Exception:
+            return None
+        if not isinstance(context, dict):
+            return None
+        normalized = self._normalized_candidate_identity(context)
+        if not all(
+            normalized[key]
+            for key in ("printer_head_id", "stock_id", "factor_name", "printing_mode")
+        ):
+            return None
+        normalized["design_volume_nL"] = context.get("design_volume_nL")
+        return normalized
+
+    def set_transient_characterization_candidate(self, candidate):
+        if not isinstance(candidate, TransientCharacterizationCandidate):
+            raise TypeError(
+                "candidate must be a TransientCharacterizationCandidate"
+            )
+        required_strings = {
+            "candidate_id": candidate.candidate_id,
+            "source_kind": candidate.source_kind,
+            "request_fingerprint": candidate.request_fingerprint,
+            "result_fingerprint": candidate.result_fingerprint,
+            "printer_head_id": candidate.printer_head_id,
+            "stock_id": candidate.stock_id,
+            "factor_name": candidate.factor_name,
+        }
+        missing = [name for name, value in required_strings.items() if not str(value or "").strip()]
+        if missing:
+            raise ValueError(
+                "transient candidate is missing: " + ", ".join(sorted(missing))
+            )
+        if candidate.candidate_id != candidate.result_fingerprint:
+            raise ValueError("transient candidate ID must equal its result fingerprint")
+        if str(candidate.printing_mode).strip().lower() != "droplet":
+            raise ValueError("Milestone 4A accepts droplet candidates only")
+
+        row = _thaw_candidate_value(candidate.summary_row)
+        if row.get("synthetic") is not True:
+            raise ValueError("transient candidate must be explicitly synthetic")
+        if row.get("synthetic_request_fingerprint") != candidate.request_fingerprint:
+            raise ValueError("transient candidate request fingerprint does not match")
+        if row.get("synthetic_result_fingerprint") != candidate.result_fingerprint:
+            raise ValueError("transient candidate result fingerprint does not match")
+        source_fingerprint = row.get("source_row_fingerprint")
+        if not isinstance(source_fingerprint, (list, tuple)) or len(source_fingerprint) != 6:
+            raise ValueError("transient candidate source-row fingerprint is invalid")
+        if tuple(source_fingerprint) != self._candidate_row_fingerprint(row):
+            raise ValueError("transient candidate source-row fingerprint does not match")
+        try:
+            mean_nl = float(row.get("mean_nL"))
+            pressure = float(row.get("pressure_psi"))
+            pulse_width = int(round(float(row.get("pw_us"))))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("transient candidate contains unusable values") from exc
+        if not (
+            math.isfinite(mean_nl)
+            and math.isfinite(pressure)
+            and 1.0 <= mean_nl < 40.0
+            and pulse_width > 0
+        ):
+            raise ValueError("transient candidate values are outside droplet bounds")
+
+        row.update(
+            {
+                "_transient_candidate_id": candidate.candidate_id,
+                "source_filter_key": "synthetic",
+                "phase_label": "Synthetic",
+            }
+        )
+        self._transient_characterization_candidate = {
+            "candidate": candidate,
+            "row": row,
+        }
+        self.characterizationSummaryUpdated.emit()
+        return candidate.candidate_id
+
+    def clear_transient_characterization_candidate(self, candidate_id=None):
+        stored = self._transient_characterization_candidate
+        if stored is None:
+            return False
+        current_id = stored["candidate"].candidate_id
+        if candidate_id is not None and str(candidate_id) != current_id:
+            return False
+        self._transient_characterization_candidate = None
+        self.characterizationSummaryUpdated.emit()
+        return True
+
+    def validate_characterization_candidate_for_application(self, row):
+        row = dict(row or {})
+        candidate_id = row.get("_transient_candidate_id")
+        if not candidate_id:
+            return {"ok": True, "code": "persisted_result", "message": ""}
+        stored = self._transient_characterization_candidate
+        if stored is None or stored["candidate"].candidate_id != str(candidate_id):
+            return {
+                "ok": False,
+                "code": "candidate_unavailable",
+                "message": "The transient calibration candidate is no longer available.",
+            }
+        candidate = stored["candidate"]
+        expected_row = stored["row"]
+        if (
+            row.get("synthetic_request_fingerprint") != candidate.request_fingerprint
+            or row.get("synthetic_result_fingerprint") != candidate.result_fingerprint
+            or self._candidate_row_fingerprint(row)
+            != self._candidate_row_fingerprint(expected_row)
+        ):
+            return {
+                "ok": False,
+                "code": "candidate_changed",
+                "message": "The transient calibration candidate changed after registration.",
+            }
+        current = self.get_characterization_application_context()
+        expected = self._normalized_candidate_identity(candidate.__dict__)
+        if current is None:
+            return {
+                "ok": False,
+                "code": "context_unavailable",
+                "message": "No exact loaded printer-head and stock context is available.",
+            }
+        observed = self._normalized_candidate_identity(current)
+        if observed != expected:
+            return {
+                "ok": False,
+                "code": "identity_mismatch",
+                "message": "The loaded printer head or experiment stock no longer matches this candidate.",
+                "expected": expected,
+                "observed": observed,
+            }
+        return {
+            "ok": True,
+            "code": "ok",
+            "message": "",
+            "candidate_id": candidate.candidate_id,
+        }
+
+    def _transient_characterization_rows(self):
+        stored = self._transient_characterization_candidate
+        if stored is None:
+            return []
+        result = self.validate_characterization_candidate_for_application(stored["row"])
+        return [dict(stored["row"])] if result.get("ok") else []
+
     def get_characterization_summary_rows(self):
         _cur_stock, matching = self._get_pressure_sweep_summary_matching_runs()
         if not matching:
-            return []
+            transient_rows = getattr(self, "_transient_characterization_rows", None)
+            return transient_rows() if callable(transient_rows) else []
 
         focus_run_id = self.get_pressure_sweep_summary_focus_run_id()
         run_ids_in_order = [run.get("run_id") for _, run in matching]
@@ -7859,6 +8102,9 @@ class CalibrationManager(QObject):
             _last_if_none(r["run_no"],       10**9),
             r["timestamp"] or ""
         ))
+        transient_rows = getattr(self, "_transient_characterization_rows", None)
+        if callable(transient_rows):
+            rows.extend(transient_rows())
         return rows
 
     def get_pressure_sweep_summary_rows(self):
