@@ -213,7 +213,10 @@ def _validate_active_revision_transition(previous: ExecutionPlan, current: Execu
     stock_id = changed[0]
     old_stock = next(item for item in previous.stocks if item.stock_id == stock_id)
     new_stock = next(item for item in current.stocks if item.stock_id == stock_id)
-    if previous.wells == current.wells:
+    calibration_record_changed = (
+        new_stock.calibration_record_key != old_stock.calibration_record_key
+    )
+    if previous.wells == current.wells and not calibration_record_changed:
         if replace(old_stock, printer_head_id=new_stock.printer_head_id) != new_stock:
             raise RuntimeError("A printer-head binding revision changed unsupported stock fields.")
         if old_stock.printer_head_id is not None or new_stock.printer_head_id is None:

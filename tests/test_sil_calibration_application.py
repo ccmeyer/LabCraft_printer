@@ -41,7 +41,13 @@ class _Recorder:
         self.events.append((kind, kwargs))
 
 
-def _adapter(tmp_path, *, context=None):
+def _adapter(
+    tmp_path,
+    *,
+    context=None,
+    session_id="session-1",
+    application_session_id="application-1",
+):
     context = context or {
         "printer_head_id": "virtual-head-1",
         "stock_id": "virtual-stock-1",
@@ -56,7 +62,7 @@ def _adapter(tmp_path, *, context=None):
         stock_id=context["stock_id"],
         factor_name=context["factor_name"],
         option_name=None,
-        printing_mode="droplet",
+        printing_mode=context["printing_mode"],
     )
     experiment = SimpleNamespace(
         applied_imaging_calibration_changed=SignalStub(),
@@ -88,8 +94,8 @@ def _adapter(tmp_path, *, context=None):
     failures = []
     adapter = SyntheticCalibrationApplicationAdapter(
         session_root=Path(tmp_path),
-        session_id="session-1",
-        application_session_id="application-1",
+        session_id=session_id,
+        application_session_id=application_session_id,
         seed=7,
         model=model,
         controller=controller,
@@ -231,3 +237,129 @@ def test_adapter_rejects_multi_stock_plan_before_evidence_or_injection(tmp_path)
     assert opened == []
     assert recorder.events == []
     assert not (tmp_path / "artifacts" / "synthetic-calibration").exists()
+
+
+def test_droplet_to_stream_generation_is_deterministic_and_reaches_boundary(
+    tmp_path,
+):
+    context = {
+        "printer_head_id": "virtual-head-1",
+        "stock_id": "virtual-stock-1",
+        "factor_name": "Virtual Factor",
+        "option_name": "",
+        "is_fill": False,
+        "printing_mode": "droplet",
+        "design_volume_nL": 25.0,
+    }
+    adapter, manager, _recorder, opened, failures = _adapter(
+        tmp_path,
+        context=context,
+    )
+
+    first = adapter.generate_and_present("droplet_to_stream")
+    second = adapter.generate_and_present("droplet_to_stream")
+
+    assert first["ok"] is True
+    assert second["result_fingerprint"] == first["result_fingerprint"]
+    assert opened == [first["result_fingerprint"], first["result_fingerprint"]]
+    assert failures == []
+    result = adapter.current_result
+    assert result.original_printing_mode == "droplet"
+    assert result.applied_printing_mode == "stream"
+    assert result.measured_volume_nL == 40.0
+    assert manager.candidate.requested_printing_mode == "droplet"
+    assert manager.candidate.printing_mode == "stream"
+    assert manager.candidate.summary_row["original_printing_mode"] == "droplet"
+    assert manager.candidate.summary_row["applied_printing_mode"] == "stream"
+
+
+def test_stream_generation_is_stable_across_instances_call_order_and_application_sessions(
+    tmp_path,
+):
+    transition_context = {
+        "printer_head_id": "virtual-head-1",
+        "stock_id": "virtual-stock-1",
+        "factor_name": "Virtual Factor",
+        "option_name": "",
+        "is_fill": False,
+        "printing_mode": "droplet",
+        "design_volume_nL": 25.0,
+    }
+    first, _manager, _recorder, _opened, _failures = _adapter(
+        tmp_path,
+        context=transition_context,
+        application_session_id="application-1",
+    )
+    first_transition = first.generate_and_present("droplet_to_stream")
+
+    reordered, _manager, _recorder, _opened, _failures = _adapter(
+        tmp_path,
+        context=transition_context,
+        application_session_id="application-2",
+    )
+    assert reordered.generate_and_present("nominal_droplet")["ok"] is True
+    reordered_transition = reordered.generate_and_present("droplet_to_stream")
+
+    assert reordered_transition["result_fingerprint"] == first_transition[
+        "result_fingerprint"
+    ]
+    assert reordered.current_request.canonical_bytes() == first.current_request.canonical_bytes()
+    assert reordered.current_result.canonical_bytes() == first.current_result.canonical_bytes()
+
+    stream_context = dict(transition_context)
+    stream_context.update(printing_mode="stream", design_volume_nL=40.0)
+    stream_first, _manager, _recorder, _opened, _failures = _adapter(
+        tmp_path,
+        context=stream_context,
+        application_session_id="application-1",
+    )
+    stream_reopened, _manager, _recorder, _opened, _failures = _adapter(
+        tmp_path,
+        context=stream_context,
+        application_session_id="application-2",
+    )
+    first_stream = stream_first.generate_and_present("nominal_stream")
+    reopened_stream = stream_reopened.generate_and_present("nominal_stream")
+
+    assert reopened_stream["result_fingerprint"] == first_stream["result_fingerprint"]
+    assert (
+        stream_reopened.current_result.canonical_bytes()
+        == stream_first.current_result.canonical_bytes()
+    )
+
+
+def test_nominal_stream_generation_uses_current_stream_context(tmp_path):
+    context = {
+        "printer_head_id": "virtual-head-1",
+        "stock_id": "virtual-stock-1",
+        "factor_name": "Virtual Factor",
+        "option_name": "",
+        "is_fill": False,
+        "printing_mode": "stream",
+        "design_volume_nL": 40.0,
+    }
+    adapter, manager, _recorder, _opened, _failures = _adapter(
+        tmp_path,
+        context=context,
+    )
+
+    result = adapter.generate_and_present("nominal_stream")
+
+    assert result["ok"] is True
+    assert adapter.current_result.original_printing_mode == "stream"
+    assert adapter.current_result.applied_printing_mode == "stream"
+    assert adapter.current_result.measured_volume_nL == 40.0
+    assert manager.candidate.requested_printing_mode == "stream"
+
+
+def test_application_adapter_allowlist_and_stream_context_fail_closed(tmp_path):
+    adapter, manager, recorder, opened, _failures = _adapter(tmp_path)
+
+    unsupported = adapter.generate_and_present("invalid_outlier")
+    wrong_mode = adapter.generate_and_present("nominal_stream")
+
+    assert unsupported["code"] == "unsupported_profile"
+    assert wrong_mode["code"] == "stream_mode_required"
+    assert manager.candidate is None
+    assert recorder.events == []
+    assert opened == []

@@ -24,6 +24,9 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
         show_inspector_callback=None,
         export_snapshot_callback=None,
         generate_calibration_callback=None,
+        calibration_availability_callback=None,
+        record_refuel_outcome_callback=None,
+        refuel_availability_callback=None,
     ):
         super().__init__(self.TITLE, parent)
         self.setObjectName("simulatorControlDock")
@@ -36,7 +39,11 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
         self._show_inspector_callback = show_inspector_callback
         self._export_snapshot_callback = export_snapshot_callback
         self._generate_calibration_callback = generate_calibration_callback
+        self._calibration_availability_callback = calibration_availability_callback
+        self._record_refuel_outcome_callback = record_refuel_outcome_callback
+        self._refuel_availability_callback = refuel_availability_callback
         self._calibration_pending = False
+        self._refuel_pending = False
         self._connection_pending = False
         self._state_signal_connected = False
 
@@ -114,8 +121,17 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
 
         calibration_group = QtWidgets.QGroupBox("Synthetic calibration", panel)
         calibration_layout = QtWidgets.QVBoxLayout(calibration_group)
+        self.calibration_profile_combo = QtWidgets.QComboBox(calibration_group)
+        self.calibration_profile_combo.setObjectName(
+            "syntheticCalibrationProfileCombo"
+        )
+        self.calibration_profile_combo.addItem("Nominal droplet", "nominal_droplet")
+        self.calibration_profile_combo.addItem(
+            "Droplet → stream", "droplet_to_stream"
+        )
+        self.calibration_profile_combo.addItem("Nominal stream", "nominal_stream")
         self.generate_calibration_button = QtWidgets.QPushButton(
-            "Generate / Open Synthetic Droplet Result",
+            "Generate / Open Synthetic Calibration Result",
             calibration_group,
         )
         self.generate_calibration_button.setObjectName(
@@ -133,9 +149,50 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
         self.generate_calibration_button.clicked.connect(
             self._generate_calibration
         )
+        self.calibration_profile_combo.currentIndexChanged.connect(
+            self._calibration_profile_changed
+        )
+        calibration_layout.addWidget(self.calibration_profile_combo)
         calibration_layout.addWidget(self.generate_calibration_button)
         calibration_layout.addWidget(self.calibration_status_label)
         layout.addWidget(calibration_group)
+
+        refuel_group = QtWidgets.QGroupBox(
+            "Simulated manual-refuel check — no physical evidence",
+            panel,
+        )
+        refuel_layout = QtWidgets.QVBoxLayout(refuel_group)
+        self.refuel_outcome_combo = QtWidgets.QComboBox(refuel_group)
+        self.refuel_outcome_combo.setObjectName("simulatedManualRefuelOutcomeCombo")
+        self.refuel_outcome_combo.addItem("Passed", "passed")
+        self.refuel_outcome_combo.addItem("Deferred", "deferred")
+        self.refuel_outcome_combo.addItem("Failed", "failed")
+        self.record_refuel_outcome_button = QtWidgets.QPushButton(
+            "Record Simulated Outcome",
+            refuel_group,
+        )
+        self.record_refuel_outcome_button.setObjectName(
+            "recordSimulatedManualRefuelOutcomeButton"
+        )
+        self.refuel_status_label = QtWidgets.QLabel(
+            "Apply a stream calibration and regulate both pressures first.",
+            refuel_group,
+        )
+        self.refuel_status_label.setObjectName("simulatedManualRefuelStatusLabel")
+        self.refuel_status_label.setWordWrap(True)
+        self.refuel_status_label.setTextInteractionFlags(
+            QtCore.Qt.TextSelectableByMouse
+        )
+        self.record_refuel_outcome_button.clicked.connect(
+            self._record_refuel_outcome
+        )
+        self.refuel_outcome_combo.currentIndexChanged.connect(
+            lambda _index: self._update_buttons(bool(self._machine.state.connected))
+        )
+        refuel_layout.addWidget(self.refuel_outcome_combo)
+        refuel_layout.addWidget(self.record_refuel_outcome_button)
+        refuel_layout.addWidget(self.refuel_status_label)
+        layout.addWidget(refuel_group)
         layout.addStretch(1)
 
         self.setWidget(panel)
@@ -184,7 +241,9 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
         self.calibration_status_label.setText(generating_message)
         self._update_buttons(bool(self._machine.state.connected))
         try:
-            result = self._generate_calibration_callback()
+            result = self._generate_calibration_callback(
+                str(self.calibration_profile_combo.currentData() or "")
+            )
         except Exception as exc:
             result = {"ok": False, "message": f"Generation failed: {exc}"}
         finally:
@@ -200,9 +259,51 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
                 )
         self._update_buttons(bool(self._machine.state.connected))
 
+    @QtCore.Slot()
+    def _calibration_profile_changed(self):
+        if callable(self._calibration_availability_callback):
+            profile_id = str(self.calibration_profile_combo.currentData() or "")
+            result = self._calibration_availability_callback(profile_id)
+            if isinstance(result, dict):
+                self.calibration_status_label.setText(
+                    str(result.get("message") or "Calibration readiness unavailable.")
+                )
+        self._update_buttons(bool(self._machine.state.connected))
+
+    @QtCore.Slot()
+    def _record_refuel_outcome(self):
+        if not callable(self._record_refuel_outcome_callback):
+            return
+        self._refuel_pending = True
+        recording_message = "Recording explicit simulated outcome..."
+        self.refuel_status_label.setText(recording_message)
+        self._update_buttons(bool(self._machine.state.connected))
+        try:
+            result = self._record_refuel_outcome_callback(
+                str(self.refuel_outcome_combo.currentData() or "")
+            )
+        except Exception as exc:
+            result = {"ok": False, "message": f"Recording failed: {exc}"}
+        finally:
+            self._refuel_pending = False
+        if self.refuel_status_label.text() == recording_message:
+            if isinstance(result, dict):
+                self.refuel_status_label.setText(
+                    str(result.get("message") or "Manual-refuel request completed.")
+                )
+            else:
+                self.refuel_status_label.setText(
+                    "Manual-refuel request completed."
+                )
+        self._update_buttons(bool(self._machine.state.connected))
+
     @QtCore.Slot(str)
     def set_calibration_status(self, status: str):
         self.calibration_status_label.setText(str(status))
+
+    @QtCore.Slot(str)
+    def set_refuel_status(self, status: str):
+        self.refuel_status_label.setText(str(status))
 
     @QtCore.Slot(object)
     def _update_state(self, state):
@@ -239,10 +340,33 @@ class SimulatorControlDock(QtWidgets.QDockWidget):
     def _update_buttons(self, connected: bool):
         self.connect_button.setEnabled(not connected and not self._connection_pending)
         self.disconnect_button.setEnabled(connected)
+        calibration_ready = True
+        if callable(self._calibration_availability_callback):
+            try:
+                calibration_ready = bool(
+                    self._calibration_availability_callback(
+                        str(self.calibration_profile_combo.currentData() or "")
+                    ).get("ok")
+                )
+            except Exception:
+                calibration_ready = False
         self.generate_calibration_button.setEnabled(
             connected
             and not self._calibration_pending
+            and calibration_ready
             and callable(self._generate_calibration_callback)
+        )
+        refuel_ready = True
+        if callable(self._refuel_availability_callback):
+            try:
+                refuel_ready = bool(self._refuel_availability_callback().get("ok"))
+            except Exception:
+                refuel_ready = False
+        self.record_refuel_outcome_button.setEnabled(
+            connected
+            and not self._refuel_pending
+            and refuel_ready
+            and callable(self._record_refuel_outcome_callback)
         )
 
     def dispose(self):

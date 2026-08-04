@@ -75,6 +75,37 @@ def test_simulator_control_is_persistent_and_uses_only_session_callbacks(
         assert "SIMULATED" in control.connection_label.text()
         assert not control.connect_button.isEnabled()
         assert control.disconnect_button.isEnabled()
+        assert [
+            control.calibration_profile_combo.itemData(index)
+            for index in range(control.calibration_profile_combo.count())
+        ] == ["nominal_droplet", "droplet_to_stream", "nominal_stream"]
+        assert [
+            control.refuel_outcome_combo.itemData(index)
+            for index in range(control.refuel_outcome_combo.count())
+        ] == ["passed", "deferred", "failed"]
+        assert control.refuel_outcome_combo.findData("bypassed") == -1
+
+        calibration_calls = []
+        refuel_calls = []
+        control._calibration_availability_callback = lambda _profile: {"ok": True}
+        control._refuel_availability_callback = lambda: {"ok": True}
+        control._generate_calibration_callback = (
+            lambda profile: calibration_calls.append(profile) or {"ok": True}
+        )
+        control._record_refuel_outcome_callback = (
+            lambda outcome: refuel_calls.append(outcome) or {"ok": True}
+        )
+        control.calibration_profile_combo.setCurrentIndex(
+            control.calibration_profile_combo.findData("droplet_to_stream")
+        )
+        control.refuel_outcome_combo.setCurrentIndex(
+            control.refuel_outcome_combo.findData("failed")
+        )
+        control._update_buttons(True)
+        control.generate_calibration_button.click()
+        control.record_refuel_outcome_button.click()
+        assert calibration_calls == ["droplet_to_stream"]
+        assert refuel_calls == ["failed"]
 
         session.components.controller.toggle_motors()
         session.components.controller.home_machine()

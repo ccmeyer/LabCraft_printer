@@ -2066,6 +2066,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         info_panel_v.setContentsMargins(6, 6, 6, 6)
         info_panel_v.setSpacing(8)
         self.synthetic_calibration_banner = None
+        self.synthetic_calibration_mode_label = None
         if self.result_presentation_only:
             self.synthetic_calibration_banner = QtWidgets.QLabel(
                 "SYNTHETIC CALIBRATION — NO CAMERA OR PHYSICAL EVIDENCE"
@@ -2076,6 +2077,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "font-weight: bold; color: #1f2937; background: #f59e0b; padding: 8px;"
             )
             info_panel_v.addWidget(self.synthetic_calibration_banner)
+            self.synthetic_calibration_mode_label = QtWidgets.QLabel()
+            self.synthetic_calibration_mode_label.setObjectName(
+                "syntheticCalibrationModeLabel"
+            )
+            self.synthetic_calibration_mode_label.setWordWrap(True)
+            self.synthetic_calibration_mode_label.setStyleSheet(
+                "font-weight: bold; color: #f59e0b; padding: 2px;"
+            )
+            info_panel_v.addWidget(self.synthetic_calibration_mode_label)
         self.info_panel_scroll = QtWidgets.QScrollArea()
         self.info_panel_scroll.setWidgetResizable(True)
         self.info_panel_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -3214,7 +3224,30 @@ class DropletImagingDialog(QtWidgets.QDialog):
             QTimer.singleShot(0, self._ensure_droplet_calibration_sequence_followup_state)
 
     def _apply_result_presentation_only_ui(self):
-        self.setWindowTitle("Synthetic Droplet Calibration Result — No Hardware")
+        manager = getattr(self.model, "calibration_manager", None)
+        stored = getattr(manager, "_transient_characterization_candidate", None)
+        candidate = stored.get("candidate") if isinstance(stored, dict) else None
+        requested_mode = str(
+            getattr(candidate, "requested_printing_mode", None)
+            or getattr(candidate, "printing_mode", "droplet")
+        ).strip().lower()
+        applied_mode = str(
+            getattr(candidate, "printing_mode", requested_mode)
+        ).strip().lower()
+        requested_label = self._printing_mode_label(requested_mode)
+        applied_label = self._printing_mode_label(applied_mode)
+        mode_text = (
+            f"{requested_label} → {applied_label}"
+            if requested_mode != applied_mode
+            else applied_label
+        )
+        self.setWindowTitle(
+            f"Synthetic {applied_label} Calibration Result — No Hardware"
+        )
+        if self.synthetic_calibration_mode_label is not None:
+            self.synthetic_calibration_mode_label.setText(
+                f"Synthetic mode: {mode_text}. No physical stream or droplet evidence was captured."
+            )
         self.resize(760, 900)
         self.control_panel_scroll.hide()
         self.analysis_panel.hide()
@@ -10935,6 +10968,28 @@ class DropletImagingDialog(QtWidgets.QDialog):
             status_lines.append(f"Invalid: {reason}")
         else:
             status_lines.append("Valid result")
+
+        if raw.get("synthetic") is True:
+            original_mode = self._normalize_printing_mode_value(
+                raw.get("original_printing_mode"),
+                fallback=self._summary_row_printing_mode(raw),
+            )
+            applied_mode = self._normalize_printing_mode_value(
+                raw.get("applied_printing_mode"),
+                fallback=self._summary_row_printing_mode(raw),
+            )
+            mode_text = self._bridge_mode_switch_text(original_mode, applied_mode)
+            if not mode_text:
+                mode_text = f"Mode: {self._printing_mode_label(applied_mode)}"
+            status_lines.append(mode_text)
+            fingerprint = str(raw.get("synthetic_result_fingerprint") or "")
+            if fingerprint:
+                status_lines.append(f"Synthetic result fingerprint: {fingerprint}")
+            limitations = [
+                str(item) for item in raw.get("synthetic_limitations") or []
+            ]
+            if limitations:
+                status_lines.append(f"Limitations: {', '.join(limitations)}")
 
         if str(raw.get("phase") or "").strip().lower() == "stream":
             stream_parts = []

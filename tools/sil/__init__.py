@@ -1,6 +1,12 @@
 """Interactive software-in-the-loop session support."""
 
 from .calibration_application import SyntheticCalibrationApplicationAdapter
+from .manual_refuel import (
+    SIMULATED_MANUAL_REFUEL_OUTCOMES,
+    SIMULATED_MANUAL_REFUEL_PROVIDER_VERSION,
+    SIMULATED_MANUAL_REFUEL_SOURCE,
+    SimulatedManualRefuelOutcomeAdapter,
+)
 
 from .state_recorder import (
     EVENT_SCHEMA_ID,
@@ -25,6 +31,10 @@ from .synthetic_calibration import (
 
 __all__ = [
     "SyntheticCalibrationApplicationAdapter",
+    "SIMULATED_MANUAL_REFUEL_OUTCOMES",
+    "SIMULATED_MANUAL_REFUEL_PROVIDER_VERSION",
+    "SIMULATED_MANUAL_REFUEL_SOURCE",
+    "SimulatedManualRefuelOutcomeAdapter",
     "EVENT_SCHEMA_ID",
     "SNAPSHOT_SCHEMA_ID",
     "STATE_SCHEMA_VERSION",

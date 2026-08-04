@@ -783,7 +783,7 @@ Rollback:
 
 ### Milestone 4B: Stream mode and manual-refuel workflow
 
-Status: `planned`
+Status: `complete`
 
 Goal:
 
@@ -1388,11 +1388,7 @@ This effort is complete when:
 
 ## Current Next Action
 
-Create and review the concrete Milestone 4B plan for stream-mode presentation,
-mode-switch application, and the existing manual-refuel lifecycle. Do not edit
-those surfaces until that plan is reviewed.
-
-Keep manual-refuel simulation, workflow migration, failure injection,
-performance remediation, firmware, protocol, Pi operations, and hardware
-changes outside Milestone 4A unless a later reviewed plan explicitly brings
-them into scope.
+Create and review the concrete Milestone 5 implementation plan for manual
+full-lifecycle characterization. Do not begin Milestone 5 implementation,
+workflow migration, failure injection, performance remediation, firmware,
+protocol, Pi operations, or hardware changes until that plan is reviewed.

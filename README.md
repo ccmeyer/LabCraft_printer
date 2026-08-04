@@ -260,8 +260,9 @@ documented in `docs/sil_calibration_schema_v1.md`.
 Milestone 4A is complete. It connects the valid `nominal_droplet` profile to the interactive
 simulator without enabling the production camera/calibration launcher. After
 connecting, homing, regulating print pressure, finalizing an experiment, and
-loading its exact virtual droplet head, use **Generate / Open Synthetic
-Droplet Result** in `SIMULATOR CONTROL`. A camera-free presentation of the real
+loading its exact virtual droplet head, select **Nominal droplet** and use
+**Generate / Open Synthetic Calibration Result** in `SIMULATOR CONTROL`. A
+camera-free presentation of the real
 calibration dialog shows an amber **Synthetic** row and an explicit no-physical-
 evidence banner. Select the row, inspect the normal design-impact preview, and
 use the existing Apply control.
@@ -281,7 +282,34 @@ The presentation mode never starts a camera/read stream, runs a physical
 calibration process, enables a print profile, or writes a synthetic run into
 `calibration.json`. It does not validate camera processing, physical ejection,
 volume accuracy, pressure response, collision safety, firmware, or protocol
-behavior. Stream calibration and manual refuel remain Milestone 4B.
+behavior.
+
+Milestone 4B is complete. The same simulation-only surface now allows
+**Droplet → stream** and
+**Nominal stream** results. Droplet-to-stream generation requires a finalized
+single-stock droplet context above 20 nL and below 40 nL; the standard visible
+exercise uses 25 nL and deterministically reaches the 40 nL stream boundary.
+The presentation shows the requested/applied mode pair and stream evidence
+warning, while Apply continues through the real mode-switch confirmation,
+execution-plan revision, printer-head mode, and Controller settings paths.
+
+Applying stream calibration leaves the existing manual-refuel preflight in a
+required state. After regulating both print and refuel pressure, use the
+clearly labeled **Simulated manual-refuel check — no physical evidence** group
+to record Passed, Deferred, or Failed. These controls call the existing
+Controller/Model recording API with source
+`sil_simulated_manual_refuel_check`, a virtual five-droplet trial, and canonical
+seed/provider provenance in the existing notes field. Bypass is intentionally
+not exposed. Required, deferred, failed, stale, or settings-mismatched evidence
+continues to block stream printing; only a matching pass clears that preflight.
+The operator manual-refuel dialog is unchanged, and no physical refuel evidence
+is claimed.
+
+The visible Windows fresh/reload gate completed on 2026-08-03. It applied a
+25 nL droplet-to-stream result, exercised deferred/failed/passed refuel states,
+applied a second nominal-stream result that invalidated the prior pass, recorded
+a new matching pass, and reloaded the retained authoritative revision through
+Experiment Editor without printing.
 
 Retain and reopen the session to inspect the authoritative result:
 
@@ -309,6 +337,18 @@ Run the Milestone 4A focused tests with:
   tests\test_sil_calibration_ui.py `
   tests\test_sil_calibration_dialog_driver.py `
   tests\system\test_sil_synthetic_calibration_lifecycle.py
+```
+
+Run the Milestone 4B focused tests with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_sil_calibration_application.py `
+  tests\test_sil_manual_refuel.py `
+  tests\test_sil_calibration_ui.py `
+  tests\test_sil_calibration_dialog_driver.py `
+  tests\test_simulator_control.py `
+  tests\system\test_sil_stream_calibration_lifecycle.py
 ```
 
 Troubleshooting:

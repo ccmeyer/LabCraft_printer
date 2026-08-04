@@ -156,6 +156,44 @@ def test_printer_head_binding_revision_changes_only_one_unbound_stock():
         )
 
 
+def test_calibration_revision_may_retain_identical_target_counts(tmp_path):
+    prepared = _prepared_plan()
+    active = build_locked_revision(
+        prepared,
+        reason="calibration_started",
+        timestamp_utc="2026-07-17T12:01:00Z",
+    )
+    stock = next(item for item in active.stocks if item.stock_id == "PURE MM_1.00_x")
+    targets = {
+        well.well_id: {
+            dispense.stock_id: dispense.target_dispenses
+            for dispense in well.dispenses
+        }
+        for well in active.wells
+    }
+    record_id = "d99ef420-efdc-5c07-a30f-3af3330e610d"
+    calibrated = build_calibrated_revision(
+        active,
+        stock_id=stock.stock_id,
+        effective_volume_nL=stock.effective_volume_nL,
+        printing_mode=stock.printing_mode,
+        printer_head_id="head-1",
+        calibration_record_key=record_id,
+        target_counts_by_well=targets,
+        timestamp_utc="2026-07-17T12:02:00Z",
+    )
+
+    assert calibrated.wells == active.wells
+    persist_immutable_revision(tmp_path, prepared)
+    persist_immutable_revision(tmp_path, active)
+    persist_immutable_revision(tmp_path, calibrated)
+    assert validate_revision_history(
+        tmp_path,
+        latest_plan=calibrated,
+        calibration_record_ids={record_id},
+    ) == (prepared, active, calibrated)
+
+
 def test_revision_history_is_immutable_contiguous_and_latest_mirrored(tmp_path):
     prepared = _prepared_plan()
     active = build_locked_revision(

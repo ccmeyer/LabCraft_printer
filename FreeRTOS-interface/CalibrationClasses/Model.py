@@ -86,6 +86,7 @@ class TransientCharacterizationCandidate:
     option_name: str | None
     is_fill: bool
     printing_mode: str
+    requested_printing_mode: str | None = None
 
     def __post_init__(self):
         object.__setattr__(
@@ -7737,8 +7738,14 @@ class CalibrationManager(QObject):
             )
         if candidate.candidate_id != candidate.result_fingerprint:
             raise ValueError("transient candidate ID must equal its result fingerprint")
-        if str(candidate.printing_mode).strip().lower() != "droplet":
-            raise ValueError("Milestone 4A accepts droplet candidates only")
+        applied_mode = str(candidate.printing_mode or "").strip().lower()
+        requested_mode = str(
+            candidate.requested_printing_mode or applied_mode
+        ).strip().lower()
+        if applied_mode not in {"droplet", "stream"}:
+            raise ValueError("transient candidate applied mode is invalid")
+        if requested_mode not in {"droplet", "stream"}:
+            raise ValueError("transient candidate requested mode is invalid")
 
         row = _thaw_candidate_value(candidate.summary_row)
         if row.get("synthetic") is not True:
@@ -7752,23 +7759,45 @@ class CalibrationManager(QObject):
             raise ValueError("transient candidate source-row fingerprint is invalid")
         if tuple(source_fingerprint) != self._candidate_row_fingerprint(row):
             raise ValueError("transient candidate source-row fingerprint does not match")
+        row_mode = str(row.get("printing_mode") or "").strip().lower()
+        row_requested_mode = str(
+            row.get("original_printing_mode") or requested_mode
+        ).strip().lower()
+        row_applied_mode = str(
+            row.get("applied_printing_mode") or row_mode
+        ).strip().lower()
+        if (
+            row_mode != applied_mode
+            or row_requested_mode != requested_mode
+            or row_applied_mode != applied_mode
+        ):
+            raise ValueError("transient candidate mode identity does not match")
         try:
             mean_nl = float(row.get("mean_nL"))
             pressure = float(row.get("pressure_psi"))
             pulse_width = int(round(float(row.get("pw_us"))))
         except (TypeError, ValueError) as exc:
             raise ValueError("transient candidate contains unusable values") from exc
+        volume_valid = (
+            1.0 <= mean_nl < 40.0
+            if applied_mode == "droplet"
+            else 40.0 <= mean_nl <= 250.0
+        )
         if not (
             math.isfinite(mean_nl)
             and math.isfinite(pressure)
-            and 1.0 <= mean_nl < 40.0
+            and volume_valid
             and pulse_width > 0
         ):
-            raise ValueError("transient candidate values are outside droplet bounds")
+            raise ValueError(
+                f"transient candidate values are outside {applied_mode} bounds"
+            )
 
         row.update(
             {
                 "_transient_candidate_id": candidate.candidate_id,
+                "original_printing_mode": requested_mode,
+                "applied_printing_mode": applied_mode,
                 "source_filter_key": "synthetic",
                 "phase_label": "Synthetic",
             }
@@ -7810,6 +7839,12 @@ class CalibrationManager(QObject):
             or row.get("synthetic_result_fingerprint") != candidate.result_fingerprint
             or self._candidate_row_fingerprint(row)
             != self._candidate_row_fingerprint(expected_row)
+            or str(row.get("printing_mode") or "").strip().lower()
+            != str(expected_row.get("printing_mode") or "").strip().lower()
+            or str(row.get("original_printing_mode") or "").strip().lower()
+            != str(expected_row.get("original_printing_mode") or "").strip().lower()
+            or str(row.get("applied_printing_mode") or "").strip().lower()
+            != str(expected_row.get("applied_printing_mode") or "").strip().lower()
         ):
             return {
                 "ok": False,
@@ -7817,7 +7852,11 @@ class CalibrationManager(QObject):
                 "message": "The transient calibration candidate changed after registration.",
             }
         current = self.get_characterization_application_context()
-        expected = self._normalized_candidate_identity(candidate.__dict__)
+        expected_payload = dict(candidate.__dict__)
+        expected_payload["printing_mode"] = (
+            candidate.requested_printing_mode or candidate.printing_mode
+        )
+        expected = self._normalized_candidate_identity(expected_payload)
         if current is None:
             return {
                 "ok": False,

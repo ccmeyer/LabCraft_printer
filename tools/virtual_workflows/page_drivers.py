@@ -27,13 +27,18 @@ class CalibrationDialogDriver:
 
     def inspect_presentation(self) -> dict[str, Any]:
         banner = self.dialog.findChild(QtWidgets.QLabel, "syntheticCalibrationBanner")
+        mode_label = self.dialog.findChild(
+            QtWidgets.QLabel, "syntheticCalibrationModeLabel"
+        )
         table = self.dialog.findChild(QtWidgets.QTableView, "characterizationSummaryTable")
-        if banner is None or table is None:
+        if banner is None or mode_label is None or table is None:
             raise RuntimeError("synthetic calibration presentation controls are missing")
         return {
             "window_title": self.dialog.windowTitle(),
             "banner_text": banner.text(),
             "banner_visible": banner.isVisible(),
+            "mode_text": mode_label.text(),
+            "mode_visible": mode_label.isVisible(),
             "row_count": table.model().rowCount(),
             "source_filter": self.dialog.summary_source_combo.currentData(),
         }
@@ -75,10 +80,46 @@ class CalibrationDialogDriver:
             "preview_rows": self.dialog.bridge_table.rowCount(),
         }
 
-    def apply_selected(self, *, expected_title: str = "Applied") -> None:
-        state: dict[str, Any] = {"handled": False, "error": None}
+    def apply_selected(
+        self,
+        *,
+        expected_title: str | None = "Applied",
+        mode_switch_choice: str | None = None,
+        manual_refuel_choice: str | None = None,
+    ) -> list[str]:
+        steps: list[tuple[str, Any]] = []
+        if mode_switch_choice is not None:
+            choice = str(mode_switch_choice).strip().lower()
+            if choice not in {"yes", "no"}:
+                raise ValueError("mode_switch_choice must be yes, no, or None")
+            steps.append(
+                (
+                    "Apply calibration as mode switch?",
+                    QtWidgets.QMessageBox.Yes
+                    if choice == "yes"
+                    else QtWidgets.QMessageBox.No,
+                )
+            )
+        if manual_refuel_choice is not None:
+            choice = str(manual_refuel_choice).strip().lower()
+            if choice not in {"yes", "no"}:
+                raise ValueError("manual_refuel_choice must be yes, no, or None")
+            steps.append(
+                (
+                    "Manual Refuel Check Required",
+                    QtWidgets.QMessageBox.Yes
+                    if choice == "yes"
+                    else QtWidgets.QMessageBox.No,
+                )
+            )
+        elif expected_title is not None:
+            steps.append((str(expected_title), None))
+
+        state: dict[str, Any] = {"handled": [], "error": None}
 
         def handle_modal():
+            if not steps:
+                return
             active = self.app.activeModalWidget()
             if not isinstance(active, QtWidgets.QMessageBox):
                 state["error"] = RuntimeError(
@@ -87,14 +128,30 @@ class CalibrationDialogDriver:
                 if isinstance(active, QtWidgets.QDialog):
                     active.reject()
                 return
-            if active.windowTitle() != expected_title:
+            expected_step_title, standard_button = steps.pop(0)
+            if active.windowTitle() != expected_step_title:
                 state["error"] = RuntimeError(
                     f"unexpected Apply dialog title: {active.windowTitle()!r}"
                 )
                 active.reject()
                 return
-            state["handled"] = True
-            active.accept()
+            state["handled"].append(active.windowTitle())
+            if standard_button is None:
+                active.accept()
+            else:
+                button = active.button(standard_button)
+                if button is None:
+                    state["error"] = RuntimeError(
+                        f"expected button is missing from {active.windowTitle()!r}"
+                    )
+                    active.reject()
+                    return
+                QtTest.QTest.mouseClick(
+                    button,
+                    QtCore.Qt.MouseButton.LeftButton,
+                )
+            if steps:
+                QtCore.QTimer.singleShot(0, handle_modal)
 
         QtCore.QTimer.singleShot(0, handle_modal)
         QtTest.QTest.mouseClick(
@@ -103,8 +160,9 @@ class CalibrationDialogDriver:
         )
         if state["error"] is not None:
             raise state["error"]
-        if not state["handled"]:
-            raise RuntimeError("expected calibration Apply completion dialog did not open")
+        if steps:
+            raise RuntimeError("expected calibration Apply dialog sequence did not complete")
+        return list(state["handled"])
 
     def close(self) -> None:
         self.dialog.close()

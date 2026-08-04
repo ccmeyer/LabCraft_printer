@@ -3676,6 +3676,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 self.main_window,
                 self.model,
                 self.controller,
+                post_apply_manual_refuel_check_callback=(
+                    self.request_manual_refuel_check_after_imager_close
+                ),
                 result_presentation_only=True,
                 transient_candidate_id=str(candidate_id),
             )

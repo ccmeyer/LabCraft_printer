@@ -30,6 +30,9 @@ class _Dialog(QtWidgets.QDialog):
         )
         banner.setObjectName("syntheticCalibrationBanner")
         layout.addWidget(banner)
+        mode_label = QtWidgets.QLabel("Synthetic mode: Droplet")
+        mode_label.setObjectName("syntheticCalibrationModeLabel")
+        layout.addWidget(mode_label)
         self.summary_source_combo = QtWidgets.QComboBox()
         self.summary_source_combo.addItem("Synthetic", "synthetic")
         layout.addWidget(self.summary_source_combo)
@@ -98,7 +101,50 @@ def test_calibration_dialog_driver_uses_visible_qt_controls(qapp):
     driver.close()
 
     assert presentation["banner_visible"] is True
+    assert presentation["mode_visible"] is True
     assert presentation["row_count"] == 1
     assert selected["synthetic"] is True
     assert preview["apply_enabled"] is True
     assert preview["payload"]["new_droplet_nL"] == row["mean_nL"]
+
+
+def test_calibration_dialog_driver_handles_mode_switch_and_refuel_prompt(qapp):
+    row = _row()
+    dialog = _Dialog(row)
+    dialog.bridge_apply_btn.clicked.disconnect()
+    choices = []
+
+    def apply_stream():
+        mode = QtWidgets.QMessageBox.question(
+            dialog,
+            "Apply calibration as mode switch?",
+            "Switch mode?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        )
+        choices.append(mode)
+        if mode == QtWidgets.QMessageBox.Yes:
+            refuel = QtWidgets.QMessageBox.question(
+                dialog,
+                "Manual Refuel Check Required",
+                "Run now?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            )
+            choices.append(refuel)
+
+    dialog.bridge_apply_btn.clicked.connect(apply_stream)
+    dialog.show()
+    qapp.processEvents()
+    driver = CalibrationDialogDriver(qapp, dialog)
+
+    handled = driver.apply_selected(
+        expected_title=None,
+        mode_switch_choice="yes",
+        manual_refuel_choice="no",
+    )
+    driver.close()
+
+    assert handled == [
+        "Apply calibration as mode switch?",
+        "Manual Refuel Check Required",
+    ]
+    assert choices == [QtWidgets.QMessageBox.Yes, QtWidgets.QMessageBox.No]

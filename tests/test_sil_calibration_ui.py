@@ -58,7 +58,27 @@ def _candidate(result=None):
         option_name=result.option_name,
         is_fill=result.is_fill,
         printing_mode=result.applied_printing_mode,
+        requested_printing_mode=result.original_printing_mode,
     )
+
+
+def _stream_result():
+    request = CalibrationGenerationRequestV1(
+        seed=4,
+        profile_id="droplet_to_stream",
+        virtual_run_id="ui-stream-run",
+        printer_head_id="head-1",
+        stock_id="stock-1",
+        factor_name="Factor A",
+        option_name=None,
+        is_fill=False,
+        requested_mode="droplet",
+        nominal_volume_nL=25.0,
+        volume_variation_fraction=0.6,
+        pressure_bounds_psi=(1.2, 1.2),
+        pulse_width_bounds_us=(1400, 1400),
+    )
+    return SyntheticCalibrationProvider().generate(request)
 
 
 def _manager():
@@ -134,6 +154,24 @@ def test_transient_surface_rejects_altered_fingerprints():
         raise AssertionError("altered transient fingerprint was accepted")
 
 
+def test_transient_surface_accepts_mode_switch_against_requested_context():
+    manager, context = _manager()
+    result = _stream_result()
+    candidate = _candidate(result)
+
+    manager.set_transient_characterization_candidate(candidate)
+    row = manager.get_characterization_summary_rows()[0]
+
+    assert row["printing_mode"] == "stream"
+    assert row["original_printing_mode"] == "droplet"
+    assert row["applied_printing_mode"] == "stream"
+    assert manager.validate_characterization_candidate_for_application(row)["ok"]
+
+    context["printing_mode"] = "stream"
+    validation = manager.validate_characterization_candidate_for_application(row)
+    assert validation["code"] == "identity_mismatch"
+
+
 def test_summary_model_visibly_marks_and_filters_synthetic_rows(qapp):
     row = _result().to_application_summary_row()
     row.update({"phase_label": "Synthetic", "source_filter_key": "synthetic"})
@@ -179,7 +217,8 @@ def test_presentation_mode_opens_and_closes_without_camera_lifecycle(
     manager, context = _manager()
     model = manager.model
     manager._emit_readiness = lambda: None
-    manager.set_transient_characterization_candidate(_candidate())
+    stream_candidate = _candidate(_stream_result())
+    manager.set_transient_characterization_candidate(stream_candidate)
     model.droplet_camera_model = SimpleNamespace(
         flash_duration=1000,
         flash_delay=2000,
@@ -229,12 +268,15 @@ def test_presentation_mode_opens_and_closes_without_camera_lifecycle(
         model,
         controller,
         result_presentation_only=True,
-        transient_candidate_id=_candidate().candidate_id,
+        transient_candidate_id=stream_candidate.candidate_id,
     )
     dialog.show()
     qapp.processEvents()
 
     assert dialog.synthetic_calibration_banner.isVisible()
+    assert dialog.synthetic_calibration_mode_label.isVisible()
+    assert "Droplet → Stream" in dialog.synthetic_calibration_mode_label.text()
+    assert "Stream" in dialog.windowTitle()
     assert dialog.summary_table_proxy_model.rowCount() == 1
     assert dialog.control_panel_scroll.isHidden()
     assert dialog.analysis_panel.isHidden()

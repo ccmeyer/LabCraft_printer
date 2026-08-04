@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import os
+import math
 from pathlib import Path
 import tempfile
 from typing import Any, Callable
 
 from .synthetic_calibration import (
     EJECTION_VOLUME_MIN_NL,
+    EJECTION_VOLUME_MAX_NL,
     MODE_BOUNDARY_NL,
     PRINT_PRESSURE_MAX_PSI,
     PRINT_PRESSURE_MIN_PSI,
     CalibrationGenerationRequestV1,
     SyntheticCalibrationProvider,
+)
+
+
+APPLICATION_PROFILE_IDS = frozenset(
+    {"nominal_droplet", "droplet_to_stream", "nominal_stream"}
 )
 
 
@@ -45,7 +52,7 @@ def _write_canonical_once(destination: Path, payload: bytes) -> None:
 
 
 class SyntheticCalibrationApplicationAdapter:
-    """Generate, retain, present, and correlate one droplet candidate."""
+    """Generate, retain, present, and correlate one synthetic candidate."""
 
     def __init__(
         self,
@@ -101,7 +108,12 @@ class SyntheticCalibrationApplicationAdapter:
         self._notify_status()
 
     def status_text(self) -> str:
-        readiness = self.availability()
+        profile_id = (
+            self.current_result.profile_id
+            if self.current_result is not None
+            else "nominal_droplet"
+        )
+        readiness = self.availability(profile_id)
         readiness_label = "Ready" if readiness.get("ok") else "Not ready"
         fingerprint = (
             self.current_result.result_fingerprint
@@ -122,7 +134,14 @@ class SyntheticCalibrationApplicationAdapter:
     def manager(self):
         return self.model.calibration_manager
 
-    def availability(self) -> dict[str, Any]:
+    def availability(self, profile_id: str = "nominal_droplet") -> dict[str, Any]:
+        profile_id = str(profile_id or "").strip()
+        if profile_id not in APPLICATION_PROFILE_IDS:
+            return {
+                "ok": False,
+                "code": "unsupported_profile",
+                "message": "That synthetic calibration profile is not available in the application UI.",
+            }
         if self._evidence_persistence_failed:
             return {
                 "ok": False,
@@ -179,11 +198,16 @@ class SyntheticCalibrationApplicationAdapter:
                 "code": "context_unavailable",
                 "message": "Load the exact virtual printer head for one experiment stock.",
             }
-        if context["printing_mode"] != "droplet":
+        requested_mode = (
+            "stream" if profile_id == "nominal_stream" else "droplet"
+        )
+        if context["printing_mode"] != requested_mode:
             return {
                 "ok": False,
-                "code": "droplet_mode_required",
-                "message": "Milestone 4A accepts droplet-mode stocks only.",
+                "code": f"{requested_mode}_mode_required",
+                "message": (
+                    f"Profile {profile_id} requires a {requested_mode}-mode stock."
+                ),
             }
         matching = [stock for stock in plan.stocks if stock.stock_id == context["stock_id"]]
         if len(matching) != 1:
@@ -214,11 +238,23 @@ class SyntheticCalibrationApplicationAdapter:
                 "code": "settings_unavailable",
                 "message": f"Current calibration settings are unavailable: {exc}",
             }
-        if not (EJECTION_VOLUME_MIN_NL <= nominal < MODE_BOUNDARY_NL):
+        if profile_id == "nominal_droplet":
+            volume_valid = EJECTION_VOLUME_MIN_NL <= nominal < MODE_BOUNDARY_NL
+            volume_message = "The current design volume is outside droplet-mode bounds."
+        elif profile_id == "droplet_to_stream":
+            volume_valid = 20.0 < nominal < MODE_BOUNDARY_NL
+            volume_message = (
+                "Droplet-to-stream generation requires a droplet design volume "
+                "strictly above 20 nL and below 40 nL."
+            )
+        else:
+            volume_valid = MODE_BOUNDARY_NL <= nominal <= EJECTION_VOLUME_MAX_NL
+            volume_message = "The current design volume is outside stream-mode bounds."
+        if not volume_valid:
             return {
                 "ok": False,
                 "code": "volume_out_of_range",
-                "message": "The current design volume is outside droplet-mode bounds.",
+                "message": volume_message,
             }
         if not (PRINT_PRESSURE_MIN_PSI <= pressure <= PRINT_PRESSURE_MAX_PSI):
             return {
@@ -232,25 +268,65 @@ class SyntheticCalibrationApplicationAdapter:
                 "code": "pulse_width_out_of_range",
                 "message": "The print pulse width must be positive.",
             }
+        try:
+            variation = self._variation_fraction(profile_id, nominal)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "code": "volume_interval_unavailable",
+                "message": str(exc),
+            }
+        applied_mode = "stream" if profile_id in {
+            "droplet_to_stream",
+            "nominal_stream",
+        } else "droplet"
         return {
             "ok": True,
             "code": "ready",
-            "message": "Ready to generate a synthetic droplet result.",
+            "message": (
+                f"Ready to generate {profile_id.replace('_', ' ')}."
+            ),
             "context": context,
             "stock": stock,
+            "profile_id": profile_id,
+            "requested_mode": requested_mode,
+            "applied_mode": applied_mode,
             "nominal_volume_nL": nominal,
+            "variation_fraction": variation,
             "pressure_psi": pressure,
             "pulse_width_us": pulse_width,
         }
 
     @staticmethod
-    def _variation_fraction(nominal_volume_nl: float) -> float:
-        low_room = max(0.0, (float(nominal_volume_nl) - EJECTION_VOLUME_MIN_NL) / float(nominal_volume_nl))
-        high_room = max(
-            0.0,
-            ((MODE_BOUNDARY_NL - 1e-6) - float(nominal_volume_nl))
-            / float(nominal_volume_nl),
+    def _variation_fraction(profile_id: str, nominal_volume_nl: float) -> float:
+        nominal = float(nominal_volume_nl)
+        if profile_id == "droplet_to_stream":
+            variation = max(0.05, (MODE_BOUNDARY_NL / nominal) - 1.0)
+            if nominal * (1.0 + variation) < MODE_BOUNDARY_NL:
+                variation = math.nextafter(variation, 1.0)
+            if (
+                variation >= 1.0
+                or nominal * (1.0 - variation) < EJECTION_VOLUME_MIN_NL
+                or nominal * (1.0 + variation) > EJECTION_VOLUME_MAX_NL
+            ):
+                raise ValueError(
+                    "The current droplet volume cannot form a valid symmetric "
+                    "request interval that reaches 40 nL."
+                )
+            return variation
+
+        low_boundary = (
+            MODE_BOUNDARY_NL
+            if profile_id == "nominal_stream"
+            else EJECTION_VOLUME_MIN_NL
         )
+        high_boundary = (
+            EJECTION_VOLUME_MAX_NL
+            if profile_id == "nominal_stream"
+            else MODE_BOUNDARY_NL - 1e-6
+        )
+        low_room = max(0.0, (nominal - low_boundary) / nominal)
+        high_room = max(0.0, (high_boundary - nominal) / nominal)
         return max(0.0, min(0.05, low_room, high_room))
 
     def _record_event(self, event_kind: str, payload: dict[str, Any]) -> None:
@@ -263,8 +339,9 @@ class SyntheticCalibrationApplicationAdapter:
             simulated_elapsed_ms=getattr(self.machine.state, "simulated_elapsed_ms", None),
         )
 
-    def generate_and_present_nominal_droplet(self) -> dict[str, Any]:
-        readiness = self.availability()
+    def generate_and_present(self, profile_id: str) -> dict[str, Any]:
+        profile_id = str(profile_id or "").strip()
+        readiness = self.availability(profile_id)
         if not readiness.get("ok"):
             self._notify_status()
             return readiness
@@ -272,25 +349,34 @@ class SyntheticCalibrationApplicationAdapter:
         nominal = readiness["nominal_volume_nL"]
         request = CalibrationGenerationRequestV1(
             seed=self.seed,
-            profile_id="nominal_droplet",
+            profile_id=profile_id,
             virtual_run_id=(
-                f"sil-m4a:{self.session_id}:{context['stock_id']}:"
-                f"{context['printer_head_id']}"
+                (
+                    f"sil-m4a:{self.session_id}:{context['stock_id']}:"
+                    f"{context['printer_head_id']}"
+                )
+                if profile_id == "nominal_droplet"
+                else (
+                    f"sil-m4b:{profile_id}:{self.session_id}:"
+                    f"{context['stock_id']}:{context['printer_head_id']}"
+                )
             ),
             printer_head_id=context["printer_head_id"],
             stock_id=context["stock_id"],
             factor_name=context["factor_name"],
             option_name=context["option_name"] or None,
             is_fill=bool(context["is_fill"]),
-            requested_mode="droplet",
+            requested_mode=readiness["requested_mode"],
             nominal_volume_nL=nominal,
-            volume_variation_fraction=self._variation_fraction(nominal),
+            volume_variation_fraction=readiness["variation_fraction"],
             pressure_bounds_psi=(readiness["pressure_psi"], readiness["pressure_psi"]),
             pulse_width_bounds_us=(readiness["pulse_width_us"], readiness["pulse_width_us"]),
         )
         result = self.provider.generate(request)
         result.validate_for_application()
         row = result.to_application_summary_row()
+        row["original_printing_mode"] = result.original_printing_mode
+        row["applied_printing_mode"] = result.applied_printing_mode
         artifact_dir = (
             self.session_root
             / "artifacts"
@@ -353,6 +439,7 @@ class SyntheticCalibrationApplicationAdapter:
             option_name=result.option_name,
             is_fill=result.is_fill,
             printing_mode=result.applied_printing_mode,
+            requested_printing_mode=result.original_printing_mode,
         )
         try:
             self.manager.set_transient_characterization_candidate(candidate)
@@ -380,6 +467,9 @@ class SyntheticCalibrationApplicationAdapter:
             "result_fingerprint": result.result_fingerprint,
             "dialog": dialog,
         }
+
+    def generate_and_present_nominal_droplet(self) -> dict[str, Any]:
+        return self.generate_and_present("nominal_droplet")
 
     def _on_applied_calibration_changed(self, record) -> None:
         result = self.current_result

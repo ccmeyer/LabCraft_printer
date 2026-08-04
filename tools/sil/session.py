@@ -40,6 +40,7 @@ from simulation import (  # noqa: E402
 
 from .control import SimulatorControlDock
 from .calibration_application import SyntheticCalibrationApplicationAdapter
+from .manual_refuel import SimulatedManualRefuelOutcomeAdapter
 from .inspector import StateInspectorDock
 from .state_observer import SimulationStateObserver
 from .state_projection import StateProjectionBuilder
@@ -243,6 +244,7 @@ class SimulationSession:
         self.inspector: StateInspectorDock | None = None
         self.recorder: StateRecorder | None = None
         self.calibration_adapter: SyntheticCalibrationApplicationAdapter | None = None
+        self.manual_refuel_adapter: SimulatedManualRefuelOutcomeAdapter | None = None
         self.projector: StateProjectionBuilder | None = None
         self.observer: SimulationStateObserver | None = None
         self._lock: QtCore.QLockFile | None = None
@@ -340,6 +342,15 @@ class SimulationSession:
             open_dialog_callback=(
                 self.components.view.pressure_box.open_simulated_calibration_result
             ),
+            snapshot_callback=self.snapshot,
+            failure_callback=self.mark_failed,
+        )
+        self.manual_refuel_adapter = SimulatedManualRefuelOutcomeAdapter(
+            seed=self.config.seed,
+            model=self.components.model,
+            controller=self.components.controller,
+            machine=self.components.machine,
+            recorder=self.recorder,
             snapshot_callback=self.snapshot,
             failure_callback=self.mark_failed,
         )
@@ -604,8 +615,13 @@ class SimulationSession:
             show_inspector_callback=self.show_state_inspector,
             export_snapshot_callback=self.export_state_snapshot,
             generate_calibration_callback=(
-                self.calibration_adapter.generate_and_present_nominal_droplet
+                self.calibration_adapter.generate_and_present
             ),
+            calibration_availability_callback=self.calibration_adapter.availability,
+            record_refuel_outcome_callback=(
+                self.manual_refuel_adapter.record_outcome
+            ),
+            refuel_availability_callback=self.manual_refuel_adapter.availability,
         )
         self.components.view.addDockWidget(
             QtCore.Qt.RightDockWidgetArea,
@@ -613,6 +629,9 @@ class SimulationSession:
         )
         self.calibration_adapter.set_status_changed_callback(
             self.control.set_calibration_status
+        )
+        self.manual_refuel_adapter.set_status_changed_callback(
+            self.control.set_refuel_status
         )
         if self.config.visible:
             self.components.view.show()
@@ -889,6 +908,12 @@ class SimulationSession:
                 except Exception as exc:
                     errors.append(f"synthetic calibration adapter cleanup failed: {exc}")
 
+            if self.manual_refuel_adapter is not None:
+                try:
+                    self.manual_refuel_adapter.dispose()
+                except Exception as exc:
+                    errors.append(f"simulated manual-refuel adapter cleanup failed: {exc}")
+
             for timer in list(
                 getattr(self.components.machine, "_deferred_timers", set())
             ):
@@ -1100,6 +1125,11 @@ class SimulationSession:
         if self.calibration_adapter is not None:
             try:
                 self.calibration_adapter.dispose()
+            except Exception:
+                pass
+        if self.manual_refuel_adapter is not None:
+            try:
+                self.manual_refuel_adapter.dispose()
             except Exception:
                 pass
         if self.inspector is not None:
