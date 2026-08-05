@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import math
 from pathlib import Path
@@ -15,12 +16,19 @@ from .synthetic_calibration import (
     PRINT_PRESSURE_MAX_PSI,
     PRINT_PRESSURE_MIN_PSI,
     CalibrationGenerationRequestV1,
+    CalibrationGenerationRequestV2,
     SyntheticCalibrationProvider,
+    deserialize_calibration_result,
 )
 
 
 APPLICATION_PROFILE_IDS = frozenset(
-    {"nominal_droplet", "droplet_to_stream", "nominal_stream"}
+    {
+        "nominal_droplet",
+        "droplet_to_stream",
+        "nominal_stream",
+        "stream_to_droplet",
+    }
 )
 
 
@@ -90,6 +98,8 @@ class SyntheticCalibrationApplicationAdapter:
         self._applied_signal_connected = False
         self._application_state = "Not generated"
         self._evidence_persistence_failed = False
+        self._history_signature = None
+        self._history_error = None
 
         signal = getattr(
             getattr(model, "experiment_model", None),
@@ -134,6 +144,131 @@ class SyntheticCalibrationApplicationAdapter:
     def manager(self):
         return self.model.calibration_manager
 
+    @staticmethod
+    def _record_matches_result(record, result) -> bool:
+        payload = record.to_dict()
+        try:
+            return bool(
+                tuple(payload.get("source_row_fingerprint") or ())
+                == tuple(result.source_row_fingerprint)
+                and str(payload.get("stock_id") or "") == result.stock_id
+                and str(payload.get("printer_head_id") or "")
+                == result.printer_head_id
+                and str(payload.get("factor_name") or "") == result.factor_name
+                and (payload.get("option_name") or None)
+                == (result.option_name or None)
+                and bool(payload.get("is_fill")) == bool(result.is_fill)
+                and str(payload.get("original_printing_mode") or "")
+                == result.original_printing_mode
+                and str(payload.get("applied_printing_mode") or "")
+                == result.applied_printing_mode
+                and math.isclose(
+                    float(payload.get("effective_volume_nL")),
+                    float(result.effective_volume_nL),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+                and math.isclose(
+                    float(payload.get("pressure_psi")),
+                    float(result.pressure_psi),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+                and int(payload.get("pw_us")) == int(result.pw_us)
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def _refresh_historical_candidates(self, *, force=False) -> None:
+        experiment = getattr(self.model, "experiment_model", None)
+        path_value = getattr(experiment, "execution_calibrations_file_path", None)
+        path = Path(path_value).resolve() if path_value else None
+        if path is None or not path.is_file():
+            if self._history_signature is not None:
+                self.manager.clear_historical_characterization_candidates()
+            self._history_signature = None
+            self._history_error = None
+            return
+        stat = path.stat()
+        signature = (str(path), stat.st_mtime_ns, stat.st_size, id(self.manager))
+        if not force and signature == self._history_signature:
+            return
+
+        try:
+            from CalibrationClasses.Model import TransientCharacterizationCandidate
+            from ExecutionCalibrationStore import load_execution_calibrations
+
+            artifact_results = {}
+            artifact_root = self.session_root / "artifacts" / "synthetic-calibration"
+            if artifact_root.is_dir():
+                for result_path in sorted(artifact_root.glob("*/*/result.json")):
+                    raw = result_path.read_bytes()
+                    result = deserialize_calibration_result(
+                        json.loads(raw.decode("utf-8"))
+                    )
+                    if raw != result.canonical_bytes():
+                        raise RuntimeError(
+                            f"synthetic calibration result is not canonical: {result_path}"
+                        )
+                    source_key = tuple(result.source_row_fingerprint)
+                    previous = artifact_results.get(source_key)
+                    if (
+                        previous is not None
+                        and previous.result_fingerprint != result.result_fingerprint
+                    ):
+                        raise RuntimeError(
+                            "multiple retained results claim the same source-row fingerprint"
+                        )
+                    artifact_results[source_key] = result
+
+            document = load_execution_calibrations(str(path))
+            candidates = []
+            for record_id, record in sorted(document.records.items()):
+                source_key = tuple(record.source_row_fingerprint or ())
+                result = artifact_results.get(source_key)
+                if result is None:
+                    continue
+                if not self._record_matches_result(record, result):
+                    raise RuntimeError(
+                        f"execution calibration {record_id} does not match retained synthetic evidence"
+                    )
+                row = result.to_application_summary_row()
+                row.update(
+                    {
+                        "original_printing_mode": result.original_printing_mode,
+                        "applied_printing_mode": result.applied_printing_mode,
+                        "execution_calibration_record_id": str(record_id),
+                        "recorded_at_utc": record.recorded_at_utc,
+                    }
+                )
+                candidates.append(
+                    TransientCharacterizationCandidate(
+                        candidate_id=result.result_fingerprint,
+                        source_kind="sil_synthetic_calibration_history",
+                        summary_row=row,
+                        request_fingerprint=result.request_fingerprint,
+                        result_fingerprint=result.result_fingerprint,
+                        printer_head_id=result.printer_head_id,
+                        stock_id=result.stock_id,
+                        factor_name=result.factor_name,
+                        option_name=result.option_name,
+                        is_fill=result.is_fill,
+                        printing_mode=result.applied_printing_mode,
+                        requested_printing_mode=result.original_printing_mode,
+                    )
+                )
+            self.manager.set_historical_characterization_candidates(candidates)
+            self._history_signature = signature
+            self._history_error = None
+        except Exception as exc:
+            self._history_error = str(exc)
+            self._application_state = "History validation failed"
+            if callable(self.failure_callback):
+                self.failure_callback(
+                    f"synthetic calibration history validation failed: {exc}"
+                )
+            raise
+
     def availability(self, profile_id: str = "nominal_droplet") -> dict[str, Any]:
         profile_id = str(profile_id or "").strip()
         if profile_id not in APPLICATION_PROFILE_IDS:
@@ -141,6 +276,17 @@ class SyntheticCalibrationApplicationAdapter:
                 "ok": False,
                 "code": "unsupported_profile",
                 "message": "That synthetic calibration profile is not available in the application UI.",
+            }
+        try:
+            self._refresh_historical_candidates()
+        except Exception:
+            return {
+                "ok": False,
+                "code": "history_validation_failed",
+                "message": (
+                    "Retained synthetic calibration history could not be validated: "
+                    f"{self._history_error}"
+                ),
             }
         if self._evidence_persistence_failed:
             return {
@@ -187,7 +333,7 @@ class SyntheticCalibrationApplicationAdapter:
                 "ok": False,
                 "code": "single_stock_required",
                 "message": (
-                    "Milestone 4A requires exactly one non-fill execution stock; "
+                    "Synthetic calibration requires exactly one non-fill execution stock; "
                     "a zero-target fill stock may also be present."
                 ),
             }
@@ -199,7 +345,9 @@ class SyntheticCalibrationApplicationAdapter:
                 "message": "Load the exact virtual printer head for one experiment stock.",
             }
         requested_mode = (
-            "stream" if profile_id == "nominal_stream" else "droplet"
+            "stream"
+            if profile_id in {"nominal_stream", "stream_to_droplet"}
+            else "droplet"
         )
         if context["printing_mode"] != requested_mode:
             return {
@@ -242,14 +390,20 @@ class SyntheticCalibrationApplicationAdapter:
             volume_valid = EJECTION_VOLUME_MIN_NL <= nominal < MODE_BOUNDARY_NL
             volume_message = "The current design volume is outside droplet-mode bounds."
         elif profile_id == "droplet_to_stream":
-            volume_valid = 20.0 < nominal < MODE_BOUNDARY_NL
+            volume_valid = EJECTION_VOLUME_MIN_NL <= nominal < MODE_BOUNDARY_NL
             volume_message = (
                 "Droplet-to-stream generation requires a droplet design volume "
-                "strictly above 20 nL and below 40 nL."
+                "of at least 1 nL and below 40 nL."
             )
-        else:
+        elif profile_id == "nominal_stream":
             volume_valid = MODE_BOUNDARY_NL <= nominal <= EJECTION_VOLUME_MAX_NL
             volume_message = "The current design volume is outside stream-mode bounds."
+        else:
+            volume_valid = MODE_BOUNDARY_NL <= nominal <= EJECTION_VOLUME_MAX_NL
+            volume_message = (
+                "Stream-to-droplet generation requires a stream design volume "
+                "that can form a symmetric 1-250 nL interval below 40 nL."
+            )
         if not volume_valid:
             return {
                 "ok": False,
@@ -268,14 +422,16 @@ class SyntheticCalibrationApplicationAdapter:
                 "code": "pulse_width_out_of_range",
                 "message": "The print pulse width must be positive.",
             }
-        try:
-            variation = self._variation_fraction(profile_id, nominal)
-        except ValueError as exc:
-            return {
-                "ok": False,
-                "code": "volume_interval_unavailable",
-                "message": str(exc),
-            }
+        variation = None
+        if profile_id != "droplet_to_stream":
+            try:
+                variation = self._variation_fraction(profile_id, nominal)
+            except ValueError as exc:
+                return {
+                    "ok": False,
+                    "code": "volume_interval_unavailable",
+                    "message": str(exc),
+                }
         applied_mode = "stream" if profile_id in {
             "droplet_to_stream",
             "nominal_stream",
@@ -284,7 +440,9 @@ class SyntheticCalibrationApplicationAdapter:
             "ok": True,
             "code": "ready",
             "message": (
-                f"Ready to generate {profile_id.replace('_', ' ')}."
+                f"Ready: {nominal:.3f} nL Droplet -> 40.000 nL Stream."
+                if profile_id == "droplet_to_stream"
+                else f"Ready to generate {profile_id.replace('_', ' ')}."
             ),
             "context": context,
             "stock": stock,
@@ -293,6 +451,9 @@ class SyntheticCalibrationApplicationAdapter:
             "applied_mode": applied_mode,
             "nominal_volume_nL": nominal,
             "variation_fraction": variation,
+            "target_volume_nL": (
+                MODE_BOUNDARY_NL if profile_id == "droplet_to_stream" else None
+            ),
             "pressure_psi": pressure,
             "pulse_width_us": pulse_width,
         }
@@ -312,6 +473,22 @@ class SyntheticCalibrationApplicationAdapter:
                 raise ValueError(
                     "The current droplet volume cannot form a valid symmetric "
                     "request interval that reaches 40 nL."
+                )
+            return variation
+
+        if profile_id == "stream_to_droplet":
+            target = MODE_BOUNDARY_NL - 1e-6
+            variation = max(0.05, (nominal - target) / nominal)
+            if nominal * (1.0 - variation) >= MODE_BOUNDARY_NL:
+                variation = math.nextafter(variation, 1.0)
+            if (
+                variation >= 1.0
+                or nominal * (1.0 - variation) < EJECTION_VOLUME_MIN_NL
+                or nominal * (1.0 + variation) > EJECTION_VOLUME_MAX_NL
+            ):
+                raise ValueError(
+                    "The current stream volume cannot form a valid symmetric "
+                    "request interval that reaches below 40 nL."
                 )
             return variation
 
@@ -339,7 +516,8 @@ class SyntheticCalibrationApplicationAdapter:
             simulated_elapsed_ms=getattr(self.machine.state, "simulated_elapsed_ms", None),
         )
 
-    def generate_and_present(self, profile_id: str) -> dict[str, Any]:
+    def generate(self, profile_id: str) -> dict[str, Any]:
+        """Generate, retain, and register a candidate without opening a dialog."""
         profile_id = str(profile_id or "").strip()
         readiness = self.availability(profile_id)
         if not readiness.get("ok"):
@@ -347,31 +525,51 @@ class SyntheticCalibrationApplicationAdapter:
             return readiness
         context = readiness["context"]
         nominal = readiness["nominal_volume_nL"]
-        request = CalibrationGenerationRequestV1(
-            seed=self.seed,
-            profile_id=profile_id,
-            virtual_run_id=(
-                (
-                    f"sil-m4a:{self.session_id}:{context['stock_id']}:"
-                    f"{context['printer_head_id']}"
-                )
-                if profile_id == "nominal_droplet"
-                else (
-                    f"sil-m4b:{profile_id}:{self.session_id}:"
-                    f"{context['stock_id']}:{context['printer_head_id']}"
-                )
+        common_request = {
+            "seed": self.seed,
+            "profile_id": profile_id,
+            "printer_head_id": context["printer_head_id"],
+            "stock_id": context["stock_id"],
+            "factor_name": context["factor_name"],
+            "option_name": context["option_name"] or None,
+            "is_fill": bool(context["is_fill"]),
+            "requested_mode": readiness["requested_mode"],
+            "pressure_bounds_psi": (
+                readiness["pressure_psi"],
+                readiness["pressure_psi"],
             ),
-            printer_head_id=context["printer_head_id"],
-            stock_id=context["stock_id"],
-            factor_name=context["factor_name"],
-            option_name=context["option_name"] or None,
-            is_fill=bool(context["is_fill"]),
-            requested_mode=readiness["requested_mode"],
-            nominal_volume_nL=nominal,
-            volume_variation_fraction=readiness["variation_fraction"],
-            pressure_bounds_psi=(readiness["pressure_psi"], readiness["pressure_psi"]),
-            pulse_width_bounds_us=(readiness["pulse_width_us"], readiness["pulse_width_us"]),
-        )
+            "pulse_width_bounds_us": (
+                readiness["pulse_width_us"],
+                readiness["pulse_width_us"],
+            ),
+        }
+        if profile_id == "droplet_to_stream":
+            request = CalibrationGenerationRequestV2(
+                **common_request,
+                virtual_run_id=(
+                    f"sil-m4c-v2:{profile_id}:{self.session_id}:"
+                    f"{context['stock_id']}:{context['printer_head_id']}"
+                ),
+                source_volume_nL=nominal,
+                target_volume_nL=readiness["target_volume_nL"],
+            )
+        else:
+            request = CalibrationGenerationRequestV1(
+                **common_request,
+                virtual_run_id=(
+                    (
+                        f"sil-m4a:{self.session_id}:{context['stock_id']}:"
+                        f"{context['printer_head_id']}"
+                    )
+                    if profile_id == "nominal_droplet"
+                    else (
+                        f"sil-m4b:{profile_id}:{self.session_id}:"
+                        f"{context['stock_id']}:{context['printer_head_id']}"
+                    )
+                ),
+                nominal_volume_nL=nominal,
+                volume_variation_fraction=readiness["variation_fraction"],
+            )
         result = self.provider.generate(request)
         result.validate_for_application()
         row = result.to_application_summary_row()
@@ -393,7 +591,9 @@ class SyntheticCalibrationApplicationAdapter:
                 "synthetic_calibration_generated",
                 {
                     "profile_id": result.profile_id,
+                    "profile_version": result.profile_version,
                     "provider_version": result.provider_version,
+                    "schema_version": result.schema_version,
                     "seed": result.seed,
                     "request_fingerprint": result.request_fingerprint,
                     "result_fingerprint": result.result_fingerprint,
@@ -403,6 +603,8 @@ class SyntheticCalibrationApplicationAdapter:
                     "factor_name": result.factor_name,
                     "option_name": result.option_name,
                     "is_fill": result.is_fill,
+                    "source_volume_nL": getattr(result, "source_volume_nL", None),
+                    "target_volume_nL": getattr(result, "target_volume_nL", None),
                     "request_artifact": request_path.relative_to(self.session_root).as_posix(),
                     "result_artifact": result_path.relative_to(self.session_root).as_posix(),
                     "synthetic_limitations": list(result.synthetic_limitations),
@@ -443,14 +645,13 @@ class SyntheticCalibrationApplicationAdapter:
         )
         try:
             self.manager.set_transient_characterization_candidate(candidate)
-            dialog = self.open_dialog_callback(candidate.candidate_id)
         except Exception as exc:
             self.manager.clear_transient_characterization_candidate(candidate.candidate_id)
-            self._application_state = "Presentation failed"
+            self._application_state = "Registration failed"
             failure = {
                 "ok": False,
-                "code": "presentation_failed",
-                "message": f"Could not present the synthetic calibration result: {exc}",
+                "code": "registration_failed",
+                "message": f"Could not register the synthetic calibration result: {exc}",
             }
             self._notify_status()
             return failure
@@ -461,10 +662,34 @@ class SyntheticCalibrationApplicationAdapter:
         self._notify_status()
         return {
             "ok": True,
-            "code": "presented",
-            "message": f"Synthetic result {result.result_fingerprint[:12]} is open.",
+            "code": "generated",
+            "message": f"Synthetic result {result.result_fingerprint[:12]} is ready.",
             "request_fingerprint": result.request_fingerprint,
             "result_fingerprint": result.result_fingerprint,
+            "candidate_id": candidate.candidate_id,
+        }
+
+    def generate_and_present(self, profile_id: str) -> dict[str, Any]:
+        generated = self.generate(profile_id)
+        if not generated.get("ok"):
+            return generated
+        candidate_id = str(generated["candidate_id"])
+        try:
+            dialog = self.open_dialog_callback(candidate_id)
+        except Exception as exc:
+            self.manager.clear_transient_characterization_candidate(candidate_id)
+            self._application_state = "Presentation failed"
+            failure = {
+                "ok": False,
+                "code": "presentation_failed",
+                "message": f"Could not present the synthetic calibration result: {exc}",
+            }
+            self._notify_status()
+            return failure
+        return {
+            **generated,
+            "code": "presented",
+            "message": f"Synthetic result {generated['result_fingerprint'][:12]} is open.",
             "dialog": dialog,
         }
 
@@ -483,6 +708,11 @@ class SyntheticCalibrationApplicationAdapter:
         ):
             return
         self._application_state = "Applied"
+        try:
+            self._refresh_historical_candidates(force=True)
+        except Exception:
+            self._notify_status()
+            return
         self._notify_status()
         try:
             self._record_event(
@@ -523,3 +753,4 @@ class SyntheticCalibrationApplicationAdapter:
             else None
         )
         self.manager.clear_transient_characterization_candidate(candidate_id)
+        self.manager.clear_historical_characterization_candidates()

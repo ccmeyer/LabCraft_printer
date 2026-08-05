@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from tests.calibration_test_utils import SignalStub, ensure_calibration_import_stubs
 
 
@@ -15,6 +17,7 @@ class _Manager:
     def __init__(self, context):
         self.context = dict(context)
         self.candidate = None
+        self.historical_candidates = ()
 
     def get_characterization_application_context(self):
         return dict(self.context)
@@ -29,6 +32,15 @@ class _Manager:
             return False
         self.candidate = None
         return True
+
+    def set_historical_characterization_candidates(self, candidates):
+        self.historical_candidates = tuple(candidates or ())
+        return tuple(candidate.candidate_id for candidate in self.historical_candidates)
+
+    def clear_historical_characterization_candidates(self):
+        changed = bool(self.historical_candidates)
+        self.historical_candidates = ()
+        return changed
 
 
 class _Recorder:
@@ -239,8 +251,10 @@ def test_adapter_rejects_multi_stock_plan_before_evidence_or_injection(tmp_path)
     assert not (tmp_path / "artifacts" / "synthetic-calibration").exists()
 
 
+@pytest.mark.parametrize("source_volume_nL", (1.0, 9.0, 20.0, 25.0, 39.999999))
 def test_droplet_to_stream_generation_is_deterministic_and_reaches_boundary(
     tmp_path,
+    source_volume_nL,
 ):
     context = {
         "printer_head_id": "virtual-head-1",
@@ -249,7 +263,7 @@ def test_droplet_to_stream_generation_is_deterministic_and_reaches_boundary(
         "option_name": "",
         "is_fill": False,
         "printing_mode": "droplet",
-        "design_volume_nL": 25.0,
+        "design_volume_nL": source_volume_nL,
     }
     adapter, manager, _recorder, opened, failures = _adapter(
         tmp_path,
@@ -266,11 +280,112 @@ def test_droplet_to_stream_generation_is_deterministic_and_reaches_boundary(
     result = adapter.current_result
     assert result.original_printing_mode == "droplet"
     assert result.applied_printing_mode == "stream"
+    assert result.schema_version == 2
+    assert result.profile_version == 2
+    assert result.provider_version == "milestone-4c-v2"
+    assert result.source_volume_nL == source_volume_nL
+    assert result.target_volume_nL == 40.0
     assert result.measured_volume_nL == 40.0
     assert manager.candidate.requested_printing_mode == "droplet"
     assert manager.candidate.printing_mode == "stream"
     assert manager.candidate.summary_row["original_printing_mode"] == "droplet"
     assert manager.candidate.summary_row["applied_printing_mode"] == "stream"
+    assert manager.candidate.summary_row["source_volume_nL"] == source_volume_nL
+    generated_event = _recorder.events[-1]
+    assert generated_event[1]["payload"]["source_volume_nL"] == source_volume_nL
+    assert generated_event[1]["payload"]["target_volume_nL"] == 40.0
+
+
+@pytest.mark.parametrize("source_volume_nL", (40.0, 250.0))
+def test_droplet_to_stream_adapter_rejects_non_droplet_source_volume(
+    tmp_path,
+    source_volume_nL,
+):
+    context = {
+        "printer_head_id": "virtual-head-1",
+        "stock_id": "virtual-stock-1",
+        "factor_name": "Virtual Factor",
+        "option_name": "",
+        "is_fill": False,
+        "printing_mode": "droplet",
+        "design_volume_nL": source_volume_nL,
+    }
+    adapter, manager, recorder, opened, _failures = _adapter(
+        tmp_path,
+        context=context,
+    )
+
+    result = adapter.generate("droplet_to_stream")
+
+    assert result["ok"] is False
+    assert result["code"] == "volume_out_of_range"
+    assert manager.candidate is None
+    assert recorder.events == []
+    assert opened == []
+
+
+def test_generate_registers_in_current_dialog_without_opening_another(tmp_path):
+    adapter, manager, _recorder, opened, _failures = _adapter(tmp_path)
+
+    generated = adapter.generate("nominal_droplet")
+
+    assert generated["ok"] is True
+    assert generated["code"] == "generated"
+    assert manager.candidate.candidate_id == generated["candidate_id"]
+    assert opened == []
+
+
+def test_stream_to_droplet_generation_uses_low_symmetric_boundary(tmp_path):
+    context = {
+        "printer_head_id": "virtual-head-1",
+        "stock_id": "virtual-stock-1",
+        "factor_name": "Virtual Factor",
+        "option_name": "",
+        "is_fill": False,
+        "printing_mode": "stream",
+        "design_volume_nL": 40.0,
+    }
+    adapter, manager, _recorder, opened, failures = _adapter(
+        tmp_path,
+        context=context,
+    )
+
+    first = adapter.generate("stream_to_droplet")
+    second = adapter.generate("stream_to_droplet")
+
+    assert first["ok"] is True
+    assert second["result_fingerprint"] == first["result_fingerprint"]
+    assert opened == []
+    assert failures == []
+    assert adapter.current_result.original_printing_mode == "stream"
+    assert adapter.current_result.applied_printing_mode == "droplet"
+    assert adapter.current_result.measured_volume_nL == 38.0
+    assert manager.candidate.requested_printing_mode == "stream"
+    assert manager.candidate.printing_mode == "droplet"
+
+
+def test_stream_to_droplet_rejects_unrepresentable_symmetric_interval(tmp_path):
+    context = {
+        "printer_head_id": "virtual-head-1",
+        "stock_id": "virtual-stock-1",
+        "factor_name": "Virtual Factor",
+        "option_name": "",
+        "is_fill": False,
+        "printing_mode": "stream",
+        "design_volume_nL": 200.0,
+    }
+    adapter, manager, recorder, opened, _failures = _adapter(
+        tmp_path,
+        context=context,
+    )
+
+    result = adapter.generate("stream_to_droplet")
+
+    assert result["ok"] is False
+    assert result["code"] == "volume_interval_unavailable"
+    assert manager.candidate is None
+    assert recorder.events == []
+    assert opened == []
 
 
 def test_stream_generation_is_stable_across_instances_call_order_and_application_sessions(
@@ -363,3 +478,59 @@ def test_application_adapter_allowlist_and_stream_context_fail_closed(tmp_path):
     assert manager.candidate is None
     assert recorder.events == []
     assert opened == []
+
+
+def test_historical_rehydration_accepts_coexisting_v1_and_v2_results(
+    monkeypatch,
+    tmp_path,
+):
+    adapter, manager, _recorder, _opened, _failures = _adapter(tmp_path)
+    assert adapter.generate("nominal_droplet")["ok"] is True
+    v1_result = adapter.current_result
+    assert adapter.generate("droplet_to_stream")["ok"] is True
+    v2_result = adapter.current_result
+
+    def record_for(result):
+        payload = {
+            "stock_id": result.stock_id,
+            "printer_head_id": result.printer_head_id,
+            "factor_name": result.factor_name,
+            "option_name": result.option_name,
+            "is_fill": result.is_fill,
+            "source_row_fingerprint": list(result.source_row_fingerprint),
+            "original_printing_mode": result.original_printing_mode,
+            "applied_printing_mode": result.applied_printing_mode,
+            "effective_volume_nL": result.effective_volume_nL,
+            "pressure_psi": result.pressure_psi,
+            "pw_us": result.pw_us,
+        }
+        return SimpleNamespace(
+            source_row_fingerprint=result.source_row_fingerprint,
+            recorded_at_utc="2026-08-04T00:00:00Z",
+            to_dict=lambda payload=payload: dict(payload),
+        )
+
+    calibration_path = tmp_path / "execution_calibrations.json"
+    calibration_path.write_text("{}", encoding="utf-8")
+    adapter.model.experiment_model.execution_calibrations_file_path = calibration_path
+    document = SimpleNamespace(
+        records={
+            "v1-record": record_for(v1_result),
+            "v2-record": record_for(v2_result),
+        }
+    )
+    monkeypatch.setattr(
+        "ExecutionCalibrationStore.load_execution_calibrations",
+        lambda _path: document,
+    )
+
+    adapter._refresh_historical_candidates(force=True)
+
+    assert {candidate.result_fingerprint for candidate in manager.historical_candidates} == {
+        v1_result.result_fingerprint,
+        v2_result.result_fingerprint,
+    }
+    assert {candidate.printing_mode for candidate in manager.historical_candidates} == {
+        "droplet",
+        "stream",
+    }

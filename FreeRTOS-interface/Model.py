@@ -4990,6 +4990,92 @@ class ExperimentModel(QObject):
         return []
 
 
+    def get_calibration_application_plan_for_key(
+        self,
+        key: tuple[str, Optional[str]],
+    ) -> dict | None:
+        """Return a read-only plan shape suitable for calibration preview/apply.
+
+        Finalized executions intentionally do not rebuild ``plans_per_option`` on
+        load.  Project the currently authoritative stock/count data into the
+        legacy preview shape so calibration UI never invokes the optimizer or
+        depends on creation-session caches.
+        """
+
+        execution_plan = self.get_execution_plan_snapshot()
+        if (
+            execution_plan is None
+            or self.get_execution_plan_source() == "legacy_reconstruction"
+        ):
+            return self.get_plan_for_key(key)
+
+        factor_name, option_name = key
+        stocks = [
+            stock
+            for stock in execution_plan.stocks
+            if stock.factor_name == factor_name and stock.option_name == option_name
+        ]
+        if not stocks:
+            return None
+
+        option = None
+        for factor in self.factors:
+            if factor.name != factor_name:
+                continue
+            if factor.kind == "additive":
+                option = factor.options[0] if factor.options else None
+            else:
+                option = next(
+                    (item for item in factor.options if item.name == option_name),
+                    None,
+                )
+            break
+        if option is None:
+            return None
+
+        starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+        reaction_targets = {
+            f"R{index + 1}": spec.get("reaction", {})
+            for index, spec in enumerate(self._iter_reaction_run_specs())
+        }
+        projected_stocks = []
+        for stock in stocks:
+            droplets_per_target = {}
+            for well in execution_plan.wells:
+                reaction = reaction_targets.get(well.reaction_id)
+                if reaction is None or key not in reaction:
+                    continue
+                target_add = max(0.0, float(reaction[key]) - starting)
+                count = next(
+                    (
+                        int(dispense.target_dispenses)
+                        for dispense in well.dispenses
+                        if dispense.stock_id == stock.stock_id
+                    ),
+                    0,
+                )
+                previous = droplets_per_target.get(target_add)
+                if previous is not None and previous != count:
+                    raise RuntimeError(
+                        "Authoritative execution wells disagree on calibration target counts."
+                    )
+                droplets_per_target[target_add] = count
+            projected_stocks.append(
+                {
+                    "stock_id": stock.stock_id,
+                    "stock_concentration": float(stock.concentration),
+                    "droplet_volume_nL": float(stock.effective_volume_nL),
+                    "units": stock.units,
+                    "quantum": 0.1,
+                    "droplets_per_target": droplets_per_target,
+                }
+            )
+        return {
+            "n_stocks": len(projected_stocks),
+            "stocks": projected_stocks,
+            "source": "authoritative_execution_plan",
+        }
+
     def get_plan_for_key(self, key: tuple[str, Optional[str]]) -> dict | None:
         """Ensure plans exist and return plans_per_option[key]."""
         if self.is_execution_design_locked() and not self.plans_per_option:
@@ -5036,7 +5122,7 @@ class ExperimentModel(QObject):
         PREVIEW ONLY. Keep existing stock concentration(s) for 'key' but recompute the mapping
         using 'new_droplet_nL'. Returns dict with per-target rows and summary.
         """
-        plan = self.get_plan_for_key(key)
+        plan = self.get_calibration_application_plan_for_key(key)
         if not plan:
             return {"ok": False, "reason": "No stock plan available for this reagent."}
 

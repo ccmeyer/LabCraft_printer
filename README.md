@@ -243,7 +243,7 @@ write is not retried.
 Milestone 3 adds a pure deterministic synthetic-calibration developer API in
 `tools.sil`. Its provider remains independent of the interactive launcher and
 calibration UI. A caller constructs `CalibrationGenerationRequestV1`, selects one of
-the seven versioned profiles, and calls
+the eight versioned profiles, and calls
 `SyntheticCalibrationProvider.generate(request)`. The returned request and
 result fingerprints, virtual timestamp, calibration values, provenance, and
 limitations are byte-reproducible for the same request and seed.
@@ -284,9 +284,10 @@ calibration process, enables a print profile, or writes a synthetic run into
 volume accuracy, pressure response, collision safety, firmware, or protocol
 behavior.
 
-Milestone 4B is complete. The same simulation-only surface now allows
+Milestone 4B is complete. Its original simulation-only surface added
 **Droplet → stream** and
-**Nominal stream** results. Droplet-to-stream generation requires a finalized
+**Nominal stream** results. The retained schema-v1 droplet-to-stream profile
+requires a finalized
 single-stock droplet context above 20 nL and below 40 nL; the standard visible
 exercise uses 25 nL and deterministically reaches the 40 nL stream boundary.
 The presentation shows the requested/applied mode pair and stream evidence
@@ -310,6 +311,62 @@ The visible Windows fresh/reload gate completed on 2026-08-03. It applied a
 applied a second nominal-stream result that invalidated the prior pass, recorded
 a new matching pass, and reloaded the retained authoritative revision through
 Experiment Editor without printing.
+
+Milestone 4C is complete. Its consolidated focused automated gate and visible
+Windows fresh/reload validation passed. In the canonical simulator, use the
+normal application workflow instead of dock workflow buttons:
+
+- the normal connection surface exposes the single read-only `SIMULATED`
+  target and its Connect/Disconnect button delegates to `SimulationSession`;
+- **Calibrate Printer head** opens the real three-panel calibration dialog in
+  an explicitly synthetic, camera-free mode;
+- the Droplet and Stream tabs retain their real **Calibrate All**, summary,
+  preview, mode-switch confirmation, and Apply behavior;
+- applied synthetic rows are reconstructed read-only from matching canonical
+  artifacts and `execution_calibrations.json`, including after retained-root
+  reload; synthetic evidence is never inserted into physical `calibration.json`;
+- finalized experiments preview and Apply against the authoritative execution
+  plan rather than requiring the creation-session `plans_per_option` cache;
+- all physical acquisition, camera, movement, optics, debug, and individual
+  calibration controls remain visible but disabled;
+- the normal Manual Refuel Check window runs its existing commands against the
+  simulated machine and records the operator's Passed, Failed, or Unclear
+  judgment with the actual trial metadata;
+- Refuel Only, Print Only, and relative refuel-pressure controls traverse the
+  normal Controller and deterministic simulated command queue;
+- choosing No in the post-Apply prompt records an explicit zero-trial deferred
+  outcome through the same simulation evidence bridge.
+
+The new additive `stream_to_droplet` profile lets the Droplet tab transition a
+stream stock back below 40 nL. Existing schema, profile, and provider versions
+are unchanged, so all earlier canonical request/result fingerprints remain
+stable. `SIMULATOR CONTROL — NO HARDWARE` now contains diagnostics, the state
+inspector launcher, and snapshot export only. It contains no connection,
+calibration, or refuel workflow buttons.
+
+The completed Milestone 4C low-volume transition correction lets the normal
+Stream-tab **Calibrate All** action accept any valid
+droplet source volume from 1 nL up to (but not including) 40 nL, including the
+normal 9 nL default. An additive schema-v2 request records the authoritative
+source volume and an exact 40 nL stream target. Schema v1 remains readable and
+byte-stable, and v1/v2 evidence may coexist in retained history. The dialog
+shows the directional readiness text before generation; preview, confirmation,
+Apply, authoritative persistence, and manual-refuel preflight remain the
+existing application paths.
+
+The final retained Windows evidence is:
+
+```text
+C:\Users\conar\AppData\Local\LabCraft\SIL\interactive-sessions\20260805T124515193488Z-ebd5d6342b4d
+```
+
+Using normal application controls, it applied an exact 9 nL Droplet to 40 nL
+Stream transition, completed a real five-droplet manual-refuel trial while the
+post-Apply dialog remained open, recorded Passed, exported a reconciled
+snapshot, and closed cleanly. Reopening the root through Experiment Editor
+restored stream mode, 40 nL, plan revision 3, the synthetic history row, and
+the matching Passed refuel record. Both application sessions completed with
+healthy closed recorders and zero terminal reconciliation mismatches.
 
 Retain and reopen the session to inspect the authoritative result:
 
@@ -350,6 +407,33 @@ Run the Milestone 4B focused tests with:
   tests\test_simulator_control.py `
   tests\system\test_sil_stream_calibration_lifecycle.py
 ```
+
+Run the Milestone 4C focused tests with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_sil_normal_ui_convergence.py `
+  tests\test_connection_widget_disconnect_state.py `
+  tests\test_pressure_plotbox_buttons.py `
+  tests\test_safe_application_construction.py `
+  tests\test_simulation_session.py `
+  tests\test_simulator_control.py `
+  tests\test_sil_synthetic_calibration.py `
+  tests\test_sil_calibration_application.py `
+  tests\test_sil_calibration_ui.py `
+  tests\test_droplet_imaging_summary_table.py `
+  tests\test_manual_refuel_check_dialog.py `
+  tests\test_sil_manual_refuel.py `
+  tests\test_sil_calibration_dialog_driver.py `
+  tests\test_simulated_machine.py `
+  tests\test_sil_state_projection.py `
+  tests\test_authoritative_execution_load.py `
+  tests\system\test_sil_normal_ui_convergence_lifecycle.py
+```
+
+This milestone intentionally uses the focused affected suite rather than the
+full pytest suite. If an implementation failure identifies another direct call
+path, add only that path's test module to the focused command.
 
 Troubleshooting:
 

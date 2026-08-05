@@ -9,7 +9,7 @@ from PySide6 import QtCore, QtTest, QtWidgets
 
 
 class CalibrationDialogDriver:
-    """Bounded QTest mechanics for the calibration result presentation dialog."""
+    """Bounded QTest mechanics for the normal simulation calibration dialog."""
 
     def __init__(self, app, dialog, *, timeout_seconds: float = 10.0):
         self.app = app
@@ -42,6 +42,49 @@ class CalibrationDialogDriver:
             "row_count": table.model().rowCount(),
             "source_filter": self.dialog.summary_source_combo.currentData(),
         }
+
+    def generate_from_tab(self, target_mode: str) -> dict[str, Any]:
+        """Use the real tab and Calibrate All control to generate one result."""
+
+        target_mode = str(target_mode or "").strip().lower()
+        if target_mode == "droplet":
+            tab = self.dialog.droplet_tab
+            button = self.dialog.calibrate_all_button
+        elif target_mode == "stream":
+            tab = self.dialog.stream_tab
+            button = self.dialog.calibrate_all_stream_button
+        else:
+            raise ValueError("target_mode must be droplet or stream")
+        self.dialog.calibration_tabs.setCurrentWidget(tab)
+        self.app.processEvents()
+        if not button.isEnabled():
+            raise RuntimeError(
+                f"synthetic {target_mode} Calibrate All is unavailable: {button.toolTip()}"
+            )
+        QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+
+        generated: dict[str, Any] = {}
+
+        def _generated_result_visible():
+            manager = getattr(self.dialog.model, "calibration_manager", None)
+            stored = getattr(manager, "_transient_characterization_candidate", None)
+            candidate = stored.get("candidate") if isinstance(stored, dict) else None
+            expected = str(getattr(candidate, "result_fingerprint", "") or "")
+            if not expected:
+                return False
+            for row in range(self.dialog.summary_table_model.rowCount()):
+                raw = self.dialog.summary_table_model.raw_row_at(row) or {}
+                fingerprint = str(raw.get("synthetic_result_fingerprint") or "")
+                if fingerprint == expected:
+                    generated.update(raw)
+                    return True
+            return False
+
+        self.wait_until(
+            _generated_result_visible,
+            f"synthetic {target_mode} result generation",
+        )
+        return dict(generated)
 
     def select_result(self, result_fingerprint: str) -> dict[str, Any]:
         table = self.dialog.summary_table

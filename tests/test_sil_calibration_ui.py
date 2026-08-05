@@ -127,6 +127,34 @@ def test_transient_surface_requires_exact_identity_and_never_persists_rows():
     assert validation["code"] == "identity_mismatch"
 
 
+def test_validated_synthetic_history_survives_transient_clear_and_mode_change():
+    manager, context = _manager()
+    candidate = _candidate()
+
+    manager.set_historical_characterization_candidates([candidate])
+    rows = manager.get_characterization_summary_rows()
+
+    assert len(rows) == 1
+    assert rows[0]["_historical_candidate_id"] == candidate.candidate_id
+    assert rows[0]["application_record_state"] == "applied_history"
+    assert manager.validate_characterization_candidate_for_application(rows[0])["ok"]
+
+    manager.set_transient_characterization_candidate(candidate)
+    rows = manager.get_characterization_summary_rows()
+    assert len(rows) == 1
+    assert rows[0]["_transient_candidate_id"] == candidate.candidate_id
+
+    manager.clear_transient_characterization_candidate(candidate.candidate_id)
+    context["printing_mode"] = "stream"
+    rows = manager.get_characterization_summary_rows()
+    assert len(rows) == 1
+    assert rows[0]["_historical_candidate_id"] == candidate.candidate_id
+    validation = manager.validate_characterization_candidate_for_application(rows[0])
+    assert validation["ok"] is False
+    assert validation["code"] == "identity_mismatch"
+    assert manager.data == {"runs": []}
+
+
 def test_transient_surface_rejects_altered_fingerprints():
     manager, _context = _manager()
     result = _result()

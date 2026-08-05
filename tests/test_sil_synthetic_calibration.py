@@ -13,12 +13,19 @@ from tools.sil.synthetic_calibration import (
     CALIBRATION_REQUEST_SCHEMA_ID,
     CALIBRATION_RESULT_SCHEMA_ID,
     CALIBRATION_SCHEMA_VERSION,
+    CALIBRATION_SCHEMA_VERSION_V2,
+    DROPLET_TO_STREAM_PROFILE_VERSION_V2,
     SYNTHETIC_CALIBRATION_PROVIDER_VERSION,
+    SYNTHETIC_CALIBRATION_PROVIDER_VERSION_V2,
     CalibrationApplicationError,
     CalibrationContractError,
     CalibrationGenerationRequestV1,
+    CalibrationGenerationRequestV2,
     CalibrationGenerationResultV1,
+    CalibrationGenerationResultV2,
     SyntheticCalibrationProvider,
+    deserialize_calibration_request,
+    deserialize_calibration_result,
 )
 
 
@@ -26,6 +33,7 @@ PROFILE_IDS = (
     "nominal_droplet",
     "nominal_stream",
     "droplet_to_stream",
+    "stream_to_droplet",
     "low_volume_boundary",
     "high_volume_boundary",
     "invalid_outlier",
@@ -58,6 +66,11 @@ def _request(profile_id="nominal_droplet", *, seed=1729, **overrides):
             "requested_mode": "droplet",
             "nominal_volume_nL": 60.0,
         },
+        "stream_to_droplet": {
+            "requested_mode": "stream",
+            "nominal_volume_nL": 40.0,
+            "volume_variation_fraction": 0.05,
+        },
         "low_volume_boundary": {
             "nominal_volume_nL": 1.0,
             "volume_variation_fraction": 0.0,
@@ -71,6 +84,26 @@ def _request(profile_id="nominal_droplet", *, seed=1729, **overrides):
     defaults.update(profile_overrides.get(profile_id, {}))
     defaults.update(overrides)
     return CalibrationGenerationRequestV1(**defaults)
+
+
+def _request_v2(*, source_volume_nL=9.0, target_volume_nL=40.0, seed=1729, **overrides):
+    defaults = {
+        "seed": seed,
+        "profile_id": "droplet_to_stream",
+        "virtual_run_id": "virtual-transition-v2",
+        "printer_head_id": "virtual-head-A",
+        "stock_id": "virtual-stock-1",
+        "factor_name": "Protein",
+        "option_name": "High",
+        "is_fill": False,
+        "requested_mode": "droplet",
+        "source_volume_nL": source_volume_nL,
+        "target_volume_nL": target_volume_nL,
+        "pressure_bounds_psi": (0.8, 2.2),
+        "pulse_width_bounds_us": (1200, 1800),
+    }
+    defaults.update(overrides)
+    return CalibrationGenerationRequestV2(**defaults)
 
 
 class _ExistingSummaryContract:
@@ -131,6 +164,102 @@ def test_public_schema_identities_and_profile_registry_are_frozen():
     assert SYNTHETIC_CALIBRATION_PROVIDER_VERSION == "milestone-3-v1"
     assert tuple(profile.profile_id for profile in provider.list_profiles()) == PROFILE_IDS
     assert all(profile.profile_version == 1 for profile in provider.list_profiles())
+    assert CALIBRATION_SCHEMA_VERSION_V2 == 2
+    assert SYNTHETIC_CALIBRATION_PROVIDER_VERSION_V2 == "milestone-4c-v2"
+    assert DROPLET_TO_STREAM_PROFILE_VERSION_V2 == 2
+    assert provider.get_profile("droplet_to_stream", 2).profile_version == 2
+
+
+@pytest.mark.parametrize("source_volume_nL", (1.0, 9.0, 20.0, 25.0, 39.999999))
+def test_directional_v2_transition_accepts_all_droplet_source_volumes(
+    source_volume_nL,
+):
+    request = _request_v2(source_volume_nL=source_volume_nL)
+    result = SyntheticCalibrationProvider().generate(request)
+    row = result.to_application_summary_row()
+
+    assert isinstance(result, CalibrationGenerationResultV2)
+    assert result.source_volume_nL == source_volume_nL
+    assert result.target_volume_nL == 40.0
+    assert result.measured_volume_nL == 40.0
+    assert result.effective_volume_nL == 40.0
+    assert result.original_printing_mode == "droplet"
+    assert result.applied_printing_mode == "stream"
+    assert result.application_valid is True
+    assert result.validation_errors == ()
+    assert row["source_volume_nL"] == source_volume_nL
+    assert row["target_volume_nL"] == 40.0
+
+
+def test_directional_v2_transition_round_trips_and_dispatches_strictly():
+    request = _request_v2()
+    result = SyntheticCalibrationProvider().generate(request)
+
+    assert deserialize_calibration_request(request.to_dict()) == request
+    assert deserialize_calibration_result(result.to_dict()) == result
+    assert result.request_fingerprint == request.fingerprint
+    assert result.to_request() == request
+    assert request.canonical_bytes() == json.dumps(
+        request.to_dict(),
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    bad_version = {**request.to_dict(), "schema_version": 3}
+    with pytest.raises(CalibrationContractError, match="unsupported schema version"):
+        deserialize_calibration_request(bad_version)
+    altered = {**result.to_dict(), "result_fingerprint": "0" * 64}
+    with pytest.raises(CalibrationContractError, match="result_fingerprint"):
+        deserialize_calibration_result(altered)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"source_volume_nL": 0.999}, "source_volume_nL"),
+        ({"source_volume_nL": 40.0}, "source_volume_nL"),
+        ({"source_volume_nL": math.nan}, "finite"),
+        ({"target_volume_nL": 39.999}, "target_volume_nL"),
+        ({"target_volume_nL": 250.001}, "target_volume_nL"),
+        ({"target_volume_nL": math.inf}, "finite"),
+        ({"requested_mode": "stream"}, "requested_mode"),
+        ({"profile_id": "nominal_stream"}, "profile_id"),
+        ({"profile_version": 1}, "profile_version"),
+        ({"provider_version": "milestone-3-v1"}, "provider_version"),
+    ],
+)
+def test_directional_v2_transition_rejects_invalid_contracts(overrides, message):
+    with pytest.raises(CalibrationContractError, match=message):
+        _request_v2(**overrides)
+
+
+def test_directional_v2_generation_is_order_independent_and_random_is_isolated():
+    request = _request_v2(seed=43)
+    random.seed(9981)
+    before = random.getstate()
+    first_provider = SyntheticCalibrationProvider()
+    first = first_provider.generate(request)
+    first_provider.generate(_request(seed=999))
+    repeated = first_provider.generate(request)
+    separate = SyntheticCalibrationProvider().generate(request)
+
+    assert first.canonical_bytes() == repeated.canonical_bytes()
+    assert first.canonical_bytes() == separate.canonical_bytes()
+    assert random.getstate() == before
+
+
+def test_additive_reverse_profile_does_not_change_existing_nominal_fingerprints():
+    request = _request()
+    result = SyntheticCalibrationProvider().generate(request)
+
+    assert request.fingerprint == (
+        "f4874082be246481c3408df14044d0d55e20e1b20da1aef85039f3cc01bac009"
+    )
+    assert result.result_fingerprint == (
+        "aa78d8dbfd52bbee63e84c894b5aaab1b0a4ea80d302ba9729c6e6839c53287b"
+    )
 
 
 def test_request_round_trip_is_canonical_and_strict():
@@ -297,6 +426,17 @@ def test_droplet_to_stream_retains_explicit_mode_transition():
     assert result.measured_volume_nL >= 40.0
     assert row["printing_mode"] == "stream"
     assert row["phase"] == "stream"
+
+
+def test_stream_to_droplet_retains_explicit_mode_transition():
+    result = SyntheticCalibrationProvider().generate(_request("stream_to_droplet"))
+    row = result.to_application_summary_row()
+
+    assert result.original_printing_mode == "stream"
+    assert result.applied_printing_mode == "droplet"
+    assert result.measured_volume_nL == 38.0
+    assert row["printing_mode"] == "droplet"
+    assert row["phase"] == "sweep"
 
 
 def test_boundary_profiles_land_on_exact_inclusive_application_bounds():

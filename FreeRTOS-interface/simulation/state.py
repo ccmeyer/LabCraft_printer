@@ -93,7 +93,7 @@ class SimulationTimingPolicy:
             return int(override)
         if command == "WAIT":
             return max(0, int(param1))
-        if command == "DISPENSE":
+        if command in {"DISPENSE", "DISPENSE_PRINT", "DISPENSE_REFUEL"}:
             droplets = max(0, int(param1))
             rate_hz = max(1, int(param2))
             return max(1, int(math.ceil(1000.0 * droplets / rate_hz)))

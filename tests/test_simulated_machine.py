@@ -60,6 +60,8 @@ def test_timing_policy_defaults_validation_and_duration_calculation():
     assert policy.gripper_duration_ms == 10
     assert policy.simulated_duration_ms("WAIT", 42) == 42
     assert policy.simulated_duration_ms("DISPENSE", 3, 20) == 150
+    assert policy.simulated_duration_ms("DISPENSE_PRINT", 3, 20) == 150
+    assert policy.simulated_duration_ms("DISPENSE_REFUEL", 3, 20) == 150
     assert policy.simulated_duration_ms("ABSOLUTE_X", 100) == 25
     assert policy.simulated_duration_ms("HOME_Z") == 50
     assert policy.wall_delay_ms(0) == 1
@@ -212,6 +214,48 @@ def test_supported_commands_update_state_and_callbacks(qapp, test_profile):
     assert callbacks == ["homed", "dispensed"]
     assert gripper_events == ["closed"]
     assert home_events == ["home"]
+
+
+def test_manual_refuel_commands_use_normal_queue_and_update_pressure(
+    qapp,
+    test_profile,
+):
+    machine = _make_machine(qapp, test_profile)
+
+    absolute = machine.set_absolute_refuel_pressure(0.5, manual=True)
+    relative = machine.set_relative_refuel_pressure(0.1, manual=True)
+    print_only = machine.print_only(5, manual=True)
+    refuel_only = machine.refuel_only(5, manual=True)
+
+    assert [
+        absolute.command_type,
+        relative.command_type,
+        print_only.command_type,
+        refuel_only.command_type,
+    ] == [
+        "ABSOLUTE_PRESSURE_R",
+        "RELATIVE_PRESSURE_R",
+        "DISPENSE_PRINT",
+        "DISPENSE_REFUEL",
+    ]
+    assert print_only.simulated_duration_ms == 250
+    assert refuel_only.simulated_duration_ms == 250
+
+    _wait_until(qapp, machine.check_if_all_completed)
+
+    assert machine.convert_to_psi(machine.state.target_refuel_pressure_raw) == pytest.approx(
+        0.6,
+        abs=0.002,
+    )
+    completed_types = [
+        command.command_type for command in machine.command_queue.completed
+    ]
+    assert completed_types[-4:] == [
+        "ABSOLUTE_PRESSURE_R",
+        "RELATIVE_PRESSURE_R",
+        "DISPENSE_PRINT",
+        "DISPENSE_REFUEL",
+    ]
 
 
 def test_completion_handler_can_extend_queue_and_runs_once(qapp, test_profile):

@@ -1560,6 +1560,7 @@ class CalibrationManager(QObject):
         self._droplet_calibration_sequence_state = {}
         self._capture_performance_process_instance_index = 0
         self._transient_characterization_candidate = None
+        self._historical_characterization_candidates = {}
 
         self.calibration_queue = []
 
@@ -3359,19 +3360,49 @@ class CalibrationManager(QObject):
         self.calibration_file_path = file_path
         self.remove_all_calibrations()
 
+    @staticmethod
+    def _normalize_loaded_calibration_data(payload):
+        """Normalize the supported legacy empty document without persisting it."""
+        if not isinstance(payload, dict):
+            raise ValueError("Calibration data must be a JSON object.")
+        normalized = dict(payload)
+        runs = normalized.get("runs")
+        if runs is None:
+            normalized.setdefault("schema_version", 1)
+            normalized["runs"] = []
+        elif not isinstance(runs, list):
+            raise ValueError("Calibration data 'runs' must be a list.")
+        return normalized
+
     def update_calibration_file_path(self, file_path):
         os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
+        previous_path = self.calibration_file_path
+        path_changed = (
+            previous_path is None
+            or os.path.normcase(os.path.abspath(previous_path))
+            != os.path.normcase(os.path.abspath(file_path))
+        )
+        if path_changed:
+            # Loading another experiment must not retain a run index belonging
+            # to the previous calibration document. Do not end that run here:
+            # experiment loading is a read-only ownership transition.
+            self._run_id = None
+            self._run_idx = None
+            self._reset_calibration_memory_prior_runtime()
+            self._reset_online_stream_prior_runtime()
+            self._reset_calibration_memory_ui_recommendation_state()
         self.calibration_file_path = file_path
-        # Try to load existing; else start a new envelope
+        # Loading an existing file is read-only. The repository's legacy empty
+        # calibration document is `{}`, normalized in memory to the v1 envelope.
         if os.path.exists(file_path):
             try:
                 with open(file_path, "r") as f:
-                    self.data = json.load(f)
+                    self.data = self._normalize_loaded_calibration_data(json.load(f))
             except Exception:
                 self.data = {"schema_version": 1, "runs": []}
         else:
             self.data = {"schema_version": 1, "runs": []}
-        self._save_atomic()
+            self._save_atomic()
 
     def save_calibration_data(self, file_path):
         self.calibration_file_path = file_path
@@ -3380,7 +3411,7 @@ class CalibrationManager(QObject):
     def load_calibration_data(self, file_path):
         self.calibration_file_path = file_path
         with open(file_path, 'r') as file:
-            self.data = json.load(file)
+            self.data = self._normalize_loaded_calibration_data(json.load(file))
 
     def ensure_loaded(self):
         """
@@ -3401,7 +3432,7 @@ class CalibrationManager(QObject):
         if os.path.exists(self.calibration_file_path) and not (self.data.get("runs")):
             try:
                 with open(self.calibration_file_path, "r") as f:
-                    self.data = json.load(f)
+                    self.data = self._normalize_loaded_calibration_data(json.load(f))
             except Exception:
                 # keep empty structure on failure
                 self.data = {"schema_version": 1, "runs": []}
@@ -6419,13 +6450,30 @@ class CalibrationManager(QObject):
         return c
 
     def _latest_step_list(self, phase_name):
-        if self._run_idx is None:
+        runs = self.data.get("runs") if isinstance(self.data, dict) else None
+        run_idx = self._run_idx
+        if (
+            not isinstance(runs, list)
+            or not isinstance(run_idx, int)
+            or isinstance(run_idx, bool)
+            or run_idx < 0
+            or run_idx >= len(runs)
+        ):
+            return []
+        run = runs[run_idx]
+        if not isinstance(run, dict):
+            return []
+        steps = run.get("steps")
+        if not isinstance(steps, dict):
             return []
         phase_key = self._resolve_phase_key(phase_name)
-        steps = self.data["runs"][self._run_idx]["steps"]
         canonical = steps.get(phase_key, [])
-        if canonical:
+        if isinstance(canonical, list) and canonical:
             return canonical
+        if canonical is None:
+            canonical = []
+        elif not isinstance(canonical, list):
+            return []
 
         # Backward compatibility: older runs may have stored the legacy alias
         # key directly (e.g. "trajectory_calibration"). Fall back to those keys
@@ -6434,7 +6482,7 @@ class CalibrationManager(QObject):
             if canonical_key != phase_key or alias_key == phase_key:
                 continue
             legacy_rows = steps.get(alias_key, [])
-            if legacy_rows:
+            if isinstance(legacy_rows, list) and legacy_rows:
                 return legacy_rows
         return canonical
 
@@ -7717,7 +7765,12 @@ class CalibrationManager(QObject):
         normalized["design_volume_nL"] = context.get("design_volume_nL")
         return normalized
 
-    def set_transient_characterization_candidate(self, candidate):
+    def _build_characterization_candidate_entry(
+        self,
+        candidate,
+        *,
+        identity_field,
+    ):
         if not isinstance(candidate, TransientCharacterizationCandidate):
             raise TypeError(
                 "candidate must be a TransientCharacterizationCandidate"
@@ -7795,19 +7848,52 @@ class CalibrationManager(QObject):
 
         row.update(
             {
-                "_transient_candidate_id": candidate.candidate_id,
+                str(identity_field): candidate.candidate_id,
                 "original_printing_mode": requested_mode,
                 "applied_printing_mode": applied_mode,
                 "source_filter_key": "synthetic",
                 "phase_label": "Synthetic",
             }
         )
-        self._transient_characterization_candidate = {
+        return {
             "candidate": candidate,
             "row": row,
         }
+
+    def set_transient_characterization_candidate(self, candidate):
+        self._transient_characterization_candidate = (
+            self._build_characterization_candidate_entry(
+                candidate,
+                identity_field="_transient_candidate_id",
+            )
+        )
         self.characterizationSummaryUpdated.emit()
         return candidate.candidate_id
+
+    def set_historical_characterization_candidates(self, candidates):
+        """Replace the read-only, artifact-validated synthetic history surface."""
+
+        entries = {}
+        for candidate in tuple(candidates or ()):
+            entry = self._build_characterization_candidate_entry(
+                candidate,
+                identity_field="_historical_candidate_id",
+            )
+            candidate_id = entry["candidate"].candidate_id
+            if candidate_id in entries and entries[candidate_id] != entry:
+                raise ValueError("historical characterization candidate ID collision")
+            entry["row"]["application_record_state"] = "applied_history"
+            entries[candidate_id] = entry
+        self._historical_characterization_candidates = entries
+        self.characterizationSummaryUpdated.emit()
+        return tuple(sorted(entries))
+
+    def clear_historical_characterization_candidates(self):
+        if not self._historical_characterization_candidates:
+            return False
+        self._historical_characterization_candidates = {}
+        self.characterizationSummaryUpdated.emit()
+        return True
 
     def clear_transient_characterization_candidate(self, candidate_id=None):
         stored = self._transient_characterization_candidate
@@ -7822,15 +7908,33 @@ class CalibrationManager(QObject):
 
     def validate_characterization_candidate_for_application(self, row):
         row = dict(row or {})
-        candidate_id = row.get("_transient_candidate_id")
+        transient_id = row.get("_transient_candidate_id")
+        historical_id = row.get("_historical_candidate_id")
+        if transient_id and historical_id:
+            return {
+                "ok": False,
+                "code": "candidate_changed",
+                "message": "The calibration row contains conflicting candidate identities.",
+            }
+        candidate_id = transient_id or historical_id
         if not candidate_id:
             return {"ok": True, "code": "persisted_result", "message": ""}
-        stored = self._transient_characterization_candidate
-        if stored is None or stored["candidate"].candidate_id != str(candidate_id):
+        if transient_id:
+            stored = self._transient_characterization_candidate
+            available = (
+                stored is not None
+                and stored["candidate"].candidate_id == str(candidate_id)
+            )
+        else:
+            stored = self._historical_characterization_candidates.get(
+                str(candidate_id)
+            )
+            available = stored is not None
+        if not available:
             return {
                 "ok": False,
                 "code": "candidate_unavailable",
-                "message": "The transient calibration candidate is no longer available.",
+                "message": "The synthetic calibration candidate is no longer available.",
             }
         candidate = stored["candidate"]
         expected_row = stored["row"]
@@ -7886,11 +7990,48 @@ class CalibrationManager(QObject):
         result = self.validate_characterization_candidate_for_application(stored["row"])
         return [dict(stored["row"])] if result.get("ok") else []
 
+    def _historical_characterization_rows(self):
+        current = self.get_characterization_application_context()
+        if current is None:
+            return []
+        observed = self._normalized_candidate_identity(current)
+        active_ids = {
+            str(row.get("_transient_candidate_id"))
+            for row in self._transient_characterization_rows()
+            if row.get("_transient_candidate_id")
+        }
+        rows = []
+        for candidate_id, stored in sorted(
+            self._historical_characterization_candidates.items()
+        ):
+            if candidate_id in active_ids:
+                continue
+            candidate = stored["candidate"]
+            expected = self._normalized_candidate_identity(candidate.__dict__)
+            identity_keys = (
+                "printer_head_id",
+                "stock_id",
+                "factor_name",
+                "option_name",
+                "is_fill",
+            )
+            if all(observed[key] == expected[key] for key in identity_keys):
+                rows.append(dict(stored["row"]))
+        return rows
+
     def get_characterization_summary_rows(self):
         _cur_stock, matching = self._get_pressure_sweep_summary_matching_runs()
         if not matching:
+            historical_rows = getattr(
+                self,
+                "_historical_characterization_rows",
+                None,
+            )
+            rows = historical_rows() if callable(historical_rows) else []
             transient_rows = getattr(self, "_transient_characterization_rows", None)
-            return transient_rows() if callable(transient_rows) else []
+            if callable(transient_rows):
+                rows.extend(transient_rows())
+            return rows
 
         focus_run_id = self.get_pressure_sweep_summary_focus_run_id()
         run_ids_in_order = [run.get("run_id") for _, run in matching]
@@ -8142,6 +8283,13 @@ class CalibrationManager(QObject):
             r["timestamp"] or ""
         ))
         transient_rows = getattr(self, "_transient_characterization_rows", None)
+        historical_rows = getattr(
+            self,
+            "_historical_characterization_rows",
+            None,
+        )
+        if callable(historical_rows):
+            rows.extend(historical_rows())
         if callable(transient_rows):
             rows.extend(transient_rows())
         return rows

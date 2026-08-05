@@ -160,14 +160,31 @@ def test_simulated_pass_uses_existing_controller_path_and_records_provenance():
 def test_deferred_failed_and_passed_outcomes_reconcile_preflight():
     adapter, _experiment, _recorder, calls, _failures = _adapter()
 
-    deferred = adapter.record_outcome("deferred")
+    deferred = adapter.record_deferred()
     failed = adapter.record_outcome("failed")
+    unclear = adapter.record_outcome(
+        "unclear",
+        operator_judgment="unclear",
+        trial_count=2,
+        trial_droplet_count=10,
+    )
     passed = adapter.record_outcome("passed")
 
     assert deferred["after_preflight"]["code"] == "deferred_refuel_check"
     assert failed["after_preflight"]["code"] == "failed_refuel_check"
+    assert unclear["after_preflight"]["code"] == "unclear_refuel_check"
     assert passed["after_preflight"]["code"] == "passed_refuel_check"
-    assert [item[0] for item in calls] == ["deferred", "failed", "passed"]
+    assert [item[0] for item in calls] == [
+        "deferred",
+        "failed",
+        "unclear",
+        "passed",
+    ]
+    assert calls[0][2]["trial_count"] == 0
+    assert calls[0][2]["trial_droplet_count"] == 0
+    assert calls[2][2]["operator_judgment"] == "unclear"
+    assert calls[2][2]["trial_count"] == 2
+    assert calls[2][2]["trial_droplet_count"] == 10
 
 
 def test_stale_fingerprint_fails_before_recording_and_repeat_is_idempotent():

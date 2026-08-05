@@ -34,7 +34,7 @@ def _wait_until(qapp, predicate, timeout_ms=5000):
     assert predicate(), "condition did not become true before timeout"
 
 
-def test_simulator_control_is_persistent_and_uses_only_session_callbacks(
+def test_simulator_control_is_diagnostics_only_and_normal_connection_is_bound(
     qapp,
     tmp_path,
 ):
@@ -52,11 +52,25 @@ def test_simulator_control_is_persistent_and_uses_only_session_callbacks(
         assert control.parent() is view
         assert control.seed_label.text() == "23"
         assert control.timing_label.text() == "1000x"
-        assert control.connect_button.isEnabled()
-        assert not control.disconnect_button.isEnabled()
         assert control.show_inspector_button.isEnabled()
         assert control.export_snapshot_button.isEnabled()
-        assert not view.connection_widget.machine_connect_button.isEnabled()
+        connection = view.connection_widget
+        assert connection.machine_connect_button.isEnabled()
+        assert connection.machine_connect_button.text() == "Connect"
+        if connection.legacy_mode:
+            assert connection.machine_port_combo.currentText() == "SIMULATED"
+            assert not connection.machine_port_combo.isEnabled()
+        else:
+            assert connection.port_label.text() == "SIMULATED"
+        assert control.findChild(
+            QtWidgets.QPushButton, "connectSimulatorButton"
+        ) is None
+        assert control.findChild(
+            QtWidgets.QPushButton, "generateSyntheticDropletCalibrationButton"
+        ) is None
+        assert control.findChild(
+            QtWidgets.QPushButton, "recordSimulatedManualRefuelOutcomeButton"
+        ) is None
 
         session.inspector.hide()
         control.show_inspector_button.click()
@@ -70,42 +84,10 @@ def test_simulator_control_is_persistent_and_uses_only_session_callbacks(
             >= snapshot_sequence + 3
         )
 
-        control.connect_button.click()
+        connection.machine_connect_button.click()
         _wait_until(qapp, lambda: session.components.machine.state.connected)
         assert "SIMULATED" in control.connection_label.text()
-        assert not control.connect_button.isEnabled()
-        assert control.disconnect_button.isEnabled()
-        assert [
-            control.calibration_profile_combo.itemData(index)
-            for index in range(control.calibration_profile_combo.count())
-        ] == ["nominal_droplet", "droplet_to_stream", "nominal_stream"]
-        assert [
-            control.refuel_outcome_combo.itemData(index)
-            for index in range(control.refuel_outcome_combo.count())
-        ] == ["passed", "deferred", "failed"]
-        assert control.refuel_outcome_combo.findData("bypassed") == -1
-
-        calibration_calls = []
-        refuel_calls = []
-        control._calibration_availability_callback = lambda _profile: {"ok": True}
-        control._refuel_availability_callback = lambda: {"ok": True}
-        control._generate_calibration_callback = (
-            lambda profile: calibration_calls.append(profile) or {"ok": True}
-        )
-        control._record_refuel_outcome_callback = (
-            lambda outcome: refuel_calls.append(outcome) or {"ok": True}
-        )
-        control.calibration_profile_combo.setCurrentIndex(
-            control.calibration_profile_combo.findData("droplet_to_stream")
-        )
-        control.refuel_outcome_combo.setCurrentIndex(
-            control.refuel_outcome_combo.findData("failed")
-        )
-        control._update_buttons(True)
-        control.generate_calibration_button.click()
-        control.record_refuel_outcome_button.click()
-        assert calibration_calls == ["droplet_to_stream"]
-        assert refuel_calls == ["failed"]
+        assert connection.machine_connect_button.text() == "Disconnect"
 
         session.components.controller.toggle_motors()
         session.components.controller.home_machine()
@@ -113,11 +95,11 @@ def test_simulator_control_is_persistent_and_uses_only_session_callbacks(
         assert "Enabled" in control.motors_label.text()
         assert "Yes" in control.motors_label.text()
 
-        control.disconnect_button.click()
+        connection.machine_connect_button.click()
         _wait_until(qapp, lambda: not session.components.machine.state.connected)
         assert control.connection_label.text() == "Disconnected"
-        assert control.connect_button.isEnabled()
-        assert not control.disconnect_button.isEnabled()
+        assert connection.machine_connect_button.isEnabled()
+        assert connection.machine_connect_button.text() == "Connect"
     finally:
         assert session.close()
 

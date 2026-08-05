@@ -82,6 +82,7 @@ order and does not inspect or change process-global random state.
 | `nominal_droplet` | Samples within a fully droplet-scale request interval |
 | `nominal_stream` | Samples within a fully stream-scale request interval |
 | `droplet_to_stream` | Retains original droplet mode and applies stream mode |
+| `stream_to_droplet` | Retains original stream mode and applies the exact low request boundary below 40 nL |
 | `low_volume_boundary` | Uses the exact inclusive lower volume bound |
 | `high_volume_boundary` | Uses the exact inclusive upper volume bound |
 | `invalid_outlier` | Produces a finite value above the request interval |
@@ -108,5 +109,11 @@ Every result states that it provides no evidence for:
 - motion/collision safety, firmware, or protocol behavior.
 
 The provider performs no filesystem, Qt, Model, Controller, serial, balance,
-camera, hardware-factory, or authoritative-state operation. Milestone 4A will
-own presentation and application through the real UI path.
+camera, hardware-factory, or authoritative-state operation. Milestones 4A–4C
+own presentation and application through simulation-gated versions of the real
+application result and workflow surfaces.
+
+Directional droplet-to-stream generation from source volumes that cannot form
+a valid symmetric v1 interval is represented by the additive
+`sil_calibration_schema_v2.md` contract. V1 serialization and fingerprints are
+unchanged.

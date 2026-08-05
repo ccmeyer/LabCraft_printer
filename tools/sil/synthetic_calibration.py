@@ -22,6 +22,9 @@ CALIBRATION_RESULT_SCHEMA_ID = "labcraft.sil_calibration_result"
 CALIBRATION_SCHEMA_VERSION = 1
 SYNTHETIC_CALIBRATION_PROVIDER_VERSION = "milestone-3-v1"
 PROFILE_VERSION = 1
+CALIBRATION_SCHEMA_VERSION_V2 = 2
+SYNTHETIC_CALIBRATION_PROVIDER_VERSION_V2 = "milestone-4c-v2"
+DROPLET_TO_STREAM_PROFILE_VERSION_V2 = 2
 
 PRINTING_MODES = frozenset({"droplet", "stream"})
 MODE_BOUNDARY_NL = 40.0
@@ -63,6 +66,44 @@ _REQUEST_FIELDS = {
 }
 
 _RESULT_FIELDS = _REQUEST_FIELDS | {
+    "request_fingerprint",
+    "result_fingerprint",
+    "measured_volume_nL",
+    "effective_volume_nL",
+    "original_printing_mode",
+    "applied_printing_mode",
+    "pw_us",
+    "pressure_psi",
+    "run_id",
+    "phase",
+    "timestamp",
+    "source_row_fingerprint",
+    "application_valid",
+    "validation_errors",
+    "synthetic_limitations",
+}
+
+_REQUEST_V2_FIELDS = {
+    "schema_id",
+    "schema_version",
+    "provider_version",
+    "profile_id",
+    "profile_version",
+    "seed",
+    "virtual_run_id",
+    "printer_head_id",
+    "stock_id",
+    "factor_name",
+    "option_name",
+    "is_fill",
+    "requested_mode",
+    "source_volume_nL",
+    "target_volume_nL",
+    "pressure_bounds_psi",
+    "pulse_width_bounds_us",
+}
+
+_RESULT_V2_FIELDS = _REQUEST_V2_FIELDS | {
     "request_fingerprint",
     "result_fingerprint",
     "measured_volume_nL",
@@ -264,6 +305,10 @@ _PROFILES = (
         "Explicit synthetic mode transition from droplet to stream.",
     ),
     SyntheticCalibrationProfileV1(
+        "stream_to_droplet", PROFILE_VERSION, "low_boundary", "stream", "droplet", True,
+        "Explicit synthetic mode transition from stream to droplet.",
+    ),
+    SyntheticCalibrationProfileV1(
         "low_volume_boundary", PROFILE_VERSION, "low_boundary", None, None, True,
         "Exact inclusive lower bound of the requested volume interval.",
     ),
@@ -281,6 +326,21 @@ _PROFILES = (
     ),
 )
 _PROFILE_REGISTRY = {(profile.profile_id, profile.profile_version): profile for profile in _PROFILES}
+_DROPLET_TO_STREAM_PROFILE_V2 = SyntheticCalibrationProfileV1(
+    "droplet_to_stream",
+    DROPLET_TO_STREAM_PROFILE_VERSION_V2,
+    "high_boundary",
+    "droplet",
+    "stream",
+    True,
+    "Directional synthetic transition from a retained droplet source to an explicit stream target.",
+)
+_PROFILE_REGISTRY[
+    (
+        _DROPLET_TO_STREAM_PROFILE_V2.profile_id,
+        _DROPLET_TO_STREAM_PROFILE_V2.profile_version,
+    )
+] = _DROPLET_TO_STREAM_PROFILE_V2
 
 
 @dataclass(frozen=True)
@@ -440,6 +500,163 @@ class CalibrationGenerationRequestV1:
         )
 
 
+@dataclass(frozen=True)
+class CalibrationGenerationRequestV2:
+    """Directional droplet-to-stream request with explicit source and target."""
+
+    seed: int
+    profile_id: str
+    virtual_run_id: str
+    printer_head_id: str
+    stock_id: str
+    factor_name: str
+    option_name: str | None
+    is_fill: bool
+    requested_mode: str
+    source_volume_nL: float
+    target_volume_nL: float
+    pressure_bounds_psi: tuple[float, float]
+    pulse_width_bounds_us: tuple[int, int]
+    provider_version: str = SYNTHETIC_CALIBRATION_PROVIDER_VERSION_V2
+    profile_version: int = DROPLET_TO_STREAM_PROFILE_VERSION_V2
+    schema_id: str = CALIBRATION_REQUEST_SCHEMA_ID
+    schema_version: int = CALIBRATION_SCHEMA_VERSION_V2
+
+    def __post_init__(self) -> None:
+        if self.schema_id != CALIBRATION_REQUEST_SCHEMA_ID:
+            raise CalibrationContractError("request.schema_id: unsupported schema identity")
+        if self.schema_version != CALIBRATION_SCHEMA_VERSION_V2:
+            raise CalibrationContractError("request.schema_version: unsupported schema version")
+        if self.provider_version != SYNTHETIC_CALIBRATION_PROVIDER_VERSION_V2:
+            raise CalibrationContractError("request.provider_version: unsupported provider version")
+        if self.profile_id != "droplet_to_stream":
+            raise CalibrationContractError(
+                "request.profile_id: schema v2 supports only droplet_to_stream"
+            )
+        if self.profile_version != DROPLET_TO_STREAM_PROFILE_VERSION_V2:
+            raise CalibrationContractError("request.profile_version: unsupported profile version")
+        seed = _require_int(self.seed, "request.seed", minimum=0)
+        if seed > 2**63 - 1:
+            raise CalibrationContractError("request.seed: must be between 0 and 2^63-1")
+        for name in (
+            "virtual_run_id",
+            "printer_head_id",
+            "stock_id",
+            "factor_name",
+        ):
+            _require_nonempty_string(getattr(self, name), f"request.{name}")
+        _require_optional_string(self.option_name, "request.option_name")
+        if not isinstance(self.is_fill, bool):
+            raise CalibrationContractError("request.is_fill: must be boolean")
+        if self.requested_mode != "droplet":
+            raise CalibrationContractError(
+                "request.requested_mode: droplet_to_stream requires droplet"
+            )
+
+        source = _require_finite_number(
+            self.source_volume_nL, "request.source_volume_nL"
+        )
+        target = _require_finite_number(
+            self.target_volume_nL, "request.target_volume_nL"
+        )
+        if not EJECTION_VOLUME_MIN_NL <= source < MODE_BOUNDARY_NL:
+            raise CalibrationContractError(
+                "request.source_volume_nL: must be at least 1 nL and below 40 nL"
+            )
+        if not MODE_BOUNDARY_NL <= target <= EJECTION_VOLUME_MAX_NL:
+            raise CalibrationContractError(
+                "request.target_volume_nL: must be between 40 and 250 nL"
+            )
+        object.__setattr__(self, "source_volume_nL", source)
+        object.__setattr__(self, "target_volume_nL", target)
+
+        pressure_pair = _require_pair(
+            self.pressure_bounds_psi, "request.pressure_bounds_psi"
+        )
+        pressure_bounds = tuple(
+            _require_finite_number(value, f"request.pressure_bounds_psi[{index}]")
+            for index, value in enumerate(pressure_pair)
+        )
+        if pressure_bounds[0] > pressure_bounds[1]:
+            raise CalibrationContractError(
+                "request.pressure_bounds_psi: lower bound must not exceed upper bound"
+            )
+        if (
+            pressure_bounds[0] < PRINT_PRESSURE_MIN_PSI
+            or pressure_bounds[1] > PRINT_PRESSURE_MAX_PSI
+        ):
+            raise CalibrationContractError(
+                "request.pressure_bounds_psi: must remain within 0.3-5.0 psi"
+            )
+        object.__setattr__(self, "pressure_bounds_psi", pressure_bounds)
+
+        pulse_pair = _require_pair(
+            self.pulse_width_bounds_us, "request.pulse_width_bounds_us"
+        )
+        pulse_bounds = tuple(
+            _require_int(value, f"request.pulse_width_bounds_us[{index}]", minimum=1)
+            for index, value in enumerate(pulse_pair)
+        )
+        if pulse_bounds[0] > pulse_bounds[1]:
+            raise CalibrationContractError(
+                "request.pulse_width_bounds_us: lower bound must not exceed upper bound"
+            )
+        object.__setattr__(self, "pulse_width_bounds_us", pulse_bounds)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_id": self.schema_id,
+            "schema_version": self.schema_version,
+            "provider_version": self.provider_version,
+            "profile_id": self.profile_id,
+            "profile_version": self.profile_version,
+            "seed": self.seed,
+            "virtual_run_id": self.virtual_run_id,
+            "printer_head_id": self.printer_head_id,
+            "stock_id": self.stock_id,
+            "factor_name": self.factor_name,
+            "option_name": self.option_name,
+            "is_fill": self.is_fill,
+            "requested_mode": self.requested_mode,
+            "source_volume_nL": self.source_volume_nL,
+            "target_volume_nL": self.target_volume_nL,
+            "pressure_bounds_psi": list(self.pressure_bounds_psi),
+            "pulse_width_bounds_us": list(self.pulse_width_bounds_us),
+        }
+
+    def canonical_bytes(self) -> bytes:
+        return _canonical_json_bytes(self.to_dict())
+
+    @property
+    def fingerprint(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> "CalibrationGenerationRequestV2":
+        if not isinstance(payload, Mapping):
+            raise CalibrationContractError("request: must be a JSON object")
+        _require_exact_fields(payload, _REQUEST_V2_FIELDS, "request")
+        return cls(
+            seed=payload["seed"],
+            profile_id=payload["profile_id"],
+            virtual_run_id=payload["virtual_run_id"],
+            printer_head_id=payload["printer_head_id"],
+            stock_id=payload["stock_id"],
+            factor_name=payload["factor_name"],
+            option_name=payload["option_name"],
+            is_fill=payload["is_fill"],
+            requested_mode=payload["requested_mode"],
+            source_volume_nL=payload["source_volume_nL"],
+            target_volume_nL=payload["target_volume_nL"],
+            pressure_bounds_psi=tuple(payload["pressure_bounds_psi"]),
+            pulse_width_bounds_us=tuple(payload["pulse_width_bounds_us"]),
+            provider_version=payload["provider_version"],
+            profile_version=payload["profile_version"],
+            schema_id=payload["schema_id"],
+            schema_version=payload["schema_version"],
+        )
+
+
 def _application_validation_errors(
     *,
     request: CalibrationGenerationRequestV1,
@@ -476,6 +693,47 @@ def _application_validation_errors(
             errors.append("droplet_volume_not_below_mode_boundary")
         if applied_mode == "stream" and measured_volume_nL < MODE_BOUNDARY_NL:
             errors.append("stream_volume_below_mode_boundary")
+    if not request.pressure_bounds_psi[0] <= pressure_psi <= request.pressure_bounds_psi[1]:
+        errors.append("pressure_outside_requested_bounds")
+    if not request.pulse_width_bounds_us[0] <= pw_us <= request.pulse_width_bounds_us[1]:
+        errors.append("pulse_width_outside_requested_bounds")
+    return tuple(errors)
+
+
+def _application_validation_errors_v2(
+    *,
+    request: CalibrationGenerationRequestV2,
+    measured_volume_nL: float | None,
+    effective_volume_nL: float | None,
+    original_mode: str,
+    applied_mode: str,
+    pressure_psi: float,
+    pw_us: int,
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    if measured_volume_nL is None:
+        errors.append("missing_measurement")
+    elif not math.isclose(
+        measured_volume_nL,
+        request.target_volume_nL,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        errors.append("measured_volume_target_mismatch")
+    if effective_volume_nL is None:
+        errors.append("missing_effective_volume")
+    elif measured_volume_nL is not None and not math.isclose(
+        effective_volume_nL, measured_volume_nL, rel_tol=0.0, abs_tol=1e-9
+    ):
+        errors.append("effective_volume_mismatch")
+    if original_mode != request.requested_mode:
+        errors.append("original_mode_mismatch")
+    if applied_mode != "stream":
+        errors.append("applied_mode_mismatch")
+    if measured_volume_nL is not None and not (
+        MODE_BOUNDARY_NL <= measured_volume_nL <= EJECTION_VOLUME_MAX_NL
+    ):
+        errors.append("stream_volume_outside_application_envelope")
     if not request.pressure_bounds_psi[0] <= pressure_psi <= request.pressure_bounds_psi[1]:
         errors.append("pressure_outside_requested_bounds")
     if not request.pulse_width_bounds_us[0] <= pw_us <= request.pulse_width_bounds_us[1]:
@@ -814,8 +1072,342 @@ class CalibrationGenerationResultV1:
         )
 
 
+@dataclass(frozen=True)
+class CalibrationGenerationResultV2:
+    """Directional droplet-to-stream result retaining its source design volume."""
+
+    request_fingerprint: str
+    result_fingerprint: str
+    provider_version: str
+    profile_id: str
+    profile_version: int
+    seed: int
+    virtual_run_id: str
+    printer_head_id: str
+    stock_id: str
+    factor_name: str
+    option_name: str | None
+    is_fill: bool
+    requested_mode: str
+    source_volume_nL: float
+    target_volume_nL: float
+    pressure_bounds_psi: tuple[float, float]
+    pulse_width_bounds_us: tuple[int, int]
+    measured_volume_nL: float | None
+    effective_volume_nL: float | None
+    original_printing_mode: str
+    applied_printing_mode: str
+    pw_us: int
+    pressure_psi: float
+    run_id: str
+    phase: str
+    timestamp: str
+    source_row_fingerprint: tuple[Any, ...]
+    application_valid: bool
+    validation_errors: tuple[str, ...]
+    synthetic_limitations: tuple[str, ...]
+    schema_id: str = CALIBRATION_RESULT_SCHEMA_ID
+    schema_version: int = CALIBRATION_SCHEMA_VERSION_V2
+
+    def __post_init__(self) -> None:
+        if self.schema_id != CALIBRATION_RESULT_SCHEMA_ID:
+            raise CalibrationContractError("result.schema_id: unsupported schema identity")
+        if self.schema_version != CALIBRATION_SCHEMA_VERSION_V2:
+            raise CalibrationContractError("result.schema_version: unsupported schema version")
+        _require_sha256(self.request_fingerprint, "result.request_fingerprint")
+        _require_sha256(self.result_fingerprint, "result.result_fingerprint")
+        request = self.to_request()
+        if request.fingerprint != self.request_fingerprint:
+            raise CalibrationContractError(
+                "result.request_fingerprint does not match the retained request inputs"
+            )
+        measured = _require_optional_finite_number(
+            self.measured_volume_nL, "result.measured_volume_nL"
+        )
+        effective = _require_optional_finite_number(
+            self.effective_volume_nL, "result.effective_volume_nL"
+        )
+        pressure = _require_finite_number(self.pressure_psi, "result.pressure_psi")
+        pulse = _require_int(self.pw_us, "result.pw_us", minimum=1)
+        object.__setattr__(self, "measured_volume_nL", measured)
+        object.__setattr__(self, "effective_volume_nL", effective)
+        object.__setattr__(self, "pressure_psi", pressure)
+        object.__setattr__(self, "pw_us", pulse)
+        if self.original_printing_mode != "droplet":
+            raise CalibrationContractError(
+                "result.original_printing_mode: droplet_to_stream requires droplet"
+            )
+        if self.applied_printing_mode != "stream":
+            raise CalibrationContractError(
+                "result.applied_printing_mode: droplet_to_stream requires stream"
+            )
+        if self.run_id != self.virtual_run_id:
+            raise CalibrationContractError("result.run_id must equal virtual_run_id")
+        if self.phase != "stream":
+            raise CalibrationContractError("result.phase must be 'stream'")
+        if self.timestamp != _virtual_timestamp(self.request_fingerprint):
+            raise CalibrationContractError(
+                "result.timestamp does not match the deterministic virtual timestamp"
+            )
+        expected_source_fingerprint = _source_row_fingerprint(
+            run_id=self.run_id,
+            phase=self.phase,
+            timestamp=self.timestamp,
+            pw_us=self.pw_us,
+            pressure_psi=self.pressure_psi,
+            measured_volume_nL=self.measured_volume_nL,
+        )
+        if tuple(self.source_row_fingerprint) != expected_source_fingerprint:
+            raise CalibrationContractError(
+                "result.source_row_fingerprint does not match the application row identity"
+            )
+        if not isinstance(self.application_valid, bool):
+            raise CalibrationContractError("result.application_valid: must be boolean")
+        if not isinstance(self.validation_errors, tuple) or any(
+            not isinstance(item, str) or not item for item in self.validation_errors
+        ):
+            raise CalibrationContractError(
+                "result.validation_errors: must be an array of nonempty strings"
+            )
+        if tuple(self.synthetic_limitations) != SYNTHETIC_LIMITATIONS:
+            raise CalibrationContractError(
+                "result.synthetic_limitations must equal the provider limitations"
+            )
+        expected_errors = _application_validation_errors_v2(
+            request=request,
+            measured_volume_nL=self.measured_volume_nL,
+            effective_volume_nL=self.effective_volume_nL,
+            original_mode=self.original_printing_mode,
+            applied_mode=self.applied_printing_mode,
+            pressure_psi=self.pressure_psi,
+            pw_us=self.pw_us,
+        )
+        if self.validation_errors != expected_errors:
+            raise CalibrationContractError(
+                "result.validation_errors do not match the application contract"
+            )
+        if self.application_valid != (not expected_errors):
+            raise CalibrationContractError(
+                "result.application_valid does not match validation_errors"
+            )
+        fingerprint_payload = self.to_dict()
+        fingerprint_payload.pop("result_fingerprint")
+        if _canonical_sha256(fingerprint_payload) != self.result_fingerprint:
+            raise CalibrationContractError(
+                "result.result_fingerprint does not match the normalized result"
+            )
+
+    def to_request(self) -> CalibrationGenerationRequestV2:
+        return CalibrationGenerationRequestV2(
+            seed=self.seed,
+            profile_id=self.profile_id,
+            virtual_run_id=self.virtual_run_id,
+            printer_head_id=self.printer_head_id,
+            stock_id=self.stock_id,
+            factor_name=self.factor_name,
+            option_name=self.option_name,
+            is_fill=self.is_fill,
+            requested_mode=self.requested_mode,
+            source_volume_nL=self.source_volume_nL,
+            target_volume_nL=self.target_volume_nL,
+            pressure_bounds_psi=self.pressure_bounds_psi,
+            pulse_width_bounds_us=self.pulse_width_bounds_us,
+            provider_version=self.provider_version,
+            profile_version=self.profile_version,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_id": self.schema_id,
+            "schema_version": self.schema_version,
+            "provider_version": self.provider_version,
+            "profile_id": self.profile_id,
+            "profile_version": self.profile_version,
+            "seed": self.seed,
+            "virtual_run_id": self.virtual_run_id,
+            "printer_head_id": self.printer_head_id,
+            "stock_id": self.stock_id,
+            "factor_name": self.factor_name,
+            "option_name": self.option_name,
+            "is_fill": self.is_fill,
+            "requested_mode": self.requested_mode,
+            "source_volume_nL": self.source_volume_nL,
+            "target_volume_nL": self.target_volume_nL,
+            "pressure_bounds_psi": list(self.pressure_bounds_psi),
+            "pulse_width_bounds_us": list(self.pulse_width_bounds_us),
+            "request_fingerprint": self.request_fingerprint,
+            "result_fingerprint": self.result_fingerprint,
+            "measured_volume_nL": self.measured_volume_nL,
+            "effective_volume_nL": self.effective_volume_nL,
+            "original_printing_mode": self.original_printing_mode,
+            "applied_printing_mode": self.applied_printing_mode,
+            "pw_us": self.pw_us,
+            "pressure_psi": self.pressure_psi,
+            "run_id": self.run_id,
+            "phase": self.phase,
+            "timestamp": self.timestamp,
+            "source_row_fingerprint": list(self.source_row_fingerprint),
+            "application_valid": self.application_valid,
+            "validation_errors": list(self.validation_errors),
+            "synthetic_limitations": list(self.synthetic_limitations),
+        }
+
+    def canonical_bytes(self) -> bytes:
+        return _canonical_json_bytes(self.to_dict())
+
+    def validate_for_application(self) -> None:
+        if not self.application_valid or self.validation_errors:
+            detail = ", ".join(self.validation_errors) or "result is not application-valid"
+            raise CalibrationApplicationError(
+                f"synthetic calibration result cannot be applied: {detail}"
+            )
+
+    def to_application_summary_row(self) -> dict[str, Any]:
+        self.validate_for_application()
+        return {
+            "run_id": self.run_id,
+            "run_no": 1,
+            "phase": self.phase,
+            "phase_label": "Stream",
+            "timestamp": self.timestamp,
+            "timestamp_display": self.timestamp,
+            "pw_us": self.pw_us,
+            "pressure_psi": self.pressure_psi,
+            "mean_nL": self.measured_volume_nL,
+            "cv_pct": None,
+            "valid": True,
+            "invalid_reason": None,
+            "is_focus_run": True,
+            "printing_mode": self.applied_printing_mode,
+            "original_printing_mode": self.original_printing_mode,
+            "applied_printing_mode": self.applied_printing_mode,
+            "source_volume_nL": self.source_volume_nL,
+            "target_volume_nL": self.target_volume_nL,
+            "source_row_fingerprint": list(self.source_row_fingerprint),
+            "synthetic": True,
+            "synthetic_request_fingerprint": self.request_fingerprint,
+            "synthetic_result_fingerprint": self.result_fingerprint,
+            "synthetic_limitations": list(self.synthetic_limitations),
+            "predicted_stream_duration_us": None,
+            "flow_fit_status": "synthetic",
+            "tail_phase_status": "captured",
+            "warnings": [SYNTHETIC_STREAM_WARNING],
+        }
+
+    def to_application_calibration_step(self) -> dict[str, Any]:
+        self.validate_for_application()
+        return {
+            "timestamp": self.timestamp,
+            "settings": {
+                "print_width": self.pw_us,
+                "print_pressure": self.pressure_psi,
+            },
+            "result": {
+                "condition": {
+                    "print_pressure_psi": self.pressure_psi,
+                    "print_pulse_width_us": self.pw_us,
+                },
+                "priors": {},
+                "flow_phase": {"status": "synthetic", "fit_status": "synthetic"},
+                "tail_phase": {
+                    "status": "captured",
+                    "evidence_source": "synthetic",
+                },
+                "predicted_stream_duration_us": None,
+                "predicted_volume_nl": self.measured_volume_nL,
+                "learned_flow_start_offset_us": None,
+                "learned_tail_start_offset_us": None,
+                "warnings": [SYNTHETIC_STREAM_WARNING],
+                "synthetic": True,
+                "synthetic_result_fingerprint": self.result_fingerprint,
+                "synthetic_limitations": list(self.synthetic_limitations),
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> "CalibrationGenerationResultV2":
+        if not isinstance(payload, Mapping):
+            raise CalibrationContractError("result: must be a JSON object")
+        _require_exact_fields(payload, _RESULT_V2_FIELDS, "result")
+        source_fingerprint = payload["source_row_fingerprint"]
+        validation_errors = payload["validation_errors"]
+        limitations = payload["synthetic_limitations"]
+        if not isinstance(source_fingerprint, list):
+            raise CalibrationContractError(
+                "result.source_row_fingerprint: must be an array"
+            )
+        if not isinstance(validation_errors, list):
+            raise CalibrationContractError("result.validation_errors: must be an array")
+        if not isinstance(limitations, list):
+            raise CalibrationContractError("result.synthetic_limitations: must be an array")
+        return cls(
+            request_fingerprint=payload["request_fingerprint"],
+            result_fingerprint=payload["result_fingerprint"],
+            provider_version=payload["provider_version"],
+            profile_id=payload["profile_id"],
+            profile_version=payload["profile_version"],
+            seed=payload["seed"],
+            virtual_run_id=payload["virtual_run_id"],
+            printer_head_id=payload["printer_head_id"],
+            stock_id=payload["stock_id"],
+            factor_name=payload["factor_name"],
+            option_name=payload["option_name"],
+            is_fill=payload["is_fill"],
+            requested_mode=payload["requested_mode"],
+            source_volume_nL=payload["source_volume_nL"],
+            target_volume_nL=payload["target_volume_nL"],
+            pressure_bounds_psi=tuple(payload["pressure_bounds_psi"]),
+            pulse_width_bounds_us=tuple(payload["pulse_width_bounds_us"]),
+            measured_volume_nL=payload["measured_volume_nL"],
+            effective_volume_nL=payload["effective_volume_nL"],
+            original_printing_mode=payload["original_printing_mode"],
+            applied_printing_mode=payload["applied_printing_mode"],
+            pw_us=payload["pw_us"],
+            pressure_psi=payload["pressure_psi"],
+            run_id=payload["run_id"],
+            phase=payload["phase"],
+            timestamp=payload["timestamp"],
+            source_row_fingerprint=tuple(source_fingerprint),
+            application_valid=payload["application_valid"],
+            validation_errors=tuple(validation_errors),
+            synthetic_limitations=tuple(limitations),
+            schema_id=payload["schema_id"],
+            schema_version=payload["schema_version"],
+        )
+
+
+def deserialize_calibration_request(
+    payload: Any,
+) -> CalibrationGenerationRequestV1 | CalibrationGenerationRequestV2:
+    if not isinstance(payload, Mapping):
+        raise CalibrationContractError("request: must be a JSON object")
+    if payload.get("schema_id") != CALIBRATION_REQUEST_SCHEMA_ID:
+        raise CalibrationContractError("request.schema_id: unsupported schema identity")
+    version = payload.get("schema_version")
+    if version == CALIBRATION_SCHEMA_VERSION:
+        return CalibrationGenerationRequestV1.from_dict(payload)
+    if version == CALIBRATION_SCHEMA_VERSION_V2:
+        return CalibrationGenerationRequestV2.from_dict(payload)
+    raise CalibrationContractError("request.schema_version: unsupported schema version")
+
+
+def deserialize_calibration_result(
+    payload: Any,
+) -> CalibrationGenerationResultV1 | CalibrationGenerationResultV2:
+    if not isinstance(payload, Mapping):
+        raise CalibrationContractError("result: must be a JSON object")
+    if payload.get("schema_id") != CALIBRATION_RESULT_SCHEMA_ID:
+        raise CalibrationContractError("result.schema_id: unsupported schema identity")
+    version = payload.get("schema_version")
+    if version == CALIBRATION_SCHEMA_VERSION:
+        return CalibrationGenerationResultV1.from_dict(payload)
+    if version == CALIBRATION_SCHEMA_VERSION_V2:
+        return CalibrationGenerationResultV2.from_dict(payload)
+    raise CalibrationContractError("result.schema_version: unsupported schema version")
+
+
 class SyntheticCalibrationProvider:
-    """Pure deterministic provider backed by the frozen profile-v1 registry."""
+    """Pure deterministic provider with frozen v1 and additive v2 contracts."""
 
     provider_version = SYNTHETIC_CALIBRATION_PROVIDER_VERSION
 
@@ -831,10 +1423,21 @@ class SyntheticCalibrationProvider:
         return profile
 
     def generate(
+        self,
+        request: CalibrationGenerationRequestV1 | CalibrationGenerationRequestV2,
+    ) -> CalibrationGenerationResultV1 | CalibrationGenerationResultV2:
+        if isinstance(request, CalibrationGenerationRequestV2):
+            return self._generate_v2(request)
+        if not isinstance(request, CalibrationGenerationRequestV1):
+            raise TypeError(
+                "request must be a CalibrationGenerationRequestV1 or "
+                "CalibrationGenerationRequestV2"
+            )
+        return self._generate_v1(request)
+
+    def _generate_v1(
         self, request: CalibrationGenerationRequestV1
     ) -> CalibrationGenerationResultV1:
-        if not isinstance(request, CalibrationGenerationRequestV1):
-            raise TypeError("request must be a CalibrationGenerationRequestV1")
         profile = self.get_profile(request.profile_id, request.profile_version)
         if (
             profile.required_requested_mode is not None
@@ -858,6 +1461,10 @@ class SyntheticCalibrationProvider:
         if profile.profile_id == "droplet_to_stream" and volume_hi < MODE_BOUNDARY_NL:
             raise CalibrationContractError(
                 "droplet_to_stream requires a volume interval that reaches 40 nL"
+            )
+        if profile.profile_id == "stream_to_droplet" and volume_lo >= MODE_BOUNDARY_NL:
+            raise CalibrationContractError(
+                "stream_to_droplet requires a volume interval below 40 nL"
             )
         if profile.volume_strategy in {"low_boundary", "high_boundary"}:
             boundary_value = volume_lo if profile.volume_strategy == "low_boundary" else volume_hi
@@ -935,16 +1542,71 @@ class SyntheticCalibrationProvider:
         payload["result_fingerprint"] = _canonical_sha256(payload)
         return CalibrationGenerationResultV1.from_dict(payload)
 
+    def _generate_v2(
+        self, request: CalibrationGenerationRequestV2
+    ) -> CalibrationGenerationResultV2:
+        request_fingerprint = request.fingerprint
+        rng = random.Random(int(request_fingerprint, 16))
+        pressure_psi = round(rng.uniform(*request.pressure_bounds_psi), 9)
+        pw_us = rng.randint(*request.pulse_width_bounds_us)
+        measured_volume_nL = round(request.target_volume_nL, 9)
+        effective_volume_nL = measured_volume_nL
+        timestamp = _virtual_timestamp(request_fingerprint)
+        source_fingerprint = _source_row_fingerprint(
+            run_id=request.virtual_run_id,
+            phase="stream",
+            timestamp=timestamp,
+            pw_us=pw_us,
+            pressure_psi=pressure_psi,
+            measured_volume_nL=measured_volume_nL,
+        )
+        errors = _application_validation_errors_v2(
+            request=request,
+            measured_volume_nL=measured_volume_nL,
+            effective_volume_nL=effective_volume_nL,
+            original_mode="droplet",
+            applied_mode="stream",
+            pressure_psi=pressure_psi,
+            pw_us=pw_us,
+        )
+        payload = {
+            **request.to_dict(),
+            "schema_id": CALIBRATION_RESULT_SCHEMA_ID,
+            "request_fingerprint": request_fingerprint,
+            "measured_volume_nL": measured_volume_nL,
+            "effective_volume_nL": effective_volume_nL,
+            "original_printing_mode": "droplet",
+            "applied_printing_mode": "stream",
+            "pw_us": pw_us,
+            "pressure_psi": pressure_psi,
+            "run_id": request.virtual_run_id,
+            "phase": "stream",
+            "timestamp": timestamp,
+            "source_row_fingerprint": list(source_fingerprint),
+            "application_valid": not errors,
+            "validation_errors": list(errors),
+            "synthetic_limitations": list(SYNTHETIC_LIMITATIONS),
+        }
+        payload["result_fingerprint"] = _canonical_sha256(payload)
+        return CalibrationGenerationResultV2.from_dict(payload)
+
 
 __all__ = [
     "CALIBRATION_REQUEST_SCHEMA_ID",
     "CALIBRATION_RESULT_SCHEMA_ID",
     "CALIBRATION_SCHEMA_VERSION",
+    "CALIBRATION_SCHEMA_VERSION_V2",
+    "DROPLET_TO_STREAM_PROFILE_VERSION_V2",
     "SYNTHETIC_CALIBRATION_PROVIDER_VERSION",
+    "SYNTHETIC_CALIBRATION_PROVIDER_VERSION_V2",
     "CalibrationApplicationError",
     "CalibrationContractError",
     "CalibrationGenerationRequestV1",
+    "CalibrationGenerationRequestV2",
     "CalibrationGenerationResultV1",
+    "CalibrationGenerationResultV2",
     "SyntheticCalibrationProfileV1",
     "SyntheticCalibrationProvider",
+    "deserialize_calibration_request",
+    "deserialize_calibration_result",
 ]

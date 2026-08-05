@@ -354,6 +354,18 @@ class SimulationSession:
             snapshot_callback=self.snapshot,
             failure_callback=self.mark_failed,
         )
+        self.components.view.connection_widget.bind_simulation_connection(
+            SIMULATED_PORT,
+            connect_callback=self.connect_simulator,
+            disconnect_callback=self.disconnect_simulator,
+        )
+        self.components.view.pressure_box.bind_simulation_workflows(
+            calibration_generate_callback=self.calibration_adapter.generate,
+            calibration_availability_callback=self.calibration_adapter.availability,
+            manual_refuel_outcome_callback=self.manual_refuel_adapter.record_outcome,
+            manual_refuel_deferred_callback=self.manual_refuel_adapter.record_deferred,
+            manual_refuel_availability_callback=self.manual_refuel_adapter.availability,
+        )
         self._update_recorder_metadata()
 
         self.components.machine.machine_connected_signal.connect(
@@ -610,18 +622,8 @@ class SimulationSession:
             session_root=str(self.session_root),
             seed=self.config.seed,
             speed_multiplier=self.config.speed_multiplier,
-            connect_callback=self.connect_simulator,
-            disconnect_callback=self.disconnect_simulator,
             show_inspector_callback=self.show_state_inspector,
             export_snapshot_callback=self.export_state_snapshot,
-            generate_calibration_callback=(
-                self.calibration_adapter.generate_and_present
-            ),
-            calibration_availability_callback=self.calibration_adapter.availability,
-            record_refuel_outcome_callback=(
-                self.manual_refuel_adapter.record_outcome
-            ),
-            refuel_availability_callback=self.manual_refuel_adapter.availability,
         )
         self.components.view.addDockWidget(
             QtCore.Qt.RightDockWidgetArea,

@@ -2,6 +2,14 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from ExecutionCalibrationStore import (
+    ExecutionCalibrationDocument,
+    ExecutionCalibrationRecord,
+    deterministic_calibration_record_id,
+    save_execution_calibrations,
+)
 from tools.sil.session import (
     ArtifactRetentionPolicy,
     SessionRootPolicy,
@@ -22,6 +30,60 @@ def _session(qapp, root: Path):
             speed_multiplier=1000.0,
             source_identity="pytest-projection",
         )
+    )
+
+
+def _execution_calibration_document(plan_id: str) -> ExecutionCalibrationDocument:
+    records = {}
+    for index, (volume, mode) in enumerate(((9.0, "droplet"), (40.0, "stream")), 1):
+        values = {
+            "stock_id": "stock-1",
+            "printer_head_id": "head-1",
+            "factor_name": "Factor A",
+            "option_name": "",
+            "is_fill": False,
+            "measured_volume_nL": volume,
+            "effective_volume_nL": volume,
+            "pw_us": 1400,
+            "pressure_psi": 1.2,
+            "run_id": f"run-{index}",
+            "phase": "synthetic_characterization",
+            "timestamp": f"2000-01-0{index}T00:00:00Z",
+            "source_row_fingerprint": ("head-1", "stock-1", index, 1.2, 1400, volume),
+            "original_printing_mode": "droplet",
+            "applied_printing_mode": mode,
+            "printing_mode": mode,
+            "applied_design_volume_nL": volume,
+            "recorded_at": f"2000-01-0{index}T00:00:00Z",
+            "recorded_at_utc": f"2000-01-0{index}T00:00:00Z",
+        }
+        record_id = deterministic_calibration_record_id(plan_id, values)
+        records[record_id] = ExecutionCalibrationRecord(
+            record_id=record_id,
+            **values,
+        )
+    latest_id = next(reversed(records))
+    latest = records[latest_id]
+    return ExecutionCalibrationDocument(
+        plan_id=plan_id,
+        records=records,
+        manual_refuel_checks={
+            "check-1": {
+                "status": "passed",
+                "source": "sil_simulated_manual_refuel_check",
+                "stock_id": "stock-1",
+                "printer_head_id": "head-1",
+                "printing_mode": "stream",
+                "factor_name": "Factor A",
+                "option_name": "",
+                "is_fill": False,
+                "calibration_record_id": latest_id,
+                "applied_calibration_fingerprint": "fingerprint-1",
+                "applied_calibration_record": latest.to_dict(),
+                "previous_status": "failed",
+                "recorded_at": "2000-01-03T00:00:00Z",
+            }
+        },
     )
 
 
@@ -141,6 +203,236 @@ def test_unavailable_layers_and_reconciliation_are_explicit(tmp_path):
         "mismatches": [],
         "domains": {},
     }
+
+
+def test_authoritative_bundle_supplies_calibration_and_refuel_memory_layers():
+    class Record:
+        def __init__(self, payload):
+            self.payload = dict(payload)
+
+        def to_dict(self):
+            return dict(self.payload)
+
+    calibration = Record(
+        {
+            "record_id": "cal-1",
+            "stock_id": "stock-1",
+            "pw_us": 1400,
+        }
+    )
+    refuel = Record(
+        {
+            "status": "passed",
+            "stock_id": "stock-1",
+        }
+    )
+    document = SimpleNamespace(
+        schema_version=1,
+        plan_id="plan-1",
+        records={"cal-1": calibration},
+        manual_refuel_checks={"check-1": refuel},
+    )
+    bundle = SimpleNamespace(
+        plan=SimpleNamespace(plan_id="plan-1"),
+        calibrations=document,
+    )
+    manager = SimpleNamespace(
+        activeCalibration=None,
+        calibration_queue=[],
+        get_stream_calibration_sequence_state=lambda: {},
+        get_droplet_calibration_sequence_state=lambda: {},
+    )
+    experiment = SimpleNamespace(
+        applied_imaging_calibrations={"schema_version": 1, "records": {}},
+        manual_refuel_checks={"schema_version": 1, "records": {}},
+        _active_authoritative_execution_session=SimpleNamespace(bundle=bundle),
+    )
+    session = SimpleNamespace(
+        components=SimpleNamespace(
+            model=SimpleNamespace(
+                experiment_model=experiment,
+                calibration_manager=manager,
+            )
+        )
+    )
+    projector = StateProjectionBuilder(session)
+
+    calibration_state = projector._calibration_state()
+    refuel_state = projector._refuel_state()
+
+    assert calibration_state["applied_records"] == {
+        "cal-1": {
+            "record_id": "cal-1",
+            "stock_id": "stock-1",
+            "pw_us": 1400,
+        }
+    }
+    assert refuel_state["records"] == {
+        "check-1": {
+            "stock_id": "stock-1",
+            "status": "passed",
+        }
+    }
+    reconciliation = projector._reconcile(
+        {
+            "simulator": {"available": True, "state": {}},
+            "model_machine": {"available": True, "state": {}},
+            "calibration": {"available": True, "state": calibration_state},
+            "refuel_check": {"available": True, "state": refuel_state},
+            "persistence": {
+                "available": True,
+                "state": {
+                    "documents": {
+                        "execution_calibrations.json": {
+                            "document": {
+                                "record_count": 1,
+                                "manual_refuel_check_count": 1,
+                            }
+                        }
+                    }
+                },
+            },
+        }
+    )
+    assert reconciliation["status"] == "ok"
+
+
+def test_stale_bundle_falls_back_to_current_contained_sidecar_without_writes(
+    tmp_path,
+):
+    session_root = tmp_path / "session"
+    experiments_root = session_root / "experiments"
+    experiment_root = experiments_root / "experiment"
+    experiment_root.mkdir(parents=True)
+    plan_id = "11111111-1111-4111-8111-111111111111"
+    sidecar_path = experiment_root / "execution_calibrations.json"
+    save_execution_calibrations(
+        sidecar_path,
+        _execution_calibration_document(plan_id),
+    )
+    before = sidecar_path.read_bytes()
+    stale_document = SimpleNamespace(
+        schema_version=1,
+        plan_id=plan_id,
+        records={},
+        manual_refuel_checks={},
+    )
+    stale_bundle = SimpleNamespace(
+        plan=SimpleNamespace(plan_id=plan_id, plan_revision=3),
+        calibrations=stale_document,
+    )
+    current_plan = SimpleNamespace(plan_id=plan_id, plan_revision=4)
+    manager = SimpleNamespace(
+        activeCalibration=None,
+        calibration_queue=[],
+        get_stream_calibration_sequence_state=lambda: {},
+        get_droplet_calibration_sequence_state=lambda: {},
+    )
+    experiment = SimpleNamespace(
+        experiment_dir_path=str(experiment_root),
+        execution_calibrations_file_path=str(sidecar_path),
+        get_execution_plan_snapshot=lambda: current_plan,
+        applied_imaging_calibrations={"schema_version": 1, "records": {}},
+        manual_refuel_checks={"schema_version": 1, "records": {}},
+        _active_authoritative_execution_session=SimpleNamespace(
+            bundle=stale_bundle
+        ),
+        _authoritative_execution_bundle=stale_bundle,
+    )
+    session = SimpleNamespace(
+        session_root=session_root,
+        application_roots=SimpleNamespace(experiments_root=experiments_root),
+        components=SimpleNamespace(
+            model=SimpleNamespace(
+                experiment_model=experiment,
+                calibration_manager=manager,
+            )
+        ),
+    )
+    projector = StateProjectionBuilder(session)
+
+    calibration_state = projector._calibration_state()
+    refuel_state = projector._refuel_state()
+
+    assert len(calibration_state["applied_records"]) == 2
+    assert len(refuel_state["records"]) == 1
+    reconciliation = projector._reconcile(
+        {
+            "simulator": {"available": True, "state": {}},
+            "model_machine": {"available": True, "state": {}},
+            "calibration": {"available": True, "state": calibration_state},
+            "refuel_check": {"available": True, "state": refuel_state},
+            "persistence": {
+                "available": True,
+                "state": {
+                    "documents": {
+                        "execution_calibrations.json": {
+                            "document": {
+                                "record_count": 2,
+                                "manual_refuel_check_count": 1,
+                            }
+                        }
+                    }
+                },
+            },
+        }
+    )
+    assert reconciliation["status"] == "ok"
+    assert sidecar_path.read_bytes() == before
+
+
+def test_current_sidecar_identity_and_schema_fail_closed(tmp_path):
+    session_root = tmp_path / "session"
+    experiments_root = session_root / "experiments"
+    experiment_root = experiments_root / "experiment"
+    experiment_root.mkdir(parents=True)
+    plan_id = "11111111-1111-4111-8111-111111111111"
+    other_plan_id = "22222222-2222-4222-8222-222222222222"
+    sidecar_path = experiment_root / "execution_calibrations.json"
+    manager = SimpleNamespace(
+        activeCalibration=None,
+        calibration_queue=[],
+        get_stream_calibration_sequence_state=lambda: {},
+        get_droplet_calibration_sequence_state=lambda: {},
+    )
+    experiment = SimpleNamespace(
+        experiment_dir_path=str(experiment_root),
+        execution_calibrations_file_path=str(sidecar_path),
+        get_execution_plan_snapshot=lambda: SimpleNamespace(
+            plan_id=plan_id,
+            plan_revision=4,
+        ),
+        applied_imaging_calibrations={"schema_version": 1, "records": {}},
+        manual_refuel_checks={"schema_version": 1, "records": {}},
+        _active_authoritative_execution_session=None,
+        _authoritative_execution_bundle=None,
+    )
+    session = SimpleNamespace(
+        session_root=session_root,
+        application_roots=SimpleNamespace(experiments_root=experiments_root),
+        components=SimpleNamespace(
+            model=SimpleNamespace(
+                experiment_model=experiment,
+                calibration_manager=manager,
+            )
+        ),
+    )
+    projector = StateProjectionBuilder(session)
+
+    save_execution_calibrations(
+        sidecar_path,
+        _execution_calibration_document(other_plan_id),
+    )
+    mismatched_before = sidecar_path.read_bytes()
+    with pytest.raises(ValueError, match="different plan ID"):
+        projector._calibration_state()
+    assert sidecar_path.read_bytes() == mismatched_before
+
+    sidecar_path.write_text('{"schema_name":', encoding="utf-8")
+    malformed_before = sidecar_path.read_bytes()
+    with pytest.raises((ValueError, json.JSONDecodeError)):
+        projector._calibration_state()
+    assert sidecar_path.read_bytes() == malformed_before
 
 
 def test_reconciliation_reports_controller_rack_and_persistence_domains():

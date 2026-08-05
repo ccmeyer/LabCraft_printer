@@ -40,12 +40,15 @@ _SUPPORTED_COMMAND_TYPES = frozenset(
         "SET_AXIS_ACCEL",
         "ABSOLUTE_PRESSURE_P",
         "ABSOLUTE_PRESSURE_R",
+        "RELATIVE_PRESSURE_R",
         "SET_WIDTH_P",
         "SET_WIDTH_R",
         "ENABLE_PRINT_PROFILE",
         "DISABLE_PRINT_PROFILE",
         "WAIT",
         "DISPENSE",
+        "DISPENSE_PRINT",
+        "DISPENSE_REFUEL",
         "OPEN_GRIPPER",
         "CLOSE_GRIPPER",
         "GRIPPER_OFF",
@@ -646,6 +649,12 @@ class SimulatedMachine(QtCore.QObject):
         elif command_type == "ABSOLUTE_PRESSURE_R":
             self.state.current_refuel_pressure_raw = p1
             self.state.target_refuel_pressure_raw = p1
+        elif command_type == "RELATIVE_PRESSURE_R":
+            direction = 1 if int(p1) == 1 else -1
+            updated = self.state.target_refuel_pressure_raw + direction * int(p2)
+            updated = min(max(updated, self.psi_offset), 10376)
+            self.state.current_refuel_pressure_raw = updated
+            self.state.target_refuel_pressure_raw = updated
         elif command_type == "SET_WIDTH_P":
             self.state.print_pulse_width_us = p1
         elif command_type == "SET_WIDTH_R":
@@ -654,7 +663,7 @@ class SimulatedMachine(QtCore.QObject):
             self.state.print_profile_enabled = True
         elif command_type == "DISABLE_PRINT_PROFILE":
             self.state.print_profile_enabled = False
-        elif command_type == "DISPENSE":
+        elif command_type in {"DISPENSE", "DISPENSE_PRINT", "DISPENSE_REFUEL"}:
             self.state.dispense_frequency_hz = max(1, p2)
         elif command_type == "OPEN_GRIPPER":
             self.state.gripper_open = True
@@ -1232,8 +1241,28 @@ class SimulatedMachine(QtCore.QObject):
     def set_relative_print_pressure(self, *args, **kwargs):
         return self._unsupported("relative print pressure")
 
-    def set_relative_refuel_pressure(self, *args, **kwargs):
-        return self._unsupported("relative refuel pressure")
+    def set_relative_refuel_pressure(
+        self,
+        psi,
+        handler=None,
+        kwargs=None,
+        manual=False,
+    ):
+        try:
+            raw_delta = self.convert_to_raw_pressure(psi) - self.psi_offset
+        except (TypeError, ValueError, OverflowError):
+            return self._emit_error("relative refuel pressure must be numeric")
+        if not -2185 <= raw_delta <= 2185:
+            return self._emit_error("relative refuel pressure is out of range")
+        sign = 1 if raw_delta >= 0 else 0
+        return self._queue(
+            "RELATIVE_PRESSURE_R",
+            sign,
+            abs(raw_delta),
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual,
+        )
 
     def start_refuel_camera(self):
         return self._unsupported("refuel camera")
@@ -1280,11 +1309,59 @@ class SimulatedMachine(QtCore.QObject):
     def print_calibration_droplets(self, *args, **kwargs):
         return self._unsupported("calibration dispensing")
 
-    def print_only(self, *args, **kwargs):
-        return self._unsupported("print-only calibration command")
+    def _queue_single_valve_dispense(
+        self,
+        command_type,
+        droplet_count,
+        *,
+        handler=None,
+        kwargs=None,
+        manual=False,
+    ):
+        try:
+            droplets = int(droplet_count)
+        except (TypeError, ValueError):
+            droplets = -1
+        if not 1 <= droplets <= 1000:
+            return self._emit_error("droplet count must be between 1 and 1000")
+        return self._queue(
+            command_type,
+            droplets,
+            self._get_dispense_rate_hz(),
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual,
+        )
 
-    def refuel_only(self, *args, **kwargs):
-        return self._unsupported("refuel-only calibration command")
+    def print_only(
+        self,
+        droplet_count,
+        handler=None,
+        kwargs=None,
+        manual=False,
+    ):
+        return self._queue_single_valve_dispense(
+            "DISPENSE_PRINT",
+            droplet_count,
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual,
+        )
+
+    def refuel_only(
+        self,
+        droplet_count,
+        handler=None,
+        kwargs=None,
+        manual=False,
+    ):
+        return self._queue_single_valve_dispense(
+            "DISPENSE_REFUEL",
+            droplet_count,
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual,
+        )
 
 
 def make_simulated_machine_factory(config: SimulationConfig | None = None):

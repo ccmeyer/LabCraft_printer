@@ -45,6 +45,25 @@ class _Dialog(QtWidgets.QDialog):
         self.summary_table.setModel(self.summary_table_proxy_model)
         self.summary_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         layout.addWidget(self.summary_table)
+        self.calibration_tabs = QtWidgets.QTabWidget()
+        self.droplet_tab = QtWidgets.QWidget()
+        self.stream_tab = QtWidgets.QWidget()
+        self.calibration_tabs.addTab(self.droplet_tab, "Droplet")
+        self.calibration_tabs.addTab(self.stream_tab, "Stream")
+        self.calibrate_all_button = QtWidgets.QPushButton("Calibrate All")
+        self.calibrate_all_stream_button = QtWidgets.QPushButton("Calibrate All")
+        self.droplet_tab.setLayout(QtWidgets.QVBoxLayout())
+        self.stream_tab.setLayout(QtWidgets.QVBoxLayout())
+        self.droplet_tab.layout().addWidget(self.calibrate_all_button)
+        self.stream_tab.layout().addWidget(self.calibrate_all_stream_button)
+        layout.addWidget(self.calibration_tabs)
+        self.model = SimpleNamespace(
+            calibration_manager=SimpleNamespace(
+                _transient_characterization_candidate=None
+            )
+        )
+        self.calibrate_all_button.clicked.connect(lambda: self._mark_generated(row))
+        self.calibrate_all_stream_button.clicked.connect(lambda: self._mark_generated(row))
         self.bridge_status_label = QtWidgets.QLabel("Preview ready")
         self.bridge_table = QtWidgets.QTableWidget(1, 1)
         self.bridge_apply_btn = QtWidgets.QPushButton("Apply selected calibration to design")
@@ -56,6 +75,13 @@ class _Dialog(QtWidgets.QDialog):
         layout.addWidget(self.bridge_table)
         layout.addWidget(self.bridge_apply_btn)
         self._bridge_preview_payload = {"new_droplet_nL": row["mean_nL"]}
+
+    def _mark_generated(self, row):
+        self.model.calibration_manager._transient_characterization_candidate = {
+            "candidate": SimpleNamespace(
+                result_fingerprint=row["synthetic_result_fingerprint"]
+            )
+        }
 
     def _selected_summary_row(self):
         selected = self.summary_table.selectionModel().selectedRows()
@@ -95,6 +121,7 @@ def test_calibration_dialog_driver_uses_visible_qt_controls(qapp):
     driver = CalibrationDialogDriver(qapp, dialog)
 
     presentation = driver.inspect_presentation()
+    generated = driver.generate_from_tab("droplet")
     selected = driver.select_result(row["synthetic_result_fingerprint"])
     preview = driver.inspect_preview()
     driver.apply_selected()
@@ -103,6 +130,9 @@ def test_calibration_dialog_driver_uses_visible_qt_controls(qapp):
     assert presentation["banner_visible"] is True
     assert presentation["mode_visible"] is True
     assert presentation["row_count"] == 1
+    assert generated["synthetic_result_fingerprint"] == row[
+        "synthetic_result_fingerprint"
+    ]
     assert selected["synthetic"] is True
     assert preview["apply_enabled"] is True
     assert preview["payload"]["new_droplet_nL"] == row["mean_nL"]

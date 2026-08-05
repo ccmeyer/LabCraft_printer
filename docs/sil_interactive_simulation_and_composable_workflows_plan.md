@@ -822,6 +822,54 @@ Rollback:
 - remove simulated refuel outcomes and stream journey support while retaining
   droplet calibration UI coverage.
 
+### Milestone 4C: Normal UI path convergence
+
+Status: `complete`
+
+Completion record:
+`docs/sil_interactive_simulation_milestone_4c_completion_record.md`
+
+The consolidated focused gate passed with 259 tests on 2026-08-05. Normal-UI
+visible evidence covers all four calibration profile mappings, and the final
+fresh/reload root reconciles the corrected 9 nL Droplet to 40 nL Stream
+transition, immediate in-dialog manual-refuel trial dispatch, Passed outcome,
+history reconstruction, plan revision, and clean teardown.
+
+Goal:
+
+- exercise simulation workflows through the application's normal connection,
+  calibration, and manual-refuel surfaces.
+
+Deliverables:
+
+- normal Connect/Disconnect bound to the exact `SIMULATED` sentinel;
+- full-layout camera-free calibration dialog launched by the normal button;
+- Droplet and Stream Calibrate All profile selection, including
+  stream-to-droplet transition;
+- additive schema-v2 directional droplet-to-stream generation from any valid
+  source below 40 nL, including the normal 9 nL default, with v1 fingerprints
+  preserved;
+- real manual-refuel command window with simulated outcome persistence;
+- diagnostics-only Simulator Control dock;
+- focused production-path, isolation, persistence, and reload coverage.
+
+Gate:
+
+- no dock workflow button is required for the normal journey;
+- physical connection, camera, optics, capture, balance, and calibration
+  handlers remain unreachable in simulation;
+- real preview, confirmation, Apply, command, preflight, and persistence paths
+  remain authoritative;
+- passed, failed, unclear, and deferred refuel states retain exact trial and
+  provenance evidence;
+- forward and reverse printing-mode transitions survive retained-root reload.
+
+Rollback:
+
+- remove the post-construction UI bindings, full-dialog simulation mode,
+  reverse profile, extended refuel bridge, and 4C tests while retaining
+  Milestones 1–4B.
+
 ### Milestone 5: Manual full-lifecycle characterization
 
 Status: `planned`
@@ -1388,7 +1436,8 @@ This effort is complete when:
 
 ## Current Next Action
 
-Create and review the concrete Milestone 5 implementation plan for manual
-full-lifecycle characterization. Do not begin Milestone 5 implementation,
-workflow migration, failure injection, performance remediation, firmware,
-protocol, Pi operations, or hardware changes until that plan is reviewed.
+Create and review a revised concrete Milestone 5 plan around the completed
+normal-UI convergence before beginning manual full-lifecycle characterization.
+Do not begin workflow migration, failure injection, performance remediation,
+firmware, protocol, Pi operations, or hardware changes as part of that planning
+step.

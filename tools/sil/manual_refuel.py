@@ -9,7 +9,9 @@ from typing import Any, Callable
 
 SIMULATED_MANUAL_REFUEL_PROVIDER_VERSION = "milestone-4b-v1"
 SIMULATED_MANUAL_REFUEL_SOURCE = "sil_simulated_manual_refuel_check"
-SIMULATED_MANUAL_REFUEL_OUTCOMES = frozenset({"passed", "deferred", "failed"})
+SIMULATED_MANUAL_REFUEL_OUTCOMES = frozenset(
+    {"passed", "deferred", "failed", "unclear"}
+)
 SIMULATED_MANUAL_REFUEL_TRIAL_COUNT = 1
 SIMULATED_MANUAL_REFUEL_DROPLET_COUNT = 5
 
@@ -275,13 +277,64 @@ class SimulatedManualRefuelOutcomeAdapter:
         status: str,
         *,
         expected_calibration_fingerprint: str | None = None,
+        operator_judgment: str = "simulated",
+        trial_count: int | None = None,
+        trial_droplet_count: int | None = None,
     ) -> dict[str, Any]:
         status = str(status or "").strip().lower()
         if status not in SIMULATED_MANUAL_REFUEL_OUTCOMES:
             return {
                 "ok": False,
                 "code": "unsupported_outcome",
-                "message": "Simulated outcomes are limited to passed, deferred, or failed.",
+                "message": (
+                    "Simulated outcomes are limited to passed, deferred, failed, "
+                    "or unclear."
+                ),
+            }
+        operator_judgment = str(operator_judgment or "").strip().lower()
+        if status == "deferred" and operator_judgment == "simulated":
+            operator_judgment = "deferred"
+        if not operator_judgment:
+            return {
+                "ok": False,
+                "code": "invalid_operator_judgment",
+                "message": "Operator judgment is required.",
+            }
+        if trial_count is None:
+            trial_count = 0 if status == "deferred" else SIMULATED_MANUAL_REFUEL_TRIAL_COUNT
+        if trial_droplet_count is None:
+            trial_droplet_count = (
+                0
+                if status == "deferred"
+                else SIMULATED_MANUAL_REFUEL_DROPLET_COUNT
+            )
+        if isinstance(trial_count, bool) or not isinstance(trial_count, int) or trial_count < 0:
+            return {
+                "ok": False,
+                "code": "invalid_trial_count",
+                "message": "Trial count must be a non-negative integer.",
+            }
+        if (
+            isinstance(trial_droplet_count, bool)
+            or not isinstance(trial_droplet_count, int)
+            or trial_droplet_count < 0
+        ):
+            return {
+                "ok": False,
+                "code": "invalid_trial_droplet_count",
+                "message": "Trial droplet count must be a non-negative integer.",
+            }
+        if status == "deferred" and (trial_count != 0 or trial_droplet_count != 0):
+            return {
+                "ok": False,
+                "code": "invalid_deferred_trial_metadata",
+                "message": "A deferred check must record zero completed trials and droplets.",
+            }
+        if status != "deferred" and (trial_count <= 0 or trial_droplet_count <= 0):
+            return {
+                "ok": False,
+                "code": "trial_required",
+                "message": "A completed paired trial is required for this outcome.",
             }
         readiness = self.availability()
         if not readiness.get("ok"):
@@ -306,10 +359,9 @@ class SimulatedManualRefuelOutcomeAdapter:
             existing.get("status") == status
             and existing.get("source") == SIMULATED_MANUAL_REFUEL_SOURCE
             and existing.get("notes") == notes
-            and existing.get("operator_judgment") == "simulated"
-            and existing.get("trial_count") == SIMULATED_MANUAL_REFUEL_TRIAL_COUNT
-            and existing.get("trial_droplet_count")
-            == SIMULATED_MANUAL_REFUEL_DROPLET_COUNT
+            and existing.get("operator_judgment") == operator_judgment
+            and existing.get("trial_count") == trial_count
+            and existing.get("trial_droplet_count") == trial_droplet_count
             and existing.get("applied_calibration_fingerprint") == fingerprint
         ):
             self.last_outcome = dict(existing)
@@ -333,9 +385,9 @@ class SimulatedManualRefuelOutcomeAdapter:
             record = recorder(
                 status,
                 SIMULATED_MANUAL_REFUEL_SOURCE,
-                trial_droplet_count=SIMULATED_MANUAL_REFUEL_DROPLET_COUNT,
-                trial_count=SIMULATED_MANUAL_REFUEL_TRIAL_COUNT,
-                operator_judgment="simulated",
+                trial_droplet_count=trial_droplet_count,
+                trial_count=trial_count,
+                operator_judgment=operator_judgment,
                 notes=notes,
             )
         except Exception as exc:
@@ -366,8 +418,9 @@ class SimulatedManualRefuelOutcomeAdapter:
                 "source": SIMULATED_MANUAL_REFUEL_SOURCE,
                 "provider_version": SIMULATED_MANUAL_REFUEL_PROVIDER_VERSION,
                 "seed": self.seed,
-                "trial_count": SIMULATED_MANUAL_REFUEL_TRIAL_COUNT,
-                "trial_droplet_count": SIMULATED_MANUAL_REFUEL_DROPLET_COUNT,
+                "trial_count": trial_count,
+                "trial_droplet_count": trial_droplet_count,
+                "operator_judgment": operator_judgment,
                 "printer_head_id": readiness["printer_head_id"],
                 "stock_id": readiness["stock_id"],
                 "factor_name": readiness["factor_name"],
@@ -404,6 +457,21 @@ class SimulatedManualRefuelOutcomeAdapter:
             "before_preflight": before_preflight,
             "after_preflight": dict(after_preflight or {}),
         }
+
+    def record_deferred(
+        self,
+        *,
+        expected_calibration_fingerprint: str | None = None,
+    ) -> dict[str, Any]:
+        """Record the real post-Apply prompt's explicit defer decision."""
+
+        return self.record_outcome(
+            "deferred",
+            expected_calibration_fingerprint=expected_calibration_fingerprint,
+            operator_judgment="deferred",
+            trial_count=0,
+            trial_droplet_count=0,
+        )
 
     def _on_manual_refuel_changed(self, record: Any) -> None:
         if isinstance(record, dict):

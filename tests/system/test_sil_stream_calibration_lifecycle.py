@@ -29,7 +29,7 @@ def _configure_stream_transition_design(em):
         "Virtual Stream Stock",
         [1.0],
         "x",
-        25.0,
+        9.0,
         forced_stock_conc=10.0,
         printing_mode="droplet",
     )
@@ -62,7 +62,7 @@ def test_stream_transition_refuel_pass_and_reload_authoritative_bundle(
     Model.load_experiment_from_model(model, finalize_execution_plan=True)
     prepared = em.get_execution_plan_snapshot()
     stock = next(item for item in prepared.stocks if item.factor_name != "Water")
-    assert stock.effective_volume_nL == 25.0
+    assert stock.effective_volume_nL == 9.0
     assert stock.printing_mode == "droplet"
 
     mode = {"value": "droplet"}
@@ -135,6 +135,8 @@ def test_stream_transition_refuel_pass_and_reload_authoritative_bundle(
     generated = calibration.generate_and_present("droplet_to_stream")
     assert generated["ok"] is True
     result = calibration.current_result
+    assert result.source_volume_nL == 9.0
+    assert result.target_volume_nL == 40.0
     assert result.measured_volume_nL == 40.0
     row = model.calibration_manager.get_characterization_summary_rows()[0]
 

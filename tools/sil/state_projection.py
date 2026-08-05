@@ -304,6 +304,7 @@ class StateProjectionBuilder:
             return {}
         keys = (
             "calibration_record_id",
+            "record_id",
             "run_id",
             "phase",
             "stock_id",
@@ -313,6 +314,7 @@ class StateProjectionBuilder:
             "effective_volume_nL",
             "pressure_psi",
             "pulse_width_us",
+            "pw_us",
             "source_row_fingerprint",
             "status",
             "outcome",
@@ -322,18 +324,93 @@ class StateProjectionBuilder:
         )
         return {key: _value(record.get(key)) for key in keys if key in record}
 
+    @staticmethod
+    def _record_payload(record: Any) -> dict[str, Any]:
+        if isinstance(record, Mapping):
+            return dict(record)
+        to_dict = _safe_attr(record, "to_dict")
+        if callable(to_dict):
+            payload = to_dict()
+            if isinstance(payload, Mapping):
+                return dict(payload)
+        raise TypeError("authoritative calibration record is not a mapping")
+
+    def _authoritative_calibration_document(self):
+        experiment = self.session.components.model.experiment_model
+        current_plan = _safe_call(experiment, "get_execution_plan_snapshot")
+        session = _safe_attr(
+            experiment,
+            "_active_authoritative_execution_session",
+        )
+        bundles = (
+            _safe_attr(session, "bundle"),
+            _safe_attr(experiment, "_authoritative_execution_bundle"),
+        )
+        for bundle in bundles:
+            document = _safe_attr(bundle, "calibrations")
+            plan = _safe_attr(bundle, "plan")
+            if document is None or plan is None:
+                continue
+            plan_id = _safe_attr(plan, "plan_id")
+            if _safe_attr(document, "plan_id") != plan_id:
+                continue
+            if current_plan is not None and (
+                plan_id != _safe_attr(current_plan, "plan_id")
+                or _safe_attr(plan, "plan_revision")
+                != _safe_attr(current_plan, "plan_revision")
+            ):
+                continue
+            return document
+
+        if current_plan is None:
+            return None
+        directory = self._experiment_directory()
+        if directory is None:
+            return None
+        sidecar_path = (directory / "execution_calibrations.json").resolve()
+        configured_path = _safe_attr(
+            experiment,
+            "execution_calibrations_file_path",
+        )
+        if configured_path and Path(configured_path).resolve() != sidecar_path:
+            raise ValueError(
+                "execution-calibration path does not match the active experiment"
+            )
+        if not sidecar_path.is_file():
+            return None
+
+        # Import lazily because the production interface directory is installed
+        # by application composition rather than being a Python package.
+        from ExecutionCalibrationStore import load_execution_calibrations
+
+        document = load_execution_calibrations(str(sidecar_path))
+        if _safe_attr(document, "plan_id") != _safe_attr(current_plan, "plan_id"):
+            raise ValueError(
+                "execution_calibrations.json references a different plan ID"
+            )
+        return document
+
     def _calibration_state(self) -> dict[str, Any]:
         experiment = self.session.components.model.experiment_model
-        document = _safe_attr(experiment, "applied_imaging_calibrations", {}) or {}
-        records = document.get("records", {}) if isinstance(document, Mapping) else {}
-        manager = self.session.components.model.calibration_manager
-        active = _safe_attr(manager, "activeCalibration")
-        return {
-            "schema_version": (
+        authoritative = self._authoritative_calibration_document()
+        if authoritative is not None:
+            schema_version = _safe_attr(authoritative, "schema_version", 1)
+            records = {
+                str(key): self._record_payload(value)
+                for key, value in _safe_attr(authoritative, "records", {}).items()
+            }
+        else:
+            document = _safe_attr(experiment, "applied_imaging_calibrations", {}) or {}
+            schema_version = (
                 document.get("schema_version")
                 if isinstance(document, Mapping)
                 else None
-            ),
+            )
+            records = document.get("records", {}) if isinstance(document, Mapping) else {}
+        manager = self.session.components.model.calibration_manager
+        active = _safe_attr(manager, "activeCalibration")
+        return {
+            "schema_version": schema_version,
             "applied_records": {
                 str(key): self._record_summary(value)
                 for key, value in sorted(records.items(), key=lambda item: str(item[0]))
@@ -350,14 +427,27 @@ class StateProjectionBuilder:
 
     def _refuel_state(self) -> dict[str, Any]:
         experiment = self.session.components.model.experiment_model
-        document = _safe_attr(experiment, "manual_refuel_checks", {}) or {}
-        records = document.get("records", {}) if isinstance(document, Mapping) else {}
-        return {
-            "schema_version": (
+        authoritative = self._authoritative_calibration_document()
+        if authoritative is not None:
+            schema_version = _safe_attr(authoritative, "schema_version", 1)
+            records = {
+                str(key): self._record_payload(value)
+                for key, value in _safe_attr(
+                    authoritative,
+                    "manual_refuel_checks",
+                    {},
+                ).items()
+            }
+        else:
+            document = _safe_attr(experiment, "manual_refuel_checks", {}) or {}
+            schema_version = (
                 document.get("schema_version")
                 if isinstance(document, Mapping)
                 else None
-            ),
+            )
+            records = document.get("records", {}) if isinstance(document, Mapping) else {}
+        return {
+            "schema_version": schema_version,
             "records": {
                 str(key): self._record_summary(value)
                 for key, value in sorted(records.items(), key=lambda item: str(item[0]))

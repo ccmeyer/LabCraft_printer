@@ -1453,10 +1453,34 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         "neutral": ("dark_gray", "#4d4d4d", "#ffffff"),
     }
 
-    def __init__(self, parent, model, controller):
+    def __init__(
+        self,
+        parent,
+        model,
+        controller,
+        *,
+        simulation_outcome_callback=None,
+        expected_calibration_fingerprint=None,
+    ):
         super().__init__(parent)
         self.model = model
         self.controller = controller
+        self.simulation_outcome_callback = (
+            simulation_outcome_callback
+            if callable(simulation_outcome_callback)
+            else None
+        )
+        self.expected_calibration_fingerprint = (
+            None
+            if expected_calibration_fingerprint is None
+            else str(expected_calibration_fingerprint)
+        )
+        if self.simulation_outcome_callback is not None:
+            runtime_context = getattr(parent, "runtime_context", None)
+            if runtime_context is not SIMULATION_RUNTIME_CONTEXT:
+                raise RuntimeError(
+                    "Simulated manual-refuel recording requires canonical simulation runtime."
+                )
         self.color_dict = dict(getattr(parent, "color_dict", {}) or {})
         self.trial_count = 0
         self.last_trial_droplet_count = None
@@ -1530,6 +1554,18 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
+
+        self.synthetic_refuel_banner = None
+        if self.simulation_outcome_callback is not None:
+            self.synthetic_refuel_banner = QtWidgets.QLabel(
+                "SIMULATED MANUAL REFUEL — NO PHYSICAL FLUID OBSERVATION"
+            )
+            self.synthetic_refuel_banner.setObjectName("syntheticManualRefuelBanner")
+            self.synthetic_refuel_banner.setWordWrap(True)
+            self.synthetic_refuel_banner.setStyleSheet(
+                "font-weight: bold; color: #1f2937; background: #f59e0b; padding: 8px;"
+            )
+            layout.addWidget(self.synthetic_refuel_banner)
 
         self.status_label = QtWidgets.QLabel(
             "Step 1: move to loading and center the visible channel level."
@@ -1807,17 +1843,30 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
             return False
         if not self._queue_idle():
             return False
-        recorder = getattr(self.controller, "record_manual_refuel_check_outcome", None)
+        recorder = self.simulation_outcome_callback
+        if recorder is None:
+            recorder = getattr(self.controller, "record_manual_refuel_check_outcome", None)
         if not callable(recorder):
             self.status_label.setText("Manual refuel check recording is unavailable.")
             return False
-        result = recorder(
-            status,
-            self.SOURCE,
-            operator_judgment=judgment,
-            trial_droplet_count=self.last_trial_droplet_count,
-            trial_count=self.trial_count,
-        )
+        if self.simulation_outcome_callback is not None:
+            result = recorder(
+                status,
+                expected_calibration_fingerprint=(
+                    self.expected_calibration_fingerprint
+                ),
+                operator_judgment=judgment,
+                trial_droplet_count=self.last_trial_droplet_count,
+                trial_count=self.trial_count,
+            )
+        else:
+            result = recorder(
+                status,
+                self.SOURCE,
+                operator_judgment=judgment,
+                trial_droplet_count=self.last_trial_droplet_count,
+                trial_count=self.trial_count,
+            )
         if isinstance(result, dict) and result.get("ok") is False:
             self.status_label.setText(str(result.get("message") or "Failed to record manual refuel check."))
             return False
@@ -1921,8 +1970,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
         post_apply_manual_refuel_check_callback=None,
         result_presentation_only=False,
         transient_candidate_id=None,
+        simulation_workflow_mode=False,
+        synthetic_generation_callback=None,
+        synthetic_availability_callback=None,
+        synthetic_deferred_refuel_callback=None,
     ):
-        super().__init__()
+        dialog_parent = (
+            main_window
+            if (
+                (result_presentation_only or simulation_workflow_mode)
+                and isinstance(main_window, QtWidgets.QWidget)
+            )
+            else None
+        )
+        super().__init__(dialog_parent)
         print('\n---Created new droplet imaging dialog---\n')
         self.main_window = main_window
         self.color_dict = self.main_window.color_dict
@@ -1931,15 +1992,45 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.refuel_camera_model = getattr(model, "refuel_camera_model", None)
         self.controller = controller
         self.result_presentation_only = bool(result_presentation_only)
+        self.simulation_workflow_mode = bool(simulation_workflow_mode)
+        if self.result_presentation_only and self.simulation_workflow_mode:
+            raise ValueError(
+                "result presentation and full simulation workflow modes are mutually exclusive"
+            )
+        self.camera_free_mode = bool(
+            self.result_presentation_only or self.simulation_workflow_mode
+        )
+        self.synthetic_generation_callback = (
+            synthetic_generation_callback
+            if callable(synthetic_generation_callback)
+            else None
+        )
+        self.synthetic_availability_callback = (
+            synthetic_availability_callback
+            if callable(synthetic_availability_callback)
+            else None
+        )
+        self.synthetic_deferred_refuel_callback = (
+            synthetic_deferred_refuel_callback
+            if callable(synthetic_deferred_refuel_callback)
+            else None
+        )
         self.transient_candidate_id = (
             None if transient_candidate_id is None else str(transient_candidate_id)
         )
-        if self.result_presentation_only:
+        if self.camera_free_mode:
             runtime_context = getattr(self.main_window, "runtime_context", None)
             if runtime_context is not SIMULATION_RUNTIME_CONTEXT:
                 raise RuntimeError(
-                    "Synthetic calibration presentation is available only in the canonical simulation runtime."
+                    "Synthetic calibration UI is available only in the canonical simulation runtime."
                 )
+        if self.simulation_workflow_mode and (
+            self.synthetic_generation_callback is None
+            or self.synthetic_availability_callback is None
+        ):
+            raise RuntimeError(
+                "Synthetic workflow mode requires generation and availability callbacks."
+            )
         self.service_mode = bool(service_mode)
         self.initial_tab = str(initial_tab or "").strip().lower()
         self.open_refuel_camera_callback = open_refuel_camera_callback if callable(open_refuel_camera_callback) else None
@@ -1957,7 +2048,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.shortcut_manager = ShortcutManager(self)
         self.manual_flash_shortcut = None
-        if not self.result_presentation_only:
+        if not self.camera_free_mode:
             self.setup_shortcuts()
 
         self.flash_active = False
@@ -1965,7 +2056,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.analysis_active = False
         self._read_camera_stream_armed = False
         self._read_camera_stream_reconciled = False
-        if not self.result_presentation_only:
+        if not self.camera_free_mode:
             self.start_droplet_camera()
             self._arm_read_camera_stream_on_open()
 
@@ -2032,7 +2123,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._calibration_record_export_thread = None
         self._calibration_record_export_worker = None
         self._calibration_record_export_in_progress = False
-        if not self.result_presentation_only:
+        if not self.camera_free_mode:
             try:
                 self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
             except Exception:
@@ -2067,7 +2158,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         info_panel_v.setSpacing(8)
         self.synthetic_calibration_banner = None
         self.synthetic_calibration_mode_label = None
-        if self.result_presentation_only:
+        if self.camera_free_mode:
             self.synthetic_calibration_banner = QtWidgets.QLabel(
                 "SYNTHETIC CALIBRATION — NO CAMERA OR PHYSICAL EVIDENCE"
             )
@@ -3196,7 +3287,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model.calibration_manager.readinessChanged.connect(self.on_readiness_changed)
         self.model.calibration_manager._emit_readiness()
 
-        if not self.result_presentation_only:
+        if not self.camera_free_mode:
             self.set_exposure_time(self.droplet_camera_model.exposure_time)
             self.set_flash_delay(self.droplet_camera_model.flash_delay)
             self.set_flash_duration(self.droplet_camera_model.flash_duration)
@@ -3210,6 +3301,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.populate_summary_table()
         if self.result_presentation_only:
             self._apply_result_presentation_only_ui()
+        elif self.simulation_workflow_mode:
+            self._apply_simulation_workflow_ui()
         else:
             self._install_droplet_capture_raw_attempt_filter()
             self._refresh_manual_control_lock_state()
@@ -3258,6 +3351,138 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if synthetic_index >= 0:
             self.summary_source_combo.setCurrentIndex(synthetic_index)
         self.populate_summary_table()
+
+    def _apply_simulation_workflow_ui(self):
+        """Keep the real result/Apply layout while making physical controls inert."""
+
+        self.setWindowTitle("Synthetic Calibration Workflow — No Hardware")
+        if self.synthetic_calibration_mode_label is not None:
+            self.synthetic_calibration_mode_label.setText(
+                "Use the Droplet or Stream tab and its Calibrate All button. "
+                "The result is deterministic and contains no physical evidence."
+            )
+        self.image_label.clear()
+        self.image_label.setText(
+            "CAMERA DISABLED IN SIMULATION\n\nNo image or physical evidence is available."
+        )
+        self.image_label.setObjectName("syntheticCalibrationCameraPlaceholder")
+        self.image_label.setStyleSheet(
+            "background-color: #111827; color: #f59e0b; border: 1px solid #f59e0b; "
+            "padding: 16px; font-weight: bold;"
+        )
+        self.online_stream_plot_container.hide()
+        self.acquisition_controls_section.setEnabled(False)
+        tabs = self.calibration_tabs
+        tabs.setTabEnabled(tabs.indexOf(self.droplet_tab), True)
+        tabs.setTabEnabled(tabs.indexOf(self.stream_tab), True)
+        tabs.setTabEnabled(tabs.indexOf(self.debug_tab), False)
+        tabs.setTabEnabled(tabs.indexOf(self.optics_tab), False)
+
+        allowed = {self.calibrate_all_button, self.calibrate_all_stream_button}
+        guarded_types = (
+            QtWidgets.QAbstractButton,
+            QtWidgets.QAbstractSpinBox,
+            QtWidgets.QComboBox,
+            QtWidgets.QLineEdit,
+        )
+        for tab in (self.droplet_tab, self.stream_tab):
+            for widget in tab.findChildren(QtWidgets.QWidget):
+                if isinstance(widget, guarded_types) and widget not in allowed:
+                    widget.setEnabled(False)
+                    widget.setToolTip(
+                        "Physical calibration control disabled in simulation."
+                    )
+        self._apply_default_calibration_tab_from_printing_mode()
+        self._refresh_synthetic_workflow_controls()
+
+    def _synthetic_profile_for_target_mode(self, target_mode):
+        current_mode = self._resolve_active_printer_head_printing_mode()
+        target_mode = self._normalize_printing_mode(target_mode)
+        mapping = {
+            ("droplet", "droplet"): "nominal_droplet",
+            ("droplet", "stream"): "droplet_to_stream",
+            ("stream", "stream"): "nominal_stream",
+            ("stream", "droplet"): "stream_to_droplet",
+        }
+        return mapping[(current_mode, target_mode)]
+
+    def _refresh_synthetic_workflow_controls(self):
+        if not bool(getattr(self, "simulation_workflow_mode", False)):
+            return
+        readiness_by_target = {}
+        for target_mode, button in (
+            ("droplet", self.calibrate_all_button),
+            ("stream", self.calibrate_all_stream_button),
+        ):
+            profile_id = self._synthetic_profile_for_target_mode(target_mode)
+            try:
+                readiness = self.synthetic_availability_callback(profile_id)
+            except Exception as exc:
+                readiness = {"ok": False, "message": str(exc)}
+            readiness_by_target[target_mode] = readiness or {}
+            button.setEnabled(bool((readiness or {}).get("ok")))
+            button.setToolTip(
+                str((readiness or {}).get("message") or "Synthetic calibration is unavailable.")
+            )
+            button.setProperty("synthetic_profile_id", profile_id)
+        active_target = (
+            "stream"
+            if self.calibration_tabs.currentWidget() is self.stream_tab
+            else "droplet"
+        )
+        active_readiness = readiness_by_target.get(active_target, {})
+        if self.synthetic_calibration_mode_label is not None:
+            current_mode = self._resolve_active_printer_head_printing_mode()
+            transition = (
+                f"{current_mode.title()} \u2192 {active_target.title()}"
+                if current_mode != active_target
+                else active_target.title()
+            )
+            self.synthetic_calibration_mode_label.setText(
+                f"{transition}: "
+                f"{str(active_readiness.get('message') or 'Synthetic calibration is unavailable.')}"
+            )
+            color = "#f59e0b" if active_readiness.get("ok") else "#ef4444"
+            self.synthetic_calibration_mode_label.setStyleSheet(
+                f"font-weight: bold; color: {color}; padding: 2px;"
+            )
+
+    def _generate_synthetic_for_target_mode(self, target_mode):
+        profile_id = self._synthetic_profile_for_target_mode(target_mode)
+        try:
+            result = self.synthetic_generation_callback(profile_id)
+        except Exception as exc:
+            result = {"ok": False, "message": f"Generation failed: {exc}"}
+        if not bool((result or {}).get("ok")):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Synthetic Calibration Not Generated",
+                str((result or {}).get("message") or "Synthetic generation failed."),
+            )
+            self._refresh_synthetic_workflow_controls()
+            return False
+        self.summary_current_run_checkbox.setChecked(True)
+        self.summary_valid_only_checkbox.setChecked(True)
+        synthetic_index = self.summary_source_combo.findData("synthetic")
+        if synthetic_index >= 0:
+            self.summary_source_combo.setCurrentIndex(synthetic_index)
+        self.populate_summary_table()
+        self.update_stage_and_log(
+            f"Synthetic result {str(result.get('result_fingerprint') or '')[:12]} is ready. "
+            "Select the row, review the preview, and Apply.",
+            "orange",
+        )
+        self._refresh_synthetic_workflow_controls()
+        QTimer.singleShot(0, self._restore_camera_free_window_activation)
+        return True
+
+    def _restore_camera_free_window_activation(self):
+        """Keep the owned asynchronous simulator dialog above its main window."""
+
+        if not bool(getattr(self, "camera_free_mode", False)) or not self.isVisible():
+            return
+        self.raise_()
+        self.activateWindow()
 
     def _build_droplet_capture_performance_debug_group(self):
         group = QtWidgets.QGroupBox("Droplet Capture Performance Debug")
@@ -5056,6 +5281,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         tabs = getattr(self, "calibration_tabs", None)
         if tabs is None:
             return
+        if bool(getattr(self, "simulation_workflow_mode", False)):
+            self._refresh_synthetic_workflow_controls()
+            return
         tab_bar = tabs.tabBar()
         lock_tabs = (
             DropletImagingDialog._is_calibration_busy(self)
@@ -6365,6 +6593,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_manual_control_lock_state()
 
     def _refresh_manual_control_lock_state(self, *_args):
+        if bool(getattr(self, "simulation_workflow_mode", False)):
+            self._refresh_synthetic_workflow_controls()
+            return
         busy = DropletImagingDialog._is_calibration_busy(self)
         was_locked = getattr(self, "_manual_controls_locked", False)
         flash_fault_latched = self._is_flash_fault_latched()
@@ -7003,6 +7234,27 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
 
     def _record_post_apply_manual_refuel_deferred(self):
+        if bool(getattr(self, "simulation_workflow_mode", False)):
+            recorder = getattr(self, "synthetic_deferred_refuel_callback", None)
+            if not callable(recorder):
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Manual Refuel Check Not Deferred",
+                    "The simulated deferred-outcome recorder is unavailable.",
+                )
+                return False
+            try:
+                result = recorder()
+            except Exception as exc:
+                result = {"ok": False, "message": str(exc)}
+            if isinstance(result, dict) and result.get("ok") is False:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Manual Refuel Check Not Deferred",
+                    str(result.get("message") or "Could not record the deferred check."),
+                )
+                return False
+            return True
         recorder = getattr(self.controller, "mark_manual_refuel_check_deferred", None)
         if not callable(recorder):
             QtWidgets.QMessageBox.warning(
@@ -9309,6 +9561,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Toggles whether the stream calibration sequence should be started.
         """
+        if bool(getattr(self, "simulation_workflow_mode", False)):
+            return self._generate_synthetic_for_target_mode("stream")
         manager = self.model.calibration_manager
         has_open_sequence = bool(
             getattr(manager, "has_open_stream_calibration_sequence", lambda: False)()
@@ -9333,6 +9587,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Toggles whether all calibrations should be started.
         """
+        if bool(getattr(self, "simulation_workflow_mode", False)):
+            return self._generate_synthetic_for_target_mode("droplet")
         manager = self.model.calibration_manager
         has_open_sequence = bool(
             getattr(manager, "has_open_droplet_calibration_sequence", lambda: False)()
@@ -9408,6 +9664,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._apply_cached_calibration_readiness()
 
     def _apply_cached_calibration_readiness(self):
+        if bool(getattr(self, "simulation_workflow_mode", False)):
+            self._refresh_synthetic_workflow_controls()
+            return
         readiness = dict(getattr(self, "_last_calibration_readiness", {}) or {})
         for key, action_key in getattr(self, "_calibration_readiness_button_specs", ()):
             if str(key) == "online_stream_calibration":
@@ -9626,6 +9885,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return None
         current_mode = self._bridge_resolve_current_printing_mode()
         result_mode = self._summary_row_printing_mode(raw)
+        if raw.get("synthetic") is True:
+            requested_mode = self._normalize_printing_mode_value(
+                raw.get("original_printing_mode"),
+                fallback=None,
+            )
+            if requested_mode == current_mode:
+                return None
         if current_mode in (None, "") or result_mode in (None, "") or current_mode == result_mode:
             return None
         return (
@@ -9804,7 +10070,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.bridge_design_targets_label.setText(
             "Design targets: " + (", ".join(f"{t:g}" for t in targets) if targets else "—")
         )
-        plan = em.get_plan_for_key(key)
+        plan_getter = getattr(
+            em,
+            "get_calibration_application_plan_for_key",
+            em.get_plan_for_key,
+        )
+        plan = plan_getter(key)
         if not plan:
             self.bridge_design_stock_label.setText("Stock concentration(s): —")
         else:
@@ -10481,7 +10752,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return
 
         key = (payload["factor_name"], payload["option_name"])
-        plan = em.get_plan_for_key(key)
+        plan_getter = getattr(
+            em,
+            "get_calibration_application_plan_for_key",
+            em.get_plan_for_key,
+        )
+        plan = plan_getter(key)
         if not plan:
             QtWidgets.QMessageBox.warning(self, "Apply", "No stock plan found; optimize first.")
             return
@@ -11338,7 +11614,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         plan = None
         try:
-            plan = em.get_plan_for_key(key)
+            plan_getter = getattr(
+                em,
+                "get_calibration_application_plan_for_key",
+                em.get_plan_for_key,
+            )
+            plan = plan_getter(key)
         except Exception:
             plan = None
         if plan and hasattr(self, "reagent_stock_label"):
@@ -11777,12 +12058,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 event.ignore()
                 return
 
-        if bool(getattr(self, "result_presentation_only", False)):
+        if bool(getattr(self, "camera_free_mode", False)):
             for timer_name in ("camera_timer", "refuel_monitor_timer", "refuel_panel_refresh_timer"):
                 timer = getattr(self, timer_name, None)
                 if timer is not None:
                     timer.stop()
-            event.accept()
+            super().closeEvent(event)
             return
 
         if self._imager_close_blocked_by_capture_or_calibration():

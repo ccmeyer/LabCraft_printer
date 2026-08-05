@@ -1767,6 +1767,10 @@ class ConnectionWidget(QGroupBox):
         # Defaults
         self.machine_default = self.model.get_default_machine_port()
         self.balance_default = self.model.get_default_balance_port()
+        self._simulation_target = None
+        self._simulation_connect_callback = None
+        self._simulation_disconnect_callback = None
+        self._machine_connect_pending = False
         self._machine_disconnect_pending = False
 
         # # Fixed on-board port (e.g., "/dev/ttyACM0" on the Pi)
@@ -1924,7 +1928,25 @@ class ConnectionWidget(QGroupBox):
 
     def request_machine_connect_change(self):
         """Toggle connect/disconnect."""
-        if self._machine_disconnect_pending:
+        if self._machine_connect_pending or self._machine_disconnect_pending:
+            return
+        if self.simulation_mode:
+            if self.model.machine_model.machine_connected:
+                if not callable(self._simulation_disconnect_callback):
+                    return
+                self._set_machine_disconnect_pending(True)
+                result = self._simulation_disconnect_callback()
+                if result is False:
+                    self._set_machine_disconnect_pending(False)
+            else:
+                if not callable(self._simulation_connect_callback):
+                    return
+                self._machine_connect_pending = True
+                self.update_machine_connect_button(False)
+                result = self._simulation_connect_callback()
+                if result is False:
+                    self._machine_connect_pending = False
+                    self.update_machine_connect_button(False)
             return
         if self.model.machine_model.machine_connected:
             self._set_machine_disconnect_pending(True)
@@ -1934,6 +1956,7 @@ class ConnectionWidget(QGroupBox):
 
     @QtCore.Slot()
     def _handle_machine_disconnect_complete(self):
+        self._machine_connect_pending = False
         self._set_machine_disconnect_pending(False)
 
     def _set_machine_disconnect_pending(self, pending: bool):
@@ -1946,6 +1969,10 @@ class ConnectionWidget(QGroupBox):
     #     self.connect_machine_requested.emit(port)
 
     def connect_machine(self):
+        if self.simulation_mode:
+            if callable(self._simulation_connect_callback):
+                return self._simulation_connect_callback()
+            return False
         if not self.legacy_mode:
             port = self.machine_default or self.model.get_default_machine_port()
         else:
@@ -1960,6 +1987,46 @@ class ConnectionWidget(QGroupBox):
             self.model.set_default_machine_port(port)
 
         self.connect_machine_requested.emit(port)
+
+    def bind_simulation_connection(
+        self,
+        target,
+        *,
+        connect_callback,
+        disconnect_callback,
+    ):
+        """Bind the normal connection surface to the contained simulator."""
+
+        if getattr(self.main_window, "runtime_context", None) is not SIMULATION_RUNTIME_CONTEXT:
+            raise RuntimeError("Simulation connection binding requires canonical simulation runtime.")
+        target = str(target or "")
+        if target != "SIMULATED":
+            raise ValueError("The simulation connection target must be exactly 'SIMULATED'.")
+        if not callable(connect_callback) or not callable(disconnect_callback):
+            raise TypeError("Simulation connection callbacks must be callable.")
+        self._simulation_target = target
+        self._simulation_connect_callback = connect_callback
+        self._simulation_disconnect_callback = disconnect_callback
+        if self.legacy_mode:
+            self.machine_port_combo.blockSignals(True)
+            self.machine_port_combo.clear()
+            self.machine_port_combo.addItem(target)
+            self.machine_port_combo.setCurrentIndex(0)
+            self.machine_port_combo.setEnabled(False)
+            self.machine_port_combo.blockSignals(False)
+            for widget_name in (
+                "balance_label",
+                "balance_port_combo",
+                "balance_connect_button",
+            ):
+                widget = getattr(self, widget_name, None)
+                if widget is not None:
+                    widget.setEnabled(False)
+                    widget.setToolTip("Physical balance connections are disabled in simulation.")
+        else:
+            self.port_label.setText(target)
+            self.port_label.setToolTip("Contained simulator target; no serial hardware is opened.")
+        self.update_machine_connect_button(self.model.machine_model.machine_connected)
 
     # def update_machine_connect_button(self, machine_connected: bool):
     #     """Set button text/color based on connection state."""
@@ -1977,12 +2044,48 @@ class ConnectionWidget(QGroupBox):
     #         )
     def update_machine_connect_button(self, machine_connected: bool):
         if self.simulation_mode:
-            self.machine_connect_button.setText("Unavailable")
-            self.machine_connect_button.setChecked(False)
-            self.machine_connect_button.setEnabled(False)
-            self.machine_connect_button.setToolTip(
-                "Physical machine connections are disabled in simulation."
+            if machine_connected:
+                self._machine_connect_pending = False
+            bound = bool(
+                self._simulation_target == "SIMULATED"
+                and callable(self._simulation_connect_callback)
+                and callable(self._simulation_disconnect_callback)
             )
+            if not bound:
+                self.machine_connect_button.setText("Simulator initializing...")
+                self.machine_connect_button.setChecked(False)
+                self.machine_connect_button.setEnabled(False)
+                self.machine_connect_button.setToolTip(
+                    "Waiting for the contained simulator session to bind."
+                )
+            elif self._machine_disconnect_pending:
+                self.machine_connect_button.setText("Disconnecting...")
+                self.machine_connect_button.setChecked(True)
+                self.machine_connect_button.setEnabled(False)
+            elif self._machine_connect_pending and not machine_connected:
+                self.machine_connect_button.setText("Connecting...")
+                self.machine_connect_button.setChecked(True)
+                self.machine_connect_button.setEnabled(False)
+            elif machine_connected:
+                self.machine_connect_button.setText("Disconnect")
+                self.machine_connect_button.setChecked(True)
+                self.machine_connect_button.setEnabled(True)
+                self.machine_connect_button.setStyleSheet(
+                    f"background-color: {self.color_dict['dark_blue']}; color: white;"
+                )
+                self.machine_connect_button.setToolTip(
+                    "Disconnect the contained SIMULATED machine."
+                )
+            else:
+                self.machine_connect_button.setText("Connect")
+                self.machine_connect_button.setChecked(False)
+                self.machine_connect_button.setEnabled(True)
+                self.machine_connect_button.setStyleSheet(
+                    f"background-color: {self.color_dict['light_blue']}; color: white;"
+                )
+                self.machine_connect_button.setToolTip(
+                    "Connect to the contained SIMULATED machine; no hardware is opened."
+                )
             if self.legacy_mode:
                 self.machine_port_combo.setEnabled(False)
             return
@@ -2874,6 +2977,11 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._manual_refuel_check_dialog = None
         self._manual_refuel_check_launch_pending = False
         self._manual_refuel_check_after_imager_pending = False
+        self._simulation_calibration_generate_callback = None
+        self._simulation_calibration_availability_callback = None
+        self._simulation_manual_refuel_outcome_callback = None
+        self._simulation_manual_refuel_deferred_callback = None
+        self._simulation_manual_refuel_availability_callback = None
         self._pressure_render_timer = QTimer(self)
         self._pressure_render_timer.setSingleShot(True)
         self._pressure_render_timer.setInterval(self.PRESSURE_RENDER_INTERVAL_MS)
@@ -3471,9 +3579,55 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                     False,
                 )
             )
-            button.setEnabled(
-                not simulation_mode and not self._droplet_imager_launch_is_active()
-            )
+            if simulation_mode:
+                bound = bool(
+                    callable(self._simulation_calibration_generate_callback)
+                    and callable(self._simulation_calibration_availability_callback)
+                )
+                button.setEnabled(bound and not self._droplet_imager_launch_is_active())
+                button.setToolTip(
+                    "Open the camera-free synthetic calibration workflow."
+                    if bound
+                    else "Waiting for the simulator calibration workflow to initialize."
+                )
+            else:
+                button.setEnabled(not self._droplet_imager_launch_is_active())
+
+    def bind_simulation_workflows(
+        self,
+        *,
+        calibration_generate_callback,
+        calibration_availability_callback,
+        manual_refuel_outcome_callback,
+        manual_refuel_deferred_callback,
+        manual_refuel_availability_callback,
+    ):
+        """Bind normal application dialogs to simulation-owned providers."""
+
+        if getattr(self.main_window, "runtime_context", None) is not SIMULATION_RUNTIME_CONTEXT:
+            raise RuntimeError("Simulation workflow binding requires canonical simulation runtime.")
+        callbacks = (
+            calibration_generate_callback,
+            calibration_availability_callback,
+            manual_refuel_outcome_callback,
+            manual_refuel_deferred_callback,
+            manual_refuel_availability_callback,
+        )
+        if not all(callable(callback) for callback in callbacks):
+            raise TypeError("All simulation workflow callbacks must be callable.")
+        self._simulation_calibration_generate_callback = calibration_generate_callback
+        self._simulation_calibration_availability_callback = calibration_availability_callback
+        self._simulation_manual_refuel_outcome_callback = manual_refuel_outcome_callback
+        self._simulation_manual_refuel_deferred_callback = manual_refuel_deferred_callback
+        self._simulation_manual_refuel_availability_callback = manual_refuel_availability_callback
+        self._refresh_droplet_imager_button_state()
+
+    def _simulation_default_calibration_profile(self):
+        manager = getattr(self.model, "calibration_manager", None)
+        getter = getattr(manager, "get_characterization_application_context", None)
+        context = getter() if callable(getter) else None
+        mode = str((context or {}).get("printing_mode") or "").strip().lower()
+        return "nominal_stream" if mode == "stream" else "nominal_droplet"
 
     def _set_droplet_imager_launch_pending(self, pending):
         self._droplet_imager_launch_pending = bool(pending)
@@ -3650,6 +3804,48 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             droplet_imaging_dialog.exec()
         finally:
             self._clear_droplet_imager_launch_state(droplet_imaging_dialog)
+
+    def _launch_simulation_calibration_dialog(self):
+        """Open the real calibration layout without any physical camera lifecycle."""
+
+        if getattr(self.main_window, "runtime_context", None) is not SIMULATION_RUNTIME_CONTEXT:
+            raise RuntimeError("Synthetic calibration workflow is simulation-only.")
+        if self._droplet_imager_launch_is_active():
+            self._reject_duplicate_droplet_imager_launch()
+            return self._droplet_imager_dialog
+        self._set_droplet_imager_launch_pending(True)
+        dialog = None
+        try:
+            dialog = CalibrationClasses.DropletImagingDialog(
+                self.main_window,
+                self.model,
+                self.controller,
+                post_apply_manual_refuel_check_callback=(
+                    self.request_manual_refuel_check_after_imager_close
+                ),
+                simulation_workflow_mode=True,
+                synthetic_generation_callback=(
+                    self._simulation_calibration_generate_callback
+                ),
+                synthetic_availability_callback=(
+                    self._simulation_calibration_availability_callback
+                ),
+                synthetic_deferred_refuel_callback=(
+                    self._simulation_manual_refuel_deferred_callback
+                ),
+            )
+            self._droplet_imager_dialog = dialog
+            self._droplet_imager_launch_pending = False
+            finished_signal = getattr(dialog, "finished", None)
+            if finished_signal is not None:
+                finished_signal.connect(
+                    lambda _result=None, active=dialog: self._clear_droplet_imager_launch_state(active)
+                )
+            dialog.open()
+            return dialog
+        except Exception:
+            self._clear_droplet_imager_launch_state(dialog)
+            raise
 
     def open_simulated_calibration_result(self, candidate_id):
         """Present one transient calibration result without a camera lifecycle."""
@@ -3881,13 +4077,34 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._set_manual_refuel_check_launch_pending(True)
         manual_dialog = None
         try:
-            importlib.reload(CalibrationClasses.View)
-            importlib.reload(CalibrationClasses)
-            manual_dialog = CalibrationClasses.ManualRefuelCheckDialog(
-                self.main_window,
-                self.model,
-                self.controller,
+            simulation_mode = (
+                getattr(self.main_window, "runtime_context", None)
+                is SIMULATION_RUNTIME_CONTEXT
             )
+            if not simulation_mode:
+                importlib.reload(CalibrationClasses.View)
+                importlib.reload(CalibrationClasses)
+            readiness = None
+            if simulation_mode and callable(self._simulation_manual_refuel_availability_callback):
+                readiness = self._simulation_manual_refuel_availability_callback()
+            if simulation_mode:
+                manual_dialog = CalibrationClasses.ManualRefuelCheckDialog(
+                    self.main_window,
+                    self.model,
+                    self.controller,
+                    simulation_outcome_callback=(
+                        self._simulation_manual_refuel_outcome_callback
+                    ),
+                    expected_calibration_fingerprint=str(
+                        (readiness or {}).get("calibration_fingerprint") or ""
+                    ),
+                )
+            else:
+                manual_dialog = CalibrationClasses.ManualRefuelCheckDialog(
+                    self.main_window,
+                    self.model,
+                    self.controller,
+                )
             self._manual_refuel_check_dialog = manual_dialog
             finished_signal = getattr(manual_dialog, "finished", None)
             if finished_signal is not None:
@@ -3906,6 +4123,23 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         if self._droplet_imager_launch_is_active():
             self._reject_duplicate_droplet_imager_launch()
             return
+
+        if getattr(self.main_window, "runtime_context", None) is SIMULATION_RUNTIME_CONTEXT:
+            availability = self._simulation_calibration_availability_callback
+            if not callable(availability):
+                self.popup_message_signal.emit(
+                    "Synthetic Calibration Unavailable",
+                    "The simulator calibration workflow is still initializing.",
+                )
+                return
+            readiness = availability(self._simulation_default_calibration_profile())
+            if not bool((readiness or {}).get("ok")):
+                self.popup_message_signal.emit(
+                    "Synthetic Calibration Not Ready",
+                    str((readiness or {}).get("message") or "Synthetic calibration is not ready."),
+                )
+                return
+            return self._launch_simulation_calibration_dialog()
 
         if not self.controller.check_if_all_completed():
             self.popup_message_signal.emit(
@@ -4172,7 +4406,21 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 return
             if not getattr(self, "_manual_refuel_check_launch_pending", False):
                 return
-            self._launch_manual_refuel_check_dialog()
+
+            # The move handler runs inside the machine command-completion stack.
+            # Entering the dialog's modal event loop from that stack leaves the
+            # simulator's non-reentrant completion guard active, so commands
+            # queued by the dialog cannot start until the dialog closes.  Hand
+            # ownership back to Qt first, then launch from a fresh event turn.
+            def _launch_after_completion_unwinds():
+                if getattr(self, "_manual_refuel_check_dialog", None) is not None:
+                    self._reject_duplicate_manual_refuel_check_launch()
+                    return
+                if not getattr(self, "_manual_refuel_check_launch_pending", False):
+                    return
+                self._launch_manual_refuel_check_dialog()
+
+            QtCore.QTimer.singleShot(0, _launch_after_completion_unwinds)
 
         move_queued = mover(
             "loading",

@@ -1336,6 +1336,7 @@ def test_current_profile_manual_refuel_check_opens_dialog(monkeypatch, qapp):
 def test_current_profile_post_apply_manual_refuel_check_moves_to_loading_then_opens(monkeypatch, qapp):
     events = []
     popups = []
+    deferred_callbacks = []
     main_window = _make_main_window(CURRENT_PROFILE, popups)
     model = _make_model(
         _FakeMachineModel(
@@ -1349,6 +1350,11 @@ def test_current_profile_post_apply_manual_refuel_check_moves_to_loading_then_op
     controller = _make_controller(events)
     box = PressurePlotBox(main_window, model, controller)
 
+    monkeypatch.setattr(
+        View.QtCore.QTimer,
+        "singleShot",
+        lambda delay_ms, callback: deferred_callbacks.append((delay_ms, callback)),
+    )
     _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
 
     box.manual_refuel_check_after_stream_apply()
@@ -1361,6 +1367,13 @@ def test_current_profile_post_apply_manual_refuel_check_moves_to_loading_then_op
     assert events == []
 
     move_args.kwargs["on_complete"]()
+
+    assert events == []
+    assert len(deferred_callbacks) == 1
+    delay_ms, launch_callback = deferred_callbacks.pop()
+    assert delay_ms == 0
+
+    launch_callback()
 
     assert events == [
         "manual_refuel_dialog_init",
@@ -1538,6 +1551,100 @@ def test_current_profile_post_apply_request_waits_for_cleanup_queue(monkeypatch,
     assert box._manual_refuel_check_after_imager_pending is False
     assert popups == []
     assert events == []
+
+
+def test_simulation_calibration_close_advances_manual_refuel_handoff(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    main_window.runtime_context = View.SIMULATION_RUNTIME_CONTEXT
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="camera",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+    box.bind_simulation_workflows(
+        calibration_generate_callback=lambda _profile: {"ok": True},
+        calibration_availability_callback=lambda _profile: {"ok": True},
+        manual_refuel_outcome_callback=lambda _status, **_kwargs: {"ok": True},
+        manual_refuel_deferred_callback=lambda: {"ok": True},
+        manual_refuel_availability_callback=lambda: {
+            "ok": True,
+            "calibration_fingerprint": "stream-fingerprint",
+        },
+    )
+
+    class _SimulationCalibrationDialog(View.QtWidgets.QDialog):
+        def __init__(self, main_window_arg, model_arg, controller_arg, **kwargs):
+            super().__init__()
+            assert main_window_arg is main_window
+            assert model_arg is model
+            assert controller_arg is controller
+            assert kwargs.get("simulation_workflow_mode") is True
+            assert callable(kwargs.get("post_apply_manual_refuel_check_callback"))
+            events.append("simulation_calibration_dialog_init")
+
+    class _SimulationManualRefuelDialog:
+        def __init__(self, main_window_arg, model_arg, controller_arg, **kwargs):
+            assert main_window_arg is main_window
+            assert model_arg is model
+            assert controller_arg is controller
+            assert callable(kwargs.get("simulation_outcome_callback"))
+            assert kwargs.get("expected_calibration_fingerprint") == "stream-fingerprint"
+            self.finished = _SignalStub()
+            events.append("simulation_manual_refuel_dialog_init")
+
+        def exec(self):
+            events.append("simulation_manual_refuel_dialog_exec")
+            return 0
+
+    monkeypatch.setattr(
+        View.CalibrationClasses,
+        "DropletImagingDialog",
+        _SimulationCalibrationDialog,
+    )
+    monkeypatch.setattr(
+        View.CalibrationClasses,
+        "ManualRefuelCheckDialog",
+        _SimulationManualRefuelDialog,
+    )
+
+    dialog = box._launch_simulation_calibration_dialog()
+    assert dialog is box._droplet_imager_dialog
+    assert not box.calibrate_pressure_button.isEnabled()
+    assert box.request_manual_refuel_check_after_imager_close() is True
+
+    dialog.close()
+    qapp.processEvents()
+
+    assert box._droplet_imager_dialog is None
+    assert box.calibrate_pressure_button.isEnabled()
+    assert box._manual_refuel_check_after_imager_pending is False
+    controller.move_to_location.assert_called_once()
+    move_call = controller.move_to_location.call_args
+    assert move_call.args == ("loading",)
+    assert move_call.kwargs["manual"] is True
+    assert callable(move_call.kwargs["on_complete"])
+
+    move_call.kwargs["on_complete"]()
+    qapp.processEvents()
+
+    assert box._manual_refuel_check_launch_is_active() is False
+    box.manual_refuel_check()
+    assert events == [
+        "simulation_calibration_dialog_init",
+        "simulation_manual_refuel_dialog_init",
+        "simulation_manual_refuel_dialog_exec",
+        "simulation_manual_refuel_dialog_init",
+        "simulation_manual_refuel_dialog_exec",
+    ]
+    assert popups == []
 
 
 def test_current_profile_manual_refuel_check_rejects_duplicate_while_dialog_open(monkeypatch, qapp):
