@@ -216,12 +216,190 @@ class MachineControlsDriver(_QTestSurfaceDriver):
 class ExperimentEditorDriver(_QTestSurfaceDriver):
     """QTest mechanics for the normal Experiment Editor surface."""
 
+    def __init__(self, context, *, action_runner=None):
+        super().__init__(context)
+        self.action_runner = action_runner
+
     def create_and_finalize(self, specification: dict[str, Any]) -> dict[str, Any]:
-        # The existing bounded editor mechanics remain the compatibility
-        # implementation while Milestone 6 moves ownership to this surface driver.
+        # The bounded editor mechanics remain the compatibility implementation
+        # while the shared harness owns composed-journey action boundaries.
         from tools.virtual_workflows.actions import drive_editor_create_finalize
 
-        return drive_editor_create_finalize(self.context, specification)
+        return drive_editor_create_finalize(
+            self.context,
+            specification,
+            action_runner=self.action_runner,
+        )
+
+
+class ExperimentLoaderDriver(_QTestSurfaceDriver):
+    """QTest mechanics for reopening a contained prepared experiment."""
+
+    def load_prepared_design(
+        self,
+        experiment_dir,
+        *,
+        expected_name: str,
+        expected_plan_id: str,
+        expected_plan_revision: int,
+    ) -> dict[str, Any]:
+        from pathlib import Path
+        from View import ExperimentDesignDialog
+
+        directory = Path(experiment_dir).resolve()
+        if not directory.is_relative_to(Path(self.context.scenario_root).resolve()):
+            raise RuntimeError("prepared experiment escaped the SIL session root")
+        button = self.view.well_plate_widget.design_experiment_button
+        if not button.isVisible() or not button.isEnabled():
+            raise RuntimeError("Experiment Editor control is not visible and enabled")
+
+        state: dict[str, Any] = {
+            "stage": "open_editor",
+            "error": None,
+            "result": None,
+            "dialog": None,
+        }
+        timer = QtCore.QTimer(self.app)
+        timer.setInterval(5)
+
+        def fail(exc: BaseException, modal=None) -> None:
+            state["error"] = exc
+            state["stage"] = "failed"
+            timer.stop()
+            for widget in (modal, state.get("dialog")):
+                if isinstance(widget, QtWidgets.QDialog) and widget.isVisible():
+                    widget.reject()
+
+        def choose_directory() -> None:
+            modal = self.app.activeModalWidget()
+            try:
+                if modal is None or modal is state.get("dialog"):
+                    return
+                if not isinstance(modal, QtWidgets.QFileDialog):
+                    raise RuntimeError(
+                        "unexpected modal while selecting prepared experiment: "
+                        f"{type(modal).__name__} {modal.windowTitle()!r}"
+                    )
+                if modal.windowTitle() != "Select Experiment Folder":
+                    raise RuntimeError(
+                        f"unexpected file dialog title {modal.windowTitle()!r}"
+                    )
+                modal.setDirectory(str(directory))
+                self.app.processEvents()
+                box = modal.findChild(QtWidgets.QDialogButtonBox)
+                accept = None
+                if box is not None:
+                    accept = box.button(QtWidgets.QDialogButtonBox.Open)
+                    if accept is None:
+                        accept = box.button(QtWidgets.QDialogButtonBox.Ok)
+                if accept is None:
+                    raise RuntimeError("prepared folder dialog has no accept button")
+                state["stage"] = "validate_loaded"
+                QtTest.QTest.mouseClick(
+                    accept, QtCore.Qt.MouseButton.LeftButton
+                )
+            except BaseException as exc:
+                fail(exc, modal)
+
+        def inspect() -> None:
+            modal = self.app.activeModalWidget()
+            try:
+                if self.context.deadline.remaining_seconds() <= 0:
+                    raise RuntimeError(
+                        f"prepared reload deadline expired at {state['stage']}"
+                    )
+                if state["stage"] == "open_editor":
+                    if modal is None:
+                        return
+                    if not isinstance(modal, ExperimentDesignDialog):
+                        raise RuntimeError(
+                            "unexpected modal while opening prepared editor: "
+                            f"{type(modal).__name__} {modal.windowTitle()!r}"
+                        )
+                    state["dialog"] = modal
+                    state["stage"] = "select_folder"
+                    folder_timer = QtCore.QTimer(modal)
+                    folder_timer.setInterval(5)
+                    folder_timer.timeout.connect(choose_directory)
+                    folder_timer.start()
+                    try:
+                        QtTest.QTest.mouseClick(
+                            modal.load_btn,
+                            QtCore.Qt.MouseButton.LeftButton,
+                        )
+                    finally:
+                        folder_timer.stop()
+                        folder_timer.deleteLater()
+                    if state["error"] is not None:
+                        raise state["error"]
+                    return
+                if state["stage"] != "validate_loaded":
+                    return
+                dialog = state["dialog"]
+                if modal is not dialog or not dialog.isVisible():
+                    return
+                plan = self.context.experiment_model.get_execution_plan_snapshot()
+                eligibility = (
+                    self.context.experiment_model.get_execution_resume_eligibility()
+                    or {}
+                )
+                runtime_active = bool(
+                    self.context.experiment_model
+                    .is_authoritative_execution_runtime_active()
+                )
+                checks = {
+                    "name_matches": dialog.exp_name_edit.text() == expected_name,
+                    "plan_id_matches": str(plan.plan_id) == str(expected_plan_id),
+                    "plan_revision_matches": int(plan.plan_revision)
+                    == int(expected_plan_revision),
+                    "plan_prepared": str(plan.state.value) == "prepared",
+                    "eligibility_ready_to_start": eligibility.get("status")
+                    == "ready_to_start",
+                    "runtime_inactive": not runtime_active,
+                    "path_matches": Path(
+                        self.context.experiment_model.experiment_dir_path
+                    ).resolve()
+                    == directory,
+                }
+                if not all(checks.values()):
+                    raise RuntimeError(
+                        "prepared design did not reload unchanged: "
+                        f"{checks}"
+                    )
+                state["result"] = {
+                    "checks": checks,
+                    "experiment_dir": str(directory),
+                    "experiment_name": dialog.exp_name_edit.text(),
+                    "plan_id": str(plan.plan_id),
+                    "plan_revision": int(plan.plan_revision),
+                    "plan_state": str(plan.state.value),
+                    "eligibility_status": eligibility.get("status"),
+                    "runtime_active": runtime_active,
+                    "activation_performed": False,
+                    "file_selection_mechanic": "qt_file_dialog_directory_selection",
+                }
+                state["stage"] = "finished"
+                QtTest.QTest.keyClick(dialog, QtCore.Qt.Key.Key_Escape)
+                if dialog.isVisible():
+                    raise RuntimeError("prepared inspection editor did not close")
+                timer.stop()
+            except BaseException as exc:
+                fail(exc, modal)
+
+        timer.timeout.connect(inspect)
+        timer.start()
+        try:
+            QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+        finally:
+            timer.stop()
+            timer.deleteLater()
+        if state["error"] is not None:
+            raise state["error"]
+        if state["stage"] != "finished" or not isinstance(state["result"], dict):
+            raise RuntimeError(
+                f"prepared UI reload did not finish; stage={state['stage']}"
+            )
+        return state["result"]
 
 
 class RackDriver(_QTestSurfaceDriver):
@@ -573,6 +751,7 @@ __all__ = [
     "ArrayDriver",
     "CalibrationDialogDriver",
     "ExperimentEditorDriver",
+    "ExperimentLoaderDriver",
     "MachineControlsDriver",
     "MainWindowDriver",
     "RackDriver",

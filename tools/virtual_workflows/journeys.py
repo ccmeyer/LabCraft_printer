@@ -16,9 +16,14 @@ from tools.virtual_workflows.assertions import (
     AssertionResult,
     calibration_assertion,
     cleanup_assertion,
+    editor_artifacts_cleanup_assertion,
+    editor_create_finalize_assertion,
+    editor_prepared_bundle_assertions,
+    editor_prepared_reload_assertions,
     machine_ready_assertion,
     prepared_execution_assertion,
     rack_head_assertion,
+    real_application_assertion,
     simulation_identity_assertion,
     terminal_execution_assertion,
 )
@@ -27,6 +32,7 @@ from tools.virtual_workflows.page_drivers import (
     ArrayDriver,
     CalibrationDialogDriver,
     ExperimentEditorDriver,
+    ExperimentLoaderDriver,
     MachineControlsDriver,
     RackDriver,
 )
@@ -74,6 +80,36 @@ SMOKE_REQUIRED_UI_ACTIONS = frozenset(
         "array.start_via_ui",
     }
 )
+EDITOR_WORKLOAD_ID = "experiment_editor_create_finalize_v1"
+EDITOR_SCENARIO_NAME = "experiment_editor_create_finalize"
+EDITOR_SCENARIO_VERSION = "1"
+EDITOR_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "experiment.editor_create_finalize",
+    "experiment.prepared_bundle_valid",
+    "experiment.prepared_reload_ready",
+    "experiment.runtime_assignments_match",
+    "experiment.key_files_consistent",
+    "artifacts.required_present",
+)
+EDITOR_REQUIRED_UI_ACTIONS = frozenset(
+    {
+        "editor.open_via_ui",
+        "editor.new_experiment_via_ui",
+        "editor.configure_design_via_ui",
+        "editor.optimize_generate_via_ui",
+        "editor.finish_via_ui",
+        "experiment.load_authoritative_via_ui",
+    }
+)
+EDITOR_REQUIRED_SCREENSHOTS = {
+    "editor_opened",
+    "generated",
+    "finalized",
+    "reloaded",
+    "validated",
+}
 
 
 def _utc_now() -> str:
@@ -91,7 +127,7 @@ class JourneyRunConfig:
     run_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.scenario_id != SMOKE_WORKLOAD_ID:
+        if self.scenario_id not in {SMOKE_WORKLOAD_ID, EDITOR_WORKLOAD_ID}:
             raise ValueError(f"unsupported composed journey: {self.scenario_id!r}")
         object.__setattr__(self, "output_root", Path(self.output_root).resolve())
 
@@ -152,11 +188,14 @@ def _add_assertion(harness: AutomationHarness, result: AssertionResult) -> None:
         )
 
 
-def _mark_incomplete_assertions(harness: AutomationHarness) -> None:
+def _mark_incomplete_assertions(
+    harness: AutomationHarness,
+    required_assertions: tuple[str, ...] = SMOKE_REQUIRED_ASSERTIONS,
+) -> None:
     present = {
         str(item.get("assertion_id")) for item in harness.assertion_results
     }
-    for assertion_id in SMOKE_REQUIRED_ASSERTIONS:
+    for assertion_id in required_assertions:
         if assertion_id in present:
             continue
         harness.add_assertion_result(
@@ -173,6 +212,40 @@ def _mark_incomplete_assertions(harness: AutomationHarness) -> None:
 
 def _relative(path: Path, root: Path) -> str:
     return path.resolve().relative_to(root.resolve()).as_posix()
+
+
+def _replay_command(
+    harness: AutomationHarness,
+    workload_id: str,
+) -> list[str]:
+    parts = [
+        r".\env\Scripts\python.exe",
+        r"tools\run_virtual_workflow.py",
+        "--scenario",
+        workload_id,
+        "--output-root",
+        str(harness.config.output_root),
+        "--seed",
+        str(harness.config.seed),
+        "--speed-multiplier",
+        str(harness.config.speed_multiplier),
+        "--timeout-seconds",
+        str(harness.config.timeout_seconds),
+    ]
+    if harness.config.visible:
+        parts.append("--visible")
+    return parts
+
+
+def _write_journey_outputs(
+    harness: AutomationHarness,
+    report: Mapping[str, Any],
+    summary: str,
+) -> None:
+    harness.write_ledgers()
+    write_report_atomic(harness.report_dir / "report.json", report)
+    (harness.report_dir / "summary.txt").write_text(summary, encoding="utf-8")
+    harness.write_evidence_manifest()
 
 
 def _report(
@@ -195,22 +268,7 @@ def _report(
     passed = all(decisions.get(item) == "pass" for item in SMOKE_REQUIRED_ASSERTIONS)
     failure_text = str(harness.failure) if harness.failure is not None else None
     classification = "pass" if passed and failure_text is None else "fail"
-    replay_parts = [
-        r".\env\Scripts\python.exe",
-        r"tools\run_virtual_workflow.py",
-        "--scenario",
-        SMOKE_WORKLOAD_ID,
-        "--output-root",
-        str(harness.config.output_root),
-        "--seed",
-        str(harness.config.seed),
-        "--speed-multiplier",
-        str(harness.config.speed_multiplier),
-        "--timeout-seconds",
-        str(harness.config.timeout_seconds),
-    ]
-    if harness.config.visible:
-        replay_parts.append("--visible")
+    replay_parts = _replay_command(harness, SMOKE_WORKLOAD_ID)
     report = {
         "schema_name": REPORT_SCHEMA_NAME,
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -585,7 +643,6 @@ def run_virtual_print_array_24_journey(config: JourneyRunConfig) -> dict[str, An
     if cleanup.decision != "pass" and harness.failure is None:
         harness.failure = RuntimeError("required cleanup assertion failed")
     _mark_incomplete_assertions(harness)
-    harness.write_ledgers()
     report = _report(
         harness,
         fixture=fixture,
@@ -594,11 +651,320 @@ def run_virtual_print_array_24_journey(config: JourneyRunConfig) -> dict[str, An
         completed_wells=completed_wells,
         teardown=teardown,
     )
-    write_report_atomic(harness.report_dir / "report.json", report)
-    (harness.report_dir / "summary.txt").write_text(
-        _summary(report), encoding="utf-8"
+    _write_journey_outputs(harness, report, _summary(report))
+    return report
+
+
+def _editor_fixture() -> tuple[dict[str, Any], Path]:
+    from tools.virtual_workflows.editor_scenarios import (
+        load_editor_create_finalize_fixture,
     )
-    harness.write_evidence_manifest()
+
+    path = (
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / f"{EDITOR_WORKLOAD_ID}.json"
+    )
+    return load_editor_create_finalize_fixture(path), path
+
+
+def _editor_report(
+    harness: AutomationHarness,
+    *,
+    fixture: Mapping[str, Any],
+    fixture_path: Path,
+    teardown: Mapping[str, Any],
+) -> dict[str, Any]:
+    import hashlib
+
+    identity = collect_environment_identity(REPO_ROOT)
+    decisions = {
+        str(row.get("assertion_id")): str(row.get("decision"))
+        for row in harness.assertion_results
+    }
+    passed = all(
+        decisions.get(assertion_id) == "pass"
+        for assertion_id in EDITOR_REQUIRED_ASSERTIONS
+    )
+    failure_text = str(harness.failure) if harness.failure is not None else None
+    classification = "pass" if passed and failure_text is None else "fail"
+    replay = _replay_command(harness, EDITOR_WORKLOAD_ID)
+
+    assertion_evidence = {
+        str(row.get("assertion_id")): dict(row.get("evidence") or {})
+        for row in harness.assertion_results
+    }
+    action_results = list(harness.context.action_results)
+    report = {
+        "schema_name": REPORT_SCHEMA_NAME,
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "run": {
+            "run_id": harness.run_id,
+            "scenario_name": EDITOR_SCENARIO_NAME,
+            "scenario_version": EDITOR_SCENARIO_VERSION,
+            "run_mode": (
+                "visible_windows_sil"
+                if harness.config.visible
+                else "offscreen_windows_sil"
+            ),
+            "timing_policy": (
+                "simulated_command_durations_x"
+                f"{harness.config.speed_multiplier:g}"
+            ),
+            "warmup_runs": 0,
+            "measured_runs": 1,
+            "started_at_utc": harness.started_at_utc,
+            "ended_at_utc": _utc_now(),
+            "duration_ms": harness.duration_ms,
+            "seed": harness.config.seed,
+            "replay_command": replay,
+        },
+        "source": identity["source"],
+        "environment": identity["environment"],
+        "safety": {
+            "simulation": True,
+            "hardware_access_allowed": False,
+            "hardware_interfaces": {
+                "serial": False,
+                "GPIO": False,
+                "camera": False,
+                "balance": False,
+                "MCU": False,
+                "firmware_update": False,
+            },
+            "simulated_port": "SIMULATED",
+            "scenario_root": str(harness.scenario_root),
+            "report_dir": str(harness.report_dir),
+            "root_containment_valid": bool(
+                harness.session is not None
+                and harness.session.application_roots is not None
+                and all(
+                    Path(value).resolve().is_relative_to(harness.scenario_root)
+                    for value in (
+                        harness.session.application_roots.config_root,
+                        harness.session.application_roots.experiments_root,
+                        harness.session.application_roots.calibration_memory_root,
+                    )
+                )
+            ),
+        },
+        "workload": {
+            "workload_id": EDITOR_WORKLOAD_ID,
+            "fixture_schema_version": fixture["schema_version"],
+            "fixture_path": fixture_path.relative_to(REPO_ROOT).as_posix(),
+            "fixture_sha256": hashlib.sha256(fixture_path.read_bytes()).hexdigest(),
+            "experiment_name": fixture["experiment"]["name"],
+            "plate_name": fixture["experiment"]["plate_name"],
+            "expected_reaction_count": fixture["experiment"]["replicates"],
+            "well_ids": list(fixture["experiment"]["expected_well_ids"]),
+            "expected_editor_finalization_operations": fixture["workload"][
+                "expected_editor_finalization_operations"
+            ],
+            "speed_multiplier": harness.config.speed_multiplier,
+            "timeout_seconds": harness.config.timeout_seconds,
+        },
+        "metrics": {
+            "responsiveness": {"status": "not_applicable", "values": {}},
+            "workflow": {
+                "status": "measured",
+                "values": {
+                    "action_results": action_results,
+                    "assertion_results": list(harness.assertion_results),
+                    "lifecycle_milestones": list(harness.context.milestones),
+                    "cleanup_results": [dict(teardown)],
+                    "dialogs": list(harness.context.dialogs),
+                    "unexpected_dialogs": list(
+                        harness.context.unexpected_dialogs
+                    ),
+                    "errors": list(harness.context.errors),
+                    "interaction_surface_policy": (
+                        "state-changing UI actions require QTest"
+                    ),
+                },
+            },
+            "queue": {
+                "status": "not_applicable",
+                "values": {"print_commands_executed": 0},
+            },
+            "persistence": {
+                "status": "measured" if passed else "partial",
+                "values": {
+                    "assertion_decisions": decisions,
+                    "prepared_bundle": assertion_evidence.get(
+                        "experiment.prepared_bundle_valid", {}
+                    ),
+                    "reload_activation": assertion_evidence.get(
+                        "experiment.prepared_reload_ready", {}
+                    ),
+                },
+            },
+            "resources": {"status": "not_applicable", "values": {}},
+        },
+        "artifacts": {
+            "report_json": "report.json",
+            "summary_text": "summary.txt",
+            "event_trace": "events.jsonl",
+            "action_ledger": "action_ledger.json",
+            "assertion_ledger": "assertion_ledger.json",
+            "evidence_manifest": "evidence_manifest.json",
+            "failure_traceback": (
+                "failure_traceback.txt" if harness.failure is not None else None
+            ),
+            "scenario_root": str(harness.scenario_root),
+            "screenshots": {
+                name: _relative(path, harness.report_dir)
+                for name, path in sorted(harness.context.screenshots.items())
+            },
+        },
+        "classification": {
+            "status": classification,
+            "threshold_maturity": "informational",
+            "reasons": (
+                []
+                if classification == "pass"
+                else [failure_text or "required assertion failed"]
+            ),
+        },
+        "limitations": [
+            "The scenario validates the editor and authoritative application lifecycle without printing or connecting the simulated machine.",
+            "The simulator does not validate firmware, protocol framing, motion, pressure, cameras, balance behavior, or droplet quality.",
+            "Generated plan IDs, timestamps, durations, and session paths are not expected to be byte-identical across replay.",
+        ],
+    }
+    observed = {str(row.get("action_id")) for row in action_results}
+    validate_interaction_surface_claims(
+        action_results,
+        required_ui_action_ids=(
+            EDITOR_REQUIRED_UI_ACTIONS
+            if classification == "pass"
+            else EDITOR_REQUIRED_UI_ACTIONS & observed
+        ),
+    )
+    validate_report_v1(report)
+    return report
+
+
+def run_editor_create_finalize_journey(
+    config: JourneyRunConfig,
+) -> dict[str, Any]:
+    if config.scenario_id != EDITOR_WORKLOAD_ID:
+        raise ValueError(
+            "run_editor_create_finalize_journey requires "
+            f"scenario_id={EDITOR_WORKLOAD_ID!r}"
+        )
+    fixture, fixture_path = _editor_fixture()
+    expected_wells = tuple(fixture["experiment"]["expected_well_ids"])
+    harness = AutomationHarness(
+        AutomationHarnessConfig(
+            scenario_id=EDITOR_SCENARIO_NAME,
+            workload_id=EDITOR_WORKLOAD_ID,
+            output_root=config.output_root,
+            visible=config.visible,
+            seed=config.seed,
+            speed_multiplier=config.speed_multiplier,
+            timeout_seconds=config.timeout_seconds,
+            run_id=config.run_id,
+        )
+    )
+    teardown: dict[str, Any] = {}
+    try:
+        harness.start()
+        context = harness.context
+        _add_assertion(harness, simulation_identity_assertion(context))
+        _add_assertion(harness, real_application_assertion(context))
+
+        editor = ExperimentEditorDriver(
+            context, action_runner=harness.run_action
+        )
+        editor.create_and_finalize(fixture)
+        _add_assertion(harness, editor_create_finalize_assertion(context))
+        capture_milestone(
+            context,
+            "finalized",
+            evidence={"experiment_name": fixture["experiment"]["name"]},
+        )
+
+        bundle_result, key_result = editor_prepared_bundle_assertions(
+            context, expected_well_ids=expected_wells
+        )
+        _add_assertion(harness, bundle_result)
+        prepared_evidence = dict(bundle_result.evidence)
+        experiment_dir = Path(prepared_evidence["experiment_dir"])
+
+        loader = ExperimentLoaderDriver(context)
+        loader_evidence = harness.run_action(
+            "experiment.load_authoritative_via_ui",
+            lambda: loader.load_prepared_design(
+                experiment_dir,
+                expected_name=fixture["experiment"]["name"],
+                expected_plan_id=str(prepared_evidence["plan_id"]),
+                expected_plan_revision=int(prepared_evidence["plan_revision"]),
+            ),
+        )["evidence"]
+        capture_milestone(
+            context,
+            "reloaded",
+            evidence={
+                "plan_state": loader_evidence["plan_state"],
+                "eligibility_status": loader_evidence["eligibility_status"],
+            },
+        )
+        reload_result, assignments_result = editor_prepared_reload_assertions(
+            context,
+            prepared_evidence=prepared_evidence,
+            loader_evidence=loader_evidence,
+        )
+        _add_assertion(harness, reload_result)
+        _add_assertion(harness, assignments_result)
+        _add_assertion(harness, key_result)
+        capture_milestone(
+            context,
+            "validated",
+            evidence={
+                "plan_state": reload_result.evidence.get("plan_state"),
+                "eligibility_status": reload_result.evidence.get(
+                    "eligibility_status"
+                ),
+                "assertion_count": len(EDITOR_REQUIRED_ASSERTIONS),
+            },
+        )
+    except BaseException as exc:
+        harness.capture_failure(exc)
+    finally:
+        try:
+            teardown = harness.close()
+        except BaseException as exc:
+            if harness.failure is None:
+                harness.capture_failure(exc)
+            teardown = {
+                "action_id": "scenario.teardown",
+                "status": "fail",
+                "evidence": {"close_succeeded": False},
+            }
+
+    artifacts = editor_artifacts_cleanup_assertion(
+        screenshots=harness.context.screenshots,
+        required_screenshots=EDITOR_REQUIRED_SCREENSHOTS,
+        teardown=teardown,
+    )
+    harness.add_assertion_result(artifacts.to_dict())
+    if artifacts.decision != "pass" and harness.failure is None:
+        harness.failure = RuntimeError("required editor artifacts/cleanup failed")
+    _mark_incomplete_assertions(harness, EDITOR_REQUIRED_ASSERTIONS)
+    report = _editor_report(
+        harness,
+        fixture=fixture,
+        fixture_path=fixture_path,
+        teardown=teardown,
+    )
+    summary = (
+        "Milestone 7 composed editor create/finalize/reload\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Assertions: {sum(row['decision'] == 'pass' for row in harness.assertion_results)} / {len(EDITOR_REQUIRED_ASSERTIONS)}\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+    _write_journey_outputs(harness, report, summary)
     return report
 
 
@@ -634,7 +1000,9 @@ def _wait_for_terminal(
 
 
 __all__ = [
+    "EDITOR_WORKLOAD_ID",
     "JourneyRunConfig",
     "SMOKE_WORKLOAD_ID",
+    "run_editor_create_finalize_journey",
     "run_virtual_print_array_24_journey",
 ]

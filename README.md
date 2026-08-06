@@ -451,6 +451,36 @@ hashes are expected to differ. Other workflow families retain their legacy
 runners until Milestone 7 parity gates; this milestone adds no Pi, protocol,
 firmware, hardware, performance, or production fault-injection behavior.
 
+Milestone 7 Slice 1 also migrates
+`experiment_editor_create_finalize_v1` to the shared harness. It creates and
+finalizes the tracked A1/A2 design through the normal editor controls, validates
+the revision-1 prepared bundle, and reopens it through **Experiment Editor →
+Load Design…** and Qt's folder dialog. Reload intentionally leaves the plan
+`PREPARED`, eligibility `ready_to_start`, the authoritative runtime inactive,
+and the resume sidecar absent; it does not use the legacy verification-only
+direct Model activation.
+
+Run the composed editor lifecycle offscreen or visibly:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario experiment_editor_create_finalize_v1 `
+  --output-root verification_reports\milestone7-slice1 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 60
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario experiment_editor_create_finalize_v1 `
+  --output-root verification_reports\milestone7-slice1-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 120
+```
+
+The create/finalize and prepared-load actions must report `ui`; assertions,
+screenshots, reporting, and teardown report `harness`. The legacy direct runner
+remains temporarily callable as a parity oracle, while prepared
+rename/refinalize and post-start lock/copy remain on the legacy editor runner.
+The full Python suite is deferred until the final Milestone 7 validation; each
+slice uses its documented targeted gates.
+
 The final retained Windows evidence is:
 
 ```text

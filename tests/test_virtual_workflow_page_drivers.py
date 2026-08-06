@@ -5,7 +5,10 @@ from types import SimpleNamespace
 import pytest
 from PySide6 import QtCore, QtWidgets
 
-from tools.virtual_workflows.page_drivers import MainWindowDriver
+from tools.virtual_workflows.page_drivers import (
+    ExperimentLoaderDriver,
+    MainWindowDriver,
+)
 
 
 def _context(qapp, view):
@@ -55,3 +58,17 @@ def test_dialog_sequence_rejects_unexpected_title(qapp):
             [("Expected title", QtWidgets.QMessageBox.StandardButton.Yes)],
         )
     view.close()
+
+
+def test_prepared_loader_rejects_directory_outside_session_root(qapp, tmp_path):
+    context = _context(qapp, QtWidgets.QWidget())
+    context.scenario_root = tmp_path / "scenario-root"
+    context.scenario_root.mkdir()
+
+    with pytest.raises(RuntimeError, match="escaped the SIL session root"):
+        ExperimentLoaderDriver(context).load_prepared_design(
+            tmp_path / "outside",
+            expected_name="example",
+            expected_plan_id="plan",
+            expected_plan_revision=1,
+        )

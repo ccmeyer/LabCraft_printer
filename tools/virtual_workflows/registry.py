@@ -110,7 +110,7 @@ _SCENARIO_DEFINITIONS = {
         ),
         expected_completion_count=1,
         scenario_name="experiment_editor_create_finalize",
-        runner_family="experiment_editor",
+        runner_family="composed_journey",
         supports_pi_evidence=False,
         supports_injected_stall=False,
         supports_report_sets=False,
@@ -222,23 +222,26 @@ def run_registered_scenario(
         pi_proof = config_values.pop("pi_hardware_proof_path", None)
         if injected_ms != 0 or injected_after != 48:
             raise RegistryError(
-                "the Milestone 6 composed smoke does not support fault injection"
+                "composed journeys do not support fault injection"
             )
         if pi_preflight is not None or pi_proof is not None:
             raise RegistryError(
-                "the Milestone 6 composed smoke does not support Pi evidence"
+                "composed journeys do not support Pi evidence"
             )
         from tools.virtual_workflows.journeys import (
+            EDITOR_WORKLOAD_ID,
             JourneyRunConfig,
+            run_editor_create_finalize_journey,
             run_virtual_print_array_24_journey,
         )
 
-        return run_virtual_print_array_24_journey(
-            JourneyRunConfig(
-                scenario_id=definition.workload_id,
-                **config_values,
-            )
+        config = JourneyRunConfig(
+            scenario_id=definition.workload_id,
+            **config_values,
         )
+        if definition.workload_id == EDITOR_WORKLOAD_ID:
+            return run_editor_create_finalize_journey(config)
+        return run_virtual_print_array_24_journey(config)
     if definition.runner_family == "virtual_print_array":
         config_values.pop("seed", None)
         if not definition.supports_injected_stall:

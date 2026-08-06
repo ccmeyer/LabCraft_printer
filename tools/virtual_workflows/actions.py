@@ -1393,6 +1393,8 @@ def _qt_select_combo_text(
 def drive_editor_create_finalize(
     context: ScenarioContext,
     specification: Mapping[str, Any],
+    *,
+    action_runner: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Drive the real modal experiment editor through bounded QTest interaction."""
 
@@ -1419,6 +1421,30 @@ def drive_editor_create_finalize(
     }
     driver_timer = QtCore.QTimer(context.app)
     driver_timer.setInterval(5)
+
+    def run_action(
+        action_id: str,
+        operation: Callable[[], Mapping[str, Any] | None],
+        *,
+        precondition: Callable[
+            [], tuple[bool, str, Mapping[str, Any] | None]
+        ]
+        | None = None,
+        allowed_dialogs: tuple[Any, ...] = (),
+    ) -> dict[str, Any]:
+        if action_runner is not None:
+            return action_runner(
+                action_id,
+                operation,
+                precondition=precondition,
+                allowed_dialogs=allowed_dialogs,
+            )
+        return execute_action(
+            context,
+            action_id,
+            operation,
+            precondition=precondition,
+        )
 
     def click(widget: Any) -> None:
         QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
@@ -1509,8 +1535,7 @@ def drive_editor_create_finalize(
                 title = active.windowTitle() if active is not None else None
                 if isinstance(active, QtWidgets.QDialog):
                     active.reject()
-                execute_action(
-                    context,
+                run_action(
                     "editor.open_via_ui",
                     lambda: {},
                     precondition=lambda: (
@@ -1528,13 +1553,13 @@ def drive_editor_create_finalize(
                 )
             dialog = active
             state["dialog"] = dialog
-            execute_action(
-                context,
+            run_action(
                 "editor.open_via_ui",
                 lambda: {
                     "dialog_type": type(dialog).__name__,
                     "window_title": dialog.windowTitle(),
                 },
+                allowed_dialogs=(dialog,),
             )
             capture_milestone(
                 context,
@@ -1543,8 +1568,7 @@ def drive_editor_create_finalize(
                 widget=dialog,
             )
 
-            execute_action(
-                context,
+            run_action(
                 "editor.new_experiment_via_ui",
                 lambda: (
                     click(dialog.new_btn)
@@ -1555,6 +1579,7 @@ def drive_editor_create_finalize(
                         "factor_count": len(dialog.model.factors),
                     }
                 ),
+                allowed_dialogs=(dialog,),
             )
 
             experiment = specification["experiment"]
@@ -1677,10 +1702,10 @@ def drive_editor_create_finalize(
                     "auto_update": dialog.auto_update_chk.isChecked(),
                 }
 
-            execute_action(
-                context,
+            run_action(
                 "editor.configure_design_via_ui",
                 configure,
+                allowed_dialogs=(dialog,),
             )
 
             def generate() -> Mapping[str, Any]:
@@ -1701,10 +1726,10 @@ def drive_editor_create_finalize(
                     "status": dialog.status_lbl.text(),
                 }
 
-            execute_action(
-                context,
+            run_action(
                 "editor.optimize_generate_via_ui",
                 generate,
+                allowed_dialogs=(dialog,),
             )
             capture_milestone(
                 context,
@@ -1736,7 +1761,7 @@ def drive_editor_create_finalize(
                     "action_label": action_label,
                 }
 
-            execute_action(context, "editor.finish_via_ui", finish)
+            run_action("editor.finish_via_ui", finish)
             state["finished"] = True
         except BaseException as exc:
             state["error"] = exc

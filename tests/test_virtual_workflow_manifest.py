@@ -253,6 +253,7 @@ def test_cli_scenario_surface_is_registry_driven_and_legacy_compatible():
         WORKLOAD_ID,
         STRESS_WORKLOAD_ID,
         SMOKE_WORKLOAD_ID,
+        EDITOR_WORKLOAD_ID,
         SOFT_STOP_RESUME_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
@@ -273,6 +274,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
 
     monkeypatch.setattr(scenarios, "run_virtual_print_array_scenario", fake_run)
     monkeypatch.setattr(journeys, "run_virtual_print_array_24_journey", fake_run)
+    monkeypatch.setattr(journeys, "run_editor_create_finalize_journey", fake_run)
 
     result = run_registered_scenario(
         scenario_id,
@@ -284,14 +286,14 @@ def test_registry_dispatch_uses_existing_config_and_runner(
     assert result == {"scenario_id": scenario_id}
     assert len(captured) == 1
     config = captured[0]
-    if scenario_id == SMOKE_WORKLOAD_ID:
+    if scenario_id in {SMOKE_WORKLOAD_ID, EDITOR_WORKLOAD_ID}:
         from tools.virtual_workflows.journeys import JourneyRunConfig
 
         assert isinstance(config, JourneyRunConfig)
     else:
         assert isinstance(config, VirtualPrintArrayScenarioConfig)
     assert config.scenario_id == scenario_id
-    if scenario_id != SMOKE_WORKLOAD_ID:
+    if scenario_id not in {SMOKE_WORKLOAD_ID, EDITOR_WORKLOAD_ID}:
         assert config.fixture_path == SCENARIO_FIXTURES[scenario_id].resolve()
     assert config.output_root == tmp_path.resolve()
     assert config.speed_multiplier == 25
@@ -301,7 +303,6 @@ def test_registry_dispatch_uses_existing_config_and_runner(
 @pytest.mark.parametrize(
     ("scenario_id", "runner_name"),
     [
-        (EDITOR_WORKLOAD_ID, "run_editor_create_finalize_scenario"),
         (
             EDITOR_RENAME_WORKLOAD_ID,
             "run_editor_prestart_rename_refinalize_scenario",

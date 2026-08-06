@@ -127,7 +127,13 @@ class AutomationHarness:
             from tools.virtual_workflows.qt_font_environment import (
                 apply_and_validate_sil_application_font,
             )
-            from PySide6 import QtWidgets
+            from PySide6 import QtCore, QtWidgets
+
+            if self.config.visible:
+                QtWidgets.QApplication.setAttribute(
+                    QtCore.Qt.ApplicationAttribute.AA_DontUseNativeDialogs,
+                    True,
+                )
 
             ownership = (
                 QtOwnership.BORROWED
@@ -172,6 +178,7 @@ class AutomationHarness:
                 "speed_multiplier": self.config.speed_multiplier,
                 "font_rendering": font,
                 "scenario_root": str(self.scenario_root),
+                "qt_non_native_dialogs": bool(self.config.visible),
             }
 
         return execute_action(
@@ -189,10 +196,11 @@ class AutomationHarness:
         surface: InteractionSurface = InteractionSurface.UI,
         precondition: Callable[[], tuple[bool, str, Mapping[str, Any] | None]]
         | None = None,
+        allowed_dialogs: tuple[Any, ...] = (),
     ) -> dict[str, Any]:
         def bounded_operation() -> Mapping[str, Any] | None:
             evidence = operation()
-            self.assert_no_unexpected_dialog()
+            self.assert_no_unexpected_dialog(allowed_dialogs=allowed_dialogs)
             if self.session is not None and self.session.recorder is not None:
                 health = self.session.recorder.health_snapshot()
                 if health.get("status") != "healthy":
@@ -222,7 +230,11 @@ class AutomationHarness:
                 self.failure = exc
             raise
 
-    def assert_no_unexpected_dialog(self) -> None:
+    def assert_no_unexpected_dialog(
+        self,
+        *,
+        allowed_dialogs: tuple[Any, ...] = (),
+    ) -> None:
         if self.context.app is None:
             return
         from PySide6 import QtWidgets
@@ -231,6 +243,7 @@ class AutomationHarness:
             widget
             for widget in self.context.app.topLevelWidgets()
             if isinstance(widget, QtWidgets.QDialog) and widget.isVisible()
+            and widget not in allowed_dialogs
             and widget
             is not getattr(
                 getattr(self.context.view, "pressure_box", None),

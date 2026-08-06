@@ -53,6 +53,26 @@ def test_harness_uses_external_session_root_and_hashes_retained_evidence(tmp_pat
     assert manifest["excluded"] == ["evidence_manifest.json"]
 
 
+def test_unexpected_dialog_check_allows_only_explicit_active_dialog(qapp, tmp_path):
+    harness = AutomationHarness(_config(tmp_path))
+    harness.context.app = qapp
+    allowed = QtWidgets.QDialog()
+    allowed.setWindowTitle("Expected editor")
+    allowed.show()
+    qapp.processEvents()
+
+    harness.assert_no_unexpected_dialog(allowed_dialogs=(allowed,))
+    assert harness.context.unexpected_dialogs == []
+
+    with pytest.raises(RuntimeError, match="unexpected dialog"):
+        harness.assert_no_unexpected_dialog()
+    assert harness.context.unexpected_dialogs == [
+        {"type": "QDialog", "title": "Expected editor"}
+    ]
+    assert allowed.isVisible() is False
+    allowed.deleteLater()
+
+
 def test_active_session_unexpected_dialog_fails_action_and_retains_evidence(
     qapp, tmp_path, monkeypatch
 ):

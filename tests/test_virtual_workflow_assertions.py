@@ -3,6 +3,7 @@ from __future__ import annotations
 from tools.virtual_workflows.assertions import (
     AssertionResult,
     cleanup_assertion,
+    editor_artifacts_cleanup_assertion,
     evaluate_assertion,
 )
 
@@ -38,4 +39,25 @@ def test_cleanup_assertion_requires_close_and_removed_lock():
     ).decision == "pass"
     assert cleanup_assertion(
         {"evidence": {"close_succeeded": True, "session_lock_present": True}}
+    ).decision == "fail"
+
+
+def test_editor_artifact_assertion_requires_exact_nonempty_screenshots_and_cleanup(
+    tmp_path,
+):
+    screenshot = tmp_path / "finalized.png"
+    screenshot.write_bytes(b"png")
+    teardown = {
+        "evidence": {"close_succeeded": True, "session_lock_present": False}
+    }
+
+    assert editor_artifacts_cleanup_assertion(
+        screenshots={"finalized": screenshot},
+        required_screenshots={"finalized"},
+        teardown=teardown,
+    ).decision == "pass"
+    assert editor_artifacts_cleanup_assertion(
+        screenshots={"finalized": screenshot},
+        required_screenshots={"finalized", "validated"},
+        teardown=teardown,
     ).decision == "fail"

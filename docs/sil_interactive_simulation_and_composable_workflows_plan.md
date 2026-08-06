@@ -1011,7 +1011,7 @@ Rollback:
 
 ### Milestone 7: Journey portfolio and legacy-runner migration
 
-Status: `planned`
+Status: `in progress — Slice 1 complete`
 
 Goal:
 
@@ -1041,7 +1041,7 @@ Focused independent scenarios:
 Migration order:
 
 1. 24-well smoke;
-2. editor create/finalize;
+2. editor create/finalize — complete in Slice 1;
 3. multi-stock 24x2;
 4. prepared edit/refinalize;
 5. soft stop/resume;
@@ -1472,8 +1472,9 @@ This effort is complete when:
 
 ## Current Next Action
 
-Review the Milestone 6 completion record and retained visible/replay evidence.
-Create a separate Milestone 7 plan before migrating any additional workflow.
-Do not begin portfolio migration, seeded exploration, production fault
-injection, performance remediation, firmware, protocol, Pi operations, or
-hardware work without separate approval.
+Review the Milestone 7 Slice 1 completion record and retained visible/replay
+evidence. Create and approve a separate plan for the next Milestone 7 slice
+before migrating another workflow. Continue to use targeted tests per slice;
+defer the complete Python suite until the final Milestone 7 validation. Do not
+begin seeded exploration, production fault injection, performance remediation,
+firmware, protocol, Pi operations, or hardware work without separate approval.
