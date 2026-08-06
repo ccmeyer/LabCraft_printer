@@ -12,7 +12,11 @@ ensure_calibration_import_stubs()
 
 from ApplicationComposition import SIMULATION_RUNTIME_CONTEXT
 from CalibrationClasses.Model import CalibrationManager
-from CalibrationClasses.View import DropletImagingDialog, ManualRefuelCheckDialog
+from CalibrationClasses.View import (
+    CalibrationModePreflightDialog,
+    DropletImagingDialog,
+    ManualRefuelCheckDialog,
+)
 from tools.sil.session import (
     ArtifactRetentionPolicy,
     SessionRootPolicy,
@@ -190,6 +194,131 @@ def test_full_layout_simulation_calibration_uses_real_tabs_but_no_camera(
     assert finished_results == [QtWidgets.QDialog.Rejected]
     assert physical_calls == []
     main_window.close()
+
+
+def test_synthetic_pulse_preflight_offers_profiles_without_override(qapp):
+    profile = {
+        "id": "water_stream",
+        "name": "Water - stream",
+        "mode": "stream",
+        "print_pressure": 0.8,
+        "refuel_pressure": 0.8,
+        "print_pulse_width": 2500,
+        "refuel_pulse_width": 6000,
+    }
+    dialog = CalibrationModePreflightDialog(
+        preflight={
+            "code": "synthetic_pulse_width_out_of_range",
+            "requested_mode": "droplet",
+            "head_mode": "droplet",
+            "current_print_pulse_width_us": 1300,
+            "expected_print_pulse_width_us": 2500,
+            "minimum_print_pulse_width_us": 2500,
+            "maximum_print_pulse_width_us": 10000,
+            "matching_profiles": [profile],
+            "message": "Select a compatible Stream profile.",
+        }
+    )
+
+    button_texts = {button.text() for button in dialog.findChildren(QtWidgets.QPushButton)}
+
+    assert "Apply Selected Profile and Continue" in button_texts
+    assert "Review Settings" in button_texts
+    assert "Cancel" in button_texts
+    assert "Continue Anyway" not in button_texts
+    combo = dialog.findChild(QtWidgets.QComboBox)
+    assert combo is not None
+    assert combo.currentData()["id"] == "water_stream"
+    assert "2500 us to 10000 us" in " ".join(
+        label.text() for label in dialog.findChildren(QtWidgets.QLabel)
+    )
+    dialog.close()
+
+
+def test_synthetic_profile_correction_uses_controller_then_continues(qapp):
+    setting = {"pulse": 1300}
+    profile = {
+        "id": "water_stream",
+        "name": "Water - stream",
+        "mode": "stream",
+        "print_pressure": 0.8,
+        "refuel_pressure": 0.8,
+        "print_pulse_width": 2500,
+        "refuel_pulse_width": 6000,
+    }
+    applied = []
+    continued = []
+
+    def apply_profile(selected, callback=None):
+        applied.append(selected["id"])
+        setting["pulse"] = selected["print_pulse_width"]
+        if callable(callback):
+            callback()
+        return True
+
+    host = SimpleNamespace(
+        controller=SimpleNamespace(apply_print_profile=apply_profile),
+        _synthetic_settings_correction_pending=False,
+        _refresh_synthetic_workflow_controls=lambda: None,
+        _show_calibration_mode_preflight_error=lambda _payload: None,
+        isVisible=lambda: True,
+        _finish_synthetic_settings_correction=lambda profile_id, **kwargs: continued.append(
+            (profile_id, kwargs.get("applied_profile", {}).get("id"))
+        ),
+    )
+
+    result = DropletImagingDialog._apply_synthetic_profile_then_generate(
+        host,
+        "droplet_to_stream",
+        profile,
+    )
+    qapp.processEvents()
+
+    assert result is True
+    assert applied == ["water_stream"]
+    assert setting["pulse"] == 2500
+    assert continued == [("droplet_to_stream", "water_stream")]
+
+
+def test_reusable_historical_candidate_requires_idle_array_and_empty_queue():
+    machine = SimpleNamespace(check_if_all_completed=lambda: False)
+    host = SimpleNamespace(
+        model=SimpleNamespace(
+            calibration_manager=SimpleNamespace(
+                validate_characterization_candidate_for_application=lambda _row: {
+                    "ok": True,
+                    "code": "ok",
+                }
+            )
+        ),
+        controller=SimpleNamespace(
+            machine=machine,
+            get_array_run_state=lambda: "running",
+        ),
+    )
+    row = {
+        "synthetic": True,
+        "_historical_candidate_id": "a" * 64,
+        "application_record_state": "generated_unapplied",
+    }
+
+    blocked = DropletImagingDialog._validate_selected_characterization_candidate(
+        host,
+        row,
+        require_idle=True,
+    )
+
+    assert blocked["ok"] is False
+    assert blocked["code"] == "application_busy"
+
+    host.controller.get_array_run_state = lambda: "idle"
+    machine.check_if_all_completed = lambda: True
+    allowed = DropletImagingDialog._validate_selected_characterization_candidate(
+        host,
+        row,
+        require_idle=True,
+    )
+    assert allowed["ok"] is True
 
 
 def test_normal_calibrate_button_routes_to_simulation_workflow(qapp, tmp_path):

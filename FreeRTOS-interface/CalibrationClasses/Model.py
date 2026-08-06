@@ -87,8 +87,25 @@ class TransientCharacterizationCandidate:
     is_fill: bool
     printing_mode: str
     requested_printing_mode: str | None = None
+    application_allowed: bool = True
+    application_block_reason: str | None = None
+    application_record_state: str = "pending_apply"
 
     def __post_init__(self):
+        if not isinstance(self.application_allowed, bool):
+            raise TypeError("application_allowed must be boolean")
+        if self.application_block_reason is not None and not str(
+            self.application_block_reason
+        ).strip():
+            raise ValueError("application_block_reason must be nonempty when provided")
+        record_state = str(self.application_record_state or "").strip().lower()
+        if record_state not in {
+            "pending_apply",
+            "generated_unapplied",
+            "applied_history",
+        }:
+            raise ValueError("application_record_state is invalid")
+        object.__setattr__(self, "application_record_state", record_state)
         object.__setattr__(
             self,
             "summary_row",
@@ -7851,6 +7868,7 @@ class CalibrationManager(QObject):
                 str(identity_field): candidate.candidate_id,
                 "original_printing_mode": requested_mode,
                 "applied_printing_mode": applied_mode,
+                "application_record_state": candidate.application_record_state,
                 "source_filter_key": "synthetic",
                 "phase_label": "Synthetic",
             }
@@ -7861,6 +7879,8 @@ class CalibrationManager(QObject):
         }
 
     def set_transient_characterization_candidate(self, candidate):
+        if candidate.application_record_state != "pending_apply":
+            raise ValueError("transient candidate must be pending Apply")
         self._transient_characterization_candidate = (
             self._build_characterization_candidate_entry(
                 candidate,
@@ -7871,10 +7891,17 @@ class CalibrationManager(QObject):
         return candidate.candidate_id
 
     def set_historical_characterization_candidates(self, candidates):
-        """Replace the read-only, artifact-validated synthetic history surface."""
+        """Replace the artifact-validated generated and applied history surface."""
 
         entries = {}
         for candidate in tuple(candidates or ()):
+            if candidate.application_record_state not in {
+                "generated_unapplied",
+                "applied_history",
+            }:
+                raise ValueError(
+                    "historical candidate must be generated-unapplied or applied history"
+                )
             entry = self._build_characterization_candidate_entry(
                 candidate,
                 identity_field="_historical_candidate_id",
@@ -7882,7 +7909,6 @@ class CalibrationManager(QObject):
             candidate_id = entry["candidate"].candidate_id
             if candidate_id in entries and entries[candidate_id] != entry:
                 raise ValueError("historical characterization candidate ID collision")
-            entry["row"]["application_record_state"] = "applied_history"
             entries[candidate_id] = entry
         self._historical_characterization_candidates = entries
         self.characterizationSummaryUpdated.emit()
@@ -7949,11 +7975,22 @@ class CalibrationManager(QObject):
             != str(expected_row.get("original_printing_mode") or "").strip().lower()
             or str(row.get("applied_printing_mode") or "").strip().lower()
             != str(expected_row.get("applied_printing_mode") or "").strip().lower()
+            or str(row.get("application_record_state") or "").strip().lower()
+            != str(expected_row.get("application_record_state") or "").strip().lower()
         ):
             return {
                 "ok": False,
                 "code": "candidate_changed",
                 "message": "The transient calibration candidate changed after registration.",
+            }
+        if not candidate.application_allowed:
+            return {
+                "ok": False,
+                "code": "legacy_synthetic_contract",
+                "message": (
+                    candidate.application_block_reason
+                    or "This historical synthetic result is retained as read-only evidence."
+                ),
             }
         current = self.get_characterization_application_context()
         expected_payload = dict(candidate.__dict__)

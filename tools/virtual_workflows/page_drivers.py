@@ -43,7 +43,54 @@ class CalibrationDialogDriver:
             "source_filter": self.dialog.summary_source_combo.currentData(),
         }
 
-    def generate_from_tab(self, target_mode: str) -> dict[str, Any]:
+    def _schedule_profile_preflight_acceptance(self, profile_id: str | None) -> None:
+        deadline = time.monotonic() + self.timeout_seconds
+
+        def _accept_when_visible():
+            modal = QtWidgets.QApplication.activeModalWidget()
+            if modal is None or modal.windowTitle() != "Calibration Settings Check":
+                if time.monotonic() >= deadline:
+                    return
+                QtCore.QTimer.singleShot(10, _accept_when_visible)
+                return
+            combo = modal.findChild(QtWidgets.QComboBox)
+            if combo is not None and profile_id:
+                match = -1
+                for index in range(combo.count()):
+                    data = combo.itemData(index)
+                    if isinstance(data, dict) and str(data.get("id") or "") == profile_id:
+                        match = index
+                        break
+                if match < 0:
+                    modal.reject()
+                    raise RuntimeError(
+                        f"calibration print profile is unavailable: {profile_id}"
+                    )
+                combo.setCurrentIndex(match)
+            apply_button = next(
+                (
+                    button
+                    for button in modal.findChildren(QtWidgets.QPushButton)
+                    if button.text() == "Apply Selected Profile and Continue"
+                ),
+                None,
+            )
+            if apply_button is None:
+                modal.reject()
+                raise RuntimeError("profile application control is missing from preflight")
+            QtTest.QTest.mouseClick(
+                apply_button,
+                QtCore.Qt.MouseButton.LeftButton,
+            )
+
+        QtCore.QTimer.singleShot(0, _accept_when_visible)
+
+    def generate_from_tab(
+        self,
+        target_mode: str,
+        *,
+        print_profile_id: str | None = None,
+    ) -> dict[str, Any]:
         """Use the real tab and Calibrate All control to generate one result."""
 
         target_mode = str(target_mode or "").strip().lower()
@@ -61,6 +108,11 @@ class CalibrationDialogDriver:
             raise RuntimeError(
                 f"synthetic {target_mode} Calibrate All is unavailable: {button.toolTip()}"
             )
+        profile_id = str(button.property("synthetic_profile_id") or "")
+        availability = getattr(self.dialog, "synthetic_availability_callback", None)
+        readiness = dict(availability(profile_id) or {}) if callable(availability) else {}
+        if readiness.get("correctable"):
+            self._schedule_profile_preflight_acceptance(print_profile_id)
         QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
 
         generated: dict[str, Any] = {}

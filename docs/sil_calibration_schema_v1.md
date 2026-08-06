@@ -117,3 +117,7 @@ Directional droplet-to-stream generation from source volumes that cannot form
 a valid symmetric v1 interval is represented by the additive
 `sil_calibration_schema_v2.md` contract. V1 serialization and fingerprints are
 unchanged.
+
+New pulse-aware application generation is represented by the additive
+`sil_calibration_schema_v3.md` contract. V1 and v2 artifacts remain readable
+and byte-stable.

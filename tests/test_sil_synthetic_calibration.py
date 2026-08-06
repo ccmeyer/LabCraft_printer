@@ -14,6 +14,7 @@ from tools.sil.synthetic_calibration import (
     CALIBRATION_RESULT_SCHEMA_ID,
     CALIBRATION_SCHEMA_VERSION,
     CALIBRATION_SCHEMA_VERSION_V2,
+    CALIBRATION_SCHEMA_VERSION_V3,
     DROPLET_TO_STREAM_PROFILE_VERSION_V2,
     SYNTHETIC_CALIBRATION_PROVIDER_VERSION,
     SYNTHETIC_CALIBRATION_PROVIDER_VERSION_V2,
@@ -21,8 +22,10 @@ from tools.sil.synthetic_calibration import (
     CalibrationContractError,
     CalibrationGenerationRequestV1,
     CalibrationGenerationRequestV2,
+    CalibrationGenerationRequestV3,
     CalibrationGenerationResultV1,
     CalibrationGenerationResultV2,
+    CalibrationGenerationResultV3,
     SyntheticCalibrationProvider,
     deserialize_calibration_request,
     deserialize_calibration_result,
@@ -104,6 +107,31 @@ def _request_v2(*, source_volume_nL=9.0, target_volume_nL=40.0, seed=1729, **ove
     }
     defaults.update(overrides)
     return CalibrationGenerationRequestV2(**defaults)
+
+
+def _request_v3(profile_id="nominal_droplet", *, pulse_width_us=None, **overrides):
+    requested_mode = "stream" if profile_id in {"nominal_stream", "stream_to_droplet"} else "droplet"
+    applied_mode = "stream" if profile_id in {"nominal_stream", "droplet_to_stream"} else "droplet"
+    defaults = {
+        "seed": 1729,
+        "profile_id": profile_id,
+        "virtual_run_id": f"virtual-{profile_id}-v3",
+        "printer_head_id": "virtual-head-A",
+        "stock_id": "virtual-stock-1",
+        "factor_name": "Protein",
+        "option_name": "High",
+        "is_fill": False,
+        "requested_mode": requested_mode,
+        "source_volume_nL": 60.0 if requested_mode == "stream" else 9.0,
+        "print_pressure_psi": 1.25,
+        "print_pulse_width_us": (
+            pulse_width_us
+            if pulse_width_us is not None
+            else (2500 if applied_mode == "stream" else 1300)
+        ),
+    }
+    defaults.update(overrides)
+    return CalibrationGenerationRequestV3(**defaults)
 
 
 class _ExistingSummaryContract:
@@ -207,12 +235,70 @@ def test_directional_v2_transition_round_trips_and_dispatches_strictly():
         separators=(",", ":"),
     ).encode("utf-8")
 
-    bad_version = {**request.to_dict(), "schema_version": 3}
+    bad_version = {**request.to_dict(), "schema_version": 4}
     with pytest.raises(CalibrationContractError, match="unsupported schema version"):
         deserialize_calibration_request(bad_version)
     altered = {**result.to_dict(), "result_fingerprint": "0" * 64}
     with pytest.raises(CalibrationContractError, match="result_fingerprint"):
         deserialize_calibration_result(altered)
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "pulse_width_us", "expected_volume"),
+    (
+        ("nominal_droplet", 1300, 9.0),
+        ("nominal_droplet", 1800, 18.0),
+        ("droplet_to_stream", 2500, 60.0),
+        ("nominal_stream", 10000, 250.0),
+        ("stream_to_droplet", 1300, 9.0),
+    ),
+)
+def test_pulse_aware_v3_profiles_round_trip_and_use_exact_response(
+    profile_id,
+    pulse_width_us,
+    expected_volume,
+):
+    request = _request_v3(profile_id, pulse_width_us=pulse_width_us)
+    before = random.getstate()
+
+    result = SyntheticCalibrationProvider().generate(request)
+
+    assert isinstance(result, CalibrationGenerationResultV3)
+    assert result.schema_version == CALIBRATION_SCHEMA_VERSION_V3
+    assert result.measured_volume_nL == expected_volume
+    assert result.effective_volume_nL == expected_volume
+    assert result.pw_us == pulse_width_us
+    assert result.pressure_psi == 1.25
+    assert result.to_request() == request
+    assert deserialize_calibration_request(request.to_dict()) == request
+    assert deserialize_calibration_result(result.to_dict()) == result
+    assert random.getstate() == before
+
+
+def test_pulse_aware_v3_seed_and_pressure_change_provenance_not_volume():
+    provider = SyntheticCalibrationProvider()
+    first = provider.generate(_request_v3(seed=1, print_pressure_psi=0.8))
+    second = provider.generate(_request_v3(seed=2, print_pressure_psi=1.4))
+
+    assert first.measured_volume_nL == second.measured_volume_nL == 9.0
+    assert first.result_fingerprint != second.result_fingerprint
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"print_pulse_width_us": 1299},
+        {"print_pulse_width_us": 1801},
+        {"print_pulse_width_us": 2000},
+        {"response_model_version": 2},
+        {"provider_version": "milestone-4c-v2"},
+        {"profile_version": 2},
+        {"source_volume_nL": math.nan},
+    ),
+)
+def test_pulse_aware_v3_rejects_invalid_contracts(overrides):
+    with pytest.raises(CalibrationContractError):
+        _request_v3(**overrides)
 
 
 @pytest.mark.parametrize(
@@ -376,6 +462,7 @@ def test_module_has_only_standard_library_imports():
         "random",
         "re",
         "typing",
+        "ejection_response",
     }
 
 

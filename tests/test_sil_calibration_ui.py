@@ -44,7 +44,7 @@ def _result():
     return SyntheticCalibrationProvider().generate(request)
 
 
-def _candidate(result=None):
+def _candidate(result=None, *, application_record_state="pending_apply"):
     result = result or _result()
     return TransientCharacterizationCandidate(
         candidate_id=result.result_fingerprint,
@@ -59,6 +59,7 @@ def _candidate(result=None):
         is_fill=result.is_fill,
         printing_mode=result.applied_printing_mode,
         requested_printing_mode=result.original_printing_mode,
+        application_record_state=application_record_state,
     )
 
 
@@ -129,7 +130,7 @@ def test_transient_surface_requires_exact_identity_and_never_persists_rows():
 
 def test_validated_synthetic_history_survives_transient_clear_and_mode_change():
     manager, context = _manager()
-    candidate = _candidate()
+    candidate = _candidate(application_record_state="applied_history")
 
     manager.set_historical_characterization_candidates([candidate])
     rows = manager.get_characterization_summary_rows()
@@ -139,7 +140,7 @@ def test_validated_synthetic_history_survives_transient_clear_and_mode_change():
     assert rows[0]["application_record_state"] == "applied_history"
     assert manager.validate_characterization_candidate_for_application(rows[0])["ok"]
 
-    manager.set_transient_characterization_candidate(candidate)
+    manager.set_transient_characterization_candidate(_candidate())
     rows = manager.get_characterization_summary_rows()
     assert len(rows) == 1
     assert rows[0]["_transient_candidate_id"] == candidate.candidate_id
@@ -153,6 +154,92 @@ def test_validated_synthetic_history_survives_transient_clear_and_mode_change():
     assert validation["ok"] is False
     assert validation["code"] == "identity_mismatch"
     assert manager.data == {"runs": []}
+
+
+def test_generated_history_coexists_with_one_pending_candidate_and_promotes_in_place():
+    manager, _context = _manager()
+    droplet_result = _result()
+    stream_result = _stream_result()
+    generated_droplet = _candidate(
+        droplet_result,
+        application_record_state="generated_unapplied",
+    )
+    generated_stream = _candidate(
+        stream_result,
+        application_record_state="generated_unapplied",
+    )
+
+    manager.set_historical_characterization_candidates(
+        [generated_droplet, generated_stream]
+    )
+    manager.set_transient_characterization_candidate(_candidate(stream_result))
+    rows = manager.get_characterization_summary_rows()
+
+    assert len(rows) == 2
+    assert {
+        row["synthetic_result_fingerprint"]: row["application_record_state"]
+        for row in rows
+    } == {
+        droplet_result.result_fingerprint: "generated_unapplied",
+        stream_result.result_fingerprint: "pending_apply",
+    }
+
+    manager.clear_transient_characterization_candidate(stream_result.result_fingerprint)
+    manager.set_historical_characterization_candidates(
+        [
+            generated_droplet,
+            _candidate(stream_result, application_record_state="applied_history"),
+        ]
+    )
+    promoted = manager.get_characterization_summary_rows()
+
+    assert len(promoted) == 2
+    assert {
+        row["synthetic_result_fingerprint"]: row["application_record_state"]
+        for row in promoted
+    } == {
+        droplet_result.result_fingerprint: "generated_unapplied",
+        stream_result.result_fingerprint: "applied_history",
+    }
+
+
+def test_candidate_record_state_is_revalidated_before_application():
+    manager, _context = _manager()
+    candidate = _candidate(application_record_state="generated_unapplied")
+    manager.set_historical_characterization_candidates([candidate])
+    row = manager.get_characterization_summary_rows()[0]
+    row["application_record_state"] = "applied_history"
+
+    validation = manager.validate_characterization_candidate_for_application(row)
+
+    assert validation["ok"] is False
+    assert validation["code"] == "candidate_changed"
+
+
+def test_legacy_synthetic_history_is_visible_but_read_only():
+    manager, _context = _manager()
+    result = _result()
+    candidate = TransientCharacterizationCandidate(
+        **{
+            **_candidate(result).__dict__,
+            "source_kind": "sil_synthetic_calibration_history",
+            "application_allowed": False,
+            "application_block_reason": (
+                "Legacy synthetic evidence has no pulse-response provenance."
+            ),
+            "application_record_state": "applied_history",
+        }
+    )
+
+    manager.set_historical_characterization_candidates([candidate])
+    rows = manager.get_characterization_summary_rows()
+    validation = manager.validate_characterization_candidate_for_application(rows[0])
+
+    assert len(rows) == 1
+    assert rows[0]["application_record_state"] == "applied_history"
+    assert validation["ok"] is False
+    assert validation["code"] == "legacy_synthetic_contract"
+    assert "pulse-response provenance" in validation["message"]
 
 
 def test_transient_surface_rejects_altered_fingerprints():
@@ -202,7 +289,13 @@ def test_transient_surface_accepts_mode_switch_against_requested_context():
 
 def test_summary_model_visibly_marks_and_filters_synthetic_rows(qapp):
     row = _result().to_application_summary_row()
-    row.update({"phase_label": "Synthetic", "source_filter_key": "synthetic"})
+    row.update(
+        {
+            "phase_label": "Synthetic",
+            "source_filter_key": "synthetic",
+            "application_record_state": "generated_unapplied",
+        }
+    )
     model = CharacterizationSummaryTableModel()
     proxy = CharacterizationSummaryProxyModel()
     proxy.setSourceModel(model)
@@ -213,6 +306,9 @@ def test_summary_model_visibly_marks_and_filters_synthetic_rows(qapp):
     source_index = model.index(0, model.column_index("phase_label"))
     assert source_index.data(QtCore.Qt.ItemDataRole.DisplayRole) == "Synthetic"
     assert "Synthetic SIL result" in source_index.data(QtCore.Qt.ItemDataRole.ToolTipRole)
+    assert "Generated — Not Applied" in source_index.data(
+        QtCore.Qt.ItemDataRole.ToolTipRole
+    )
     assert source_index.data(QtCore.Qt.ItemDataRole.BackgroundRole) is not None
 
 

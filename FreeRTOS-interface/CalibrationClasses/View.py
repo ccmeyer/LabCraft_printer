@@ -252,6 +252,8 @@ class CalibrationModePreflightDialog(QtWidgets.QDialog):
         head_mode = self.preflight.get("head_mode")
         current_pw = self.preflight.get("current_print_pulse_width_us")
         expected_pw = self.preflight.get("expected_print_pulse_width_us")
+        minimum_pw = self.preflight.get("minimum_print_pulse_width_us")
+        maximum_pw = self.preflight.get("maximum_print_pulse_width_us")
         code = str(self.preflight.get("code") or "")
         profiles = list(self.preflight.get("matching_profiles") or [])
 
@@ -261,16 +263,26 @@ class CalibrationModePreflightDialog(QtWidgets.QDialog):
         message_label.setStyleSheet("font-weight: 600;")
         layout.addWidget(message_label)
 
+        expected_description = self._format_pulse_width(expected_pw)
+        if minimum_pw is not None and maximum_pw is not None:
+            expected_description = (
+                f"{self._format_pulse_width(minimum_pw)} to "
+                f"{self._format_pulse_width(maximum_pw)}"
+            )
         details = QtWidgets.QLabel(
             f"Requested: {self._mode_label(requested_mode)} calibration\n"
             f"Loaded head: {self._mode_label(head_mode) if head_mode else '-'}\n"
             f"Current print pulse width: {self._format_pulse_width(current_pw)}\n"
-            f"Expected print pulse width: {self._format_pulse_width(expected_pw)}"
+            f"Expected print pulse width: {expected_description}"
         )
         details.setWordWrap(True)
         layout.addWidget(details)
 
-        if code == "pulse_width_mismatch" and profiles:
+        pulse_mismatch_codes = {
+            "pulse_width_mismatch",
+            "synthetic_pulse_width_out_of_range",
+        }
+        if code in pulse_mismatch_codes and profiles:
             self._profile_combo = QtWidgets.QComboBox()
             for profile in profiles:
                 profile_data = dict(profile)
@@ -305,6 +317,14 @@ class CalibrationModePreflightDialog(QtWidgets.QDialog):
             add_button("Apply Selected Profile and Continue", self.ACTION_APPLY_PROFILE, default=True)
             add_button("Review Settings", self.ACTION_REVIEW_SETTINGS)
             add_button("Continue Anyway", self.ACTION_CONTINUE_ANYWAY)
+            add_button("Cancel", self.ACTION_CANCEL)
+        elif code == "synthetic_pulse_width_out_of_range" and profiles:
+            add_button("Apply Selected Profile and Continue", self.ACTION_APPLY_PROFILE, default=True)
+            add_button("Review Settings", self.ACTION_REVIEW_SETTINGS)
+            add_button("Cancel", self.ACTION_CANCEL)
+        elif code == "synthetic_pulse_width_out_of_range":
+            add_button("Review Settings", self.ACTION_REVIEW_SETTINGS, default=True)
+            add_button("Set Pulse Width Only and Continue", self.ACTION_SET_PULSE_WIDTH)
             add_button("Cancel", self.ACTION_CANCEL)
         elif code == "pulse_width_mismatch":
             add_button("Review Settings", self.ACTION_REVIEW_SETTINGS, default=True)
@@ -670,6 +690,15 @@ def _configure_characterization_table_view(table, model):
             header.setSectionResizeMode(idx, QtWidgets.QHeaderView.ResizeToContents)
 
 
+def _synthetic_record_state_label(row):
+    state = str((row or {}).get("application_record_state") or "").strip().lower()
+    return {
+        "pending_apply": "Pending Apply",
+        "generated_unapplied": "Generated — Not Applied",
+        "applied_history": "Applied History",
+    }.get(state, "")
+
+
 class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
     def __init__(self, parent=None, *, include_recorded=False, muted_brush=None, applied_brush=None, synthetic_brush=None):
         super().__init__(parent)
@@ -865,6 +894,9 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
                 fingerprint = str(row.get("synthetic_result_fingerprint") or "")
                 limitations = ", ".join(row.get("synthetic_limitations") or [])
                 detail = f"Synthetic SIL result {fingerprint}"
+                state_label = _synthetic_record_state_label(row)
+                if state_label:
+                    detail = f"{detail}\nState: {state_label}"
                 return f"{detail}\nLimitations: {limitations}" if limitations else detail
             invalid_reason = row.get("invalid_reason")
             if row.get("valid") is False and invalid_reason:
@@ -3420,7 +3452,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
             except Exception as exc:
                 readiness = {"ok": False, "message": str(exc)}
             readiness_by_target[target_mode] = readiness or {}
-            button.setEnabled(bool((readiness or {}).get("ok")))
+            button.setEnabled(
+                not bool(getattr(self, "_synthetic_settings_correction_pending", False))
+                and bool(
+                    (readiness or {}).get("ok")
+                    or (readiness or {}).get("correctable")
+                )
+            )
             button.setToolTip(
                 str((readiness or {}).get("message") or "Synthetic calibration is unavailable.")
             )
@@ -3442,13 +3480,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 f"{transition}: "
                 f"{str(active_readiness.get('message') or 'Synthetic calibration is unavailable.')}"
             )
-            color = "#f59e0b" if active_readiness.get("ok") else "#ef4444"
+            color = (
+                "#f59e0b"
+                if active_readiness.get("ok") or active_readiness.get("correctable")
+                else "#ef4444"
+            )
             self.synthetic_calibration_mode_label.setStyleSheet(
                 f"font-weight: bold; color: {color}; padding: 2px;"
             )
 
-    def _generate_synthetic_for_target_mode(self, target_mode):
-        profile_id = self._synthetic_profile_for_target_mode(target_mode)
+    def _execute_synthetic_generation(self, profile_id):
+        profile_id = str(profile_id or "").strip()
         try:
             result = self.synthetic_generation_callback(profile_id)
         except Exception as exc:
@@ -3475,6 +3517,103 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_synthetic_workflow_controls()
         QTimer.singleShot(0, self._restore_camera_free_window_activation)
         return True
+
+    def _finish_synthetic_settings_correction(self, profile_id, *, applied_profile=None):
+        self._synthetic_settings_correction_pending = False
+        if not self.isVisible():
+            return False
+        if isinstance(applied_profile, dict):
+            self._sync_pressure_scan_start_pressure_from_profile(applied_profile)
+        self._refresh_print_pulse_width_control()
+        self._refresh_synthetic_workflow_controls()
+        return self._execute_synthetic_generation(profile_id)
+
+    def _apply_synthetic_profile_then_generate(self, profile_id, profile):
+        if not isinstance(profile, dict):
+            self._show_calibration_mode_preflight_error(
+                {"message": "No compatible print profile was selected."}
+            )
+            return False
+        applier = getattr(self.controller, "apply_print_profile", None)
+        if not callable(applier):
+            self._show_calibration_mode_preflight_error(
+                {"message": "Print profiles cannot be applied by this controller."}
+            )
+            return False
+        self._synthetic_settings_correction_pending = True
+        self._refresh_synthetic_workflow_controls()
+
+        def _after_apply(*_args, **_kwargs):
+            QTimer.singleShot(
+                0,
+                lambda: self._finish_synthetic_settings_correction(
+                    profile_id,
+                    applied_profile=profile,
+                ),
+            )
+
+        result = applier(profile, callback=_after_apply)
+        if result is False:
+            self._synthetic_settings_correction_pending = False
+            self._refresh_synthetic_workflow_controls()
+            return False
+        return True
+
+    def _set_synthetic_pulse_width_then_generate(self, profile_id, preflight):
+        setter = getattr(self.controller, "set_print_pulse_width", None)
+        if not callable(setter):
+            self._show_calibration_mode_preflight_error(
+                {"message": "Print pulse width cannot be changed by this controller."}
+            )
+            return False
+        try:
+            expected_pw = int(preflight.get("expected_print_pulse_width_us"))
+        except Exception:
+            self._show_calibration_mode_preflight_error(
+                {"message": "Default print pulse width could not be determined."}
+            )
+            return False
+        self._synthetic_settings_correction_pending = True
+        self._refresh_synthetic_workflow_controls()
+
+        def _after_set(*_args, **_kwargs):
+            QTimer.singleShot(
+                0,
+                lambda: self._finish_synthetic_settings_correction(profile_id),
+            )
+
+        result = setter(expected_pw, manual=True, handler=_after_set)
+        if result is False:
+            self._synthetic_settings_correction_pending = False
+            self._refresh_synthetic_workflow_controls()
+            return False
+        return True
+
+    def _generate_synthetic_for_target_mode(self, target_mode):
+        profile_id = self._synthetic_profile_for_target_mode(target_mode)
+        try:
+            preflight = dict(self.synthetic_availability_callback(profile_id) or {})
+        except Exception as exc:
+            preflight = {"ok": False, "message": str(exc)}
+        if preflight.get("ok"):
+            return self._execute_synthetic_generation(profile_id)
+        if not preflight.get("correctable"):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Synthetic Calibration Not Generated",
+                str(preflight.get("message") or "Synthetic generation is unavailable."),
+            )
+            self._refresh_synthetic_workflow_controls()
+            return False
+        action, selected_profile = self._run_calibration_mode_preflight_dialog(preflight)
+        if action == CalibrationModePreflightDialog.ACTION_APPLY_PROFILE:
+            return self._apply_synthetic_profile_then_generate(profile_id, selected_profile)
+        if action == CalibrationModePreflightDialog.ACTION_SET_PULSE_WIDTH:
+            return self._set_synthetic_pulse_width_then_generate(profile_id, preflight)
+        if action == CalibrationModePreflightDialog.ACTION_REVIEW_SETTINGS:
+            self._review_calibration_mode_settings()
+        self._refresh_synthetic_workflow_controls()
+        return False
 
     def _restore_camera_free_window_activation(self):
         """Keep the owned asynchronous simulator dialog above its main window."""
@@ -11246,6 +11385,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             status_lines.append("Valid result")
 
         if raw.get("synthetic") is True:
+            record_state_label = _synthetic_record_state_label(raw)
+            if record_state_label:
+                status_lines.append(f"Record state: {record_state_label}")
             original_mode = self._normalize_printing_mode_value(
                 raw.get("original_printing_mode"),
                 fallback=self._summary_row_printing_mode(raw),
@@ -11392,7 +11534,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 }
             if not result.get("ok"):
                 return result
-        if require_idle and raw.get("_transient_candidate_id"):
+        if require_idle and raw.get("synthetic") is True and (
+            raw.get("_transient_candidate_id")
+            or raw.get("_historical_candidate_id")
+        ):
             state_getter = getattr(self.controller, "get_array_run_state", None)
             state = str(state_getter() if callable(state_getter) else "idle")
             queue_getter = getattr(getattr(self.controller, "machine", None), "check_if_all_completed", None)

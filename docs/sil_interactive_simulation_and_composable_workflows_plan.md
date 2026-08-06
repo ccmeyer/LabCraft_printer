@@ -870,6 +870,42 @@ Rollback:
   reverse profile, extended refuel bridge, and 4C tests while retaining
   Milestones 1–4B.
 
+### Milestone 4D: Pulse-aware synthetic ejection response
+
+Status: `complete`
+
+Goal:
+
+- make new synthetic calibration volume causally depend on the exact settled
+  simulation pulse width before beginning full-lifecycle characterization.
+
+Deliverables:
+
+- schema-v3 pulse-aware requests/results with v1/v2 compatibility;
+- deterministic droplet 1300–1800 us / 9–18 nL response;
+- deterministic stream 2500–10000 us / 60–250 nL response;
+- simulation-only settings preflight with configured profile selection;
+- Controller/SimMachine settings convergence before generation;
+- read-only historical pre-v3 synthetic application evidence.
+- fingerprint-deduplicated pending, generated-unapplied, and applied synthetic
+  history reconstructed from canonical artifact pairs and authoritative
+  execution-calibration records.
+
+Gate:
+
+- unsupported pulse widths cannot create candidates or artifacts;
+- valid current settings are preserved;
+- selected profiles complete through the normal command path before generation;
+- real preview, Apply, persistence, refuel, and retained-root reload reconcile;
+- physical calibration preflight remains unchanged.
+- generating a different profile retains earlier unapplied evidence, and
+  applying a retained schema-v3 row promotes it without duplication.
+
+Rollback:
+
+- remove v3 response/contracts and the simulation pulse-preflight bridge while
+  retaining Milestones 1–4C and all v1/v2 evidence.
+
 ### Milestone 5: Manual full-lifecycle characterization
 
 Status: `planned`
@@ -1437,7 +1473,8 @@ This effort is complete when:
 ## Current Next Action
 
 Create and review a revised concrete Milestone 5 plan around the completed
-normal-UI convergence before beginning manual full-lifecycle characterization.
+pulse-aware normal-UI calibration workflow before beginning manual
+full-lifecycle characterization.
 Do not begin workflow migration, failure injection, performance remediation,
 firmware, protocol, Pi operations, or hardware changes as part of that planning
 step.

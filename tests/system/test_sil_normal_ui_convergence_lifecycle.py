@@ -72,10 +72,11 @@ def test_stream_to_droplet_apply_and_reload_authoritative_bundle(
     )
     model.machine_state_updated = SignalStub()
     model.rack_model = SimpleNamespace(get_gripper_printer_head=lambda: head)
+    settings = {"pulse_width_us": 2500}
     model.machine_model = SimpleNamespace(
         get_target_print_pressure=lambda: 1.2,
         get_current_print_pressure=lambda: 1.2,
-        get_print_pulse_width=lambda: 1400,
+        get_print_pulse_width=lambda: settings["pulse_width_us"],
         get_target_refuel_pressure=lambda: 0.4,
         get_current_refuel_pressure=lambda: 0.4,
         get_refuel_pulse_width=lambda: 2400,
@@ -109,13 +110,20 @@ def test_stream_to_droplet_apply_and_reload_authoritative_bundle(
         open_dialog_callback=lambda _candidate_id: object(),
     )
 
+    retained_stream = adapter.generate("nominal_stream")
+    assert retained_stream["ok"] is True
+    settings["pulse_width_us"] = 1400
     generated = adapter.generate("stream_to_droplet")
     assert generated["ok"] is True
     result = adapter.current_result
     assert result.original_printing_mode == "stream"
     assert result.applied_printing_mode == "droplet"
-    assert result.measured_volume_nL == 38.0
-    row = model.calibration_manager.get_characterization_summary_rows()[0]
+    assert result.measured_volume_nL == 10.8
+    row = next(
+        item
+        for item in model.calibration_manager.get_characterization_summary_rows()
+        if item.get("synthetic_result_fingerprint") == result.result_fingerprint
+    )
 
     experiment.apply_droplet_volume_for_option(
         result.factor_name,
@@ -144,7 +152,7 @@ def test_stream_to_droplet_apply_and_reload_authoritative_bundle(
     )
     assert calibrated.plan_revision > prepared.plan_revision
     assert calibrated_stock.printing_mode == "droplet"
-    assert calibrated_stock.effective_volume_nL == 38.0
+    assert calibrated_stock.effective_volume_nL == 10.8
     assert experiment.validate_manual_refuel_check_for_print(
         printer_head=head,
         machine_model=model.machine_model,
@@ -171,10 +179,10 @@ def test_stream_to_droplet_apply_and_reload_authoritative_bundle(
         (stock.factor_name, stock.option_name)
     )
     assert projected_plan["source"] == "authoritative_execution_plan"
-    assert projected_plan["stocks"][0]["droplet_volume_nL"] == 38.0
+    assert projected_plan["stocks"][0]["droplet_volume_nL"] == 10.8
     reloaded_preview = loaded_experiment.preview_requantized_for_option(
         (stock.factor_name, stock.option_name),
-        37.5,
+        10.5,
     )
     assert reloaded_preview["ok"] is True
     assert reloaded_preview["n_stocks"] == 1
@@ -225,10 +233,16 @@ def test_stream_to_droplet_apply_and_reload_authoritative_bundle(
     historical_rows = (
         bridge_model.calibration_manager.get_characterization_summary_rows()
     )
-    assert len(historical_rows) == 1
-    assert historical_rows[0]["application_record_state"] == "applied_history"
-    assert historical_rows[0]["synthetic_result_fingerprint"] == result.result_fingerprint
+    assert len(historical_rows) == 2
+    assert {
+        row["synthetic_result_fingerprint"]: row["application_record_state"]
+        for row in historical_rows
+    } == {
+        retained_stream["result_fingerprint"]: "generated_unapplied",
+        result.result_fingerprint: "applied_history",
+    }
     assert [kind for kind, _payload in recorder.events] == [
+        "synthetic_calibration_generated",
         "synthetic_calibration_generated",
         "synthetic_calibration_applied",
     ]

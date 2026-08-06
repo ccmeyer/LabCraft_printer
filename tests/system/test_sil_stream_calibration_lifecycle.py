@@ -78,7 +78,7 @@ def test_stream_transition_refuel_pass_and_reload_authoritative_bundle(
     model.machine_model = SimpleNamespace(
         get_target_print_pressure=lambda: 1.2,
         get_current_print_pressure=lambda: 1.2,
-        get_print_pulse_width=lambda: 1400,
+        get_print_pulse_width=lambda: 2500,
         get_target_refuel_pressure=lambda: 0.4,
         get_current_refuel_pressure=lambda: 0.4,
         get_refuel_pulse_width=lambda: 2400,
@@ -136,8 +136,7 @@ def test_stream_transition_refuel_pass_and_reload_authoritative_bundle(
     assert generated["ok"] is True
     result = calibration.current_result
     assert result.source_volume_nL == 9.0
-    assert result.target_volume_nL == 40.0
-    assert result.measured_volume_nL == 40.0
+    assert result.measured_volume_nL == 60.0
     row = model.calibration_manager.get_characterization_summary_rows()[0]
 
     em.apply_droplet_volume_for_option(
@@ -209,7 +208,7 @@ def test_stream_transition_refuel_pass_and_reload_authoritative_bundle(
     )
     assert calibrated.plan_revision > prepared.plan_revision
     assert calibrated_stock.printing_mode == "stream"
-    assert calibrated_stock.effective_volume_nL == 40.0
+    assert calibrated_stock.effective_volume_nL == 60.0
 
     persisted_plan = load_execution_plan(em.execution_plan_file_path)
     progress = json.loads(Path(em.progress_file_path).read_text(encoding="utf-8"))

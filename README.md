@@ -354,6 +354,36 @@ shows the directional readiness text before generation; preview, confirmation,
 Apply, authoritative persistence, and manual-refuel preflight remain the
 existing application paths.
 
+Milestone 4D and its generated-history correction are complete. Focused
+automated validation and the visible Windows/retained-root gates passed. New
+synthetic application results are pulse-aware:
+droplet mode maps 1300–1800 us linearly from 9–18 nL, while stream mode maps
+2500–10000 us linearly from 60–250 nL. Pulse widths outside the target mode's
+inclusive range cannot generate a result. **Calibrate All** instead opens the
+normal settings-check surface, where a compatible configured print profile can
+be selected and applied through Controller and the simulated command queue. An
+already-valid pulse width is preserved.
+
+The response is deterministic and explicitly non-empirical. Pressure is
+retained in provenance but does not change volume. Schema-v3 details are in
+`docs/sil_calibration_schema_v3.md`. V1/v2 artifacts remain readable and
+fingerprint-stable, but historical pre-v3 synthetic rows are read-only for new
+application because they lack pulse-response provenance. Production
+calibration preflight remains unchanged.
+
+Each distinct canonical synthetic result now remains in the real calibration
+table as `Pending Apply`, `Generated — Not Applied`, or `Applied History`.
+Generating another profile does not replace an earlier unapplied result, and
+identical deterministic fingerprints occupy one row. Schema-v3 generated rows
+rehydrate from their retained canonical request/result pair and may be applied
+later only when their exact head, stock, requested mode, and normal idle/queue
+guards still match. The execution-calibration sidecar and SIL snapshots
+continue to count only authoritative applied records.
+
+The closing retained root and exact artifacts, fingerprints, snapshots, and
+limitations are recorded in
+`docs/sil_interactive_simulation_milestone_4d_completion_record.md`.
+
 The final retained Windows evidence is:
 
 ```text
@@ -434,6 +464,27 @@ Run the Milestone 4C focused tests with:
 This milestone intentionally uses the focused affected suite rather than the
 full pytest suite. If an implementation failure identifies another direct call
 path, add only that path's test module to the focused command.
+
+Run the Milestone 4D focused tests with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_sil_ejection_response.py `
+  tests\test_sil_synthetic_calibration.py `
+  tests\test_sil_calibration_application.py `
+  tests\test_sil_normal_ui_convergence.py `
+  tests\test_sil_calibration_ui.py `
+  tests\test_sil_calibration_dialog_driver.py `
+  tests\test_droplet_imaging_summary_table.py `
+  tests\test_print_profiles.py `
+  tests\test_online_stream_ui_integration.py `
+  tests\test_simulated_machine.py `
+  tests\system\test_sil_stream_calibration_lifecycle.py `
+  tests\system\test_sil_normal_ui_convergence_lifecycle.py
+```
+
+Do not use the full Python suite as a Milestone 4D completion gate unless a
+focused failure identifies a wider production call path.
 
 Troubleshooting:
 
