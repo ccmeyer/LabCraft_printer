@@ -9,7 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 from tools.virtual_workflows.actions import (
+    ACTION_INTERACTION_SURFACES,
     ACTION_IDS,
+    COMPOSED_SMOKE_ACTION_IDS,
+    InteractionSurface,
     ScenarioActionError,
     ScenarioContext,
     capture_milestone,
@@ -78,6 +81,25 @@ def test_action_catalog_matches_the_tracked_manifest(tmp_path):
     assert {item["source_path"] for item in catalog} == {
         "tools/virtual_workflows/actions.py"
     }
+    declared = {
+        item["id"]: item["interaction_surface"]
+        for item in catalog
+        if "interaction_surface" in item
+    }
+    assert declared
+    assert all(
+        ACTION_INTERACTION_SURFACES[action_id].value == surface
+        for action_id, surface in declared.items()
+    )
+
+
+def test_composed_smoke_actions_have_explicit_truthful_surfaces():
+    assert COMPOSED_SMOKE_ACTION_IDS <= ACTION_IDS
+    assert {
+        ACTION_INTERACTION_SURFACES[action_id]
+        for action_id in COMPOSED_SMOKE_ACTION_IDS
+        if action_id.endswith("_via_ui")
+    } == {InteractionSurface.UI}
 
 
 def test_action_precondition_blocks_operation_and_records_one_failure(tmp_path):

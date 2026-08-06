@@ -57,7 +57,7 @@
       "owner_role": "execution verification maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
       "required_assertion_ids": ["execution.no_queue_starvation"],
       "related_source_areas": ["FreeRTOS-interface/Controller.py", "tools/virtual_workflows/scenarios.py"],
       "limitations": ["The in-process simulator does not reproduce serial or firmware queue timing."],
@@ -69,7 +69,7 @@
       "owner_role": "execution persistence maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1"],
       "required_assertion_ids": ["execution.intent_durability_exact"],
       "related_source_areas": ["FreeRTOS-interface/Model.py", "tools/virtual_workflows/persistence_io.py"],
       "limitations": ["Host filesystem durability evidence does not characterize power-loss hardware."],
@@ -380,10 +380,10 @@
       "suite_ids": ["standard"],
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
-      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.wait_for_completions", "array.wait_for_state", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
-      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "artifacts.required_present"],
-      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "screenshots", "scenario_root"],
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "machine.configure_print_settings_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.wait_for_completions", "artifact.capture_milestone", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "machine.normal_ui_ready", "experiment.prepared_bundle_valid", "execution.rack_head_associated", "execution.applied_calibration_valid", "execution.terminal_bundle_valid", "artifacts.cleanup_complete"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.terminal_bundle"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The standard smoke proves application-facing SIL correctness, not sustained performance, firmware, or physical printing."],
       "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_smoke_fixture_contract_is_exact", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"],
@@ -629,6 +629,72 @@
         "source_path": "tools/virtual_workflows/actions.py"
       },
       {
+        "id": "machine.connect_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "machine.enable_motors_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "machine.home_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "machine.configure_print_settings_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "head.set_volume_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "head.stage_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "pressure.enable_regulation_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "calibration.open_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "calibration.generate_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "calibration.select_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "calibration.apply_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
         "id": "machine.connect_ready",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py"
@@ -815,6 +881,30 @@
         "evidence_kind": "report_path",
         "evidence_path": "safety.hardware_interfaces",
         "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_scenario_source_has_no_production_machine_or_device_construction", "tests/system/test_virtual_print_array_384x10_workflow.py::test_stress_scenario_source_stays_hardware_isolated", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
+      },
+      {
+        "id": "machine.normal_ui_ready",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
+      },
+      {
+        "id": "execution.rack_head_associated",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
+      },
+      {
+        "id": "execution.applied_calibration_valid",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
+      },
+      {
+        "id": "artifacts.cleanup_complete",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {
         "id": "sil.pi_evidence_valid",

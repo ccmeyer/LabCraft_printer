@@ -7,6 +7,7 @@ import math
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
@@ -80,10 +81,72 @@ EDITOR_LIFECYCLE_ACTION_IDS = frozenset(
         "scenario.teardown",
     }
 )
+COMPOSED_SMOKE_ACTION_IDS = frozenset(
+    {
+        "app.launch_simulated",
+        "machine.connect_via_ui",
+        "machine.enable_motors_via_ui",
+        "machine.home_via_ui",
+        "machine.configure_print_settings_via_ui",
+        "editor.open_via_ui",
+        "editor.new_experiment_via_ui",
+        "editor.configure_design_via_ui",
+        "editor.optimize_generate_via_ui",
+        "editor.finish_via_ui",
+        "head.set_volume_via_ui",
+        "head.stage_via_ui",
+        "calibration.open_via_ui",
+        "calibration.generate_via_ui",
+        "calibration.select_via_ui",
+        "calibration.apply_via_ui",
+        "pressure.enable_regulation_via_ui",
+        "array.start_via_ui",
+        "array.wait_for_completions",
+        "artifact.capture_milestone",
+        "scenario.teardown",
+    }
+)
 ACTION_IDS = (
     AUTHORITATIVE_RELOAD_ACTION_IDS
     | MULTI_STOCK_LIFECYCLE_ACTION_IDS
     | EDITOR_LIFECYCLE_ACTION_IDS
+    | COMPOSED_SMOKE_ACTION_IDS
+)
+
+
+class InteractionSurface(str, Enum):
+    """The application layer that one semantic action actually drives."""
+
+    UI = "ui"
+    CONTROLLER = "controller"
+    MODEL = "model"
+    SIMULATOR = "simulator"
+    HARNESS = "harness"
+
+
+ACTION_INTERACTION_SURFACES = {
+    action_id: InteractionSurface.HARNESS for action_id in ACTION_IDS
+}
+ACTION_INTERACTION_SURFACES.update(
+    {
+        "machine.connect_ready": InteractionSurface.SIMULATOR,
+        "head.stage_virtual": InteractionSurface.MODEL,
+        "pressure.enable_regulation": InteractionSurface.CONTROLLER,
+        "array.start_via_ui": InteractionSurface.UI,
+        "array.request_soft_stop_via_ui": InteractionSurface.UI,
+        "experiment.load_authoritative_via_ui": InteractionSurface.UI,
+        "experiment.activate_authoritative_via_ui": InteractionSurface.UI,
+        **{
+            action_id: InteractionSurface.UI
+            for action_id in EDITOR_LIFECYCLE_ACTION_IDS
+            if action_id.startswith("editor.")
+        },
+        **{
+            action_id: InteractionSurface.UI
+            for action_id in COMPOSED_SMOKE_ACTION_IDS
+            if action_id.endswith("_via_ui")
+        },
+    }
 )
 
 
@@ -173,6 +236,7 @@ class ScenarioDeadline:
 @dataclass(frozen=True)
 class ActionResult:
     action_id: str
+    interaction_surface: str
     status: str
     started_monotonic_ns: int
     ended_monotonic_ns: int
@@ -185,6 +249,7 @@ class ActionResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "action_id": self.action_id,
+            "interaction_surface": self.interaction_surface,
             "status": self.status,
             "started_monotonic_ns": self.started_monotonic_ns,
             "ended_monotonic_ns": self.ended_monotonic_ns,
@@ -292,6 +357,7 @@ def _record_action(
     context: ScenarioContext,
     *,
     action_id: str,
+    interaction_surface: InteractionSurface,
     started_ns: int,
     status: str,
     evidence: Mapping[str, Any] | None = None,
@@ -301,6 +367,7 @@ def _record_action(
     ended_ns = time.perf_counter_ns()
     result = ActionResult(
         action_id=action_id,
+        interaction_surface=interaction_surface.value,
         status=status,
         started_monotonic_ns=started_ns,
         ended_monotonic_ns=ended_ns,
@@ -316,6 +383,7 @@ def _record_action(
     context.record_event(
         "action_completed",
         action_id=action_id,
+        interaction_surface=interaction_surface.value,
         status=status,
         duration_ms=result["duration_ms"],
         failure_stage=failure_stage,
@@ -336,11 +404,16 @@ def execute_action(
     precondition: Callable[[], tuple[bool, str, Mapping[str, Any] | None]]
     | None = None,
     enforce_deadline: bool = True,
+    interaction_surface: InteractionSurface | str | None = None,
 ) -> dict[str, Any]:
     """Execute one explicit Python action and append exactly one result."""
 
     if action_id not in ACTION_IDS:
         raise ValueError(f"unknown SIL action ID: {action_id!r}")
+    if interaction_surface is None:
+        surface = ACTION_INTERACTION_SURFACES[action_id]
+    else:
+        surface = InteractionSurface(interaction_surface)
     if context.closed:
         raise ScenarioActionError(
             action_id,
@@ -389,6 +462,7 @@ def execute_action(
         _record_action(
             context,
             action_id=action_id,
+            interaction_surface=surface,
             started_ns=started_ns,
             status="fail",
             evidence=action_error.evidence,
@@ -401,6 +475,7 @@ def execute_action(
     return _record_action(
         context,
         action_id=action_id,
+        interaction_surface=surface,
         started_ns=started_ns,
         status="pass",
         evidence=evidence,
@@ -3368,9 +3443,12 @@ def teardown_scenario(context: ScenarioContext) -> dict[str, Any]:
 
 
 __all__ = [
+    "ACTION_INTERACTION_SURFACES",
     "ACTION_IDS",
     "AUTHORITATIVE_RELOAD_ACTION_IDS",
+    "COMPOSED_SMOKE_ACTION_IDS",
     "EDITOR_LIFECYCLE_ACTION_IDS",
+    "InteractionSurface",
     "MULTI_STOCK_LIFECYCLE_ACTION_IDS",
     "PRINT_ARRAY_ACTION_IDS",
     "PRINT_ARRAY_LIFECYCLE_ACTION_IDS",

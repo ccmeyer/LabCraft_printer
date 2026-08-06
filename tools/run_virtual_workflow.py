@@ -40,6 +40,12 @@ def _parser() -> argparse.ArgumentParser:
         default=REPO_ROOT / "verification_reports" / "virtual_workflows",
     )
     parser.add_argument("--speed-multiplier", type=float, default=1.0)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=1,
+        help="Deterministic simulation seed retained in composed-journey evidence.",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=180.0)
     parser.add_argument(
         "--visible",
@@ -161,6 +167,8 @@ def _run_set_summary(report_set: dict[str, object]) -> str:
 def _report_path(report: dict[str, object]) -> Path:
     safety = report["safety"]
     assert isinstance(safety, dict)
+    if safety.get("report_dir"):
+        return Path(str(safety["report_dir"])).resolve() / "report.json"
     return Path(str(safety["scenario_root"])).resolve().parent / "report.json"
 
 
@@ -325,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_root=args.output_root,
                 visible=args.visible,
                 speed_multiplier=args.speed_multiplier,
+                seed=args.seed,
                 timeout_seconds=args.timeout_seconds,
                 inject_ui_stall_ms=args.inject_ui_stall_ms,
                 inject_after_completion=args.inject_after_completion,

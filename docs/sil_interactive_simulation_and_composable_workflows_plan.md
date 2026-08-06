@@ -966,7 +966,7 @@ Rollback:
 
 ### Milestone 6: Shared harness, page drivers, actions, and assertions
 
-Status: `planned`
+Status: `complete`
 
 Goal:
 
@@ -1472,8 +1472,8 @@ This effort is complete when:
 
 ## Current Next Action
 
-Create and review the concrete Milestone 6 shared-harness plan around the
-manually qualified normal-UI lifecycle before beginning automation extraction.
-Do not begin workflow migration, failure injection, performance remediation,
-firmware, protocol, Pi operations, or hardware changes as part of that planning
-step.
+Review the Milestone 6 completion record and retained visible/replay evidence.
+Create a separate Milestone 7 plan before migrating any additional workflow.
+Do not begin portfolio migration, seeded exploration, production fault
+injection, performance remediation, firmware, protocol, Pi operations, or
+hardware work without separate approval.

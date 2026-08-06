@@ -521,10 +521,18 @@ def load_virtual_print_array_fixture(
         head = stock["printer_head"]
         stock_id = _stock_id(stock)
         head_id = str(head.get("printer_head_id") or "")
+        expected_prepared_volume = (
+            9.0 if scenario_id == SMOKE_WORKLOAD_ID else 5.0
+        )
+        expected_calibrated_volume = (
+            9.0 if scenario_id == SMOKE_WORKLOAD_ID else 10.0
+        )
         if (
             stock.get("printing_mode") != "droplet"
-            or float(stock.get("prepared_droplet_volume_nL", -1)) != 5.0
-            or float(stock.get("droplet_volume_nL", -1)) != 10.0
+            or float(stock.get("prepared_droplet_volume_nL", -1))
+            != expected_prepared_volume
+            or float(stock.get("droplet_volume_nL", -1))
+            != expected_calibrated_volume
             or not head_id
             or int(head.get("print_pulse_width_us", 0)) <= 0
             or float(head.get("print_pressure_psi", -1)) <= 0

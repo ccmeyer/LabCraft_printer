@@ -50,6 +50,7 @@ _CADENCES = {"every_change", "nightly", "weekly", "monthly", "pre_release"}
 _AUTOMATION_STATUSES = {"not_configured", "manual", "automated"}
 _ACTION_IMPLEMENTATION_STATUSES = {"embedded", "reusable"}
 _ASSERTION_EVIDENCE_KINDS = {"report_path", "pytest"}
+_INTERACTION_SURFACES = {"ui", "controller", "model", "simulator", "harness"}
 _PI_REQUIRED_EVIDENCE = ("preflight", "hardware_proof")
 
 
@@ -96,6 +97,10 @@ _SCENARIO_DEFINITIONS = {
         workload_id="virtual_print_array_24_v1",
         fixture_path=_FIXTURE_ROOT / "virtual_print_array_24_v1.json",
         expected_completion_count=24,
+        runner_family="composed_journey",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
     ),
     "experiment_editor_create_finalize_v1": ScenarioDefinition(
         registry_id="experiment_editor_create_finalize_v1",
@@ -210,7 +215,32 @@ def run_registered_scenario(
         )
 
     # Keep CLI help and registry inspection independent of Qt/application imports.
+    if definition.runner_family == "composed_journey":
+        injected_ms = int(config_values.pop("inject_ui_stall_ms", 0))
+        injected_after = int(config_values.pop("inject_after_completion", 48))
+        pi_preflight = config_values.pop("pi_preflight_path", None)
+        pi_proof = config_values.pop("pi_hardware_proof_path", None)
+        if injected_ms != 0 or injected_after != 48:
+            raise RegistryError(
+                "the Milestone 6 composed smoke does not support fault injection"
+            )
+        if pi_preflight is not None or pi_proof is not None:
+            raise RegistryError(
+                "the Milestone 6 composed smoke does not support Pi evidence"
+            )
+        from tools.virtual_workflows.journeys import (
+            JourneyRunConfig,
+            run_virtual_print_array_24_journey,
+        )
+
+        return run_virtual_print_array_24_journey(
+            JourneyRunConfig(
+                scenario_id=definition.workload_id,
+                **config_values,
+            )
+        )
     if definition.runner_family == "virtual_print_array":
+        config_values.pop("seed", None)
         if not definition.supports_injected_stall:
             injected_ms = config_values.get("inject_ui_stall_ms", 0)
             injected_after = config_values.get("inject_after_completion", 48)
@@ -498,10 +528,13 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
         "manifest.policy.action_catalog",
     )
     for action_id, action in action_rows.items():
+        expected_action_fields = {"id", "implementation_status", "source_path"}
+        if "interaction_surface" in action:
+            expected_action_fields.add("interaction_surface")
         _require_keys(
             action,
             label=f"action {action_id}",
-            expected={"id", "implementation_status", "source_path"},
+            expected=expected_action_fields,
         )
         _require_enum(
             action["implementation_status"],
@@ -513,6 +546,12 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
             f"action {action_id}.source_path",
             must_exist=True,
         )
+        if "interaction_surface" in action:
+            _require_enum(
+                action["interaction_surface"],
+                f"action {action_id}.interaction_surface",
+                _INTERACTION_SURFACES,
+            )
 
     assertion_rows = _require_unique_ids(
         _require_list(

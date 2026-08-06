@@ -43,10 +43,50 @@ METRIC_STATUSES = {
 }
 CLASSIFICATION_STATUSES = {"pass", "warning", "fail"}
 THRESHOLD_MATURITIES = {"informational", "candidate", "acceptance"}
+INTERACTION_SURFACES = {"ui", "controller", "model", "simulator", "harness"}
 
 
 class ReportValidationError(ValueError):
     """Raised when a virtual-workflow report violates its versioned contract."""
+
+
+def validate_interaction_surface_claims(
+    action_results: list[Mapping[str, Any]],
+    *,
+    required_ui_action_ids: set[str] | frozenset[str] = frozenset(),
+) -> None:
+    """Fail closed when a composed run overstates normal-UI coverage."""
+    observed: dict[str, set[str]] = {}
+    for index, row in enumerate(action_results):
+        if not isinstance(row, Mapping):
+            raise ReportValidationError(f"action_results[{index}] must be an object")
+        action_id = row.get("action_id")
+        surface = row.get("interaction_surface")
+        if not isinstance(action_id, str) or not action_id:
+            raise ReportValidationError(
+                f"action_results[{index}].action_id must be a non-empty string"
+            )
+        if surface not in INTERACTION_SURFACES:
+            raise ReportValidationError(
+                f"action {action_id} has invalid interaction_surface {surface!r}"
+            )
+        observed.setdefault(action_id, set()).add(str(surface))
+
+    missing = sorted(required_ui_action_ids - set(observed))
+    non_ui = sorted(
+        action_id
+        for action_id in required_ui_action_ids & set(observed)
+        if observed[action_id] != {"ui"}
+    )
+    if missing or non_ui:
+        details = []
+        if missing:
+            details.append("missing actions: " + ", ".join(missing))
+        if non_ui:
+            details.append("non-UI actions: " + ", ".join(non_ui))
+        raise ReportValidationError(
+            "normal-UI interaction claim failed; " + "; ".join(details)
+        )
 
 
 def _git(repo_root: Path, *args: str) -> tuple[str | None, str | None]:

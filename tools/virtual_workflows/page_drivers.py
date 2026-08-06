@@ -8,6 +8,311 @@ from typing import Any, Callable
 from PySide6 import QtCore, QtTest, QtWidgets
 
 
+class _QTestSurfaceDriver:
+    """Shared bounded QTest mechanics with no workflow policy."""
+
+    def __init__(self, context):
+        self.context = context
+        self.app = context.app
+        self.view = context.view
+
+    def wait_until(
+        self,
+        predicate: Callable[[], bool],
+        description: str,
+        *,
+        timeout_seconds: float = 10.0,
+    ) -> None:
+        allowed = self.context.deadline.remaining_seconds(timeout_seconds)
+        deadline = time.monotonic() + allowed
+        while time.monotonic() < deadline:
+            self.context.pump_events()
+            if predicate():
+                return
+            QtTest.QTest.qWait(5)
+        self.context.pump_events()
+        if predicate():
+            return
+        raise RuntimeError(f"timed out waiting for {description}")
+
+    def click(self, widget: Any) -> None:
+        if widget is None or not widget.isVisible() or not widget.isEnabled():
+            raise RuntimeError("requested UI control is not visible and enabled")
+        widget.setFocus()
+        QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
+        self.context.pump_events()
+
+    def replace_spin_value(self, widget: Any, value: int | float) -> None:
+        if not widget.isVisible() or not widget.isEnabled():
+            raise RuntimeError("requested spin control is not visible and enabled")
+        editor = widget.lineEdit()
+        self.click(editor)
+        QtTest.QTest.keyClick(
+            editor,
+            QtCore.Qt.Key.Key_A,
+            QtCore.Qt.KeyboardModifier.ControlModifier,
+        )
+        QtTest.QTest.keyClicks(editor, str(value))
+        QtTest.QTest.keyClick(editor, QtCore.Qt.Key.Key_Enter)
+        self.context.pump_events()
+
+    def click_with_message_boxes(
+        self,
+        widget: Any,
+        expected: list[tuple[str, QtWidgets.QMessageBox.StandardButton]],
+    ) -> list[dict[str, Any]]:
+        """Click once and accept only the exact ordered QMessageBox sequence."""
+
+        handled: list[dict[str, Any]] = []
+        state: dict[str, Any] = {"error": None}
+        deadline = time.monotonic() + self.context.deadline.remaining_seconds(10.0)
+
+        def inspect() -> None:
+            if state["error"] is not None or len(handled) >= len(expected):
+                return
+            active = self.app.activeModalWidget()
+            if active is None:
+                if time.monotonic() >= deadline:
+                    state["error"] = RuntimeError(
+                        "expected dialog sequence did not complete"
+                    )
+                    return
+                QtCore.QTimer.singleShot(5, inspect)
+                return
+            if not isinstance(active, QtWidgets.QMessageBox):
+                state["error"] = RuntimeError(
+                    "unexpected modal while handling action: "
+                    f"{type(active).__name__} {active.windowTitle()!r}"
+                )
+                if isinstance(active, QtWidgets.QDialog):
+                    active.reject()
+                return
+            expected_title, standard_button = expected[len(handled)]
+            if active.windowTitle() != expected_title:
+                state["error"] = RuntimeError(
+                    f"unexpected dialog title {active.windowTitle()!r}; "
+                    f"expected {expected_title!r}"
+                )
+                active.reject()
+                return
+            button = active.button(standard_button)
+            if button is None:
+                state["error"] = RuntimeError(
+                    f"expected dialog button is missing from {expected_title!r}"
+                )
+                active.reject()
+                return
+            entry = {"title": active.windowTitle(), "text": active.text()}
+            handled.append(entry)
+            self.context.dialogs.append(entry)
+            self.context.record_event("dialog", **entry)
+            QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+            if len(handled) < len(expected):
+                QtCore.QTimer.singleShot(0, inspect)
+
+        QtCore.QTimer.singleShot(0, inspect)
+        self.click(widget)
+        self.context.pump_events()
+        if state["error"] is not None:
+            raise state["error"]
+        if len(handled) != len(expected):
+            raise RuntimeError(
+                f"handled {len(handled)} dialogs; expected {len(expected)}"
+            )
+        return handled
+
+
+class MainWindowDriver(_QTestSurfaceDriver):
+    """Read and focus the normal application window."""
+
+    def inspect_simulation_identity(self) -> dict[str, Any]:
+        banner = getattr(self.view, "simulation_identity_banner", None)
+        label = getattr(self.view, "simulation_identity_label", None)
+        return {
+            "window_visible": bool(self.view.isVisible()),
+            "banner_visible": bool(banner is not None and banner.isVisible()),
+            "banner_text": label.text() if label is not None else None,
+        }
+
+
+class MachineControlsDriver(_QTestSurfaceDriver):
+    """QTest mechanics for normal connection, motor, and pressure controls."""
+
+    def connect(self) -> None:
+        button = self.view.connection_widget.machine_connect_button
+        if button.text() != "Connect":
+            raise RuntimeError(f"expected Connect control; observed {button.text()!r}")
+        self.click(button)
+        self.wait_until(
+            lambda: self.context.model.machine_model.is_connected(),
+            "simulator connection",
+        )
+
+    def enable_motors(self) -> None:
+        button = self.view.coordinates_box.toggle_motor_button
+        if button.text() != "Enable Motors":
+            raise RuntimeError(
+                f"expected Enable Motors control; observed {button.text()!r}"
+            )
+        self.click(button)
+        self.wait_until(
+            self.context.model.machine_model.motors_are_enabled,
+            "motor enable",
+        )
+
+    def home_motors(self) -> None:
+        self.click(self.view.coordinates_box.home_button)
+        self.wait_until(
+            self.context.model.machine_model.motors_are_homed,
+            "motor home",
+        )
+        self.wait_until(
+            self.context.machine.check_if_all_completed,
+            "home command queue",
+        )
+
+    def configure_print_settings(
+        self,
+        *,
+        pulse_width_us: int,
+        pressure_psi: float,
+        frequency_hz: int,
+    ) -> None:
+        box = self.view.pressure_box
+        self.replace_spin_value(box.print_pulse_width_spinbox, pulse_width_us)
+        self.replace_spin_value(box.target_print_pressure_spinbox, pressure_psi)
+        self.replace_spin_value(box.print_frequency_spinbox, frequency_hz)
+        self.wait_until(
+            self.context.machine.check_if_all_completed,
+            "print settings command queue",
+        )
+
+    def enable_pressure_regulation(self) -> None:
+        button = self.view.pressure_box.pressure_regulation_button
+        self.click(button)
+        self.wait_until(
+            lambda: bool(
+                self.context.model.machine_model.regulating_print_pressure
+            ),
+            "print-pressure regulation",
+        )
+
+    def open_calibration_dialog(self) -> Any:
+        button = self.view.pressure_box.calibrate_pressure_button
+        self.click(button)
+        self.wait_until(
+            lambda: getattr(
+                self.view.pressure_box, "_droplet_imager_dialog", None
+            )
+            is not None,
+            "normal calibration dialog",
+        )
+        dialog = self.view.pressure_box._droplet_imager_dialog
+        if not dialog.isVisible():
+            raise RuntimeError("normal calibration dialog is not visible")
+        return dialog
+
+
+class ExperimentEditorDriver(_QTestSurfaceDriver):
+    """QTest mechanics for the normal Experiment Editor surface."""
+
+    def create_and_finalize(self, specification: dict[str, Any]) -> dict[str, Any]:
+        # The existing bounded editor mechanics remain the compatibility
+        # implementation while Milestone 6 moves ownership to this surface driver.
+        from tools.virtual_workflows.actions import drive_editor_create_finalize
+
+        return drive_editor_create_finalize(self.context, specification)
+
+
+class RackDriver(_QTestSurfaceDriver):
+    """QTest mechanics for rack volume, confirmation, and head loading."""
+
+    def set_slot_volume(self, slot_index: int, volume_uL: float) -> None:
+        rack = self.view.rack_box
+        volume_label = rack.slot_widgets[int(slot_index)][1]
+        state: dict[str, Any] = {"entered": False, "error": None}
+
+        def drive_dialog() -> None:
+            active = self.app.activeModalWidget()
+            try:
+                if active is None or active.windowTitle() != "Edit Volume":
+                    raise RuntimeError("Edit Volume dialog did not open")
+                state["entered"] = True
+                spin = active.findChild(QtWidgets.QDoubleSpinBox)
+                button = next(
+                    (
+                        item
+                        for item in active.findChildren(QtWidgets.QPushButton)
+                        if item.text() == "Update volume"
+                    ),
+                    None,
+                )
+                if spin is None or button is None:
+                    raise RuntimeError("Edit Volume controls are missing")
+                self.replace_spin_value(spin, volume_uL)
+                # Enter on the spin editor may activate the dialog's default
+                # Update button. Click it only when the modal is still open.
+                if active.isVisible():
+                    QtTest.QTest.mouseClick(
+                        button, QtCore.Qt.MouseButton.LeftButton
+                    )
+            except BaseException as exc:
+                state["error"] = exc
+                if isinstance(active, QtWidgets.QDialog) and active.isVisible():
+                    active.reject()
+
+        QtCore.QTimer.singleShot(0, drive_dialog)
+        QtTest.QTest.mouseDClick(
+            volume_label,
+            QtCore.Qt.MouseButton.LeftButton,
+        )
+        if state["error"] is not None:
+            raise state["error"]
+        if not state["entered"]:
+            raise RuntimeError("Edit Volume dialog did not run")
+        head = self.context.model.rack_model.slots[int(slot_index)].printer_head
+        self.wait_until(
+            lambda: head is not None
+            and abs(float(head.get_current_volume() or 0.0) - float(volume_uL))
+            < 1e-6,
+            "printer-head volume update",
+        )
+
+    def confirm_and_load(self, slot_index: int) -> None:
+        rack = self.view.rack_box
+        button = rack.slot_widgets[int(slot_index)][2]
+        if button.text() != "Confirm":
+            raise RuntimeError(f"expected Confirm control; observed {button.text()!r}")
+        self.click(button)
+        self.wait_until(lambda: button.text() == "Load", "rack slot confirmation")
+        self.click(button)
+        self.wait_until(
+            lambda: self.context.model.rack_model.get_gripper_printer_head()
+            is not None,
+            "printer-head load",
+        )
+        self.wait_until(
+            self.context.machine.check_if_all_completed,
+            "printer-head load command queue",
+        )
+
+
+class ArrayDriver(_QTestSurfaceDriver):
+    """QTest mechanics for the normal print-array surface."""
+
+    def start(self) -> list[dict[str, Any]]:
+        return self.click_with_message_boxes(
+            self.view.well_plate_widget.start_print_array_button,
+            [
+                ("Start Print Array", QtWidgets.QMessageBox.StandardButton.Yes),
+                (
+                    "Evaporation Plate Dock Check",
+                    QtWidgets.QMessageBox.StandardButton.Yes,
+                ),
+            ],
+        )
+
+
 class CalibrationDialogDriver:
     """Bounded QTest mechanics for the normal simulation calibration dialog."""
 
@@ -264,4 +569,11 @@ class CalibrationDialogDriver:
         self.wait_until(lambda: not self.dialog.isVisible(), "calibration dialog close")
 
 
-__all__ = ["CalibrationDialogDriver"]
+__all__ = [
+    "ArrayDriver",
+    "CalibrationDialogDriver",
+    "ExperimentEditorDriver",
+    "MachineControlsDriver",
+    "MainWindowDriver",
+    "RackDriver",
+]

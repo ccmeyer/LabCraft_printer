@@ -263,7 +263,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
     tmp_path,
     monkeypatch,
 ):
-    from tools.virtual_workflows import scenarios
+    from tools.virtual_workflows import journeys, scenarios
 
     captured = []
 
@@ -272,6 +272,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
         return {"scenario_id": config.scenario_id}
 
     monkeypatch.setattr(scenarios, "run_virtual_print_array_scenario", fake_run)
+    monkeypatch.setattr(journeys, "run_virtual_print_array_24_journey", fake_run)
 
     result = run_registered_scenario(
         scenario_id,
@@ -283,9 +284,15 @@ def test_registry_dispatch_uses_existing_config_and_runner(
     assert result == {"scenario_id": scenario_id}
     assert len(captured) == 1
     config = captured[0]
-    assert isinstance(config, VirtualPrintArrayScenarioConfig)
+    if scenario_id == SMOKE_WORKLOAD_ID:
+        from tools.virtual_workflows.journeys import JourneyRunConfig
+
+        assert isinstance(config, JourneyRunConfig)
+    else:
+        assert isinstance(config, VirtualPrintArrayScenarioConfig)
     assert config.scenario_id == scenario_id
-    assert config.fixture_path == SCENARIO_FIXTURES[scenario_id].resolve()
+    if scenario_id != SMOKE_WORKLOAD_ID:
+        assert config.fixture_path == SCENARIO_FIXTURES[scenario_id].resolve()
     assert config.output_root == tmp_path.resolve()
     assert config.speed_multiplier == 25
     assert config.timeout_seconds == 90

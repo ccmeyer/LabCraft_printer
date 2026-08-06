@@ -412,6 +412,45 @@ Milestone 5 qualifies the application-contract simulator for shared automation
 harness planning. It does not validate physical fluid behavior, cameras,
 balances, collision safety, firmware, protocol, or hardware performance.
 
+Milestone 6 is complete. The deterministic `virtual_print_array_24_v1` smoke
+now runs as a short composition over a shared `SimulationSession` harness and
+surface-specific QTest drivers. Connection, motor enable/home, experiment
+creation/finalization, print settings, rack volume/confirm/load, pressure
+regulation, normal synthetic calibration generation/selection/Apply, and
+array start all use visible, enabled normal Qt controls. Every action records
+its actual `ui`, `controller`, `model`, `simulator`, or `harness` interaction
+surface; successful normal-UI coverage fails if a required operator action is
+missing or labeled with another surface.
+
+Run the migrated smoke offscreen or visibly:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario virtual_print_array_24_v1 `
+  --output-root verification_reports\milestone6 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario virtual_print_array_24_v1 `
+  --output-root verification_reports\milestone6-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 300
+```
+
+The report directory retains `report.json`, summary, JSONL events, screenshots,
+separate action/assertion ledgers, and a SHA-256 evidence manifest. The report
+also records an exact replay command and links the retained isolated session
+root under `%TEMP%\LabCraft\SIL\composed-sessions`. Session roots intentionally
+remain outside the repository and production data roots. Unexpected dialogs,
+deadlines, unhealthy recorder evidence, incomplete assertions, and ambiguous
+cleanup fail closed with retained failure evidence.
+
+Replay compares fixture hash, seed, action order/surfaces, assertion decisions,
+calibration values, completion order, and terminal state. UUIDs, timestamps,
+durations, generated plan/head/run identities, and their identity-bearing
+hashes are expected to differ. Other workflow families retain their legacy
+runners until Milestone 7 parity gates; this milestone adds no Pi, protocol,
+firmware, hardware, performance, or production fault-injection behavior.
+
 The final retained Windows evidence is:
 
 ```text

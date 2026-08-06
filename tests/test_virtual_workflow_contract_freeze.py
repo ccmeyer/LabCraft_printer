@@ -47,6 +47,7 @@ def test_legacy_cli_surface_remains_additively_compatible():
 
     assert {WORKLOAD_ID, STRESS_WORKLOAD_ID} <= set(scenario_action.choices)
     assert args.scenario == WORKLOAD_ID
+    assert args.seed == 1
     assert args.output_root == (
         REPO_ROOT / "verification_reports" / "virtual_workflows"
     )
@@ -77,6 +78,7 @@ def test_legacy_cli_surface_remains_additively_compatible():
     help_text = parser.format_help()
     for option in (
         "--scenario",
+        "--seed",
         "--output-root",
         "--speed-multiplier",
         "--timeout-seconds",
