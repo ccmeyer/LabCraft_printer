@@ -908,7 +908,7 @@ Rollback:
 
 ### Milestone 5: Manual full-lifecycle characterization
 
-Status: `planned`
+Status: `complete`
 
 Goal:
 
@@ -1472,9 +1472,8 @@ This effort is complete when:
 
 ## Current Next Action
 
-Create and review a revised concrete Milestone 5 plan around the completed
-pulse-aware normal-UI calibration workflow before beginning manual
-full-lifecycle characterization.
+Create and review the concrete Milestone 6 shared-harness plan around the
+manually qualified normal-UI lifecycle before beginning automation extraction.
 Do not begin workflow migration, failure injection, performance remediation,
 firmware, protocol, Pi operations, or hardware changes as part of that planning
 step.

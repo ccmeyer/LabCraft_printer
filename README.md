@@ -384,6 +384,34 @@ The closing retained root and exact artifacts, fingerprints, snapshots, and
 limitations are recorded in
 `docs/sil_interactive_simulation_milestone_4d_completion_record.md`.
 
+Milestone 5 manual full-lifecycle characterization is complete. Three fresh,
+retained Windows journeys used only normal application controls and existing
+authoritative writers:
+
+- one 24-well, one-stock droplet execution, including prepared reload,
+  `Stop After Well`, process restart from `resume_ready`, nonrepeating resume,
+  completion, and terminal reload;
+- one 24-well, two-stock droplet execution with a real rack head exchange and
+  exact 24 + 24 completion;
+- one 24-well mixed droplet/stream execution with 9 nL/1300 us droplet and
+  60 nL/2500 us stream calibrations, a real five-droplet manual-refuel trial,
+  Passed judgment, and exact 24 + 24 completion.
+
+Every qualifying terminal and retained-root snapshot reconciled with zero
+mismatches. Completed reloads preserved plan IDs/revisions, calibration and
+refuel records, progress, and clean checkpoints without relying on prior
+process memory. The focused defects exposed during characterization were
+corrected and separately tested: zero-target fill omission, exact-stock
+selection in multi-stock synthetic calibration, and acceptance of the
+application's own manual-refuel sidecar write by the active authoritative
+runtime. The full suite was intentionally not rerun; Milestone 5 used the
+approved focused gates documented in
+`docs/sil_interactive_simulation_milestone_5_completion_record.md`.
+
+Milestone 5 qualifies the application-contract simulator for shared automation
+harness planning. It does not validate physical fluid behavior, cameras,
+balances, collision safety, firmware, protocol, or hardware performance.
+
 The final retained Windows evidence is:
 
 ```text

@@ -449,25 +449,6 @@ class SyntheticCalibrationApplicationAdapter:
                 "code": "finalized_plan_required",
                 "message": "Load or finalize an authoritative experiment first.",
             }
-        try:
-            fill_reagent_name = str(experiment.get_fill_reagent_name() or "")
-        except (AttributeError, TypeError, ValueError):
-            fill_reagent_name = ""
-        non_fill_stocks = [
-            stock
-            for stock in plan.stocks
-            if not fill_reagent_name
-            or str(getattr(stock, "factor_name", "")) != fill_reagent_name
-        ]
-        if len(non_fill_stocks) != 1:
-            return {
-                "ok": False,
-                "code": "single_stock_required",
-                "message": (
-                    "Synthetic calibration requires exactly one non-fill execution stock; "
-                    "a zero-target fill stock may also be present."
-                ),
-            }
         context = self.manager.get_characterization_application_context()
         if context is None:
             return {

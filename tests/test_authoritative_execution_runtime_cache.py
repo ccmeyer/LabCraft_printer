@@ -6,6 +6,10 @@ from pathlib import Path
 import pytest
 
 import Model as model_module
+from ExecutionCalibrationStore import (
+    ExecutionCalibrationDocument,
+    save_execution_calibrations,
+)
 from ExecutionResumeStore import (
     load_execution_resume,
     progress_fingerprint,
@@ -256,6 +260,33 @@ def test_external_authoritative_changes_fail_closed(
     assert "Reload and explicitly reactivate" in experiment_model.get_execution_plan_sync_error()
     if mutation in {"replace", "revision_addition"}:
         assert resume_path.read_bytes() == before
+
+
+def test_external_execution_calibration_change_fails_closed_without_overwrite(
+    experiment_model_factory,
+):
+    _model, experiment_model, well_spec, dispense = _active_runtime(
+        experiment_model_factory
+    )
+    calibration_path = Path(experiment_model.execution_calibrations_file_path)
+    assert not calibration_path.exists()
+    plan = experiment_model.get_execution_plan_snapshot()
+    save_execution_calibrations(
+        calibration_path,
+        ExecutionCalibrationDocument(plan_id=plan.plan_id),
+    )
+    externally_changed = calibration_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="execution_calibrations.json changed"):
+        experiment_model.begin_execution_print_intent(
+            well_id=well_spec.well_id,
+            stock_id=dispense.stock_id,
+            commanded_droplets=1,
+            printer_head_id="cache-test-head",
+        )
+
+    assert experiment_model._active_authoritative_execution_session is None
+    assert calibration_path.read_bytes() == externally_changed
 
 
 def test_resume_save_failure_keeps_cache_retryable(

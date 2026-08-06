@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import gcd
 from functools import reduce
 from typing import List, Dict, Tuple, Optional, Any, Set, Iterable
@@ -5783,12 +5783,20 @@ class ExperimentModel(QObject):
             stored_record["calibration_record_id"] = stock.calibration_record_key
             if save:
                 try:
+                    runtime_active = (
+                        getattr(self, "_active_authoritative_execution_session", None)
+                        is not None
+                    )
+                    if runtime_active:
+                        self._guard_authoritative_runtime_session()
                     document = self._execution_calibration_document(plan)
                     document.manual_refuel_checks[str(key)] = stored_record
                     save_execution_calibrations(
                         self.execution_calibrations_file_path,
                         document,
                     )
+                    if runtime_active:
+                        self._accept_execution_calibration_runtime_write(document)
                     self.set_execution_plan_sync_error(None)
                 except Exception as exc:
                     self.set_execution_plan_sync_error(exc)
@@ -7652,6 +7660,21 @@ class ExperimentModel(QObject):
         session.file_identities = identities
         session.revision_names = revision_names
 
+    def _accept_execution_calibration_runtime_write(
+        self,
+        document: ExecutionCalibrationDocument,
+    ) -> None:
+        self._accept_authoritative_runtime_write("execution_calibrations.json")
+        session = self._require_authoritative_runtime_session()
+        plan = session.bundle.plan
+        if plan is None or document.plan_id != plan.plan_id:
+            raise self._authoritative_runtime_conflict(
+                "execution_calibrations.json references a different plan after a durable write"
+            )
+        bundle = replace(session.bundle, calibrations=document)
+        session.bundle = bundle
+        self._authoritative_execution_bundle = bundle
+
     def _reconcile_authoritative_runtime_session(self) -> None:
         session = getattr(self, "_active_authoritative_execution_session", None)
         if session is None:
@@ -9446,10 +9469,29 @@ class ExperimentModel(QObject):
             else:
                 option = next((item for item in factor.options if item.name == stock.option_name), None)
             break
-        fill_stocks = [item for item in plan.stocks if item.units == "--" and item.factor_name == self.get_fill_reagent_name()]
-        if len(fill_stocks) != 1:
+        fill_stocks = [
+            item
+            for item in plan.stocks
+            if item.units == "--" and item.factor_name == self.get_fill_reagent_name()
+        ]
+        if len(fill_stocks) > 1:
             raise RuntimeError("The execution plan must contain exactly one identifiable fill stock.")
-        fill_stock = fill_stocks[0]
+        fill_stock = fill_stocks[0] if fill_stocks else None
+        missing_fill_volume = None
+        if fill_stock is None:
+            try:
+                missing_fill_volume = float(
+                    self.metadata.get(
+                        "fill_droplet_volume_nL",
+                        self._default_fill_droplet_volume_nl(),
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "The finalized fill-droplet volume is invalid."
+                ) from exc
+            if not math.isfinite(missing_fill_volume) or missing_fill_volume <= 0:
+                raise RuntimeError("The finalized fill-droplet volume is invalid.")
         stock_volumes = {
             item.stock_id: (float(new_volume_nL) if item.stock_id == stock.stock_id else item.effective_volume_nL)
             for item in plan.stocks
@@ -9463,7 +9505,7 @@ class ExperimentModel(QObject):
         for well in plan.wells:
             old_counts = {item.stock_id: item.target_dispenses for item in well.dispenses}
             counts = dict(old_counts)
-            if stock.stock_id == fill_stock.stock_id:
+            if fill_stock is not None and stock.stock_id == fill_stock.stock_id:
                 pass
             else:
                 if option is None:
@@ -9486,15 +9528,23 @@ class ExperimentModel(QObject):
             nonfill_volume = sum(
                 count * stock_volumes[stock_id]
                 for stock_id, count in counts.items()
-                if stock_id != fill_stock.stock_id
+                if fill_stock is None or stock_id != fill_stock.stock_id
             )
             remaining = max(0.0, plan.volume_basis.target_printed_volume_nL - nonfill_volume)
-            fill_volume = stock_volumes[fill_stock.stock_id]
-            fill_count = max(0, int(round(remaining / fill_volume)))
-            if fill_count > 0 or fill_stock.stock_id in counts:
-                counts[fill_stock.stock_id] = fill_count
+            if fill_stock is None:
+                fill_count = max(0, int(round(remaining / missing_fill_volume)))
+                if fill_count > 0:
+                    raise RuntimeError(
+                        f"Calibrating stock {stock.stock_id!r} would require a fill stock "
+                        "that is absent from the finalized execution plan."
+                    )
             else:
-                counts.pop(fill_stock.stock_id, None)
+                fill_volume = stock_volumes[fill_stock.stock_id]
+                fill_count = max(0, int(round(remaining / fill_volume)))
+                if fill_count > 0 or fill_stock.stock_id in counts:
+                    counts[fill_stock.stock_id] = fill_count
+                else:
+                    counts.pop(fill_stock.stock_id, None)
             results[well.well_id] = counts
         return results
 

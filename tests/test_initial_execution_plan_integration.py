@@ -82,6 +82,36 @@ def _configure_minimal_editor_design(em):
     em.save_experiment()
 
 
+def _configure_zero_fill_design(em):
+    """Create a finalized design whose one dispense exactly fills each well."""
+    em.factors = []
+    em.add_additive(
+        "reagent-1",
+        [1.0],
+        "mM",
+        9.0,
+        forced_stock_conc=1.0,
+        printing_mode="droplet",
+    )
+    em.set_metadata(
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=2,
+        target_reaction_volume_nL=9.0,
+        final_reaction_volume_nL=9.0,
+        printed_volume_tolerance_nL=50.0,
+        fill_reagent_name="Water",
+        fill_printing_mode="droplet",
+        fill_droplet_volume_nL=9.0,
+    )
+    em.set_well_selection(["A1", "A2"])
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    assert em._fill_row_cache["total_droplets"] == 0
+    em.save_experiment()
+
+
 def _apply_stream_editor_revision(em):
     option = em.factors[0].options[0]
     option.targets = [0.5, 1.0]
@@ -496,7 +526,6 @@ def test_lock_and_calibration_revision_preserve_design_and_allow_tolerance_overr
     assert active.plan_revision == 2
     assert active.state is ExecutionPlanState.ACTIVE
     assert design_path.read_bytes() == design_bytes
-
     pure = next(stock for stock in active.stocks if stock.factor_name == "PURE_MM")
     result = em.apply_execution_calibration(
         stock_id=pure.stock_id,
@@ -542,7 +571,9 @@ def test_lock_and_calibration_revision_preserve_design_and_allow_tolerance_overr
     )
     assert calibrated_stock.calibration_record_key in document.records
     assert document.manual_refuel_checks
-    em.record_manual_refuel_check_outcome(
+    em.ensure_execution_resume_checkpoint()
+    assert em._active_authoritative_execution_session is not None
+    passed = em.record_manual_refuel_check_outcome(
         status="passed",
         source="focused-test",
         stock_id=pure.stock_id,
@@ -556,6 +587,15 @@ def test_lock_and_calibration_revision_preserve_design_and_allow_tolerance_overr
         operator_judgment="stable",
         save=True,
     )
+    runtime_session = em._guard_authoritative_runtime_session()
+    assert runtime_session.bundle.calibrations is not None
+    assert any(
+        check["status"] == "passed"
+        and check["applied_calibration_fingerprint"]
+        == passed["applied_calibration_fingerprint"]
+        for check in runtime_session.bundle.calibrations.manual_refuel_checks.values()
+    )
+    assert em._authoritative_execution_bundle is runtime_session.bundle
     assert design_path.read_bytes() == design_bytes
     updated_document = load_execution_calibrations(em.execution_calibrations_file_path)
     assert any(
@@ -595,6 +635,112 @@ def test_lock_and_calibration_revision_preserve_design_and_allow_tolerance_overr
         for path in Path(em.execution_plan_revisions_dir_path).glob("revision_*.json")
     }
     assert design_path.read_bytes() == design_bytes
+
+
+def test_calibration_revision_accepts_plan_with_no_required_fill_stock(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_zero_fill_design(em)
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    prepared = load_execution_plan(em.execution_plan_file_path)
+
+    assert len(prepared.stocks) == 1
+    stock = prepared.stocks[0]
+    assert stock.factor_name == "reagent-1"
+    assert all(
+        {dispense.stock_id: dispense.target_dispenses for dispense in well.dispenses}
+        == {stock.stock_id: 1}
+        for well in prepared.wells
+    )
+
+    result = em.apply_execution_calibration(
+        stock_id=stock.stock_id,
+        new_effective_volume_nL=9.0,
+        printing_mode="droplet",
+        printer_head_id="head-zero-fill",
+        factor_name="reagent-1",
+        option_name=None,
+        is_fill=False,
+        calibration_payload={
+            "measured_volume_nL": 9.0,
+            "pw_us": 1300,
+            "pressure_psi": 0.6,
+            "run_id": "zero-fill-run",
+            "phase": "synthetic_characterization",
+            "timestamp": "2000-01-01T00:00:00Z",
+            "source_row_fingerprint": (
+                "zero-fill-run",
+                "synthetic_characterization",
+                1300,
+                0.6,
+                "droplet",
+                9.0,
+            ),
+            "original_printing_mode": "droplet",
+        },
+        timestamp_utc=prepared.created_at_utc,
+    )
+
+    calibrated = result["plan"]
+    assert result["status"] == "created"
+    assert calibrated.plan_revision == 3
+    assert len(calibrated.stocks) == 1
+    assert calibrated.stocks[0].calibration_record_key == result["record"]["record_id"]
+    assert calibrated.stocks[0].effective_volume_nL == pytest.approx(9.0)
+    assert all(well.expected_printed_volume_nL == pytest.approx(9.0) for well in calibrated.wells)
+    assert all(
+        {dispense.stock_id: dispense.target_dispenses for dispense in well.dispenses}
+        == {stock.stock_id: 1}
+        for well in calibrated.wells
+    )
+    progress = json.loads(Path(em.progress_file_path).read_text(encoding="utf-8"))
+    assert progress["plan_id"] == calibrated.plan_id
+    assert progress["plan_revision"] == calibrated.plan_revision
+    document = load_execution_calibrations(em.execution_calibrations_file_path)
+    assert set(document.records) == {result["record"]["record_id"]}
+
+
+def test_calibration_revision_rejects_missing_fill_stock_when_fill_is_required(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_zero_fill_design(em)
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    prepared = load_execution_plan(em.execution_plan_file_path)
+    stock = prepared.stocks[0]
+    active = em.lock_execution_plan(
+        "calibration_started",
+        timestamp_utc=prepared.created_at_utc,
+    )
+    before = _directory_bytes(Path(em.experiment_dir_path))
+
+    with pytest.raises(
+        RuntimeError,
+        match="would require a fill stock that is absent",
+    ):
+        em.apply_execution_calibration(
+            stock_id=stock.stock_id,
+            new_effective_volume_nL=20.0,
+            printing_mode="droplet",
+            printer_head_id="head-zero-fill",
+            factor_name="reagent-1",
+            option_name=None,
+            is_fill=False,
+            calibration_payload={
+                "measured_volume_nL": 20.0,
+                "pw_us": 1800,
+                "pressure_psi": 0.6,
+                "original_printing_mode": "droplet",
+            },
+            timestamp_utc=active.updated_at_utc,
+        )
+
+    assert em.get_execution_plan_snapshot() == active
+    assert _directory_bytes(Path(em.experiment_dir_path)) == before
+    assert not Path(em.execution_calibrations_file_path).exists()
 
 
 def test_calibration_rejects_stock_with_printed_progress_without_new_revision(

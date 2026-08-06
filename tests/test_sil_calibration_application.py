@@ -457,7 +457,7 @@ def test_adapter_rejects_missing_or_mismatched_execution_identity(tmp_path):
     assert opened == []
 
 
-def test_adapter_rejects_multi_stock_plan_before_evidence_or_injection(tmp_path):
+def test_adapter_accepts_exact_loaded_stock_in_multi_stock_plan(tmp_path):
     adapter, manager, recorder, opened, _failures = _adapter(tmp_path)
     matching_stock = adapter.model.experiment_model.get_execution_plan_snapshot().stocks[0]
     adapter.model.experiment_model.get_execution_plan_snapshot = lambda: SimpleNamespace(
@@ -480,8 +480,49 @@ def test_adapter_rejects_multi_stock_plan_before_evidence_or_injection(tmp_path)
 
     result = adapter.generate_and_present_nominal_droplet()
 
+    assert result["ok"] is True
+    assert manager.candidate.stock_id == matching_stock.stock_id
+    assert manager.candidate.factor_name == matching_stock.factor_name
+    assert opened == [result["result_fingerprint"]]
+    assert [kind for kind, _payload in recorder.events] == [
+        "synthetic_calibration_generated"
+    ]
+    artifact = (
+        tmp_path
+        / "artifacts"
+        / "synthetic-calibration"
+        / "application-1"
+        / result["result_fingerprint"]
+    )
+    assert (artifact / "request.json").is_file()
+    assert (artifact / "result.json").is_file()
+
+
+def test_adapter_rejects_duplicate_loaded_stock_identity_before_evidence(tmp_path):
+    adapter, manager, recorder, opened, _failures = _adapter(tmp_path)
+    matching_stock = adapter.model.experiment_model.get_execution_plan_snapshot().stocks[0]
+    adapter.model.experiment_model.get_execution_plan_snapshot = lambda: SimpleNamespace(
+        stocks=(
+            matching_stock,
+            SimpleNamespace(
+                stock_id=matching_stock.stock_id,
+                factor_name=matching_stock.factor_name,
+                option_name=matching_stock.option_name,
+                printing_mode=matching_stock.printing_mode,
+            ),
+            SimpleNamespace(
+                stock_id="other-stock",
+                factor_name="Other Factor",
+                option_name=None,
+                printing_mode="droplet",
+            ),
+        )
+    )
+
+    result = adapter.generate_and_present_nominal_droplet()
+
     assert result["ok"] is False
-    assert result["code"] == "single_stock_required"
+    assert result["code"] == "stock_identity_mismatch"
     assert manager.candidate is None
     assert opened == []
     assert recorder.events == []
