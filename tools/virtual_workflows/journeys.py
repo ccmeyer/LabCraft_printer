@@ -21,6 +21,7 @@ from tools.virtual_workflows.assertions import (
     editor_prepared_revision_failure_assertion,
     editor_prepared_reload_assertions,
     machine_ready_assertion,
+    matrix_case_assertions,
     mixed_mode_lifecycle_assertions,
     multi_stock_artifacts_assertion,
     multi_stock_prepared_assertion,
@@ -69,6 +70,7 @@ from tools.virtual_workflows.journey_phases import (
     run_prepared_editor_revision,
     run_post_start_lock_copy,
     run_stock_passes,
+    normalized_stock_pass_steps,
     run_soft_stop_resume,
     run_disconnect_fail_closed_boundary,
     run_authoritative_reload_resume_boundary,
@@ -105,6 +107,15 @@ AUTHORITATIVE_RELOAD_SCENARIO_VERSION = "1"
 POST_START_LOCK_WORKLOAD_ID = "experiment_editor_post_start_lock_v1"
 DISCONNECT_WORKLOAD_ID = "print_array_disconnect_mid_array_24_v1"
 DISCONNECT_SCENARIO_NAME = "print_array_disconnect_fail_closed"
+MATRIX_SCENARIO_NAME = "parameterized_calibration_matrix_case"
+
+MATRIX_CASE_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "execution.matrix_case_parameters_applied",
+    "execution.matrix_case_outcome_valid",
+    "artifacts.required_present",
+)
 
 SMOKE_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -733,12 +744,30 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
     from tools.sil.ejection_response import PulseAwareSyntheticEjectionModelV1
     response = PulseAwareSyntheticEjectionModelV1()
     result = []
-    mixed_mode = runtime.definition.registry_id == MIXED_MODE_WORKLOAD_ID
+    matrix_case = fixture.get("lifecycle", {}).get("kind") == (
+        "parameterized_calibration_matrix_case"
+    )
+    mixed_mode = (
+        runtime.definition.registry_id == MIXED_MODE_WORKLOAD_ID and not matrix_case
+    )
     manual_contract = dict(
         fixture.get("lifecycle", {}).get("manual_refuel_check") or {}
     )
+    matrix_contracts = dict(
+        fixture.get("lifecycle", {}).get("manual_refuel_checks") or {}
+    )
+    blocked_seen = False
     for index, stock in enumerate(fixture["stocks"]):
         head = stock["printer_head"]
+        stock_key = str(stock.get("matrix_stock_key") or "")
+        matrix_manual = dict(matrix_contracts.get(stock_key) or {})
+        matrix_blocked = bool(
+            matrix_manual and matrix_manual.get("status") != "passed"
+        )
+        if blocked_seen:
+            break
+        is_last_configured = index == stock_count - 1
+        will_complete_case = is_last_configured and not matrix_blocked
         pulse_width_us = (
             STRESS_FIXED_CALIBRATION_PULSE_WIDTH_US
             if compact else int(head["print_pulse_width_us"])
@@ -756,16 +785,23 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
                     if compact else float(stock["droplet_volume_nL"])
                 ),
                 expected_completion_count=well_count * (index + 1),
-                expected_plan_state=("completed" if index == stock_count - 1 else "active"),
+                expected_plan_state=("completed" if will_complete_case else "active"),
                 ready_milestone=(
+                    f"pass_{index + 1}_ready" if matrix_case else
                     ("ready" if index == 0 else None) if compact
                     else ("stock_1_ready" if index == 0 else "stock_2_staged")
                 ),
                 printing_milestone=(
+                    (None if matrix_blocked else f"pass_{index + 1}_printing")
+                    if matrix_case else
                     ("printing" if index == 0 else None) if compact
                     else ("stock_1_printing" if index == 0 else "stock_2_printing")
                 ),
                 completed_milestone=(
+                    (
+                        None if matrix_blocked else
+                        "completed" if will_complete_case else f"pass_{index + 1}_completed"
+                    ) if matrix_case else
                     ("mid_array" if index == stock_count // 2 - 1 else
                      "completed" if index == stock_count - 1 else None)
                     if compact else ("stock_1_completed" if index == 0 else "completed")
@@ -775,13 +811,14 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
                     if compact else None
                 ),
                 start_dialog_titles=(
+                    ("Start Print Array",)
+                    if matrix_blocked else
                     ("Start Print Array", "Evaporation Plate Dock Check")
                     if index == 0
                     else ("Start Print Array",)
                 ),
                 bind_identity=True,
                 enable_pressure_regulation=index == 0,
-                validate_pass_boundary=True,
                 return_head=True,
                 detailed_evidence=True,
                 include_frequency_evidence=False,
@@ -807,10 +844,32 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
                         ),
                     )
                     if mixed_mode and str(stock["printing_mode"]) == "stream"
-                    else None
+                    else (
+                        ManualRefuelCheckSpec(
+                            trial_count=int(matrix_manual["trial_count"]),
+                            trial_droplet_count=int(
+                                matrix_manual["trial_droplet_count"]
+                            ),
+                            outcome=str(matrix_manual["status"]),
+                            operator_judgment=str(
+                                matrix_manual["operator_judgment"]
+                            ),
+                            milestone=(
+                                f"pass_{index + 1}_refuel_passed"
+                                if matrix_manual.get("status") == "passed"
+                                else None
+                            ),
+                        )
+                        if matrix_case and matrix_manual else None
+                    )
                 ),
+                expected_start_outcome=(
+                    "manual_refuel_cancelled" if matrix_blocked else "running"
+                ),
+                validate_pass_boundary=not matrix_blocked,
             )
         )
+        blocked_seen = blocked_seen or matrix_blocked
     if mixed_mode:
         result[0] = replace(
             result[0],
@@ -1112,8 +1171,7 @@ def _post_start_lock_body(runtime: JourneyRuntime) -> None:
 
 
 def _multi_body(runtime: JourneyRuntime) -> None:
-    context = runtime.context
-    fixture = runtime.fixture
+    context, fixture = runtime.context, runtime.fixture
     expected_wells = _well_ids(fixture)
     expected_stock_ids = tuple(_stock_id(stock) for stock in fixture["stocks"])
     runtime.observations.update(
@@ -1141,16 +1199,14 @@ def _multi_body(runtime: JourneyRuntime) -> None:
         context,
         expected_well_ids=expected_wells,
         expected_stock_ids=expected_stock_ids,
+        require_stock_order=fixture.get("lifecycle", {}).get("kind")
+        != "parameterized_calibration_matrix_case",
     )
     if prepared.decision != "pass":
         raise RuntimeError(f"prepared multi-stock bundle was invalid: {prepared.evidence}")
     pass_specs = _multi_passes(runtime)
-    runtime.observations["expected_pulse_widths_us"] = tuple(
-        spec.pulse_width_us for spec in pass_specs
-    )
-    runtime.observations["expected_volumes_nL"] = tuple(
-        spec.expected_volume_nL for spec in pass_specs
-    )
+    runtime.observations["expected_pulse_widths_us"] = tuple(spec.pulse_width_us for spec in pass_specs)
+    runtime.observations["expected_volumes_nL"] = tuple(spec.expected_volume_nL for spec in pass_specs)
     runtime.run_steps((head_identity_step(pass_specs),))
     if profile is None:
         observer = ExecutionObserver(
@@ -1176,27 +1232,46 @@ def _multi_body(runtime: JourneyRuntime) -> None:
         snapshot = dict(profile_snapshot["observer"])
         runtime.observations["execution_snapshot"] = snapshot
         starvation_events = list(profile_snapshot["queue"]["unexpected_starvation_events"])
-    for assertion in execution_lifecycle_assertions(
-        context,
-        expectation=ExecutionLifecycleExpectation(
+    matrix_case = fixture.get("lifecycle", {}).get("kind") == "parameterized_calibration_matrix_case"
+    matrix_terminal = str(
+        fixture.get("lifecycle", {}).get("case", {}).get("expected_terminal") or ""
+    )
+    if not matrix_case or matrix_terminal == "completed":
+        for assertion in execution_lifecycle_assertions(
+            context,
+            expectation=ExecutionLifecycleExpectation(
+                fixture=fixture,
+                expected_well_ids=expected_wells,
+                expected_stock_ids=expected_stock_ids,
+                expected_pulse_widths_us=tuple(
+                    runtime.observations["expected_pulse_widths_us"]
+                ),
+                expected_volumes_nL=tuple(
+                    runtime.observations["expected_volumes_nL"]
+                ),
+            ),
+            completed_wells=runtime.observations["completed_wells"],
+            pass_boundaries=runtime.observations["pass_boundaries"],
+            head_staging=runtime.observations["head_staging"],
+            starvation_events=starvation_events,
+            observer=snapshot,
+        ):
+            runtime.add_assertion(assertion)
+    if matrix_case:
+        for assertion in matrix_case_assertions(
+            context,
             fixture=fixture,
-            expected_well_ids=expected_wells,
-            expected_stock_ids=expected_stock_ids,
-            expected_pulse_widths_us=tuple(
-                runtime.observations["expected_pulse_widths_us"]
+            completed_wells=runtime.observations["completed_wells"],
+            pass_boundaries=runtime.observations["pass_boundaries"],
+            head_staging=runtime.observations["head_staging"],
+            manual_refuel_checks=runtime.observations.get(
+                "manual_refuel_checks", []
             ),
-            expected_volumes_nL=tuple(
-                runtime.observations["expected_volumes_nL"]
-            ),
-        ),
-        completed_wells=runtime.observations["completed_wells"],
-        pass_boundaries=runtime.observations["pass_boundaries"],
-        head_staging=runtime.observations["head_staging"],
-        starvation_events=starvation_events,
-        observer=snapshot,
-    ):
-        runtime.add_assertion(assertion)
-    if runtime.definition.registry_id == MIXED_MODE_WORKLOAD_ID:
+            action_results=context.action_results,
+            block_evidence=runtime.observations.get("matrix_block"),
+        ):
+            runtime.add_assertion(assertion)
+    elif runtime.definition.registry_id == MIXED_MODE_WORKLOAD_ID:
         for assertion in mixed_mode_lifecycle_assertions(
             context,
             fixture=fixture,
@@ -1759,7 +1834,10 @@ def _multi_payload(
     stock_count = len(fixture["stocks"])
     expected_count = int(fixture["workload"]["completion_count"])
     multi = evidence.get("execution.multi_stock_head_exchange", {})
-    mixed_mode = runtime.definition.registry_id == MIXED_MODE_WORKLOAD_ID
+    matrix_case = fixture.get("lifecycle", {}).get("kind") == (
+        "parameterized_calibration_matrix_case"
+    )
+    mixed_mode = runtime.definition.registry_id == MIXED_MODE_WORKLOAD_ID and not matrix_case
     observer = dict(observations.get("execution_snapshot") or {})
     observer_persistence = _observer_persistence(observer)
     boundaries = observations.get("pass_boundaries", [])
@@ -1835,6 +1913,24 @@ def _multi_payload(
                         }
                     }
                     if mixed_mode else {}
+                ),
+                **(
+                    {
+                        "matrix_case": {
+                            "matrix_id": fixture["lifecycle"]["matrix_id"],
+                            "catalog_sha256": fixture["lifecycle"]["catalog_sha256"],
+                            "case_sha256": fixture["lifecycle"]["case_sha256"],
+                            "case": dict(fixture["lifecycle"]["case"]),
+                            "profile": dict(fixture["lifecycle"]["profile"]),
+                            "parameters": evidence.get(
+                                "execution.matrix_case_parameters_applied", {}
+                            ),
+                            "outcome": evidence.get(
+                                "execution.matrix_case_outcome_valid", {}
+                            ),
+                        }
+                    }
+                    if matrix_case else {}
                 ),
                 "stock_well_completion_count": len(completed),
                 **observer_persistence,
@@ -2232,9 +2328,19 @@ def _post_start_lock_summary(report: Mapping[str, Any], runtime: JourneyRuntime)
 
 
 def _multi_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> str:
-    expected = int(runtime.fixture["workload"]["completion_count"])
+    case = dict(runtime.fixture.get("lifecycle", {}).get("case") or {})
+    expected = int(
+        case.get("expected_completion_count", runtime.fixture["workload"]["completion_count"])
+    )
+    label = (
+        f"Milestone 8 parameterized matrix case {case['case_id']}"
+        if case else
+        "Milestone 8 mixed droplet/stream"
+        if runtime.definition.registry_id == MIXED_MODE_WORKLOAD_ID else
+        "Milestone 7 composed " + str(len(runtime.fixture["stocks"])) + "-stock"
+    )
     return (
-        f"{'Milestone 8 mixed droplet/stream' if runtime.definition.registry_id == MIXED_MODE_WORKLOAD_ID else 'Milestone 7 composed ' + str(len(runtime.fixture['stocks'])) + '-stock'} lifecycle\n"
+        f"{label} lifecycle\n"
         f"Status: {report['classification']['status']}\n"
         f"Completions: {len(runtime.observations['completed_wells'])} / {expected}\n"
         f"Seed: {report['run']['seed']}\n"
@@ -2539,6 +2645,80 @@ def run_composed_journey(config: JourneyRunConfig) -> dict[str, Any]:
     return JourneyExecutor().run(get_journey_definition(config.scenario_id), config)
 
 
+def run_matrix_case(
+    config: JourneyRunConfig,
+    *,
+    matrix_id: str,
+    case_id: str,
+) -> dict[str, Any]:
+    """Run one typed matrix case through the shared multi-stock journey body."""
+
+    if config.scenario_id != MIXED_MODE_WORKLOAD_ID:
+        raise ValueError("matrix cases require the mixed-mode composed base")
+    from tools.virtual_workflows.matrices import build_case_fixture, get_matrix_case
+
+    fixture_bundle = build_case_fixture(matrix_id, case_id)
+    case = get_matrix_case(matrix_id, case_id)
+    # Build pass specs without executing by using the fixture-derived case contract.
+    fixture = fixture_bundle[0]
+    # The action and screenshot contracts are derived from the same typed case data.
+    dummy = type("MatrixPlanRuntime", (), {})()
+    dummy.fixture = fixture
+    dummy.definition = MIXED_MODE_DEFINITION
+    dummy.harness = type("Harness", (), {"config": config})()
+    pass_specs = _multi_passes(dummy)
+    steps = normalized_stock_pass_steps(pass_specs)
+    observed_actions = {row["action_id"] for row in steps}
+    required_actions = (
+        _COMMON_ACTIONS
+        | _EDITOR_ACTIONS
+        | frozenset({
+            "machine.connect_via_ui",
+            "machine.enable_motors_via_ui",
+            "machine.home_via_ui",
+        })
+        | frozenset(observed_actions)
+    )
+    non_ui = {
+        "app.launch_simulated", "artifact.capture_milestone", "scenario.teardown",
+        "head.bind_identity", "array.wait_for_completions",
+        "validation.stock_pass_boundary",
+    }
+    required_screenshots = {"editor_opened", "generated"}
+    for spec in pass_specs:
+        for name in (
+            spec.ready_milestone,
+            spec.printing_milestone,
+            spec.completed_milestone,
+            spec.manual_refuel_check.milestone
+            if spec.manual_refuel_check is not None else None,
+        ):
+            if name:
+                required_screenshots.add(name)
+    if case.expected_terminal == "manual_refuel_cancelled":
+        required_screenshots.add("manual_refuel_blocked")
+    required_assertions = (
+        (*MULTI_STOCK_REQUIRED_ASSERTIONS[:-1], *MATRIX_CASE_REQUIRED_ASSERTIONS[2:])
+        if case.expected_terminal == "completed"
+        else MATRIX_CASE_REQUIRED_ASSERTIONS
+    )
+    definition = replace(
+        MIXED_MODE_DEFINITION,
+        scenario_name=MATRIX_SCENARIO_NAME,
+        workload_id=matrix_id,
+        required_action_ids=frozenset(required_actions),
+        required_ui_action_ids=frozenset(required_actions - non_ui),
+        required_assertion_ids=tuple(required_assertions),
+        required_screenshots=frozenset(required_screenshots),
+    )
+    return JourneyExecutor().run(
+        definition,
+        config,
+        fixture_bundle=fixture_bundle,
+        replay_selector_args=("--matrix", matrix_id, "--case", case_id),
+    )
+
+
 def run_virtual_print_array_24_journey(config: JourneyRunConfig) -> dict[str, Any]:
     return JourneyExecutor().run(SMOKE_DEFINITION, config)
 
@@ -2590,6 +2770,7 @@ __all__ = [
     "SOFT_STOP_WORKLOAD_ID",
     "get_journey_definition",
     "run_composed_journey",
+    "run_matrix_case",
     "run_editor_create_finalize_journey",
     "run_disconnect_fail_closed_24_journey",
     "run_multi_stock_24x2_journey",

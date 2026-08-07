@@ -56,9 +56,13 @@ def _parser() -> argparse.ArgumentParser:
         help="Plan or execute a covered/partial capability.",
     )
     selector.add_argument(
+        "--matrix",
+        help="Plan or execute a validated typed parameter matrix.",
+    )
+    selector.add_argument(
         "--list",
         dest="list_section",
-        choices=("all", "suites", "capabilities"),
+        choices=("all", "suites", "capabilities", "matrices"),
         help="Print a read-only manifest catalog and exit.",
     )
     selector.add_argument(
@@ -86,6 +90,10 @@ def _parser() -> argparse.ArgumentParser:
             "Explicit changed path for --recommend-changed; repeatable and "
             "overrides Git discovery."
         ),
+    )
+    parser.add_argument(
+        "--case",
+        help="Run exactly one case from the selected --matrix.",
     )
     parser.add_argument(
         "--dry-run",
@@ -244,6 +252,37 @@ def _aggregate_replay_command(
     return tuple(command)
 
 
+def _matrix_replay_command(
+    args: argparse.Namespace,
+    output_root: Path,
+) -> tuple[str, ...]:
+    command = [
+        r".\env\Scripts\python.exe",
+        r"tools\run_virtual_workflow.py",
+        "--matrix",
+        str(args.matrix),
+    ]
+    if args.case is not None:
+        command.extend(["--case", str(args.case)])
+    command.extend(
+        [
+            "--output-root",
+            str(output_root),
+            "--seed",
+            str(args.seed),
+            "--speed-multiplier",
+            f"{args.speed_multiplier:g}",
+            "--timeout-seconds",
+            str(float(args.timeout_seconds)),
+        ]
+    )
+    if args.visible:
+        command.append("--visible")
+    else:
+        command.extend(["--qt-platform", args.qt_platform])
+    return tuple(command)
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -280,7 +319,7 @@ def _reject_aggregate_option_conflicts(
         conflicts.append("--compare")
     if conflicts:
         parser.error(
-            "suite/capability execution does not support: "
+            "suite/capability/matrix execution does not support: "
             + ", ".join(conflicts)
         )
 
@@ -422,6 +461,8 @@ def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(raw_argv)
     coverage_mode = bool(args.coverage_from)
+    if args.case is not None and args.matrix is None:
+        parser.error("--case requires --matrix")
     if coverage_mode:
         _reject_coverage_option_conflicts(parser, raw_argv)
     if args.changed_path and not args.recommend_changed:
@@ -436,6 +477,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.list_section:
+            if args.list_section == "matrices":
+                from tools.virtual_workflows.matrices import matrix_catalog
+
+                print(deterministic_json(matrix_catalog()), end="")
+                return 0
             print(deterministic_json(build_catalog(args.list_section)), end="")
             return 0
         if args.recommend_changed:
@@ -497,7 +543,10 @@ def main(argv: list[str] | None = None) -> int:
         not args.dry_run
         and (args.suite is not None or args.capability is not None)
     )
+    matrix_execution = not args.dry_run and args.matrix is not None
     if aggregate_execution:
+        _reject_aggregate_option_conflicts(parser, args, raw_argv)
+    if matrix_execution:
         _reject_aggregate_option_conflicts(parser, args, raw_argv)
     pi_evidence = (args.pi_preflight, args.pi_hardware_proof)
     if args.target_pi and any(value is None for value in pi_evidence):
@@ -510,6 +559,20 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.dry_run:
         try:
+            if args.matrix is not None:
+                if args.target_pi:
+                    parser.error("parameter matrices are Windows SIL only")
+                from tools.virtual_workflows.matrices import resolve_matrix_plan
+
+                plan = resolve_matrix_plan(
+                    args.matrix,
+                    case_id=args.case,
+                    seed=args.seed,
+                    timeout_seconds=args.timeout_seconds,
+                    execution_authorized=False,
+                )
+                print(deterministic_json(plan), end="")
+                return 0
             if args.target_pi:
                 from tools.virtual_workflows.pi_sil import (
                     load_and_validate_pi_evidence,
@@ -568,6 +631,84 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             print(
                 "Virtual workflow aggregate failed: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 3
+
+    if matrix_execution:
+        if args.target_pi:
+            parser.error("parameter matrices are Windows SIL only")
+        if not math.isfinite(args.speed_multiplier) or args.speed_multiplier <= 0:
+            parser.error("--speed-multiplier must be finite and greater than zero")
+        matrix_output_root = (
+            args.output_root
+            if _option_was_supplied(raw_argv, "--output-root")
+            else REPO_ROOT / "verification_reports" / "matrices"
+        )
+        try:
+            from tools.virtual_workflows.matrices import resolve_matrix_plan
+
+            if args.case is None:
+                from tools.virtual_workflows.matrix_runner import (
+                    MatrixRunConfig,
+                    execute_matrix,
+                )
+
+                plan = resolve_matrix_plan(
+                    args.matrix,
+                    seed=args.seed,
+                    timeout_seconds=args.timeout_seconds,
+                )
+                result = execute_matrix(
+                    MatrixRunConfig(
+                        plan=plan,
+                        output_root=matrix_output_root,
+                        speed_multiplier=args.speed_multiplier,
+                        visible=args.visible,
+                        qt_platform=args.qt_platform,
+                        replay_command=_matrix_replay_command(
+                            args, matrix_output_root
+                        ),
+                    )
+                )
+                print(result.summary_path.read_text(encoding="utf-8"), end="")
+                print(f"Matrix aggregate: {result.aggregate_path}")
+                print(f"Matrix aggregate SHA-256: {_file_sha256(result.aggregate_path)}")
+                return result.exit_code
+
+            if not args.visible:
+                os.environ["QT_QPA_PLATFORM"] = args.qt_platform
+            from tools.virtual_workflows.qt_font_environment import (
+                configure_sil_qt_font_environment,
+            )
+            configure_sil_qt_font_environment(
+                qt_platform=(None if args.visible else args.qt_platform)
+            )
+            from tools.virtual_workflows.journeys import (
+                JourneyRunConfig,
+                MIXED_MODE_WORKLOAD_ID,
+                run_matrix_case,
+            )
+            report = run_matrix_case(
+                JourneyRunConfig(
+                    scenario_id=MIXED_MODE_WORKLOAD_ID,
+                    output_root=matrix_output_root,
+                    visible=args.visible,
+                    seed=args.seed,
+                    speed_multiplier=args.speed_multiplier,
+                    timeout_seconds=args.timeout_seconds,
+                ),
+                matrix_id=args.matrix,
+                case_id=args.case,
+            )
+            report_path = _report_path(report)
+            print(report_path.with_name("summary.txt").read_text(encoding="utf-8"), end="")
+            print(f"Report: {report_path}")
+            return 0 if report["classification"]["status"] != "fail" else 2
+        except Exception as exc:
+            print(
+                "Virtual workflow matrix failed: "
                 f"{type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )

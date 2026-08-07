@@ -571,6 +571,7 @@ def multi_stock_prepared_assertion(
     *,
     expected_well_ids: tuple[str, ...],
     expected_stock_ids: tuple[str, ...],
+    require_stock_order: bool = True,
 ) -> AssertionResult:
     def inspect() -> tuple[bool, Mapping[str, Any]]:
         plan = context.experiment_model.get_execution_plan_snapshot()
@@ -600,7 +601,11 @@ def multi_stock_prepared_assertion(
         return (
             len(observed_wells) == len(expected_well_ids)
             and set(observed_wells) == set(expected_well_ids)
-            and observed_stock_ids == expected_stock_ids
+            and (
+                observed_stock_ids == expected_stock_ids
+                if require_stock_order
+                else set(observed_stock_ids) == set(expected_stock_ids)
+            )
             and len(targets) == expected_entries
             and sum(targets) == expected_entries
             and set(targets) == {1}
@@ -1029,6 +1034,207 @@ def mixed_mode_lifecycle_assertions(
         None if refuel_ok else "stream manual-refuel gate evidence was invalid",
     )
     return calibration_assertion, refuel_assertion
+
+
+def matrix_case_assertions(
+    context: Any,
+    *,
+    fixture: Mapping[str, Any],
+    completed_wells: list[str],
+    head_staging: list[Mapping[str, Any]],
+    pass_boundaries: list[Mapping[str, Any]],
+    manual_refuel_checks: list[Mapping[str, Any]],
+    action_results: list[Mapping[str, Any]],
+    block_evidence: Mapping[str, Any] | None,
+) -> tuple[AssertionResult, AssertionResult]:
+    """Validate one normalized matrix case, including expected safe cancellation."""
+
+    from ExecutionCalibrationStore import load_execution_calibrations
+    from ExecutionResumeStore import load_execution_resume
+
+    lifecycle = dict(fixture["lifecycle"])
+    case = dict(lifecycle["case"])
+    profile = dict(lifecycle["profile"])
+    expected_terminal = str(case["expected_terminal"])
+    expected_count = int(case["expected_completion_count"])
+    expected_stocks = list(fixture["stocks"])
+    expected_by_id = {
+        f"{stock['factor_name']}_{float(stock['concentration']):.2f}_{stock['units']}": stock
+        for stock in expected_stocks
+    }
+    staged_ids = [str(row.get("stock_id") or "") for row in head_staging]
+    expected_order = list(expected_by_id)
+    document = load_execution_calibrations(
+        context.experiment_model.execution_calibrations_file_path
+    )
+    records = [record.to_dict() for record in document.records.values()]
+    records_by_stock = {str(record.get("stock_id")): record for record in records}
+    calibration_rows: list[dict[str, Any]] = []
+    calibration_ok = staged_ids == expected_order[: len(staged_ids)]
+    for stock_id in staged_ids:
+        stock = expected_by_id.get(stock_id, {})
+        head = dict(stock.get("printer_head") or {})
+        record = records_by_stock.get(stock_id, {})
+        row = {
+            "stock_id": stock_id,
+            "printer_head_id": record.get("printer_head_id"),
+            "printing_mode": record.get("printing_mode"),
+            "pw_us": record.get("pw_us"),
+            "effective_volume_nL": record.get("effective_volume_nL"),
+        }
+        calibration_rows.append(row)
+        calibration_ok = calibration_ok and bool(stock) and (
+            record.get("printer_head_id") == head.get("printer_head_id")
+            and record.get("printing_mode") == stock.get("printing_mode")
+            and int(record.get("pw_us") or 0)
+            == int(head.get("print_pulse_width_us") or 0)
+            and abs(
+                float(record.get("effective_volume_nL") or -1)
+                - float(stock.get("droplet_volume_nL") or -2)
+            )
+            < 1e-6
+        )
+    refuel_expected = sum(
+        expected_by_id[stock_id]["printing_mode"] == "stream"
+        for stock_id in staged_ids
+    )
+    parameter_ok = (
+        lifecycle.get("matrix_id") == "mixed_mode_calibration_v1"
+        and lifecycle.get("catalog_sha256")
+        and lifecycle.get("case_sha256")
+        and len(expected_stocks) == 2
+        and calibration_ok
+        and len(records) == len(staged_ids)
+        and len(manual_refuel_checks) == refuel_expected
+        and profile.get("profile_id") == case.get("profile_id")
+    )
+    parameter_evidence = {
+        "matrix_id": lifecycle.get("matrix_id"),
+        "catalog_sha256": lifecycle.get("catalog_sha256"),
+        "case_sha256": lifecycle.get("case_sha256"),
+        "case": case,
+        "profile": profile,
+        "expected_stock_order": expected_order,
+        "staged_stock_order": staged_ids,
+        "calibration_records": calibration_rows,
+        "manual_refuel_check_count": len(manual_refuel_checks),
+    }
+    parameter_assertion = AssertionResult(
+        "execution.matrix_case_parameters_applied",
+        "terminal",
+        "pass" if parameter_ok else "fail",
+        ("ui", "model", "persistence"),
+        parameter_evidence,
+        None if parameter_ok else "matrix parameters were not applied exactly",
+    )
+
+    plan = context.experiment_model.get_execution_plan_snapshot()
+    resume_path = Path(context.experiment_model.execution_resume_file_path)
+    resume = load_execution_resume(resume_path) if resume_path.is_file() else None
+    resume_state = str(resume.state) if resume is not None else "absent_clean"
+    resume_intents = list(resume.intents) if resume is not None else []
+    gripper_empty = context.model.rack_model.get_gripper_printer_head() is None
+    action_ids = [str(row.get("action_id") or "") for row in action_results]
+    block = dict(block_evidence or {})
+    persisted_checks = [dict(item) for item in document.manual_refuel_checks.values()]
+    blocked_check = next(
+        (
+            item
+            for item in persisted_checks
+            if item.get("stock_id") == block.get("stock_id")
+            and item.get("printer_head_id") == block.get("printer_head_id")
+        ),
+        {},
+    )
+    expected_plan_state = (
+        "completed" if expected_terminal == "completed" else "active"
+    )
+    common_ok = (
+        len(completed_wells) == expected_count
+        and str(plan.state.value) == expected_plan_state
+        and context.controller.get_array_run_state() == "idle"
+        and context.machine.check_if_all_completed()
+        and resume_state in {"clean", "absent_clean"}
+        and len(resume_intents) == 0
+        and gripper_empty
+        and not context.errors
+        and not context.unexpected_dialogs
+    )
+    if expected_terminal == "completed":
+        outcome_ok = (
+            common_ok
+            and not block
+            and len(pass_boundaries) == 2
+            and all(item.get("status") == "passed" for item in persisted_checks)
+        )
+    else:
+        dialog_titles = [str(row.get("title") or "") for row in block.get("dialogs", [])]
+        expected_status = next(
+            (
+                item["status"]
+                for item in case["refuel_outcomes"]
+                if item["status"] != "passed"
+            ),
+            None,
+        )
+        expected_judgment = next(
+            (
+                item["operator_judgment"]
+                for item in case["refuel_outcomes"]
+                if item["status"] != "passed"
+            ),
+            None,
+        )
+        manual_indexes = [
+            index for index, value in enumerate(action_ids)
+            if value == "manual_refuel.complete_check_via_ui"
+        ]
+        start_indexes = [
+            index for index, value in enumerate(action_ids)
+            if value == "array.start_via_ui"
+        ]
+        outcome_ok = (
+            common_ok
+            and block.get("terminal") == "manual_refuel_cancelled"
+            and block.get("cancelled") is True
+            and block.get("completion_count_before")
+            == block.get("completion_count_after") == expected_count
+            and block.get("plan_state_before")
+            == block.get("plan_state_after") == expected_plan_state
+            and dialog_titles[-2:]
+            == ["Start Print Array", "Manual Refuel Check Required"]
+            and blocked_check.get("status") == expected_status
+            and blocked_check.get("operator_judgment") == expected_judgment
+            and blocked_check.get("source") == "sil_simulated_manual_refuel_check"
+            and bool(blocked_check.get("applied_calibration_fingerprint"))
+            and manual_indexes
+            and start_indexes
+            and manual_indexes[-1] < start_indexes[-1]
+        )
+    outcome_evidence = {
+        "expected_terminal": expected_terminal,
+        "expected_completion_count": expected_count,
+        "observed_completion_count": len(completed_wells),
+        "expected_plan_state": expected_plan_state,
+        "observed_plan_state": str(plan.state.value),
+        "block": block,
+        "persisted_manual_refuel_checks": persisted_checks,
+        "pass_boundaries": [dict(item) for item in pass_boundaries],
+        "queue_drained": bool(context.machine.check_if_all_completed()),
+        "checkpoint_state": resume_state,
+        "checkpoint_intent_count": len(resume_intents),
+        "gripper_empty": gripper_empty,
+        "array_state": context.controller.get_array_run_state(),
+    }
+    outcome_assertion = AssertionResult(
+        "execution.matrix_case_outcome_valid",
+        "terminal",
+        "pass" if outcome_ok else "fail",
+        ("ui", "controller", "model", "persistence", "simulator"),
+        outcome_evidence,
+        None if outcome_ok else "matrix terminal outcome or safeguard was invalid",
+    )
+    return parameter_assertion, outcome_assertion
 
 
 def multi_stock_artifacts_assertion(
@@ -2218,6 +2424,7 @@ __all__ = [
     "multi_stock_prepared_assertion",
     "multi_stock_terminal_assertions",
     "mixed_mode_lifecycle_assertions",
+    "matrix_case_assertions",
     "prepared_execution_assertion",
     "rack_head_assertion",
     "real_application_assertion",

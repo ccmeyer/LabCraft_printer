@@ -182,6 +182,7 @@ class StockPassSpec:
     refuel_pulse_width_us: int | None = None
     refuel_pressure_psi: float | None = None
     manual_refuel_check: ManualRefuelCheckSpec | None = None
+    expected_start_outcome: str = "running"
 
     def __post_init__(self) -> None:
         if not self.stock_id or not self.printer_head_id:
@@ -231,6 +232,26 @@ class StockPassSpec:
         ):
             raise ValueError(
                 "manual-refuel checks require stream mode and both refuel settings"
+            )
+        if self.expected_start_outcome not in {
+            "running",
+            "manual_refuel_cancelled",
+        }:
+            raise ValueError("stock-pass start outcome is unsupported")
+        if self.expected_start_outcome == "manual_refuel_cancelled" and (
+            self.manual_refuel_check is None
+            or self.manual_refuel_check.outcome == "passed"
+        ):
+            raise ValueError(
+                "manual-refuel cancellation requires a non-passed stream check"
+            )
+        if self.expected_start_outcome == "manual_refuel_cancelled" and (
+            self.printing_milestone is not None
+            or self.completed_milestone is not None
+            or self.validate_pass_boundary
+        ):
+            raise ValueError(
+                "a cancelled pass cannot print, complete, or validate a pass boundary"
             )
 
 
@@ -557,7 +578,7 @@ def normalized_stock_pass_steps(
                 action_ids.index("array.start_via_ui"),
                 "manual_refuel.complete_check_via_ui",
             )
-        if spec.await_terminal_boundary:
+        if spec.await_terminal_boundary and spec.expected_start_outcome == "running":
             action_ids.append("array.wait_for_completions")
         if spec.ready_milestone:
             action_ids.insert(action_ids.index("array.start_via_ui"), "artifact.capture_milestone")
@@ -569,7 +590,7 @@ def normalized_stock_pass_steps(
                 )
             else:
                 action_ids.append("artifact.capture_milestone")
-        if spec.validate_pass_boundary:
+        if spec.validate_pass_boundary and spec.expected_start_outcome == "running":
             action_ids.append("validation.stock_pass_boundary")
         if spec.completed_milestone:
             action_ids.append("artifact.capture_milestone")
@@ -813,15 +834,6 @@ def _stage_stock_head(
             refuel_pulse_width_us=spec.refuel_pulse_width_us,
             refuel_pressure_psi=spec.refuel_pressure_psi,
         )
-        if spec.manual_refuel_check is not None:
-            machine.wait_until(
-                lambda: bool(
-                    context.model.machine_model.regulating_print_pressure
-                ) and bool(
-                    context.model.machine_model.regulating_refuel_pressure
-                ),
-                "both regulated pressure channels for manual-refuel preflight",
-            )
         evidence = {
             "pulse_width_us": spec.pulse_width_us,
             "pressure_psi": spec.pressure_psi,
@@ -1057,7 +1069,7 @@ def run_stock_passes(
     *,
     bind_identities: bool = True,
     active_phase: Callable[[JourneyRuntime, StockPassSpec], Any] | None = None,
-) -> None:
+) -> Mapping[str, Any] | None:
     """Execute ordered head passes through existing page drivers and QTest."""
 
     specs = tuple(pass_specs)
@@ -1082,7 +1094,7 @@ def run_stock_passes(
                 "stock_id": spec.stock_id,
             }
         )
-        _run_stock_pass(
+        result = _run_stock_pass(
             runtime,
             spec,
             index=index,
@@ -1093,6 +1105,9 @@ def run_stock_passes(
             active_phase=active_phase,
         )
         pressure_enabled = pressure_enabled or spec.enable_pressure_regulation
+        if result is not None and result.get("terminal") == "manual_refuel_cancelled":
+            return result
+    return None
 
 
 def capture_completion_midpoint(
@@ -1133,7 +1148,7 @@ def _run_stock_pass(
     head_staging: list[dict[str, Any]],
     returned_head_ids: list[str],
     active_phase: Callable[[JourneyRuntime, StockPassSpec], Any] | None,
-) -> None:
+) -> Mapping[str, Any] | None:
     context = runtime.context
     machine, rack, slot, _rows = _stage_stock_head(
         runtime,
@@ -1148,7 +1163,9 @@ def _run_stock_pass(
                 SemanticStep(
                     "pressure.enable_regulation_via_ui",
                     InteractionSurface.UI,
-                    lambda _runtime: machine.enable_pressure_regulation()
+                    lambda _runtime: machine.enable_pressure_regulation(
+                        require_refuel=spec.manual_refuel_check is not None
+                    )
                     or {"regulating_print_pressure": True},
                 ),
             )
@@ -1303,6 +1320,50 @@ def _run_stock_pass(
         for title in spec.start_dialog_titles
     ]
     array = ArrayDriver(context)
+    if spec.expected_start_outcome == "manual_refuel_cancelled":
+        starting_count = len(runtime.observations["completed_wells"])
+        before_plan = context.experiment_model.get_execution_plan_snapshot()
+        result = runtime.run_steps(
+            (
+                SemanticStep(
+                    "array.start_via_ui",
+                    InteractionSurface.UI,
+                    lambda _runtime: array.start_and_cancel_manual_refuel_guard(
+                        expected_dialogs,
+                        completion_count=lambda: len(
+                            runtime.observations["completed_wells"]
+                        ),
+                    ),
+                ),
+            )
+        )[0]
+        evidence = {
+            "terminal": "manual_refuel_cancelled",
+            "pass_index": index + 1,
+            "stock_id": spec.stock_id,
+            "printer_head_id": spec.printer_head_id,
+            "starting_completion_count": starting_count,
+            "observed_completion_count": len(runtime.observations["completed_wells"]),
+            "plan_state_before": str(before_plan.state.value),
+            **dict(result.get("evidence") or {}),
+        }
+        runtime.observations["matrix_block"] = dict(evidence)
+        capture_milestone(
+            context,
+            "manual_refuel_blocked",
+            evidence=evidence,
+        )
+        if spec.return_head:
+            runtime.run_steps(
+                (
+                    SemanticStep(
+                        "head.return_via_ui",
+                        InteractionSurface.UI,
+                        return_active_head,
+                    ),
+                )
+            )
+        return evidence
     runtime.run_steps(
         (
             SemanticStep(
@@ -1320,7 +1381,7 @@ def _run_stock_pass(
     if active_phase is not None:
         active_phase(runtime, spec)
     if not spec.await_terminal_boundary:
-        return
+        return None
     if spec.return_head and spec.expected_plan_state == "completed":
         from tools.virtual_workflows.execution_observer import (
             capture_execution_liveness_snapshot,
@@ -1399,6 +1460,7 @@ def _run_stock_pass(
                 ),
             )
         )
+    return None
 
 
 def wait_for_execution_boundary(

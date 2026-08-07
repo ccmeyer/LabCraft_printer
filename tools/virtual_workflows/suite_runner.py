@@ -800,6 +800,18 @@ def aggregate_exit_code(payload: Mapping[str, Any]) -> int:
     return 2 if status == "fail" else 0
 
 
+# Reusable process/evidence primitives shared by suite and matrix aggregation.
+# Slice 3 continues to call the original private names so its behavior and
+# schemas remain frozen.
+contained_artifact_path = _contained
+relative_artifact_path = _relative
+write_json_atomic = _write_json_atomic
+write_text_atomic = _write_text_atomic
+communicate_bounded = _communicate_bounded
+log_reference = _log_reference
+file_sha256 = _sha256
+
+
 __all__ = [
     "AGGREGATE_SCHEMA_NAME",
     "AGGREGATE_SCHEMA_VERSION",
@@ -812,4 +824,11 @@ __all__ = [
     "load_aggregate",
     "validate_aggregate",
     "write_aggregate_atomic",
+    "communicate_bounded",
+    "contained_artifact_path",
+    "file_sha256",
+    "log_reference",
+    "relative_artifact_path",
+    "write_json_atomic",
+    "write_text_atomic",
 ]

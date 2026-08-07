@@ -137,6 +137,38 @@ def test_replay_command_retains_requested_stall_controls(tmp_path):
     ]
 
 
+def test_replay_command_can_retain_a_typed_matrix_case_selector(tmp_path):
+    config = SimpleNamespace(
+        output_root=tmp_path,
+        seed=1,
+        speed_multiplier=20.0,
+        timeout_seconds=120.0,
+        visible=True,
+        inject_ui_stall_ms=0,
+        inject_after_completion=48,
+    )
+
+    command = replay_command(
+        SimpleNamespace(config=config),
+        "mixed_mode_calibration_v1",
+        selector_args=(
+            "--matrix",
+            "mixed_mode_calibration_v1",
+            "--case",
+            "mixed_ab_baseline_pass",
+        ),
+    )
+
+    assert "--scenario" not in command
+    assert command[2:6] == [
+        "--matrix",
+        "mixed_mode_calibration_v1",
+        "--case",
+        "mixed_ab_baseline_pass",
+    ]
+    assert command[-1] == "--visible"
+
+
 def test_runtime_executes_steps_through_harness_and_records_assertions(tmp_path):
     harness = _Harness()
     runtime = JourneyRuntime(

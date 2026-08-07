@@ -187,12 +187,16 @@ class JourneyRuntime:
             )
 
 
-def replay_command(harness: AutomationHarness, workload_id: str) -> list[str]:
+def replay_command(
+    harness: AutomationHarness,
+    workload_id: str,
+    *,
+    selector_args: Sequence[str] | None = None,
+) -> list[str]:
     command = [
         r".\env\Scripts\python.exe",
         r"tools\run_virtual_workflow.py",
-        "--scenario",
-        str(workload_id),
+        *(list(selector_args) if selector_args else ["--scenario", str(workload_id)]),
         "--output-root",
         str(harness.config.output_root),
         "--seed",
@@ -219,13 +223,23 @@ def replay_command(harness: AutomationHarness, workload_id: str) -> list[str]:
 class JourneyExecutor:
     """Own the common success, failure, evidence, report, and teardown path."""
 
-    def run(self, definition: JourneyDefinition, config: Any) -> dict[str, Any]:
+    def run(
+        self,
+        definition: JourneyDefinition,
+        config: Any,
+        *,
+        fixture_bundle: tuple[dict[str, Any], Path] | None = None,
+        replay_selector_args: Sequence[str] | None = None,
+        initial_observations: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if str(config.scenario_id) != definition.registry_id:
             raise ValueError(
                 f"journey {definition.registry_id!r} cannot run "
                 f"scenario {config.scenario_id!r}"
             )
-        fixture, fixture_path = definition.fixture_loader()
+        fixture, fixture_path = (
+            fixture_bundle if fixture_bundle is not None else definition.fixture_loader()
+        )
         harness = AutomationHarness(
             AutomationHarnessConfig(
                 scenario_id=definition.scenario_name,
@@ -248,6 +262,8 @@ class JourneyExecutor:
             fixture=fixture,
             fixture_path=Path(fixture_path).resolve(),
         )
+        if initial_observations:
+            runtime.observations.update(dict(initial_observations))
         teardown: Mapping[str, Any] = {}
         try:
             harness.start()
@@ -284,7 +300,11 @@ class JourneyExecutor:
 
         self._mark_incomplete(runtime)
         payload = definition.payload_builder(runtime, teardown)
-        command = replay_command(harness, definition.workload_id)
+        command = replay_command(
+            harness,
+            definition.workload_id,
+            selector_args=replay_selector_args,
+        )
         report = ComposedReportAdapter(harness, repo_root=REPO_ROOT).build(
             workload_id=definition.workload_id,
             scenario_name=definition.scenario_name,

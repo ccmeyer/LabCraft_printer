@@ -133,6 +133,77 @@ def test_interrupted_stock_pass_rejects_terminal_policy_mix():
         )
 
 
+def test_manual_refuel_cancelled_pass_stops_at_the_ui_start_guard():
+    spec = StockPassSpec(
+        stock_id="stream-stock",
+        printer_head_id="stream-head",
+        pulse_width_us=2500,
+        pressure_psi=1.2,
+        frequency_hz=20,
+        initial_volume_uL=1000.0,
+        expected_volume_nL=60.0,
+        expected_completion_count=1,
+        expected_plan_state="active",
+        ready_milestone="ready",
+        printing_milestone=None,
+        completed_milestone=None,
+        calibration_mode="stream",
+        refuel_pulse_width_us=6000,
+        refuel_pressure_psi=0.4,
+        manual_refuel_check=ManualRefuelCheckSpec(
+            trial_count=2,
+            trial_droplet_count=5,
+            outcome="unclear",
+            operator_judgment="unclear",
+        ),
+        expected_start_outcome="manual_refuel_cancelled",
+        return_head=True,
+    )
+
+    action_ids = [
+        row["action_id"] for row in normalized_stock_pass_steps((spec,))
+    ]
+    assert action_ids.count("manual_refuel.complete_check_via_ui") == 1
+    assert action_ids.count("array.start_via_ui") == 1
+    assert "array.wait_for_completions" not in action_ids
+    assert "validation.stock_pass_boundary" not in action_ids
+    assert action_ids[-1] == "head.return_via_ui"
+
+
+def test_manual_refuel_cancelled_requires_a_nonpassing_stream_check():
+    values = dict(
+        stock_id="stock-a",
+        printer_head_id="head-a",
+        pulse_width_us=1300,
+        pressure_psi=1.2,
+        frequency_hz=20,
+        initial_volume_uL=1000.0,
+        expected_volume_nL=9.0,
+        expected_completion_count=1,
+        expected_plan_state="active",
+        ready_milestone=None,
+        printing_milestone=None,
+        completed_milestone=None,
+        expected_start_outcome="manual_refuel_cancelled",
+    )
+    with pytest.raises(ValueError, match="non-passed stream check"):
+        StockPassSpec(**values)
+
+    values.update(
+        calibration_mode="stream",
+        refuel_pulse_width_us=6000,
+        refuel_pressure_psi=0.4,
+        manual_refuel_check=ManualRefuelCheckSpec(
+            trial_count=2,
+            trial_droplet_count=5,
+            outcome="passed",
+            operator_judgment="stable",
+        ),
+    )
+    with pytest.raises(ValueError, match="non-passed stream check"):
+        StockPassSpec(**values)
+
+
 def test_two_stock_plan_has_exact_repeated_groups_and_truthful_surfaces():
     specs = (
         _stock("stock-a", "head-a", completion_count=24, plan_state="active", first=True),

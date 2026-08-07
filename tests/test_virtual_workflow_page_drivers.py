@@ -71,6 +71,61 @@ def test_dialog_sequence_rejects_unexpected_title(qapp):
     view.close()
 
 
+def test_dialog_sequence_selects_exact_named_safe_button(qapp):
+    view = QtWidgets.QWidget()
+    button = QtWidgets.QPushButton("Start", view)
+    selected = []
+
+    def show_guard():
+        dialog = QtWidgets.QMessageBox(view)
+        dialog.setWindowTitle("Manual Refuel Check Required")
+        dialog.setText("A passed check is required.")
+        dialog.addButton(
+            "Proceed Without Pass", QtWidgets.QMessageBox.ButtonRole.ActionRole
+        )
+        dialog.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        dialog.exec()
+        selected.append(dialog.clickedButton().text())
+
+    button.clicked.connect(show_guard)
+    view.show()
+    qapp.processEvents()
+    driver = MainWindowDriver(_context(qapp, view))
+
+    handled = driver.click_with_message_boxes(
+        button, [("Manual Refuel Check Required", "Cancel")]
+    )
+
+    assert selected == ["Cancel"]
+    assert handled[0]["title"] == "Manual Refuel Check Required"
+    view.close()
+
+
+def test_dialog_sequence_fails_closed_when_named_button_is_missing(qapp):
+    view = QtWidgets.QWidget()
+    button = QtWidgets.QPushButton("Start", view)
+
+    def show_guard():
+        dialog = QtWidgets.QMessageBox(view)
+        dialog.setWindowTitle("Manual Refuel Check Required")
+        dialog.setText("A passed check is required.")
+        dialog.addButton(
+            "Proceed Without Pass", QtWidgets.QMessageBox.ButtonRole.ActionRole
+        )
+        dialog.exec()
+
+    button.clicked.connect(show_guard)
+    view.show()
+    qapp.processEvents()
+    driver = MainWindowDriver(_context(qapp, view))
+
+    with pytest.raises(RuntimeError, match="expected dialog button is missing"):
+        driver.click_with_message_boxes(
+            button, [("Manual Refuel Check Required", "Cancel")]
+        )
+    view.close()
+
+
 def test_array_driver_owns_soft_stop_and_resume_qtest_mechanics(qapp):
     window = QtWidgets.QWidget()
     button = QtWidgets.QPushButton("Stop After Well", window)

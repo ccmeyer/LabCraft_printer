@@ -259,7 +259,7 @@ class _QTestSurfaceDriver:
     def click_with_message_boxes(
         self,
         widget: Any,
-        expected: list[tuple[str, QtWidgets.QMessageBox.StandardButton]],
+        expected: list[tuple[str, Any]],
     ) -> list[dict[str, Any]]:
         """Click once and accept only the exact ordered QMessageBox sequence."""
 
@@ -287,7 +287,7 @@ class _QTestSurfaceDriver:
                 if isinstance(active, QtWidgets.QDialog):
                     active.reject()
                 return
-            expected_title, standard_button = expected[len(handled)]
+            expected_title, requested_button = expected[len(handled)]
             if active.windowTitle() != expected_title:
                 state["error"] = RuntimeError(
                     f"unexpected dialog title {active.windowTitle()!r}; "
@@ -295,7 +295,18 @@ class _QTestSurfaceDriver:
                 )
                 active.reject()
                 return
-            button = active.button(standard_button)
+            if isinstance(requested_button, str):
+                button = next(
+                    (
+                        candidate
+                        for candidate in active.buttons()
+                        if candidate.text().replace("&", "").strip()
+                        == requested_button
+                    ),
+                    None,
+                )
+            else:
+                button = active.button(requested_button)
             if button is None:
                 state["error"] = RuntimeError(
                     f"expected dialog button is missing from {expected_title!r}"
@@ -1569,6 +1580,51 @@ class ArrayDriver(_QTestSurfaceDriver):
             "started array running state",
         )
         return dialogs
+
+    def start_and_cancel_manual_refuel_guard(
+        self,
+        start_dialogs: list[tuple[str, Any]],
+        *,
+        completion_count: Callable[[], int],
+    ) -> dict[str, Any]:
+        """Attempt Start, select the default-safe refuel Cancel, and prove no run."""
+
+        before_plan = self.context.experiment_model.get_execution_plan_snapshot()
+        before_state = self.context.controller.get_array_run_state()
+        before_completed = int(completion_count())
+        dialogs = self.click_with_message_boxes(
+            self.control,
+            [
+                *start_dialogs,
+                ("Manual Refuel Check Required", "Cancel"),
+            ],
+        )
+        self.wait_until(
+            lambda: self.context.controller.get_array_run_state() == "idle"
+            and self.context.machine.check_if_all_completed(),
+            "cancelled manual-refuel safeguard boundary",
+        )
+        after_plan = self.context.experiment_model.get_execution_plan_snapshot()
+        after_completed = int(completion_count())
+        if (
+            before_state != "idle"
+            or str(after_plan.state.value) != str(before_plan.state.value)
+            or before_completed != after_completed
+        ):
+            raise RuntimeError(
+                "manual-refuel Cancel did not preserve the authoritative idle boundary"
+            )
+        return {
+            "dialogs": dialogs,
+            "cancelled": True,
+            "array_state_before": before_state,
+            "array_state_after": self.context.controller.get_array_run_state(),
+            "plan_state_before": str(before_plan.state.value),
+            "plan_state_after": str(after_plan.state.value),
+            "completion_count_before": before_completed,
+            "completion_count_after": after_completed,
+            "queue_drained": True,
+        }
 
     def request_soft_stop(self) -> dict[str, Any]:
         """Click the running array control; trigger timing remains journey policy."""

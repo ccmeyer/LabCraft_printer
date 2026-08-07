@@ -1243,16 +1243,23 @@ Status: `complete` (2026-08-07)
 
 #### Milestone 8 Slice 5: Parameterized scenario matrices
 
-Status: `planned`
+Status: `complete`
 
-- introduce typed case records that vary values, modes, stock order, and
-  expected safeguard outcomes while reusing the same journey and phases;
-- begin with approximately eight curated pairwise mixed-mode/calibration cases,
-  including nominal completions and negative manual-refuel states that stop
-  after proving the intended block;
-- retain normalized parameters, case identity, seed, assertions, and an exact
-  replay command for every case;
-- do not create a separate fixture or workflow body for every combination.
+- `mixed_mode_calibration_v1` defines eight immutable, hash-identified cases
+  across mixed, droplet/droplet, and stream/stream pairs, both stock orders,
+  both calibration profiles, and every planned manual-refuel state;
+- every case is built in memory from the single tracked mixed-mode reference
+  fixture and runs through the shared multi-stock body, stock-pass phases, Qt
+  page drivers, assertions, report-v1 writer, and simulator;
+- negative cases attempt Start through normal UI controls, choose Cancel in
+  the exact manual-refuel safeguard, and pass only after authoritative proof
+  that no bypass, new intent, additional completion, or running state occurred;
+- the parent runner uses fresh child processes and retains a hashed plan,
+  aggregate, child reports, logs, parameters, seed, and exact replay;
+- the complete offscreen matrix and exact replay passed 8/8. Both visible
+  representative cases and their exact replays passed. Focused validation
+  passed 114 unit/contract tests and four system tests; the complete Python
+  suite remains deferred to Slice 8.
 
 #### Milestone 8 Slice 6: Seeded sequence exploration
 
@@ -1677,13 +1684,15 @@ This effort is complete when:
 ## Current Next Action
 
 Milestone 7 is complete and the eight-slice Milestone 8 direction is approved.
-Milestone 8 Slices 1 through 4 are complete. The operator can list the tracked
+Milestone 8 Slices 1 through 5 are complete. The operator can list the tracked
 portfolio, dry-run suite/capability/direct-scenario plans, request
 changed-source recommendations, and explicitly execute Windows suite or
 capability plans as isolated fresh processes with hashed aggregate evidence.
 The operator can also explicitly join retained aggregates to the tracked
 manifest and receive a source-current five-state capability evaluation without
-running another workflow. Create a concrete implementation plan for Milestone
-8 Slice 5: parameterized scenario matrices. Do not begin seeded sequence
-exploration, remote Pi operations, firmware/protocol work, or hardware work
+running another workflow. The operator can also list, dry-run, execute, and
+replay the eight-case mixed-mode calibration matrix without adding a journey
+or tracked fixture per variation. Create a concrete implementation plan for
+Milestone 8 Slice 6: seeded sequence exploration. Do not begin remote Pi
+operations, firmware/protocol work, or hardware work
 until their respective later slices are separately planned and approved.

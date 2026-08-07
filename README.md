@@ -1550,6 +1550,53 @@ otherwise-passing report with a different fingerprint is `stale`. Evidence
 age is always retained as informational metadata and does not schedule or gate
 manual testing.
 
+### Parameterized SIL calibration matrix
+
+Milestone 8 Slice 5 adds the operator-invoked
+`mixed_mode_calibration_v1` matrix. Its eight typed cases reuse the existing
+mixed-mode journey and tracked reference fixture while varying droplet/stream
+pairing, stock order, calibration profile, and manual-refuel outcome. Generated
+case data stays in memory; the matrix does not create a fixture or workflow
+body for each variation.
+
+List the catalog, inspect a deterministic plan, run all cases in isolated
+children, or run one replayable case with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --list matrices
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix mixed_mode_calibration_v1 --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix mixed_mode_calibration_v1 `
+  --output-root verification_reports\matrices `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix mixed_mode_calibration_v1 `
+  --case mixed_ba_baseline_unclear `
+  --output-root verification_reports\matrices `
+  --seed 1 --speed-multiplier 20 --timeout-seconds 120 --visible
+```
+
+An all-case run writes
+`verification_reports/matrices/mixed_mode_calibration_v1/<run>/` with the
+hashed `matrix_plan.json`, `aggregate.json`, summary, ordered child logs, and
+references to each authoritative report-v1 evidence tree. Children continue
+after an earlier failure, but any timeout, launch error, missing or ambiguous
+report, identity/hash mismatch, return-code disagreement, or failed case makes
+the aggregate fail.
+
+Three negative cases exercise the real “Manual Refuel Check Required” guard.
+They accept the initial Start confirmation, select the default-safe Cancel
+response, and pass only when the matching non-passed check and calibration
+fingerprint persist while completion count, plan state, queue, gripper, and
+execution intents prove that printing was not bypassed. Matrix aggregates are
+separate evidence and do not satisfy registered capability-manifest coverage.
+Pi, scheduling, repetition, fault injection, baseline, comparison, and
+performance controls remain unavailable in matrix mode.
+
 The report's responsiveness phase timings include `ui.pressure_render`, the
 count and duration distribution for the real pressure-plot update slot. The
 text summary shows its count, p95, and maximum. This diagnostic covers the
