@@ -4908,6 +4908,7 @@ class CalibrationManager(QObject):
             "gripper_was_open": None,
             "gripper_refresh_suspended": False,
             "mass_source": "manual",
+            "ending_mass_source": "manual",
             "balance_request_id": None,
             "balance_request_phase": None,
             "balance_request_status": "inactive",
@@ -4979,8 +4980,6 @@ class CalibrationManager(QObject):
     def has_open_stream_calibration_sequence(self) -> bool:
         status = str((getattr(self, "_stream_calibration_sequence_state", None) or {}).get("status") or "idle")
         return status in {
-            "awaiting_starting_balance_mass",
-            "awaiting_starting_balance_confirmation",
             "pending_gripper_refresh",
             "refreshing_gripper",
             "suspending_gripper_refresh",
@@ -4994,8 +4993,6 @@ class CalibrationManager(QObject):
     def is_stream_calibration_sequence_busy(self) -> bool:
         status = str((getattr(self, "_stream_calibration_sequence_state", None) or {}).get("status") or "idle")
         return status in {
-            "awaiting_starting_balance_mass",
-            "awaiting_starting_balance_confirmation",
             "pending_gripper_refresh",
             "refreshing_gripper",
             "suspending_gripper_refresh",
@@ -5093,6 +5090,8 @@ class CalibrationManager(QObject):
     def has_open_stream_gravimetric_capture(self) -> bool:
         status = str((getattr(self, "_stream_capture_state", None) or {}).get("status") or "idle")
         return status in {
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
             "pending_gripper_refresh",
             "refreshing_gripper",
             "suspending_gripper_refresh",
@@ -5100,6 +5099,9 @@ class CalibrationManager(QObject):
             "pending_loading_move",
             "moving_to_loading",
             "awaiting_mass_entry",
+            "awaiting_ending_balance_ready",
+            "awaiting_ending_balance_mass",
+            "awaiting_ending_balance_confirmation",
             "pending_gripper_restore",
             "restoring_gripper_refresh",
             "pending_camera_return",
@@ -5111,6 +5113,8 @@ class CalibrationManager(QObject):
     def is_stream_gravimetric_capture_busy(self) -> bool:
         status = str((getattr(self, "_stream_capture_state", None) or {}).get("status") or "idle")
         return status in {
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
             "pending_gripper_refresh",
             "refreshing_gripper",
             "suspending_gripper_refresh",
@@ -5118,6 +5122,9 @@ class CalibrationManager(QObject):
             "pending_loading_move",
             "moving_to_loading",
             "awaiting_mass_entry",
+            "awaiting_ending_balance_ready",
+            "awaiting_ending_balance_mass",
+            "awaiting_ending_balance_confirmation",
             "pending_gripper_restore",
             "restoring_gripper_refresh",
             "pending_camera_return",
@@ -5993,14 +6000,37 @@ class CalibrationManager(QObject):
         self._emit_stream_capture_state_changed()
         return True, ""
 
-    def mark_stream_gravimetric_capture_loading_reached(self):
+    def mark_stream_gravimetric_capture_loading_reached(
+        self,
+        *,
+        use_balance_ending=False,
+    ):
         status = str((self._stream_capture_state or {}).get("status") or "idle")
         if status not in {"pending_loading_move", "moving_to_loading"}:
             return False, "Stream gravimetric capture is not waiting for the loading position."
-        self._stream_capture_state["status"] = "awaiting_mass_entry"
-        self._stream_capture_state["status_message"] = (
-            "Loading position reached. Enter ending mass and inspect the printer head."
-        )
+        if bool(use_balance_ending):
+            self._stream_capture_state["status"] = "awaiting_ending_balance_ready"
+            self._stream_capture_state["status_message"] = (
+                "Loading position reached. Place the collected sample on the balance, "
+                "then request a stable ending mass."
+            )
+            self._stream_capture_state["ending_mass_source"] = "veritas_balance"
+            self._stream_capture_state["balance_request_phase"] = "ending"
+            self._stream_capture_state["balance_status_message"] = (
+                "Place the collected sample on the balance before starting the reading."
+            )
+        else:
+            self._stream_capture_state["status"] = "awaiting_mass_entry"
+            self._stream_capture_state["status_message"] = (
+                "Loading position reached. Enter ending mass and inspect the printer head."
+            )
+            self._stream_capture_state["ending_mass_source"] = "manual"
+            self._stream_capture_state["balance_request_phase"] = None
+            self._stream_capture_state["balance_status_message"] = ""
+        self._stream_capture_state["balance_request_id"] = None
+        self._stream_capture_state["balance_request_status"] = "inactive"
+        self._stream_capture_state["balance_progress"] = None
+        self._stream_capture_state["ending_mass_capture"] = None
         self._stream_capture_state["error_message"] = ""
         self._emit_stream_capture_state_changed()
         return True, ""
@@ -6397,6 +6427,7 @@ class CalibrationManager(QObject):
             "gripper_was_open": bool(prepared["gripper_was_open"]),
             "gripper_refresh_suspended": False,
             "mass_source": str(mass_source),
+            "ending_mass_source": "manual",
             "balance_request_id": balance_request_id,
             "balance_request_phase": "starting" if balance_request_id else None,
             "balance_request_status": str(balance_request_status),
@@ -6672,13 +6703,215 @@ class CalibrationManager(QObject):
         self._emit_stream_capture_state_changed()
         return True, ""
 
-    def finalize_stream_gravimetric_capture(self, ending_mass_mg, rep_override=None, notes=""):
-        status = str((self._stream_capture_state or {}).get("status") or "idle")
-        if status not in {"awaiting_mass", "awaiting_mass_entry"}:
-            if status in {"error", "stopped"} and not bool((self._stream_capture_state or {}).get("sidecar_written")):
-                self._write_stream_capture_log(outcome=status, error_message=str((self._stream_capture_state or {}).get("error_message") or ""))
-            return False, "Stream gravimetric capture is not ready to save."
+    def _stream_gravimetric_ending_request_matches(self, request_id, session_id):
+        state = self._stream_capture_state or {}
+        return (
+            str(state.get("status") or "")
+            in {
+                "awaiting_ending_balance_mass",
+                "awaiting_ending_balance_confirmation",
+            }
+            and str(state.get("balance_request_id") or "")
+            == str(request_id or "")
+            and str(state.get("session_id") or "") == str(session_id or "")
+            and str(state.get("balance_request_phase") or "") == "ending"
+        )
 
+    def stage_stream_gravimetric_ending_mass_request(self, request_id):
+        state = self._stream_capture_state or {}
+        status = str(state.get("status") or "")
+        if status not in {
+            "awaiting_ending_balance_ready",
+            "awaiting_ending_balance_mass",
+            "awaiting_ending_balance_confirmation",
+        }:
+            return False, "Stream capture is not ready for an ending balance mass.", None
+        if str(state.get("balance_request_status") or "") in {
+            "requesting",
+            "waiting",
+            "cancelling",
+        }:
+            return False, "The current ending-mass request has not finished.", None
+        explicit_request_id = str(request_id or "").strip()
+        if not explicit_request_id:
+            return False, "Balance request id is required.", None
+        session_id = str(state.get("session_id") or "")
+        if not session_id:
+            return False, "Stream capture session id is unavailable.", None
+        state["status"] = "awaiting_ending_balance_mass"
+        state["status_message"] = "Waiting for a stable ending mass from the balance."
+        state["ending_mass_source"] = "veritas_balance"
+        state["balance_request_id"] = explicit_request_id
+        state["balance_request_phase"] = "ending"
+        state["balance_request_status"] = "requesting"
+        state["balance_status_message"] = "Starting stable ending-mass request."
+        state["balance_progress"] = None
+        state["ending_mass_capture"] = None
+        state["error_message"] = ""
+        self._emit_stream_capture_state_changed()
+        return True, "", session_id
+
+    def mark_stream_gravimetric_ending_mass_request_started(
+        self,
+        request_id,
+        session_id,
+    ):
+        if not self._stream_gravimetric_ending_request_matches(
+            request_id,
+            session_id,
+        ):
+            return False, "Ending balance request no longer matches the stream capture."
+        self._stream_capture_state["balance_request_status"] = "waiting"
+        self._stream_capture_state["balance_status_message"] = (
+            "Waiting for stable ending-mass readings."
+        )
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def update_stream_gravimetric_ending_mass_progress(
+        self,
+        request_id,
+        session_id,
+        progress,
+    ):
+        if not self._stream_gravimetric_ending_request_matches(
+            request_id,
+            session_id,
+        ):
+            return False
+        if str(self._stream_capture_state.get("balance_request_status") or "") != "waiting":
+            return False
+        payload = dict(progress or {})
+        self._stream_capture_state["balance_progress"] = payload
+        elapsed_ms = int(payload.get("elapsed_ms") or 0)
+        self._stream_capture_state["balance_status_message"] = (
+            f"Waiting for stable ending-mass readings ({elapsed_ms / 1000.0:.1f} s)."
+        )
+        self._emit_stream_capture_state_changed()
+        return True
+
+    def mark_stream_gravimetric_ending_mass_request_cancelling(
+        self,
+        request_id,
+        session_id,
+    ):
+        if not self._stream_gravimetric_ending_request_matches(
+            request_id,
+            session_id,
+        ):
+            return False, "Ending balance request no longer matches the stream capture."
+        if str(self._stream_capture_state.get("balance_request_status") or "") not in {
+            "requesting",
+            "waiting",
+        }:
+            return False, "Ending balance request is not active."
+        self._stream_capture_state["balance_request_status"] = "cancelling"
+        self._stream_capture_state["balance_status_message"] = (
+            "Cancelling stable ending-mass reading."
+        )
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def mark_stream_gravimetric_ending_mass_request_failure(
+        self,
+        request_id,
+        session_id,
+        *,
+        request_status,
+        message,
+        capture=None,
+    ):
+        if not self._stream_gravimetric_ending_request_matches(
+            request_id,
+            session_id,
+        ):
+            return False
+        normalized = str(request_status or "error")
+        if normalized not in {"timeout", "cancelled", "error", "rejected"}:
+            normalized = "error"
+        if str(self._stream_capture_state.get("balance_request_status") or "") == "cancelling":
+            normalized = "cancelled"
+        detail = str(message or "Stable ending-mass request failed.")
+        self._stream_capture_state["status"] = "awaiting_ending_balance_mass"
+        self._stream_capture_state["status_message"] = detail
+        self._stream_capture_state["balance_request_status"] = normalized
+        self._stream_capture_state["balance_status_message"] = detail
+        self._stream_capture_state["ending_mass_capture"] = (
+            dict(capture or {}) or None
+        )
+        self._emit_stream_capture_state_changed()
+        return True
+
+    def record_stream_gravimetric_ending_mass_candidate(
+        self,
+        request_id,
+        session_id,
+        capture,
+    ):
+        if not self._stream_gravimetric_ending_request_matches(
+            request_id,
+            session_id,
+        ):
+            return False
+        if str(self._stream_capture_state.get("balance_request_status") or "") == "cancelling":
+            return self.mark_stream_gravimetric_ending_mass_request_failure(
+                request_id,
+                session_id,
+                request_status="cancelled",
+                message="Stable ending-mass reading was cancelled.",
+            )
+        candidate = dict(capture or {})
+        if (
+            str(candidate.get("outcome") or "") != "stable"
+            or candidate.get("stable_mass_mg") in (None, "")
+        ):
+            return False
+        self._stream_capture_state["status"] = (
+            "awaiting_ending_balance_confirmation"
+        )
+        self._stream_capture_state["status_message"] = (
+            "Stable ending mass is ready for operator confirmation."
+        )
+        self._stream_capture_state["balance_request_status"] = "stable_candidate"
+        self._stream_capture_state["balance_status_message"] = (
+            "Review the calculated mass change before saving."
+        )
+        self._stream_capture_state["ending_mass_capture"] = candidate
+        self._emit_stream_capture_state_changed()
+        return True
+
+    def return_stream_gravimetric_ending_mass_to_manual(
+        self,
+        reason="operator_manual_fallback",
+    ):
+        status = str((self._stream_capture_state or {}).get("status") or "")
+        if status not in {
+            "awaiting_ending_balance_ready",
+            "awaiting_ending_balance_mass",
+            "awaiting_ending_balance_confirmation",
+        }:
+            return False, "Stream capture is not waiting for an ending balance mass."
+        self._stream_capture_state["status"] = "awaiting_mass_entry"
+        self._stream_capture_state["status_message"] = (
+            "Enter ending mass manually and inspect the printer head."
+        )
+        self._stream_capture_state["ending_mass_source"] = "manual"
+        self._stream_capture_state["balance_fallback_reason"] = str(reason or "")
+        self._stream_capture_state["balance_request_id"] = None
+        self._stream_capture_state["balance_request_phase"] = None
+        self._stream_capture_state["balance_request_status"] = "inactive"
+        self._stream_capture_state["balance_status_message"] = ""
+        self._stream_capture_state["balance_progress"] = None
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def _save_stream_gravimetric_capture(
+        self,
+        ending_mass_mg,
+        *,
+        rep_override=None,
+        notes="",
+    ):
         ending_mass = self._stream_capture_float_or_none(ending_mass_mg)
         if ending_mass is None:
             return False, "Ending mass is required."
@@ -6721,6 +6954,51 @@ class CalibrationManager(QObject):
         )
         return True, ""
 
+    def confirm_stream_gravimetric_ending_mass(
+        self,
+        *,
+        rep_override=None,
+        notes="",
+    ):
+        state = self._stream_capture_state or {}
+        if str(state.get("status") or "") != "awaiting_ending_balance_confirmation":
+            return False, "No stable ending mass is awaiting confirmation."
+        capture = dict(state.get("ending_mass_capture") or {})
+        ending_mass = self._stream_capture_float_or_none(
+            capture.get("stable_mass_mg")
+        )
+        if ending_mass is None:
+            return False, "Stable ending mass candidate is unavailable."
+        return self._save_stream_gravimetric_capture(
+            ending_mass,
+            rep_override=rep_override,
+            notes=notes,
+        )
+
+    def finalize_stream_gravimetric_capture(
+        self,
+        ending_mass_mg,
+        rep_override=None,
+        notes="",
+    ):
+        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        if status not in {"awaiting_mass", "awaiting_mass_entry"}:
+            if status in {"error", "stopped"} and not bool(
+                (self._stream_capture_state or {}).get("sidecar_written")
+            ):
+                self._write_stream_capture_log(
+                    outcome=status,
+                    error_message=str(
+                        (self._stream_capture_state or {}).get("error_message") or ""
+                    ),
+                )
+            return False, "Stream gravimetric capture is not ready to save."
+        return self._save_stream_gravimetric_capture(
+            ending_mass_mg,
+            rep_override=rep_override,
+            notes=notes,
+        )
+
     def discard_stream_gravimetric_capture(self, reason="operator_discarded"):
         status = str((self._stream_capture_state or {}).get("status") or "idle")
         if status == "idle":
@@ -6753,6 +7031,9 @@ class CalibrationManager(QObject):
                     "pending_loading_move",
                     "awaiting_mass",
                     "awaiting_mass_entry",
+                    "awaiting_ending_balance_ready",
+                    "awaiting_ending_balance_mass",
+                    "awaiting_ending_balance_confirmation",
                 }
                 else status
             )
@@ -6768,7 +7049,13 @@ class CalibrationManager(QObject):
         except Exception:
             pass
 
-        if status in {"awaiting_mass", "awaiting_mass_entry"}:
+        if status in {
+            "awaiting_mass",
+            "awaiting_mass_entry",
+            "awaiting_ending_balance_ready",
+            "awaiting_ending_balance_mass",
+            "awaiting_ending_balance_confirmation",
+        }:
             return self._queue_stream_gravimetric_capture_gripper_restore(
                 post_restore_action="discard_camera_return",
             )

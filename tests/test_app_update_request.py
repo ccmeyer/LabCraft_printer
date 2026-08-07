@@ -779,9 +779,12 @@ def test_controller_app_update_blockers_cover_busy_states(tmp_path):
     [
         "awaiting_starting_balance_mass",
         "awaiting_starting_balance_confirmation",
+        "awaiting_ending_balance_ready",
+        "awaiting_ending_balance_mass",
+        "awaiting_ending_balance_confirmation",
     ],
 )
-def test_controller_app_update_blocker_covers_starting_balance_states(
+def test_controller_app_update_blocker_covers_balance_capture_states(
     tmp_path, status
 ):
     controller = _make_controller(tmp_path)

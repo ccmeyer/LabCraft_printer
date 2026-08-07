@@ -2,9 +2,10 @@
 
 This connection panel is an intentionally hidden data-collection aid for the
 Veritas/BEL HPB-625i. It can display the live balance stream and, after an
-additional session opt-in, stage a stable starting mass for stream gravimetric
-capture. The printer sequence never begins until the operator confirms the
-candidate starting mass.
+additional session opt-in, stage stable starting and ending masses for stream
+gravimetric capture. The printer sequence never begins until the operator
+confirms the candidate starting mass, and a completed row is never saved until
+the operator confirms the candidate ending mass.
 
 ## Before Launch
 
@@ -78,8 +79,54 @@ Closing the imager while a starting reading or candidate is pending abandons
 that provisional measurement but does not disconnect the balance or clear the
 application-session opt-in.
 
-Slice 5 automates only the confirmed starting mass. Ending-mass entry remains
-the existing manual workflow until Slice 6 is implemented.
+## Use A Balance Ending Mass
+
+This path is offered only when the run began with a confirmed balance starting
+mass, the session opt-in remains selected, and the balance is still Streaming.
+Otherwise, loading arrival opens the unchanged manual ending-mass workflow.
+
+1. Complete the existing stream sequence and wait for the printer head to
+   reach the loading position.
+2. Place the collected sample on the balance. No ending-mass request starts
+   merely because the loading position was reached.
+3. In the ending-mass dialog, click **Sample Placed - Read Ending Mass**.
+4. Leave the sample undisturbed while the progress display updates.
+5. Review the candidate, mass change, mass per print, sample count, duration,
+   span, standard deviation, and slope.
+6. If the candidate is correct, click **Confirm Ending Mass & Save**. This is
+   the only balance path that invokes the existing CSV finalizer, gripper
+   restoration, and camera return.
+
+A zero or negative mass gain displays a prominent warning, but it may still be
+saved intentionally for diagnostic data. Use **Cancel Reading** while a read is
+active, **Read Again** after a failure or unwanted candidate, or **Enter Ending
+Mass Manually** to return to the existing editable ending-mass workflow without
+repeating the print run. Manual ending fallback does not clear the
+application-session balance opt-in.
+
+Closing the imager cancels an active ending read but retains the completed run.
+Reopen the imager to retry the read or finish it manually. Discard uses the
+existing gripper-restoration and camera-return sequence.
+
+The CSV columns and calculations are unchanged. Balance request policy,
+stability evidence, selected adapter, connection generation, and receive-only
+serial settings are written only as additive provenance in
+`stream_capture_log.jsonl`; raw serial frames are not stored there.
+
+## Slice 6 Pi Acceptance
+
+Before treating ending capture as hardware-verified, complete one real
+balance-backed run and check all of the following:
+
+1. Loading arrival does not start a balance request before the sample-ready
+   button is clicked.
+2. The candidate agrees with the HPB display and no CSV row exists before
+   confirmation.
+3. **Confirm Ending Mass & Save** writes exactly one expected CSV row.
+4. The matching `stream_capture_log.jsonl` entry includes both starting and
+   ending capture provenance and contains no raw frame history.
+5. Gripper refresh settings are restored before the head returns to the
+   camera position.
 
 ## Disable And Restore
 

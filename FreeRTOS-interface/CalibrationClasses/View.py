@@ -401,6 +401,55 @@ class StreamCaptureMassEntryDialog(QtWidgets.QDialog):
         form.addRow("Ending Mass (mg):", self.ending_mass_spin)
         layout.addLayout(form)
 
+        self.balance_status_label = QtWidgets.QLabel("")
+        self.balance_status_label.setWordWrap(True)
+        layout.addWidget(self.balance_status_label)
+
+        self.balance_progress_label = QtWidgets.QLabel("")
+        self.balance_progress_label.setWordWrap(True)
+        layout.addWidget(self.balance_progress_label)
+
+        self.balance_preview_label = QtWidgets.QLabel("")
+        self.balance_preview_label.setWordWrap(True)
+        layout.addWidget(self.balance_preview_label)
+
+        self.balance_warning_label = QtWidgets.QLabel("")
+        self.balance_warning_label.setWordWrap(True)
+        self.balance_warning_label.setStyleSheet(
+            "color: #b45309; font-weight: 600;"
+        )
+        layout.addWidget(self.balance_warning_label)
+
+        balance_button_row = QtWidgets.QHBoxLayout()
+        self.read_ending_mass_button = QtWidgets.QPushButton(
+            "Sample Placed - Read Ending Mass"
+        )
+        self.read_ending_mass_button.clicked.connect(
+            self._request_ending_balance_mass
+        )
+        balance_button_row.addWidget(self.read_ending_mass_button)
+
+        self.cancel_ending_mass_button = QtWidgets.QPushButton("Cancel Reading")
+        self.cancel_ending_mass_button.clicked.connect(
+            self._cancel_ending_balance_mass
+        )
+        balance_button_row.addWidget(self.cancel_ending_mass_button)
+
+        self.retry_ending_mass_button = QtWidgets.QPushButton("Read Again")
+        self.retry_ending_mass_button.clicked.connect(
+            self._retry_ending_balance_mass
+        )
+        balance_button_row.addWidget(self.retry_ending_mass_button)
+        layout.addLayout(balance_button_row)
+
+        self.manual_ending_mass_button = QtWidgets.QPushButton(
+            "Enter Ending Mass Manually"
+        )
+        self.manual_ending_mass_button.clicked.connect(
+            self._use_manual_ending_mass
+        )
+        layout.addWidget(self.manual_ending_mass_button)
+
         button_row = QtWidgets.QHBoxLayout()
         self.discard_button = QtWidgets.QPushButton("Discard Run")
         self.discard_button.setMinimumHeight(32)
@@ -447,6 +496,10 @@ class StreamCaptureMassEntryDialog(QtWidgets.QDialog):
         self.controller.set_refuel_pulse_width(target, manual=True)
 
     def update_state(self, state: dict, *, rep_value: int, notes: str):
+        status = str(state.get("status") or "idle")
+        request_status = str(
+            state.get("balance_request_status") or "inactive"
+        )
         status_message = str(state.get("status_message") or "")
         dataset_run_id = str(state.get("dataset_run_id") or state.get("timecourse_run_id") or "-")
         capture_mode = str(state.get("capture_mode") or "timecourse")
@@ -495,9 +548,125 @@ class StreamCaptureMassEntryDialog(QtWidgets.QDialog):
                 if segmented_volume_delta is not None:
                     summary_text += f" | Delta: {segmented_volume_delta} nL"
         self.summary_label.setText(summary_text)
+        capture = dict(state.get("ending_mass_capture") or {})
+        candidate_mass = capture.get("stable_mass_mg")
         ending_mass = state.get("ending_mass_mg")
+        if (
+            status == "awaiting_ending_balance_confirmation"
+            and candidate_mass not in (None, "")
+        ):
+            ending_mass = candidate_mass
         if ending_mass is not None and not self._mass_editor_has_focus():
             self.ending_mass_spin.setValue(float(ending_mass))
+
+        balance_states = {
+            "awaiting_ending_balance_ready",
+            "awaiting_ending_balance_mass",
+            "awaiting_ending_balance_confirmation",
+        }
+        balance_mode = status in balance_states
+        active = (
+            status == "awaiting_ending_balance_mass"
+            and request_status in {"requesting", "waiting", "cancelling"}
+        )
+        retryable = (
+            status
+            in {
+                "awaiting_ending_balance_mass",
+                "awaiting_ending_balance_confirmation",
+            }
+            and request_status
+            in {"stable_candidate", "timeout", "cancelled", "error", "rejected"}
+        )
+        confirming = (
+            status == "awaiting_ending_balance_confirmation"
+            and request_status == "stable_candidate"
+        )
+
+        balance_message = str(state.get("balance_status_message") or "")
+        self.balance_status_label.setText(balance_message)
+        progress = dict(state.get("balance_progress") or {})
+        if progress:
+            elapsed_s = float(int(progress.get("elapsed_ms") or 0)) / 1000.0
+            samples = int(progress.get("retained_sample_count") or 0)
+            latest_mass = progress.get("latest_mass_mg", "?")
+            stability = (
+                "stable" if progress.get("latest_device_stable") else "unstable"
+            )
+            self.balance_progress_label.setText(
+                f"{elapsed_s:.1f} s | {samples} retained samples | "
+                f"{latest_mass} mg ({stability})"
+            )
+        else:
+            self.balance_progress_label.setText("")
+
+        self.balance_preview_label.setText("")
+        self.balance_warning_label.setText("")
+        if confirming and candidate_mass not in (None, ""):
+            starting_mass = float(state.get("starting_mass_mg") or 0.0)
+            candidate_value = float(candidate_mass)
+            mass_change = candidate_value - starting_mass
+            printed_value = state.get("printed_capture_count")
+            try:
+                printed_count = int(printed_value)
+            except (TypeError, ValueError):
+                printed_count = 0
+            mass_per_print = (
+                mass_change / printed_count if printed_count > 0 else None
+            )
+            evidence = dict(capture.get("evidence") or {})
+            duration_s = float(int(evidence.get("window_duration_ns") or 0)) / 1e9
+            preview = (
+                f"Starting: {starting_mass:.4f} mg | Ending: {candidate_value:.4f} mg\n"
+                f"Mass change: {mass_change:.4f} mg | "
+                f"Printed: {printed_count if printed_count > 0 else '-'} | "
+                f"Mass/print: "
+                f"{f'{mass_per_print:.4f} mg' if mass_per_print is not None else '-'}\n"
+                f"Evidence: {int(evidence.get('sample_count') or 0)} samples, "
+                f"{duration_s:.2f} s, span {evidence.get('span_mg', '-')} mg, "
+                f"SD {evidence.get('population_standard_deviation_mg', '-')} mg, "
+                f"slope {evidence.get('fitted_slope_mg_per_second', '-')} mg/s"
+            )
+            self.balance_preview_label.setText(preview)
+            if mass_change <= 0:
+                self.balance_warning_label.setText(
+                    "Warning: ending mass does not exceed starting mass. "
+                    "Verify sample placement. Saving remains available for diagnostic data."
+                )
+
+        for widget in (
+            self.balance_status_label,
+            self.balance_progress_label,
+            self.balance_preview_label,
+            self.balance_warning_label,
+            self.read_ending_mass_button,
+            self.cancel_ending_mass_button,
+            self.retry_ending_mass_button,
+            self.manual_ending_mass_button,
+        ):
+            widget.setVisible(balance_mode)
+        self.balance_progress_label.setVisible(balance_mode and bool(progress))
+        self.balance_preview_label.setVisible(confirming)
+        self.balance_warning_label.setVisible(
+            confirming and bool(self.balance_warning_label.text())
+        )
+        self.read_ending_mass_button.setVisible(
+            status == "awaiting_ending_balance_ready"
+        )
+        self.cancel_ending_mass_button.setVisible(active)
+        self.cancel_ending_mass_button.setEnabled(
+            active and request_status != "cancelling"
+        )
+        self.retry_ending_mass_button.setVisible(retryable)
+        self.manual_ending_mass_button.setVisible(balance_mode)
+        self.ending_mass_spin.setEnabled(not balance_mode)
+        self.complete_button.setText(
+            "Confirm Ending Mass & Save"
+            if confirming
+            else "Save Row And Return To Camera"
+        )
+        self.complete_button.setVisible((not balance_mode) or confirming)
+        self.complete_button.setEnabled((not balance_mode) or confirming)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -568,6 +737,25 @@ class StreamCaptureMassEntryDialog(QtWidgets.QDialog):
         handler = getattr(parent, "_complete_stream_gravimetric_capture_from_popup", None)
         if callable(handler) and handler(float(self.ending_mass_spin.value())):
             self.accept()
+
+    def _invoke_parent_handler(self, name):
+        parent = self.parent()
+        if parent is None:
+            return False
+        handler = getattr(parent, name, None)
+        return bool(callable(handler) and handler())
+
+    def _request_ending_balance_mass(self):
+        self._invoke_parent_handler("_request_stream_gravimetric_ending_mass")
+
+    def _retry_ending_balance_mass(self):
+        self._invoke_parent_handler("_retry_stream_gravimetric_ending_mass")
+
+    def _cancel_ending_balance_mass(self):
+        self._invoke_parent_handler("_cancel_stream_gravimetric_ending_mass")
+
+    def _use_manual_ending_mass(self):
+        self._invoke_parent_handler("_use_manual_stream_gravimetric_ending_mass")
 
     def _discard(self):
         parent = self.parent()
@@ -2289,6 +2477,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
     _STREAM_CAPTURE_READ_CAMERA_DISARM_STATUSES = {
         "awaiting_mass",
         "awaiting_mass_entry",
+        "awaiting_ending_balance_ready",
+        "awaiting_ending_balance_mass",
+        "awaiting_ending_balance_confirmation",
         "pending_gripper_restore",
         "restoring_gripper_refresh",
     }
@@ -8823,7 +9014,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if self._stream_capture_dialog_closing:
             return
         state = self._get_stream_capture_state()
-        if str(state.get("status") or "") == "awaiting_mass_entry":
+        if str(state.get("status") or "") in {
+            "awaiting_mass_entry",
+            "awaiting_ending_balance_ready",
+            "awaiting_ending_balance_mass",
+            "awaiting_ending_balance_confirmation",
+        }:
             QTimer.singleShot(0, self._ensure_stream_capture_followup_state)
 
     def _show_stream_capture_mass_dialog(self, state: dict):
@@ -8961,7 +9157,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._close_stream_capture_mass_dialog()
             return
 
-        if status == "awaiting_mass_entry":
+        if status in {
+            "awaiting_mass_entry",
+            "awaiting_ending_balance_ready",
+            "awaiting_ending_balance_mass",
+            "awaiting_ending_balance_confirmation",
+        }:
             self._show_stream_capture_mass_dialog(state)
         else:
             self._close_stream_capture_mass_dialog()
@@ -9018,11 +9219,18 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._droplet_calibration_sequence_gripper_restore_attempted = False
 
     def _complete_stream_gravimetric_capture_from_popup(self, ending_mass_mg: float):
-        result = self.controller.finalize_stream_gravimetric_capture(
-            float(ending_mass_mg),
-            rep_override=int(self.stream_capture_rep_spin.value()),
-            notes=self.stream_capture_notes_edit.toPlainText().strip(),
-        )
+        state = self._get_stream_capture_state()
+        if str(state.get("status") or "") == "awaiting_ending_balance_confirmation":
+            result = self.controller.confirm_stream_gravimetric_ending_mass(
+                rep_override=int(self.stream_capture_rep_spin.value()),
+                notes=self.stream_capture_notes_edit.toPlainText().strip(),
+            )
+        else:
+            result = self.controller.finalize_stream_gravimetric_capture(
+                float(ending_mass_mg),
+                rep_override=int(self.stream_capture_rep_spin.value()),
+                notes=self.stream_capture_notes_edit.toPlainText().strip(),
+            )
         if isinstance(result, tuple) and result and (result[0] is False):
             QtWidgets.QMessageBox.warning(
                 self,
@@ -9032,6 +9240,45 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return False
         self._close_stream_capture_mass_dialog()
         return True
+
+    def _run_stream_ending_balance_command(self, method_name, failure_message):
+        method = getattr(self.controller, method_name, None)
+        if not callable(method):
+            result = (False, failure_message)
+        else:
+            result = method()
+        if isinstance(result, tuple) and result and result[0] is False:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Experimental Balance",
+                str(result[1] or failure_message),
+            )
+            return False
+        return True
+
+    def _request_stream_gravimetric_ending_mass(self):
+        return self._run_stream_ending_balance_command(
+            "start_stream_gravimetric_ending_mass",
+            "Failed to start the ending-mass reading.",
+        )
+
+    def _retry_stream_gravimetric_ending_mass(self):
+        return self._run_stream_ending_balance_command(
+            "retry_stream_gravimetric_ending_mass",
+            "Failed to retry the ending-mass reading.",
+        )
+
+    def _cancel_stream_gravimetric_ending_mass(self):
+        return self._run_stream_ending_balance_command(
+            "cancel_stream_gravimetric_ending_mass",
+            "Failed to cancel the ending-mass reading.",
+        )
+
+    def _use_manual_stream_gravimetric_ending_mass(self):
+        return self._run_stream_ending_balance_command(
+            "use_manual_stream_gravimetric_ending_mass",
+            "Failed to return to manual ending-mass entry.",
+        )
 
     def _discard_stream_gravimetric_capture_from_popup(self):
         result = self.controller.discard_stream_gravimetric_capture(
@@ -9089,6 +9336,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "awaiting_starting_balance_confirmation",
             "awaiting_mass",
             "awaiting_mass_entry",
+            "awaiting_ending_balance_ready",
+            "awaiting_ending_balance_mass",
+            "awaiting_ending_balance_confirmation",
             "pending_camera_return",
             "returning_to_camera",
         }:
@@ -9171,6 +9421,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     "pending_loading_move",
                     "moving_to_loading",
                     "awaiting_mass_entry",
+                    "awaiting_ending_balance_ready",
+                    "awaiting_ending_balance_mass",
+                    "awaiting_ending_balance_confirmation",
                     "pending_gripper_restore",
                     "restoring_gripper_refresh",
                     "pending_camera_return",
@@ -9187,6 +9440,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "pending_loading_move",
                 "moving_to_loading",
                 "awaiting_mass_entry",
+                "awaiting_ending_balance_ready",
+                "awaiting_ending_balance_mass",
+                "awaiting_ending_balance_confirmation",
                 "pending_gripper_restore",
                 "restoring_gripper_refresh",
                 "pending_camera_return",
@@ -9211,6 +9467,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "pending_loading_move",
             "moving_to_loading",
             "awaiting_mass_entry",
+            "awaiting_ending_balance_ready",
+            "awaiting_ending_balance_mass",
+            "awaiting_ending_balance_confirmation",
             "pending_gripper_restore",
             "restoring_gripper_refresh",
             "pending_camera_return",
@@ -9240,6 +9499,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "awaiting_starting_balance_confirmation",
             "pending_loading_move",
             "awaiting_mass_entry",
+            "awaiting_ending_balance_ready",
+            "awaiting_ending_balance_mass",
+            "awaiting_ending_balance_confirmation",
             "error",
             "stopped",
         }
@@ -12552,6 +12814,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             )
             if callable(abandon):
                 abandon(reason="imager_closed_pending_balance_start")
+        elif (
+            str(stream_state.get("status") or "")
+            == "awaiting_ending_balance_mass"
+            and str(stream_state.get("balance_request_status") or "")
+            in {"requesting", "waiting", "cancelling"}
+        ):
+            cancel_ending = getattr(
+                self.controller,
+                "cancel_stream_gravimetric_ending_mass",
+                None,
+            )
+            if callable(cancel_ending):
+                cancel_ending()
 
         deferred_close_requested = bool(getattr(self, "_imager_close_after_stop_requested", False))
         if self._should_confirm_close_without_applied_calibration():

@@ -4,7 +4,7 @@
 
 - Date: 2026-08-07
 - Branch: `feature/balance_integration`
-- Status: Slices 0-5 verified; Slice 6 ready
+- Status: Slices 0-5 verified; Slice 6 implemented awaiting HIL
 - Scope: implementation plan and slice verification record
 - Target hardware: Veritas/BEL HPB balance connected to the Raspberry Pi through a proper RS-232-to-USB adapter
 - Target workflow: stream gravimetric data collection only
@@ -1009,9 +1009,10 @@ Operator instructions:
 
 Manual/HIL check:
 
-- With pressure/motion disabled or the machine disconnected, capture a stable
-  starting mass and verify no machine command is sent before the result is
-  explicitly accepted.
+- Completed on the Raspberry Pi on 2026-08-07. The real HPB produced a stable
+  candidate that agreed with its display, explicit confirmation released the
+  existing start path, and **Use Manual Starting Mass** restored manual entry
+  and unchecked the session opt-in as designed.
 
 Rollback:
 
@@ -1020,7 +1021,7 @@ Rollback:
 
 ## Slice 6: Ending Mass, Provenance, And Confirmed Save
 
-Status: `not_started`
+Status: `implemented_awaiting_hil`
 
 Goal:
 
@@ -1060,7 +1061,36 @@ Implementation steps:
 
 Validation:
 
-`.\env\Scripts\python.exe -m pytest -q tests\test_stream_gravimetric_balance_integration.py tests\test_stream_gravimetric_capture.py tests\test_stream_analysis_summary.py`
+`.\env\Scripts\python.exe -m pytest -q tests\test_stream_gravimetric_balance_integration.py tests\test_stream_gravimetric_capture.py tests\test_app_update_request.py tests\test_stream_analysis_summary.py tests\test_balance_service.py`
+
+Implementation findings:
+
+- Loading arrival enters `awaiting_ending_balance_ready` only for a
+  balance-backed start with the session opt-in still selected and the service
+  still streaming. It never submits a request automatically.
+- An explicit sample-ready action submits an identified `ENDING` request.
+  Progress and completion are accepted only while request id, stream session,
+  phase, active binding, and Manager state all match.
+- A stable result remains a non-authoritative candidate until **Confirm Ending
+  Mass & Save** passes its stored mass to the existing finalizer. A
+  cancellation race, stale completion, or duplicate completion cannot save.
+- The ending dialog shows numeric stability evidence and calculated mass
+  change/mass-per-print. Non-positive gain is visibly advisory and remains
+  explicitly saveable.
+- Retry keeps the completed print run and assigns a new request id. Manual
+  fallback returns to the existing editable ending-mass path without clearing
+  the application-session opt-in or repeating printing.
+- Starting and ending result payloads now include the exact policy, request
+  and completion monotonic times, phase, reading counts, connection
+  generation, selected-port/adapter metadata, and fixed receive-only serial
+  settings. Raw serial frames remain excluded and CSV formatting is unchanged.
+- Starting-balance states were removed from the unrelated stream-calibration
+  guards; all starting and ending balance states are now open/busy only for
+  stream gravimetric capture and block app updates.
+- Focused automated validation passed on 2026-08-07: 187 tests passed across
+  the Slice 6 balance integration, stream capture, app-update, stream-analysis,
+  and BalanceService targets. The full repository suite remains deferred to
+  final all-slices validation as agreed.
 
 Proceed criteria:
 
@@ -1068,6 +1098,13 @@ Proceed criteria:
 - Balance failure after printing never forces a repeated print run.
 - Manual fallback can save the existing run.
 - Restore and camera-return sequencing remains unchanged.
+
+Manual/HIL check:
+
+- Pending. Complete one balance-backed ending candidate and confirmed save on
+  the Raspberry Pi, then verify the CSV row, both provenance payloads in the
+  sidecar, gripper restoration, and camera return. Slice 7 remains gated on
+  this check.
 
 Rollback:
 
