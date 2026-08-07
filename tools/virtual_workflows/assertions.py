@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -48,6 +50,21 @@ class ExecutionLifecycleExpectation:
             raise ValueError("expected well IDs must be unique")
         if len(set(self.expected_stock_ids)) != len(self.expected_stock_ids):
             raise ValueError("expected stock IDs must be unique")
+
+
+@dataclass(frozen=True)
+class ActionSequenceExpectation:
+    action_ids: tuple[str, ...]
+    interaction_surfaces: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.action_ids or any(not str(value).strip() for value in self.action_ids):
+            raise ValueError("action sequence IDs must be non-empty")
+        if len(self.interaction_surfaces) != len(self.action_ids):
+            raise ValueError("action sequence surfaces must align with action IDs")
+        valid = {"ui", "controller", "model", "simulator", "harness"}
+        if any(surface not in valid for surface in self.interaction_surfaces):
+            raise ValueError("action sequence interaction surface is invalid")
 
 
 def evaluate_assertion(
@@ -629,41 +646,84 @@ def real_application_assertion(context: Any) -> AssertionResult:
     )
 
 
-def editor_create_finalize_assertion(context: Any) -> AssertionResult:
-    required = (
-        "editor.open_via_ui",
-        "editor.new_experiment_via_ui",
-        "editor.configure_design_via_ui",
-        "editor.optimize_generate_via_ui",
-        "editor.finish_via_ui",
-    )
+def exact_action_sequence_assertion(
+    context: Any,
+    *,
+    expectation: ActionSequenceExpectation,
+    start_index: int,
+    end_index: int | None,
+    assertion_id: str,
+    checkpoint: str,
+    evidence_surface: str | None = None,
+) -> AssertionResult:
+    """Validate one explicit ledger window without subsequence matching."""
 
     def inspect() -> tuple[bool, Mapping[str, Any]]:
-        rows = [
-            row for row in context.action_results
-            if row.get("action_id") in required
+        rows = list(context.action_results[start_index:end_index])
+        all_observed = [str(row.get("action_id")) for row in rows]
+        all_surfaces = [str(row.get("interaction_surface")) for row in rows]
+        all_statuses = [str(row.get("status")) for row in rows]
+        required = list(expectation.action_ids)
+        required_surfaces = list(expectation.interaction_surfaces)
+        selected_rows = (
+            [row for row in rows if row.get("interaction_surface") == evidence_surface]
+            if evidence_surface is not None
+            else rows
+        )
+        observed = [str(row.get("action_id")) for row in selected_rows]
+        surfaces = [str(row.get("interaction_surface")) for row in selected_rows]
+        statuses = [str(row.get("status")) for row in selected_rows]
+        reported_required = [
+            action_id
+            for action_id, surface in zip(required, required_surfaces)
+            if evidence_surface is None or surface == evidence_surface
         ]
-        observed = [str(row.get("action_id")) for row in rows]
-        surfaces = [str(row.get("interaction_surface")) for row in rows]
-        statuses = [str(row.get("status")) for row in rows]
         evidence = {
-            "required_action_ids": list(required),
+            "required_action_ids": reported_required,
             "observed_action_ids": observed,
             "interaction_surfaces": surfaces,
             "statuses": statuses,
         }
         return (
-            observed == list(required)
-            and surfaces == ["ui"] * len(required)
-            and statuses == ["pass"] * len(required),
+            all_observed == required
+            and all_surfaces == required_surfaces
+            and all_statuses == ["pass"] * len(required),
             evidence,
         )
 
     return evaluate_assertion(
-        "experiment.editor_create_finalize",
-        "finalized",
+        assertion_id,
+        checkpoint,
         ("ui", "action_ledger"),
         inspect,
+    )
+
+
+def editor_create_finalize_assertion(
+    context: Any,
+    *,
+    action_start: int = 0,
+    action_end: int | None = None,
+) -> AssertionResult:
+    return exact_action_sequence_assertion(
+        context,
+        expectation=ActionSequenceExpectation(
+            (
+                "editor.open_via_ui",
+                "artifact.capture_milestone",
+                "editor.new_experiment_via_ui",
+                "editor.configure_design_via_ui",
+                "editor.optimize_generate_via_ui",
+                "artifact.capture_milestone",
+                "editor.finish_via_ui",
+            ),
+            ("ui", "harness", "ui", "ui", "ui", "harness", "ui"),
+        ),
+        start_index=action_start,
+        end_index=action_end,
+        assertion_id="experiment.editor_create_finalize",
+        checkpoint="finalized",
+        evidence_surface="ui",
     )
 
 
@@ -672,164 +732,484 @@ def editor_prepared_bundle_assertions(
     *,
     expected_well_ids: tuple[str, ...],
 ) -> tuple[AssertionResult, AssertionResult]:
-    import csv
-    import json
-    import math
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+    )
 
-    def csv_rows(path: Path) -> dict[str, dict[str, str]]:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            rows = list(csv.DictReader(handle))
-        if not rows or "Well ID" not in rows[0]:
-            raise RuntimeError(f"{path.name} has no Well ID rows")
-        return {
-            str(row.pop("Well ID")): {
-                str(key): str(value) for key, value in row.items()
-            }
-            for row in rows
-        }
+    snapshot = capture_authoritative_bundle(context)
+    return _prepared_bundle_results(snapshot, expected_well_ids=expected_well_ids)
 
-    def inspect_bundle() -> tuple[bool, Mapping[str, Any]]:
-        from AuthoritativeExecutionLoad import inspect_authoritative_execution
-        from ExecutionCalibrationStore import load_execution_calibrations
-        from ExecutionPlan import canonical_sha256
-        from ExecutionProgressStore import decode_execution_progress
 
-        model = context.experiment_model
-        experiment_dir = Path(model.experiment_dir_path).resolve()
-        design_path = Path(model.experiment_file_path).resolve()
-        design = json.loads(design_path.read_text(encoding="utf-8"))
-        plan = model.get_execution_plan_snapshot()
-        bundle = inspect_authoritative_execution(experiment_dir, design)
-        decoded = decode_execution_progress(plan, bundle.progress_payload)
-        assignments = {
-            well.well_id: well.get_assigned_reaction().unique_id
-            for well in context.model.well_plate.get_all_wells()
-            if well.get_assigned_reaction() is not None
-        }
-        plan_wells = [well.well_id for well in plan.wells]
-        expected_assignments = {
-            well.well_id: well.reaction_id for well in plan.wells
-        }
-        total_added = sum(
-            int(details["added_droplets"])
-            for well in decoded.progress_wells.values()
-            for details in well["reagents"].values()
-        )
-        calibration_path = experiment_dir / "execution_calibrations.json"
-        calibration_empty = True
-        if calibration_path.exists():
-            calibration = load_execution_calibrations(calibration_path)
-            calibration_empty = (
-                not calibration.records and not calibration.manual_refuel_checks
-            )
-        resume_path = Path(model.execution_resume_file_path)
-        checks = {
-            "directory_name_matches": experiment_dir.name
-            == design.get("metadata", {}).get("name"),
-            "design_hash_matches": plan.design_sha256 == canonical_sha256(design),
-            "plan_revision_one": int(plan.plan_revision) == 1,
-            "plan_prepared": str(plan.state.value) == "prepared",
-            "plan_wells_exact": plan_wells == list(expected_well_ids),
-            "history_exact": len(bundle.history) == 1 and bundle.history[0] == plan,
-            "bundle_valid": bool(bundle.valid),
-            "ready_to_start": bundle.eligibility.status == "ready_to_start",
-            "progress_schema_v2": decoded.schema_version == 2,
-            "progress_reference_matches": decoded.reference.plan_id
-            == plan.plan_id
-            and decoded.reference.plan_revision == plan.plan_revision,
-            "progress_zero": total_added == 0 and all(
-                not bool(well["completed"])
-                for well in decoded.progress_wells.values()
-            ),
-            "resume_absent": not resume_path.exists(),
-            "runtime_assignments_match": assignments == expected_assignments,
-            "calibration_history_absent": calibration_empty,
-            "runtime_inactive": not bool(
-                model.is_authoritative_execution_runtime_active()
-            ),
-        }
-        evidence = {
-            "checks": checks,
-            "failed_checks": sorted(
-                name for name, passed in checks.items() if not passed
-            ),
-            "experiment_dir": str(experiment_dir),
-            "design_path": str(design_path),
-            "plan_id": str(plan.plan_id),
-            "plan_revision": int(plan.plan_revision),
-            "plan_state": str(plan.state.value),
-            "eligibility_status": bundle.eligibility.status,
-            "well_ids": plan_wells,
-            "runtime_assignments": assignments,
-            "total_added_droplets": total_added,
-            "resume_present": resume_path.exists(),
-            "design_sha256": canonical_sha256(design),
-        }
-        return not evidence["failed_checks"], evidence
-
+def _prepared_bundle_results(
+    snapshot: Any,
+    *,
+    expected_well_ids: tuple[str, ...],
+) -> tuple[AssertionResult, AssertionResult]:
+    expected = list(expected_well_ids)
+    bundle_checks = {
+        "directory_name_matches": Path(snapshot.experiment_dir).name
+        == snapshot.metadata.get("name"),
+        "design_hash_matches": snapshot.plan_design_sha256
+        == snapshot.design_sha256,
+        "plan_revision_one": snapshot.plan_revision == 1,
+        "plan_prepared": snapshot.plan_state == "prepared",
+        "plan_wells_exact": list(snapshot.plan_well_ids) == expected,
+        "history_exact": len(snapshot.history_json) == 1
+        and snapshot.history_matches_current,
+        "bundle_valid": snapshot.bundle_valid,
+        "ready_to_start": snapshot.eligibility_status == "ready_to_start",
+        "progress_schema_v2": snapshot.progress_schema_version == 2,
+        "progress_reference_matches": snapshot.progress_plan_id
+        == snapshot.plan_id
+        and snapshot.progress_plan_revision == snapshot.plan_revision,
+        "progress_zero": snapshot.total_added_droplets == 0
+        and not snapshot.completed_well_ids,
+        "resume_absent": not snapshot.resume_present,
+        "runtime_assignments_match": snapshot.assignments
+        == snapshot.expected_assignments,
+        "calibration_history_absent": snapshot.calibration_record_count == 0
+        and snapshot.manual_refuel_check_count == 0,
+        "runtime_inactive": not snapshot.runtime_active,
+    }
+    bundle_evidence = {
+        "checks": bundle_checks,
+        "failed_checks": sorted(
+            name for name, passed in bundle_checks.items() if not passed
+        ),
+        **snapshot.prepared_evidence(),
+    }
     bundle_result = evaluate_assertion(
         "experiment.prepared_bundle_valid",
         "prepared",
         ("model", "persistence"),
-        inspect_bundle,
+        lambda: (not bundle_evidence["failed_checks"], bundle_evidence),
     )
 
-    def inspect_keys() -> tuple[bool, Mapping[str, Any]]:
-        from AuthoritativeExecutionLoad import inspect_authoritative_execution
-        from ExecutionProgressStore import decode_execution_progress
-
-        model = context.experiment_model
-        plan = model.get_execution_plan_snapshot()
-        experiment_dir = Path(model.experiment_dir_path).resolve()
-        design = json.loads(
-            Path(model.experiment_file_path).read_text(encoding="utf-8")
-        )
-        bundle = inspect_authoritative_execution(experiment_dir, design)
-        decoded = decode_execution_progress(plan, bundle.progress_payload)
-        key_rows = csv_rows(Path(model.key_file_path))
-        concentration_rows = csv_rows(Path(model.concentration_key_file_path))
-        target_by_well = {
-            well_id: sum(
-                int(details["target_droplets"])
-                for details in entry["reagents"].values()
-            )
-            for well_id, entry in decoded.progress_wells.items()
-        }
-        key_totals = {
-            well_id: sum(int(float(value or 0)) for value in row.values())
-            for well_id, row in key_rows.items()
-        }
-        concentration_values = {
-            well_id: sum(float(value or 0) for value in row.values())
-            for well_id, row in concentration_rows.items()
-        }
-        checks = {
-            "key_wells_exact": list(key_rows) == list(expected_well_ids),
-            "concentration_wells_exact": list(concentration_rows)
-            == list(expected_well_ids),
-            "key_targets_match": key_totals == target_by_well,
-            "concentration_targets_match": all(
-                math.isclose(value, 1.0, rel_tol=0.0, abs_tol=1e-9)
-                for value in concentration_values.values()
-            ),
-        }
-        evidence = {
-            "checks": checks,
-            "failed_checks": sorted(
-                name for name, passed in checks.items() if not passed
-            ),
-            "key_rows": key_rows,
-            "concentration_rows": concentration_rows,
-        }
-        return not evidence["failed_checks"], evidence
-
+    key_rows = snapshot.key_rows
+    concentration_rows = snapshot.concentration_rows
+    key_totals = {
+        well_id: sum(int(float(value or 0)) for value in row.values())
+        for well_id, row in key_rows.items()
+    }
+    concentration_values = {
+        well_id: sum(float(value or 0) for value in row.values())
+        for well_id, row in concentration_rows.items()
+    }
+    key_checks = {
+        "key_wells_exact": list(key_rows) == expected,
+        "concentration_wells_exact": list(concentration_rows) == expected,
+        "key_targets_match": key_totals == snapshot.targets_by_well,
+        "concentration_targets_match": all(
+            math.isclose(value, 1.0, rel_tol=0.0, abs_tol=1e-9)
+            for value in concentration_values.values()
+        ),
+    }
+    key_evidence = {
+        "checks": key_checks,
+        "failed_checks": sorted(
+            name for name, passed in key_checks.items() if not passed
+        ),
+        "key_rows": key_rows,
+        "concentration_rows": concentration_rows,
+    }
     key_result = evaluate_assertion(
         "experiment.key_files_consistent",
         "prepared",
         ("persistence",),
-        inspect_keys,
+        lambda: (not key_evidence["failed_checks"], key_evidence),
     )
     return bundle_result, key_result
+
+
+def capture_editor_prepared_revision_snapshot(
+    context: Any,
+    *,
+    expected_well_ids: tuple[str, ...],
+) -> dict[str, Any]:
+    """Capture one validated untouched PREPARED bundle without mutating it."""
+
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+    )
+
+    snapshot = capture_authoritative_bundle(context)
+    bundle_result, key_result = _prepared_bundle_results(
+        snapshot, expected_well_ids=expected_well_ids
+    )
+    if bundle_result.decision != "pass" or key_result.decision != "pass":
+        raise RuntimeError(
+            "initial prepared editor bundle was invalid: "
+            f"bundle={bundle_result.evidence}, keys={key_result.evidence}"
+        )
+    prepared = {
+        **dict(bundle_result.evidence),
+        **dict(key_result.evidence),
+    }
+    before = {
+        "experiment_dir": snapshot.experiment_dir,
+        "metadata_name": snapshot.metadata.get("name"),
+        "plan_id": snapshot.plan_id,
+        "plan_revision": snapshot.plan_revision,
+        "plan_design_sha256": snapshot.plan_design_sha256,
+        "resume_present": snapshot.resume_present,
+        "runtime_assignments": snapshot.assignments,
+        "file_sha256": snapshot.core_file_hashes,
+        "audit_rows": snapshot.audit_rows,
+    }
+    return {
+        "prepared_bundle": prepared,
+        "before": before,
+        "authoritative_snapshot": snapshot,
+    }
+
+
+def editor_prepared_revision_assertions(
+    context: Any,
+    *,
+    fixture: Mapping[str, Any],
+    initial_snapshot: Mapping[str, Any],
+    action_start: int,
+    action_end: int | None = None,
+) -> tuple[tuple[AssertionResult, ...], dict[str, Any]]:
+    """Validate a renamed/refinalized PREPARED bundle through read-only reads."""
+
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+        snapshot_directory,
+    )
+
+    experiment = fixture["experiment"]
+    reagent = fixture["reagent"]
+    initial = initial_snapshot["authoritative_snapshot"]
+    before = dict(initial_snapshot["before"])
+    initial_dir = Path(before["experiment_dir"]).resolve()
+    after = capture_authoritative_bundle(
+        context, experiments_root=initial_dir.parent
+    )
+    experiment_dir = Path(after.experiment_dir)
+    design_path = Path(after.design_path)
+    design = after.design
+    expected_wells = list(experiment["refinalized_expected_well_ids"])
+    plan_wells = list(after.plan_well_ids)
+    assignments = after.assignments
+    expected_assignments = after.expected_assignments
+    key_rows = after.key_rows
+    concentration_rows = after.concentration_rows
+    key_totals = {
+        well_id: sum(int(float(value or 0)) for value in row.values())
+        for well_id, row in key_rows.items()
+    }
+    concentration_values = {
+        well_id: sum(
+            float(value or 0)
+            for column, value in row.items()
+            if column.startswith(f"{reagent['stock_label']}_")
+        )
+        for well_id, row in concentration_rows.items()
+    }
+    expected_concentrations = sorted(
+        float(target)
+        for target in reagent["refinalized_targets"]
+        for _ in range(int(experiment["refinalized_replicates"]))
+    )
+    observed_concentrations = sorted(concentration_values.values())
+    metadata = design.get("metadata", {})
+    factors = design.get("factors", [])
+    reagent_option = (
+        factors[0].get("options", [{}])[0] if len(factors) == 1 else {}
+    )
+    calibration_empty = after.calibration_record_count == 0 and (
+        after.manual_refuel_check_count == 0
+    )
+    experiment_directories = list(after.experiment_directories)
+    staging_directories = list(after.staging_directories)
+    current_plan_paths = list(after.current_plan_paths)
+    audit_rows = after.audit_rows
+    file_sha256 = after.core_file_hashes
+    archived_root = (
+        experiment_dir
+        / "superseded_prepared_execution_plans"
+        / initial.plan_id
+    )
+    archived_plan_path = archived_root / "prepared_plan_at_replacement.json"
+    archived_design_path = archived_root / "experiment_design_at_replacement.json"
+    inspection_hashes = snapshot_directory(experiment_dir).hashes
+    inspection_file_sha256 = {
+        path: inspection_hashes[path] for path in file_sha256
+    }
+    revision_ui_ids = (
+        "editor.open_via_ui",
+        "editor.rename_prepared_via_ui",
+        "editor.edit_prepared_design_via_ui",
+        "editor.regenerate_prepared_design_via_ui",
+        "editor.refinalize_prepared_via_ui",
+    )
+    revision_ids = tuple(
+        value
+        for action_id in revision_ui_ids
+        for value in (action_id, "artifact.capture_milestone")
+    )
+    revision_surfaces = tuple(
+        value
+        for _action_id in revision_ui_ids
+        for value in ("ui", "harness")
+    )
+    action_result = exact_action_sequence_assertion(
+        context,
+        expectation=ActionSequenceExpectation(revision_ids, revision_surfaces),
+        start_index=action_start,
+        end_index=action_end,
+        assertion_id="experiment.prepared_rename_refinalize",
+        checkpoint="refinalized",
+        evidence_surface="ui",
+    )
+    action_evidence = action_result.evidence
+    archived_plan_json = (
+        json.dumps(
+            json.loads(archived_plan_path.read_text(encoding="utf-8")),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if archived_plan_path.is_file()
+        else None
+    )
+    archived_design_json = (
+        json.dumps(
+            json.loads(archived_design_path.read_text(encoding="utf-8")),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if archived_design_path.is_file()
+        else None
+    )
+    checks = {
+        "revision_actions_exact": action_evidence["observed_action_ids"]
+        == list(revision_ui_ids),
+        "revision_actions_ui": action_evidence["interaction_surfaces"]
+        == ["ui"] * len(revision_ui_ids),
+        "revision_actions_passed": action_evidence["statuses"]
+        == ["pass"] * len(revision_ui_ids),
+        "old_directory_absent": not initial_dir.exists(),
+        "renamed_directory_present": experiment_dir.is_dir(),
+        "directory_name_matches": experiment_dir.name == experiment["renamed_name"],
+        "metadata_name_matches": metadata.get("name") == experiment["renamed_name"],
+        "replicates_updated": metadata.get("replicates")
+        == experiment["refinalized_replicates"],
+        "printed_volume_updated": math.isclose(
+            float(metadata.get("target_reaction_volume_nL", -1)),
+            float(experiment["refinalized_printed_volume_nL"]),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ),
+        "final_volume_updated": math.isclose(
+            float(metadata.get("final_reaction_volume_nL", -1)),
+            float(experiment["refinalized_final_volume_nL"]),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ),
+        "fill_mode_updated": metadata.get("fill_printing_mode")
+        == experiment["refinalized_fill_printing_mode"],
+        "fill_droplet_updated": math.isclose(
+            float(metadata.get("fill_droplet_volume_nL", -1)),
+            float(experiment["refinalized_fill_droplet_volume_nL"]),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ),
+        "reagent_mode_updated": reagent_option.get("printing_mode")
+        == reagent["refinalized_printing_mode"],
+        "reagent_targets_updated": reagent_option.get("targets")
+        == reagent["refinalized_targets"],
+        "reagent_droplet_updated": math.isclose(
+            float(reagent_option.get("droplet_nL", -1)),
+            float(reagent["refinalized_droplet_volume_nL"]),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ),
+        "bundle_valid": after.bundle_valid,
+        "design_hash_matches": after.plan_design_sha256 == after.design_sha256,
+        "fresh_plan_identity": after.plan_id != initial.plan_id,
+        "plan_revision_one": after.plan_revision == 1,
+        "plan_prepared": after.plan_state == "prepared",
+        "plan_volume_basis_updated": math.isclose(
+            after.target_printed_volume_nl,
+            float(experiment["refinalized_printed_volume_nL"]),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ) and math.isclose(
+            after.final_reaction_volume_nl,
+            float(experiment["refinalized_final_volume_nL"]),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ),
+        "plan_modes_updated": set(after.plan_stock_modes)
+        == {reagent["refinalized_printing_mode"]},
+        "plan_wells_exact": plan_wells == expected_wells,
+        "history_current_matches": after.history_matches_current,
+        "ready_to_start": after.eligibility_status == "ready_to_start",
+        "progress_reference_matches": after.progress_plan_id == after.plan_id
+        and after.progress_plan_revision == after.plan_revision,
+        "progress_zero": after.total_added_droplets == 0
+        and not after.completed_well_ids,
+        "resume_absent": not after.resume_present,
+        "runtime_inactive": not after.runtime_active,
+        "key_wells_exact": list(key_rows) == expected_wells,
+        "concentration_wells_exact": list(concentration_rows) == expected_wells,
+        "key_targets_match": key_totals == after.targets_by_well,
+        "concentration_targets_match": len(observed_concentrations)
+        == len(expected_concentrations)
+        and all(
+            math.isclose(observed, expected, rel_tol=0.0, abs_tol=1e-9)
+            for observed, expected in zip(
+                observed_concentrations, expected_concentrations
+            )
+        ),
+        "runtime_assignments_match_plan": assignments == expected_assignments,
+        "runtime_assignments_replaced": assignments
+        != before["runtime_assignments"],
+        "original_plan_archived": archived_plan_json == initial.plan_json,
+        "original_design_archived": archived_design_json == initial.design_json,
+        "calibration_history_absent": calibration_empty,
+        "printing_history_absent": after.total_added_droplets == 0,
+        "inspection_read_only": inspection_file_sha256 == file_sha256,
+        "single_experiment_directory": experiment_directories
+        == [experiment["renamed_name"]],
+        "no_staging_directories": not staging_directories,
+        "single_current_plan": current_plan_paths
+        == [f"{experiment['renamed_name']}/execution_plan.json"],
+        "audit_retained_and_advanced": len(audit_rows)
+        > len(before["audit_rows"]),
+    }
+    failed_checks = sorted(name for name, passed in checks.items() if not passed)
+    evidence = {
+        "checks": checks,
+        "failed_checks": failed_checks,
+        "experiment_dir": str(experiment_dir),
+        "design_path": str(design_path),
+        "initial_name": experiment["initial_name"],
+        "renamed_name": experiment["renamed_name"],
+        "previous_plan_id": initial.plan_id,
+        "plan_id": after.plan_id,
+        "plan_revision": after.plan_revision,
+        "plan_state": after.plan_state,
+        "eligibility_status": after.eligibility_status,
+        "history_count": len(after.history_json),
+        "well_ids": plan_wells,
+        "runtime_assignments": assignments,
+        "runtime_assignments_before": dict(before["runtime_assignments"]),
+        "key_rows": key_rows,
+        "concentration_rows": concentration_rows,
+        "total_added_droplets": after.total_added_droplets,
+        "experiment_directories": experiment_directories,
+        "staging_directories": staging_directories,
+        "current_plan_paths": current_plan_paths,
+        "file_sha256": file_sha256,
+        "audit_rows": audit_rows,
+        "superseded_prepared_execution": {
+            "directory": str(archived_root),
+            "plan_path": str(archived_plan_path),
+            "design_path": str(archived_design_path),
+        },
+    }
+    groups = {
+        "experiment.prepared_rename_refinalize": (
+            "revision_actions_exact",
+            "revision_actions_ui",
+            "revision_actions_passed",
+            "old_directory_absent",
+            "renamed_directory_present",
+            "directory_name_matches",
+            "metadata_name_matches",
+            "fresh_plan_identity",
+        ),
+        "experiment.prepared_design_refinalize": (
+            "replicates_updated",
+            "printed_volume_updated",
+            "final_volume_updated",
+            "fill_mode_updated",
+            "fill_droplet_updated",
+            "reagent_mode_updated",
+            "reagent_targets_updated",
+            "reagent_droplet_updated",
+            "plan_volume_basis_updated",
+            "plan_modes_updated",
+            "plan_wells_exact",
+            "runtime_assignments_replaced",
+            "original_plan_archived",
+            "original_design_archived",
+        ),
+        "experiment.renamed_artifacts_unique": (
+            "single_experiment_directory",
+            "no_staging_directories",
+            "single_current_plan",
+            "audit_retained_and_advanced",
+        ),
+        "experiment.refinalized_bundle_valid": (
+            "bundle_valid",
+            "design_hash_matches",
+            "plan_revision_one",
+            "plan_prepared",
+            "history_current_matches",
+            "ready_to_start",
+            "progress_reference_matches",
+            "progress_zero",
+            "resume_absent",
+            "runtime_inactive",
+            "runtime_assignments_match_plan",
+            "calibration_history_absent",
+            "printing_history_absent",
+            "inspection_read_only",
+        ),
+        "experiment.key_files_consistent": (
+            "key_wells_exact",
+            "concentration_wells_exact",
+            "key_targets_match",
+            "concentration_targets_match",
+        ),
+    }
+    results = tuple(
+        evaluate_assertion(
+            assertion_id,
+            "refinalized",
+            ("ui", "model", "persistence"),
+            lambda names=names: (
+                all(checks[name] for name in names),
+                {
+                    "checks": {name: checks[name] for name in names},
+                    "failed_checks": [name for name in names if not checks[name]],
+                    "plan_id": after.plan_id,
+                    "plan_state": after.plan_state,
+                    "experiment_dir": str(experiment_dir),
+                },
+            ),
+        )
+        for assertion_id, names in groups.items()
+    )
+    return results, evidence
+
+
+def editor_prepared_revision_failure_assertion(exc: BaseException) -> AssertionResult:
+    action_id = str(getattr(exc, "action_id", "") or "")
+    assertion_id = (
+        "experiment.prepared_design_refinalize"
+        if action_id in {
+            "editor.edit_prepared_design_via_ui",
+            "editor.regenerate_prepared_design_via_ui",
+        }
+        else "experiment.prepared_rename_refinalize"
+    )
+    return AssertionResult(
+        assertion_id=assertion_id,
+        checkpoint="prepared_revision_failed",
+        decision="fail",
+        observable_sources=("ui", "action_ledger"),
+        evidence={
+            "action_id": action_id or None,
+            "failure_type": type(exc).__name__,
+            "failure_message": str(exc)[:2000],
+            "action_evidence": dict(getattr(exc, "evidence", {}) or {}),
+        },
+        message=str(exc)[:2000],
+    )
 
 
 def editor_prepared_reload_assertions(
@@ -838,18 +1218,20 @@ def editor_prepared_reload_assertions(
     prepared_evidence: Mapping[str, Any],
     loader_evidence: Mapping[str, Any],
 ) -> tuple[AssertionResult, AssertionResult]:
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+    )
+
+    snapshot = capture_authoritative_bundle(context)
+
     def inspect_reload() -> tuple[bool, Mapping[str, Any]]:
-        plan = context.experiment_model.get_execution_plan_snapshot()
-        resume_path = Path(context.experiment_model.execution_resume_file_path)
         evidence = {
             **dict(loader_evidence),
-            "plan_id": str(plan.plan_id),
-            "plan_revision": int(plan.plan_revision),
-            "plan_state": str(plan.state.value),
-            "resume_present": resume_path.exists(),
-            "runtime_active": bool(
-                context.experiment_model.is_authoritative_execution_runtime_active()
-            ),
+            "plan_id": snapshot.plan_id,
+            "plan_revision": snapshot.plan_revision,
+            "plan_state": snapshot.plan_state,
+            "resume_present": snapshot.resume_present,
+            "runtime_active": snapshot.runtime_active,
             "activation_performed": False,
         }
         passed = (
@@ -871,11 +1253,7 @@ def editor_prepared_reload_assertions(
     )
 
     def inspect_assignments() -> tuple[bool, Mapping[str, Any]]:
-        assignments = {
-            well.well_id: well.get_assigned_reaction().unique_id
-            for well in context.model.well_plate.get_all_wells()
-            if well.get_assigned_reaction() is not None
-        }
+        assignments = snapshot.assignments
         before = dict(prepared_evidence.get("runtime_assignments") or {})
         return assignments == before, {"before": before, "after": assignments}
 
@@ -924,6 +1302,7 @@ def editor_artifacts_cleanup_assertion(
 
 
 __all__ = [
+    "ActionSequenceExpectation",
     "AssertionResult",
     "ExecutionLifecycleExpectation",
     "calibration_assertion",
@@ -933,6 +1312,7 @@ __all__ = [
     "editor_create_finalize_assertion",
     "editor_prepared_bundle_assertions",
     "editor_prepared_reload_assertions",
+    "exact_action_sequence_assertion",
     "execution_lifecycle_assertions",
     "machine_ready_assertion",
     "multi_stock_artifacts_assertion",

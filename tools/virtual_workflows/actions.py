@@ -1816,6 +1816,7 @@ def drive_editor_prestart_rename_refinalize(
     renamed_name: str,
     experiment: Mapping[str, Any],
     reagent: Mapping[str, Any],
+    action_runner: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Reopen and materially revise a prepared design through real Qt controls."""
 
@@ -1844,6 +1845,30 @@ def drive_editor_prestart_rename_refinalize(
     }
     driver_timer = QtCore.QTimer(context.app)
     driver_timer.setInterval(5)
+
+    def run_action(
+        action_id: str,
+        operation: Callable[[], Mapping[str, Any] | None],
+        *,
+        precondition: Callable[
+            [], tuple[bool, str, Mapping[str, Any] | None]
+        ]
+        | None = None,
+        allowed_dialogs: tuple[Any, ...] = (),
+    ) -> dict[str, Any]:
+        if action_runner is not None:
+            return action_runner(
+                action_id,
+                operation,
+                precondition=precondition,
+                allowed_dialogs=allowed_dialogs,
+            )
+        return execute_action(
+            context,
+            action_id,
+            operation,
+            precondition=precondition,
+        )
 
     def click(widget: Any) -> None:
         QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
@@ -1970,8 +1995,7 @@ def drive_editor_prestart_rename_refinalize(
                 title = active.windowTitle() if active is not None else None
                 if isinstance(active, QtWidgets.QDialog):
                     active.reject()
-                execute_action(
-                    context,
+                run_action(
                     "editor.open_via_ui",
                     lambda: {},
                     precondition=lambda: (
@@ -1989,8 +2013,7 @@ def drive_editor_prestart_rename_refinalize(
                 )
             dialog = active
             state["dialog"] = dialog
-            execute_action(
-                context,
+            run_action(
                 "editor.open_via_ui",
                 lambda: {
                     "dialog_type": type(dialog).__name__,
@@ -1998,6 +2021,7 @@ def drive_editor_prestart_rename_refinalize(
                     "prepared_reopen": True,
                     "action_label": str(dialog.finish_btn.text() or ""),
                 },
+                allowed_dialogs=(dialog,),
             )
             capture_milestone(
                 context,
@@ -2063,10 +2087,10 @@ def drive_editor_prestart_rename_refinalize(
                     "action_label": str(dialog.finish_btn.text() or ""),
                 }
 
-            execute_action(
-                context,
+            run_action(
                 "editor.rename_prepared_via_ui",
                 rename,
+                allowed_dialogs=(dialog,),
             )
             capture_milestone(
                 context,
@@ -2166,10 +2190,10 @@ def drive_editor_prestart_rename_refinalize(
                     ).value(),
                 }
 
-            edit_evidence = execute_action(
-                context,
+            edit_evidence = run_action(
                 "editor.edit_prepared_design_via_ui",
                 edit_prepared_design,
+                allowed_dialogs=(dialog,),
             )
             capture_milestone(
                 context,
@@ -2202,10 +2226,10 @@ def drive_editor_prestart_rename_refinalize(
                     "status": dialog.status_lbl.text(),
                 }
 
-            regeneration_evidence = execute_action(
-                context,
+            regeneration_evidence = run_action(
                 "editor.regenerate_prepared_design_via_ui",
                 regenerate,
+                allowed_dialogs=(dialog,),
             )
             capture_milestone(
                 context,
@@ -2239,8 +2263,7 @@ def drive_editor_prestart_rename_refinalize(
                     ),
                 }
 
-            execute_action(
-                context,
+            run_action(
                 "editor.refinalize_prepared_via_ui",
                 refinalize,
             )

@@ -1052,3 +1052,17 @@ if loaded:
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_prepared_revision_action_supports_legacy_and_harness_execution():
+    import inspect
+
+    from tools.virtual_workflows.actions import (
+        drive_editor_prestart_rename_refinalize,
+    )
+
+    parameter = inspect.signature(
+        drive_editor_prestart_rename_refinalize
+    ).parameters["action_runner"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import ast
 from dataclasses import fields
 from pathlib import Path
 
@@ -20,6 +21,10 @@ from tools.virtual_workflows.report import (
     REQUIRED_TOP_LEVEL_FIELDS,
 )
 from tools.virtual_workflows.registry import get_registered_scenario
+from tools.virtual_workflows.journeys import (
+    EDITOR_REVISION_REQUIRED_ASSERTIONS,
+    EDITOR_REVISION_REQUIRED_UI_ACTIONS,
+)
 from tools.virtual_workflows.scenarios import (
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
     MULTI_STOCK_WORKLOAD_ID,
@@ -39,6 +44,59 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_ROOT = REPO_ROOT / "tests" / "performance" / "baselines"
 
 
+def test_authoritative_evidence_readers_are_centralized_and_read_only():
+    source = (
+        REPO_ROOT / "tools" / "virtual_workflows" / "authoritative_evidence.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    functions = {
+        node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+    }
+    assert {
+        "capture_authoritative_bundle",
+        "read_csv_rows",
+        "read_audit_rows",
+        "runtime_assignments",
+        "snapshot_directory",
+    } <= functions
+    for forbidden in (
+        "load_authoritative_execution_runtime",
+        "save_execution_",
+        "write_report_atomic",
+        "run_action(",
+        "QTest",
+        "os.replace",
+    ):
+        assert forbidden not in source
+
+    assertions = (
+        REPO_ROOT / "tools" / "virtual_workflows" / "assertions.py"
+    ).read_text(encoding="utf-8")
+    editor = (
+        REPO_ROOT / "tools" / "virtual_workflows" / "editor_scenarios.py"
+    ).read_text(encoding="utf-8")
+    scenarios = (
+        REPO_ROOT / "tools" / "virtual_workflows" / "scenarios.py"
+    ).read_text(encoding="utf-8")
+    for removed in (
+        "def _editor_csv_rows",
+        "def _editor_file_sha256",
+        "def _editor_audit_rows",
+        "def _editor_runtime_assignments",
+    ):
+        assert removed not in assertions
+    for removed in (
+        "def _csv_rows",
+        "def _file_sha256",
+        "def _audit_rows",
+        "def _runtime_assignments",
+        "def _directory_file_snapshot",
+    ):
+        assert removed not in editor
+    assert "def _file_inventory" not in scenarios
+    assert "def _read_audit_rows" not in scenarios
+
+
 def test_multi_stock_v4_composed_contract_is_frozen():
     fixture = load_virtual_print_array_fixture(
         scenario_id=MULTI_STOCK_WORKLOAD_ID
@@ -55,6 +113,29 @@ def test_multi_stock_v4_composed_contract_is_frozen():
         stock["printer_head"]["print_pulse_width_us"]
         for stock in fixture["stocks"]
     ] == [1300, 1800]
+
+
+def test_prepared_editor_refinalize_composed_contract_is_frozen():
+    definition = get_registered_scenario(
+        "experiment_editor_prestart_rename_refinalize_v1"
+    )
+
+    assert definition.runner_family == "composed_journey"
+    assert EDITOR_REVISION_REQUIRED_ASSERTIONS == (
+        "sil.host_hardware_disabled",
+        "ui.real_app_constructed",
+        "experiment.prepared_rename_refinalize",
+        "experiment.prepared_design_refinalize",
+        "experiment.renamed_artifacts_unique",
+        "experiment.refinalized_bundle_valid",
+        "experiment.prepared_reload_ready",
+        "experiment.runtime_assignments_match",
+        "experiment.key_files_consistent",
+        "artifacts.required_present",
+    )
+    assert "experiment.load_authoritative_via_ui" in (
+        EDITOR_REVISION_REQUIRED_UI_ACTIONS
+    )
 
 
 def test_legacy_cli_surface_remains_additively_compatible():

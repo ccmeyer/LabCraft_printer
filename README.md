@@ -545,6 +545,89 @@ select a fresh `--basetemp` below `%TEMP%\LabCraft`; do not place it inside the
 repository because `SimulationSession` correctly rejects roots overlapping
 repository or production data.
 
+Milestone 7 Slice 3 migrates
+`experiment_editor_prestart_rename_refinalize_v1` onto that composition layer.
+The journey creates the initial A1/A2 droplet design, then reopens the untouched
+prepared design and drives rename, six-well selection, 120 nL volumes, stream
+mode, 0.5x/1.0x targets, regeneration, and refinalization through normal Qt
+controls. It finally reloads the renamed directory through **Experiment Editor
+→ Load Design…** and Qt's folder dialog. It remains disconnected throughout
+and does not execute print commands.
+
+`PreparedEditorRevisionSpec` holds the varying names, wells, modes, targets,
+and volumes. `ExperimentEditorDriver` reuses the existing bounded modal QTest
+mechanics through the harness action runner, while one read-only assertion
+family owns the authoritative plan/archive/progress/key/audit checks. The
+scenario body is 76 lines and contains no QTest loop, report writer, or cleanup
+path. Ordinary prepared-design values therefore do not require another
+runner. Active matrices and seeded action-order exploration remain later work.
+
+Run the Slice 3 focused gates:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  --basetemp "$env:TEMP\LabCraft\pytest-m7-slice3-unit" `
+  tests\test_virtual_workflow_actions.py `
+  tests\test_virtual_workflow_page_drivers.py `
+  tests\test_virtual_workflow_journey_phases.py `
+  tests\test_virtual_workflow_assertions.py `
+  tests\test_virtual_workflow_composition.py `
+  tests\test_virtual_workflow_report.py `
+  tests\test_virtual_workflow_manifest.py `
+  tests\test_virtual_workflow_contract_freeze.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  --basetemp "$env:TEMP\LabCraft\pytest-m7-slice3-lifecycle" `
+  tests\system\test_virtual_workflow_editor_composed.py `
+  tests\system\test_virtual_workflow_editor_refinalize_composed.py `
+  tests\system\test_virtual_workflow_editor_lifecycle.py
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario experiment_editor_prestart_rename_refinalize_v1 `
+  --output-root verification_reports\milestone7-slice3-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 60
+```
+
+The emitted replay command must reproduce the fixture hash, seed, 23 ordered
+actions and surfaces, ten passing assertions, ten screenshot names, prepared
+terminal state, and pass classification. Generated IDs, paths, timestamps,
+durations, and identity-bearing hashes are intentionally nondeterministic. The
+full Python suite remains deferred until the final Milestone 7 validation.
+
+Milestone 7 Slice 3.5 consolidates the evidence and reporting added by the
+editor migrations. `authoritative_evidence.py` captures one immutable,
+JSON-safe view of design, plan/history, progress, resume, calibration, runtime
+assignments, key files, audit rows, and directory hashes without activating or
+repairing execution. The composed editor journeys, legacy authoritative reload
+validator, and legacy post-start lock/copy validator use the same readers and
+inventory contracts. `editor_reporting.py` supplies the common zero-print
+editor payload and leaves each journey adapter at 12 lines.
+
+Action-order assertions validate an explicit complete ledger window, including
+interleaved harness milestones, while retaining the existing UI-only evidence
+projection. Slice 3.5 adds no workflow, fixture, registry entry, capability
+claim, UI action, page-driver operation, or production behavior. Run its
+targeted gates with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_virtual_workflow_authoritative_evidence.py `
+  tests\test_virtual_workflow_editor_reporting.py `
+  tests\test_virtual_workflow_assertions.py `
+  tests\test_virtual_workflow_composition.py `
+  tests\test_virtual_workflow_report.py `
+  tests\test_virtual_workflow_contract_freeze.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_virtual_workflow_editor_composed.py `
+  tests\system\test_virtual_workflow_editor_refinalize_composed.py `
+  tests\system\test_virtual_workflow_editor_lifecycle.py `
+  tests\system\test_virtual_workflow_editor_post_start_lifecycle.py `
+  tests\system\test_virtual_workflow_authoritative_reload_lifecycle.py
+```
+
+The complete Python suite remains deferred until the final Milestone 7 gate.
+
 The final retained Windows evidence is:
 
 ```text

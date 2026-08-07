@@ -124,7 +124,7 @@ _SCENARIO_DEFINITIONS = {
         ),
         expected_completion_count=2,
         scenario_name="experiment_editor_prestart_rename_refinalize",
-        runner_family="experiment_editor",
+        runner_family="composed_journey",
         supports_pi_evidence=False,
         supports_injected_stall=False,
         supports_report_sets=False,
@@ -282,18 +282,14 @@ def run_registered_scenario(
         from tools.virtual_workflows.editor_scenarios import (
             EditorLifecycleScenarioConfig,
             POST_START_LOCK_WORKLOAD_ID,
-            RENAME_WORKLOAD_ID,
             run_editor_create_finalize_scenario,
             run_editor_post_start_lock_scenario,
-            run_editor_prestart_rename_refinalize_scenario,
         )
 
         config = EditorLifecycleScenarioConfig(
             scenario_id=definition.workload_id,
             **config_values,
         )
-        if definition.workload_id == RENAME_WORKLOAD_ID:
-            return run_editor_prestart_rename_refinalize_scenario(config)
         if definition.workload_id == POST_START_LOCK_WORKLOAD_ID:
             return run_editor_post_start_lock_scenario(config)
         return run_editor_create_finalize_scenario(config)
@@ -766,7 +762,11 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
         for scenario in scenario_rows.values()
         for assertion_id in scenario["assertion_ids"]
     }
-    unused_actions = sorted(set(action_rows) - referenced_actions)
+    unused_actions = sorted(
+        action_id
+        for action_id in set(action_rows) - referenced_actions
+        if action_rows[action_id]["implementation_status"] != "reusable"
+    )
     unused_assertions = sorted(set(assertion_rows) - referenced_assertions)
     if unused_actions:
         raise ManifestValidationError(

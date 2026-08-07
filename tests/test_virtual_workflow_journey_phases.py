@@ -6,8 +6,10 @@ import pytest
 
 from tools.virtual_workflows.composition import normalized_steps
 from tools.virtual_workflows.journey_phases import (
+    PreparedEditorRevisionSpec,
     StockPassSpec,
     machine_startup_steps,
+    normalized_prepared_revision_steps,
     normalized_stock_pass_steps,
 )
 
@@ -129,3 +131,70 @@ def test_stock_pass_contract_rejects_invalid_boundary_values():
             printing_milestone="printing",
             completed_milestone="completed",
         )
+
+
+def _prepared_revision(**values) -> PreparedEditorRevisionSpec:
+    defaults = {
+        "initial_name": "initial",
+        "renamed_name": "renamed",
+        "replicates": 3,
+        "well_ids": ("A1", "A2", "A3"),
+        "printed_volume_nL": 120.0,
+        "final_volume_nL": 120.0,
+        "fill_printing_mode": "stream",
+        "fill_droplet_volume_nL": 60.0,
+        "reagent_printing_mode": "stream",
+        "reagent_targets": (0.5, 1.0),
+        "reagent_droplet_volume_nL": 60.0,
+    }
+    defaults.update(values)
+    return PreparedEditorRevisionSpec(**defaults)
+
+
+def test_prepared_revision_plan_is_short_typed_and_ui_only():
+    plan = normalized_prepared_revision_steps(_prepared_revision())
+
+    assert [row["action_id"] for row in plan] == [
+        "editor.open_via_ui",
+        "editor.rename_prepared_via_ui",
+        "editor.edit_prepared_design_via_ui",
+        "editor.regenerate_prepared_design_via_ui",
+        "editor.refinalize_prepared_via_ui",
+    ]
+    assert {row["interaction_surface"] for row in plan} == {"ui"}
+    assert {tuple(row["well_ids"]) for row in plan} == {("A1", "A2", "A3")}
+
+
+def test_prepared_revision_values_vary_without_a_new_runner():
+    first = normalized_prepared_revision_steps(_prepared_revision())
+    second = normalized_prepared_revision_steps(
+        _prepared_revision(
+            renamed_name="second",
+            replicates=2,
+            well_ids=("B1", "B2"),
+            printed_volume_nL=90.0,
+        )
+    )
+
+    assert [row["action_id"] for row in first] == [
+        row["action_id"] for row in second
+    ]
+    assert {row["renamed_name"] for row in second} == {"second"}
+    assert {tuple(row["well_ids"]) for row in second} == {("B1", "B2")}
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ({"renamed_name": "initial"}, "change the experiment name"),
+        ({"replicates": 0}, "replicates"),
+        ({"well_ids": ("A1", "A1")}, "unique"),
+        ({"fill_printing_mode": "invalid"}, "fill mode"),
+        ({"reagent_targets": ()}, "targets"),
+        ({"reagent_targets": (float("nan"),)}, "targets"),
+        ({"reagent_droplet_volume_nL": 0}, "droplet volume"),
+    ],
+)
+def test_prepared_revision_rejects_invalid_values(values, message):
+    with pytest.raises(ValueError, match=message):
+        _prepared_revision(**values)

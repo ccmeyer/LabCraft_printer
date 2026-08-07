@@ -6,6 +6,7 @@ import pytest
 from PySide6 import QtCore, QtWidgets
 
 from tools.virtual_workflows.page_drivers import (
+    ExperimentEditorDriver,
     ExperimentLoaderDriver,
     MainWindowDriver,
     RackDriver,
@@ -87,3 +88,38 @@ def test_rack_driver_requires_one_unambiguous_stock_slot(qapp):
     assert driver.find_slot_for_stock("stock-1") == 0
     with pytest.raises(RuntimeError, match="expected one rack slot"):
         driver.find_slot_for_stock("missing")
+
+
+def test_editor_revision_driver_delegates_to_existing_bounded_mechanics(
+    qapp, monkeypatch
+):
+    import tools.virtual_workflows.actions as actions
+
+    context = _context(qapp, QtWidgets.QWidget())
+    runner = object()
+    observed = {}
+
+    def drive(received_context, **values):
+        observed.update(values)
+        assert received_context is context
+        return {"refinalized": True}
+
+    monkeypatch.setattr(actions, "drive_editor_prestart_rename_refinalize", drive)
+    result = ExperimentEditorDriver(
+        context,
+        action_runner=runner,
+    ).revise_prepared_design(
+        initial_name="initial",
+        renamed_name="renamed",
+        experiment={"refinalized_replicates": 3},
+        reagent={"refinalized_targets": [0.5, 1.0]},
+    )
+
+    assert result == {"refinalized": True}
+    assert observed == {
+        "initial_name": "initial",
+        "renamed_name": "renamed",
+        "experiment": {"refinalized_replicates": 3},
+        "reagent": {"refinalized_targets": [0.5, 1.0]},
+        "action_runner": runner,
+    }

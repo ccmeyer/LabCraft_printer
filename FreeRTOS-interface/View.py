@@ -102,15 +102,24 @@ class EditableCopyNameDialog(QInputDialog):
     MINIMUM_DIALOG_WIDTH = 640
     MINIMUM_NAME_FIELD_WIDTH = 480
 
-    def _enforce_minimum_widths(self):
+    def _enforce_minimum_width_constraints(self):
         self.setMinimumWidth(self.MINIMUM_DIALOG_WIDTH)
         name_field = self.findChild(QLineEdit)
         if name_field is not None:
             name_field.setMinimumWidth(self.MINIMUM_NAME_FIELD_WIDTH)
+
+    def _enforce_minimum_widths(self):
+        self._enforce_minimum_width_constraints()
         self.resize(
             max(self.MINIMUM_DIALOG_WIDTH, self.width(), self.sizeHint().width()),
             max(self.height(), self.sizeHint().height()),
         )
+
+    def event(self, event):
+        handled = super().event(event)
+        if event.type() == QtCore.QEvent.Type.LayoutRequest:
+            self._enforce_minimum_width_constraints()
+        return handled
 
     def showEvent(self, event):
         super().showEvent(event)

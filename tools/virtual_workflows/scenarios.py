@@ -128,6 +128,11 @@ from tools.virtual_workflows.actions import (  # noqa: E402
     wait_for_completions,
     wait_until,
 )
+from tools.virtual_workflows.authoritative_evidence import (  # noqa: E402
+    capture_authoritative_bundle,
+    read_model_audit_rows as _read_audit_rows,
+    rich_file_inventory as _file_inventory,
+)
 from tools.virtual_workflows.persistence_io import PersistenceIoObserver  # noqa: E402
 from tools.virtual_workflows.progress_snapshot import (  # noqa: E402
     ProgressSnapshotObserver,
@@ -158,18 +163,6 @@ def _resolved_beneath(path: str | Path, root: str | Path) -> bool:
     candidate = Path(path).resolve()
     parent = Path(root).resolve()
     return candidate == parent or parent in candidate.parents
-
-
-def _file_inventory(root: str | Path) -> dict[str, dict[str, Any]]:
-    directory = Path(root).resolve()
-    return {
-        path.relative_to(directory).as_posix(): {
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            "size_bytes": path.stat().st_size,
-        }
-        for path in sorted(directory.rglob("*"))
-        if path.is_file()
-    }
 
 
 def _merge_session_lifecycles(
@@ -1870,18 +1863,6 @@ def _progress_added_count(experiment_model: Any) -> int:
     return total
 
 
-def _read_audit_rows(experiment_model: Any) -> list[dict[str, Any]]:
-    path_value = getattr(experiment_model, "experiment_audit_file_path", None)
-    path = Path(path_value) if path_value else None
-    if path is None or not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            rows.append(json.loads(line))
-    return rows
-
-
 def _contains_ordered_subsequence(
     values: list[str],
     expected: tuple[str, ...],
@@ -3007,14 +2988,15 @@ def run_virtual_print_array_scenario(
                 )
                 quiescence_evidence = dict(quiescence_result["evidence"])
                 if is_authoritative_reload_resume:
-                    paused_inventory = _file_inventory(
-                        fixture_info["experiment_dir"]
+                    session_1_authoritative = capture_authoritative_bundle(context)
+                    paused_inventory = (
+                        session_1_authoritative.directory.rich_inventory()
                     )
                     session_1_lifecycle = instrumentation.lifecycle_snapshot()
                     first_instrumentation = instrumentation
                     first_progress_observer = progress_observer
                     first_io_observer = io_observer
-                    session_1_audit_rows = _read_audit_rows(experiment_model)
+                    session_1_audit_rows = session_1_authoritative.audit_rows
                     session_1_plan_id = str(fixture_info["plan_id"])
                     session_1_completed_intent_ids = set(
                         session_1_lifecycle.get("completions", ())
@@ -3169,21 +3151,14 @@ def run_virtual_print_array_scenario(
                     activated_boundary: dict[str, Any] = {}
 
                     def validate_loaded_boundary() -> Mapping[str, Any]:
-                        current = _file_inventory(
-                            fixture_info["experiment_dir"]
-                        )
-                        eligibility = (
-                            experiment_model
-                            .get_execution_resume_eligibility()
-                        )
+                        loaded_snapshot = capture_authoritative_bundle(context)
+                        current = loaded_snapshot.directory.rich_inventory()
+                        eligibility = loaded_snapshot.eligibility
                         checks = {
                             "authoritative_files_byte_identical": (
                                 current == paused_inventory
                             ),
-                            "runtime_inactive": not (
-                                experiment_model
-                                .is_authoritative_execution_runtime_active()
-                            ),
+                            "runtime_inactive": not loaded_snapshot.runtime_active,
                             "eligibility_ready_to_resume": (
                                 eligibility.get("status")
                                 == "ready_to_resume"
@@ -3203,9 +3178,8 @@ def run_virtual_print_array_scenario(
                         return loaded_boundary
 
                     def validate_activated_boundary() -> Mapping[str, Any]:
-                        current = _file_inventory(
-                            fixture_info["experiment_dir"]
-                        )
+                        activated_snapshot = capture_authoritative_bundle(context)
+                        current = activated_snapshot.directory.rich_inventory()
                         all_paths = set(paused_inventory) | set(current)
                         changed = sorted(
                             path
@@ -3221,7 +3195,7 @@ def run_virtual_print_array_scenario(
                             "experiment_audit.jsonl",
                         }
                         disallowed = sorted(set(changed) - allowed)
-                        audit_rows = _read_audit_rows(experiment_model)
+                        audit_rows = activated_snapshot.audit_rows
                         activation_rows = [
                             row
                             for row in audit_rows[
@@ -3230,17 +3204,11 @@ def run_virtual_print_array_scenario(
                             if row.get("event_type")
                             == "authoritative_execution_activated"
                         ]
-                        snapshot = (
-                            experiment_model.get_execution_plan_snapshot()
-                        )
-                        eligibility = (
-                            experiment_model
-                            .get_execution_resume_eligibility()
-                        )
+                        eligibility = activated_snapshot.eligibility
                         checks = {
                             "only_allowlisted_files_changed": not disallowed,
                             "plan_identity_unchanged": (
-                                str(snapshot.plan_id)
+                                activated_snapshot.plan_id
                                 == session_1_plan_id
                             ),
                             "eligibility_ready_to_resume": (
@@ -3251,7 +3219,7 @@ def run_virtual_print_array_scenario(
                                 len(activation_rows) == 1
                             ),
                             "partial_progress_rehydrated": (
-                                _progress_added_count(experiment_model)
+                                activated_snapshot.total_added_droplets
                                 == len(session_1_completed_pairs)
                             ),
                         }

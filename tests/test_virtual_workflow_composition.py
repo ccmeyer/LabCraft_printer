@@ -209,7 +209,9 @@ def test_named_journeys_meet_concision_and_generic_dispatch_gates():
     }
     assert lengths["_smoke_body"] <= 120
     assert lengths["_editor_body"] <= 120
+    assert lengths["_editor_revision_body"] <= 120
     assert lengths["_multi_body"] <= 120
     dispatch_source = inspect.getsource(registry.run_registered_scenario)
     assert "definition.workload_id == EDITOR_WORKLOAD_ID" not in dispatch_source
     assert "definition.workload_id == MULTI_STOCK_WORKLOAD_ID" not in dispatch_source
+    assert "definition.workload_id == RENAME_WORKLOAD_ID" not in dispatch_source

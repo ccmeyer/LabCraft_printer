@@ -616,6 +616,32 @@ def test_create_editable_copy_uses_current_source_and_wide_name_dialog(
     assert "New experiment" in dialog.status_lbl.text()
 
 
+def test_editable_copy_name_widths_survive_real_modal_layout(qapp):
+    dialog = View.EditableCopyNameDialog()
+    dialog.setInputMode(QInputDialog.TextInput)
+    dialog.setLabelText("Name for editable copy:")
+    dialog.setTextValue("editable-copy")
+    observed = {}
+
+    def observe_after_layout():
+        name_field = dialog.findChild(QLineEdit)
+        observed.update(
+            dialog_width=dialog.width(),
+            dialog_minimum_width=dialog.minimumWidth(),
+            name_field_width=name_field.width(),
+            name_field_minimum_width=name_field.minimumWidth(),
+        )
+        dialog.accept()
+
+    View.QTimer.singleShot(25, observe_after_layout)
+
+    assert dialog.exec() == QDialog.Accepted
+    assert observed["dialog_width"] >= 640
+    assert observed["dialog_minimum_width"] >= 640
+    assert observed["name_field_width"] >= 480
+    assert observed["name_field_minimum_width"] >= 480
+
+
 def test_create_editable_copy_cancel_is_side_effect_free(
     qapp,
     tmp_path,

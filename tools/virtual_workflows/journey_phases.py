@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -33,6 +34,67 @@ class EditorPreparationSpec:
     def __post_init__(self) -> None:
         if not isinstance(self.specification, Mapping):
             raise ValueError("editor specification must be a mapping")
+
+
+@dataclass(frozen=True)
+class PreparedEditorRevisionSpec:
+    initial_name: str
+    renamed_name: str
+    replicates: int
+    well_ids: tuple[str, ...]
+    printed_volume_nL: float
+    final_volume_nL: float
+    fill_printing_mode: str
+    fill_droplet_volume_nL: float
+    reagent_printing_mode: str
+    reagent_targets: tuple[float, ...]
+    reagent_droplet_volume_nL: float
+
+    def __post_init__(self) -> None:
+        if not self.initial_name.strip() or not self.renamed_name.strip():
+            raise ValueError("prepared revision names must be non-empty")
+        if self.initial_name == self.renamed_name:
+            raise ValueError("prepared revision must change the experiment name")
+        if self.replicates <= 0:
+            raise ValueError("prepared revision replicates must be positive")
+        if not self.well_ids or any(not value.strip() for value in self.well_ids):
+            raise ValueError("prepared revision wells must be non-empty")
+        if len(set(self.well_ids)) != len(self.well_ids):
+            raise ValueError("prepared revision wells must be unique")
+        for label, value in (
+            ("printed volume", self.printed_volume_nL),
+            ("final volume", self.final_volume_nL),
+            ("fill droplet volume", self.fill_droplet_volume_nL),
+            ("reagent droplet volume", self.reagent_droplet_volume_nL),
+        ):
+            if not math.isfinite(float(value)) or float(value) <= 0:
+                raise ValueError(f"prepared revision {label} must be positive")
+        if self.fill_printing_mode not in {"droplet", "stream"}:
+            raise ValueError("prepared revision fill mode is unsupported")
+        if self.reagent_printing_mode not in {"droplet", "stream"}:
+            raise ValueError("prepared revision reagent mode is unsupported")
+        if not self.reagent_targets or any(
+            not math.isfinite(float(value)) or float(value) < 0
+            for value in self.reagent_targets
+        ):
+            raise ValueError("prepared revision targets must be non-negative")
+
+    def experiment_values(self) -> dict[str, Any]:
+        return {
+            "refinalized_replicates": self.replicates,
+            "refinalized_expected_well_ids": list(self.well_ids),
+            "refinalized_printed_volume_nL": self.printed_volume_nL,
+            "refinalized_final_volume_nL": self.final_volume_nL,
+            "refinalized_fill_printing_mode": self.fill_printing_mode,
+            "refinalized_fill_droplet_volume_nL": self.fill_droplet_volume_nL,
+        }
+
+    def reagent_values(self) -> dict[str, Any]:
+        return {
+            "refinalized_printing_mode": self.reagent_printing_mode,
+            "refinalized_targets": list(self.reagent_targets),
+            "refinalized_droplet_volume_nL": self.reagent_droplet_volume_nL,
+        }
 
 
 @dataclass(frozen=True)
@@ -139,6 +201,47 @@ def run_editor_preparation(
             include_persistence=True,
             correlation={"action_id": "editor.finish_via_ui"},
         )
+    return dict(result)
+
+
+def normalized_prepared_revision_steps(
+    spec: PreparedEditorRevisionSpec,
+) -> list[dict[str, Any]]:
+    """Return the ledger plan and typed values without constructing Qt objects."""
+
+    return [
+        {
+            "action_id": action_id,
+            "interaction_surface": "ui",
+            "initial_name": spec.initial_name,
+            "renamed_name": spec.renamed_name,
+            "well_ids": list(spec.well_ids),
+            "replicates": spec.replicates,
+        }
+        for action_id in (
+            "editor.open_via_ui",
+            "editor.rename_prepared_via_ui",
+            "editor.edit_prepared_design_via_ui",
+            "editor.regenerate_prepared_design_via_ui",
+            "editor.refinalize_prepared_via_ui",
+        )
+    ]
+
+
+def run_prepared_editor_revision(
+    runtime: JourneyRuntime,
+    spec: PreparedEditorRevisionSpec,
+) -> dict[str, Any]:
+    result = ExperimentEditorDriver(
+        runtime.context,
+        action_runner=runtime.harness.run_action,
+    ).revise_prepared_design(
+        initial_name=spec.initial_name,
+        renamed_name=spec.renamed_name,
+        experiment=spec.experiment_values(),
+        reagent=spec.reagent_values(),
+    )
+    runtime.harness.assert_no_unexpected_dialog()
     return dict(result)
 
 

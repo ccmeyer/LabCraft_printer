@@ -12,9 +12,12 @@ from tools.virtual_workflows.assertions import (
     ExecutionLifecycleExpectation,
     calibration_assertion,
     cleanup_assertion,
+    capture_editor_prepared_revision_snapshot,
     editor_artifacts_cleanup_assertion,
     editor_create_finalize_assertion,
     editor_prepared_bundle_assertions,
+    editor_prepared_revision_assertions,
+    editor_prepared_revision_failure_assertion,
     editor_prepared_reload_assertions,
     machine_ready_assertion,
     multi_stock_artifacts_assertion,
@@ -32,12 +35,19 @@ from tools.virtual_workflows.composition import (
     JourneyRuntime,
 )
 from tools.virtual_workflows.execution_observer import ExecutionObserver
+from tools.virtual_workflows.editor_reporting import (
+    build_editor_lifecycle_payload,
+    create_finalize_report_spec,
+    prepared_revision_report_spec,
+)
 from tools.virtual_workflows.journey_phases import (
     EditorPreparationSpec,
+    PreparedEditorRevisionSpec,
     StockPassSpec,
     head_identity_step,
     machine_startup_steps,
     run_editor_preparation,
+    run_prepared_editor_revision,
     run_stock_passes,
 )
 from tools.virtual_workflows.page_drivers import ExperimentLoaderDriver
@@ -51,6 +61,9 @@ SMOKE_SCENARIO_VERSION = "1"
 EDITOR_WORKLOAD_ID = "experiment_editor_create_finalize_v1"
 EDITOR_SCENARIO_NAME = "experiment_editor_create_finalize"
 EDITOR_SCENARIO_VERSION = "1"
+EDITOR_REVISION_WORKLOAD_ID = "experiment_editor_prestart_rename_refinalize_v1"
+EDITOR_REVISION_SCENARIO_NAME = "experiment_editor_prestart_rename_refinalize"
+EDITOR_REVISION_SCENARIO_VERSION = "1"
 MULTI_STOCK_WORKLOAD_ID = "print_array_multi_stock_24x2_v1"
 MULTI_STOCK_SCENARIO_NAME = "print_array_multi_stock_head_exchange"
 MULTI_STOCK_SCENARIO_VERSION = "1"
@@ -69,6 +82,18 @@ EDITOR_REQUIRED_ASSERTIONS = (
     "ui.real_app_constructed",
     "experiment.editor_create_finalize",
     "experiment.prepared_bundle_valid",
+    "experiment.prepared_reload_ready",
+    "experiment.runtime_assignments_match",
+    "experiment.key_files_consistent",
+    "artifacts.required_present",
+)
+EDITOR_REVISION_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "experiment.prepared_rename_refinalize",
+    "experiment.prepared_design_refinalize",
+    "experiment.renamed_artifacts_unique",
+    "experiment.refinalized_bundle_valid",
     "experiment.prepared_reload_ready",
     "experiment.runtime_assignments_match",
     "experiment.key_files_consistent",
@@ -119,11 +144,33 @@ EDITOR_REQUIRED_UI_ACTIONS = frozenset(
         "experiment.load_authoritative_via_ui",
     }
 )
+EDITOR_REVISION_REQUIRED_UI_ACTIONS = EDITOR_REQUIRED_UI_ACTIONS | frozenset(
+    {
+        "editor.rename_prepared_via_ui",
+        "editor.edit_prepared_design_via_ui",
+        "editor.regenerate_prepared_design_via_ui",
+        "editor.refinalize_prepared_via_ui",
+    }
+)
 MULTI_STOCK_REQUIRED_UI_ACTIONS = SMOKE_REQUIRED_UI_ACTIONS | frozenset(
     {"head.return_via_ui"}
 )
 EDITOR_REQUIRED_SCREENSHOTS = frozenset(
     {"editor_opened", "generated", "finalized", "reloaded", "validated"}
+)
+EDITOR_REVISION_REQUIRED_SCREENSHOTS = frozenset(
+    {
+        "editor_opened",
+        "generated",
+        "initial_finalized",
+        "rename_editor_opened",
+        "renamed",
+        "prepared_design_edited",
+        "regenerated",
+        "refinalized",
+        "reloaded",
+        "validated",
+    }
 )
 MULTI_STOCK_REQUIRED_SCREENSHOTS = frozenset(
     {
@@ -209,6 +256,19 @@ def _editor_fixture() -> tuple[dict[str, Any], Path]:
     return load_editor_create_finalize_fixture(path), path
 
 
+def _editor_revision_fixture() -> tuple[dict[str, Any], Path]:
+    from tools.virtual_workflows.editor_scenarios import (
+        load_editor_prestart_rename_refinalize_fixture,
+    )
+
+    path = (
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / f"{EDITOR_REVISION_WORKLOAD_ID}.json"
+    )
+    return load_editor_prestart_rename_refinalize_fixture(path), path
+
+
 def _well_ids(fixture: Mapping[str, Any]) -> tuple[str, ...]:
     from tools.virtual_workflows.scenarios import fixture_well_ids
 
@@ -254,6 +314,68 @@ def _editor_specification(
         reagents[0] if len(reagents) == 1 else reagents
     )
     return specification
+
+
+def _editor_revision_initial_specification(
+    fixture: Mapping[str, Any],
+) -> dict[str, Any]:
+    experiment = fixture["experiment"]
+    reagent = fixture["reagent"]
+    return {
+        "experiment": {
+            "name": experiment["initial_name"],
+            "plate_name": experiment["plate_name"],
+            "replicates": experiment["initial_replicates"],
+            "expected_well_ids": list(experiment["initial_expected_well_ids"]),
+            "printed_volume_nL": experiment["initial_printed_volume_nL"],
+            "final_volume_nL": experiment["initial_final_volume_nL"],
+            "printed_volume_tolerance_nL": experiment[
+                "printed_volume_tolerance_nL"
+            ],
+            "randomize_assignments": experiment["randomize_assignments"],
+            "allow_two_stock_solutions": experiment[
+                "allow_two_stock_solutions"
+            ],
+            "fill_printing_mode": experiment["initial_fill_printing_mode"],
+            "fill_droplet_volume_nL": experiment[
+                "initial_fill_droplet_volume_nL"
+            ],
+        },
+        "reagent": {
+            "stock_label": reagent["stock_label"],
+            "group": reagent["group"],
+            "printing_mode": reagent["initial_printing_mode"],
+            "starting_concentration": reagent["starting_concentration"],
+            "targets": list(reagent["initial_targets"]),
+            "units": reagent["units"],
+            "fixed_stock_concentration": reagent["fixed_stock_concentration"],
+            "droplet_volume_nL": reagent["initial_droplet_volume_nL"],
+        },
+    }
+
+
+def _editor_revision_spec(
+    fixture: Mapping[str, Any],
+) -> PreparedEditorRevisionSpec:
+    experiment = fixture["experiment"]
+    reagent = fixture["reagent"]
+    return PreparedEditorRevisionSpec(
+        initial_name=experiment["initial_name"],
+        renamed_name=experiment["renamed_name"],
+        replicates=int(experiment["refinalized_replicates"]),
+        well_ids=tuple(experiment["refinalized_expected_well_ids"]),
+        printed_volume_nL=float(experiment["refinalized_printed_volume_nL"]),
+        final_volume_nL=float(experiment["refinalized_final_volume_nL"]),
+        fill_printing_mode=str(experiment["refinalized_fill_printing_mode"]),
+        fill_droplet_volume_nL=float(
+            experiment["refinalized_fill_droplet_volume_nL"]
+        ),
+        reagent_printing_mode=str(reagent["refinalized_printing_mode"]),
+        reagent_targets=tuple(float(value) for value in reagent["refinalized_targets"]),
+        reagent_droplet_volume_nL=float(
+            reagent["refinalized_droplet_volume_nL"]
+        ),
+    )
 
 
 def _connect_execution_signals(
@@ -390,11 +512,18 @@ def _editor_body(runtime: JourneyRuntime) -> None:
     expected_wells = tuple(fixture["experiment"]["expected_well_ids"])
     runtime.add_assertion(simulation_identity_assertion(runtime.context))
     runtime.add_assertion(real_application_assertion(runtime.context))
+    editor_action_start = len(runtime.context.action_results)
     run_editor_preparation(
         runtime,
         EditorPreparationSpec(fixture, use_harness_action_runner=True),
     )
-    runtime.add_assertion(editor_create_finalize_assertion(runtime.context))
+    runtime.add_assertion(
+        editor_create_finalize_assertion(
+            runtime.context,
+            action_start=editor_action_start,
+            action_end=len(runtime.context.action_results),
+        )
+    )
     capture_milestone(
         runtime.context,
         "finalized",
@@ -433,6 +562,87 @@ def _editor_body(runtime: JourneyRuntime) -> None:
             "plan_state": reload_result.evidence.get("plan_state"),
             "eligibility_status": reload_result.evidence.get("eligibility_status"),
             "assertion_count": len(EDITOR_REQUIRED_ASSERTIONS),
+        },
+    )
+
+
+def _editor_revision_body(runtime: JourneyRuntime) -> None:
+    fixture = runtime.fixture
+    experiment = fixture["experiment"]
+    initial_wells = tuple(experiment["initial_expected_well_ids"])
+    runtime.add_assertion(simulation_identity_assertion(runtime.context))
+    runtime.add_assertion(real_application_assertion(runtime.context))
+    run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(
+            _editor_revision_initial_specification(fixture),
+            use_harness_action_runner=True,
+        ),
+    )
+    capture_milestone(
+        runtime.context,
+        "initial_finalized",
+        evidence={"experiment_name": experiment["initial_name"]},
+    )
+    initial = capture_editor_prepared_revision_snapshot(
+        runtime.context,
+        expected_well_ids=initial_wells,
+    )
+    runtime.observations["prepared_revision_initial"] = initial
+    revision_action_start = len(runtime.context.action_results)
+    try:
+        run_prepared_editor_revision(runtime, _editor_revision_spec(fixture))
+    except BaseException as exc:
+        runtime.add_assertion(
+            editor_prepared_revision_failure_assertion(exc),
+            required=False,
+        )
+        raise
+    revision_results, refinalized = editor_prepared_revision_assertions(
+        runtime.context,
+        fixture=fixture,
+        initial_snapshot=initial,
+        action_start=revision_action_start,
+        action_end=len(runtime.context.action_results),
+    )
+    results = {result.assertion_id: result for result in revision_results}
+    for assertion_id in EDITOR_REVISION_REQUIRED_ASSERTIONS[2:6]:
+        runtime.add_assertion(results[assertion_id])
+    runtime.observations["refinalized_bundle"] = refinalized
+    loader_evidence = runtime.harness.run_action(
+        "experiment.load_authoritative_via_ui",
+        lambda: ExperimentLoaderDriver(runtime.context).load_prepared_design(
+            Path(refinalized["experiment_dir"]),
+            expected_name=experiment["renamed_name"],
+            expected_plan_id=str(refinalized["plan_id"]),
+            expected_plan_revision=int(refinalized["plan_revision"]),
+        ),
+    )["evidence"]
+    capture_milestone(
+        runtime.context,
+        "reloaded",
+        evidence={
+            key: loader_evidence[key]
+            for key in ("plan_state", "eligibility_status")
+        },
+    )
+    reload_result, assignments = editor_prepared_reload_assertions(
+        runtime.context,
+        prepared_evidence=refinalized,
+        loader_evidence=loader_evidence,
+    )
+    runtime.observations["reload_activation"] = dict(reload_result.evidence)
+    for result in (reload_result, assignments, results["experiment.key_files_consistent"]):
+        runtime.add_assertion(result)
+    capture_milestone(
+        runtime.context,
+        "validated",
+        evidence={
+            "plan_state": reload_result.evidence.get("plan_state"),
+            "eligibility_status": reload_result.evidence.get(
+                "eligibility_status"
+            ),
+            "assertion_count": len(EDITOR_REVISION_REQUIRED_ASSERTIONS),
         },
     )
 
@@ -614,37 +824,27 @@ def _smoke_payload(
 def _editor_payload(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> ComposedReportPayload:
-    fixture = runtime.fixture
-    decisions = _decisions(runtime)
-    evidence = _assertion_evidence(runtime)
-    passed = all(decisions.get(item) == "pass" for item in EDITOR_REQUIRED_ASSERTIONS)
-    return ComposedReportPayload(
-        workload={
-            **_base_workload(runtime),
-            "experiment_name": fixture["experiment"]["name"],
-            "plate_name": fixture["experiment"]["plate_name"],
-            "expected_reaction_count": fixture["experiment"]["replicates"],
-            "well_ids": list(fixture["experiment"]["expected_well_ids"]),
-            "expected_editor_finalization_operations": fixture["workload"][
-                "expected_editor_finalization_operations"
-            ],
-            "speed_multiplier": runtime.harness.config.speed_multiplier,
-            "timeout_seconds": runtime.harness.config.timeout_seconds,
-        },
-        workflow_values={"cleanup_results": [dict(teardown)]},
-        queue={"status": "not_applicable", "values": {"print_commands_executed": 0}},
-        persistence={
-            "status": "measured" if passed else "partial",
-            "values": {
-                "assertion_decisions": decisions,
-                "prepared_bundle": evidence.get("experiment.prepared_bundle_valid", {}),
-                "reload_activation": evidence.get("experiment.prepared_reload_ready", {}),
-            },
-        },
-        limitations=(
-            "The scenario validates the editor and authoritative application lifecycle without printing or connecting the simulated machine.",
-            "The simulator does not validate firmware, protocol framing, motion, pressure, cameras, balance behavior, or droplet quality.",
-            "Generated plan IDs, timestamps, durations, and session paths are not expected to be byte-identical across replay.",
+    return build_editor_lifecycle_payload(
+        runtime,
+        teardown,
+        create_finalize_report_spec(
+            runtime,
+            base_workload=_base_workload(runtime),
+            required_assertion_ids=EDITOR_REQUIRED_ASSERTIONS,
+        ),
+    )
+
+
+def _editor_revision_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    return build_editor_lifecycle_payload(
+        runtime,
+        teardown,
+        prepared_revision_report_spec(
+            runtime,
+            base_workload=_base_workload(runtime),
+            required_assertion_ids=EDITOR_REVISION_REQUIRED_ASSERTIONS,
         ),
     )
 
@@ -751,6 +951,16 @@ def _editor_artifact(runtime: JourneyRuntime, teardown: Mapping[str, Any]) -> An
     )
 
 
+def _editor_revision_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return editor_artifacts_cleanup_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(EDITOR_REVISION_REQUIRED_SCREENSHOTS),
+        teardown=teardown,
+    )
+
+
 def _multi_artifact(runtime: JourneyRuntime, teardown: Mapping[str, Any]) -> Any:
     return multi_stock_artifacts_assertion(
         screenshots=runtime.context.screenshots,
@@ -776,6 +986,21 @@ def _editor_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> str:
         "Milestone 7 composed editor create/finalize/reload\n"
         f"Status: {report['classification']['status']}\n"
         f"Assertions: {passed} / {len(EDITOR_REQUIRED_ASSERTIONS)}\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _editor_revision_summary(
+    report: Mapping[str, Any], runtime: JourneyRuntime
+) -> str:
+    passed = sum(
+        row["decision"] == "pass" for row in runtime.harness.assertion_results
+    )
+    return (
+        "Milestone 7 composed prepared editor rename/refinalize/reload\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Assertions: {passed} / {len(EDITOR_REVISION_REQUIRED_ASSERTIONS)}\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
     )
@@ -821,6 +1046,33 @@ EDITOR_DEFINITION = JourneyDefinition(
     payload_builder=_editor_payload,
     summary_builder=_editor_summary,
 )
+EDITOR_REVISION_DEFINITION = JourneyDefinition(
+    registry_id=EDITOR_REVISION_WORKLOAD_ID,
+    scenario_name=EDITOR_REVISION_SCENARIO_NAME,
+    scenario_version=EDITOR_REVISION_SCENARIO_VERSION,
+    workload_id=EDITOR_REVISION_WORKLOAD_ID,
+    required_action_ids=(
+        _COMMON_ACTIONS
+        | _EDITOR_ACTIONS
+        | frozenset(
+            {
+                "editor.rename_prepared_via_ui",
+                "editor.edit_prepared_design_via_ui",
+                "editor.regenerate_prepared_design_via_ui",
+                "editor.refinalize_prepared_via_ui",
+                "experiment.load_authoritative_via_ui",
+            }
+        )
+    ),
+    required_ui_action_ids=EDITOR_REVISION_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=EDITOR_REVISION_REQUIRED_ASSERTIONS,
+    required_screenshots=EDITOR_REVISION_REQUIRED_SCREENSHOTS,
+    fixture_loader=_editor_revision_fixture,
+    body=_editor_revision_body,
+    artifact_assertion=_editor_revision_artifact,
+    payload_builder=_editor_revision_payload,
+    summary_builder=_editor_revision_summary,
+)
 MULTI_STOCK_DEFINITION = JourneyDefinition(
     registry_id=MULTI_STOCK_WORKLOAD_ID,
     scenario_name=MULTI_STOCK_SCENARIO_NAME,
@@ -839,7 +1091,12 @@ MULTI_STOCK_DEFINITION = JourneyDefinition(
 
 JOURNEY_DEFINITIONS = {
     definition.registry_id: definition
-    for definition in (SMOKE_DEFINITION, EDITOR_DEFINITION, MULTI_STOCK_DEFINITION)
+    for definition in (
+        SMOKE_DEFINITION,
+        EDITOR_DEFINITION,
+        EDITOR_REVISION_DEFINITION,
+        MULTI_STOCK_DEFINITION,
+    )
 }
 JOURNEY_DEFINITION_IDS = frozenset(JOURNEY_DEFINITIONS)
 

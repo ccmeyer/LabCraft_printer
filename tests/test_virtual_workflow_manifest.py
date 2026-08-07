@@ -274,6 +274,7 @@ def test_cli_scenario_surface_is_registry_driven_and_legacy_compatible():
         STRESS_WORKLOAD_ID,
         SMOKE_WORKLOAD_ID,
         EDITOR_WORKLOAD_ID,
+        EDITOR_RENAME_WORKLOAD_ID,
         SOFT_STOP_RESUME_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
@@ -311,6 +312,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
     if scenario_id in {
         SMOKE_WORKLOAD_ID,
         EDITOR_WORKLOAD_ID,
+        EDITOR_RENAME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
     }:
         from tools.virtual_workflows.journeys import JourneyRunConfig
@@ -322,6 +324,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
     if scenario_id not in {
         SMOKE_WORKLOAD_ID,
         EDITOR_WORKLOAD_ID,
+        EDITOR_RENAME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
     }:
         assert config.fixture_path == SCENARIO_FIXTURES[scenario_id].resolve()
@@ -333,10 +336,6 @@ def test_registry_dispatch_uses_existing_config_and_runner(
 @pytest.mark.parametrize(
     ("scenario_id", "runner_name"),
     [
-        (
-            EDITOR_RENAME_WORKLOAD_ID,
-            "run_editor_prestart_rename_refinalize_scenario",
-        ),
         (
             EDITOR_POST_START_WORKLOAD_ID,
             "run_editor_post_start_lock_scenario",

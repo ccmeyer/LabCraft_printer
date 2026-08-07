@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import csv
-import hashlib
 import io
 import json
 import math
@@ -100,6 +98,18 @@ from tools.virtual_workflows.actions import (  # noqa: E402
     teardown_scenario,
     validate_prepared_bundle,
     validate_refinalized_bundle,
+)
+from tools.virtual_workflows.authoritative_evidence import (  # noqa: E402
+    capture_authoritative_bundle,
+    check_evidence as _check_evidence,
+    editor_directory_snapshot as _directory_file_snapshot,
+    read_audit_rows as _audit_rows,
+    read_csv_rows as _csv_rows,
+    runtime_assignments as _runtime_assignments,
+    sha256_file as _file_sha256,
+)
+from tools.virtual_workflows.assertions import (  # noqa: E402
+    editor_prepared_bundle_assertions,
 )
 from tools.virtual_workflows.report import (  # noqa: E402
     REPORT_SCHEMA_NAME,
@@ -641,58 +651,12 @@ class _EventLog:
                 handle.write(json.dumps(event, sort_keys=True) + "\n")
 
 
-def _runtime_assignments(model: Any) -> dict[str, str]:
-    return {
-        well.well_id: well.get_assigned_reaction().unique_id
-        for well in model.well_plate.get_all_wells()
-        if well.get_assigned_reaction() is not None
-    }
-
-
-def _csv_rows(path: Path) -> dict[str, dict[str, str]]:
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    if not rows or "Well ID" not in rows[0]:
-        raise RuntimeError(f"{path.name} has no Well ID rows")
-    return {
-        str(row.pop("Well ID")): {str(key): str(value) for key, value in row.items()}
-        for row in rows
-    }
-
-
-def _file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _audit_rows(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            value = json.loads(line)
-            if isinstance(value, dict):
-                rows.append(value)
-    return rows
-
-
 def _design_without_name(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = json.loads(json.dumps(payload))
     metadata = normalized.get("metadata")
     if isinstance(metadata, dict):
         metadata.pop("name", None)
     return normalized
-
-
-def _directory_file_snapshot(directory: Path) -> dict[str, Any]:
-    files = sorted(path for path in directory.rglob("*") if path.is_file())
-    return {
-        "inventory": [path.relative_to(directory).as_posix() for path in files],
-        "sha256": {
-            path.relative_to(directory).as_posix(): _file_sha256(path)
-            for path in files
-        },
-    }
 
 
 def _copy_semantic_design(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -702,14 +666,6 @@ def _copy_semantic_design(payload: Mapping[str, Any]) -> dict[str, Any]:
         metadata.pop("name", None)
         metadata.pop("printed_volume_tolerance_nL", None)
     return normalized
-
-
-def _check_evidence(
-    checks: Mapping[str, bool],
-    **values: Any,
-) -> dict[str, Any]:
-    failed = sorted(name for name, passed in checks.items() if not passed)
-    return {"checks": dict(checks), "failed_checks": failed, **values}
 
 
 def _write_summary(report: Mapping[str, Any]) -> str:
@@ -913,102 +869,31 @@ def _run_editor_lifecycle_scenario(
         resume_path = Path(experiment_model.execution_resume_file_path).resolve()
 
         def validate_pre_activation() -> Mapping[str, Any]:
-            design = json.loads(design_path.read_text(encoding="utf-8"))
-            plan = load_execution_plan(
-                experiment_model.execution_plan_file_path
-            )
-            bundle = inspect_authoritative_execution(experiment_dir, design)
-            decoded = decode_execution_progress(plan, bundle.progress_payload)
-            expected_wells = initial_fixture["experiment"]["expected_well_ids"]
-            plan_wells = [well.well_id for well in plan.wells]
-            expected_assignments = {
-                well.well_id: well.reaction_id for well in plan.wells
-            }
-            assignments = _runtime_assignments(context.model)
-            total_added = sum(
-                int(details["added_droplets"])
-                for well in decoded.progress_wells.values()
-                for details in well["reagents"].values()
-            )
-            all_incomplete = all(
-                not bool(well["completed"])
-                for well in decoded.progress_wells.values()
-            )
-            key_rows = _csv_rows(Path(experiment_model.key_file_path))
-            concentration_rows = _csv_rows(
-                Path(experiment_model.concentration_key_file_path)
-            )
-            target_by_well = {
-                well_id: sum(
-                    int(details["target_droplets"])
-                    for details in entry["reagents"].values()
-                )
-                for well_id, entry in decoded.progress_wells.items()
-            }
-            key_totals = {
-                well_id: sum(int(float(value or 0)) for value in row.values())
-                for well_id, row in key_rows.items()
-            }
-            concentration_values = {
-                well_id: sum(float(value or 0) for value in row.values())
-                for well_id, row in concentration_rows.items()
-            }
-            calibration_path = experiment_dir / "execution_calibrations.json"
-            calibration_empty = True
-            if calibration_path.exists():
-                calibration = load_execution_calibrations(calibration_path)
-                calibration_empty = (
-                    not calibration.records
-                    and not calibration.manual_refuel_checks
-                )
-            checks = {
-                "directory_name_matches": experiment_dir.name
-                == initial_fixture["experiment"]["name"],
-                "metadata_name_matches": design.get("metadata", {}).get("name")
-                == initial_fixture["experiment"]["name"],
-                "design_hash_matches": plan.design_sha256
-                == canonical_sha256(design),
-                "plan_revision_one": plan.plan_revision == 1,
-                "plan_prepared": plan.state is ExecutionPlanState.PREPARED,
-                "plan_wells_exact": plan_wells == expected_wells,
-                "history_exact": len(bundle.history) == 1
-                and bundle.history[0] == plan,
-                "bundle_valid": bool(bundle.valid),
-                "ready_to_start": bundle.eligibility.status
-                == "ready_to_start",
-                "progress_schema_v2": decoded.schema_version == 2,
-                "progress_reference_matches": decoded.reference.plan_id
-                == plan.plan_id
-                and decoded.reference.plan_revision == plan.plan_revision,
-                "progress_zero": total_added == 0 and all_incomplete,
-                "resume_absent": not resume_path.exists(),
-                "key_wells_exact": list(key_rows) == expected_wells,
-                "concentration_wells_exact": list(concentration_rows)
-                == expected_wells,
-                "key_targets_match": key_totals == target_by_well,
-                "concentration_targets_match": all(
-                    math.isclose(value, 1.0, rel_tol=0.0, abs_tol=1e-9)
-                    for value in concentration_values.values()
+            bundle, keys = editor_prepared_bundle_assertions(
+                context,
+                expected_well_ids=tuple(
+                    initial_fixture["experiment"]["expected_well_ids"]
                 ),
-                "runtime_assignments_match": assignments
-                == expected_assignments,
-                "calibration_history_absent": calibration_empty,
-                "printing_history_absent": total_added == 0,
-            }
-            evidence = _check_evidence(
-                checks,
-                experiment_dir=str(experiment_dir),
-                design_path=str(design_path),
-                plan_id=plan.plan_id,
-                plan_revision=plan.plan_revision,
-                plan_state=plan.state.value,
-                eligibility_status=bundle.eligibility.status,
-                well_ids=plan_wells,
-                runtime_assignments=assignments,
-                key_rows=key_rows,
-                concentration_rows=concentration_rows,
-                total_added_droplets=total_added,
             )
+            checks = {
+                **dict(bundle.evidence["checks"]),
+                **dict(keys.evidence["checks"]),
+                "metadata_name_matches": Path(
+                    bundle.evidence["experiment_dir"]
+                ).name
+                == initial_fixture["experiment"]["name"],
+                "printing_history_absent": bundle.evidence[
+                    "total_added_droplets"
+                ] == 0,
+            }
+            evidence = {
+                **dict(bundle.evidence),
+                **dict(keys.evidence),
+                "checks": checks,
+                "failed_checks": sorted(
+                    name for name, passed in checks.items() if not passed
+                ),
+            }
             prepared_evidence.update(evidence)
             if evidence["failed_checks"]:
                 raise RuntimeError(
@@ -1034,55 +919,21 @@ def _run_editor_lifecycle_scenario(
 
         if rename_refinalize:
             initial_dir = experiment_dir
-            initial_design_path = design_path
-            initial_design = json.loads(
-                initial_design_path.read_text(encoding="utf-8")
-            )
+            initial_snapshot = capture_authoritative_bundle(context)
+            initial_design = initial_snapshot.design
             initial_plan = load_execution_plan(
                 experiment_model.execution_plan_file_path
             )
-            initial_assignments = dict(
-                prepared_evidence["runtime_assignments"]
-            )
-            initial_audit_path = Path(
-                experiment_model.experiment_audit_file_path
-            )
-            initial_audit = _audit_rows(initial_audit_path)
-            initial_revision_paths = sorted(
-                Path(experiment_model.execution_plan_revisions_dir_path).glob(
-                    "*.json"
-                )
-            )
-            initial_hashes = {
-                "experiment_design.json": _file_sha256(initial_design_path),
-                "execution_plan.json": _file_sha256(
-                    Path(experiment_model.execution_plan_file_path)
-                ),
-                "progress.json": _file_sha256(
-                    Path(experiment_model.progress_file_path)
-                ),
-                "key.csv": _file_sha256(
-                    Path(experiment_model.key_file_path)
-                ),
-                "concentration_key.csv": _file_sha256(
-                    Path(experiment_model.concentration_key_file_path)
-                ),
-                **{
-                    f"execution_plan_revisions/{path.name}": _file_sha256(
-                        path
-                    )
-                    for path in initial_revision_paths
-                },
-            }
+            initial_assignments = initial_snapshot.assignments
+            initial_audit = initial_snapshot.audit_rows
+            initial_hashes = initial_snapshot.core_file_hashes
             rename_evidence["before"] = {
                 "experiment_dir": str(initial_dir),
-                "metadata_name": initial_design.get("metadata", {}).get(
-                    "name"
-                ),
-                "plan_id": initial_plan.plan_id,
-                "plan_revision": initial_plan.plan_revision,
-                "plan_design_sha256": initial_plan.design_sha256,
-                "resume_present": resume_path.exists(),
+                "metadata_name": initial_snapshot.metadata.get("name"),
+                "plan_id": initial_snapshot.plan_id,
+                "plan_revision": initial_snapshot.plan_revision,
+                "plan_design_sha256": initial_snapshot.plan_design_sha256,
+                "resume_present": initial_snapshot.resume_present,
                 "runtime_assignments": initial_assignments,
                 "file_sha256": initial_hashes,
                 "audit_rows": initial_audit,
@@ -1131,48 +982,18 @@ def _run_editor_lifecycle_scenario(
             ).resolve()
 
             def validate_after_refinalization() -> Mapping[str, Any]:
-                design = json.loads(design_path.read_text(encoding="utf-8"))
-                plan = load_execution_plan(
-                    experiment_model.execution_plan_file_path
+                snapshot = capture_authoritative_bundle(
+                    context,
+                    experiments_root=dependencies.roots.experiments_root,
                 )
-                bundle = inspect_authoritative_execution(
-                    experiment_dir,
-                    design,
-                )
-                decoded = decode_execution_progress(
-                    plan,
-                    bundle.progress_payload,
-                )
+                design = snapshot.design
                 expected_wells = fixture["experiment"][
                     "refinalized_expected_well_ids"
                 ]
-                plan_wells = [well.well_id for well in plan.wells]
-                expected_assignments = {
-                    well.well_id: well.reaction_id for well in plan.wells
-                }
-                assignments = _runtime_assignments(context.model)
-                total_added = sum(
-                    int(details["added_droplets"])
-                    for well in decoded.progress_wells.values()
-                    for details in well["reagents"].values()
-                )
-                all_incomplete = all(
-                    not bool(well["completed"])
-                    for well in decoded.progress_wells.values()
-                )
-                key_rows = _csv_rows(
-                    Path(experiment_model.key_file_path)
-                )
-                concentration_rows = _csv_rows(
-                    Path(experiment_model.concentration_key_file_path)
-                )
-                target_by_well = {
-                    well_id: sum(
-                        int(details["target_droplets"])
-                        for details in entry["reagents"].values()
-                    )
-                    for well_id, entry in decoded.progress_wells.items()
-                }
+                plan_wells = list(snapshot.plan_well_ids)
+                assignments = snapshot.assignments
+                key_rows = snapshot.key_rows
+                concentration_rows = snapshot.concentration_rows
                 key_totals = {
                     well_id: sum(
                         int(float(value or 0)) for value in row.values()
@@ -1206,66 +1027,11 @@ def _run_editor_lifecycle_scenario(
                     if len(factors) == 1
                     else {}
                 )
-                calibration_path = (
-                    experiment_dir / "execution_calibrations.json"
-                )
-                calibration_empty = True
-                if calibration_path.exists():
-                    calibration = load_execution_calibrations(
-                        calibration_path
-                    )
-                    calibration_empty = (
-                        not calibration.records
-                        and not calibration.manual_refuel_checks
-                    )
-                experiments_root = Path(
-                    dependencies.roots.experiments_root
-                ).resolve()
-                experiment_directories = sorted(
-                    path.name
-                    for path in experiments_root.iterdir()
-                    if path.is_dir() and not path.name.startswith(".")
-                )
-                staging_directories = sorted(
-                    str(path.relative_to(experiments_root))
-                    for path in experiments_root.rglob(".*.staging-*")
-                    if path.is_dir()
-                )
-                current_plan_paths = sorted(
-                    path.relative_to(experiments_root).as_posix()
-                    for path in experiments_root.rglob(
-                        "execution_plan.json"
-                    )
-                )
-                audit_rows = _audit_rows(
-                    Path(experiment_model.experiment_audit_file_path)
-                )
-                revision_paths = sorted(
-                    Path(
-                        experiment_model.execution_plan_revisions_dir_path
-                    ).glob("*.json")
-                )
-                file_hashes = {
-                    "experiment_design.json": _file_sha256(design_path),
-                    "execution_plan.json": _file_sha256(
-                        Path(experiment_model.execution_plan_file_path)
-                    ),
-                    "progress.json": _file_sha256(
-                        Path(experiment_model.progress_file_path)
-                    ),
-                    "key.csv": _file_sha256(
-                        Path(experiment_model.key_file_path)
-                    ),
-                    "concentration_key.csv": _file_sha256(
-                        Path(experiment_model.concentration_key_file_path)
-                    ),
-                    **{
-                        f"execution_plan_revisions/{path.name}": (
-                            _file_sha256(path)
-                        )
-                        for path in revision_paths
-                    },
-                }
+                experiment_directories = list(snapshot.experiment_directories)
+                staging_directories = list(snapshot.staging_directories)
+                current_plan_paths = list(snapshot.current_plan_paths)
+                audit_rows = snapshot.audit_rows
+                file_hashes = snapshot.core_file_hashes
                 archived_root = (
                     experiment_dir
                     / "superseded_prepared_execution_plans"
@@ -1330,17 +1096,16 @@ def _run_editor_lifecycle_scenario(
                         rel_tol=0.0,
                         abs_tol=1e-9,
                     ),
-                    "bundle_valid": bool(bundle.valid),
-                    "design_hash_matches": plan.design_sha256
-                    == canonical_sha256(design),
-                    "fresh_plan_identity": plan.plan_id
-                    != initial_plan.plan_id,
-                    "plan_revision_one": plan.plan_revision == 1,
-                    "plan_prepared": plan.state
-                    is ExecutionPlanState.PREPARED,
+                    "bundle_valid": snapshot.bundle_valid,
+                    "design_hash_matches": snapshot.plan_design_sha256
+                    == snapshot.design_sha256,
+                    "fresh_plan_identity": snapshot.plan_id
+                    != initial_snapshot.plan_id,
+                    "plan_revision_one": snapshot.plan_revision == 1,
+                    "plan_prepared": snapshot.plan_state == "prepared",
                     "plan_volume_basis_updated": (
                         math.isclose(
-                            plan.volume_basis.target_printed_volume_nL,
+                            snapshot.target_printed_volume_nl,
                             fixture["experiment"][
                                 "refinalized_printed_volume_nL"
                             ],
@@ -1348,7 +1113,7 @@ def _run_editor_lifecycle_scenario(
                             abs_tol=1e-9,
                         )
                         and math.isclose(
-                            plan.volume_basis.final_reaction_volume_nL,
+                            snapshot.final_reaction_volume_nl,
                             fixture["experiment"][
                                 "refinalized_final_volume_nL"
                             ],
@@ -1356,27 +1121,24 @@ def _run_editor_lifecycle_scenario(
                             abs_tol=1e-9,
                         )
                     ),
-                    "plan_modes_updated": {
-                        stock.printing_mode for stock in plan.stocks
-                    }
+                    "plan_modes_updated": set(snapshot.plan_stock_modes)
                     == {fixture["reagent"]["refinalized_printing_mode"]},
                     "plan_wells_exact": plan_wells == expected_wells,
-                    "history_current_matches": bool(bundle.history)
-                    and bundle.history[-1] == plan,
-                    "ready_to_start": bundle.eligibility.status
-                    == "ready_to_start",
-                    "progress_reference_matches": decoded.reference.plan_id
-                    == plan.plan_id
-                    and decoded.reference.plan_revision
-                    == plan.plan_revision,
-                    "progress_zero": total_added == 0 and all_incomplete,
-                    "resume_absent": not resume_path.exists(),
+                    "history_current_matches": snapshot.history_matches_current,
+                    "ready_to_start": snapshot.eligibility_status == "ready_to_start",
+                    "progress_reference_matches": snapshot.progress_plan_id
+                    == snapshot.plan_id
+                    and snapshot.progress_plan_revision
+                    == snapshot.plan_revision,
+                    "progress_zero": snapshot.total_added_droplets == 0
+                    and not snapshot.completed_well_ids,
+                    "resume_absent": not snapshot.resume_present,
                     "key_wells_exact": list(key_rows) == expected_wells,
                     "concentration_wells_exact": list(
                         concentration_rows
                     )
                     == expected_wells,
-                    "key_targets_match": key_totals == target_by_well,
+                    "key_targets_match": key_totals == snapshot.targets_by_well,
                     "concentration_targets_match": len(
                         observed_concentrations
                     )
@@ -1394,7 +1156,7 @@ def _run_editor_lifecycle_scenario(
                         )
                     ),
                     "runtime_assignments_match_plan": assignments
-                    == expected_assignments,
+                    == snapshot.expected_assignments,
                     "runtime_assignments_replaced": assignments
                     != initial_assignments,
                     "original_plan_archived": archived_plan_path.is_file()
@@ -1405,8 +1167,9 @@ def _run_editor_lifecycle_scenario(
                         archived_design_path.read_text(encoding="utf-8")
                     )
                     == initial_design,
-                    "calibration_history_absent": calibration_empty,
-                    "printing_history_absent": total_added == 0,
+                    "calibration_history_absent": snapshot.calibration_record_count == 0
+                    and snapshot.manual_refuel_check_count == 0,
+                    "printing_history_absent": snapshot.total_added_droplets == 0,
                     "single_experiment_directory": (
                         experiment_directories
                         == [fixture["experiment"]["renamed_name"]]
@@ -1428,12 +1191,12 @@ def _run_editor_lifecycle_scenario(
                     design_path=str(design_path),
                     initial_name=fixture["experiment"]["initial_name"],
                     renamed_name=fixture["experiment"]["renamed_name"],
-                    previous_plan_id=initial_plan.plan_id,
-                    plan_id=plan.plan_id,
-                    plan_revision=plan.plan_revision,
-                    plan_state=plan.state.value,
-                    eligibility_status=bundle.eligibility.status,
-                    history_count=len(bundle.history),
+                    previous_plan_id=initial_snapshot.plan_id,
+                    plan_id=snapshot.plan_id,
+                    plan_revision=snapshot.plan_revision,
+                    plan_state=snapshot.plan_state,
+                    eligibility_status=snapshot.eligibility_status,
+                    history_count=len(snapshot.history_json),
                     well_ids=plan_wells,
                     runtime_assignments=assignments,
                     runtime_assignments_before=initial_assignments,
@@ -1465,7 +1228,7 @@ def _run_editor_lifecycle_scenario(
                     },
                     key_rows=key_rows,
                     concentration_rows=concentration_rows,
-                    total_added_droplets=total_added,
+                    total_added_droplets=snapshot.total_added_droplets,
                     experiment_directories=experiment_directories,
                     staging_directories=staging_directories,
                     current_plan_paths=current_plan_paths,
@@ -1588,44 +1351,24 @@ def _run_editor_lifecycle_scenario(
                 }
 
             locked = lock_execution_for_printing(context, lock_source)
-            locked_design = json.loads(
-                source_design_path.read_text(encoding="utf-8")
-            )
-            locked_bundle = inspect_authoritative_execution(
-                source_dir,
-                locked_design,
-            )
-            locked_plan = load_execution_plan(
-                experiment_model.execution_plan_file_path
-            )
-            locked_resume = load_execution_resume(
-                experiment_model.execution_resume_file_path
-            )
-            locked_decoded = decode_execution_progress(
-                locked_plan,
-                locked_bundle.progress_payload,
-            )
-            locked_total_added = sum(
-                int(details["added_droplets"])
-                for well in locked_decoded.progress_wells.values()
-                for details in well["reagents"].values()
-            )
-            locked_snapshot = _directory_file_snapshot(source_dir)
+            locked_authoritative = capture_authoritative_bundle(context)
+            locked_design = locked_authoritative.design
+            locked_snapshot = locked_authoritative.directory.editor_projection()
             locked_checks = {
-                "bundle_valid": bool(locked_bundle.valid),
-                "active": locked_plan.state is ExecutionPlanState.ACTIVE,
-                "revision_two": locked_plan.plan_revision == 2,
-                "printing_started": locked_plan.lock_reason
+                "bundle_valid": locked_authoritative.bundle_valid,
+                "active": locked_authoritative.plan_state == "active",
+                "revision_two": locked_authoritative.plan_revision == 2,
+                "printing_started": locked_authoritative.plan_lock_reason
                 == "printing_started",
-                "history_two": len(locked_bundle.history) == 2
-                and locked_bundle.history[-1] == locked_plan,
-                "resume_clean": locked_resume.state == "clean",
-                "resume_zero_intents": not locked_resume.intents,
-                "resume_reference_matches": locked_resume.plan_id
-                == locked_plan.plan_id
-                and locked_resume.plan_revision
-                == locked_plan.plan_revision,
-                "zero_progress": locked_total_added == 0,
+                "history_two": len(locked_authoritative.history_json) == 2
+                and locked_authoritative.history_matches_current,
+                "resume_clean": locked_authoritative.resume_state == "clean",
+                "resume_zero_intents": locked_authoritative.resume_intent_count == 0,
+                "resume_reference_matches": locked_authoritative.resume_plan_id
+                == locked_authoritative.plan_id
+                and locked_authoritative.resume_plan_revision
+                == locked_authoritative.plan_revision,
+                "zero_progress": locked_authoritative.total_added_droplets == 0,
                 "design_unchanged": locked_design == source_design,
             }
             post_start_evidence["source_locked"] = _check_evidence(
@@ -1633,14 +1376,14 @@ def _run_editor_lifecycle_scenario(
                 activation=activation,
                 lock=locked,
                 experiment_dir=str(source_dir),
-                plan_id=locked_plan.plan_id,
-                plan_revision=locked_plan.plan_revision,
-                plan_state=locked_plan.state.value,
-                lock_reason=locked_plan.lock_reason,
-                history_count=len(locked_bundle.history),
-                total_added_droplets=locked_total_added,
-                resume_state=locked_resume.state,
-                resume_intent_count=len(locked_resume.intents),
+                plan_id=locked_authoritative.plan_id,
+                plan_revision=locked_authoritative.plan_revision,
+                plan_state=locked_authoritative.plan_state,
+                lock_reason=locked_authoritative.plan_lock_reason,
+                history_count=len(locked_authoritative.history_json),
+                total_added_droplets=locked_authoritative.total_added_droplets,
+                resume_state=locked_authoritative.resume_state,
+                resume_intent_count=locked_authoritative.resume_intent_count,
                 runtime_assignments=_runtime_assignments(context.model),
                 directory_snapshot=locked_snapshot,
                 audit_rows=_audit_rows(
@@ -1657,17 +1400,17 @@ def _run_editor_lifecycle_scenario(
                     )
                 )
             assertion_evidence["experiment.active_edit_lock"] = {
-                "plan_state": locked_plan.state.value,
-                "plan_revision": locked_plan.plan_revision,
-                "lock_reason": locked_plan.lock_reason,
+                "plan_state": locked_authoritative.plan_state,
+                "plan_revision": locked_authoritative.plan_revision,
+                "lock_reason": locked_authoritative.plan_lock_reason,
             }
             capture_milestone(
                 context,
                 "source_locked",
                 evidence={
-                    "plan_state": locked_plan.state.value,
-                    "plan_revision": locked_plan.plan_revision,
-                    "lock_reason": locked_plan.lock_reason,
+                    "plan_state": locked_authoritative.plan_state,
+                    "plan_revision": locked_authoritative.plan_revision,
+                    "lock_reason": locked_authoritative.plan_lock_reason,
                 },
             )
 
@@ -1712,35 +1455,11 @@ def _run_editor_lifecycle_scenario(
             copy_resume_path = Path(
                 experiment_model.execution_resume_file_path
             ).resolve()
-            copy_design = json.loads(
-                copy_design_path.read_text(encoding="utf-8")
-            )
-            copy_plan = load_execution_plan(
-                experiment_model.execution_plan_file_path
-            )
-            copy_bundle = inspect_authoritative_execution(
-                copy_dir,
-                copy_design,
-            )
-            copy_decoded = decode_execution_progress(
-                copy_plan,
-                copy_bundle.progress_payload,
-            )
-            copy_total_added = sum(
-                int(details["added_droplets"])
-                for well in copy_decoded.progress_wells.values()
-                for details in well["reagents"].values()
-            )
-            copy_key_rows = _csv_rows(
-                Path(experiment_model.key_file_path)
-            )
-            copy_concentration_rows = _csv_rows(
-                Path(experiment_model.concentration_key_file_path)
-            )
-            copy_calibration_path = (
-                copy_dir / "execution_calibrations.json"
-            )
-            copy_calibration_absent = not copy_calibration_path.exists()
+            copy_authoritative = capture_authoritative_bundle(context)
+            copy_design = copy_authoritative.design
+            copy_key_rows = copy_authoritative.key_rows
+            copy_concentration_rows = copy_authoritative.concentration_rows
+            copy_calibration_absent = not copy_authoritative.calibration_present
             source_after_snapshot = _directory_file_snapshot(source_dir)
             copy_checks = {
                 "copy_directory_distinct": copy_dir != source_dir,
@@ -1768,22 +1487,19 @@ def _run_editor_lifecycle_scenario(
                     rel_tol=0.0,
                     abs_tol=1e-9,
                 ),
-                "copy_bundle_valid": bool(copy_bundle.valid),
-                "copy_prepared": copy_plan.state
-                is ExecutionPlanState.PREPARED,
-                "copy_revision_one": copy_plan.plan_revision == 1,
-                "copy_ready_to_start": copy_bundle.eligibility.status
+                "copy_bundle_valid": copy_authoritative.bundle_valid,
+                "copy_prepared": copy_authoritative.plan_state == "prepared",
+                "copy_revision_one": copy_authoritative.plan_revision == 1,
+                "copy_ready_to_start": copy_authoritative.eligibility_status
                 == "ready_to_start",
-                "copy_plan_distinct": copy_plan.plan_id
-                != locked_plan.plan_id,
-                "copy_history_fresh": len(copy_bundle.history) == 1
-                and copy_bundle.history[0] == copy_plan,
-                "copy_zero_progress": copy_total_added == 0,
-                "copy_resume_absent": not copy_resume_path.exists(),
+                "copy_plan_distinct": copy_authoritative.plan_id
+                != locked_authoritative.plan_id,
+                "copy_history_fresh": len(copy_authoritative.history_json) == 1
+                and copy_authoritative.history_matches_current,
+                "copy_zero_progress": copy_authoritative.total_added_droplets == 0,
+                "copy_resume_absent": not copy_authoritative.resume_present,
                 "copy_calibration_absent": copy_calibration_absent,
-                "copy_wells_exact": [
-                    well.well_id for well in copy_plan.wells
-                ]
+                "copy_wells_exact": list(copy_authoritative.plan_well_ids)
                 == fixture["experiment"]["expected_well_ids"],
                 "copy_key_wells_exact": list(copy_key_rows)
                 == fixture["experiment"]["expected_well_ids"],
@@ -1804,17 +1520,17 @@ def _run_editor_lifecycle_scenario(
                 copy_checks,
                 experiment_dir=str(copy_dir),
                 design_path=str(copy_design_path),
-                plan_id=copy_plan.plan_id,
-                plan_revision=copy_plan.plan_revision,
-                plan_state=copy_plan.state.value,
-                eligibility_status=copy_bundle.eligibility.status,
-                history_count=len(copy_bundle.history),
-                total_added_droplets=copy_total_added,
-                resume_present=copy_resume_path.exists(),
+                plan_id=copy_authoritative.plan_id,
+                plan_revision=copy_authoritative.plan_revision,
+                plan_state=copy_authoritative.plan_state,
+                eligibility_status=copy_authoritative.eligibility_status,
+                history_count=len(copy_authoritative.history_json),
+                total_added_droplets=copy_authoritative.total_added_droplets,
+                resume_present=copy_authoritative.resume_present,
                 runtime_assignments=_runtime_assignments(context.model),
                 key_rows=copy_key_rows,
                 concentration_rows=copy_concentration_rows,
-                directory_snapshot=_directory_file_snapshot(copy_dir),
+                directory_snapshot=copy_authoritative.directory.editor_projection(),
             )
             post_start_evidence["editable_copy_after_finalize"] = (
                 copy_evidence
@@ -1842,12 +1558,12 @@ def _run_editor_lifecycle_scenario(
             assertion_evidence[
                 "experiment.editable_copy_fresh_execution"
             ] = {
-                "source_plan_id": locked_plan.plan_id,
-                "copy_plan_id": copy_plan.plan_id,
-                "copy_plan_revision": copy_plan.plan_revision,
-                "copy_plan_state": copy_plan.state.value,
+                "source_plan_id": locked_authoritative.plan_id,
+                "copy_plan_id": copy_authoritative.plan_id,
+                "copy_plan_revision": copy_authoritative.plan_revision,
+                "copy_plan_state": copy_authoritative.plan_state,
                 "copy_resume_absent_before_activation": True,
-                "copy_history_count": len(copy_bundle.history),
+                "copy_history_count": len(copy_authoritative.history_json),
             }
             experiment_dir = copy_dir
             design_path = copy_design_path

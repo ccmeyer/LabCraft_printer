@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from PySide6 import QtCore, QtTest, QtWidgets
 
@@ -228,6 +228,29 @@ class ExperimentEditorDriver(_QTestSurfaceDriver):
         return drive_editor_create_finalize(
             self.context,
             specification,
+            action_runner=self.action_runner,
+        )
+
+    def revise_prepared_design(
+        self,
+        *,
+        initial_name: str,
+        renamed_name: str,
+        experiment: Mapping[str, Any],
+        reagent: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Rename, edit, regenerate, and refinalize one prepared design."""
+
+        from tools.virtual_workflows.actions import (
+            drive_editor_prestart_rename_refinalize,
+        )
+
+        return drive_editor_prestart_rename_refinalize(
+            self.context,
+            initial_name=initial_name,
+            renamed_name=renamed_name,
+            experiment=experiment,
+            reagent=reagent,
             action_runner=self.action_runner,
         )
 

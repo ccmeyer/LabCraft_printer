@@ -420,13 +420,13 @@
       "suite_ids": ["lifecycle"],
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
-      "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "editor.rename_prepared_via_ui", "editor.edit_prepared_design_via_ui", "editor.regenerate_prepared_design_via_ui", "editor.refinalize_prepared_via_ui", "artifact.capture_milestone", "validation.prepared_bundle", "validation.refinalized_bundle", "experiment.reload_authoritative", "scenario.teardown"],
+      "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "editor.rename_prepared_via_ui", "editor.edit_prepared_design_via_ui", "editor.regenerate_prepared_design_via_ui", "editor.refinalize_prepared_via_ui", "artifact.capture_milestone", "experiment.load_authoritative_via_ui", "scenario.teardown"],
       "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "experiment.prepared_rename_refinalize", "experiment.prepared_design_refinalize", "experiment.renamed_artifacts_unique", "experiment.refinalized_bundle_valid", "experiment.prepared_reload_ready", "experiment.runtime_assignments_match", "experiment.key_files_consistent", "artifacts.required_present"],
       "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "experiment.prepared_rename_refinalize", "experiment.prepared_design_refinalize", "experiment.prepared_reopen", "experiment.design_plan_consistency"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The lifecycle scenario covers material edits and rename while the prepared execution is untouched; post-start changes remain prohibited by Slice 4.3."],
-      "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_lifecycle_report"],
+      "test_node_ids": ["tests/system/test_virtual_workflow_editor_refinalize_composed.py::test_composed_editor_prestart_rename_refinalize_report", "tests/system/test_virtual_workflow_editor_refinalize_composed.py::test_composed_and_legacy_editor_refinalize_stable_parity"],
       "pi_safety_evidence": []
     },
     {
