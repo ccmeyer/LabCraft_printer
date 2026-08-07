@@ -474,14 +474,46 @@ class RackDriver(_QTestSurfaceDriver):
             "printer-head load command queue",
         )
 
+    def find_slot_for_stock(self, stock_id: str) -> int:
+        matches = [
+            index
+            for index, slot in enumerate(self.context.model.rack_model.slots)
+            if slot.printer_head is not None
+            and str(slot.printer_head.get_stock_id()) == str(stock_id)
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"expected one rack slot for stock {stock_id!r}; observed {matches}"
+            )
+        return matches[0]
+
+    def unload(self, slot_index: int) -> None:
+        rack = self.view.rack_box
+        button = rack.slot_widgets[int(slot_index)][2]
+        if button.text() != "Unload":
+            raise RuntimeError(f"expected Unload control; observed {button.text()!r}")
+        self.click(button)
+        self.wait_until(
+            lambda: self.context.model.rack_model.get_gripper_printer_head()
+            is None,
+            "printer-head return",
+        )
+        self.wait_until(
+            self.context.machine.check_if_all_completed,
+            "printer-head return command queue",
+        )
+
 
 class ArrayDriver(_QTestSurfaceDriver):
     """QTest mechanics for the normal print-array surface."""
 
-    def start(self) -> list[dict[str, Any]]:
+    def start(
+        self,
+        expected_dialogs: list[tuple[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         return self.click_with_message_boxes(
             self.view.well_plate_widget.start_print_array_button,
-            [
+            expected_dialogs or [
                 ("Start Print Array", QtWidgets.QMessageBox.StandardButton.Yes),
                 (
                     "Evaporation Plate Dock Check",

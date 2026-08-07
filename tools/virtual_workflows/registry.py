@@ -174,6 +174,7 @@ _SCENARIO_DEFINITIONS = {
         ),
         expected_completion_count=48,
         scenario_name="print_array_multi_stock_head_exchange",
+        runner_family="composed_journey",
         supports_pi_evidence=False,
         supports_injected_stall=False,
         supports_report_sets=False,
@@ -229,19 +230,15 @@ def run_registered_scenario(
                 "composed journeys do not support Pi evidence"
             )
         from tools.virtual_workflows.journeys import (
-            EDITOR_WORKLOAD_ID,
             JourneyRunConfig,
-            run_editor_create_finalize_journey,
-            run_virtual_print_array_24_journey,
+            run_composed_journey,
         )
 
         config = JourneyRunConfig(
             scenario_id=definition.workload_id,
             **config_values,
         )
-        if definition.workload_id == EDITOR_WORKLOAD_ID:
-            return run_editor_create_finalize_journey(config)
-        return run_virtual_print_array_24_journey(config)
+        return run_composed_journey(config)
     if definition.runner_family == "virtual_print_array":
         config_values.pop("seed", None)
         if not definition.supports_injected_stall:

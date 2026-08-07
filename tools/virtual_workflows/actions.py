@@ -106,11 +106,19 @@ COMPOSED_SMOKE_ACTION_IDS = frozenset(
         "scenario.teardown",
     }
 )
+COMPOSED_MULTI_STOCK_ACTION_IDS = COMPOSED_SMOKE_ACTION_IDS | frozenset(
+    {
+        "head.bind_identity",
+        "head.return_via_ui",
+        "validation.stock_pass_boundary",
+    }
+)
 ACTION_IDS = (
     AUTHORITATIVE_RELOAD_ACTION_IDS
     | MULTI_STOCK_LIFECYCLE_ACTION_IDS
     | EDITOR_LIFECYCLE_ACTION_IDS
     | COMPOSED_SMOKE_ACTION_IDS
+    | COMPOSED_MULTI_STOCK_ACTION_IDS
 )
 
 
@@ -127,6 +135,7 @@ class InteractionSurface(str, Enum):
 ACTION_INTERACTION_SURFACES = {
     action_id: InteractionSurface.HARNESS for action_id in ACTION_IDS
 }
+ACTION_INTERACTION_SURFACES["head.bind_identity"] = InteractionSurface.MODEL
 ACTION_INTERACTION_SURFACES.update(
     {
         "machine.connect_ready": InteractionSurface.SIMULATOR,
@@ -143,7 +152,7 @@ ACTION_INTERACTION_SURFACES.update(
         },
         **{
             action_id: InteractionSurface.UI
-            for action_id in COMPOSED_SMOKE_ACTION_IDS
+            for action_id in COMPOSED_MULTI_STOCK_ACTION_IDS
             if action_id.endswith("_via_ui")
         },
     }
@@ -1583,7 +1592,12 @@ def drive_editor_create_finalize(
             )
 
             experiment = specification["experiment"]
-            reagent = specification["reagent"]
+            reagents = specification.get("reagents")
+            if reagents is None:
+                reagents = [specification["reagent"]]
+            reagents = list(reagents)
+            if not reagents:
+                raise RuntimeError("editor specification requires a reagent")
 
             def configure() -> Mapping[str, Any]:
                 if dialog.auto_update_chk.isChecked():
@@ -1638,60 +1652,60 @@ def drive_editor_create_finalize(
                         toggle_checkbox(checkbox)
                     if bool(checkbox.isChecked()) != bool(expected):
                         raise RuntimeError("checkbox did not retain requested state")
-                click(dialog.add_reagent_btn)
-                if dialog._reagent_row_count() != 1:
-                    raise RuntimeError("editor did not create exactly one reagent")
-                row = 0
-                _qt_replace_text(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(
-                        row, dialog.COL_STOCK_LABEL
-                    ),
-                    reagent["stock_label"],
-                )
-                _qt_select_combo_text(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_GROUP),
-                    reagent["group"],
-                )
-                _qt_select_combo_text(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_MODE),
-                    reagent["printing_mode"],
-                )
-                _qt_set_spin_value(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_STARTING),
-                    reagent["starting_concentration"],
-                )
-                _qt_replace_text(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_TARGETS),
-                    ", ".join(str(value) for value in reagent["targets"]),
-                )
-                _qt_replace_text(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_UNITS),
-                    reagent["units"],
-                )
-                _qt_replace_text(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_SET_STOCK),
-                    reagent["fixed_stock_concentration"],
-                )
-                _qt_set_spin_value(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_DROPLET),
-                    reagent["droplet_volume_nL"],
-                )
+                for row, reagent in enumerate(reagents):
+                    click(dialog.add_reagent_btn)
+                    if dialog._reagent_row_count() != row + 1:
+                        raise RuntimeError(
+                            "editor did not create the requested reagent row"
+                        )
+                    _qt_replace_text(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_STOCK_LABEL),
+                        reagent["stock_label"],
+                    )
+                    _qt_select_combo_text(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_GROUP),
+                        reagent["group"],
+                    )
+                    _qt_select_combo_text(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_MODE),
+                        reagent["printing_mode"],
+                    )
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_STARTING),
+                        reagent["starting_concentration"],
+                    )
+                    _qt_replace_text(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_TARGETS),
+                        ", ".join(str(value) for value in reagent["targets"]),
+                    )
+                    _qt_replace_text(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_UNITS),
+                        reagent["units"],
+                    )
+                    _qt_replace_text(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_SET_STOCK),
+                        reagent["fixed_stock_concentration"],
+                    )
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_DROPLET),
+                        reagent["droplet_volume_nL"],
+                    )
                 _ensure_editor_deadline(
                     context, "editor.configure_design_via_ui", "configured"
                 )
@@ -3468,6 +3482,7 @@ def teardown_scenario(context: ScenarioContext) -> dict[str, Any]:
 
 
 __all__ = [
+    "COMPOSED_MULTI_STOCK_ACTION_IDS",
     "ACTION_INTERACTION_SURFACES",
     "ACTION_IDS",
     "AUTHORITATIVE_RELOAD_ACTION_IDS",

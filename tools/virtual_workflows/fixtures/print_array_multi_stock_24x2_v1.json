@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "fixture_id": "print_array_multi_stock_24x2_v1",
   "plate": {
     "name": "shallow-384_well_plate",
@@ -20,12 +20,12 @@
   "stocks": [
     {
       "factor_name": "Virtual Multi Stock 01",
-      "concentration": 2.0,
+      "concentration": 3.0,
       "target_concentration": 1.0,
       "units": "x",
       "printing_mode": "droplet",
-      "prepared_droplet_volume_nL": 5.0,
-      "droplet_volume_nL": 10.0,
+      "prepared_droplet_volume_nL": 9.0,
+      "droplet_volume_nL": 9.0,
       "printer_head": {
         "printer_head_id": "virtual-head-multi-24x2-01-v1",
         "initial_volume_uL": 1000.0,
@@ -35,16 +35,16 @@
     },
     {
       "factor_name": "Virtual Multi Stock 02",
-      "concentration": 2.0,
+      "concentration": 1.5,
       "target_concentration": 1.0,
       "units": "x",
       "printing_mode": "droplet",
-      "prepared_droplet_volume_nL": 5.0,
-      "droplet_volume_nL": 10.0,
+      "prepared_droplet_volume_nL": 18.0,
+      "droplet_volume_nL": 18.0,
       "printer_head": {
         "printer_head_id": "virtual-head-multi-24x2-02-v1",
         "initial_volume_uL": 1000.0,
-        "print_pulse_width_us": 1500,
+        "print_pulse_width_us": 1800,
         "print_pressure_psi": 1.5
       }
     }

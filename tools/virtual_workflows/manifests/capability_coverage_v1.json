@@ -227,8 +227,8 @@
       "required_verification_layers": ["host_sil"],
       "active_scenario_ids": ["print_array_multi_stock_24x2_v1"],
       "required_assertion_ids": ["execution.multi_stock_head_exchange", "execution.stock_pass_boundaries_valid", "execution.stock_head_settings_match", "execution.event_history_bounded"],
-      "related_source_areas": ["tools/virtual_workflows/scenarios.py", "tests/system/test_virtual_workflow_multi_stock_lifecycle.py"],
-      "limitations": ["Coverage uses the in-process simulator and virtual rack model; it does not validate physical head handling, pressure response, or droplet output."],
+      "related_source_areas": ["tools/virtual_workflows/journeys.py", "tests/system/test_virtual_workflow_multi_stock_composed.py"],
+      "limitations": ["Coverage uses normal Qt rack controls and the in-process simulator; it does not validate physical head handling, pressure response, or droplet output."],
       "max_evidence_age_days": 2
     },
     {
@@ -500,13 +500,13 @@
       "suite_ids": ["lifecycle"],
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
-      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.wait_for_completions", "array.wait_for_state", "validation.stock_pass_boundary", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "head.bind_identity", "machine.configure_print_settings_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "head.return_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.wait_for_completions", "validation.stock_pass_boundary", "artifact.capture_milestone", "scenario.teardown"],
       "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "execution.multi_stock_head_exchange", "execution.stock_pass_boundaries_valid", "execution.stock_head_settings_match", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.event_history_bounded", "execution.terminal_bundle_valid", "artifacts.required_present"],
       "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle", "execution.multi_stock_head_exchange"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The scenario validates virtual rack/head association and durable application behavior, not physical head handling, pressure response, or droplet output."],
-      "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_fixture_contract_is_exact", "tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"],
+      "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_fixture_contract_is_exact", "tests/system/test_virtual_workflow_multi_stock_composed.py::test_composed_multi_stock_lifecycle_report"],
       "pi_safety_evidence": []
     }
   ],
@@ -663,6 +663,18 @@
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py",
         "interaction_surface": "ui"
+      },
+      {
+        "id": "head.return_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "head.bind_identity",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "model"
       },
       {
         "id": "pressure.enable_regulation_via_ui",
@@ -946,25 +958,25 @@
         "id": "execution.multi_stock_head_exchange",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.multi_stock_head_exchange",
-        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_composed.py::test_composed_multi_stock_lifecycle_report"]
       },
       {
         "id": "execution.stock_pass_boundaries_valid",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.multi_stock_head_exchange.pass_boundaries",
-        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_composed.py::test_composed_multi_stock_lifecycle_report"]
       },
       {
         "id": "execution.stock_head_settings_match",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.multi_stock_head_exchange.pass_settings",
-        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_composed.py::test_composed_multi_stock_lifecycle_report"]
       },
       {
         "id": "execution.event_history_bounded",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.multi_stock_head_exchange.event_history",
-        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_composed.py::test_composed_multi_stock_lifecycle_report"]
       },
       {
         "id": "artifacts.required_present",

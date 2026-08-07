@@ -8,6 +8,7 @@ from PySide6 import QtCore, QtWidgets
 from tools.virtual_workflows.page_drivers import (
     ExperimentLoaderDriver,
     MainWindowDriver,
+    RackDriver,
 )
 
 
@@ -72,3 +73,17 @@ def test_prepared_loader_rejects_directory_outside_session_root(qapp, tmp_path):
             expected_plan_id="plan",
             expected_plan_revision=1,
         )
+
+
+def test_rack_driver_requires_one_unambiguous_stock_slot(qapp):
+    head = SimpleNamespace(get_stock_id=lambda: "stock-1")
+    slots = [
+        SimpleNamespace(printer_head=head),
+        SimpleNamespace(printer_head=None),
+    ]
+    context = _context(qapp, QtWidgets.QWidget())
+    context.model = SimpleNamespace(rack_model=SimpleNamespace(slots=slots))
+    driver = RackDriver(context)
+    assert driver.find_slot_for_stock("stock-1") == 0
+    with pytest.raises(RuntimeError, match="expected one rack slot"):
+        driver.find_slot_for_stock("missing")

@@ -478,8 +478,72 @@ The create/finalize and prepared-load actions must report `ui`; assertions,
 screenshots, reporting, and teardown report `harness`. The legacy direct runner
 remains temporarily callable as a parity oracle, while prepared
 rename/refinalize and post-start lock/copy remain on the legacy editor runner.
+
+Milestone 7 Slice 2 migrates `print_array_multi_stock_24x2_v1` to the same
+composed harness. The normal Experiment Editor creates both A1-A24 reagent
+rows; normal rack controls set volume, Confirm, Load, and Unload each head;
+the normal calibration dialog applies 9 nL at 1300 us and 18 nL at 1800 us;
+and the normal array control starts both passes. Only deterministic fixture
+head-ID binding is a recorded `model` action, so it is excluded from UI
+coverage. The schema-v4 recipe uses 3.0x and 1.5x stocks to retain exactly one
+dispense per stock and a 27 nL final reaction volume.
+
+Run the Slice 2 journey offscreen or visibly, then execute the exact
+`run.replay_command` retained in `report.json`:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_multi_stock_24x2_v1 `
+  --output-root verification_reports\milestone7-slice2 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_multi_stock_24x2_v1 `
+  --output-root verification_reports\milestone7-slice2-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 300
+```
+
+The first pass must settle `ACTIVE`, idle, drained, and intent-clean before
+the first head is returned. The second must settle `COMPLETED` with 48 exact
+stock/well intent lifecycles before the final head is returned. Both retained
+heads, all three expected dialogs, action/assertion ledgers, observer evidence,
+screenshots, hashes, seed, and replay command remain inspectable.
 The full Python suite is deferred until the final Milestone 7 validation; each
 slice uses its documented targeted gates.
+
+Milestone 7 Slice 2.5 consolidates the three composed runners before another
+workflow is migrated. `JourneyDefinition`, `JourneyRuntime`, `SemanticStep`,
+and `JourneyExecutor` now own generic identity, execution, failure, restoration,
+artifact, report, and teardown behavior. Typed phase specifications own machine
+startup, editor preparation, and ordered stock/head passes. Registry dispatch
+calls one generic composed runner instead of branching on each scenario ID.
+
+The compatibility runners are now two-line delegates. The smoke, editor, and
+multi-stock journey bodies are 35, 50, and 56 lines respectively; changing
+validated stock values or stock order produces a new normalized plan without a
+new runner. Active parameter matrices and seeded sequence generation remain
+future work, but this typed boundary is their intended input rather than
+another monolithic workflow function.
+
+Run the Slice 2.5 focused composition and lifecycle gates:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_virtual_workflow_composition.py `
+  tests\test_virtual_workflow_journey_phases.py `
+  tests\test_virtual_workflow_report.py `
+  tests\test_virtual_workflow_manifest.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_virtual_workflow_smoke.py `
+  tests\system\test_virtual_workflow_editor_composed.py `
+  tests\system\test_virtual_workflow_multi_stock_composed.py
+```
+
+On Windows, if pytest's reused default temporary root reports an access error,
+select a fresh `--basetemp` below `%TEMP%\LabCraft`; do not place it inside the
+repository because `SimulationSession` correctly rejects roots overlapping
+repository or production data.
 
 The final retained Windows evidence is:
 
@@ -856,15 +920,17 @@ Run the multi-stock virtual-head lifecycle directly with:
   --timeout-seconds 60
 ```
 
-This scenario promotes the former stress-derived reduced test into a strict
-tracked A1-A24 by two-stock fixture. It stages two distinct virtual heads,
-starts each stock pass through the real UI, and requires an idle, drained
-simulator queue before the initial stage and the between-pass replacement.
+This composed scenario promotes the former stress-derived reduced test into a
+strict tracked A1-A24 by two-stock fixture. It creates the design, stages and
+returns both distinct virtual heads, calibrates both heads, and starts each
+stock pass through normal Qt controls. It requires an idle, drained simulator
+queue before the initial stage, between-pass exchange, and final return.
 The first pass must leave the original plan `ACTIVE`; the second must finish
 the same plan as `COMPLETED`. A passing report proves the stock/head identity,
 effective pulse width and pressure, two durable pass boundaries, and all 48
 stock/well pairs exactly once with no discarded or outstanding intents.
-It retains `stock_1_ready`, `stock_1_printing`, `stock_1_completed`,
+It also retains `editor_opened` and `generated`, followed by
+`stock_1_ready`, `stock_1_printing`, `stock_1_completed`,
 `stock_2_staged`, `stock_2_printing`, and `completed` screenshots.
 Responsiveness, resources, and performance are `not_applicable`.
 

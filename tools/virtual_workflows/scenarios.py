@@ -459,10 +459,10 @@ def load_virtual_print_array_fixture(
             "stocks",
             "fill_stock",
             "simulation",
-            *({"lifecycle"} if schema_version == 3 else set()),
+            *({"lifecycle"} if schema_version in {3, 4} else set()),
         }
     )
-    if set(payload) != expected_top or schema_version not in {1, 2, 3}:
+    if set(payload) != expected_top or schema_version not in {1, 2, 3, 4}:
         raise VirtualWorkflowScenarioError(
             "virtual print-array fixture has an invalid top-level contract"
         )
@@ -522,10 +522,14 @@ def load_virtual_print_array_fixture(
         stock_id = _stock_id(stock)
         head_id = str(head.get("printer_head_id") or "")
         expected_prepared_volume = (
-            9.0 if scenario_id == SMOKE_WORKLOAD_ID else 5.0
+            float(stock.get("droplet_volume_nL", -1))
+            if scenario_id == MULTI_STOCK_WORKLOAD_ID
+            else 9.0 if scenario_id == SMOKE_WORKLOAD_ID else 5.0
         )
         expected_calibrated_volume = (
-            9.0 if scenario_id == SMOKE_WORKLOAD_ID else 10.0
+            float(stock.get("prepared_droplet_volume_nL", -1))
+            if scenario_id == MULTI_STOCK_WORKLOAD_ID
+            else 9.0 if scenario_id == SMOKE_WORKLOAD_ID else 10.0
         )
         if (
             stock.get("printing_mode") != "droplet"
@@ -547,9 +551,9 @@ def load_virtual_print_array_fixture(
         workload.get("stock_count", 1)
     ):
         raise VirtualWorkflowScenarioError("fixture stock count is invalid")
-    if schema_version in {2, 3} and int(simulation.get("staging_slot", -1)) != 0:
+    if schema_version in {2, 3, 4} and int(simulation.get("staging_slot", -1)) != 0:
         raise VirtualWorkflowScenarioError("fixture staging-slot contract is invalid")
-    if schema_version == 3:
+    if schema_version in {3, 4}:
         lifecycle = payload.get("lifecycle")
         expected_lifecycle = {
             SOFT_STOP_RESUME_WORKLOAD_ID: {
@@ -4683,6 +4687,10 @@ def run_virtual_print_array_scenario(
         "workload": {
             "workload_id": workload_id,
             "fixture_schema_version": fixture["schema_version"],
+            "fixture_path": config.fixture_path.relative_to(REPO_ROOT).as_posix(),
+            "fixture_sha256": hashlib.sha256(
+                config.fixture_path.read_bytes()
+            ).hexdigest(),
             "plate_name": fixture["plate"]["name"],
             "plate_rows": fixture["plate"]["rows"],
             "plate_columns": fixture["plate"]["columns"],

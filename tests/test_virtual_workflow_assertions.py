@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from tools.virtual_workflows.assertions import (
     AssertionResult,
+    ExecutionLifecycleExpectation,
     cleanup_assertion,
     editor_artifacts_cleanup_assertion,
     evaluate_assertion,
+    multi_stock_artifacts_assertion,
 )
+
+import pytest
 
 
 def test_assertion_result_rejects_ambiguous_decision():
@@ -15,6 +19,13 @@ def test_assertion_result_rejects_ambiguous_decision():
         assert "pass, fail, or incomplete" in str(exc)
     else:
         raise AssertionError("ambiguous assertion decision was accepted")
+
+
+def test_execution_lifecycle_expectation_rejects_ambiguous_identity_sets():
+    with pytest.raises(ValueError, match="well IDs must be unique"):
+        ExecutionLifecycleExpectation({}, ("A1", "A1"), ("stock-1",))
+    with pytest.raises(ValueError, match="stock IDs must be unique"):
+        ExecutionLifecycleExpectation({}, ("A1",), ("stock-1", "stock-1"))
 
 
 def test_evaluate_assertion_records_pass_fail_and_incomplete():
@@ -61,3 +72,21 @@ def test_editor_artifact_assertion_requires_exact_nonempty_screenshots_and_clean
         required_screenshots={"finalized", "validated"},
         teardown=teardown,
     ).decision == "fail"
+
+
+def test_multi_stock_artifacts_require_exact_screenshots_and_removed_lock(tmp_path):
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    first.write_bytes(b"png")
+    second.write_bytes(b"png")
+    result = multi_stock_artifacts_assertion(
+        screenshots={"first": first, "second": second},
+        required_screenshots={"first", "second"},
+        teardown={
+            "evidence": {
+                "close_succeeded": True,
+                "session_lock_present": False,
+            }
+        },
+    )
+    assert result.decision == "pass"

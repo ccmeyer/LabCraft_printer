@@ -152,6 +152,26 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert multi_stock["status"] == "active"
     assert multi_stock["suite_ids"] == ["lifecycle"]
     assert multi_stock["registry_id"] == MULTI_STOCK_WORKLOAD_ID
+    assert "fixture.prepare_authoritative" not in multi_stock["action_ids"]
+    assert "head.stage_virtual" not in multi_stock["action_ids"]
+    assert {
+        "editor.configure_design_via_ui",
+        "head.bind_identity",
+        "head.stage_via_ui",
+        "head.return_via_ui",
+        "calibration.apply_via_ui",
+        "array.start_via_ui",
+    } <= set(multi_stock["action_ids"])
+    assert multi_stock["required_artifacts"] == [
+        "report_json",
+        "summary_text",
+        "event_trace",
+        "action_ledger",
+        "assertion_ledger",
+        "evidence_manifest",
+        "screenshots",
+        "scenario_root",
+    ]
 
     smoke = _row(payload, "scenarios", "print_array_smoke_24_v1")
     assert smoke["registry_id"] == SMOKE_WORKLOAD_ID
@@ -275,6 +295,8 @@ def test_registry_dispatch_uses_existing_config_and_runner(
     monkeypatch.setattr(scenarios, "run_virtual_print_array_scenario", fake_run)
     monkeypatch.setattr(journeys, "run_virtual_print_array_24_journey", fake_run)
     monkeypatch.setattr(journeys, "run_editor_create_finalize_journey", fake_run)
+    monkeypatch.setattr(journeys, "run_multi_stock_24x2_journey", fake_run)
+    monkeypatch.setattr(journeys, "run_composed_journey", fake_run)
 
     result = run_registered_scenario(
         scenario_id,
@@ -286,14 +308,22 @@ def test_registry_dispatch_uses_existing_config_and_runner(
     assert result == {"scenario_id": scenario_id}
     assert len(captured) == 1
     config = captured[0]
-    if scenario_id in {SMOKE_WORKLOAD_ID, EDITOR_WORKLOAD_ID}:
+    if scenario_id in {
+        SMOKE_WORKLOAD_ID,
+        EDITOR_WORKLOAD_ID,
+        MULTI_STOCK_WORKLOAD_ID,
+    }:
         from tools.virtual_workflows.journeys import JourneyRunConfig
 
         assert isinstance(config, JourneyRunConfig)
     else:
         assert isinstance(config, VirtualPrintArrayScenarioConfig)
     assert config.scenario_id == scenario_id
-    if scenario_id not in {SMOKE_WORKLOAD_ID, EDITOR_WORKLOAD_ID}:
+    if scenario_id not in {
+        SMOKE_WORKLOAD_ID,
+        EDITOR_WORKLOAD_ID,
+        MULTI_STOCK_WORKLOAD_ID,
+    }:
         assert config.fixture_path == SCENARIO_FIXTURES[scenario_id].resolve()
     assert config.output_root == tmp_path.resolve()
     assert config.speed_multiplier == 25

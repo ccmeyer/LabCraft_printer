@@ -7,7 +7,8 @@ import platform
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -48,6 +49,253 @@ INTERACTION_SURFACES = {"ui", "controller", "model", "simulator", "harness"}
 
 class ReportValidationError(ValueError):
     """Raised when a virtual-workflow report violates its versioned contract."""
+
+
+@dataclass(frozen=True)
+class ComposedReportPayload:
+    """Scenario-specific values inserted into the common report-v1 envelope."""
+
+    workload: Mapping[str, Any]
+    workflow_values: Mapping[str, Any] = field(default_factory=dict)
+    workflow_status: str = "measured"
+    queue: Mapping[str, Any] = field(
+        default_factory=lambda: {"status": "not_applicable", "values": {}}
+    )
+    persistence: Mapping[str, Any] = field(
+        default_factory=lambda: {"status": "not_applicable", "values": {}}
+    )
+    resources: Mapping[str, Any] = field(
+        default_factory=lambda: {"status": "not_applicable", "values": {}}
+    )
+    limitations: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.workload, Mapping):
+            raise ValueError("composed report workload must be a mapping")
+        if self.workflow_status not in METRIC_STATUSES:
+            raise ValueError("composed workflow status is invalid")
+
+
+class ComposedReportAdapter:
+    """Build the common envelope retained by every composed journey."""
+
+    def __init__(self, harness: Any, *, repo_root: str | Path) -> None:
+        self.harness = harness
+        self.repo_root = Path(repo_root).resolve()
+
+    def sections(
+        self,
+        *,
+        workload_id: str,
+        scenario_name: str,
+        scenario_version: str,
+        replay_command: list[str],
+        passed: bool,
+    ) -> dict[str, Any]:
+        harness = self.harness
+        identity = collect_environment_identity(self.repo_root)
+        failure_text = str(harness.failure) if harness.failure is not None else None
+        classification = "pass" if passed and failure_text is None else "fail"
+        roots = getattr(harness.session, "application_roots", None)
+        contained = bool(
+            roots is not None
+            and all(
+                Path(value).resolve().is_relative_to(harness.scenario_root)
+                for value in (
+                    roots.config_root,
+                    roots.experiments_root,
+                    roots.calibration_memory_root,
+                )
+            )
+        )
+        return {
+            "schema_name": REPORT_SCHEMA_NAME,
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "run": {
+                "run_id": harness.run_id,
+                "scenario_name": str(scenario_name),
+                "scenario_version": str(scenario_version),
+                "run_mode": (
+                    "visible_windows_sil"
+                    if harness.config.visible
+                    else "offscreen_windows_sil"
+                ),
+                "timing_policy": (
+                    "simulated_command_durations_x"
+                    f"{harness.config.speed_multiplier:g}"
+                ),
+                "warmup_runs": 0,
+                "measured_runs": 1,
+                "started_at_utc": harness.started_at_utc,
+                "ended_at_utc": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "duration_ms": harness.duration_ms,
+                "seed": harness.config.seed,
+                "replay_command": list(replay_command),
+            },
+            "source": identity["source"],
+            "environment": identity["environment"],
+            "safety": {
+                "simulation": True,
+                "hardware_access_allowed": False,
+                "hardware_interfaces": {
+                    "serial": False,
+                    "GPIO": False,
+                    "camera": False,
+                    "balance": False,
+                    "MCU": False,
+                    "firmware_update": False,
+                },
+                "simulated_port": "SIMULATED",
+                "scenario_root": str(harness.scenario_root),
+                "report_dir": str(harness.report_dir),
+                "root_containment_valid": contained,
+            },
+            "artifacts": {
+                "report_json": "report.json",
+                "summary_text": "summary.txt",
+                "event_trace": "events.jsonl",
+                "action_ledger": "action_ledger.json",
+                "assertion_ledger": "assertion_ledger.json",
+                "evidence_manifest": "evidence_manifest.json",
+                "failure_traceback": (
+                    "failure_traceback.txt" if harness.failure is not None else None
+                ),
+                "scenario_root": str(harness.scenario_root),
+                "screenshots": {
+                    name: path.resolve()
+                    .relative_to(harness.report_dir.resolve())
+                    .as_posix()
+                    for name, path in sorted(harness.context.screenshots.items())
+                },
+            },
+            "classification": {
+                "status": classification,
+                "threshold_maturity": "informational",
+                "reasons": (
+                    []
+                    if classification == "pass"
+                    else [failure_text or "required assertion failed"]
+                ),
+            },
+        }
+
+    def build(
+        self,
+        *,
+        workload_id: str,
+        scenario_name: str,
+        scenario_version: str,
+        replay_command: list[str],
+        required_assertion_ids: tuple[str, ...],
+        required_ui_action_ids: frozenset[str],
+        payload: ComposedReportPayload,
+    ) -> dict[str, Any]:
+        """Build and validate one complete composed report-v1 document."""
+
+        harness = self.harness
+        decisions = {
+            str(row.get("assertion_id")): str(row.get("decision"))
+            for row in harness.assertion_results
+        }
+        passed = all(
+            decisions.get(assertion_id) == "pass"
+            for assertion_id in required_assertion_ids
+        )
+        report = self.sections(
+            workload_id=workload_id,
+            scenario_name=scenario_name,
+            scenario_version=scenario_version,
+            replay_command=replay_command,
+            passed=passed,
+        )
+        common_workflow_values = {
+            "action_results": list(harness.context.action_results),
+            "assertion_results": list(harness.assertion_results),
+            "lifecycle_milestones": list(harness.context.milestones),
+            "dialogs": list(harness.context.dialogs),
+            "unexpected_dialogs": list(harness.context.unexpected_dialogs),
+            "errors": list(harness.context.errors),
+            "interaction_surface_policy": "state-changing UI actions require QTest",
+        }
+        common_workflow_values.update(dict(payload.workflow_values))
+        report.update(
+            {
+                "workload": dict(payload.workload),
+                "metrics": {
+                    "responsiveness": {
+                        "status": "not_applicable",
+                        "values": {},
+                    },
+                    "workflow": {
+                        "status": payload.workflow_status,
+                        "values": common_workflow_values,
+                    },
+                    "queue": dict(payload.queue),
+                    "persistence": dict(payload.persistence),
+                    "resources": dict(payload.resources),
+                },
+                "limitations": list(payload.limitations),
+            }
+        )
+        actions = report["metrics"]["workflow"]["values"]["action_results"]
+        observed = {str(row.get("action_id")) for row in actions}
+        validate_interaction_surface_claims(
+            actions,
+            required_ui_action_ids=(
+                required_ui_action_ids
+                if report["classification"]["status"] == "pass"
+                else required_ui_action_ids & observed
+            ),
+        )
+        validate_report_v1(report)
+        return report
+
+
+def composed_report_contract_projection(
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Select replay-stable composed fields for before/after parity checks."""
+
+    validate_report_v1(report)
+    workflow = report["metrics"]["workflow"]["values"]
+    return {
+        "schema_name": report["schema_name"],
+        "schema_version": report["schema_version"],
+        "scenario_name": report["run"]["scenario_name"],
+        "scenario_version": report["run"]["scenario_version"],
+        "seed": report["run"].get("seed"),
+        "workload": dict(report["workload"]),
+        "actions": [
+            {
+                "action_id": row.get("action_id"),
+                "interaction_surface": row.get("interaction_surface"),
+                "status": row.get("status"),
+            }
+            for row in workflow.get("action_results", [])
+        ],
+        "assertions": [
+            {
+                "assertion_id": row.get("assertion_id"),
+                "decision": row.get("decision"),
+            }
+            for row in workflow.get("assertion_results", [])
+        ],
+        "milestones": [
+            row.get("name") for row in workflow.get("lifecycle_milestones", [])
+        ],
+        "screenshot_names": sorted(report["artifacts"].get("screenshots", {})),
+        "dialogs": list(workflow.get("dialogs", [])),
+        "unexpected_dialogs": list(workflow.get("unexpected_dialogs", [])),
+        "errors": list(workflow.get("errors", [])),
+        "classification": report["classification"]["status"],
+        "assertion_decisions": dict(
+            report["metrics"]["persistence"]["values"].get(
+                "assertion_decisions", {}
+            )
+        ),
+    }
 
 
 def validate_interaction_surface_claims(

@@ -12,6 +12,7 @@ from tools.virtual_workflows.actions import (
     ACTION_INTERACTION_SURFACES,
     ACTION_IDS,
     COMPOSED_SMOKE_ACTION_IDS,
+    COMPOSED_MULTI_STOCK_ACTION_IDS,
     InteractionSurface,
     ScenarioActionError,
     ScenarioContext,
@@ -35,6 +36,16 @@ from tools.virtual_workflows.registry import load_capability_manifest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_composed_multi_stock_actions_report_truthful_surfaces():
+    assert COMPOSED_SMOKE_ACTION_IDS < COMPOSED_MULTI_STOCK_ACTION_IDS
+    assert ACTION_INTERACTION_SURFACES["head.bind_identity"] is (
+        InteractionSurface.MODEL
+    )
+    assert ACTION_INTERACTION_SURFACES["head.return_via_ui"] is (
+        InteractionSurface.UI
+    )
 
 
 class FakeClock:

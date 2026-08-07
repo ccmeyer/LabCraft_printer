@@ -19,6 +19,7 @@ from tools.virtual_workflows.report import (
     REPORT_SCHEMA_VERSION,
     REQUIRED_TOP_LEVEL_FIELDS,
 )
+from tools.virtual_workflows.registry import get_registered_scenario
 from tools.virtual_workflows.scenarios import (
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
     MULTI_STOCK_WORKLOAD_ID,
@@ -36,6 +37,24 @@ from tools.virtual_workflows.scenarios import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_ROOT = REPO_ROOT / "tests" / "performance" / "baselines"
+
+
+def test_multi_stock_v4_composed_contract_is_frozen():
+    fixture = load_virtual_print_array_fixture(
+        scenario_id=MULTI_STOCK_WORKLOAD_ID
+    )
+    definition = get_registered_scenario(MULTI_STOCK_WORKLOAD_ID)
+    assert definition.runner_family == "composed_journey"
+    assert fixture["schema_version"] == 4
+    assert [stock["concentration"] for stock in fixture["stocks"]] == [3.0, 1.5]
+    assert [stock["droplet_volume_nL"] for stock in fixture["stocks"]] == [
+        9.0,
+        18.0,
+    ]
+    assert [
+        stock["printer_head"]["print_pulse_width_us"]
+        for stock in fixture["stocks"]
+    ] == [1300, 1800]
 
 
 def test_legacy_cli_surface_remains_additively_compatible():
