@@ -1,0 +1,347 @@
+{
+  "schema": "labcraft.veritas_balance_fixture",
+  "schema_version": 1,
+  "status": "verified_physical_capture",
+  "captured_at_utc": "2026-08-07",
+  "device": {
+    "balance_model": "Veritas HPB-625i",
+    "adapter_model": "BENFEI 000302",
+    "adapter_chipset": "Prolific PL-2303",
+    "adapter_vid_pid": "067b:23a3",
+    "linux_driver": "pl2303",
+    "usb_serial_redacted": true,
+    "persistent_by_id_path_verified_after_reconnect": true
+  },
+  "transport": {
+    "balance_mode": "PC cont",
+    "baud": 9600,
+    "data_bits": 8,
+    "parity": "N",
+    "stop_bits": 1,
+    "flow_control": "none",
+    "encoding": "ASCII",
+    "payload_bytes": 13,
+    "terminator_hex": "0d0a",
+    "record_bytes_including_terminator": 15,
+    "observed_update_period_seconds": 0.1495,
+    "observed_update_rate_hz_approx": 6.69
+  },
+  "record_contract": {
+    "sign": {
+      "offset": 0,
+      "width": 1,
+      "observed_nonnegative": " ",
+      "observed_negative": "-",
+      "plus_not_observed": true
+    },
+    "magnitude": {
+      "offset": 1,
+      "width": 8,
+      "format": "right-aligned ASCII decimal",
+      "observed_decimal_places": 2
+    },
+    "separator": {
+      "offset": 9,
+      "value": " "
+    },
+    "unit": {
+      "offset": 10,
+      "width": 2,
+      "observed": [
+        "mg"
+      ]
+    },
+    "stability": {
+      "offset": 12,
+      "width": 1,
+      "stable": "S",
+      "unstable": " "
+    }
+  },
+  "operator_markers": {
+    "reliability": "advisory_only",
+    "used_for_protocol_or_threshold_results": false
+  },
+  "stability_characterization": {
+    "candidate_policy": {
+      "ignore_period_seconds": 1.0,
+      "minimum_window_seconds": 3.0,
+      "minimum_samples": 10,
+      "maximum_span_mg": 0.03,
+      "maximum_absolute_slope_mg_per_second": 0.01,
+      "request_timeout_seconds": 30.0,
+      "require_every_sample_device_stable": true
+    },
+    "results": {
+      "stable_zero_passed_at_first_eligible_window": true,
+      "stable_loaded_passed_at_first_eligible_window": true,
+      "natural_drift_120_seconds_passed_at_first_eligible_window": true,
+      "mass_statistics_rejected_disturbance_while_device_flag_remained_stable": true,
+      "device_flag_rejected_quiet_unsettled_windows_that_mass_statistics_alone_accepted": true
+    }
+  },
+  "captures": [
+    {
+      "id": "stream_start_mid_record",
+      "scenario": "stable_zero",
+      "source_run_sha256": "76033647215eb7d4c12a3055bd0ce26b577cbf19c162925c1b8f158eaf5c39b6",
+      "source_run_outcome": "scheduled_capture_complete",
+      "source_chunk_sequences": [0, 1, 2, 3, 4, 5],
+      "chunks_hex": [
+        "3030206d67530d0a",
+        "2020202020302e3030206d67530d0a",
+        "2020202020302e3030",
+        "206d67530d0a",
+        "2020202020302e3030206d67530d0a",
+        "2020202020302e3030206d"
+      ],
+      "excerpt_sha256": "6be7a4e1681ccb7f13b39f8b5dd58f7cd008d90f832ef915636637ae57ddc434",
+      "expected_payloads_ascii": [
+        "00 mgS",
+        "     0.00 mgS",
+        "     0.00 mgS",
+        "     0.00 mgS"
+      ],
+      "expected_rejected_payload_indexes": [0],
+      "expected_readings": [
+        ["0.00", true],
+        ["0.00", true],
+        ["0.00", true]
+      ],
+      "expected_remaining_tail_ascii": "     0.00 m"
+    },
+    {
+      "id": "stable_loaded",
+      "scenario": "stable_loaded",
+      "source_run_sha256": "0dfbe845079aa19815c79b0d9ffd26ec9501aed361726caf65854ccaf7bebd02",
+      "source_run_outcome": "scheduled_capture_complete",
+      "source_chunk_sequences": [0, 1, 2, 3, 4, 5],
+      "chunks_hex": [
+        "2020313534302e3537206d6753",
+        "0d0a",
+        "2020313534302e3537206d67530d0a",
+        "2020313534302e3537206d67530d0a",
+        "2020313534302e3537206d67530d0a",
+        "2020313534302e3537206d67530d0a"
+      ],
+      "excerpt_sha256": "0a4d8d73e57a81fe401a69ba978ab2474c0bb499dea04967e0cf8dd0b7766b8a",
+      "expected_payloads_ascii": [
+        "  1540.57 mgS",
+        "  1540.57 mgS",
+        "  1540.57 mgS",
+        "  1540.57 mgS",
+        "  1540.57 mgS"
+      ],
+      "expected_rejected_payload_indexes": [],
+      "expected_readings": [
+        ["1540.57", true],
+        ["1540.57", true],
+        ["1540.57", true],
+        ["1540.57", true],
+        ["1540.57", true]
+      ],
+      "expected_remaining_tail_ascii": ""
+    },
+    {
+      "id": "unstable_removal_transition",
+      "scenario": "remove_replace",
+      "source_run_sha256": "660dfd033617fa4fe70000dc6813f7ecd621993bd94fa9f140efbcdc003657dc",
+      "source_run_outcome": "scheduled_capture_complete",
+      "source_chunk_sequences": [55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69],
+      "chunks_hex": [
+        "2020313534302e3630",
+        "206d67530d0a",
+        "2020313238302e3738206d67200d0a",
+        "2020313032332e3438206d6720",
+        "0d0a",
+        "2020203736362e3834206d67200d0a",
+        "2020203531302e3230206d67200d",
+        "0a",
+        "2020203235332e3336206d67200d0a",
+        "2d20202020332e3434206d67200d0a",
+        "2d20202020302e3132206d67200d0a",
+        "2d20202020302e3033206d67200d0a",
+        "2d20202020302e3033206d67200d0a",
+        "2d20202020302e3035206d67200d0a",
+        "2d20202020302e3035206d67200d0a"
+      ],
+      "excerpt_sha256": "c52f50c309da9d10d55346e358d4c8795517fa05d27ad5bd7fd3dae89818e248",
+      "expected_payloads_ascii": [
+        "  1540.60 mgS",
+        "  1280.78 mg ",
+        "  1023.48 mg ",
+        "   766.84 mg ",
+        "   510.20 mg ",
+        "   253.36 mg ",
+        "-    3.44 mg ",
+        "-    0.12 mg ",
+        "-    0.03 mg ",
+        "-    0.03 mg ",
+        "-    0.05 mg ",
+        "-    0.05 mg "
+      ],
+      "expected_rejected_payload_indexes": [],
+      "expected_readings": [
+        ["1540.60", true],
+        ["1280.78", false],
+        ["1023.48", false],
+        ["766.84", false],
+        ["510.20", false],
+        ["253.36", false],
+        ["-3.44", false],
+        ["-0.12", false],
+        ["-0.03", false],
+        ["-0.03", false],
+        ["-0.05", false],
+        ["-0.05", false]
+      ],
+      "expected_remaining_tail_ascii": ""
+    },
+    {
+      "id": "negative_status_transition",
+      "scenario": "negative_after_manual_tare",
+      "source_run_sha256": "3d3f89b34946a1c09c5a46b427cac973b1159bdae51ebef1385f37d489e6fd5d",
+      "source_run_outcome": "scheduled_capture_complete",
+      "source_chunk_sequences": [177, 178, 179, 180, 181, 182, 183, 184],
+      "chunks_hex": [
+        "2d20313534302e3537206d67200d0a",
+        "2d20313534302e3537206d67200d0a",
+        "2d20313534302e3537206d67200d0a",
+        "2d20313534302e3537206d67530d0a",
+        "2d20313534302e3537206d67530d0a",
+        "2d20313534302e3537206d67530d0a",
+        "2d20313534302e3537206d67530d0a",
+        "2d20313534302e3537206d67530d0a"
+      ],
+      "excerpt_sha256": "6d87e75f0a1244999316216dec78731058abbfbe40b37ea68e021a1fad6ec581",
+      "expected_payloads_ascii": [
+        "- 1540.57 mg ",
+        "- 1540.57 mg ",
+        "- 1540.57 mg ",
+        "- 1540.57 mgS",
+        "- 1540.57 mgS",
+        "- 1540.57 mgS",
+        "- 1540.57 mgS",
+        "- 1540.57 mgS"
+      ],
+      "expected_rejected_payload_indexes": [],
+      "expected_readings": [
+        ["-1540.57", false],
+        ["-1540.57", false],
+        ["-1540.57", false],
+        ["-1540.57", true],
+        ["-1540.57", true],
+        ["-1540.57", true],
+        ["-1540.57", true],
+        ["-1540.57", true]
+      ],
+      "expected_remaining_tail_ascii": ""
+    },
+    {
+      "id": "fragmented_stable_loaded",
+      "scenario": "fragmented_read",
+      "source_run_sha256": "7f6388f43f6bd85f86006598055be2689c91f77c99dd21eff1a80e07ef0a4e00",
+      "source_run_outcome": "scheduled_capture_complete",
+      "source_chunk_sequences": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+      "chunks_hex": [
+        "202031",
+        "353430",
+        "2e3631",
+        "206d67",
+        "530d0a",
+        "202031",
+        "353430",
+        "2e3631",
+        "206d67",
+        "530d0a",
+        "202031",
+        "353430",
+        "2e3631",
+        "206d67",
+        "530d0a"
+      ],
+      "excerpt_sha256": "1ef440574123d34760d8f55c5cf14a48d4e5309f8d84cae6a98234c81feb3964",
+      "expected_payloads_ascii": [
+        "  1540.61 mgS",
+        "  1540.61 mgS",
+        "  1540.61 mgS"
+      ],
+      "expected_rejected_payload_indexes": [],
+      "expected_readings": [
+        ["1540.61", true],
+        ["1540.61", true],
+        ["1540.61", true]
+      ],
+      "expected_remaining_tail_ascii": ""
+    },
+    {
+      "id": "stream_end_mid_record",
+      "scenario": "negative_after_manual_tare",
+      "source_run_sha256": "3d3f89b34946a1c09c5a46b427cac973b1159bdae51ebef1385f37d489e6fd5d",
+      "source_run_outcome": "scheduled_capture_complete",
+      "source_chunk_sequences": [221, 222, 223, 224, 225, 226, 227, 228],
+      "chunks_hex": [
+        "2d20313534302e3535206d67530d0a",
+        "2d20313534302e3535",
+        "206d67530d0a",
+        "2d20313534302e3535206d67530d0a",
+        "2d20313534302e353520",
+        "6d67530d0a",
+        "2d20313534302e3535206d67530d0a",
+        "2d20313534302e3535206d67"
+      ],
+      "excerpt_sha256": "19278ce99b8206884c6722853a2bfe5144f24bf5c19cf2898076ad8234318f60",
+      "expected_payloads_ascii": [
+        "- 1540.55 mgS",
+        "- 1540.55 mgS",
+        "- 1540.55 mgS",
+        "- 1540.55 mgS",
+        "- 1540.55 mgS"
+      ],
+      "expected_rejected_payload_indexes": [],
+      "expected_readings": [
+        ["-1540.55", true],
+        ["-1540.55", true],
+        ["-1540.55", true],
+        ["-1540.55", true],
+        ["-1540.55", true]
+      ],
+      "expected_remaining_tail_ascii": "- 1540.55 mg"
+    },
+    {
+      "id": "disconnect_at_record_boundary",
+      "scenario": "disconnect",
+      "source_run_sha256": "22c38533e011ccf94dc1a11be1ce7176b30d5b72533a0789f595f539ba65d762",
+      "source_run_outcome": "serial_error",
+      "source_chunk_sequences": [81, 82, 83, 84, 85],
+      "chunks_hex": [
+        "2020313534302e3631206d67530d0a",
+        "2020313534302e3631206d67530d0a",
+        "20",
+        "20313534302e3631206d67530d0a",
+        "2020313534302e3631206d67530d0a"
+      ],
+      "excerpt_sha256": "565be6a402fa425487276e403d17eb21e8c78822868739c54168cda4db486f98",
+      "expected_payloads_ascii": [
+        "  1540.61 mgS",
+        "  1540.61 mgS",
+        "  1540.61 mgS",
+        "  1540.61 mgS"
+      ],
+      "expected_rejected_payload_indexes": [],
+      "expected_readings": [
+        ["1540.61", true],
+        ["1540.61", true],
+        ["1540.61", true],
+        ["1540.61", true]
+      ],
+      "expected_remaining_tail_ascii": ""
+    }
+  ],
+  "limitations": [
+    "Only mg output was observed; other documented balance units were not physically characterized.",
+    "A leading plus sign was not observed.",
+    "The deliberate USB disconnect happened at a complete CR/LF boundary; separate captures provide partial-start and partial-tail evidence.",
+    "Operator markers were not used as exact event timestamps."
+  ]
+}
