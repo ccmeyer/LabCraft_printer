@@ -1436,6 +1436,7 @@ def drive_editor_create_finalize(
     specification: Mapping[str, Any],
     *,
     action_runner: Callable[..., dict[str, Any]] | None = None,
+    capture_editor_milestones: bool = True,
 ) -> dict[str, Any]:
     """Drive the real modal experiment editor through bounded QTest interaction."""
 
@@ -1602,12 +1603,13 @@ def drive_editor_create_finalize(
                 },
                 allowed_dialogs=(dialog,),
             )
-            capture_milestone(
-                context,
-                "editor_opened",
-                evidence={"window_title": dialog.windowTitle()},
-                widget=dialog,
-            )
+            if capture_editor_milestones:
+                capture_milestone(
+                    context,
+                    "editor_opened",
+                    evidence={"window_title": dialog.windowTitle()},
+                    widget=dialog,
+                )
 
             run_action(
                 "editor.new_experiment_via_ui",
@@ -1777,14 +1779,15 @@ def drive_editor_create_finalize(
                 generate,
                 allowed_dialogs=(dialog,),
             )
-            capture_milestone(
-                context,
-                "generated",
-                evidence={
-                    "reaction_count": dialog.model.get_number_of_reactions()
-                },
-                widget=dialog,
-            )
+            if capture_editor_milestones:
+                capture_milestone(
+                    context,
+                    "generated",
+                    evidence={
+                        "reaction_count": dialog.model.get_number_of_reactions()
+                    },
+                    widget=dialog,
+                )
 
             def finish() -> Mapping[str, Any]:
                 action_label = str(dialog.finish_btn.text() or "")
@@ -2368,310 +2371,16 @@ def drive_authoritative_reload_via_editor(
     before_activation: Callable[[], Mapping[str, Any]] | None = None,
     after_activation: Callable[[], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Load and activate a paused execution through the real modal editor."""
+    """Load and activate a paused execution through the shared page driver."""
 
-    if context.app is None or context.qt_core is None or context.view is None:
-        raise RuntimeError("authoritative reload requires a launched Qt application")
+    from tools.virtual_workflows.page_drivers import ExperimentLoaderDriver
 
-    from PySide6 import QtTest, QtWidgets
-    from View import ExperimentDesignDialog
-
-    QtCore = context.qt_core
-    button = context.view.well_plate_widget.design_experiment_button
-    state: dict[str, Any] = {
-        "stage": "open_editor",
-        "dialog": None,
-        "error": None,
-        "loaded": None,
-        "activated": None,
-    }
-    driver_timer = QtCore.QTimer(context.app)
-    driver_timer.setInterval(5)
-
-    def click(widget: Any) -> None:
-        QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
-        context.app.processEvents()
-
-    def fail(exc: BaseException, modal: Any = None) -> None:
-        state["error"] = exc
-        state["stage"] = "failed"
-        driver_timer.stop()
-        dialog = state.get("dialog")
-        if (
-            isinstance(dialog, QtWidgets.QDialog)
-            and dialog.isVisible()
-            and "session_2_load_failed" not in context.screenshots
-        ):
-            try:
-                capture_milestone(
-                    context,
-                    "session_2_load_failed",
-                    evidence={
-                        "failure_type": type(exc).__name__,
-                        "failure_message": str(exc),
-                    },
-                    widget=dialog,
-                )
-            except Exception:
-                pass
-        if isinstance(modal, QtWidgets.QDialog) and modal.isVisible():
-            modal.reject()
-        if isinstance(dialog, QtWidgets.QDialog) and dialog.isVisible():
-            dialog.reject()
-
-    def drive_folder_modal() -> None:
-        modal = context.app.activeModalWidget()
-        try:
-            if modal is None or modal is state["dialog"]:
-                return
-            if not isinstance(modal, QtWidgets.QFileDialog):
-                raise RuntimeError(
-                    "unexpected modal while selecting authoritative folder: "
-                    f"{type(modal).__name__} {modal.windowTitle()!r}"
-                )
-            if modal.windowTitle() != "Select Experiment Folder":
-                raise RuntimeError(
-                    f"unexpected file dialog title: {modal.windowTitle()!r}"
-                )
-            modal.setDirectory(str(Path(experiment_dir).resolve()))
-            context.app.processEvents()
-            button_box = modal.findChild(QtWidgets.QDialogButtonBox)
-            accept = None
-            if button_box is not None:
-                accept = button_box.button(QtWidgets.QDialogButtonBox.Open)
-                if accept is None:
-                    accept = button_box.button(QtWidgets.QDialogButtonBox.Ok)
-            if accept is None:
-                raise RuntimeError("folder dialog has no accept button")
-            state["stage"] = "validate_loaded"
-            click(accept)
-        except BaseException as exc:
-            fail(exc, modal)
-
-    def inspect() -> None:
-        modal = context.app.activeModalWidget()
-        try:
-            if context.deadline.remaining_seconds() <= 0:
-                raise ScenarioActionError(
-                    "experiment.load_authoritative_via_ui",
-                    "scenario deadline expired during modal reload",
-                    stage="timeout",
-                    evidence={
-                        "stage": state["stage"],
-                        "modal_type": (
-                            type(modal).__name__
-                            if modal is not None
-                            else None
-                        ),
-                        "modal_title": (
-                            modal.windowTitle()
-                            if modal is not None
-                            else None
-                        ),
-                    },
-                )
-            if state["stage"] == "open_editor":
-                if not isinstance(modal, ExperimentDesignDialog):
-                    if modal is None:
-                        return
-                    raise RuntimeError(
-                        "unexpected modal while opening authoritative editor: "
-                        f"{type(modal).__name__} {modal.windowTitle()!r}"
-                    )
-                state["dialog"] = modal
-                state["stage"] = "select_folder"
-                folder_timer = QtCore.QTimer(modal)
-                folder_timer.setInterval(5)
-                folder_timer.timeout.connect(drive_folder_modal)
-                folder_timer.start()
-                try:
-                    click(modal.load_btn)
-                finally:
-                    folder_timer.stop()
-                    folder_timer.deleteLater()
-                if state["error"] is not None:
-                    raise state["error"]
-                return
-
-            if state["stage"] == "select_folder":
-                return
-
-            if state["stage"] == "validate_loaded":
-                dialog = state["dialog"]
-                if modal is not dialog or not dialog.isVisible():
-                    return
-
-                def validate_loaded() -> Mapping[str, Any]:
-                    import json
-                    from ExecutionPlan import canonical_sha256
-
-                    eligibility = (
-                        context.experiment_model.get_execution_resume_eligibility()
-                    )
-                    runtime_active = bool(
-                        context.experiment_model.is_authoritative_execution_runtime_active()
-                    )
-                    status_text = str(dialog.status_lbl.text() or "")
-                    banner_text = str(
-                        dialog.lifecycle_banner.text() or ""
-                    )
-                    checks = {
-                        "name_matches": dialog.exp_name_edit.text() == expected_name,
-                        "action_is_load_execution": dialog.finish_btn.text()
-                        == "Load Execution",
-                        "finish_enabled": bool(dialog.finish_btn.isEnabled()),
-                        "eligibility_ready_to_resume": eligibility.get("status")
-                        == "ready_to_resume",
-                        "runtime_inactive": not runtime_active,
-                        "read_only_guidance": (
-                            "execution plan validated" in status_text.casefold()
-                            and "load execution" in status_text.casefold()
-                        ),
-                        "visible_lock_banner": (
-                            not dialog.lifecycle_banner.isHidden()
-                            and "load execution" in banner_text.casefold()
-                            and "without starting or resuming printing"
-                            in banner_text.casefold()
-                        ),
-                    }
-                    loaded_path = Path(
-                        context.experiment_model.experiment_file_path
-                    )
-                    with loaded_path.open("r", encoding="utf-8") as handle:
-                        disk_payload = json.load(handle)
-                    design_identity = {
-                        "experiment_dir_path": str(
-                            context.experiment_model.experiment_dir_path
-                        ),
-                        "experiment_file_path": str(loaded_path),
-                        "disk_design_sha256": canonical_sha256(disk_payload),
-                        "model_design_sha256": canonical_sha256(
-                            context.experiment_model.to_dict()
-                        ),
-                        "plan_design_sha256": (
-                            context.experiment_model
-                            .get_execution_plan_snapshot()
-                            .design_sha256
-                        ),
-                    }
-                    if not all(checks.values()):
-                        raise ScenarioActionError(
-                            "experiment.load_authoritative_via_ui",
-                            "loaded authoritative editor state is invalid",
-                            stage="operation",
-                            evidence={
-                                "checks": checks,
-                                "eligibility": eligibility,
-                                "status_text": status_text,
-                                "banner_text": banner_text,
-                                "action_label": dialog.finish_btn.text(),
-                                "design_identity": design_identity,
-                            },
-                        )
-                    boundary = (
-                        dict(before_activation())
-                        if before_activation is not None
-                        else {}
-                    )
-                    return {
-                        "checks": checks,
-                        "eligibility": eligibility,
-                        "status_text": status_text,
-                        "banner_text": banner_text,
-                        "action_label": str(dialog.finish_btn.text() or ""),
-                        "design_identity": design_identity,
-                        "experiment_dir": str(Path(experiment_dir).resolve()),
-                        "reload_boundary": boundary,
-                    }
-
-                result = execute_action(
-                    context,
-                    "experiment.load_authoritative_via_ui",
-                    validate_loaded,
-                )
-                state["loaded"] = dict(result["evidence"])
-                capture_milestone(
-                    context,
-                    "session_2_loaded",
-                    evidence=state["loaded"],
-                    widget=dialog,
-                )
-                state["stage"] = "activate"
-                return
-
-            if state["stage"] == "activate":
-                dialog = state["dialog"]
-
-                def activate() -> Mapping[str, Any]:
-                    if dialog.finish_btn.text() != "Load Execution":
-                        raise RuntimeError(
-                            "saved runtime did not expose Load Execution"
-                        )
-                    click(dialog.finish_btn)
-                    if dialog.isVisible():
-                        raise RuntimeError(
-                            "Load Execution did not close the editor"
-                        )
-                    eligibility = (
-                        context.experiment_model.get_execution_resume_eligibility()
-                    )
-                    runtime_active = bool(
-                        context.experiment_model.is_authoritative_execution_runtime_active()
-                    )
-                    array_state = context.controller.get_array_run_state()
-                    if (
-                        not runtime_active
-                        or eligibility.get("status") != "ready_to_resume"
-                        or array_state != "resume_ready"
-                    ):
-                        raise RuntimeError(
-                            "authoritative activation did not restore resume_ready"
-                        )
-                    boundary = (
-                        dict(after_activation())
-                        if after_activation is not None
-                        else {}
-                    )
-                    return {
-                        "eligibility": eligibility,
-                        "runtime_active": runtime_active,
-                        "array_state": array_state,
-                        "action_label": "Load Execution",
-                        "reload_boundary": boundary,
-                    }
-
-                result = execute_action(
-                    context,
-                    "experiment.activate_authoritative_via_ui",
-                    activate,
-                )
-                state["activated"] = dict(result["evidence"])
-                state["stage"] = "finished"
-                driver_timer.stop()
-        except BaseException as exc:
-            fail(exc, modal)
-
-    driver_timer.timeout.connect(inspect)
-    driver_timer.start()
-    try:
-        click(button)
-    finally:
-        driver_timer.stop()
-        driver_timer.deleteLater()
-    if state["error"] is not None:
-        raise state["error"]
-    if state["stage"] != "finished":
-        raise ScenarioActionError(
-            "experiment.activate_authoritative_via_ui",
-            "authoritative editor workflow did not finish",
-            stage="timeout",
-            evidence={"stage": state["stage"]},
-        )
-    return {
-        "loaded": state["loaded"],
-        "activated": state["activated"],
-    }
-
+    return ExperimentLoaderDriver(context).load_authoritative_execution(
+        experiment_dir,
+        expected_name=expected_name,
+        before_activation=before_activation,
+        after_activation=after_activation,
+    )
 
 def validate_reload_boundary(
     context: ScenarioContext,

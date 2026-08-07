@@ -129,7 +129,10 @@ from tools.virtual_workflows.actions import (  # noqa: E402
     wait_until,
 )
 from tools.virtual_workflows.authoritative_evidence import (  # noqa: E402
+    authoritative_activation_boundary,
+    authoritative_loaded_boundary,
     capture_authoritative_bundle,
+    completed_stock_well_pairs,
     read_model_audit_rows as _read_audit_rows,
     rich_file_inventory as _file_inventory,
 )
@@ -168,27 +171,11 @@ def _resolved_beneath(path: str | Path, root: str | Path) -> bool:
 def _merge_session_lifecycles(
     sessions: tuple[tuple[str, dict[str, Any]], ...],
 ) -> dict[str, list[Any]]:
-    keys = {
-        key
-        for _session_id, snapshot in sessions
-        for key in snapshot
-    }
-    merged: dict[str, list[Any]] = {}
-    for key in sorted(keys):
-        values: list[Any] = []
-        for session_id, snapshot in sessions:
-            for item in snapshot.get(key, ()):
-                if isinstance(item, dict):
-                    attributed = dict(item)
-                    attributed.setdefault(
-                        "application_session_id",
-                        session_id,
-                    )
-                    values.append(attributed)
-                else:
-                    values.append(item)
-        merged[key] = values
-    return merged
+    from tools.virtual_workflows.authoritative_evidence import (
+        merge_session_lifecycles,
+    )
+
+    return merge_session_lifecycles(sessions)
 
 
 def _merge_progress_snapshots(
@@ -2996,20 +2983,9 @@ def run_virtual_print_array_scenario(
                     first_instrumentation = instrumentation
                     first_progress_observer = progress_observer
                     first_io_observer = io_observer
-                    session_1_audit_rows = session_1_authoritative.audit_rows
-                    session_1_plan_id = str(fixture_info["plan_id"])
-                    session_1_completed_intent_ids = set(
-                        session_1_lifecycle.get("completions", ())
+                    session_1_completed_pairs = completed_stock_well_pairs(
+                        session_1_lifecycle
                     )
-                    session_1_completed_pairs = {
-                        (
-                            str(item["stock_id"]),
-                            str(item["well_id"]),
-                        )
-                        for item in session_1_lifecycle.get("begins", ())
-                        if item.get("intent_id")
-                        in session_1_completed_intent_ids
-                    }
                     session_1_cleanup_result = close_simulated_session(
                         context,
                         session_id="session_1",
@@ -3152,91 +3128,28 @@ def run_virtual_print_array_scenario(
 
                     def validate_loaded_boundary() -> Mapping[str, Any]:
                         loaded_snapshot = capture_authoritative_bundle(context)
-                        current = loaded_snapshot.directory.rich_inventory()
-                        eligibility = loaded_snapshot.eligibility
-                        checks = {
-                            "authoritative_files_byte_identical": (
-                                current == paused_inventory
-                            ),
-                            "runtime_inactive": not loaded_snapshot.runtime_active,
-                            "eligibility_ready_to_resume": (
-                                eligibility.get("status")
-                                == "ready_to_resume"
-                            ),
-                        }
-                        if not all(checks.values()):
+                        loaded_boundary.update(
+                            authoritative_loaded_boundary(
+                                session_1_authoritative, loaded_snapshot
+                            )
+                        )
+                        if loaded_boundary["failed_checks"]:
                             raise RuntimeError(
                                 "authoritative reload boundary is invalid"
                             )
-                        loaded_boundary.update(
-                            {
-                                "checks": checks,
-                                "inventory": current,
-                                "eligibility": eligibility,
-                            }
-                        )
                         return loaded_boundary
 
                     def validate_activated_boundary() -> Mapping[str, Any]:
-                        activated_snapshot = capture_authoritative_bundle(context)
-                        current = activated_snapshot.directory.rich_inventory()
-                        all_paths = set(paused_inventory) | set(current)
-                        changed = sorted(
-                            path
-                            for path in all_paths
-                            if paused_inventory.get(path)
-                            != current.get(path)
+                        evidence = authoritative_activation_boundary(
+                            session_1_authoritative,
+                            capture_authoritative_bundle(context),
+                            completed_pair_count=len(session_1_completed_pairs),
                         )
-                        allowed = {
-                            "execution_resume.json",
-                            "execution_plan.json",
-                            "key.csv",
-                            "concentration_key.csv",
-                            "experiment_audit.jsonl",
-                        }
-                        disallowed = sorted(set(changed) - allowed)
-                        audit_rows = activated_snapshot.audit_rows
-                        activation_rows = [
-                            row
-                            for row in audit_rows[
-                                len(session_1_audit_rows):
-                            ]
-                            if row.get("event_type")
-                            == "authoritative_execution_activated"
-                        ]
-                        eligibility = activated_snapshot.eligibility
-                        checks = {
-                            "only_allowlisted_files_changed": not disallowed,
-                            "plan_identity_unchanged": (
-                                activated_snapshot.plan_id
-                                == session_1_plan_id
-                            ),
-                            "eligibility_ready_to_resume": (
-                                eligibility.get("status")
-                                == "ready_to_resume"
-                            ),
-                            "one_activation_audit_event": (
-                                len(activation_rows) == 1
-                            ),
-                            "partial_progress_rehydrated": (
-                                activated_snapshot.total_added_droplets
-                                == len(session_1_completed_pairs)
-                            ),
-                        }
-                        if not all(checks.values()):
+                        if evidence["failed_checks"]:
                             raise RuntimeError(
                                 "authoritative activation boundary is invalid"
                             )
-                        activated_boundary.update(
-                            {
-                                "checks": checks,
-                                "changed_paths": changed,
-                                "disallowed_changed_paths": disallowed,
-                                "inventory": current,
-                                "eligibility": eligibility,
-                                "activation_audit_rows": activation_rows,
-                            }
-                        )
+                        activated_boundary.update(evidence)
                         return activated_boundary
 
                     validate_reload_boundary(

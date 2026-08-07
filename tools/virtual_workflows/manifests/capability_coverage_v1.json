@@ -480,13 +480,13 @@
       "suite_ids": ["lifecycle"],
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
-      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.request_soft_stop_via_ui", "array.wait_for_state", "validation.paused_bundle", "array.observe_stopped_quiescence", "app.close_simulated_session", "validation.reload_boundary", "experiment.load_authoritative_via_ui", "experiment.activate_authoritative_via_ui", "array.wait_for_completions", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "machine.configure_print_settings_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.request_soft_stop_via_ui", "array.wait_for_state", "array.observe_stopped_quiescence", "app.close_simulated_session", "experiment.load_authoritative_via_ui", "experiment.activate_authoritative_via_ui", "array.resume_via_ui", "array.wait_for_completions", "artifact.capture_milestone", "scenario.teardown"],
       "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "ui.fresh_application_session_constructed", "execution.first_session_paused", "execution.first_session_teardown_clean", "execution.authoritative_reload_valid", "execution.authoritative_runtime_rehydrated", "execution.reload_resume_exactly_once", "execution.expected_completions", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "artifacts.required_present"],
       "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.intent_durability", "execution.terminal_bundle", "execution.authoritative_reload_resume"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The target is a fresh MVC/simulator composition in one QApplication process, not an operating-system process restart or physical hardware resume."],
-      "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_fixture_contract_is_exact", "tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"],
+      "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_fixture_contract_is_exact", "tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_direct_oracle_report_passes", "tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes", "tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_matches_direct_stable_oracle", "tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_fails_closed_on_first_teardown_mutation", "tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_fails_closed_on_disallowed_activation_write"],
       "pi_safety_evidence": []
     },
     {
@@ -1125,37 +1125,37 @@
         "id": "ui.fresh_application_session_constructed",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.action_results",
-        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes"]
       },
       {
         "id": "execution.first_session_paused",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.authoritative_reload_resume.session_1_paused",
-        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes"]
       },
       {
         "id": "execution.first_session_teardown_clean",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.cleanup_results",
-        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes"]
       },
       {
         "id": "execution.authoritative_reload_valid",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.assertion_results",
-        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes"]
       },
       {
         "id": "execution.authoritative_runtime_rehydrated",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.authoritative_reload_resume.session_2_activation",
-        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes"]
       },
       {
         "id": "execution.reload_resume_exactly_once",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.authoritative_reload_resume.resume_reconciliation",
-        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes"]
       }
     ]
   }

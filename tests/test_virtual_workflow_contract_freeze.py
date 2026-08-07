@@ -22,6 +22,8 @@ from tools.virtual_workflows.report import (
 )
 from tools.virtual_workflows.registry import get_registered_scenario
 from tools.virtual_workflows.journeys import (
+    AUTHORITATIVE_RELOAD_REQUIRED_ASSERTIONS,
+    AUTHORITATIVE_RELOAD_REQUIRED_UI_ACTIONS,
     EDITOR_REVISION_REQUIRED_ASSERTIONS,
     EDITOR_REVISION_REQUIRED_UI_ACTIONS,
     SOFT_STOP_REQUIRED_ASSERTIONS,
@@ -158,6 +160,50 @@ def test_soft_stop_composed_contract_is_frozen():
     assert {"array.request_soft_stop_via_ui", "array.resume_via_ui"} <= (
         SOFT_STOP_REQUIRED_UI_ACTIONS
     )
+
+
+def test_authoritative_reload_composed_contract_is_frozen():
+    definition = get_registered_scenario("authoritative_reload_resume_24_v1")
+    assert definition.runner_family == "composed_journey"
+    assert AUTHORITATIVE_RELOAD_REQUIRED_ASSERTIONS == (
+        "sil.host_hardware_disabled",
+        "ui.real_app_constructed",
+        "ui.fresh_application_session_constructed",
+        "execution.first_session_paused",
+        "execution.first_session_teardown_clean",
+        "execution.authoritative_reload_valid",
+        "execution.authoritative_runtime_rehydrated",
+        "execution.reload_resume_exactly_once",
+        "execution.expected_completions",
+        "execution.intent_durability_exact",
+        "execution.terminal_bundle_valid",
+        "artifacts.required_present",
+    )
+    assert {
+        "experiment.load_authoritative_via_ui",
+        "experiment.activate_authoritative_via_ui",
+        "array.request_soft_stop_via_ui",
+        "array.resume_via_ui",
+    } <= AUTHORITATIVE_RELOAD_REQUIRED_UI_ACTIONS
+
+    action_source = (
+        REPO_ROOT / "tools" / "virtual_workflows" / "actions.py"
+    ).read_text(encoding="utf-8")
+    driver_source = (
+        REPO_ROOT / "tools" / "virtual_workflows" / "page_drivers.py"
+    ).read_text(encoding="utf-8")
+    action_function = ast.get_source_segment(
+        action_source,
+        next(
+            node
+            for node in ast.parse(action_source).body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "drive_authoritative_reload_via_editor"
+        ),
+    )
+    assert "QTest" not in action_function
+    assert "load_authoritative_execution" in action_function
+    assert "def load_authoritative_execution" in driver_source
 
 
 def test_legacy_cli_surface_remains_additively_compatible():

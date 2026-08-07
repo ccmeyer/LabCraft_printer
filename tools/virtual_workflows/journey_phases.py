@@ -20,6 +20,7 @@ from tools.virtual_workflows.page_drivers import (
     ArrayDriver,
     CalibrationDialogDriver,
     ExperimentEditorDriver,
+    ExperimentLoaderDriver,
     MachineControlsDriver,
     RackDriver,
 )
@@ -37,6 +38,7 @@ class EditorPreparationSpec:
     specification: Mapping[str, Any]
     use_harness_action_runner: bool = False
     snapshot_finish: bool = False
+    capture_editor_milestones: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.specification, Mapping):
@@ -162,6 +164,9 @@ class SoftStopResumeSpec:
     maximum_completion_catchup: int
     quiescence_observation_ms: int
     timeout_seconds: float = 20.0
+    stop_requested_milestone: str = "stop_requested"
+    stopped_milestone: str = "stopped"
+    resumed_milestone: str = "resumed"
 
     def __post_init__(self) -> None:
         positive = {
@@ -173,6 +178,15 @@ class SoftStopResumeSpec:
         invalid = next((name for name, value in positive.items() if value <= 0), None)
         if invalid:
             raise ValueError(f"soft-stop {invalid} must be positive")
+        if any(
+            not str(value).strip()
+            for value in (
+                self.stop_requested_milestone,
+                self.stopped_milestone,
+                self.resumed_milestone,
+            )
+        ):
+            raise ValueError("soft-stop milestone names must be non-empty")
 
 
 def machine_startup_steps(
@@ -219,7 +233,10 @@ def run_editor_preparation(
     result = ExperimentEditorDriver(
         runtime.context,
         action_runner=runner,
-    ).create_and_finalize(dict(spec.specification))
+    ).create_and_finalize(
+        dict(spec.specification),
+        capture_editor_milestones=spec.capture_editor_milestones,
+    )
     runtime.harness.assert_no_unexpected_dialog()
     if spec.snapshot_finish:
         runtime.harness.session.snapshot(
@@ -396,7 +413,9 @@ def run_soft_stop_resume(
     evidence = dict(run_soft_stop_boundary(runtime, spec))
     if paused_callback is not None:
         paused_callback(runtime)
-    evidence["resume"] = resume_soft_stopped_array(runtime)
+    evidence["resume"] = resume_soft_stopped_array(
+        runtime, milestone_name=spec.resumed_milestone
+    )
     return evidence
 
 
@@ -417,7 +436,9 @@ def run_soft_stop_boundary(
     request_evidence = dict(request.get("evidence") or {})
     request_evidence["maximum_completion_catchup"] = spec.maximum_completion_catchup
     observed["soft_stop_request"] = request_evidence
-    capture_milestone(context, "stop_requested", evidence=request_evidence)
+    capture_milestone(
+        context, spec.stop_requested_milestone, evidence=request_evidence
+    )
     wait_for_array_state(
         context,
         state="resume_ready",
@@ -427,7 +448,7 @@ def run_soft_stop_boundary(
     observed["paused_execution_snapshot"] = observed["execution_observer"].snapshot()
     capture_milestone(
         context,
-        "stopped",
+        spec.stopped_milestone,
         evidence={
             "completed_count": len(completed),
             "array_state": context.controller.get_array_run_state(),
@@ -448,7 +469,11 @@ def run_soft_stop_boundary(
     return {"request": request_evidence, "quiescence": quiescence}
 
 
-def resume_soft_stopped_array(runtime: JourneyRuntime) -> Mapping[str, Any]:
+def resume_soft_stopped_array(
+    runtime: JourneyRuntime,
+    *,
+    milestone_name: str = "resumed",
+) -> Mapping[str, Any]:
     """Resume an already validated paused boundary through the normal UI."""
 
     context = runtime.context
@@ -457,10 +482,257 @@ def resume_soft_stopped_array(runtime: JourneyRuntime) -> Mapping[str, Any]:
     runtime.observations["resume_evidence"] = evidence
     capture_milestone(
         context,
-        "resumed",
+        milestone_name,
         evidence={"array_state": context.controller.get_array_run_state()},
     )
     return evidence
+
+
+def _stage_stock_head(
+    runtime: JourneyRuntime,
+    spec: StockPassSpec,
+    *,
+    index: int,
+    head_staging: list[dict[str, Any]],
+    returned_head_ids: list[str],
+    persisted: bool = False,
+) -> tuple[MachineControlsDriver, RackDriver, int, list[dict[str, Any]]]:
+    """Configure, fill, and stage a stock head through shared UI mechanics."""
+
+    context = runtime.context
+    machine = MachineControlsDriver(context)
+    rack = RackDriver(context)
+    slot = (
+        int(spec.staging_slot)
+        if spec.staging_slot is not None
+        else rack.find_slot_for_stock(spec.stock_id)
+    )
+
+    def configure(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        machine.configure_print_settings(
+            pulse_width_us=spec.pulse_width_us,
+            pressure_psi=spec.pressure_psi,
+            frequency_hz=spec.frequency_hz,
+        )
+        evidence = {
+            "pulse_width_us": spec.pulse_width_us,
+            "pressure_psi": spec.pressure_psi,
+        }
+        if persisted or spec.include_frequency_evidence:
+            evidence["frequency_hz"] = spec.frequency_hz
+        return evidence
+
+    def set_volume(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        rack.set_slot_volume(slot, spec.initial_volume_uL)
+        return {"slot": slot, "volume_uL": spec.initial_volume_uL}
+
+    def stage(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        state_before = context.controller.get_array_run_state()
+        drained_before = bool(context.machine.check_if_all_completed())
+        rack.confirm_and_load(slot)
+        head = context.model.rack_model.get_gripper_printer_head()
+        if persisted or not spec.detailed_evidence:
+            return {
+                "slot": slot,
+                "stock_id": str(head.get_stock_id()),
+                **({"printer_head_id": str(head.printer_head_id),
+                    "persisted_calibration_reused": True} if persisted else {}),
+            }
+        evidence = {
+            "pass_index": index + 1,
+            "slot": slot,
+            "stock_id": spec.stock_id,
+            "printer_head_id": str(head.printer_head_id),
+            "array_state_before": state_before,
+            "queue_drained_before": drained_before,
+            "returned_previous": index > 0 and len(returned_head_ids) >= index,
+            "requested_print_pulse_width_us": spec.pulse_width_us,
+            "effective_print_pulse_width_us": int(
+                context.model.machine_model.get_print_pulse_width()
+            ),
+            "requested_print_pressure_psi": spec.pressure_psi,
+            "effective_print_pressure_psi": float(
+                context.model.machine_model.get_target_print_pressure()
+            ),
+            "queue_drained_after": bool(context.machine.check_if_all_completed()),
+        }
+        head_staging.append(evidence)
+        return evidence
+
+    rows = runtime.run_steps(
+        (
+            SemanticStep(
+                "machine.configure_print_settings_via_ui",
+                InteractionSurface.UI,
+                configure,
+            ),
+            SemanticStep("head.set_volume_via_ui", InteractionSurface.UI, set_volume),
+            SemanticStep("head.stage_via_ui", InteractionSurface.UI, stage),
+        )
+    )
+    return machine, rack, slot, rows
+
+
+def prepare_persisted_head_for_resume(
+    runtime: JourneyRuntime,
+    spec: StockPassSpec,
+) -> Mapping[str, Any]:
+    """Restage a persisted calibrated head without generating a new result."""
+
+    machine, _rack, slot, rows = _stage_stock_head(
+        runtime, spec, index=0, head_staging=[], returned_head_ids=[], persisted=True
+    )
+    rows.extend(runtime.run_steps((SemanticStep(
+        "pressure.enable_regulation_via_ui",
+        InteractionSurface.UI,
+        lambda _runtime: machine.enable_pressure_regulation()
+        or {"regulating_print_pressure": True},
+    ),)))
+    return {
+        "slot": slot,
+        "actions": [dict(row) for row in rows],
+        "persisted_calibration_reused": True,
+    }
+
+
+def run_authoritative_reload_resume_boundary(
+    runtime: JourneyRuntime,
+    *,
+    stock_spec: StockPassSpec,
+    soft_stop_spec: SoftStopResumeSpec,
+    expectation: Any,
+    expected_name: str,
+    rebind_execution_signals: Callable[[], None],
+    install_starvation_observer: Callable[[], None],
+) -> Mapping[str, Any]:
+    """Pause, rotate application sessions, reload, restage, and resume."""
+
+    from tools.virtual_workflows.assertions import (
+        authoritative_first_session_paused_assertion,
+        authoritative_reload_boundary_assertions,
+        authoritative_session_rotation_assertions,
+        soft_stop_paused_assertions,
+    )
+    from tools.virtual_workflows.authoritative_evidence import (
+        authoritative_loaded_boundary,
+        authoritative_reload_boundaries,
+        capture_authoritative_bundle,
+        completed_stock_well_pairs,
+        compare_directories,
+        snapshot_directory,
+    )
+    from tools.virtual_workflows.execution_observer import ExecutionObserver
+
+    context = runtime.context
+    run_soft_stop_boundary(runtime, soft_stop_spec)
+    paused_results = soft_stop_paused_assertions(
+        context,
+        expectation=expectation,
+        request_evidence=runtime.observations["soft_stop_request"],
+        completed_count=len(runtime.observations["completed_wells"]),
+        intent_lifecycle=runtime.observations["paused_execution_snapshot"][
+            "lifecycle"
+        ],
+        quiescence=runtime.observations["stopped_quiescence"],
+    )
+    runtime.observations["paused_validation"] = dict(paused_results[1].evidence)
+    paused_assertion = authoritative_first_session_paused_assertion(paused_results)
+    paused_bundle = capture_authoritative_bundle(context)
+    runtime.restore_all()
+    first_snapshot = runtime.observations["session_1_execution_snapshot"]
+    lifecycle_1 = dict(first_snapshot["lifecycle"])
+    completed_pairs = completed_stock_well_pairs(lifecycle_1)
+
+    first_close = runtime.harness.close_application_session()["evidence"]
+    close_comparison = compare_directories(
+        paused_bundle.directory,
+        snapshot_directory(paused_bundle.experiment_dir),
+    ).to_dict()
+    second_launch = runtime.harness.reopen_application_session()["evidence"]
+    fresh, teardown = authoritative_session_rotation_assertions(
+        first_close=first_close,
+        second_launch=second_launch,
+        application_sessions=runtime.harness.application_sessions,
+        files_byte_identical=close_comparison["checks"]["files_byte_identical"],
+    )
+    for result in (fresh, paused_assertion, teardown):
+        runtime.add_assertion(result)
+
+    rebind_execution_signals()
+    second_observer = ExecutionObserver(
+        context,
+        experiment_dir=expectation.experiment_dir,
+        completed_count=lambda: len(runtime.observations["completed_wells"]),
+        pass_context=lambda: _active_pass_context(runtime),
+    )
+    runtime.observations["execution_observer"] = second_observer
+    runtime.register_restorable("session_2_execution", second_observer)
+    second_observer.install()
+    install_starvation_observer()
+    boundaries: dict[str, Any] = {}
+    loaded_snapshot: dict[str, Any] = {}
+
+    def validate_loaded() -> Mapping[str, Any]:
+        loaded = capture_authoritative_bundle(context)
+        loaded_snapshot["value"] = loaded
+        evidence = authoritative_loaded_boundary(paused_bundle, loaded)
+        if evidence["failed_checks"]:
+            raise RuntimeError("authoritative load boundary is invalid")
+        boundaries["loaded"] = evidence
+        return evidence
+
+    def validate_activated() -> Mapping[str, Any]:
+        loaded, activated = authoritative_reload_boundaries(
+            paused_bundle,
+            loaded_snapshot["value"],
+            capture_authoritative_bundle(context),
+            completed_pair_count=len(completed_pairs),
+        )
+        if loaded["failed_checks"] or activated["failed_checks"]:
+            raise RuntimeError("authoritative activation boundary is invalid")
+        boundaries.update({"loaded": loaded, "activated": activated})
+        return activated
+
+    editor = ExperimentLoaderDriver(context).load_authoritative_execution(
+        expectation.experiment_dir,
+        expected_name=expected_name,
+        before_activation=validate_loaded,
+        after_activation=validate_activated,
+    )
+    capture_milestone(context, "session_2_activated", evidence=editor["activated"])
+    for result in authoritative_reload_boundary_assertions(
+        loaded=boundaries["loaded"], activated=boundaries["activated"]
+    ):
+        runtime.add_assertion(result)
+    runtime.run_steps(machine_startup_steps())
+    resume_head = prepare_persisted_head_for_resume(runtime, stock_spec)
+    resume_soft_stopped_array(
+        runtime, milestone_name=soft_stop_spec.resumed_milestone
+    )
+    evidence = {
+        "session_1_bundle": paused_bundle,
+        "session_1_lifecycle": lifecycle_1,
+        "session_1_completed_pairs": completed_pairs,
+        "session_1_cleanup": first_close,
+        "reload_boundaries": boundaries,
+        "resume_head": resume_head,
+        "between_sessions": {
+            **close_comparison,
+            "byte_identical": close_comparison["checks"]["files_byte_identical"],
+        },
+    }
+    runtime.observations.update(evidence)
+    return evidence
+
+
+def _active_pass_context(runtime: JourneyRuntime) -> Mapping[str, Any] | None:
+    current = runtime.observations.get("current_pass", {})
+    if int(current.get("index", -1)) < 0:
+        return None
+    return {
+        "pass_index": int(current["index"]) + 1,
+        "stock_id": current.get("stock_id"),
+    }
 
 
 def run_stock_passes(
@@ -519,78 +791,12 @@ def _run_stock_pass(
     active_phase: Callable[[JourneyRuntime, StockPassSpec], Any] | None,
 ) -> None:
     context = runtime.context
-    machine = MachineControlsDriver(context)
-    rack = RackDriver(context)
-    slot = (
-        int(spec.staging_slot)
-        if spec.staging_slot is not None
-        else rack.find_slot_for_stock(spec.stock_id)
-    )
-
-    def configure(_runtime: JourneyRuntime) -> Mapping[str, Any]:
-        machine.configure_print_settings(
-            pulse_width_us=spec.pulse_width_us,
-            pressure_psi=spec.pressure_psi,
-            frequency_hz=spec.frequency_hz,
-        )
-        evidence = {
-            "pulse_width_us": spec.pulse_width_us,
-            "pressure_psi": spec.pressure_psi,
-        }
-        if spec.include_frequency_evidence:
-            evidence["frequency_hz"] = spec.frequency_hz
-        return evidence
-
-    def set_volume(_runtime: JourneyRuntime) -> Mapping[str, Any]:
-        rack.set_slot_volume(slot, spec.initial_volume_uL)
-        return {"slot": slot, "volume_uL": spec.initial_volume_uL}
-
-    def load_head(_runtime: JourneyRuntime) -> Mapping[str, Any]:
-        if not spec.detailed_evidence:
-            rack.confirm_and_load(slot)
-            return {
-                "slot": slot,
-                "stock_id": context.model.rack_model.get_gripper_printer_head().get_stock_id(),
-            }
-        state_before = context.controller.get_array_run_state()
-        drained_before = bool(context.machine.check_if_all_completed())
-        rack.confirm_and_load(slot)
-        active = context.model.rack_model.get_gripper_printer_head()
-        evidence = {
-            "pass_index": index + 1,
-            "slot": slot,
-            "stock_id": spec.stock_id,
-            "printer_head_id": str(active.printer_head_id),
-            "array_state_before": state_before,
-            "queue_drained_before": drained_before,
-            "returned_previous": index > 0 and len(returned_head_ids) >= index,
-            "requested_print_pulse_width_us": spec.pulse_width_us,
-            "effective_print_pulse_width_us": int(
-                context.model.machine_model.get_print_pulse_width()
-            ),
-            "requested_print_pressure_psi": spec.pressure_psi,
-            "effective_print_pressure_psi": float(
-                context.model.machine_model.get_target_print_pressure()
-            ),
-            "queue_drained_after": bool(context.machine.check_if_all_completed()),
-        }
-        head_staging.append(evidence)
-        return evidence
-
-    runtime.run_steps(
-        (
-            SemanticStep(
-                "machine.configure_print_settings_via_ui",
-                InteractionSurface.UI,
-                configure,
-            ),
-            SemanticStep(
-                "head.set_volume_via_ui",
-                InteractionSurface.UI,
-                set_volume,
-            ),
-            SemanticStep("head.stage_via_ui", InteractionSurface.UI, load_head),
-        )
+    machine, rack, slot, _rows = _stage_stock_head(
+        runtime,
+        spec,
+        index=index,
+        head_staging=head_staging,
+        returned_head_ids=returned_head_ids,
     )
     if spec.enable_pressure_regulation and not pressure_enabled:
         runtime.run_steps(
@@ -875,6 +1081,8 @@ __all__ = [
     "run_editor_preparation",
     "run_soft_stop_boundary",
     "resume_soft_stopped_array",
+    "prepare_persisted_head_for_resume",
+    "run_authoritative_reload_resume_boundary",
     "run_stock_passes",
     "run_soft_stop_resume",
     "validate_stock_pass_boundary",

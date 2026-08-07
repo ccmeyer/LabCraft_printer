@@ -1011,7 +1011,7 @@ Rollback:
 
 ### Milestone 7: Journey portfolio and legacy-runner migration
 
-Status: `in progress — Slices 1, 2, 2.5, 3, and 3.5 complete; Slice 4 functionally validated with its code-growth gate open`
+Status: `in progress - Slices 1 through 5 complete`
 
 Goal:
 
@@ -1044,9 +1044,9 @@ Migration order:
 2. editor create/finalize — complete in Slice 1;
 3. multi-stock 24x2 — complete in Slice 2;
 4. prepared edit/refinalize — complete in Slice 3;
-5. soft stop/resume — functionally validated in Slice 4; code-growth gate open;
-6. authoritative reload/resume;
-7. post-start lock/copy;
+5. soft stop/resume - complete in Slice 4; code-growth variance explicitly accepted;
+6. authoritative reload/resume - complete in Slice 5;
+7. post-start lock/copy - next candidate, not yet planned;
 8. 96-well regression;
 9. 384x10 stress;
 10. disconnect scenario according to the Milestone 0 decision.
@@ -1472,14 +1472,15 @@ This effort is complete when:
 
 ## Current Next Action
 
-Milestone 7 Slice 4 is functionally validated, with its planned total
-runtime-growth gate still open; see
-`docs/sil_interactive_simulation_milestone_7_slice_4_completion_record.md`.
-Address or explicitly review that bounded consolidation issue before planning
-the next migration, authoritative reload/resume. That migration also requires
-a separate concrete plan and approval before implementation. Keep
-targeted tests per remaining slice and defer the complete Python suite until
-the final Milestone 7 validation. Do not begin post-start lock/copy migration,
+Milestone 7 Slice 5 is complete; see
+`docs/sil_interactive_simulation_milestone_7_slice_5_completion_record.md`.
+The generic harness now owns same-root application rotation, the page driver
+owns bounded authoritative editor load/activation, and the shared phases and
+assertions prove clean first-session teardown, exact rehydration, no replay,
+and terminal durability. The visible run and exact replay passed with equal
+stable projections. Create a separate plan before migrating post-start
+lock/editable copy. Keep targeted tests per remaining slice and defer the
+complete Python suite until the final Milestone 7 validation. Do not begin
 active parameter matrices, seeded exploration, production fault injection,
 performance remediation, firmware, protocol, Pi operations, or hardware work
 without separate approval.

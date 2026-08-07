@@ -1,6 +1,6 @@
 # Milestone 7 Slice 4 — Composed Soft Stop/Resume
 
-Status: `implemented and validated — code-growth gate requires review`
+Status: `implemented and validated - code-growth variance explicitly accepted`
 
 Completion evidence is recorded in
 `docs/sil_interactive_simulation_milestone_7_slice_4_completion_record.md`.
@@ -248,6 +248,11 @@ Slice 4 is not complete if it adds another large scenario runner:
 Line limits are review gates, not permission to compress or hide behavior. If
 the implementation cannot meet them cleanly, stop and propose a bounded Slice
 4.5 consolidation rather than accepting another monolith.
+
+Post-implementation decision: the user explicitly accepted the measured
+variance because the additional code is reusable page-driver, phase, observer,
+and assertion infrastructure rather than workflow-specific orchestration. No
+Slice 4.5 consolidation pass is required before Slice 5.
 
 ## Exact Files To Touch During Implementation
 

@@ -131,7 +131,7 @@ def _policy_assertion(
     return AssertionResult(
         assertion_id, checkpoint, "pass" if passed else "fail", sources,
         evidence={"checks": selected, **dict(evidence)},
-        message=None if passed else "soft-stop policy failed",
+        message=None if passed else "lifecycle policy failed",
     )
 
 
@@ -215,6 +215,129 @@ def soft_stop_terminal_assertions(
         ("controller", "model", "simulator", "persistence"),
     ))
     return tuple(projected)
+
+
+def authoritative_first_session_paused_assertion(
+    paused_results: tuple[AssertionResult, ...],
+) -> AssertionResult:
+    checks = {row.assertion_id: row.decision == "pass" for row in paused_results}
+    return _policy_assertion(
+        "execution.first_session_paused",
+        "session_1_stopped",
+        {"checks": checks, "assertions": [row.to_dict() for row in paused_results]},
+        tuple(checks) if len(checks) == 3 else (*checks, "three_pause_assertions"),
+        ("ui", "controller", "model", "simulator", "persistence"),
+    )
+
+
+def authoritative_session_rotation_assertions(
+    *,
+    first_close: Mapping[str, Any],
+    second_launch: Mapping[str, Any],
+    application_sessions: list[Mapping[str, Any]],
+    files_byte_identical: bool,
+) -> tuple[AssertionResult, AssertionResult]:
+    close, launch = dict(first_close), dict(second_launch)
+    first = dict(application_sessions[0]) if application_sessions else {}
+    fresh_checks = {
+        "two_application_sessions": len(application_sessions) == 2,
+        "same_retained_session": first.get("session_id") == launch.get("session_id"),
+        "fresh_application_identity": first.get("application_session_id") != launch.get("application_session_id"),
+        "second_launch_passed": bool(launch.get("application_session_id")),
+        "real_components_reconstructed": launch.get("component_type") == "ApplicationComponents" and launch.get("view_type") == "MainWindow",
+        "simulator_reconstructed": launch.get("machine_type") == "SimulatedMachine" and launch.get("hardware_access_allowed") is False,
+    }
+    close_checks = {
+        "close_succeeded": close.get("close_succeeded") is True,
+        "recorder_closed": (close.get("recorder") or {}).get("status") == "closed",
+        "session_lock_released": close.get("session_lock_present") is False,
+        "root_retained": close.get("root_retained") is True,
+        "authoritative_files_byte_identical": bool(files_byte_identical),
+    }
+    return (
+        _policy_assertion(
+            "ui.fresh_application_session_constructed", "session_2_launched",
+            {"checks": fresh_checks, "application_sessions": application_sessions},
+            tuple(fresh_checks), ("ui", "session", "harness"),
+        ),
+        _policy_assertion(
+            "execution.first_session_teardown_clean", "session_1_closed",
+            {"checks": close_checks, "close": close},
+            tuple(close_checks), ("session", "persistence", "harness"),
+        ),
+    )
+
+
+def authoritative_reload_boundary_assertions(
+    *,
+    loaded: Mapping[str, Any],
+    activated: Mapping[str, Any],
+) -> tuple[AssertionResult, AssertionResult]:
+    return (
+        _policy_assertion(
+            "execution.authoritative_reload_valid", "session_2_loaded", loaded,
+            tuple((loaded.get("checks") or {}).keys()),
+            ("ui", "model", "persistence"),
+        ),
+        _policy_assertion(
+            "execution.authoritative_runtime_rehydrated", "session_2_activated",
+            activated,
+            tuple((activated.get("checks") or {}).keys()),
+            ("ui", "controller", "model", "persistence"),
+        ),
+    )
+
+
+def authoritative_reload_terminal_assertions(
+    context: Any,
+    *,
+    expectation: SoftStopResumeExpectation,
+    completed_wells: list[str],
+    array_complete_count: int,
+    combined_lifecycle: Mapping[str, Any],
+    session_2_lifecycle: Mapping[str, Any],
+    session_1_completed_pairs: set[tuple[str, str]],
+    paused_validation: Mapping[str, Any],
+    quiescence: Mapping[str, Any],
+    starvation_events: list[Mapping[str, Any]],
+) -> tuple[AssertionResult, ...]:
+    """Project the shared terminal oracle plus the cross-session no-replay rule."""
+
+    by_id = {row.assertion_id: row for row in soft_stop_terminal_assertions(
+        context,
+        expectation=expectation,
+        completed_wells=completed_wells,
+        array_complete_count=array_complete_count,
+        intent_lifecycle=combined_lifecycle,
+        paused_validation=paused_validation,
+        quiescence=quiescence,
+        starvation_events=starvation_events,
+    )}
+    session_2_pairs = {
+        (str(row.get("stock_id")), str(row.get("well_id")))
+        for row in session_2_lifecycle.get("begins", ())
+    }
+    no_replay = not (session_1_completed_pairs & session_2_pairs)
+    resume = by_id["execution.resume_exactly_once"]
+    resume_evidence = {
+        **dict(resume.evidence),
+        "session_1_completed_pairs_not_replayed": no_replay,
+        "session_1_completed_pairs": list(map(list, sorted(session_1_completed_pairs))),
+        "session_2_begin_pairs": [list(pair) for pair in sorted(session_2_pairs)],
+    }
+    by_id["execution.resume_exactly_once"] = AssertionResult(
+        "execution.reload_resume_exactly_once",
+        resume.checkpoint,
+        "pass" if resume.decision == "pass" and no_replay else "fail",
+        resume.observable_sources,
+        resume_evidence,
+        None if resume.decision == "pass" and no_replay else
+        "fresh application replayed completed work or resumed incorrectly",
+    )
+    return tuple(by_id[name] for name in (
+        "execution.resume_exactly_once", "execution.expected_completions",
+        "execution.intent_durability_exact", "execution.terminal_bundle_valid",
+    ))
 
 
 def simulation_identity_assertion(context: Any) -> AssertionResult:
@@ -1425,6 +1548,10 @@ def editor_artifacts_cleanup_assertion(
 __all__ = [
     "ActionSequenceExpectation",
     "AssertionResult",
+    "authoritative_first_session_paused_assertion",
+    "authoritative_reload_boundary_assertions",
+    "authoritative_reload_terminal_assertions",
+    "authoritative_session_rotation_assertions",
     "ExecutionLifecycleExpectation",
     "calibration_assertion",
     "cleanup_assertion",

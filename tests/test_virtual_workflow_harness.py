@@ -73,6 +73,80 @@ def test_unexpected_dialog_check_allows_only_explicit_active_dialog(qapp, tmp_pa
     allowed.deleteLater()
 
 
+def test_harness_reopens_fresh_application_on_same_retained_session(qapp, tmp_path):
+    harness = AutomationHarness(_config(tmp_path))
+    first_launch = harness.start()["evidence"]
+    first_root = Path(first_launch["scenario_root"])
+    sentinel = first_root / "experiments" / "rotation-sentinel.txt"
+    sentinel.write_text("retained\n", encoding="utf-8")
+
+    first_close = harness.close_application_session()["evidence"]
+    assert first_close["close_succeeded"]
+    assert first_close["recorder"]["status"] == "closed"
+    assert not first_close["session_lock_present"]
+    assert harness.context.components is None
+
+    second_launch = harness.reopen_application_session()["evidence"]
+    assert second_launch["session_id"] == first_launch["session_id"]
+    assert second_launch["application_session_id"] != first_launch[
+        "application_session_id"
+    ]
+    assert second_launch["application_session_index"] == 2
+    assert sentinel.read_text(encoding="utf-8") == "retained\n"
+
+    teardown = harness.close()["evidence"]
+    assert teardown["close_succeeded"]
+    assert not teardown["session_lock_present"]
+    assert [row["status"] for row in teardown["application_sessions"]] == [
+        "completed",
+        "completed",
+    ]
+    assert len(
+        {row["recorder_artifact_dir"] for row in teardown["application_sessions"]}
+    ) == 2
+
+
+def test_harness_fails_closed_on_dirty_first_session_close(qapp, tmp_path, monkeypatch):
+    harness = AutomationHarness(_config(tmp_path))
+    harness.start()
+    session_type = type(harness.session)
+    original = session_type.close
+
+    def close_but_report_failure(session, *args, **kwargs):
+        original(session, *args, **kwargs)
+        return False
+
+    monkeypatch.setattr(session_type, "close", close_but_report_failure)
+    with pytest.raises(RuntimeError, match="did not close cleanly"):
+        harness.close_application_session()
+    assert harness.session is None
+    assert harness.application_sessions[0]["status"] == "failed"
+    assert not (harness.scenario_root / ".sil-session.lock").exists()
+    harness.close()
+
+
+def test_harness_retains_first_recorder_when_second_launch_fails(
+    qapp, tmp_path, monkeypatch
+):
+    from tools.sil.session import SimulationSession
+
+    harness = AutomationHarness(_config(tmp_path))
+    harness.start()
+    first = harness.close_application_session()["evidence"]
+
+    def reject_second_create(_cls, _config):
+        raise RuntimeError("injected second-session construction failure")
+
+    monkeypatch.setattr(SimulationSession, "create", classmethod(reject_second_create))
+    with pytest.raises(RuntimeError, match="second-session construction failure"):
+        harness.reopen_application_session()
+    assert harness.session is None
+    assert harness.application_sessions[0]["recorder"]["status"] == "closed"
+    assert Path(first["recorder_artifact_dir"]).is_dir()
+    assert not (harness.scenario_root / ".sil-session.lock").exists()
+    harness.close()
+
+
 def test_active_session_unexpected_dialog_fails_action_and_retains_evidence(
     qapp, tmp_path, monkeypatch
 ):

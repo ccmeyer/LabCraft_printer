@@ -326,6 +326,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
         EDITOR_WORKLOAD_ID,
         EDITOR_RENAME_WORKLOAD_ID,
         SOFT_STOP_RESUME_WORKLOAD_ID,
+        AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
     }:
         from tools.virtual_workflows.journeys import JourneyRunConfig
@@ -339,6 +340,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
         EDITOR_WORKLOAD_ID,
         EDITOR_RENAME_WORKLOAD_ID,
         SOFT_STOP_RESUME_WORKLOAD_ID,
+        AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
     }:
         assert config.fixture_path == SCENARIO_FIXTURES[scenario_id].resolve()

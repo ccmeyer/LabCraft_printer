@@ -220,7 +220,12 @@ class ExperimentEditorDriver(_QTestSurfaceDriver):
         super().__init__(context)
         self.action_runner = action_runner
 
-    def create_and_finalize(self, specification: dict[str, Any]) -> dict[str, Any]:
+    def create_and_finalize(
+        self,
+        specification: dict[str, Any],
+        *,
+        capture_editor_milestones: bool = True,
+    ) -> dict[str, Any]:
         # The bounded editor mechanics remain the compatibility implementation
         # while the shared harness owns composed-journey action boundaries.
         from tools.virtual_workflows.actions import drive_editor_create_finalize
@@ -229,6 +234,7 @@ class ExperimentEditorDriver(_QTestSurfaceDriver):
             self.context,
             specification,
             action_runner=self.action_runner,
+            capture_editor_milestones=capture_editor_milestones,
         )
 
     def revise_prepared_design(
@@ -256,7 +262,249 @@ class ExperimentEditorDriver(_QTestSurfaceDriver):
 
 
 class ExperimentLoaderDriver(_QTestSurfaceDriver):
-    """QTest mechanics for reopening a contained prepared experiment."""
+    """QTest mechanics for reopening contained authoritative experiments."""
+
+    def _drive_directory_load(
+        self,
+        experiment_dir,
+        *,
+        purpose: str,
+        on_loaded: Callable[[Any], Mapping[str, Any]],
+        on_activated: Callable[[Any], Mapping[str, Any]] | None = None,
+        on_failure: Callable[[BaseException, Any], None] | None = None,
+    ) -> dict[str, Any]:
+        """Drive the editor and nested directory chooser, then run callbacks."""
+
+        from pathlib import Path
+        from View import ExperimentDesignDialog
+
+        directory = Path(experiment_dir).resolve()
+        if not directory.is_relative_to(Path(self.context.scenario_root).resolve()):
+            root_label = "SIL session root" if purpose == "prepared" else "SIL root"
+            raise RuntimeError(f"{purpose} experiment escaped the {root_label}")
+        button = self.view.well_plate_widget.design_experiment_button
+        if not button.isVisible() or not button.isEnabled():
+            raise RuntimeError("Experiment Editor control is not visible and enabled")
+        state: dict[str, Any] = {"error": None, "loaded": None, "activated": None}
+
+        def fail(exc: BaseException, modal=None) -> None:
+            state["error"] = exc
+            if on_failure is not None:
+                on_failure(exc, modal)
+            for widget in (modal, self.app.activeModalWidget()):
+                if isinstance(widget, QtWidgets.QDialog) and widget.isVisible():
+                    widget.reject()
+
+        def choose_directory(editor) -> None:
+            modal = self.app.activeModalWidget()
+            try:
+                if not isinstance(modal, QtWidgets.QFileDialog):
+                    raise RuntimeError(
+                        f"unexpected modal while selecting {purpose} folder: "
+                        f"{type(modal).__name__} {modal.windowTitle()!r}"
+                    )
+                if modal.windowTitle() != "Select Experiment Folder":
+                    raise RuntimeError(
+                        f"unexpected file dialog title: {modal.windowTitle()!r}"
+                    )
+                modal.setDirectory(str(directory))
+                self.context.pump_events()
+                box = modal.findChild(QtWidgets.QDialogButtonBox)
+                accept = box.button(QtWidgets.QDialogButtonBox.Open) if box else None
+                if accept is None and box is not None:
+                    accept = box.button(QtWidgets.QDialogButtonBox.Ok)
+                if accept is None:
+                    raise RuntimeError(f"{purpose} folder dialog has no accept button")
+                self.click(accept)
+            except BaseException as exc:
+                fail(exc, modal)
+
+        def drive_editor() -> None:
+            modal = self.app.activeModalWidget()
+            try:
+                if self.context.deadline.remaining_seconds() <= 0:
+                    raise RuntimeError(f"{purpose} reload deadline expired")
+                if not isinstance(modal, ExperimentDesignDialog):
+                    raise RuntimeError(
+                        f"unexpected modal while opening {purpose} editor: "
+                        f"{type(modal).__name__} {modal.windowTitle()!r}"
+                    )
+                QtCore.QTimer.singleShot(0, lambda: choose_directory(modal))
+                self.click(modal.load_btn)
+                if state["error"] is not None:
+                    raise state["error"]
+                state["loaded"] = dict(on_loaded(modal))
+                if on_activated is not None:
+                    state["activated"] = dict(on_activated(modal))
+            except BaseException as exc:
+                fail(exc, modal)
+
+        QtCore.QTimer.singleShot(0, drive_editor)
+        self.click(button)
+        if state["error"] is not None:
+            raise state["error"]
+        if state["loaded"] is None or (on_activated and state["activated"] is None):
+            raise RuntimeError(f"{purpose} UI reload did not finish")
+        return {key: state[key] for key in ("loaded", "activated")}
+
+    def load_authoritative_execution(
+        self,
+        experiment_dir,
+        *,
+        expected_name: str,
+        before_activation: Callable[[], Mapping[str, Any]] | None = None,
+        after_activation: Callable[[], Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Load and activate one paused execution through the real editor."""
+
+        import json
+        from pathlib import Path
+
+        from ExecutionPlan import canonical_sha256
+        from tools.virtual_workflows.actions import (
+            ScenarioActionError,
+            capture_milestone,
+            execute_action,
+        )
+
+        directory = Path(experiment_dir).resolve()
+        def capture_failure(exc: BaseException, dialog) -> None:
+            if (
+                isinstance(dialog, QtWidgets.QDialog)
+                and dialog.isVisible()
+                and "session_2_load_failed" not in self.context.screenshots
+            ):
+                try:
+                    capture_milestone(
+                        self.context,
+                        "session_2_load_failed",
+                        evidence={
+                            "failure_type": type(exc).__name__,
+                            "failure_message": str(exc),
+                        },
+                        widget=dialog,
+                    )
+                except Exception:
+                    pass
+
+        def loaded_evidence(dialog) -> Mapping[str, Any]:
+            eligibility = (
+                self.context.experiment_model.get_execution_resume_eligibility() or {}
+            )
+            runtime_active = bool(
+                self.context.experiment_model
+                .is_authoritative_execution_runtime_active()
+            )
+            status_text = str(dialog.status_lbl.text() or "")
+            banner_text = str(dialog.lifecycle_banner.text() or "")
+            checks = {
+                "name_matches": dialog.exp_name_edit.text() == expected_name,
+                "action_is_load_execution": dialog.finish_btn.text()
+                == "Load Execution",
+                "finish_enabled": bool(dialog.finish_btn.isEnabled()),
+                "eligibility_ready_to_resume": eligibility.get("status")
+                == "ready_to_resume",
+                "runtime_inactive": not runtime_active,
+                "read_only_guidance": "execution plan validated"
+                in status_text.casefold()
+                and "load execution" in status_text.casefold(),
+                "visible_lock_banner": not dialog.lifecycle_banner.isHidden()
+                and "load execution" in banner_text.casefold()
+                and "without starting or resuming printing"
+                in banner_text.casefold(),
+            }
+            loaded_path = Path(self.context.experiment_model.experiment_file_path)
+            disk_payload = json.loads(loaded_path.read_text(encoding="utf-8"))
+            design_identity = {
+                "experiment_dir_path": str(
+                    self.context.experiment_model.experiment_dir_path
+                ),
+                "experiment_file_path": str(loaded_path),
+                "disk_design_sha256": canonical_sha256(disk_payload),
+                "model_design_sha256": canonical_sha256(
+                    self.context.experiment_model.to_dict()
+                ),
+                "plan_design_sha256": self.context.experiment_model
+                .get_execution_plan_snapshot()
+                .design_sha256,
+            }
+            evidence = {
+                "checks": checks,
+                "eligibility": eligibility,
+                "status_text": status_text,
+                "banner_text": banner_text,
+                "action_label": str(dialog.finish_btn.text() or ""),
+                "design_identity": design_identity,
+                "experiment_dir": str(directory),
+            }
+            if not all(checks.values()):
+                raise ScenarioActionError(
+                    "experiment.load_authoritative_via_ui",
+                    "loaded authoritative editor state is invalid",
+                    stage="operation",
+                    evidence=evidence,
+                )
+            evidence["reload_boundary"] = (
+                dict(before_activation()) if before_activation is not None else {}
+            )
+            return evidence
+
+        def activate_evidence(dialog) -> Mapping[str, Any]:
+            if dialog.finish_btn.text() != "Load Execution":
+                raise RuntimeError("saved runtime did not expose Load Execution")
+            self.click(dialog.finish_btn)
+            if dialog.isVisible():
+                raise RuntimeError("Load Execution did not close the editor")
+            eligibility = (
+                self.context.experiment_model.get_execution_resume_eligibility() or {}
+            )
+            runtime_active = bool(
+                self.context.experiment_model
+                .is_authoritative_execution_runtime_active()
+            )
+            array_state = self.context.controller.get_array_run_state()
+            if (
+                not runtime_active
+                or eligibility.get("status") != "ready_to_resume"
+                or array_state != "resume_ready"
+            ):
+                raise RuntimeError(
+                    "authoritative activation did not restore resume_ready"
+                )
+            return {
+                "eligibility": eligibility,
+                "runtime_active": runtime_active,
+                "array_state": array_state,
+                "action_label": "Load Execution",
+                "reload_boundary": (
+                    dict(after_activation()) if after_activation is not None else {}
+                ),
+            }
+
+        def record_loaded(dialog) -> Mapping[str, Any]:
+            result = execute_action(
+                self.context, "experiment.load_authoritative_via_ui",
+                lambda: loaded_evidence(dialog),
+            )
+            evidence = dict(result["evidence"])
+            capture_milestone(
+                self.context, "session_2_loaded", evidence=evidence, widget=dialog
+            )
+            return evidence
+
+        def record_activated(dialog) -> Mapping[str, Any]:
+            return execute_action(
+                self.context, "experiment.activate_authoritative_via_ui",
+                lambda: activate_evidence(dialog),
+            )["evidence"]
+
+        return self._drive_directory_load(
+            directory,
+            purpose="authoritative",
+            on_loaded=record_loaded,
+            on_activated=record_activated,
+            on_failure=capture_failure,
+        )
 
     def load_prepared_design(
         self,
@@ -267,100 +515,8 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
         expected_plan_revision: int,
     ) -> dict[str, Any]:
         from pathlib import Path
-        from View import ExperimentDesignDialog
-
         directory = Path(experiment_dir).resolve()
-        if not directory.is_relative_to(Path(self.context.scenario_root).resolve()):
-            raise RuntimeError("prepared experiment escaped the SIL session root")
-        button = self.view.well_plate_widget.design_experiment_button
-        if not button.isVisible() or not button.isEnabled():
-            raise RuntimeError("Experiment Editor control is not visible and enabled")
-
-        state: dict[str, Any] = {
-            "stage": "open_editor",
-            "error": None,
-            "result": None,
-            "dialog": None,
-        }
-        timer = QtCore.QTimer(self.app)
-        timer.setInterval(5)
-
-        def fail(exc: BaseException, modal=None) -> None:
-            state["error"] = exc
-            state["stage"] = "failed"
-            timer.stop()
-            for widget in (modal, state.get("dialog")):
-                if isinstance(widget, QtWidgets.QDialog) and widget.isVisible():
-                    widget.reject()
-
-        def choose_directory() -> None:
-            modal = self.app.activeModalWidget()
-            try:
-                if modal is None or modal is state.get("dialog"):
-                    return
-                if not isinstance(modal, QtWidgets.QFileDialog):
-                    raise RuntimeError(
-                        "unexpected modal while selecting prepared experiment: "
-                        f"{type(modal).__name__} {modal.windowTitle()!r}"
-                    )
-                if modal.windowTitle() != "Select Experiment Folder":
-                    raise RuntimeError(
-                        f"unexpected file dialog title {modal.windowTitle()!r}"
-                    )
-                modal.setDirectory(str(directory))
-                self.app.processEvents()
-                box = modal.findChild(QtWidgets.QDialogButtonBox)
-                accept = None
-                if box is not None:
-                    accept = box.button(QtWidgets.QDialogButtonBox.Open)
-                    if accept is None:
-                        accept = box.button(QtWidgets.QDialogButtonBox.Ok)
-                if accept is None:
-                    raise RuntimeError("prepared folder dialog has no accept button")
-                state["stage"] = "validate_loaded"
-                QtTest.QTest.mouseClick(
-                    accept, QtCore.Qt.MouseButton.LeftButton
-                )
-            except BaseException as exc:
-                fail(exc, modal)
-
-        def inspect() -> None:
-            modal = self.app.activeModalWidget()
-            try:
-                if self.context.deadline.remaining_seconds() <= 0:
-                    raise RuntimeError(
-                        f"prepared reload deadline expired at {state['stage']}"
-                    )
-                if state["stage"] == "open_editor":
-                    if modal is None:
-                        return
-                    if not isinstance(modal, ExperimentDesignDialog):
-                        raise RuntimeError(
-                            "unexpected modal while opening prepared editor: "
-                            f"{type(modal).__name__} {modal.windowTitle()!r}"
-                        )
-                    state["dialog"] = modal
-                    state["stage"] = "select_folder"
-                    folder_timer = QtCore.QTimer(modal)
-                    folder_timer.setInterval(5)
-                    folder_timer.timeout.connect(choose_directory)
-                    folder_timer.start()
-                    try:
-                        QtTest.QTest.mouseClick(
-                            modal.load_btn,
-                            QtCore.Qt.MouseButton.LeftButton,
-                        )
-                    finally:
-                        folder_timer.stop()
-                        folder_timer.deleteLater()
-                    if state["error"] is not None:
-                        raise state["error"]
-                    return
-                if state["stage"] != "validate_loaded":
-                    return
-                dialog = state["dialog"]
-                if modal is not dialog or not dialog.isVisible():
-                    return
+        def inspect_loaded(dialog) -> Mapping[str, Any]:
                 plan = self.context.experiment_model.get_execution_plan_snapshot()
                 eligibility = (
                     self.context.experiment_model.get_execution_resume_eligibility()
@@ -386,10 +542,9 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 }
                 if not all(checks.values()):
                     raise RuntimeError(
-                        "prepared design did not reload unchanged: "
-                        f"{checks}"
+                        f"prepared design did not reload unchanged: {checks}"
                     )
-                state["result"] = {
+                result = {
                     "checks": checks,
                     "experiment_dir": str(directory),
                     "experiment_name": dialog.exp_name_edit.text(),
@@ -401,28 +556,14 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                     "activation_performed": False,
                     "file_selection_mechanic": "qt_file_dialog_directory_selection",
                 }
-                state["stage"] = "finished"
                 QtTest.QTest.keyClick(dialog, QtCore.Qt.Key.Key_Escape)
                 if dialog.isVisible():
                     raise RuntimeError("prepared inspection editor did not close")
-                timer.stop()
-            except BaseException as exc:
-                fail(exc, modal)
+                return result
 
-        timer.timeout.connect(inspect)
-        timer.start()
-        try:
-            QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
-        finally:
-            timer.stop()
-            timer.deleteLater()
-        if state["error"] is not None:
-            raise state["error"]
-        if state["stage"] != "finished" or not isinstance(state["result"], dict):
-            raise RuntimeError(
-                f"prepared UI reload did not finish; stage={state['stage']}"
-            )
-        return state["result"]
+        return self._drive_directory_load(
+            directory, purpose="prepared", on_loaded=inspect_loaded
+        )["loaded"]
 
 
 class RackDriver(_QTestSurfaceDriver):

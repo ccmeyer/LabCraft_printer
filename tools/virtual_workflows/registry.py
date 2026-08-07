@@ -163,6 +163,7 @@ _SCENARIO_DEFINITIONS = {
         ),
         expected_completion_count=24,
         scenario_name="authoritative_reload_resume",
+        runner_family="composed_journey",
         supports_pi_evidence=False,
         supports_injected_stall=False,
         supports_report_sets=False,

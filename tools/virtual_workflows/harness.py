@@ -61,7 +61,7 @@ class AutomationHarnessConfig:
 
 
 class AutomationHarness:
-    """Own exactly one composed SimulationSession and its generic evidence."""
+    """Own composed application sessions and their generic evidence."""
 
     def __init__(self, config: AutomationHarnessConfig):
         self.config = config
@@ -72,6 +72,8 @@ class AutomationHarness:
         self.assertion_results: list[dict[str, Any]] = []
         self.failure: BaseException | None = None
         self.session = None
+        self.session_id: str | None = None
+        self.application_sessions: list[dict[str, Any]] = []
         self.closed = False
 
         self.report_dir = (
@@ -113,10 +115,14 @@ class AutomationHarness:
             }
         )
 
-    def start(self) -> dict[str, Any]:
-        """Construct and launch the canonical retained SimulationSession."""
+    def _launch_application_session(self) -> Mapping[str, Any]:
+        """Construct, launch, and bind one canonical retained session."""
 
-        def operation() -> Mapping[str, Any]:
+        if self.session is not None:
+            raise RuntimeError("an application session is already active")
+        if self.closed:
+            raise RuntimeError("automation harness is closed")
+        try:
             from tools.sil.session import (
                 ArtifactRetentionPolicy,
                 QtOwnership,
@@ -141,7 +147,7 @@ class AutomationHarness:
                 else QtOwnership.OWNED
             )
 
-            self.session = SimulationSession.create(
+            session = SimulationSession.create(
                 SimulationSessionConfigV1(
                     # QTest coverage requires controls to be visible even when
                     # Qt itself is using the offscreen platform.
@@ -156,37 +162,133 @@ class AutomationHarness:
                     source_identity="milestone6-composed-workflow",
                 )
             )
-            self.scenario_root = Path(self.session.session_root).resolve()
+            observed_session_id = str(session.session_id)
+            if self.session_id is not None and observed_session_id != self.session_id:
+                session.close("retained SIL session identity changed during reopen")
+                raise RuntimeError("retained SIL session identity changed during reopen")
+            self.session = session
+            self.session_id = observed_session_id
+            self.scenario_root = Path(session.session_root).resolve()
             self.context.scenario_root = self.scenario_root
-            font = apply_and_validate_sil_application_font(self.session.app)
-            view = self.session.launch()
-            components = self.session.components
+            font = apply_and_validate_sil_application_font(session.app)
+            view = session.launch()
+            components = session.components
             context = self.context
-            context.app = self.session.app
+            context.app = session.app
             context.qt_core = __import__("PySide6.QtCore", fromlist=["QtCore"])
-            context.components = components
-            context.model = components.model
-            context.machine = components.machine
+            context.components, context.view = components, view
+            context.model, context.machine = components.model, components.machine
             context.controller = components.controller
-            context.view = view
             context.experiment_model = components.model.experiment_model
-            context.application_session_id = self.session.application_session_id
-            return {
-                "session_id": self.session.session_id,
-                "application_session_id": self.session.application_session_id,
+            context.application_session_id = session.application_session_id
+            evidence = {
+                "session_id": session.session_id,
+                "application_session_id": session.application_session_id,
+                "application_session_index": len(self.application_sessions) + 1,
                 "seed": self.config.seed,
                 "speed_multiplier": self.config.speed_multiplier,
                 "font_rendering": font,
                 "scenario_root": str(self.scenario_root),
                 "qt_non_native_dialogs": bool(self.config.visible),
+                "component_type": type(components).__name__,
+                "view_type": type(view).__name__,
+                "machine_type": type(components.machine).__name__,
+                "hardware_access_allowed": bool(components.controller.runtime_context.hardware_access_allowed),
             }
+            self.application_sessions.append(
+                {
+                    "session_id": str(session.session_id),
+                    "application_session_id": str(session.application_session_id),
+                    "application_session_index": len(self.application_sessions) + 1,
+                    "status": "active",
+                    "recorder_artifact_dir": str(session.recorder.artifact_dir),
+                }
+            )
+            return evidence
+        except BaseException:
+            if self.session is not None:
+                try:
+                    self.session.close("application session launch failed")
+                except Exception:
+                    pass
+                self.session = None
+            raise
+
+    def start(self) -> dict[str, Any]:
+        """Construct and launch the canonical retained SimulationSession."""
 
         return execute_action(
-            self.context,
-            "app.launch_simulated",
-            operation,
+            self.context, "app.launch_simulated", self._launch_application_session,
             interaction_surface=InteractionSurface.HARNESS,
         )
+
+    def _record_application_close(self, session: Any, succeeded: bool) -> tuple[dict[str, Any], bool]:
+        recorder = dict(session.recorder.health_snapshot())
+        lock_present = (self.scenario_root / ".sil-session.lock").exists()
+        application_session_id = str(session.application_session_id)
+        for record in reversed(self.application_sessions):
+            if record["application_session_id"] == application_session_id:
+                record.update(
+                    status="completed" if succeeded else "failed",
+                    close_succeeded=succeeded,
+                    recorder=recorder,
+                    session_lock_present_after_close=lock_present,
+                )
+                break
+        return recorder, lock_present
+
+    def close_application_session(self) -> dict[str, Any]:
+        """Close one application while retaining the reusable SIL root."""
+
+        def operation() -> Mapping[str, Any]:
+            if self.session is None:
+                raise RuntimeError("no application session is active")
+            session = self.session
+            application_session_id = str(session.application_session_id)
+            session_id = str(session.session_id)
+            recorder_dir = Path(session.recorder.artifact_dir).resolve()
+            succeeded = bool(session.close())
+            recorder, lock_present = self._record_application_close(session, succeeded)
+            self.session = None
+            context = self.context
+            for name in ("components", "model", "machine", "controller", "view", "experiment_model"):
+                setattr(context, name, None)
+            evidence = {
+                "session_id": session_id,
+                "application_session_id": application_session_id,
+                "close_succeeded": succeeded,
+                "recorder": recorder,
+                "recorder_artifact_dir": str(recorder_dir),
+                "session_lock_present": lock_present,
+                "root_retained": self.scenario_root.is_dir(),
+            }
+            if not succeeded or lock_present or recorder.get("status") != "closed":
+                raise ScenarioActionError(
+                    "app.close_simulated_session",
+                    "application session did not close cleanly",
+                    stage="cleanup",
+                    evidence=evidence,
+                )
+            return evidence
+
+        return execute_action(
+            self.context, "app.close_simulated_session", operation,
+            interaction_surface=InteractionSurface.HARNESS,
+        )
+
+    def reopen_application_session(self) -> dict[str, Any]:
+        """Open a fresh application composition on the retained SIL root."""
+
+        result = execute_action(
+            self.context, "app.launch_simulated", self._launch_application_session,
+            interaction_surface=InteractionSurface.HARNESS,
+        )
+        if len(self.application_sessions) < 2:
+            raise RuntimeError("application session reopen did not create a fresh record")
+        first, current = self.application_sessions[-2:]
+        if first["application_session_id"] == current["application_session_id"]:
+            raise RuntimeError("application session reopen reused an application identity")
+        return result
 
     def run_action(
         self,
@@ -304,17 +406,29 @@ class AutomationHarness:
 
         def operation() -> Mapping[str, Any]:
             if self.session is None:
-                return {"session_created": False, "close_succeeded": True}
-            succeeded = bool(self.session.close(failure=self.failure))
+                return {
+                    "session_created": False,
+                    "close_succeeded": True,
+                    "application_sessions": [
+                        dict(row) for row in self.application_sessions
+                    ],
+                }
+            session = self.session
+            succeeded = bool(session.close(failure=self.failure))
             if not succeeded and self.failure is None:
                 raise RuntimeError("SimulationSession teardown failed")
-            lock_path = self.scenario_root / ".sil-session.lock"
+            _recorder, lock_present = self._record_application_close(
+                session, succeeded
+            )
             return {
                 "session_created": True,
                 "close_succeeded": succeeded or self.failure is not None,
                 "session_terminal_success": succeeded,
-                "session_lock_present": lock_path.exists(),
+                "session_lock_present": lock_present,
                 "root_retained": self.scenario_root.is_dir(),
+                "application_sessions": [
+                    dict(row) for row in self.application_sessions
+                ],
             }
 
         try:

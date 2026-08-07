@@ -59,7 +59,7 @@ def test_authoritative_reload_resume_fixture_contract_is_exact():
 
 
 @pytest.mark.sil_lifecycle
-def test_authoritative_reload_resume_composed_report_passes(
+def test_authoritative_reload_resume_direct_oracle_report_passes(
     qapp,
     tmp_path,
 ):

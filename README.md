@@ -663,10 +663,42 @@ process and a parity node is transiently incomplete, rerun that exact node in
 a fresh process/root before diagnosing the workflow. The full Python suite is
 still deferred until the final Milestone 7 validation.
 
-The functional migration is validated, but the Slice 4 completion record
-retains one open review item: touched runtime growth is net 598 physical lines
-against the planned 450-line consolidation gate. Do not start the next
-migration until that variance is consolidated or explicitly accepted.
+The Slice 4 migration is complete. Its touched runtime growth was net 598
+physical lines against the planned 450-line consolidation gate; the variance
+was explicitly accepted because most of the added code is reusable
+page-driver, phase, observer, and assertion infrastructure.
+
+Milestone 7 Slice 5 migrates `authoritative_reload_resume_24_v1` to generic
+composed dispatch. It creates and partially prints A1-A24 through normal UI
+controls, proves the soft-stop boundary, cleanly closes the first application
+composition, opens a fresh composition on the same retained SIL root, loads
+and activates the authoritative execution through Experiment Editor, reuses
+the persisted calibration, and resumes without replaying completed work. The
+legacy path remains directly callable as the fixed parity oracle.
+
+Run the composed lifecycle offscreen or visibly, then execute the exact replay
+command emitted in `report.json`:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario authoritative_reload_resume_24_v1 `
+  --output-root verification_reports\milestone7-slice5 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 60
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario authoritative_reload_resume_24_v1 `
+  --output-root verification_reports\milestone7-slice5-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 60
+```
+
+The report retains eight cross-session screenshots, both application-session
+recorder roots, exact UI/harness action surfaces, paused/load/activation/
+resume/terminal evidence, hashes, seed, and replay command. A visible run and
+its exact replay passed on 2026-08-06 with identical stable projections. If a
+nested editor or folder dialog is unexpected, mislabeled, or left open, the
+journey fails closed and retains its traceback, ledgers, manifest, available
+recorders, and failure screenshot. The complete Python suite remains deferred
+until the final Milestone 7 validation.
 
 The final retained Windows evidence is:
 

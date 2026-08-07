@@ -1,6 +1,6 @@
 # Milestone 7 Slice 4 Completion Record
 
-Status: `functionally complete — code-growth gate requires review`
+Status: `complete - code-growth variance explicitly accepted`
 
 Completed: 2026-08-06
 
@@ -41,14 +41,14 @@ hardware file changed. The fixture remained byte-identical with SHA-256
   90-line gate. The stop-boundary and resume operations are separate reusable
   functions.
 
-The approved total runtime-growth gate was not met: the touched runtime files
+The planned total runtime-growth gate was not met: the touched runtime files
 currently measure a net 598 physical lines versus the planned maximum of 450.
 The named workflow itself remains concise; most growth is in reusable page
 driver, typed phase, observer, and assertion infrastructure intended for the
 authoritative-reload migration. This variance is recorded explicitly rather
-than treating line wrapping as consolidation. Slice 4 should not be considered
-fully closed until the excess is consolidated or the gate is explicitly
-revised after review.
+than treating line wrapping as consolidation. On 2026-08-06 the user
+explicitly accepted the variance and chose to proceed without a Slice 4.5
+consolidation pass, so Slice 4 is closed.
 
 ## Validation
 
@@ -109,5 +109,7 @@ required.
 
 ## Next Step
 
-Stop here. Create and approve a separate concrete plan before migrating
-`authoritative_reload_resume_24_v1`.
+The separate concrete plan for migrating
+`authoritative_reload_resume_24_v1` is
+`docs/sil_interactive_simulation_milestone_7_slice_5_implementation_plan.md`.
+Do not implement it until approved.

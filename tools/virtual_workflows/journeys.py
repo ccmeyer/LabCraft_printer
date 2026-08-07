@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -28,6 +28,7 @@ from tools.virtual_workflows.assertions import (
     real_application_assertion,
     simulation_identity_assertion,
     SoftStopResumeExpectation,
+    authoritative_reload_terminal_assertions,
     soft_stop_paused_assertions,
     soft_stop_terminal_assertions,
     terminal_execution_assertion,
@@ -38,6 +39,9 @@ from tools.virtual_workflows.composition import (
     JourneyRuntime,
 )
 from tools.virtual_workflows.execution_observer import ExecutionObserver
+from tools.virtual_workflows.authoritative_evidence import (
+    merge_session_lifecycles,
+)
 from tools.virtual_workflows.editor_reporting import (
     build_editor_lifecycle_payload,
     create_finalize_report_spec,
@@ -54,6 +58,7 @@ from tools.virtual_workflows.journey_phases import (
     run_prepared_editor_revision,
     run_stock_passes,
     run_soft_stop_resume,
+    run_authoritative_reload_resume_boundary,
 )
 from tools.virtual_workflows.page_drivers import ExperimentLoaderDriver
 from tools.virtual_workflows.report import ComposedReportPayload
@@ -75,6 +80,9 @@ MULTI_STOCK_SCENARIO_VERSION = "1"
 SOFT_STOP_WORKLOAD_ID = "print_array_soft_stop_resume_24_v1"
 SOFT_STOP_SCENARIO_NAME = "print_array_soft_stop_resume"
 SOFT_STOP_SCENARIO_VERSION = "1"
+AUTHORITATIVE_RELOAD_WORKLOAD_ID = "authoritative_reload_resume_24_v1"
+AUTHORITATIVE_RELOAD_SCENARIO_NAME = "authoritative_reload_resume"
+AUTHORITATIVE_RELOAD_SCENARIO_VERSION = "1"
 
 SMOKE_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -132,6 +140,20 @@ SOFT_STOP_REQUIRED_ASSERTIONS = (
     "execution.terminal_bundle_valid",
     "artifacts.required_present",
 )
+AUTHORITATIVE_RELOAD_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "ui.fresh_application_session_constructed",
+    "execution.first_session_paused",
+    "execution.first_session_teardown_clean",
+    "execution.authoritative_reload_valid",
+    "execution.authoritative_runtime_rehydrated",
+    "execution.reload_resume_exactly_once",
+    "execution.expected_completions",
+    "execution.intent_durability_exact",
+    "execution.terminal_bundle_valid",
+    "artifacts.required_present",
+)
 
 SMOKE_REQUIRED_UI_ACTIONS = frozenset(
     {
@@ -178,6 +200,8 @@ MULTI_STOCK_REQUIRED_UI_ACTIONS = SMOKE_REQUIRED_UI_ACTIONS | frozenset(
 SOFT_STOP_REQUIRED_UI_ACTIONS = SMOKE_REQUIRED_UI_ACTIONS | frozenset(
     {"array.request_soft_stop_via_ui", "array.resume_via_ui"}
 )
+AUTHORITATIVE_RELOAD_REQUIRED_UI_ACTIONS = SOFT_STOP_REQUIRED_UI_ACTIONS | frozenset({
+    "experiment.load_authoritative_via_ui", "experiment.activate_authoritative_via_ui"})
 EDITOR_REQUIRED_SCREENSHOTS = frozenset(
     {"editor_opened", "generated", "finalized", "reloaded", "validated"}
 )
@@ -219,10 +243,21 @@ SOFT_STOP_REQUIRED_SCREENSHOTS = frozenset(
         "completed",
     }
 )
+AUTHORITATIVE_RELOAD_REQUIRED_SCREENSHOTS = frozenset({
+    "session_1_ready", "session_1_printing", "session_1_stop_requested",
+    "session_1_stopped", "session_2_loaded", "session_2_activated",
+    "session_2_resumed", "completed",
+})
 
 _COMMON_ACTIONS = frozenset(
     {"app.launch_simulated", "artifact.capture_milestone", "scenario.teardown"}
 )
+_AUTHORITATIVE_RELOAD_ACTIONS = frozenset({
+    "app.close_simulated_session", "array.request_soft_stop_via_ui",
+    "array.wait_for_state", "array.observe_stopped_quiescence",
+    "experiment.load_authoritative_via_ui",
+    "experiment.activate_authoritative_via_ui", "array.resume_via_ui",
+})
 _EDITOR_ACTIONS = frozenset(
     {
         "editor.open_via_ui",
@@ -284,6 +319,10 @@ def _multi_fixture() -> tuple[dict[str, Any], Path]:
 
 def _soft_stop_fixture() -> tuple[dict[str, Any], Path]:
     return _print_fixture(SOFT_STOP_WORKLOAD_ID)
+
+
+def _authoritative_reload_fixture() -> tuple[dict[str, Any], Path]:
+    return _print_fixture(AUTHORITATIVE_RELOAD_WORKLOAD_ID)
 
 
 def _editor_fixture() -> tuple[dict[str, Any], Path]:
@@ -835,6 +874,105 @@ def _soft_stop_body(runtime: JourneyRuntime) -> None:
         runtime.add_assertion(result)
 
 
+def _authoritative_reload_body(runtime: JourneyRuntime) -> None:
+    context, fixture = runtime.context, runtime.fixture
+    expected_wells = _well_ids(fixture)
+    stock_ids = tuple(_stock_id(stock) for stock in fixture["stocks"])
+    runtime.observations.update(
+        {
+            "expected_wells": expected_wells,
+            "starvation_events": [],
+            "current_pass": {"index": -1, "starting_count": 0, "stock_id": None},
+        }
+    )
+    _connect_execution_signals(runtime, array_complete=True, machine_errors=True)
+    runtime.add_assertion(simulation_identity_assertion(context))
+    runtime.add_assertion(real_application_assertion(context))
+    runtime.run_steps(machine_startup_steps())
+    run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(
+            _editor_specification(fixture, expected_wells),
+            capture_editor_milestones=False,
+        ),
+    )
+    plan = context.experiment_model.get_execution_plan_snapshot()
+    expectation = SoftStopResumeExpectation(
+        experiment_dir=Path(context.experiment_model.experiment_dir_path),
+        plan_id=str(plan.plan_id),
+        well_ids=expected_wells,
+        stock_ids=stock_ids,
+        target_dispenses_per_stock=int(
+            fixture["workload"]["target_dispenses_per_stock_per_well"]
+        ),
+    )
+    first_observer = ExecutionObserver(
+        context,
+        experiment_dir=expectation.experiment_dir,
+        completed_count=lambda: len(runtime.observations["completed_wells"]),
+        pass_context=lambda: _current_pass_context(runtime),
+    )
+    runtime.observations["execution_observer"] = first_observer
+    runtime.register_restorable("session_1_execution", first_observer)
+    first_observer.install()
+    _install_starvation_observer(runtime)
+
+    stop_spec = replace(
+        _soft_stop_spec(runtime),
+        stop_requested_milestone="session_1_stop_requested",
+        stopped_milestone="session_1_stopped",
+        resumed_milestone="session_2_resumed",
+    )
+
+    def rotate_and_resume(_runtime: JourneyRuntime, spec: StockPassSpec) -> None:
+        run_authoritative_reload_resume_boundary(
+            runtime,
+            stock_spec=spec,
+            soft_stop_spec=stop_spec,
+            expectation=expectation,
+            expected_name=AUTHORITATIVE_RELOAD_WORKLOAD_ID,
+            rebind_execution_signals=lambda: _connect_execution_signals(
+                runtime, array_complete=True, machine_errors=True
+            ),
+            install_starvation_observer=lambda: _install_starvation_observer(
+                runtime
+            ),
+        )
+
+    first_pass = replace(
+        _smoke_pass(runtime),
+        ready_milestone="session_1_ready",
+        printing_milestone="session_1_printing",
+    )
+    run_stock_passes(runtime, (first_pass,), active_phase=rotate_and_resume)
+    runtime.restore_all()
+    session_2 = runtime.observations["session_2_execution_snapshot"]
+    combined = merge_session_lifecycles(
+        (
+            ("session_1", runtime.observations["session_1_lifecycle"]),
+            ("session_2", session_2["lifecycle"]),
+        )
+    )
+    runtime.observations.update(
+        {"execution_snapshot": session_2, "combined_lifecycle": combined}
+    )
+    for result in authoritative_reload_terminal_assertions(
+        context,
+        expectation=expectation,
+        completed_wells=runtime.observations["completed_wells"],
+        array_complete_count=len(runtime.observations["array_completions"]),
+        combined_lifecycle=combined,
+        session_2_lifecycle=session_2["lifecycle"],
+        session_1_completed_pairs=runtime.observations[
+            "session_1_completed_pairs"
+        ],
+        paused_validation=runtime.observations["paused_validation"],
+        quiescence=runtime.observations["stopped_quiescence"],
+        starvation_events=runtime.observations["starvation_events"],
+    ):
+        runtime.add_assertion(result)
+
+
 def _current_pass_context(runtime: JourneyRuntime) -> Mapping[str, Any] | None:
     current = runtime.observations["current_pass"]
     if int(current["index"]) < 0:
@@ -1110,17 +1248,7 @@ def _soft_stop_payload(
     }
     return ComposedReportPayload(
         workload={
-            **_base_workload(runtime),
-            "plate_name": fixture["plate"]["name"],
-            "plate_rows": fixture["plate"]["rows"],
-            "plate_columns": fixture["plate"]["columns"],
-            "well_ids": list(expected),
-            "stock_count": 1,
-            "array_passes": 1,
-            "target_dispenses_per_well": 1,
-            "expected_completion_count": len(expected),
-            "speed_multiplier": runtime.harness.config.speed_multiplier,
-            "timeout_seconds": runtime.harness.config.timeout_seconds,
+            **_single_stock_workload(runtime),
         },
         workflow_status=status,
         workflow_values={"expected_well_count": len(expected), "completed_well_count": len(completed), "expected_stock_well_completion_count": len(expected), "completed_stock_well_count": len(completed), "completed_well_ids": list(completed), "well_update_count": len(completed), "array_states": list(runtime.context.array_states), "array_complete_count": len(observed.get("array_completions", [])), "cleanup_results": [dict(teardown)]},
@@ -1132,6 +1260,92 @@ def _soft_stop_payload(
             "Generated identities, timestamps, durations, paths, and calibration identities are not expected to be byte-identical across replay.",
         ),
     )
+
+
+def _authoritative_reload_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    observed = runtime.observations
+    expected, completed = observed["expected_wells"], observed["completed_wells"]
+    decisions = _decisions(runtime)
+    evidence = _assertion_evidence(runtime)
+    passed = all(decisions.get(item) == "pass" for item in AUTHORITATIVE_RELOAD_REQUIRED_ASSERTIONS)
+    status = "measured" if passed else "partial"
+    return ComposedReportPayload(
+        workload=_single_stock_workload(runtime),
+        workflow_status=status,
+        workflow_values={
+            "expected_well_count": len(expected),
+            "completed_well_count": len(completed),
+            "expected_stock_well_completion_count": len(expected),
+            "completed_stock_well_count": len(completed),
+            "completed_well_ids": list(completed),
+            "well_update_count": len(completed),
+            "array_states": list(runtime.context.array_states),
+            "array_complete_count": len(observed.get("array_completions", [])),
+            "application_sessions": list(map(dict, runtime.harness.application_sessions)),
+            "cleanup_results": [dict(teardown)],
+        },
+        queue={
+            "status": status,
+            "values": {
+                "unexpected_starvation_count": len(observed.get("starvation_events", [])),
+                "queue_drained_at_terminal": decisions.get("execution.terminal_bundle_valid") == "pass",
+            },
+        },
+        persistence={"status": status, "values": _authoritative_reload_persistence(
+            runtime, decisions=decisions, evidence=evidence
+        )},
+        limitations=(
+            "The two fresh application compositions share one in-process QApplication and retained SIL root; this is not an OS-process restart test.",
+            "The simulator does not validate firmware, protocol framing, motion, pressure response, cameras, balance behavior, or droplet quality.",
+            "Generated identities, timestamps, durations, paths, and identity-bearing hashes are not expected to be byte-identical across replay.",
+        ),
+    )
+
+
+def _single_stock_workload(runtime: JourneyRuntime) -> dict[str, Any]:
+    fixture, expected = runtime.fixture, runtime.observations["expected_wells"]
+    return {
+        **_base_workload(runtime),
+        "plate_name": fixture["plate"]["name"],
+        "plate_rows": fixture["plate"]["rows"],
+        "plate_columns": fixture["plate"]["columns"],
+        "well_ids": list(expected),
+        "stock_count": 1,
+        "array_passes": 1,
+        "target_dispenses_per_well": 1,
+        "expected_completion_count": len(expected),
+        "speed_multiplier": runtime.harness.config.speed_multiplier,
+        "timeout_seconds": runtime.harness.config.timeout_seconds,
+    }
+
+
+def _authoritative_reload_persistence(
+    runtime: JourneyRuntime, *, decisions: Mapping[str, str],
+    evidence: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    observed = runtime.observations
+    boundaries = observed.get("reload_boundaries", {})
+    terminal = evidence.get("execution.terminal_bundle_valid", {})
+    return {
+        "assertion_decisions": dict(decisions),
+        "authoritative_reload_resume": {
+            "session_1_paused": observed.get("paused_validation", {}),
+            "session_1_cleanup": observed.get("session_1_cleanup", {}),
+            "between_sessions": observed.get("between_sessions", {}),
+            "session_2_loaded": boundaries.get("loaded", {}),
+            "session_2_activation": boundaries.get("activated", {}),
+            "resume_reconciliation": evidence.get("execution.reload_resume_exactly_once", {}),
+            "terminal": {
+                "plan_state": terminal.get("terminal_plan_state"),
+                "completion_count": terminal.get("stock_well_completion_count"),
+                "checks": terminal.get("checks", {}),
+            },
+        },
+        "intent_durability": evidence.get("execution.intent_durability_exact", {}),
+        **_observer_persistence(dict(observed.get("execution_snapshot") or {})),
+    }
 
 
 def _cleanup_artifact(runtime: JourneyRuntime, teardown: Mapping[str, Any]) -> Any:
@@ -1170,6 +1384,16 @@ def _soft_stop_artifact(
     return multi_stock_artifacts_assertion(
         screenshots=runtime.context.screenshots,
         required_screenshots=set(SOFT_STOP_REQUIRED_SCREENSHOTS),
+        teardown=teardown,
+    )
+
+
+def _authoritative_reload_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return multi_stock_artifacts_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(AUTHORITATIVE_RELOAD_REQUIRED_SCREENSHOTS),
         teardown=teardown,
     )
 
@@ -1226,6 +1450,19 @@ def _soft_stop_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> st
         "Milestone 7 composed 24-well soft-stop/resume lifecycle\n"
         f"Status: {report['classification']['status']}\n"
         f"Completions: {len(runtime.observations['completed_wells'])} / 24\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _authoritative_reload_summary(
+    report: Mapping[str, Any], runtime: JourneyRuntime
+) -> str:
+    return (
+        "Milestone 7 composed authoritative reload/resume lifecycle\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Completions: {len(runtime.observations['completed_wells'])} / 24\n"
+        f"Application sessions: {len(runtime.harness.application_sessions)}\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
     )
@@ -1330,6 +1567,24 @@ SOFT_STOP_DEFINITION = JourneyDefinition(
     payload_builder=_soft_stop_payload,
     summary_builder=_soft_stop_summary,
 )
+AUTHORITATIVE_RELOAD_DEFINITION = JourneyDefinition(
+    registry_id=AUTHORITATIVE_RELOAD_WORKLOAD_ID,
+    scenario_name=AUTHORITATIVE_RELOAD_SCENARIO_NAME,
+    scenario_version=AUTHORITATIVE_RELOAD_SCENARIO_VERSION,
+    workload_id=AUTHORITATIVE_RELOAD_WORKLOAD_ID,
+    required_action_ids=(
+        _COMMON_ACTIONS | _EDITOR_ACTIONS | _PRINT_ACTIONS
+        | _AUTHORITATIVE_RELOAD_ACTIONS
+    ),
+    required_ui_action_ids=AUTHORITATIVE_RELOAD_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=AUTHORITATIVE_RELOAD_REQUIRED_ASSERTIONS,
+    required_screenshots=AUTHORITATIVE_RELOAD_REQUIRED_SCREENSHOTS,
+    fixture_loader=_authoritative_reload_fixture,
+    body=_authoritative_reload_body,
+    artifact_assertion=_authoritative_reload_artifact,
+    payload_builder=_authoritative_reload_payload,
+    summary_builder=_authoritative_reload_summary,
+)
 
 JOURNEY_DEFINITIONS = {
     definition.registry_id: definition
@@ -1339,6 +1594,7 @@ JOURNEY_DEFINITIONS = {
         EDITOR_REVISION_DEFINITION,
         MULTI_STOCK_DEFINITION,
         SOFT_STOP_DEFINITION,
+        AUTHORITATIVE_RELOAD_DEFINITION,
     )
 }
 JOURNEY_DEFINITION_IDS = frozenset(JOURNEY_DEFINITIONS)
@@ -1373,6 +1629,9 @@ def run_soft_stop_resume_24_journey(config: JourneyRunConfig) -> dict[str, Any]:
 
 __all__ = [
     "EDITOR_WORKLOAD_ID",
+    "AUTHORITATIVE_RELOAD_REQUIRED_ASSERTIONS",
+    "AUTHORITATIVE_RELOAD_REQUIRED_UI_ACTIONS",
+    "AUTHORITATIVE_RELOAD_WORKLOAD_ID",
     "JOURNEY_DEFINITIONS",
     "JourneyRunConfig",
     "MULTI_STOCK_REQUIRED_ASSERTIONS",

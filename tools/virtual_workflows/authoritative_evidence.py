@@ -307,6 +307,129 @@ def compare_directories(
     )
 
 
+def merge_session_lifecycles(
+    sessions: Iterable[tuple[str, Mapping[str, Any]]],
+) -> dict[str, list[Any]]:
+    """Merge observer lifecycles while attributing dictionary rows to sessions."""
+
+    values = tuple((str(name), dict(snapshot)) for name, snapshot in sessions)
+    merged: dict[str, list[Any]] = {}
+    for key in sorted({key for _name, snapshot in values for key in snapshot}):
+        rows: list[Any] = []
+        for session_id, snapshot in values:
+            for item in snapshot.get(key, ()):
+                attributed = dict(item) if isinstance(item, Mapping) else item
+                if isinstance(attributed, dict):
+                    attributed.setdefault("application_session_id", session_id)
+                rows.append(attributed)
+        merged[key] = rows
+    return merged
+
+
+def completed_stock_well_pairs(lifecycle: Mapping[str, Any]) -> set[tuple[str, str]]:
+    """Return stock/well pairs for observer intents with a completion."""
+
+    begins = {row.get("intent_id"): row for row in lifecycle.get("begins", ())}
+    return {
+        (str(begins[intent_id].get("stock_id")), str(begins[intent_id].get("well_id")))
+        for intent_id in lifecycle.get("completions", ()) if intent_id in begins
+    }
+
+
+def _boundary_evidence(
+    snapshot: AuthoritativeBundleSnapshot,
+    checks: Mapping[str, bool],
+    **extra: Any,
+) -> dict[str, Any]:
+    return {
+        "checks": dict(checks),
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "eligibility": snapshot.eligibility,
+        "inventory": snapshot.directory.rich_inventory(),
+        **extra,
+    }
+
+
+def authoritative_loaded_boundary(
+    paused: AuthoritativeBundleSnapshot,
+    loaded: AuthoritativeBundleSnapshot,
+) -> dict[str, Any]:
+    """Prove that editor load is read-only and does not activate runtime."""
+    loaded_comparison = compare_directories(paused.directory, loaded.directory)
+    loaded_checks = {
+        **dict(loaded_comparison.checks),
+        "authoritative_files_byte_identical": paused.directory.hashes
+        == loaded.directory.hashes,
+        "runtime_inactive": not loaded.runtime_active,
+        "eligibility_ready_to_resume": loaded.eligibility_status
+        == "ready_to_resume",
+        "plan_identity_unchanged": loaded.plan_id == paused.plan_id,
+    }
+    return _boundary_evidence(loaded, loaded_checks)
+
+
+def authoritative_activation_boundary(
+    paused: AuthoritativeBundleSnapshot,
+    activated: AuthoritativeBundleSnapshot,
+    *,
+    completed_pair_count: int,
+) -> dict[str, Any]:
+    """Prove the allowlisted effects of explicit runtime activation."""
+    allowed = {
+        "execution_resume.json",
+        "execution_plan.json",
+        "key.csv",
+        "concentration_key.csv",
+        "experiment_audit.jsonl",
+    }
+    activation_comparison = compare_directories(
+        paused.directory,
+        activated.directory,
+        allowed_changed_paths=allowed,
+    ).to_dict()
+    activation_rows = [
+        row
+        for row in activated.audit_rows[len(paused.audit_rows) :]
+        if row.get("event_type") == "authoritative_execution_activated"
+    ]
+    activated_checks = {
+        "only_allowlisted_files_changed": not activation_comparison[
+            "disallowed_changed_paths"
+        ],
+        "plan_identity_unchanged": activated.plan_id == paused.plan_id,
+        "eligibility_ready_to_resume": activated.eligibility_status
+        == "ready_to_resume",
+        "runtime_active": activated.runtime_active,
+        "one_activation_audit_event": len(activation_rows) == 1,
+        "partial_progress_rehydrated": activated.total_added_droplets
+        == int(completed_pair_count),
+    }
+    return _boundary_evidence(
+        activated,
+        activated_checks,
+        changed_paths=activation_comparison["changed_paths"],
+        disallowed_changed_paths=activation_comparison["disallowed_changed_paths"],
+        activation_audit_rows=activation_rows,
+    )
+
+
+def authoritative_reload_boundaries(
+    paused: AuthoritativeBundleSnapshot,
+    loaded: AuthoritativeBundleSnapshot,
+    activated: AuthoritativeBundleSnapshot,
+    *,
+    completed_pair_count: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Compare read-only load and explicit activation boundaries."""
+
+    return (
+        authoritative_loaded_boundary(paused, loaded),
+        authoritative_activation_boundary(
+            paused, activated, completed_pair_count=completed_pair_count
+        ),
+    )
+
+
 def capture_authoritative_bundle(
     context: Any,
     *,
@@ -452,13 +575,18 @@ __all__ = [
     "DirectoryEvidence",
     "FileEvidence",
     "capture_authoritative_bundle",
+    "authoritative_activation_boundary",
+    "authoritative_loaded_boundary",
+    "authoritative_reload_boundaries",
     "check_evidence",
     "compare_directories",
+    "completed_stock_well_pairs",
     "editor_directory_snapshot",
     "read_audit_rows",
     "read_csv_rows",
     "read_model_audit_rows",
     "rich_file_inventory",
+    "merge_session_lifecycles",
     "runtime_assignments",
     "sha256_file",
     "snapshot_directory",
