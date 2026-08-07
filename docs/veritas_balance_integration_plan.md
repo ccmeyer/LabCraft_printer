@@ -4,7 +4,7 @@
 
 - Date: 2026-08-07
 - Branch: `feature/balance_integration`
-- Status: Slices 0-3 verified; Slice 4 ready
+- Status: Slices 0-4 verified; Slice 5 ready
 - Scope: implementation plan and slice verification record
 - Target hardware: Veritas/BEL HPB balance connected to the Raspberry Pi through a proper RS-232-to-USB adapter
 - Target workflow: stream gravimetric data collection only
@@ -842,7 +842,7 @@ Rollback:
 
 ## Slice 4: Explicit Activation, Composition, And Connection UI
 
-Status: `ready`
+Status: `verified`
 
 Goal:
 
@@ -884,7 +884,24 @@ Implementation steps:
 
 Validation:
 
-`.\env\Scripts\python.exe -m pytest -q tests\test_safe_application_construction.py tests\test_controller_port_classification.py tests\test_stream_gravimetric_balance_integration.py`
+`.\env\Scripts\python.exe -m pytest -q tests\test_safe_application_construction.py tests\test_controller_port_classification.py tests\test_stream_gravimetric_balance_integration.py tests\test_balance_service.py`
+
+Implementation findings:
+
+- Only exact environment value `1` enables the immutable feature setting.
+- Composition creates the service only for production/current-profile runs;
+  default, simulation, and non-current requests remain disabled.
+- Port discovery is read-only, prefers `/dev/serial/by-id`, accepts the
+  verified Prolific `067b:23a3` identity and explicit balance metadata, and
+  rejects CP2102, STM, unknown, `ttyAMA`, and the resolved active MCU device.
+- The Controller caches and re-emits typed service events without calling the
+  Model or changing either gravimetric mass field.
+- The hidden UI performs discovery only. A selected or remembered port is not
+  opened until the operator clicks Connect.
+- Component teardown closes the service before deleting Qt objects. A
+  rejected shutdown remains retryable and never force-terminates the worker.
+- Focused validation passed on 2026-08-07. The full repository suite remains
+  deferred to final all-slices validation as agreed.
 
 Proceed criteria:
 
@@ -894,6 +911,11 @@ Proceed criteria:
   without opening real hardware.
 - Simulation cannot enumerate or connect to the balance.
 - Legacy balance construction tests remain unchanged and passing.
+
+Operator instructions:
+
+- See `docs/veritas_balance_operator.md` for activation, connection, disable,
+  restoration, and troubleshooting steps.
 
 Rollback:
 

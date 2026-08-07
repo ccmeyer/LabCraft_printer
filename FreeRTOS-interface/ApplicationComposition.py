@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from PySide6.QtCore import QCoreApplication
 
@@ -13,6 +13,9 @@ from hardware.profile import HardwareProfile
 
 
 SIMULATION_IDENTITY_TEXT = "SIMULATION — NO HARDWARE CONNECTED"
+
+
+EXPERIMENTAL_BALANCE_ENV = "LABCRAFT_ENABLE_EXPERIMENTAL_BALANCE"
 
 
 class RuntimeMode(str, Enum):
@@ -45,6 +48,27 @@ SIMULATION_RUNTIME_CONTEXT = RuntimeContext(
     RuntimeMode.SIMULATION,
     SIMULATION_IDENTITY_TEXT,
 )
+
+
+@dataclass(frozen=True)
+class ExperimentalFeatures:
+    balance_integration: bool = False
+
+    def __post_init__(self):
+        if not isinstance(self.balance_integration, bool):
+            raise TypeError("balance_integration must be a bool")
+
+    @classmethod
+    def from_environment(
+        cls, environment: Mapping[str, str]
+    ) -> "ExperimentalFeatures":
+        if not isinstance(environment, Mapping):
+            raise TypeError("environment must be a mapping")
+        return cls(
+            balance_integration=(
+                environment.get(EXPERIMENTAL_BALANCE_ENV) == "1"
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -90,6 +114,7 @@ class ApplicationDependencies:
     droplet_camera_factory: Factory
     log_reader_factory: Factory
     balance_factory: Factory
+    experimental_balance_factory: Factory
     legacy_calibration_model_factory: Factory
 
     def __post_init__(self):
@@ -100,6 +125,7 @@ class ApplicationDependencies:
             "droplet_camera_factory",
             "log_reader_factory",
             "balance_factory",
+            "experimental_balance_factory",
             "legacy_calibration_model_factory",
         )
         for name in factories:
@@ -137,12 +163,16 @@ class ApplicationComponents:
     controller: Any
     view: Any
     balance: Any = None
+    balance_service: Any = None
+    experimental_features: ExperimentalFeatures = ExperimentalFeatures()
     _closed: bool = False
 
     def close(self):
         """Release Qt-owned construction objects without initiating hardware work."""
         if self._closed:
-            return
+            return True
+        if not _close_experimental_balance_service(self.balance_service):
+            return False
         self._closed = True
 
         timers = (
@@ -166,7 +196,14 @@ class ApplicationComponents:
             except RuntimeError:
                 pass
 
-        for obj in (self.view, self.controller, self.balance, self.machine, self.model):
+        for obj in (
+            self.view,
+            self.controller,
+            self.balance,
+            self.balance_service,
+            self.machine,
+            self.model,
+        ):
             delete_later = getattr(obj, "deleteLater", None)
             if callable(delete_later):
                 try:
@@ -177,6 +214,7 @@ class ApplicationComponents:
         app = QCoreApplication.instance()
         if app is not None:
             app.processEvents()
+        return True
 
 
 def _blocked_factory(label: str) -> Factory:
@@ -225,6 +263,12 @@ def _production_balance_factory(*, machine, model):
     return Balance(machine=machine, model=model)
 
 
+def _production_experimental_balance_factory():
+    from BalanceService import BalanceService
+
+    return BalanceService()
+
+
 def _production_legacy_calibration_model_factory(model):
     from legacy.mass_calibration import MassCalibrationModel
 
@@ -246,6 +290,7 @@ def production_dependencies() -> ApplicationDependencies:
         droplet_camera_factory=_production_droplet_camera_factory,
         log_reader_factory=_production_log_reader_factory,
         balance_factory=_production_balance_factory,
+        experimental_balance_factory=_production_experimental_balance_factory,
         legacy_calibration_model_factory=_production_legacy_calibration_model_factory,
     )
 
@@ -266,14 +311,48 @@ def simulation_dependencies(
         droplet_camera_factory=_blocked_factory("droplet camera access"),
         log_reader_factory=_blocked_factory("log-reader access"),
         balance_factory=_blocked_factory("balance access"),
+        experimental_balance_factory=_blocked_factory(
+            "experimental balance access"
+        ),
         legacy_calibration_model_factory=_blocked_factory(
             "legacy calibration hardware access"
         ),
     )
 
 
-def _delete_partial_objects(*objects):
-    for obj in objects:
+def _close_experimental_balance_service(balance_service) -> bool:
+    if balance_service is None:
+        return True
+    close = getattr(balance_service, "close", None)
+    if not callable(close):
+        print("Experimental balance service has no close() method")
+        return False
+    try:
+        result = close()
+    except Exception as exc:
+        print(
+            "Experimental balance service shutdown failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return False
+    if result is not None and not bool(getattr(result, "accepted", True)):
+        detail = str(getattr(result, "detail", "shutdown was rejected"))
+        print(f"Experimental balance service shutdown rejected: {detail}")
+        return False
+    return True
+
+
+def _delete_partial_objects(*objects, balance_service=None):
+    balance_service_closed = _close_experimental_balance_service(balance_service)
+    if not balance_service_closed:
+        print(
+            "Experimental balance service remains open after construction "
+            "failure; no forced thread termination was attempted."
+        )
+    cleanup_objects = list(objects)
+    if balance_service_closed and balance_service is not None:
+        cleanup_objects.append(balance_service)
+    for obj in cleanup_objects:
         delete_later = getattr(obj, "deleteLater", None)
         if callable(delete_later):
             try:
@@ -285,18 +364,42 @@ def _delete_partial_objects(*objects):
         app.processEvents()
 
 
+def _effective_experimental_features(
+    profile: HardwareProfile,
+    dependencies: ApplicationDependencies,
+    requested: ExperimentalFeatures,
+) -> ExperimentalFeatures:
+    return ExperimentalFeatures(
+        balance_integration=(
+            requested.balance_integration
+            and dependencies.runtime_context.mode is RuntimeMode.PRODUCTION
+            and profile.name == "current"
+        )
+    )
+
+
 def build_application_components(
     profile: HardwareProfile,
     dependencies: ApplicationDependencies,
     *,
     model_setup: Callable[[Any], None] | None = None,
+    experimental_features: ExperimentalFeatures = ExperimentalFeatures(),
 ) -> ApplicationComponents:
     """Construct the real MVC objects using only the supplied dependencies."""
     from Controller import Controller
     from Model import Model
     from View import MainWindow
 
-    model = machine = controller = balance = view = None
+    if not isinstance(experimental_features, ExperimentalFeatures):
+        raise TypeError("experimental_features must be ExperimentalFeatures")
+
+    effective_features = _effective_experimental_features(
+        profile,
+        dependencies,
+        experimental_features,
+    )
+
+    model = machine = controller = balance = balance_service = view = None
     try:
         roots = dependencies.roots
         model = Model(
@@ -315,11 +418,15 @@ def build_application_components(
             droplet_camera_factory=dependencies.droplet_camera_factory,
             log_reader_factory=dependencies.log_reader_factory,
         )
+        if effective_features.balance_integration:
+            balance_service = dependencies.experimental_balance_factory()
         controller = Controller(
             machine,
             model,
             profile=profile,
             runtime_context=dependencies.runtime_context,
+            experimental_features=effective_features,
+            experimental_balance_service=balance_service,
         )
 
         if profile.name == "legacy":
@@ -354,9 +461,18 @@ def build_application_components(
             controller=controller,
             view=view,
             balance=balance,
+            balance_service=balance_service,
+            experimental_features=effective_features,
         )
     except Exception as exc:
-        _delete_partial_objects(view, controller, balance, machine, model)
+        _delete_partial_objects(
+            view,
+            controller,
+            balance,
+            machine,
+            model,
+            balance_service=balance_service,
+        )
         if isinstance(exc, ApplicationConstructionError):
             raise
         raise ApplicationConstructionError(

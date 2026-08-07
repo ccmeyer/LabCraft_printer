@@ -1961,6 +1961,128 @@ class ManualRefuelCheckDialog(QtWidgets.QDialog):
         super().keyPressEvent(event)
 
 
+class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
+    """Explicit connection controls for the opt-in HPB balance service."""
+
+    _BUSY_STATES = {"connecting", "streaming", "disconnecting"}
+
+    def __init__(self, controller, *, preselected_port="", parent=None):
+        super().__init__("Experimental Balance", parent)
+        self.controller = controller
+        self._preselected_port = str(preselected_port or "").strip()
+        self._state = "disconnected"
+
+        layout = QtWidgets.QGridLayout(self)
+        self.port_combo = QtWidgets.QComboBox()
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.connection_button = QtWidgets.QPushButton("Connect")
+        self.connection_state_label = QtWidgets.QLabel("Disconnected")
+        self.last_reading_label = QtWidgets.QLabel("Last reading: —")
+
+        layout.addWidget(QtWidgets.QLabel("Balance port:"), 0, 0)
+        layout.addWidget(self.port_combo, 0, 1)
+        layout.addWidget(self.refresh_button, 0, 2)
+        layout.addWidget(self.connection_button, 1, 0, 1, 3)
+        layout.addWidget(self.connection_state_label, 2, 0, 1, 3)
+        layout.addWidget(self.last_reading_label, 3, 0, 1, 3)
+
+        self.refresh_button.clicked.connect(self.refresh_ports)
+        self.connection_button.clicked.connect(self._toggle_connection)
+        self.port_combo.currentIndexChanged.connect(self._update_controls)
+        controller.experimental_balance_connection_changed.connect(
+            self._on_connection_changed
+        )
+        controller.experimental_balance_reading_received.connect(
+            self._on_reading_received
+        )
+
+        self.refresh_ports()
+        cached_reading = controller.get_experimental_balance_last_reading()
+        if cached_reading is not None:
+            self._on_reading_received(cached_reading)
+        cached_snapshot = controller.get_experimental_balance_connection_snapshot()
+        if cached_snapshot is not None:
+            self._on_connection_changed(cached_snapshot)
+        else:
+            self._update_controls()
+
+    @staticmethod
+    def _state_name(snapshot) -> str:
+        state = getattr(snapshot, "state", "disconnected")
+        return str(getattr(state, "value", state)).casefold()
+
+    def refresh_ports(self):
+        if self._state in self._BUSY_STATES:
+            return
+        previous = str(self.port_combo.currentData() or "")
+        descriptors = self.controller.list_experimental_balance_ports()
+        self.port_combo.clear()
+        for descriptor in descriptors:
+            self.port_combo.addItem(
+                descriptor.display_label,
+                descriptor.device_path,
+            )
+        preferred = self._preselected_port or previous
+        if preferred:
+            index = self.port_combo.findData(preferred)
+            if index >= 0:
+                self.port_combo.setCurrentIndex(index)
+        self._update_controls()
+
+    def _toggle_connection(self):
+        if self._state in {"streaming", "error"}:
+            self.controller.disconnect_experimental_balance()
+            return
+        if self._state == "disconnected":
+            selected = str(self.port_combo.currentData() or "").strip()
+            if selected:
+                self.controller.connect_experimental_balance(selected)
+
+    def _on_connection_changed(self, snapshot):
+        self._state = self._state_name(snapshot)
+        detail = str(getattr(snapshot, "detail", "") or "").strip()
+        labels = {
+            "disconnected": "Disconnected",
+            "connecting": "Connecting…",
+            "streaming": "Streaming",
+            "disconnecting": "Disconnecting…",
+            "error": "Error",
+            "closed": "Closed",
+        }
+        text = labels.get(self._state, self._state.title())
+        self.connection_state_label.setText(
+            f"{text}: {detail}" if detail else text
+        )
+        self._update_controls()
+
+    def _on_reading_received(self, reading):
+        mass = getattr(reading, "mass_mg", getattr(reading, "display_value", "?"))
+        stability = "stable" if bool(getattr(reading, "device_stable", False)) else "unstable"
+        self.last_reading_label.setText(
+            f"Last reading: {mass} mg ({stability})"
+        )
+
+    def _update_controls(self, *_args):
+        busy = self._state in self._BUSY_STATES
+        self.port_combo.setEnabled(not busy and self._state == "disconnected")
+        self.refresh_button.setEnabled(not busy and self._state == "disconnected")
+        if self._state in {"streaming", "error"}:
+            self.connection_button.setText("Disconnect")
+            self.connection_button.setEnabled(True)
+        elif self._state == "disconnected":
+            self.connection_button.setText("Connect")
+            self.connection_button.setEnabled(self.port_combo.currentData() is not None)
+        elif self._state == "connecting":
+            self.connection_button.setText("Connecting…")
+            self.connection_button.setEnabled(False)
+        elif self._state == "disconnecting":
+            self.connection_button.setText("Disconnecting…")
+            self.connection_button.setEnabled(False)
+        else:
+            self.connection_button.setText("Connect")
+            self.connection_button.setEnabled(False)
+
+
 class DropletImagingDialog(QtWidgets.QDialog):
     REFUEL_LEVEL_CHART_WINDOW_SAMPLES = 100
     REFUEL_LEVEL_CHART_FALLBACK_HEIGHT_PX = 100.0
@@ -2644,6 +2766,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.stream_capture_discard_button.setMinimumHeight(32)
         stream_grid.addWidget(self.stream_capture_begin_button, srow, 0, 1, 2); srow += 1
         stream_grid.addWidget(self.stream_capture_discard_button, srow, 0, 1, 2); srow += 1
+
+        if bool(getattr(self.controller, "experimental_balance_enabled", False)):
+            try:
+                preselected_balance_port = self.model.get_default_balance_port()
+            except (AttributeError, KeyError, TypeError):
+                preselected_balance_port = ""
+            self.experimental_balance_group = ExperimentalBalanceConnectionGroup(
+                self.controller,
+                preselected_port=preselected_balance_port,
+            )
+            stream_grid.addWidget(
+                self.experimental_balance_group,
+                srow,
+                0,
+                1,
+                2,
+            )
+            srow += 1
 
         self.run_options_group = QtWidgets.QGroupBox("Run Options")
         run_options_v = QtWidgets.QVBoxLayout(self.run_options_group)

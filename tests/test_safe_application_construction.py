@@ -1,5 +1,6 @@
 import sys
 import types
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,7 +9,7 @@ from PySide6 import QtCore
 
 import ApplicationComposition as composition
 import LocalConfig
-from hardware.profile import CURRENT_PROFILE
+from hardware.profile import CURRENT_PROFILE, LEGACY_PROFILE
 from simulation import (
     SIMULATED_PORT,
     SimulationConfig,
@@ -30,6 +31,27 @@ class _SafeCommandQueue(QtCore.QObject):
 class _SafeDropletCamera(QtCore.QObject):
     image_captured_signal = QtCore.Signal(object)
     capture_failed_signal = QtCore.Signal()
+
+
+class _FakeExperimentalBalanceService(QtCore.QObject):
+    connection_changed = QtCore.Signal(object)
+    reading_received = QtCore.Signal(object)
+    request_progress = QtCore.Signal(object)
+    request_finished = QtCore.Signal(object)
+    error_occurred = QtCore.Signal(object)
+
+    def __init__(self, close_results=None):
+        super().__init__()
+        self.close_calls = 0
+        self._close_results = list(close_results or [True])
+
+    def close(self):
+        self.close_calls += 1
+        accepted = self._close_results.pop(0) if self._close_results else True
+        return SimpleNamespace(
+            accepted=accepted,
+            detail="closed" if accepted else "worker still running",
+        )
 
 
 class _ConstructionSafeMachine(QtCore.QObject):
@@ -132,6 +154,163 @@ def _build_simulation(tmp_path, suffix="run"):
     return dependencies, components
 
 
+def _production_safe_dependencies(tmp_path, experimental_factory):
+    simulation = composition.simulation_dependencies(
+        tmp_path,
+        machine_factory=_safe_machine_factory,
+    )
+    return replace(
+        simulation,
+        runtime_context=composition.PRODUCTION_RUNTIME_CONTEXT,
+        experimental_balance_factory=experimental_factory,
+    )
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (None, False),
+        ("", False),
+        ("true", False),
+        ("yes", False),
+        (" 1", False),
+        ("1 ", False),
+        ("1", True),
+    ],
+)
+def test_experimental_balance_environment_requires_exact_one(value, expected):
+    environment = {}
+    if value is not None:
+        environment[composition.EXPERIMENTAL_BALANCE_ENV] = value
+    features = composition.ExperimentalFeatures.from_environment(environment)
+    assert features.balance_integration is expected
+
+
+def test_experimental_balance_constructs_only_when_production_current_enabled(
+    qapp, tmp_path
+):
+    services = []
+
+    def factory():
+        service = _FakeExperimentalBalanceService()
+        services.append(service)
+        return service
+
+    dependencies = _production_safe_dependencies(tmp_path / "enabled", factory)
+    components = composition.build_application_components(
+        CURRENT_PROFILE,
+        dependencies,
+        experimental_features=composition.ExperimentalFeatures(True),
+    )
+
+    assert services == [components.balance_service]
+    assert components.controller.experimental_balance_enabled is True
+    assert components.experimental_features.balance_integration is True
+    assert components.close() is True
+    assert components.close() is True
+    assert services[0].close_calls == 1
+
+
+def test_default_and_simulation_construction_never_invoke_experimental_factory(
+    qapp, tmp_path
+):
+    calls = []
+    production = _production_safe_dependencies(
+        tmp_path / "default",
+        lambda: calls.append("production") or _FakeExperimentalBalanceService(),
+    )
+    default_components = composition.build_application_components(
+        CURRENT_PROFILE,
+        production,
+    )
+    simulation = composition.simulation_dependencies(
+        tmp_path / "simulation-enabled-request",
+        machine_factory=_safe_machine_factory,
+    )
+    simulated_components = composition.build_application_components(
+        CURRENT_PROFILE,
+        simulation,
+        experimental_features=composition.ExperimentalFeatures(True),
+    )
+
+    assert calls == []
+    assert default_components.balance_service is None
+    assert simulated_components.balance_service is None
+    assert default_components.controller.experimental_balance_enabled is False
+    assert simulated_components.controller.experimental_balance_enabled is False
+    default_components.close()
+    simulated_components.close()
+
+
+def test_legacy_profile_forces_experimental_balance_feature_off(tmp_path):
+    calls = []
+    dependencies = _production_safe_dependencies(
+        tmp_path / "legacy-gate",
+        lambda: calls.append("constructed"),
+    )
+
+    effective = composition._effective_experimental_features(
+        LEGACY_PROFILE,
+        dependencies,
+        composition.ExperimentalFeatures(True),
+    )
+
+    assert effective == composition.ExperimentalFeatures(False)
+    assert calls == []
+
+
+def test_experimental_shutdown_rejection_is_retryable_and_not_forceful(
+    qapp, tmp_path
+):
+    service = _FakeExperimentalBalanceService([False, True])
+    dependencies = _production_safe_dependencies(
+        tmp_path / "shutdown-retry",
+        lambda: service,
+    )
+    components = composition.build_application_components(
+        CURRENT_PROFILE,
+        dependencies,
+        experimental_features=composition.ExperimentalFeatures(True),
+    )
+
+    assert components.close() is False
+    assert components._closed is False
+    assert service.close_calls == 1
+    assert not hasattr(service, "terminate")
+
+    assert components.close() is True
+    assert components._closed is True
+    assert service.close_calls == 2
+
+
+def test_construction_failure_closes_created_experimental_service(
+    monkeypatch, qapp, tmp_path
+):
+    import View as view_module
+
+    service = _FakeExperimentalBalanceService()
+    dependencies = _production_safe_dependencies(
+        tmp_path / "partial-construction",
+        lambda: service,
+    )
+    monkeypatch.setattr(
+        view_module,
+        "MainWindow",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected view failure")
+        ),
+    )
+
+    with pytest.raises(composition.ApplicationConstructionError):
+        composition.build_application_components(
+            CURRENT_PROFILE,
+            dependencies,
+            experimental_features=composition.ExperimentalFeatures(True),
+        )
+
+    assert service.close_calls == 1
+
+
 def _assert_beneath(path, root):
     resolved_path = Path(path).resolve()
     resolved_root = Path(root).resolve()
@@ -170,6 +349,7 @@ def test_simulation_dependencies_create_contained_roots_and_reject_hardware(tmp_
         "droplet_camera_factory",
         "log_reader_factory",
         "balance_factory",
+        "experimental_balance_factory",
         "legacy_calibration_model_factory",
     ):
         with pytest.raises(composition.HardwareAccessBlocked, match="Simulation mode"):
@@ -385,6 +565,7 @@ def test_production_runtime_does_not_show_simulation_identity(qapp, tmp_path):
         droplet_camera_factory=simulation.droplet_camera_factory,
         log_reader_factory=simulation.log_reader_factory,
         balance_factory=simulation.balance_factory,
+        experimental_balance_factory=simulation.experimental_balance_factory,
         legacy_calibration_model_factory=simulation.legacy_calibration_model_factory,
     )
     components = composition.build_application_components(

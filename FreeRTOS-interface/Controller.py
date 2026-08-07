@@ -9,6 +9,7 @@ from AppVersion import get_app_version as read_app_version
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import Counter, deque
+from dataclasses import dataclass
 
 import ast
 import time
@@ -27,7 +28,7 @@ from hardware.null_devices import NullCamera
 from simulation import SIMULATED_PORT
 from CaptureCoordinator import CaptureCoordinator
 from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
-from ApplicationComposition import PRODUCTION_RUNTIME_CONTEXT
+from ApplicationComposition import ExperimentalFeatures, PRODUCTION_RUNTIME_CONTEXT
 
 ARRAY_PAUSE_DEPARTURE_ACCEL = 32000
 ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
@@ -62,6 +63,59 @@ PROMPTABLE_MANUAL_REFUEL_CHECK_CODES = {
     "print_pressure_mismatch",
     "refuel_pressure_mismatch",
 }
+
+
+@dataclass(frozen=True)
+class ExperimentalBalancePort:
+    device_path: str
+    system_device: str
+    by_id_paths: tuple[str, ...]
+    display_label: str
+    vid: str | None
+    pid: str | None
+    vid_pid: str | None
+    description: str | None
+    manufacturer: str | None
+    product: str | None
+    serial_number: str | None
+
+    def __post_init__(self):
+        if not self.device_path or not self.system_device:
+            raise ValueError("balance port paths must not be empty")
+        if not isinstance(self.by_id_paths, tuple):
+            raise TypeError("by_id_paths must be a tuple")
+
+
+def _normalized_usb_id(value) -> str | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            return f"{int(value, 16):04x}"
+        return f"{int(value):04x}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolved_serial_path(path: str) -> str:
+    return os.path.normcase(os.path.realpath(os.path.abspath(str(path))))
+
+
+def _serial_by_id_aliases(
+    root: Path = Path("/dev/serial/by-id"),
+) -> dict[str, tuple[str, ...]]:
+    aliases: dict[str, list[str]] = {}
+    try:
+        entries = sorted(root.iterdir(), key=lambda item: item.name.casefold())
+    except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+        return {}
+    for entry in entries:
+        try:
+            resolved = _resolved_serial_path(str(entry))
+        except OSError:
+            continue
+        aliases.setdefault(resolved, []).append(str(entry))
+    return {key: tuple(values) for key, values in aliases.items()}
 
 
 class DropletCapturePerformanceDiagnostics:
@@ -769,6 +823,9 @@ class Controller(QObject):
     update_volumes_in_view_signal = Signal()
     error_occurred_signal = Signal(str,str)
     transport_fault_ui_signal = Signal(object)
+    experimental_balance_connection_changed = Signal(object)
+    experimental_balance_reading_received = Signal(object)
+    experimental_balance_error_occurred = Signal(object)
 
     # DFU signals
     dfu_progress = QtCore.Signal(int)
@@ -819,6 +876,8 @@ class Controller(QObject):
         monotonic_fn=None,
         timer_factory=None,
         runtime_context=None,
+        experimental_features=None,
+        experimental_balance_service=None,
     ):
         super().__init__()
 
@@ -826,6 +885,33 @@ class Controller(QObject):
         self.model = model
         self.profile = profile
         self.runtime_context = runtime_context or PRODUCTION_RUNTIME_CONTEXT
+        self.experimental_features = (
+            experimental_features or ExperimentalFeatures()
+        )
+        if not isinstance(self.experimental_features, ExperimentalFeatures):
+            raise TypeError("experimental_features must be ExperimentalFeatures")
+        self._experimental_balance_service = experimental_balance_service
+        self._experimental_balance_connection_snapshot = None
+        self._experimental_balance_last_reading = None
+        self._experimental_balance_ports = ()
+        if self.experimental_features.balance_integration:
+            if self._experimental_balance_service is None:
+                raise ValueError(
+                    "enabled experimental balance requires a service"
+                )
+            self._experimental_balance_service.connection_changed.connect(
+                self._on_experimental_balance_connection_changed
+            )
+            self._experimental_balance_service.reading_received.connect(
+                self._on_experimental_balance_reading_received
+            )
+            self._experimental_balance_service.error_occurred.connect(
+                self._on_experimental_balance_error_occurred
+            )
+        elif self._experimental_balance_service is not None:
+            raise ValueError(
+                "experimental balance service supplied while feature is disabled"
+            )
         self._monotonic_fn = monotonic_fn or time.monotonic
         self._timer_factory = timer_factory or (lambda parent: QtCore.QTimer(parent))
         self.balance = None  # to be set for legacy if needed
@@ -1147,35 +1233,208 @@ class Controller(QObject):
 
         self.model.machine_model.update_ports(ports)
 
+    @property
+    def experimental_balance_enabled(self) -> bool:
+        return bool(
+            self.experimental_features.balance_integration
+            and self._experimental_balance_service is not None
+        )
+
+    @staticmethod
+    def _port_metadata_text(info) -> str:
+        return " ".join(
+            str(getattr(info, name, "") or "").casefold()
+            for name in ("description", "manufacturer", "product")
+        )
+
+    @classmethod
+    def _is_mcu_port_info(cls, info) -> bool:
+        vid = _normalized_usb_id(getattr(info, "vid", None))
+        pid = _normalized_usb_id(getattr(info, "pid", None))
+        text = cls._port_metadata_text(info)
+        return (
+            (vid == "10c4" and pid == "ea60")
+            or vid == "0483"
+            or "cp210" in text
+            or "stm" in text
+        )
+
+    @classmethod
+    def _is_balance_port_info(cls, info) -> bool:
+        vid = _normalized_usb_id(getattr(info, "vid", None))
+        pid = _normalized_usb_id(getattr(info, "pid", None))
+        if vid == "067b" and pid == "23a3":
+            return True
+        text = cls._port_metadata_text(info)
+        return any(
+            marker in text
+            for marker in (
+                "prolific",
+                "balance",
+                "scale",
+                "ohaus",
+                "sartorius",
+                "mettler",
+                "toledo",
+            )
+        )
+
+    def list_experimental_balance_ports(
+        self,
+    ) -> tuple[ExperimentalBalancePort, ...]:
+        if self._reject_physical_action(
+            "experimental balance serial port enumeration"
+        ) is not None:
+            self._experimental_balance_ports = ()
+            return ()
+        if not self.experimental_balance_enabled:
+            self._experimental_balance_ports = ()
+            return ()
+
+        active_machine_port = str(self.get_machine_port() or "").strip()
+        active_machine_device = (
+            _resolved_serial_path(active_machine_port)
+            if active_machine_port
+            else None
+        )
+        aliases_by_device = _serial_by_id_aliases()
+        descriptors = []
+        seen_system_devices = set()
+        for info in comports():
+            system_device = str(getattr(info, "device", "") or "").strip()
+            if not system_device or "ttyAMA" in system_device:
+                continue
+            resolved_device = _resolved_serial_path(system_device)
+            if resolved_device == active_machine_device:
+                continue
+            if self._is_mcu_port_info(info) or not self._is_balance_port_info(info):
+                continue
+            if resolved_device in seen_system_devices:
+                continue
+            seen_system_devices.add(resolved_device)
+
+            by_id_paths = aliases_by_device.get(resolved_device, ())
+            device_path = by_id_paths[0] if by_id_paths else system_device
+            vid = _normalized_usb_id(getattr(info, "vid", None))
+            pid = _normalized_usb_id(getattr(info, "pid", None))
+            vid_pid = f"{vid}:{pid}" if vid and pid else None
+            description = str(getattr(info, "description", "") or "") or None
+            manufacturer = str(getattr(info, "manufacturer", "") or "") or None
+            product = str(getattr(info, "product", "") or "") or None
+            serial_number = str(getattr(info, "serial_number", "") or "") or None
+            identity = product or description or manufacturer or "Balance adapter"
+            suffix = f" [{vid_pid}]" if vid_pid else ""
+            descriptors.append(
+                ExperimentalBalancePort(
+                    device_path=device_path,
+                    system_device=system_device,
+                    by_id_paths=tuple(by_id_paths),
+                    display_label=f"{identity} — {device_path}{suffix}",
+                    vid=vid,
+                    pid=pid,
+                    vid_pid=vid_pid,
+                    description=description,
+                    manufacturer=manufacturer,
+                    product=product,
+                    serial_number=serial_number,
+                )
+            )
+        self._experimental_balance_ports = tuple(
+            sorted(descriptors, key=lambda item: item.display_label.casefold())
+        )
+        return self._experimental_balance_ports
+
+    def _experimental_balance_command_accepted(
+        self, result, action: str
+    ) -> bool:
+        if bool(getattr(result, "accepted", False)):
+            return True
+        detail = str(getattr(result, "detail", "") or f"{action} was rejected")
+        self.error_occurred_signal.emit("Experimental Balance", detail)
+        return False
+
+    def connect_experimental_balance(self, port: str) -> bool:
+        if self._reject_physical_action(
+            "experimental balance connection"
+        ) is not None:
+            return False
+        if not self.experimental_balance_enabled:
+            self.error_occurred_signal.emit(
+                "Experimental Balance",
+                "Experimental balance integration is not enabled.",
+            )
+            return False
+        selected = str(port or "").strip()
+        available = {
+            descriptor.device_path: descriptor
+            for descriptor in self.list_experimental_balance_ports()
+        }
+        descriptor = available.get(selected)
+        if descriptor is None:
+            self.error_occurred_signal.emit(
+                "Experimental Balance",
+                "Select a currently available balance adapter before connecting.",
+            )
+            return False
+        active_machine_port = str(self.get_machine_port() or "").strip()
+        if active_machine_port and (
+            _resolved_serial_path(descriptor.device_path)
+            == _resolved_serial_path(active_machine_port)
+        ):
+            self.error_occurred_signal.emit(
+                "Experimental Balance",
+                "The selected port is the active printer-controller port.",
+            )
+            return False
+        result = self._experimental_balance_service.connect_balance(
+            descriptor.device_path
+        )
+        return self._experimental_balance_command_accepted(result, "Connect")
+
+    def disconnect_experimental_balance(self) -> bool:
+        if self._reject_physical_action(
+            "experimental balance disconnection"
+        ) is not None:
+            return False
+        if not self.experimental_balance_enabled:
+            return False
+        result = self._experimental_balance_service.disconnect_balance()
+        return self._experimental_balance_command_accepted(result, "Disconnect")
+
+    def get_experimental_balance_connection_snapshot(self):
+        return self._experimental_balance_connection_snapshot
+
+    def get_experimental_balance_last_reading(self):
+        return self._experimental_balance_last_reading
+
+    def _on_experimental_balance_connection_changed(self, snapshot):
+        self._experimental_balance_connection_snapshot = snapshot
+        self.experimental_balance_connection_changed.emit(snapshot)
+
+    def _on_experimental_balance_reading_received(self, reading):
+        self._experimental_balance_last_reading = reading
+        self.experimental_balance_reading_received.emit(reading)
+
+    def _on_experimental_balance_error_occurred(self, error):
+        self.experimental_balance_error_occurred.emit(error)
+        detail = str(getattr(error, "detail", "") or "Balance service error")
+        self.error_occurred_signal.emit("Experimental Balance Error", detail)
+
     def _classify_port(self, port: str) -> str | None:
-            """
-            Return "mcu", "balance", or None (unknown).
-            Uses cached comports metadata if available.
-            """
-            info = self._port_info.get(port)
-            if info is None:
-                # refresh metadata if needed
-                for p in comports():
-                    if p.device == port:
-                        info = p
-                        break
-            print(f"Classifying port {port} with info: {info}")
-            if info is None:
-                return None
-
-            vid = getattr(info, "vid", None)
-            desc = (getattr(info, "description", "") or "").lower()
-            manuf = (getattr(info, "manufacturer", "") or "").lower()
-
-            # MCU heuristics
-            if vid == 0x0483 or "CP210" in desc or "stm" in desc or "stmicro" in manuf:
-                return "mcu"
-
-            # Balance heuristics (best-effort)
-            if any(k in desc for k in ("prolific", "balance", "scale", "ohaus", "sartorius", "mettler", "toledo")):
-                return "balance"
-
+        """Return ``mcu``, ``balance``, or ``None`` from cached USB metadata."""
+        info = self._port_info.get(port)
+        if info is None:
+            for candidate in comports():
+                if getattr(candidate, "device", None) == port:
+                    info = candidate
+                    break
+        if info is None:
             return None
+        if self._is_mcu_port_info(info):
+            return "mcu"
+        if self._is_balance_port_info(info):
+            return "balance"
+        return None
 
     @QtCore.Slot(str)
     def connect_machine(self, port: str):

@@ -195,6 +195,7 @@ def main():
         show_single_instance_warning(lock_path)
         return EXIT_ALREADY_RUNNING
 
+    components = None
     try:
         # Create splash screen
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -210,6 +211,7 @@ def main():
         app.processEvents()
 
         from ApplicationComposition import (
+            ExperimentalFeatures,
             build_application_components,
             production_dependencies,
         )
@@ -242,7 +244,12 @@ def main():
             profile,
             production_dependencies(),
             model_setup=configure_model,
+            experimental_features=ExperimentalFeatures.from_environment(
+                os.environ
+            ),
         )
+        if components.balance_service is not None:
+            app.aboutToQuit.connect(components.close)
         view = components.view
 
         def show_main_window():
@@ -260,6 +267,12 @@ def main():
         install_ui_freeze_watchdog(app)
         return app.exec()
     finally:
+        if components is not None and components.balance_service is not None:
+            if not components.close():
+                print(
+                    "Experimental balance service is still shutting down; "
+                    "no forced thread termination was attempted."
+                )
         app_lock.unlock()
 
 
