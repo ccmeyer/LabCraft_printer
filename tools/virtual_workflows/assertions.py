@@ -888,6 +888,149 @@ def multi_stock_terminal_assertions(
     )
 
 
+def mixed_mode_lifecycle_assertions(
+    context: Any,
+    *,
+    fixture: Mapping[str, Any],
+    manual_refuel_checks: list[Mapping[str, Any]],
+    action_results: list[Mapping[str, Any]],
+) -> tuple[AssertionResult, AssertionResult]:
+    """Validate persisted mixed calibration identities and the stream gate."""
+
+    from ExecutionCalibrationStore import load_execution_calibrations
+
+    document = load_execution_calibrations(
+        context.experiment_model.execution_calibrations_file_path
+    )
+    expected_stocks = list(fixture["stocks"])
+    expected_by_id = {
+        f"{stock['factor_name']}_{float(stock['concentration']):.2f}_{stock['units']}": stock
+        for stock in expected_stocks
+    }
+    records = [record.to_dict() for record in document.records.values()]
+    records_by_stock = {str(record["stock_id"]): record for record in records}
+    calibration_rows = []
+    calibration_ok = len(records) == len(expected_by_id)
+    for stock_id, stock in expected_by_id.items():
+        head = stock["printer_head"]
+        record = records_by_stock.get(stock_id, {})
+        row = {
+            "stock_id": stock_id,
+            "printer_head_id": record.get("printer_head_id"),
+            "printing_mode": record.get("printing_mode"),
+            "effective_volume_nL": record.get("effective_volume_nL"),
+            "pw_us": record.get("pw_us"),
+            "record_id": record.get("record_id"),
+        }
+        calibration_rows.append(row)
+        calibration_ok = calibration_ok and (
+            record.get("printer_head_id") == head["printer_head_id"]
+            and record.get("printing_mode") == stock["printing_mode"]
+            and record.get("applied_printing_mode") == stock["printing_mode"]
+            and int(record.get("pw_us") or 0) == int(head["print_pulse_width_us"])
+            and abs(
+                float(record.get("effective_volume_nL") or -1)
+                - float(stock["droplet_volume_nL"])
+            ) < 1e-6
+            and abs(
+                float(record.get("applied_design_volume_nL") or -1)
+                - float(stock["prepared_droplet_volume_nL"])
+            ) < 1e-6
+        )
+
+    calibration_assertion = AssertionResult(
+        "execution.mixed_mode_calibrations_valid",
+        "terminal",
+        "pass" if calibration_ok else "fail",
+        ("ui", "model", "persistence"),
+        {
+            "expected_modes": [stock["printing_mode"] for stock in expected_stocks],
+            "calibration_records": calibration_rows,
+        },
+        None if calibration_ok else "mixed calibration records did not match the fixture",
+    )
+
+    lifecycle = fixture["lifecycle"]["manual_refuel_check"]
+    stream_stock = next(
+        stock for stock in expected_stocks if stock["printing_mode"] == "stream"
+    )
+    stream_id = (
+        f"{stream_stock['factor_name']}_{float(stream_stock['concentration']):.2f}_"
+        f"{stream_stock['units']}"
+    )
+    stream_record = records_by_stock.get(stream_id, {})
+    persisted_checks = list(document.manual_refuel_checks.values())
+    persisted = dict(persisted_checks[0]) if len(persisted_checks) == 1 else {}
+    driver_record = (
+        dict(manual_refuel_checks[0].get("record") or {})
+        if len(manual_refuel_checks) == 1 else {}
+    )
+    action_ids = [str(row.get("action_id") or "") for row in action_results]
+    apply_indexes = [
+        index for index, value in enumerate(action_ids)
+        if value == "calibration.apply_via_ui"
+    ]
+    start_indexes = [
+        index for index, value in enumerate(action_ids)
+        if value == "array.start_via_ui"
+    ]
+    manual_indexes = [
+        index for index, value in enumerate(action_ids)
+        if value == "manual_refuel.complete_check_via_ui"
+    ]
+    ordering_ok = (
+        len(apply_indexes) == 2
+        and len(start_indexes) == 2
+        and len(manual_indexes) == 1
+        and apply_indexes[1] < manual_indexes[0] < start_indexes[1]
+    )
+    head = stream_stock["printer_head"]
+    refuel_ok = (
+        len(persisted_checks) == 1
+        and len(manual_refuel_checks) == 1
+        and persisted == driver_record
+        and persisted.get("status") == lifecycle["status"]
+        and persisted.get("source") == "sil_simulated_manual_refuel_check"
+        and persisted.get("stock_id") == stream_id
+        and persisted.get("printer_head_id") == head["printer_head_id"]
+        and persisted.get("printing_mode") == "stream"
+        and persisted.get("operator_judgment") == lifecycle["operator_judgment"]
+        and int(persisted.get("trial_count") or 0) == lifecycle["trial_count"]
+        and int(persisted.get("trial_droplet_count") or 0)
+        == lifecycle["trial_droplet_count"]
+        and int(persisted.get("print_pulse_width_us") or 0)
+        == head["print_pulse_width_us"]
+        and int(persisted.get("refuel_pulse_width_us") or 0)
+        == head["refuel_pulse_width_us"]
+        and abs(
+            float(persisted.get("target_refuel_pressure_psi") or -1)
+            - float(head["refuel_pressure_psi"])
+        ) < 0.01
+        and persisted.get("calibration_record_id") == stream_record.get("record_id")
+        and bool(persisted.get("applied_calibration_fingerprint"))
+        and ordering_ok
+    )
+    refuel_evidence = {
+        "persisted_record": persisted,
+        "driver_record_matched": persisted == driver_record,
+        "action_order": {
+            "stream_apply_index": apply_indexes[1] if len(apply_indexes) > 1 else None,
+            "manual_refuel_index": manual_indexes[0] if manual_indexes else None,
+            "stream_start_index": start_indexes[1] if len(start_indexes) > 1 else None,
+            "valid": ordering_ok,
+        },
+    }
+    refuel_assertion = AssertionResult(
+        "execution.stream_manual_refuel_passed",
+        "terminal",
+        "pass" if refuel_ok else "fail",
+        ("ui", "controller", "model", "persistence"),
+        refuel_evidence,
+        None if refuel_ok else "stream manual-refuel gate evidence was invalid",
+    )
+    return calibration_assertion, refuel_assertion
+
+
 def multi_stock_artifacts_assertion(
     *,
     screenshots: Mapping[str, Path],
@@ -2074,6 +2217,7 @@ __all__ = [
     "multi_stock_artifacts_assertion",
     "multi_stock_prepared_assertion",
     "multi_stock_terminal_assertions",
+    "mixed_mode_lifecycle_assertions",
     "prepared_execution_assertion",
     "rack_head_assertion",
     "real_application_assertion",

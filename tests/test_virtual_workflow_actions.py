@@ -123,8 +123,13 @@ def test_action_catalog_matches_the_tracked_manifest(tmp_path):
     assert {item["id"] for item in catalog} == ACTION_IDS
     assert {item["implementation_status"] for item in catalog} == {"reusable"}
     assert {item["source_path"] for item in catalog} == {
-        "tools/virtual_workflows/actions.py"
+        "tools/virtual_workflows/actions.py",
+        "tools/virtual_workflows/page_drivers.py",
     }
+    assert next(
+        item for item in catalog
+        if item["id"] == "manual_refuel.complete_check_via_ui"
+    )["interaction_surface"] == "ui"
     declared = {
         item["id"]: item["interaction_surface"]
         for item in catalog

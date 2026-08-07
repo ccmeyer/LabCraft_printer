@@ -26,6 +26,7 @@ from tools.virtual_workflows.page_drivers import (
     ExperimentEditorDriver,
     ExperimentLoaderDriver,
     MachineControlsDriver,
+    ManualRefuelCheckDriver,
     RackDriver,
 )
 
@@ -128,6 +129,29 @@ class PostStartLockCopySpec:
 
 
 @dataclass(frozen=True)
+class ManualRefuelCheckSpec:
+    trial_count: int = 2
+    trial_droplet_count: int = 5
+    outcome: str = "passed"
+    operator_judgment: str = "stable"
+    milestone: str | None = "manual_refuel_passed"
+
+    def __post_init__(self) -> None:
+        if self.trial_count <= 0 or self.trial_droplet_count <= 0:
+            raise ValueError("manual-refuel trial counts must be positive")
+        valid = {
+            ("passed", "stable"),
+            ("failed", "level_rose"),
+            ("failed", "level_fell"),
+            ("unclear", "unclear"),
+        }
+        if (self.outcome, self.operator_judgment) not in valid:
+            raise ValueError("manual-refuel outcome and judgment are unsupported")
+        if self.milestone is not None and not self.milestone:
+            raise ValueError("manual-refuel milestone must be non-empty")
+
+
+@dataclass(frozen=True)
 class StockPassSpec:
     stock_id: str
     printer_head_id: str
@@ -154,6 +178,10 @@ class StockPassSpec:
     include_frequency_evidence: bool = True
     no_progress_timeout_seconds: float | None = None
     await_terminal_boundary: bool = True
+    calibration_mode: str = "droplet"
+    refuel_pulse_width_us: int | None = None
+    refuel_pressure_psi: float | None = None
+    manual_refuel_check: ManualRefuelCheckSpec | None = None
 
     def __post_init__(self) -> None:
         if not self.stock_id or not self.printer_head_id:
@@ -190,6 +218,20 @@ class StockPassSpec:
             )
         ):
             raise ValueError("no-progress timeout must be finite and positive")
+        if self.calibration_mode not in {"droplet", "stream"}:
+            raise ValueError("calibration mode must be droplet or stream")
+        if self.refuel_pulse_width_us is not None and self.refuel_pulse_width_us <= 0:
+            raise ValueError("refuel pulse width must be positive")
+        if self.refuel_pressure_psi is not None and self.refuel_pressure_psi <= 0:
+            raise ValueError("refuel pressure must be positive")
+        if self.manual_refuel_check is not None and (
+            self.calibration_mode != "stream"
+            or self.refuel_pulse_width_us is None
+            or self.refuel_pressure_psi is None
+        ):
+            raise ValueError(
+                "manual-refuel checks require stream mode and both refuel settings"
+            )
 
 
 @dataclass(frozen=True)
@@ -510,6 +552,11 @@ def normalized_stock_pass_steps(
                 "array.start_via_ui",
             ]
         )
+        if spec.manual_refuel_check is not None:
+            action_ids.insert(
+                action_ids.index("array.start_via_ui"),
+                "manual_refuel.complete_check_via_ui",
+            )
         if spec.await_terminal_boundary:
             action_ids.append("array.wait_for_completions")
         if spec.ready_milestone:
@@ -763,11 +810,27 @@ def _stage_stock_head(
             pulse_width_us=spec.pulse_width_us,
             pressure_psi=spec.pressure_psi,
             frequency_hz=spec.frequency_hz,
+            refuel_pulse_width_us=spec.refuel_pulse_width_us,
+            refuel_pressure_psi=spec.refuel_pressure_psi,
         )
+        if spec.manual_refuel_check is not None:
+            machine.wait_until(
+                lambda: bool(
+                    context.model.machine_model.regulating_print_pressure
+                ) and bool(
+                    context.model.machine_model.regulating_refuel_pressure
+                ),
+                "both regulated pressure channels for manual-refuel preflight",
+            )
         evidence = {
             "pulse_width_us": spec.pulse_width_us,
             "pressure_psi": spec.pressure_psi,
+            "calibration_mode": spec.calibration_mode,
         }
+        if spec.refuel_pulse_width_us is not None:
+            evidence["refuel_pulse_width_us"] = spec.refuel_pulse_width_us
+        if spec.refuel_pressure_psi is not None:
+            evidence["refuel_pressure_psi"] = spec.refuel_pressure_psi
         if persisted or spec.include_frequency_evidence:
             evidence["frequency_hz"] = spec.frequency_hz
         return evidence
@@ -1136,7 +1199,7 @@ def _run_stock_pass(
     )
 
     def generate(_runtime: JourneyRuntime) -> Mapping[str, Any]:
-        generated.update(calibration.generate_from_tab("droplet"))
+        generated.update(calibration.generate_from_tab(spec.calibration_mode))
         evidence = {
             "result_fingerprint": generated.get("synthetic_result_fingerprint")
         }
@@ -1153,8 +1216,14 @@ def _run_stock_pass(
 
     def apply(_runtime: JourneyRuntime) -> Mapping[str, Any]:
         preview = calibration.inspect_preview()
-        handled = calibration.apply_selected(expected_title="Applied")
-        calibration.close()
+        handled = calibration.apply_selected(
+            expected_title=(None if spec.manual_refuel_check is not None else "Applied"),
+            manual_refuel_choice=(
+                "yes" if spec.manual_refuel_check is not None else None
+            ),
+        )
+        if spec.manual_refuel_check is None:
+            calibration.close()
         evidence = {"preview": preview, "handled_dialogs": handled}
         if spec.detailed_evidence:
             evidence = {"stock_id": spec.stock_id, **evidence}
@@ -1179,6 +1248,47 @@ def _run_stock_pass(
             ),
         )
     )
+    if spec.manual_refuel_check is not None:
+        manual_spec = spec.manual_refuel_check
+
+        def complete_manual_refuel(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+            driver = ManualRefuelCheckDriver(context)
+            evidence = driver.complete_after_calibration_close(
+                calibration,
+                stock_id=spec.stock_id,
+                printer_head_id=spec.printer_head_id,
+                trial_count=manual_spec.trial_count,
+                trial_droplet_count=manual_spec.trial_droplet_count,
+                outcome=manual_spec.outcome,
+                operator_judgment=manual_spec.operator_judgment,
+                capture_passed=(
+                    lambda record: capture_milestone(
+                        context,
+                        manual_spec.milestone,
+                        evidence={
+                            "stock_id": spec.stock_id,
+                            "printer_head_id": spec.printer_head_id,
+                            "status": record.get("status"),
+                        },
+                    )
+                    if manual_spec.milestone
+                    else None
+                ),
+            )
+            runtime.observations.setdefault("manual_refuel_checks", []).append(
+                dict(evidence)
+            )
+            return evidence
+
+        runtime.run_steps(
+            (
+                SemanticStep(
+                    "manual_refuel.complete_check_via_ui",
+                    InteractionSurface.UI,
+                    complete_manual_refuel,
+                ),
+            )
+        )
     if spec.ready_milestone:
         capture_milestone(
             context, spec.ready_milestone,

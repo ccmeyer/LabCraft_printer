@@ -11,6 +11,7 @@ from tools.virtual_workflows.page_drivers import (
     ExperimentLoaderDriver,
     MainWindowDriver,
     MachineControlsDriver,
+    ManualRefuelCheckDriver,
     RackDriver,
 )
 
@@ -165,6 +166,163 @@ def test_pressure_regulation_waits_for_the_simulated_command_queue(qapp):
 
     assert len(queue_checks) >= 2
     window.close()
+
+
+def test_machine_settings_and_pressure_gate_include_optional_refuel_controls(qapp):
+    window = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout(window)
+    print_pulse = QtWidgets.QSpinBox()
+    print_pressure = QtWidgets.QDoubleSpinBox()
+    frequency = QtWidgets.QSpinBox()
+    refuel_pulse = QtWidgets.QSpinBox()
+    refuel_pressure = QtWidgets.QDoubleSpinBox()
+    for widget in (print_pulse, print_pressure, frequency, refuel_pulse, refuel_pressure):
+        widget.setRange(0, 10000)
+        layout.addWidget(widget)
+    button = QtWidgets.QPushButton("Regulate", window)
+    layout.addWidget(button)
+    machine_model = SimpleNamespace(
+        regulating_print_pressure=False,
+        regulating_refuel_pressure=False,
+    )
+    button.clicked.connect(
+        lambda: (
+            setattr(machine_model, "regulating_print_pressure", True),
+            setattr(machine_model, "regulating_refuel_pressure", True),
+        )
+    )
+    window.show()
+    qapp.processEvents()
+    context = _context(qapp, SimpleNamespace(pressure_box=SimpleNamespace(
+        print_pulse_width_spinbox=print_pulse,
+        target_print_pressure_spinbox=print_pressure,
+        print_frequency_spinbox=frequency,
+        refuel_pulse_width_spinbox=refuel_pulse,
+        target_refuel_pressure_spinbox=refuel_pressure,
+        pressure_regulation_button=button,
+    )))
+    context.model = SimpleNamespace(machine_model=machine_model)
+    context.machine = SimpleNamespace(check_if_all_completed=lambda: True)
+    driver = MachineControlsDriver(context)
+
+    driver.configure_print_settings(
+        pulse_width_us=2500,
+        pressure_psi=1.2,
+        frequency_hz=20,
+        refuel_pulse_width_us=6000,
+        refuel_pressure_psi=0.4,
+    )
+    driver.enable_pressure_regulation(require_refuel=True)
+
+    assert [print_pulse.value(), frequency.value(), refuel_pulse.value()] == [2500, 20, 6000]
+    assert print_pressure.value() == pytest.approx(1.2)
+    assert refuel_pressure.value() == pytest.approx(0.4)
+    window.close()
+
+
+def _manual_refuel_driver_fixture(qapp, *, fingerprint="fingerprint-1"):
+    parent = QtWidgets.QWidget()
+    dialog = QtWidgets.QDialog(parent)
+    dialog.setWindowTitle("Manual Refuel Check")
+    dialog.setModal(True)
+    layout = QtWidgets.QVBoxLayout(dialog)
+    dialog.trial_droplets_spin = QtWidgets.QSpinBox(dialog)
+    dialog.trial_droplets_spin.setRange(1, 1000)
+    dialog.trial_droplets_spin.setValue(5)
+    dialog.run_trial_button = QtWidgets.QPushButton("Run Trial", dialog)
+    dialog.stable_button = QtWidgets.QPushButton("Stable", dialog)
+    dialog.level_rose_button = QtWidgets.QPushButton("Level moved up", dialog)
+    dialog.level_fell_button = QtWidgets.QPushButton("Level moved down", dialog)
+    dialog.unclear_button = QtWidgets.QPushButton("Unclear", dialog)
+    dialog.close_button = QtWidgets.QPushButton("Close", dialog)
+    for widget in (
+        dialog.trial_droplets_spin, dialog.run_trial_button, dialog.stable_button,
+        dialog.level_rose_button, dialog.level_fell_button, dialog.unclear_button,
+        dialog.close_button,
+    ):
+        layout.addWidget(widget)
+    dialog.trial_count = 0
+    dialog.expected_calibration_fingerprint = "fingerprint-1"
+    record = {
+        "status": "passed",
+        "source": "sil_simulated_manual_refuel_check",
+        "stock_id": "stream-stock",
+        "printer_head_id": "stream-head",
+        "printing_mode": "stream",
+        "trial_count": 2,
+        "trial_droplet_count": 5,
+        "operator_judgment": "stable",
+        "applied_calibration_fingerprint": fingerprint,
+    }
+    dialog.run_trial_button.clicked.connect(
+        lambda: setattr(dialog, "trial_count", dialog.trial_count + 1)
+    )
+    dialog.stable_button.clicked.connect(lambda: dialog.close_button.setText("Done"))
+    dialog.close_button.clicked.connect(dialog.accept)
+    pressure_box = SimpleNamespace(
+        _manual_refuel_check_dialog=None,
+        _manual_refuel_check_launch_is_active=lambda: bool(dialog.isVisible()),
+    )
+    context = _context(qapp, SimpleNamespace(pressure_box=pressure_box))
+    context.machine = SimpleNamespace(check_if_all_completed=lambda: True)
+    context.model = SimpleNamespace(
+        rack_model=SimpleNamespace(
+            get_gripper_printer_head=lambda: SimpleNamespace()
+        )
+    )
+    context.experiment_model = SimpleNamespace(
+        get_manual_refuel_check=lambda **_kwargs: dict(record)
+    )
+
+    class Calibration:
+        dialog = QtWidgets.QDialog(parent)
+
+        def close(self):
+            pressure_box._manual_refuel_check_dialog = dialog
+            dialog.exec()
+            pressure_box._manual_refuel_check_dialog = None
+
+    return parent, context, Calibration(), record
+
+
+def test_manual_refuel_driver_completes_two_trials_and_closes_nested_modal(qapp):
+    parent, context, calibration, record = _manual_refuel_driver_fixture(qapp)
+    captured = []
+
+    evidence = ManualRefuelCheckDriver(context).complete_after_calibration_close(
+        calibration,
+        stock_id="stream-stock",
+        printer_head_id="stream-head",
+        trial_count=2,
+        trial_droplet_count=5,
+        outcome="passed",
+        operator_judgment="stable",
+        capture_passed=lambda value: captured.append(dict(value)),
+    )
+
+    assert evidence["trial_count"] == 2
+    assert evidence["record"] == record
+    assert evidence["dialog_closed"] is True
+    assert captured == [record]
+    parent.close()
+
+
+def test_manual_refuel_driver_fails_closed_on_stale_fingerprint(qapp):
+    parent, context, calibration, _record = _manual_refuel_driver_fixture(
+        qapp, fingerprint="stale"
+    )
+
+    with pytest.raises(RuntimeError, match="matching record"):
+        ManualRefuelCheckDriver(context).complete_after_calibration_close(
+            calibration,
+            stock_id="stream-stock",
+            printer_head_id="stream-head",
+            trial_count=2,
+            trial_droplet_count=5,
+            outcome="passed",
+            operator_judgment="stable",
+        )
+    parent.close()
 
 
 def test_machine_driver_disconnects_through_normal_control(qapp):

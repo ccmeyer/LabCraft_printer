@@ -1076,37 +1076,187 @@ Rollback:
 - revert one migrated scenario to its compatibility adapter; do not revert
   unrelated journeys or simulator capabilities.
 
-### Milestone 8: Suites, exploration, scheduling, and handoff
+### Milestone 8: Manual suites, exploration, and operational handoff
 
 Status: `planned`
 
 Goal:
 
-- operate the composed portfolio at appropriate cadences and make coverage
-  freshness visible.
+- make the composed portfolio easy to select and run on demand, add compact
+  parameter and sequence exploration, and make coverage/source freshness
+  visible without enabling unattended test scheduling.
+
+Approved operating decisions:
+
+- runs remain operator-initiated after relevant changes; Milestone 8 will not
+  add GitHub Actions, Windows Task Scheduler, or another unattended scheduler;
+- the mixed droplet/stream calibration and execution workflow becomes a
+  registered composed lifecycle scenario because it represents normal user
+  behavior;
+- the first parameter matrix uses approximately eight curated pairwise cases
+  instead of the full Cartesian product;
+- the initial tracked exploration seed set is `1, 7, 19, 42, 101`;
+- the first sequence campaign is capped at five seeds, one legal and one
+  intentionally illegal sequence per seed, and 25 semantic actions per
+  sequence;
+- generated evidence remains beneath the existing ignored
+  `verification_reports/` root; no automatic deletion is authorized.
 
 Target suites:
 
 | Suite | Purpose | Initial policy |
 | --- | --- | --- |
-| Standard | One deterministic complete smoke journey | Every change |
-| Lifecycle | Bounded editor/execution/calibration journeys | Nightly and by affected capability |
-| Seed exploration | Multiple retained calibration seeds | Nightly or weekly |
-| Regression | Existing representative 96-well path | Nightly |
-| Stress | Existing 384x10 path | Weekly/pre-release |
-| Pi primary | Representative safe SIL path | Weekly |
-| Pi stress | Sustained target characterization | Monthly/pre-release |
+| Standard | One deterministic complete smoke journey | Manually after shared UI, Controller, Model, simulator, or SIL-infrastructure changes |
+| Lifecycle | Bounded editor/execution/calibration journeys | Manually after lifecycle, persistence, recovery, calibration, or execution-state changes |
+| Matrix/exploration | Curated cases and bounded seeded sequences | Manually after changing the exercised actions, guards, values, modes, or ordering |
+| Regression | Existing representative 96-well path | Manually before integrating substantial execution changes |
+| Stress | Existing 384x10 path | Manually after persistence, rack, responsiveness, or scalability changes and before important releases |
+| Pi primary | Representative safe SIL path | Manually after Pi-specific changes or before a release |
+| Pi stress | Sustained target characterization | Explicit Pi characterization or pre-release only |
+
+Manual selection is distinct from UI automation: the runner may automate a
+journey after the operator launches it, but no service will decide when to
+launch a run. Existing manifest schedule rows will be revised to express
+manual triggers rather than calendar automation. Evidence age remains
+informational; primary freshness is the evidence's source/worktree identity
+and satisfaction of its required assertions.
+
+Artifact layout:
+
+```text
+verification_reports/
+  virtual_workflows/<scenario>/<run>/
+  suites/<suite>/<run>/
+  matrices/<matrix>/<run>/
+  exploration/<campaign>/<run>/
+```
+
+Scenario reports remain authoritative. Suite, matrix, and exploration reports
+reference and hash child reports rather than copying their complete artifact
+trees. Failures, visible qualifications, and exact replays are retained until
+manually reviewed. Any future cleanup command must be separately approved,
+restricted to a validated `verification_reports/` subtree, dry-run by default,
+and incapable of deleting tracked baselines.
 
 Deliverables:
 
-- suite/capability CLI selection;
+- manual suite/capability CLI selection, listing, and dry-run planning;
+- optional changed-source recommendations that never start a run by
+  themselves;
+- a registered mixed droplet/stream lifecycle scenario;
+- isolated host suite execution and aggregate reports;
 - fixed standard seed;
-- recorded seed-set policy;
+- typed parameter cases and a recorded seed-set/sequence policy;
 - rerun command emitted for every exploratory failure;
 - assertion-backed coverage/freshness summary;
-- scheduler ownership and troubleshooting documentation;
-- artifact retention and cleanup policy;
+- manual trigger ownership and troubleshooting documentation;
+- artifact retention policy with no automatic deletion;
+- Pi suite selection that preserves preflight and hardware-isolation proof;
 - final operational handoff.
+
+#### Milestone 8 Slice 1: Registered mixed droplet/stream lifecycle
+
+Status: `complete` (2026-08-07)
+
+- compose one representative mixed-mode lifecycle from the existing editor,
+  multi-stock, rack, calibration, manual-refuel, and stock-pass phases;
+- exercise normal Qt controls for both droplet and stream heads, matching
+  calibration evidence, the required passed manual-refuel check, both stock
+  passes, exact terminal persistence, and clean teardown;
+- retain visible Windows evidence and its exact replay before declaring the
+  scenario active in the lifecycle suite;
+- do not add another runner family or claim physical stream/refuel evidence.
+
+#### Milestone 8 Slice 2: Manual suite and capability selection
+
+Status: `planned`
+
+- add deterministic `--suite`, `--capability`, listing, and dry-run selection
+  over the validated manifest while retaining direct `--scenario` behavior;
+- reject conflicting selectors, unsupported platforms, deferred capabilities,
+  and missing Pi evidence before execution;
+- optionally recommend affected scenarios from changed source areas without
+  automatically executing them;
+- freeze the standard lane's scenario, seed, order, and timeout.
+
+#### Milestone 8 Slice 3: Host suite execution and aggregation
+
+Status: `planned`
+
+- run each manually selected Windows journey in a fresh child process so Qt
+  state cannot leak between journeys;
+- retain every child report and write an aggregate JSON/text summary with
+  child paths, hashes, statuses, durations, and replay commands;
+- continue independent lifecycle children after a failure to collect coverage,
+  but classify the aggregate fail-closed;
+- keep regression and stress explicitly selected rather than implied by the
+  standard lane.
+
+#### Milestone 8 Slice 4: Capability coverage and source freshness
+
+Status: `planned`
+
+- join retained reports to manifest capabilities, required assertions, action
+  surfaces, and source identities;
+- distinguish `pass`, `fail`, `incomplete`, `missing`, and `stale` instead of
+  treating report presence as coverage;
+- produce machine-readable and human-readable summaries without modifying the
+  tracked manifest from generated evidence;
+- treat evidence age as informational under the manual policy and source
+  identity as the primary freshness boundary.
+
+#### Milestone 8 Slice 5: Parameterized scenario matrices
+
+Status: `planned`
+
+- introduce typed case records that vary values, modes, stock order, and
+  expected safeguard outcomes while reusing the same journey and phases;
+- begin with approximately eight curated pairwise mixed-mode/calibration cases,
+  including nominal completions and negative manual-refuel states that stop
+  after proving the intended block;
+- retain normalized parameters, case identity, seed, assertions, and an exact
+  replay command for every case;
+- do not create a separate fixture or workflow body for every combination.
+
+#### Milestone 8 Slice 6: Seeded sequence exploration
+
+Status: `planned`
+
+- add a bounded state-aware generator over the existing semantic-action
+  vocabulary for legal and intentionally illegal action orders;
+- start with the fixed five-seed set, at most 25 actions per sequence, and at
+  most ten sequences per campaign;
+- record the generated action sequence, expected acceptance/rejection at each
+  step, reached transitions, seed, and exact replay command;
+- begin on a narrow editor/activation safeguard surface and prohibit physical
+  hardware actions, direct Model mutation for UI claims, and unbounded random
+  walks.
+
+#### Milestone 8 Slice 7: Manual Pi suite integration
+
+Status: `planned`
+
+- expose `pi_primary` and `pi_stress` through the same manual suite-selection
+  and aggregate-report contracts;
+- preserve mandatory Pi preflight, traced hardware-isolation proof, supported
+  platform checks, and production-mode rejection;
+- keep stress explicitly opt-in and perform remote Pi operations only after
+  separate operator authorization;
+- run local contract tests before any representative remote evidence is
+  requested.
+
+#### Milestone 8 Slice 8: Retention, runbook, and closeout
+
+Status: `planned`
+
+- document which manual suite to run for each class of change, artifact
+  locations, replay, stale-evidence handling, troubleshooting, and Pi safety;
+- retain artifacts in the existing root with no automatic cleanup; document a
+  future bounded cleanup policy without implementing destructive behavior;
+- inspect representative standard, lifecycle, matrix/exploration, regression,
+  stress, and authorized Pi evidence;
+- run focused tests per slice and the complete Python suite once at final
+  Milestone 8 validation.
 
 Gate:
 
@@ -1114,13 +1264,21 @@ Gate:
 - exploratory failures are exactly replayable;
 - stress and Pi policies retain existing safety gates;
 - missing, failed, incomplete, and stale evidence remain distinct;
-- no scheduled workflow can select production hardware mode;
+- no manual suite or generated sequence can select production hardware mode;
+- the mixed droplet/stream lifecycle is active and assertion-backed;
+- ordinary matrix cases add data rather than duplicate journey bodies;
+- generated sequences are bounded, state-aware, and exactly replayable;
+- every run is operator-initiated;
 - complete documentation and representative evidence are inspected.
 
 Rollback:
 
-- disable or remove one schedule/suite selection while retaining direct
-  scenario execution and reports.
+- remove one suite, matrix, or exploration selector while retaining direct
+  scenario execution and its reports;
+- return the mixed-mode scenario to focused test coverage without reverting
+  unrelated reusable phases;
+- remove generated aggregate/freshness output without deleting authoritative
+  child scenario evidence.
 
 ## Milestone Dependency Graph
 
@@ -1482,14 +1640,12 @@ This effort is complete when:
 
 ## Current Next Action
 
-Milestone 7 is complete. Slice 9 added the composed mid-array disconnect
-journey and proved exact-trigger UI disconnection, confirmed simulator-only
-intent cancellation, a quiescent `ready_to_resume` boundary, retained failure
-evidence, visible Windows execution, and exact replay. Visible qualification
-also exposed and corrected a generic teardown race in which hiding a focused
-editor could emit a deferred machine command after disconnect.
-
-Proceed only through a separately reviewed Milestone 8 plan for suites,
-seeded exploration, scheduling, retention policy, and operational handoff. Do
-not fold new fault injection, Pi operations, firmware/protocol work, or
-hardware work into the completed Milestone 7 migration.
+Milestone 7 is complete and the eight-slice Milestone 8 direction is approved.
+Milestone 8 Slice 1 is complete. The registered
+`print_array_mixed_mode_24x2_v1` journey passed its focused tests, offscreen
+qualification, visible Windows qualification, and exact visible replay with
+48/48 completions and 13/13 assertions. Create a concrete implementation plan
+for Milestone 8 Slice 2: manual suite and capability selection. Do not begin
+host suite aggregation, matrices, seeded sequence exploration, remote Pi
+operations, firmware/protocol work, or hardware work until their respective
+later slices are separately planned and approved.

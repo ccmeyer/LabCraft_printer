@@ -424,24 +424,37 @@ class MachineControlsDriver(_QTestSurfaceDriver):
         pulse_width_us: int,
         pressure_psi: float,
         frequency_hz: int,
+        refuel_pulse_width_us: int | None = None,
+        refuel_pressure_psi: float | None = None,
     ) -> None:
         box = self.view.pressure_box
         self.replace_spin_value(box.print_pulse_width_spinbox, pulse_width_us)
         self.replace_spin_value(box.target_print_pressure_spinbox, pressure_psi)
         self.replace_spin_value(box.print_frequency_spinbox, frequency_hz)
+        if refuel_pulse_width_us is not None:
+            self.replace_spin_value(
+                box.refuel_pulse_width_spinbox, refuel_pulse_width_us
+            )
+        if refuel_pressure_psi is not None:
+            self.replace_spin_value(
+                box.target_refuel_pressure_spinbox, refuel_pressure_psi
+            )
         self.wait_until(
             self.context.machine.check_if_all_completed,
             "print settings command queue",
         )
 
-    def enable_pressure_regulation(self) -> None:
+    def enable_pressure_regulation(self, *, require_refuel: bool = False) -> None:
         button = self.view.pressure_box.pressure_regulation_button
         self.click(button)
         self.wait_until(
             lambda: bool(
                 self.context.model.machine_model.regulating_print_pressure
+            ) and (
+                not require_refuel
+                or bool(self.context.model.machine_model.regulating_refuel_pressure)
             ),
-            "print-pressure regulation",
+            "print/refuel-pressure regulation" if require_refuel else "print-pressure regulation",
         )
         self.wait_until(self.context.machine.check_if_all_completed, "pressure regulation command queue")
 
@@ -1785,12 +1798,217 @@ class CalibrationDialogDriver:
         self.wait_until(lambda: not self.dialog.isVisible(), "calibration dialog close")
 
 
+class ManualRefuelCheckDriver(_QTestSurfaceDriver):
+    """Drive the real post-calibration modal through bounded QTest clicks."""
+
+    def complete_after_calibration_close(
+        self,
+        calibration: CalibrationDialogDriver,
+        *,
+        stock_id: str,
+        printer_head_id: str,
+        trial_count: int,
+        trial_droplet_count: int,
+        outcome: str,
+        operator_judgment: str,
+        capture_passed: Callable[[Mapping[str, Any]], Any] | None = None,
+    ) -> dict[str, Any]:
+        if trial_count <= 0 or trial_droplet_count <= 0:
+            raise ValueError("manual-refuel trial count and droplet count must be positive")
+        outcome = str(outcome).strip().lower()
+        operator_judgment = str(operator_judgment).strip().lower()
+        outcome_controls = {
+            ("passed", "stable"): "stable_button",
+            ("failed", "level_rose"): "level_rose_button",
+            ("failed", "level_fell"): "level_fell_button",
+            ("unclear", "unclear"): "unclear_button",
+        }
+        control_name = outcome_controls.get((outcome, operator_judgment))
+        if control_name is None:
+            raise ValueError("manual-refuel outcome and judgment are unsupported")
+
+        pressure_box = self.view.pressure_box
+        deadline = time.monotonic() + self.context.deadline.remaining_seconds(20.0)
+        state: dict[str, Any] = {
+            "phase": "discover",
+            "dialog": None,
+            "trials_queued": 0,
+            "error": None,
+            "record": None,
+        }
+
+        def fail(message: str) -> None:
+            if state["error"] is None:
+                state["error"] = RuntimeError(message)
+            dialog = state.get("dialog")
+            if isinstance(dialog, QtWidgets.QDialog) and dialog.isVisible():
+                dialog.reject()
+
+        def reschedule() -> None:
+            QtCore.QTimer.singleShot(10, advance)
+
+        def current_record() -> dict[str, Any] | None:
+            head = self.context.model.rack_model.get_gripper_printer_head()
+            if head is None:
+                return None
+            record = self.context.experiment_model.get_manual_refuel_check(
+                printer_head=head
+            )
+            return dict(record) if isinstance(record, dict) else None
+
+        def record_matches(record: Mapping[str, Any], dialog: Any) -> bool:
+            return (
+                str(record.get("status") or "") == outcome
+                and str(record.get("source") or "")
+                == "sil_simulated_manual_refuel_check"
+                and str(record.get("stock_id") or "") == str(stock_id)
+                and str(record.get("printer_head_id") or "")
+                == str(printer_head_id)
+                and str(record.get("printing_mode") or "") == "stream"
+                and int(record.get("trial_count") or 0) == trial_count
+                and int(record.get("trial_droplet_count") or 0)
+                == trial_droplet_count
+                and str(record.get("operator_judgment") or "")
+                == operator_judgment
+                and str(record.get("applied_calibration_fingerprint") or "")
+                == str(dialog.expected_calibration_fingerprint or "")
+            )
+
+        def advance() -> None:
+            if state["error"] is not None or state["phase"] == "done":
+                return
+            if time.monotonic() >= deadline:
+                fail(f"timed out during manual-refuel phase {state['phase']}")
+                return
+            dialog = getattr(pressure_box, "_manual_refuel_check_dialog", None)
+            active = QtWidgets.QApplication.activeModalWidget()
+            if state["phase"] == "discover":
+                if dialog is None:
+                    if active is not None and active is not calibration.dialog:
+                        fail(
+                            "unexpected modal while waiting for Manual Refuel Check: "
+                            f"{active.windowTitle()!r}"
+                        )
+                        return
+                    reschedule()
+                    return
+                if dialog.windowTitle() != "Manual Refuel Check" or not dialog.isVisible():
+                    fail("manual-refuel dialog was not the expected visible application dialog")
+                    return
+                state["dialog"] = dialog
+                try:
+                    self.replace_spin_value(
+                        dialog.trial_droplets_spin, trial_droplet_count
+                    )
+                except Exception as exc:
+                    fail(f"could not set manual-refuel trial droplets: {exc}")
+                    return
+                state["phase"] = "queue_trial"
+                reschedule()
+                return
+
+            dialog = state.get("dialog")
+            if not isinstance(dialog, QtWidgets.QDialog):
+                fail("manual-refuel dialog identity became unavailable")
+                return
+            if state["phase"] == "queue_trial":
+                if not self.context.machine.check_if_all_completed():
+                    reschedule()
+                    return
+                button = dialog.run_trial_button
+                if not button.isVisible() or not button.isEnabled():
+                    fail("manual-refuel Run Trial control is unavailable")
+                    return
+                trial_count_before = int(dialog.trial_count)
+                QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+                state["trials_queued"] += 1
+                if int(dialog.trial_count) != trial_count_before + 1:
+                    fail(
+                        "manual-refuel trial click produced no authoritative trial "
+                        f"increment: before={trial_count_before} "
+                        f"after={int(dialog.trial_count)}"
+                    )
+                    return
+                state["phase"] = "wait_trial"
+                reschedule()
+                return
+            if state["phase"] == "wait_trial":
+                if not self.context.machine.check_if_all_completed():
+                    reschedule()
+                    return
+                state["phase"] = (
+                    "queue_trial"
+                    if state["trials_queued"] < trial_count
+                    else "record_outcome"
+                )
+                reschedule()
+                return
+            if state["phase"] == "record_outcome":
+                button = getattr(dialog, control_name)
+                if not button.isVisible() or not button.isEnabled():
+                    fail("manual-refuel outcome control is unavailable")
+                    return
+                QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+                record = current_record()
+                if record is None or not record_matches(record, dialog):
+                    fail("manual-refuel outcome did not persist the expected matching record")
+                    return
+                state["record"] = record
+                if outcome == "passed" and dialog.close_button.text() != "Done":
+                    fail("passed manual-refuel check did not expose the Done control")
+                    return
+                if capture_passed is not None:
+                    capture_passed(record)
+                state["phase"] = "close"
+                reschedule()
+                return
+            if state["phase"] == "close":
+                QtTest.QTest.mouseClick(
+                    dialog.close_button, QtCore.Qt.MouseButton.LeftButton
+                )
+                state["phase"] = "wait_closed"
+                reschedule()
+                return
+            if state["phase"] == "wait_closed":
+                active_launch = bool(
+                    getattr(pressure_box, "_manual_refuel_check_launch_is_active")()
+                )
+                if dialog.isVisible() or active_launch:
+                    reschedule()
+                    return
+                state["phase"] = "done"
+
+        with _expected_dialogs(
+            self.app, ("Manual Refuel Check", "ManualRefuelCheckDialog")
+        ):
+            QtCore.QTimer.singleShot(0, advance)
+            calibration.close()
+            self.wait_until(
+                lambda: state["error"] is not None or state["phase"] == "done",
+                "manual-refuel modal completion",
+                timeout_seconds=20.0,
+            )
+        if state["error"] is not None:
+            raise state["error"]
+        return {
+            "dialog_title": "Manual Refuel Check",
+            "trial_count": state["trials_queued"],
+            "trial_droplet_count": trial_droplet_count,
+            "outcome": outcome,
+            "operator_judgment": operator_judgment,
+            "record": dict(state["record"] or {}),
+            "dialog_closed": True,
+            "launch_pending": False,
+        }
+
+
 __all__ = [
     "ArrayDriver",
     "CalibrationDialogDriver",
     "ExperimentEditorDriver",
     "ExperimentLoaderDriver",
     "MachineControlsDriver",
+    "ManualRefuelCheckDriver",
     "MainWindowDriver",
     "RackDriver",
 ]

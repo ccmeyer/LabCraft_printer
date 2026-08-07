@@ -51,6 +51,11 @@ MULTI_STOCK_FIXTURE_PATH = (
     / "fixtures"
     / "print_array_multi_stock_24x2_v1.json"
 )
+MIXED_MODE_FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "print_array_mixed_mode_24x2_v1.json"
+)
 DISCONNECT_FIXTURE_PATH = (
     Path(__file__).resolve().parent
     / "fixtures"
@@ -63,6 +68,7 @@ STRESS_WORKLOAD_ID = "virtual_print_array_384x10_v1"
 SOFT_STOP_RESUME_WORKLOAD_ID = "print_array_soft_stop_resume_24_v1"
 AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID = "authoritative_reload_resume_24_v1"
 MULTI_STOCK_WORKLOAD_ID = "print_array_multi_stock_24x2_v1"
+MIXED_MODE_WORKLOAD_ID = "print_array_mixed_mode_24x2_v1"
 DISCONNECT_WORKLOAD_ID = "print_array_disconnect_mid_array_24_v1"
 SCENARIO_FIXTURES = {
     WORKLOAD_ID: FIXTURE_PATH,
@@ -71,6 +77,7 @@ SCENARIO_FIXTURES = {
     SOFT_STOP_RESUME_WORKLOAD_ID: SOFT_STOP_RESUME_FIXTURE_PATH,
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: AUTHORITATIVE_RELOAD_RESUME_FIXTURE_PATH,
     MULTI_STOCK_WORKLOAD_ID: MULTI_STOCK_FIXTURE_PATH,
+    MIXED_MODE_WORKLOAD_ID: MIXED_MODE_FIXTURE_PATH,
     DISCONNECT_WORKLOAD_ID: DISCONNECT_FIXTURE_PATH,
 }
 SCENARIO_COMPLETION_COUNTS = {
@@ -80,6 +87,7 @@ SCENARIO_COMPLETION_COUNTS = {
     SOFT_STOP_RESUME_WORKLOAD_ID: 24,
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: 24,
     MULTI_STOCK_WORKLOAD_ID: 48,
+    MIXED_MODE_WORKLOAD_ID: 48,
     DISCONNECT_WORKLOAD_ID: 24,
 }
 SCENARIO_WORKFLOW_STRATEGIES = {
@@ -89,6 +97,7 @@ SCENARIO_WORKFLOW_STRATEGIES = {
     SOFT_STOP_RESUME_WORKLOAD_ID: "soft_stop_resume",
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: "authoritative_reload_resume",
     MULTI_STOCK_WORKLOAD_ID: "multi_stock_head_exchange",
+    MIXED_MODE_WORKLOAD_ID: "mixed_droplet_stream",
 }
 SCENARIO_NAME = "virtual_print_array"
 SCENARIO_VERSION = "1"
@@ -509,18 +518,40 @@ def load_virtual_print_array_fixture(
         head = stock["printer_head"]
         stock_id = _stock_id(stock)
         head_id = str(head.get("printer_head_id") or "")
+        is_multi_fixture = scenario_id in {
+            MULTI_STOCK_WORKLOAD_ID,
+            MIXED_MODE_WORKLOAD_ID,
+        }
         expected_prepared_volume = (
             float(stock.get("droplet_volume_nL", -1))
-            if scenario_id == MULTI_STOCK_WORKLOAD_ID
+            if is_multi_fixture
             else 9.0 if scenario_id == SMOKE_WORKLOAD_ID else 5.0
         )
         expected_calibrated_volume = (
             float(stock.get("prepared_droplet_volume_nL", -1))
-            if scenario_id == MULTI_STOCK_WORKLOAD_ID
+            if is_multi_fixture
             else 9.0 if scenario_id == SMOKE_WORKLOAD_ID else 10.0
         )
+        expected_modes = ("droplet", "stream")
+        expected_mode = (
+            expected_modes[len(stock_ids)]
+            if scenario_id == MIXED_MODE_WORKLOAD_ID
+            and len(stock_ids) < len(expected_modes)
+            else "droplet"
+        )
+        mixed_head_valid = True
+        if scenario_id == MIXED_MODE_WORKLOAD_ID:
+            if expected_mode == "stream":
+                mixed_head_valid = (
+                    int(head.get("refuel_pulse_width_us", 0)) == 6000
+                    and float(head.get("refuel_pressure_psi", -1)) == 0.4
+                )
+            else:
+                mixed_head_valid = not {
+                    "refuel_pulse_width_us", "refuel_pressure_psi"
+                }.intersection(head)
         if (
-            stock.get("printing_mode") != "droplet"
+            stock.get("printing_mode") != expected_mode
             or float(stock.get("prepared_droplet_volume_nL", -1))
             != expected_prepared_volume
             or float(stock.get("droplet_volume_nL", -1))
@@ -531,6 +562,7 @@ def load_virtual_print_array_fixture(
             or float(head.get("initial_volume_uL", -1)) <= 0
             or stock_id in stock_ids
             or head_id in head_ids
+            or not mixed_head_valid
         ):
             raise VirtualWorkflowScenarioError("fixture stock/head contract is invalid")
         stock_ids.add(stock_id)
@@ -539,6 +571,28 @@ def load_virtual_print_array_fixture(
         workload.get("stock_count", 1)
     ):
         raise VirtualWorkflowScenarioError("fixture stock count is invalid")
+    if scenario_id == MIXED_MODE_WORKLOAD_ID:
+        expected_mixed = (
+            ("Virtual Mixed Droplet", 23.0, 3.0, "mM", "droplet", 9.0, 1300, 1.2),
+            ("Virtual Mixed Stream", 23.0, 20.0, "mM", "stream", 60.0, 2500, 1.2),
+        )
+        observed_mixed = tuple(
+            (
+                stock.get("factor_name"),
+                float(stock.get("concentration", -1)),
+                float(stock.get("target_concentration", -1)),
+                stock.get("units"),
+                stock.get("printing_mode"),
+                float(stock.get("droplet_volume_nL", -1)),
+                int(stock.get("printer_head", {}).get("print_pulse_width_us", 0)),
+                float(stock.get("printer_head", {}).get("print_pressure_psi", -1)),
+            )
+            for stock in stock_specs
+        )
+        if observed_mixed != expected_mixed:
+            raise VirtualWorkflowScenarioError(
+                "mixed-mode fixture stock contract is invalid"
+            )
     if schema_version in {2, 3, 4} and int(simulation.get("staging_slot", -1)) != 0:
         raise VirtualWorkflowScenarioError("fixture staging-slot contract is invalid")
     if schema_version in {3, 4}:
@@ -562,6 +616,18 @@ def load_virtual_print_array_fixture(
                 "expected_stock_pass_count": 2,
                 "expected_head_stage_count": 2,
                 "expected_between_pass_exchange_count": 1,
+            },
+            MIXED_MODE_WORKLOAD_ID: {
+                "kind": "mixed_droplet_stream",
+                "expected_stock_pass_count": 2,
+                "expected_head_stage_count": 2,
+                "expected_between_pass_exchange_count": 1,
+                "manual_refuel_check": {
+                    "status": "passed",
+                    "operator_judgment": "stable",
+                    "trial_count": 2,
+                    "trial_droplet_count": 5,
+                },
             },
             DISCONNECT_WORKLOAD_ID: {
                 "kind": "disconnect_fail_closed",
@@ -4878,6 +4944,7 @@ def run_virtual_print_array_scenario(
 __all__ = [
     "AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID",
     "MULTI_STOCK_WORKLOAD_ID",
+    "MIXED_MODE_WORKLOAD_ID",
     "SCENARIO_NAME",
     "SCENARIO_VERSION",
     "SCENARIO_FIXTURES",

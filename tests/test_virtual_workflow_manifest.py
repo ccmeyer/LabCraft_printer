@@ -27,6 +27,7 @@ from tools.virtual_workflows.scenarios import (
             AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
             DISCONNECT_WORKLOAD_ID,
             MULTI_STOCK_WORKLOAD_ID,
+            MIXED_MODE_WORKLOAD_ID,
             STRESS_WORKLOAD_ID,
     SCENARIO_COMPLETION_COUNTS,
     SCENARIO_FIXTURES,
@@ -71,6 +72,7 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         SOFT_STOP_RESUME_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
+        MIXED_MODE_WORKLOAD_ID,
         DISCONNECT_WORKLOAD_ID,
     )
 
@@ -113,9 +115,10 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         "experiment_editor_prestart_rename_refinalize_v1",
         "experiment_editor_post_start_lock_v1",
         "print_array_soft_stop_resume_24_v1",
-        AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
-        MULTI_STOCK_WORKLOAD_ID,
-        DISCONNECT_WORKLOAD_ID,
+            AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+            MULTI_STOCK_WORKLOAD_ID,
+            MIXED_MODE_WORKLOAD_ID,
+            DISCONNECT_WORKLOAD_ID,
     ]
     rename_scenario = _row(
         payload,
@@ -261,6 +264,9 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert capabilities["execution.multi_stock_head_exchange"][
         "max_evidence_age_days"
     ] == 2
+    assert capabilities["execution.mixed_droplet_stream_lifecycle"][
+        "active_scenario_ids"
+    ] == [MIXED_MODE_WORKLOAD_ID]
     assert capabilities["execution.disconnect_fail_closed"]["status"] == "covered"
     assert capabilities["execution.disconnect_fail_closed"][
         "active_scenario_ids"
@@ -299,6 +305,9 @@ def test_cli_scenario_surface_is_registry_driven_and_legacy_compatible():
     assert parser.parse_args(
         ["--scenario", MULTI_STOCK_WORKLOAD_ID]
     ).scenario == MULTI_STOCK_WORKLOAD_ID
+    assert parser.parse_args(
+        ["--scenario", MIXED_MODE_WORKLOAD_ID]
+    ).scenario == MIXED_MODE_WORKLOAD_ID
 
 
 @pytest.mark.parametrize(
@@ -351,6 +360,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
         SOFT_STOP_RESUME_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
+        MIXED_MODE_WORKLOAD_ID,
         STRESS_WORKLOAD_ID,
     }:
         from tools.virtual_workflows.journeys import JourneyRunConfig

@@ -13,6 +13,7 @@ from tools.virtual_workflows.journey_phases import (
     SoftStopResumeSpec,
     DisconnectFailClosedSpec,
     StockPassSpec,
+    ManualRefuelCheckSpec,
     _run_stock_pass,
     capture_completion_midpoint,
     machine_startup_steps,
@@ -165,6 +166,57 @@ def test_two_stock_plan_has_exact_repeated_groups_and_truthful_surfaces():
         for row in plan
         if row["action_id"] == "array.wait_for_completions"
     } == {"harness"}
+
+
+def test_stream_pass_inserts_one_ui_manual_refuel_gate_before_start():
+    stream = StockPassSpec(
+        stock_id="stream-stock",
+        printer_head_id="stream-head",
+        pulse_width_us=2500,
+        pressure_psi=1.2,
+        frequency_hz=20,
+        initial_volume_uL=1000.0,
+        expected_volume_nL=60.0,
+        expected_completion_count=24,
+        expected_plan_state="completed",
+        ready_milestone="stream-ready",
+        printing_milestone="stream-printing",
+        completed_milestone="completed",
+        calibration_mode="stream",
+        refuel_pulse_width_us=6000,
+        refuel_pressure_psi=0.4,
+        manual_refuel_check=ManualRefuelCheckSpec(),
+    )
+
+    plan = normalized_stock_pass_steps((stream,))
+    action_ids = [row["action_id"] for row in plan]
+    manual_index = action_ids.index("manual_refuel.complete_check_via_ui")
+
+    assert action_ids.index("calibration.apply_via_ui") < manual_index
+    assert manual_index < action_ids.index("array.start_via_ui")
+    assert plan[manual_index]["interaction_surface"] == "ui"
+
+
+def test_manual_refuel_contract_is_stream_only_and_requires_refuel_settings():
+    values = dict(
+        stock_id="stock",
+        printer_head_id="head",
+        pulse_width_us=2500,
+        pressure_psi=1.2,
+        frequency_hz=20,
+        initial_volume_uL=1000.0,
+        expected_volume_nL=60.0,
+        expected_completion_count=24,
+        expected_plan_state="completed",
+        ready_milestone=None,
+        printing_milestone=None,
+        completed_milestone=None,
+        manual_refuel_check=ManualRefuelCheckSpec(),
+    )
+    with pytest.raises(ValueError, match="stream mode"):
+        StockPassSpec(**values)
+    with pytest.raises(ValueError, match="both refuel settings"):
+        StockPassSpec(**values, calibration_mode="stream")
 
 
 def test_ten_stock_compact_plan_retains_only_six_named_milestones():

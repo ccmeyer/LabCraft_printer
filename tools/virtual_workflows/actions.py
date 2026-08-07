@@ -113,6 +113,9 @@ COMPOSED_MULTI_STOCK_ACTION_IDS = COMPOSED_SMOKE_ACTION_IDS | frozenset(
         "validation.stock_pass_boundary",
     }
 )
+COMPOSED_MIXED_MODE_ACTION_IDS = COMPOSED_MULTI_STOCK_ACTION_IDS | frozenset(
+    {"manual_refuel.complete_check_via_ui"}
+)
 COMPOSED_SOFT_STOP_ACTION_IDS = COMPOSED_SMOKE_ACTION_IDS | frozenset(
     {
         "array.request_soft_stop_via_ui",
@@ -137,6 +140,7 @@ ACTION_IDS = (
     | EDITOR_LIFECYCLE_ACTION_IDS
     | COMPOSED_SMOKE_ACTION_IDS
     | COMPOSED_MULTI_STOCK_ACTION_IDS
+    | COMPOSED_MIXED_MODE_ACTION_IDS
     | COMPOSED_SOFT_STOP_ACTION_IDS
     | COMPOSED_DISCONNECT_ACTION_IDS
 )
@@ -176,7 +180,7 @@ ACTION_INTERACTION_SURFACES.update(
         },
         **{
             action_id: InteractionSurface.UI
-            for action_id in COMPOSED_MULTI_STOCK_ACTION_IDS
+            for action_id in COMPOSED_MIXED_MODE_ACTION_IDS
             if action_id.endswith("_via_ui")
         },
     }
@@ -3044,6 +3048,7 @@ def teardown_scenario(context: ScenarioContext) -> dict[str, Any]:
 
 __all__ = [
     "COMPOSED_MULTI_STOCK_ACTION_IDS",
+    "COMPOSED_MIXED_MODE_ACTION_IDS",
     "COMPOSED_DISCONNECT_ACTION_IDS",
     "COMPOSED_SOFT_STOP_ACTION_IDS",
     "ACTION_INTERACTION_SURFACES",

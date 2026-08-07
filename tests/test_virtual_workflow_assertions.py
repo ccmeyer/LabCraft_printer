@@ -11,12 +11,14 @@ from tools.virtual_workflows.assertions import (
     exact_action_sequence_assertion,
     evaluate_assertion,
     multi_stock_artifacts_assertion,
+    mixed_mode_lifecycle_assertions,
     regression_evidence_assertions,
     soft_stop_paused_assertions,
     synthetic_calibration_contract,
 )
 
 import pytest
+from types import SimpleNamespace
 
 
 def test_assertion_result_rejects_ambiguous_decision():
@@ -279,6 +281,85 @@ def test_multi_stock_artifacts_require_exact_screenshots_and_removed_lock(tmp_pa
         },
     )
     assert result.decision == "pass"
+
+
+def test_mixed_mode_assertions_fail_closed_on_stale_driver_record(monkeypatch):
+    import ExecutionCalibrationStore
+
+    fixture = {
+        "stocks": [
+            {
+                "factor_name": "Droplet", "concentration": 23.0, "units": "mM",
+                "printing_mode": "droplet", "droplet_volume_nL": 9.0,
+                "prepared_droplet_volume_nL": 9.0,
+                "printer_head": {"printer_head_id": "head-d", "print_pulse_width_us": 1300},
+            },
+            {
+                "factor_name": "Stream", "concentration": 23.0, "units": "mM",
+                "printing_mode": "stream", "droplet_volume_nL": 60.0,
+                "prepared_droplet_volume_nL": 60.0,
+                "printer_head": {
+                    "printer_head_id": "head-s", "print_pulse_width_us": 2500,
+                    "refuel_pulse_width_us": 6000, "refuel_pressure_psi": 0.4,
+                },
+            },
+        ],
+        "lifecycle": {"manual_refuel_check": {
+            "status": "passed", "operator_judgment": "stable",
+            "trial_count": 2, "trial_droplet_count": 5,
+        }},
+    }
+    records = {
+        "drop": SimpleNamespace(to_dict=lambda: {
+            "record_id": "drop", "stock_id": "Droplet_23.00_mM",
+            "printer_head_id": "head-d", "printing_mode": "droplet",
+            "applied_printing_mode": "droplet", "pw_us": 1300,
+            "effective_volume_nL": 9.0, "applied_design_volume_nL": 9.0,
+        }),
+        "stream": SimpleNamespace(to_dict=lambda: {
+            "record_id": "stream", "stock_id": "Stream_23.00_mM",
+            "printer_head_id": "head-s", "printing_mode": "stream",
+            "applied_printing_mode": "stream", "pw_us": 2500,
+            "effective_volume_nL": 60.0, "applied_design_volume_nL": 60.0,
+        }),
+    }
+    persisted = {
+        "status": "passed", "source": "sil_simulated_manual_refuel_check",
+        "stock_id": "Stream_23.00_mM", "printer_head_id": "head-s",
+        "printing_mode": "stream", "operator_judgment": "stable",
+        "trial_count": 2, "trial_droplet_count": 5,
+        "print_pulse_width_us": 2500, "refuel_pulse_width_us": 6000,
+        "target_refuel_pressure_psi": 0.4, "calibration_record_id": "stream",
+        "applied_calibration_fingerprint": "current",
+    }
+    monkeypatch.setattr(
+        ExecutionCalibrationStore,
+        "load_execution_calibrations",
+        lambda _path: SimpleNamespace(
+            records=records, manual_refuel_checks={"check": persisted}
+        ),
+    )
+    actions = [
+        {"action_id": "calibration.apply_via_ui"},
+        {"action_id": "array.start_via_ui"},
+        {"action_id": "calibration.apply_via_ui"},
+        {"action_id": "manual_refuel.complete_check_via_ui"},
+        {"action_id": "array.start_via_ui"},
+    ]
+    stale = {**persisted, "applied_calibration_fingerprint": "stale"}
+
+    calibration, refuel = mixed_mode_lifecycle_assertions(
+        SimpleNamespace(experiment_model=SimpleNamespace(
+            execution_calibrations_file_path="unused"
+        )),
+        fixture=fixture,
+        manual_refuel_checks=[{"record": stale}],
+        action_results=actions,
+    )
+
+    assert calibration.decision == "pass"
+    assert refuel.decision == "fail"
+    assert refuel.evidence["driver_record_matched"] is False
 
 
 @pytest.mark.parametrize(

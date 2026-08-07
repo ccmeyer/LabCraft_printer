@@ -21,6 +21,7 @@ from tools.virtual_workflows.assertions import (
     editor_prepared_revision_failure_assertion,
     editor_prepared_reload_assertions,
     machine_ready_assertion,
+    mixed_mode_lifecycle_assertions,
     multi_stock_artifacts_assertion,
     multi_stock_prepared_assertion,
     execution_lifecycle_assertions,
@@ -58,6 +59,7 @@ from tools.virtual_workflows.journey_phases import (
     PreparedEditorRevisionSpec,
     PostStartLockCopySpec,
     StockPassSpec,
+    ManualRefuelCheckSpec,
     SoftStopResumeSpec,
     DisconnectFailClosedSpec,
     capture_completion_midpoint,
@@ -89,6 +91,9 @@ EDITOR_REVISION_SCENARIO_VERSION = "1"
 MULTI_STOCK_WORKLOAD_ID = "print_array_multi_stock_24x2_v1"
 MULTI_STOCK_SCENARIO_NAME = "print_array_multi_stock_head_exchange"
 MULTI_STOCK_SCENARIO_VERSION = "1"
+MIXED_MODE_WORKLOAD_ID = "print_array_mixed_mode_24x2_v1"
+MIXED_MODE_SCENARIO_NAME = "print_array_mixed_droplet_stream"
+MIXED_MODE_SCENARIO_VERSION = "1"
 STRESS_WORKLOAD_ID = "virtual_print_array_384x10_v1"
 STRESS_FIXED_CALIBRATION_PULSE_WIDTH_US = 1355
 SOFT_STOP_WORKLOAD_ID = "print_array_soft_stop_resume_24_v1"
@@ -155,6 +160,12 @@ MULTI_STOCK_REQUIRED_ASSERTIONS = (
     "execution.intent_durability_exact",
     "execution.event_history_bounded",
     "execution.terminal_bundle_valid",
+    "artifacts.required_present",
+)
+MIXED_MODE_REQUIRED_ASSERTIONS = (
+    *MULTI_STOCK_REQUIRED_ASSERTIONS[:-1],
+    "execution.mixed_mode_calibrations_valid",
+    "execution.stream_manual_refuel_passed",
     "artifacts.required_present",
 )
 STRESS_REQUIRED_ASSERTIONS = (
@@ -252,6 +263,9 @@ EDITOR_REVISION_REQUIRED_UI_ACTIONS = EDITOR_REQUIRED_UI_ACTIONS | frozenset(
 MULTI_STOCK_REQUIRED_UI_ACTIONS = SMOKE_REQUIRED_UI_ACTIONS | frozenset(
     {"head.return_via_ui"}
 )
+MIXED_MODE_REQUIRED_UI_ACTIONS = MULTI_STOCK_REQUIRED_UI_ACTIONS | frozenset(
+    {"manual_refuel.complete_check_via_ui"}
+)
 SOFT_STOP_REQUIRED_UI_ACTIONS = SMOKE_REQUIRED_UI_ACTIONS | frozenset(
     {"array.request_soft_stop_via_ui", "array.resume_via_ui"}
 )
@@ -295,6 +309,19 @@ MULTI_STOCK_REQUIRED_SCREENSHOTS = frozenset(
         "stock_1_completed",
         "stock_2_staged",
         "stock_2_printing",
+        "completed",
+    }
+)
+MIXED_MODE_REQUIRED_SCREENSHOTS = frozenset(
+    {
+        "editor_opened",
+        "generated",
+        "droplet_ready",
+        "droplet_printing",
+        "droplet_completed",
+        "manual_refuel_passed",
+        "stream_ready",
+        "stream_printing",
         "completed",
     }
 )
@@ -437,6 +464,10 @@ def _regression_profile(runtime: JourneyRuntime) -> Any:
 
 def _multi_fixture() -> tuple[dict[str, Any], Path]:
     return _print_fixture(MULTI_STOCK_WORKLOAD_ID)
+
+
+def _mixed_mode_fixture() -> tuple[dict[str, Any], Path]:
+    return _print_fixture(MIXED_MODE_WORKLOAD_ID)
 
 
 def _stress_fixture() -> tuple[dict[str, Any], Path]:
@@ -702,6 +733,10 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
     from tools.sil.ejection_response import PulseAwareSyntheticEjectionModelV1
     response = PulseAwareSyntheticEjectionModelV1()
     result = []
+    mixed_mode = runtime.definition.registry_id == MIXED_MODE_WORKLOAD_ID
+    manual_contract = dict(
+        fixture.get("lifecycle", {}).get("manual_refuel_check") or {}
+    )
     for index, stock in enumerate(fixture["stocks"]):
         head = stock["printer_head"]
         pulse_width_us = (
@@ -751,7 +786,43 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
                 detailed_evidence=True,
                 include_frequency_evidence=False,
                 no_progress_timeout_seconds=120.0 if compact else None,
+                calibration_mode=str(stock["printing_mode"]),
+                refuel_pulse_width_us=(
+                    int(head["refuel_pulse_width_us"])
+                    if "refuel_pulse_width_us" in head else None
+                ),
+                refuel_pressure_psi=(
+                    float(head["refuel_pressure_psi"])
+                    if "refuel_pressure_psi" in head else None
+                ),
+                manual_refuel_check=(
+                    ManualRefuelCheckSpec(
+                        trial_count=int(manual_contract["trial_count"]),
+                        trial_droplet_count=int(
+                            manual_contract["trial_droplet_count"]
+                        ),
+                        outcome=str(manual_contract["status"]),
+                        operator_judgment=str(
+                            manual_contract["operator_judgment"]
+                        ),
+                    )
+                    if mixed_mode and str(stock["printing_mode"]) == "stream"
+                    else None
+                ),
             )
+        )
+    if mixed_mode:
+        result[0] = replace(
+            result[0],
+            ready_milestone="droplet_ready",
+            printing_milestone="droplet_printing",
+            completed_milestone="droplet_completed",
+        )
+        result[1] = replace(
+            result[1],
+            ready_milestone="stream_ready",
+            printing_milestone="stream_printing",
+            completed_milestone="completed",
         )
     return tuple(result)
 
@@ -1125,6 +1196,16 @@ def _multi_body(runtime: JourneyRuntime) -> None:
         observer=snapshot,
     ):
         runtime.add_assertion(assertion)
+    if runtime.definition.registry_id == MIXED_MODE_WORKLOAD_ID:
+        for assertion in mixed_mode_lifecycle_assertions(
+            context,
+            fixture=fixture,
+            manual_refuel_checks=runtime.observations.get(
+                "manual_refuel_checks", []
+            ),
+            action_results=context.action_results,
+        ):
+            runtime.add_assertion(assertion)
     if profile is not None:
         for assertion in sustained_evidence_assertions(
             snapshot=profile_snapshot,
@@ -1678,6 +1759,7 @@ def _multi_payload(
     stock_count = len(fixture["stocks"])
     expected_count = int(fixture["workload"]["completion_count"])
     multi = evidence.get("execution.multi_stock_head_exchange", {})
+    mixed_mode = runtime.definition.registry_id == MIXED_MODE_WORKLOAD_ID
     observer = dict(observations.get("execution_snapshot") or {})
     observer_persistence = _observer_persistence(observer)
     boundaries = observations.get("pass_boundaries", [])
@@ -1741,6 +1823,19 @@ def _multi_payload(
             "values": {
                 "assertion_decisions": decisions,
                 "multi_stock_head_exchange": multi,
+                **(
+                    {
+                        "mixed_mode_lifecycle": {
+                            "calibrations": evidence.get(
+                                "execution.mixed_mode_calibrations_valid", {}
+                            ),
+                            "manual_refuel": evidence.get(
+                                "execution.stream_manual_refuel_passed", {}
+                            ),
+                        }
+                    }
+                    if mixed_mode else {}
+                ),
                 "stock_well_completion_count": len(completed),
                 **observer_persistence,
             },
@@ -2092,7 +2187,7 @@ def _post_start_lock_summary(report: Mapping[str, Any], runtime: JourneyRuntime)
 def _multi_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> str:
     expected = int(runtime.fixture["workload"]["completion_count"])
     return (
-        f"Milestone 7 composed {len(runtime.fixture['stocks'])}-stock lifecycle\n"
+        f"{'Milestone 8 mixed droplet/stream' if runtime.definition.registry_id == MIXED_MODE_WORKLOAD_ID else 'Milestone 7 composed ' + str(len(runtime.fixture['stocks'])) + '-stock'} lifecycle\n"
         f"Status: {report['classification']['status']}\n"
         f"Completions: {len(runtime.observations['completed_wells'])} / {expected}\n"
         f"Seed: {report['run']['seed']}\n"
@@ -2254,6 +2349,28 @@ MULTI_STOCK_DEFINITION = JourneyDefinition(
     payload_builder=_multi_payload,
     summary_builder=_multi_summary,
 )
+MIXED_MODE_DEFINITION = JourneyDefinition(
+    registry_id=MIXED_MODE_WORKLOAD_ID,
+    scenario_name=MIXED_MODE_SCENARIO_NAME,
+    scenario_version=MIXED_MODE_SCENARIO_VERSION,
+    workload_id=MIXED_MODE_WORKLOAD_ID,
+    required_action_ids=(
+        _COMMON_ACTIONS | _EDITOR_ACTIONS | _PRINT_ACTIONS
+        | frozenset({
+            "head.bind_identity", "head.return_via_ui",
+            "manual_refuel.complete_check_via_ui",
+            "validation.stock_pass_boundary",
+        })
+    ),
+    required_ui_action_ids=MIXED_MODE_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=MIXED_MODE_REQUIRED_ASSERTIONS,
+    required_screenshots=MIXED_MODE_REQUIRED_SCREENSHOTS,
+    fixture_loader=_mixed_mode_fixture,
+    body=_multi_body,
+    artifact_assertion=_multi_artifact,
+    payload_builder=_multi_payload,
+    summary_builder=_multi_summary,
+)
 STRESS_DEFINITION = JourneyDefinition(
     registry_id=STRESS_WORKLOAD_ID,
     scenario_name=SMOKE_SCENARIO_NAME,
@@ -2354,6 +2471,7 @@ JOURNEY_DEFINITIONS = {
         EDITOR_REVISION_DEFINITION,
         POST_START_LOCK_DEFINITION,
         MULTI_STOCK_DEFINITION,
+        MIXED_MODE_DEFINITION,
         STRESS_DEFINITION,
         SOFT_STOP_DEFINITION,
         AUTHORITATIVE_RELOAD_DEFINITION,
@@ -2409,6 +2527,9 @@ __all__ = [
     "MULTI_STOCK_REQUIRED_ASSERTIONS",
     "MULTI_STOCK_REQUIRED_UI_ACTIONS",
     "MULTI_STOCK_WORKLOAD_ID",
+    "MIXED_MODE_WORKLOAD_ID",
+    "MIXED_MODE_REQUIRED_ASSERTIONS",
+    "MIXED_MODE_REQUIRED_UI_ACTIONS",
     "STRESS_REQUIRED_ASSERTIONS",
     "STRESS_REQUIRED_SCREENSHOTS",
     "STRESS_WORKLOAD_ID",

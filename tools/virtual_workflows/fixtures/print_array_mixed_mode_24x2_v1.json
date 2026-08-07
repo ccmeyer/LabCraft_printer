@@ -1,0 +1,77 @@
+{
+  "schema_version": 4,
+  "fixture_id": "print_array_mixed_mode_24x2_v1",
+  "plate": {
+    "name": "shallow-384_well_plate",
+    "rows": 16,
+    "columns": 24,
+    "included_rows": ["A"],
+    "serpentine": true
+  },
+  "workload": {
+    "target_dispenses_per_stock_per_well": 1,
+    "well_count": 24,
+    "stock_count": 2,
+    "array_passes": 2,
+    "completion_count": 48
+  },
+  "stocks": [
+    {
+      "factor_name": "Virtual Mixed Droplet",
+      "concentration": 23.0,
+      "target_concentration": 3.0,
+      "units": "mM",
+      "printing_mode": "droplet",
+      "prepared_droplet_volume_nL": 9.0,
+      "droplet_volume_nL": 9.0,
+      "printer_head": {
+        "printer_head_id": "virtual-head-mixed-24x2-droplet-v1",
+        "initial_volume_uL": 1000.0,
+        "print_pulse_width_us": 1300,
+        "print_pressure_psi": 1.2
+      }
+    },
+    {
+      "factor_name": "Virtual Mixed Stream",
+      "concentration": 23.0,
+      "target_concentration": 20.0,
+      "units": "mM",
+      "printing_mode": "stream",
+      "prepared_droplet_volume_nL": 60.0,
+      "droplet_volume_nL": 60.0,
+      "printer_head": {
+        "printer_head_id": "virtual-head-mixed-24x2-stream-v1",
+        "initial_volume_uL": 1000.0,
+        "print_pulse_width_us": 2500,
+        "print_pressure_psi": 1.2,
+        "refuel_pulse_width_us": 6000,
+        "refuel_pressure_psi": 0.4
+      }
+    }
+  ],
+  "fill_stock": {
+    "factor_name": "Water",
+    "concentration": 1.0,
+    "units": "--",
+    "printing_mode": "droplet",
+    "droplet_volume_nL": 10.0,
+    "target_dispenses_per_well": 0
+  },
+  "simulation": {
+    "dispense_frequency_hz": 20,
+    "lookahead_wells": 2,
+    "staging_slot": 0
+  },
+  "lifecycle": {
+    "kind": "mixed_droplet_stream",
+    "expected_stock_pass_count": 2,
+    "expected_head_stage_count": 2,
+    "expected_between_pass_exchange_count": 1,
+    "manual_refuel_check": {
+      "status": "passed",
+      "operator_judgment": "stable",
+      "trial_count": 2,
+      "trial_droplet_count": 5
+    }
+  }
+}

@@ -1344,7 +1344,58 @@ trace, hashes, seed, exact replay command, and cleanup evidence beneath
 If a visible teardown ever opens a command-error dialog, verify that application
 component cleanup blocks deferred child-widget signals before hiding and
 deleting the window. Slice 9 and the final Milestone 7 Python validation are
-complete; seeded exploration and suite scheduling remain Milestone 8 work.
+complete; seeded exploration and manual suite selection remain Milestone 8
+work.
+
+### Mixed droplet/stream composed lifecycle
+
+Milestone 8 Slice 1 registers `print_array_mixed_mode_24x2_v1` in the manual
+lifecycle suite. The journey reuses the composed editor, rack, calibration,
+stock-pass, persistence, and teardown phases. It drives a 9 nL droplet pass
+and a 60 nL stream pass through normal Qt controls, performs two five-droplet
+trials in the real `ManualRefuelCheckDialog`, records Stable, and then crosses
+the normal stream array-start preflight. This is synthetic application-facing
+SIL evidence, not proof of physical printing, flow, pressure, or refueling.
+
+Run it offscreen or visibly, then use the exact replay command emitted in the
+report:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_mixed_mode_24x2_v1 `
+  --output-root verification_reports\milestone8-slice1 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90
+
+$env:QT_QPA_PLATFORM = "windows"
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_mixed_mode_24x2_v1 `
+  --output-root verification_reports\milestone8-slice1-visible `
+  --seed 1 --speed-multiplier 20 --timeout-seconds 120 --visible
+```
+
+Run the focused tests with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_virtual_workflow_page_drivers.py `
+  tests\test_virtual_workflow_actions.py `
+  tests\test_virtual_workflow_journey_phases.py `
+  tests\test_virtual_workflow_assertions.py `
+  tests\test_virtual_workflow_manifest.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\test_manual_refuel_check_dialog.py `
+  tests\test_sil_manual_refuel.py `
+  tests\system\test_sil_stream_calibration_lifecycle.py `
+  tests\system\test_virtual_workflow_mixed_mode_composed.py `
+  tests\system\test_virtual_workflow_multi_stock_composed.py `
+  tests\system\test_virtual_workflow_smoke.py
+```
+
+Reports retain nine screenshots, exact UI/harness action surfaces, the two
+calibration records, the passed manual-refuel record and ordering, 48 durable
+completion intents, hashes, seed, replay command, and clean teardown. The full
+pytest suite remains deferred to the final Milestone 8 validation.
 
 The report's responsiveness phase timings include `ui.pressure_render`, the
 count and duration distribution for the real pressure-plot update slot. The
