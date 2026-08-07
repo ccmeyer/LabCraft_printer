@@ -1400,8 +1400,9 @@ pytest suite remains deferred to the final Milestone 8 validation.
 ### Manual SIL selection and changed-source recommendations
 
 Milestone 8 Slice 2 adds a read-only planning surface over the validated
-capability manifest. It does not schedule tests and it does not execute suite
-or capability selections. Operators still decide when to run a journey.
+capability manifest. Dry runs do not schedule or execute tests. Operators
+still decide when to run a journey; Milestone 8 Slice 3 adds explicit host
+execution for the same suite and capability selectors.
 Listing, recommendations, and dry runs print deterministic JSON to stdout and
 return before importing Qt or constructing the application; they do not create
 anything beneath `verification_reports/`.
@@ -1424,9 +1425,8 @@ Inspect the catalog or produce plans with:
 The standard plan is frozen at `print_array_smoke_24_v1`, order 1, seed 1,
 and a 60-second timeout. A different explicit seed or timeout fails closed.
 Lifecycle plans retain the manifest order and each scenario's declared
-timeout. Suite/capability execution is deliberately unavailable until the
-fresh-process aggregation work in Slice 3; omitting `--dry-run` exits with a
-usage error rather than starting the first scenario.
+timeout. Omitting `--dry-run` now executes the selected Windows plan through
+the Slice 3 fresh-process aggregate runner.
 
 Request recommendations for all staged, unstaged, and untracked paths, or
 override Git discovery with one or more explicit repository paths:
@@ -1463,6 +1463,51 @@ running a scenario. If a Pi plan is rejected, regenerate or transfer matching
 preflight/hardware-isolation evidence rather than bypassing validation. No
 unattended scheduler, suite artifact writer, or cleanup command is introduced
 by this slice.
+
+### Isolated host SIL suite execution
+
+Milestone 8 Slice 3 executes `--suite` and `--capability` selections only when
+an operator invokes them. Each selected journey runs sequentially in a fresh
+Python child process through the unchanged direct `--scenario` CLI. This keeps
+Qt and application state out of the parent process and prevents state from one
+journey leaking into the next.
+
+Run the standard lane, a capability, or the complete lifecycle portfolio with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --suite standard --output-root verification_reports\suites `
+  --seed 1 --speed-multiplier 1000
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --capability execution.mixed_droplet_stream_lifecycle `
+  --output-root verification_reports\suites `
+  --seed 1 --speed-multiplier 1000
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --suite lifecycle --output-root verification_reports\suites `
+  --seed 1 --speed-multiplier 1000
+```
+
+Without an explicit output root, aggregates use
+`verification_reports/suites`. Each run contains the hashed selection plan,
+`aggregate.json`, `summary.txt`, and ordered `children/<order>_<scenario>/`
+directories. Child stdout/stderr and the authoritative report-v1 tree remain
+separate; the aggregate references and hashes them rather than copying their
+evidence.
+
+Every selected child runs even after an earlier failure. A child passes only
+when its process result agrees with exactly one valid, identity-matched report.
+The aggregate returns 0 for pass or warning, 2 for a completed failing
+selection, and 3 for orchestration or aggregate-writing failure. A per-child
+watchdog uses the selected scenario timeout plus 60 seconds, then terminates
+and, after five seconds, kills a still-running child while retaining logs.
+
+Pi execution, repetition, fault injection, report sets, baselines, comparisons,
+and performance-threshold controls remain unavailable for aggregate runs.
+Use direct `--scenario` execution for supported single-scenario controls. For
+visible qualification, set `QT_QPA_PLATFORM=windows`, add `--visible`, and run
+the exact replay command printed by the aggregate summary.
 
 The report's responsiveness phase timings include `ui.pressure_render`, the
 count and duration distribution for the real pressure-plot update slot. The

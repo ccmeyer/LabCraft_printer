@@ -1877,6 +1877,74 @@ def _soft_stop_payload(
     passed = all(
         decisions.get(item) == "pass" for item in SOFT_STOP_REQUIRED_ASSERTIONS
     )
+    status = "measured" if passed else "partial"
+    intent_reconciliation = {
+        "completed_count": terminal.get("intent_count"),
+        "discarded_count": terminal.get("discarded_intent_count"),
+        "begin_count": terminal.get("begin_intent_count"),
+        "discard_batch_count": terminal.get("discard_batch_count"),
+    }
+    return ComposedReportPayload(
+        workload={**_single_stock_workload(runtime)},
+        workflow_status=status,
+        workflow_values={
+            "expected_well_count": len(expected),
+            "completed_well_count": len(completed),
+            "expected_stock_well_completion_count": len(expected),
+            "completed_stock_well_count": len(completed),
+            "completed_well_ids": list(completed),
+            "well_update_count": len(completed),
+            "array_states": list(runtime.context.array_states),
+            "array_complete_count": len(
+                observed.get("array_completions", [])
+            ),
+            "cleanup_results": [dict(teardown)],
+        },
+        queue={
+            "status": status,
+            "values": {
+                "unexpected_starvation_count": len(
+                    observed.get("starvation_events", [])
+                ),
+                "queue_drained_at_terminal": decisions.get(
+                    "execution.terminal_bundle_valid"
+                )
+                == "pass",
+            },
+        },
+        persistence={
+            "status": status,
+            "values": {
+                "assertion_decisions": decisions,
+                "soft_stop_resume": {
+                    "request": request,
+                    "stopped_checkpoint": paused,
+                    "quiescence": quiescence,
+                    "intent_reconciliation": intent_reconciliation,
+                },
+                "paused_boundary": paused,
+                "quiescence": quiescence,
+                "intent_durability": evidence.get(
+                    "execution.intent_durability_exact", {}
+                ),
+                "terminal": terminal,
+                "terminal_plan_state": terminal.get("terminal_plan_state"),
+                "stock_well_completion_count": terminal.get(
+                    "stock_well_completion_count"
+                ),
+                "intent_count": len(lifecycle.get("completions", [])),
+                "discard_batch_count": len(
+                    lifecycle.get("discard_batches", [])
+                ),
+                **_observer_persistence(observer),
+            },
+        },
+        limitations=(
+            "The soft-stop lifecycle uses an in-process simulator and normal Qt controls; it does not validate physical stopping distance.",
+            "The simulator does not validate firmware, protocol framing, motion, pressure response, cameras, balance behavior, or droplet quality.",
+            "Generated identities, timestamps, durations, paths, and calibration identities are not expected to be byte-identical across replay.",
+        ),
+    )
 
 
 def _disconnect_payload(
@@ -1944,27 +2012,6 @@ def _disconnect_payload(
             "The disconnect lifecycle validates only the in-process simulated machine boundary and normal Qt controls.",
             "It does not validate serial framing, ACK/status loss, MCU reset, firmware recovery, physical motion, pressure response, or hardware output.",
             "Only confirmed simulated queue cancellation permits canceled intent discard; physical or unconfirmed disconnects remain ambiguous.",
-        ),
-    )
-    status = "measured" if passed else "partial"
-    intent_reconciliation = {
-        "completed_count": terminal.get("intent_count"),
-        "discarded_count": terminal.get("discarded_intent_count"),
-        "begin_count": terminal.get("begin_intent_count"),
-        "discard_batch_count": terminal.get("discard_batch_count"),
-    }
-    return ComposedReportPayload(
-        workload={
-            **_single_stock_workload(runtime),
-        },
-        workflow_status=status,
-        workflow_values={"expected_well_count": len(expected), "completed_well_count": len(completed), "expected_stock_well_completion_count": len(expected), "completed_stock_well_count": len(completed), "completed_well_ids": list(completed), "well_update_count": len(completed), "array_states": list(runtime.context.array_states), "array_complete_count": len(observed.get("array_completions", [])), "cleanup_results": [dict(teardown)]},
-        queue={"status": status, "values": {"unexpected_starvation_count": len(observed.get("starvation_events", [])), "queue_drained_at_terminal": decisions.get("execution.terminal_bundle_valid") == "pass"}},
-        persistence={"status": status, "values": {"assertion_decisions": decisions, "soft_stop_resume": {"request": request, "stopped_checkpoint": paused, "quiescence": quiescence, "intent_reconciliation": intent_reconciliation}, "paused_boundary": paused, "quiescence": quiescence, "intent_durability": evidence.get("execution.intent_durability_exact", {}), "terminal": terminal, "terminal_plan_state": terminal.get("terminal_plan_state"), "stock_well_completion_count": terminal.get("stock_well_completion_count"), "intent_count": len(lifecycle.get("completions", [])), "discard_batch_count": len(lifecycle.get("discard_batches", [])), **_observer_persistence(observer)}},
-        limitations=(
-            "The soft-stop lifecycle uses an in-process simulator and normal Qt controls; it does not validate physical stopping distance.",
-            "The simulator does not validate firmware, protocol framing, motion, pressure response, cameras, balance behavior, or droplet quality.",
-            "Generated identities, timestamps, durations, paths, and calibration identities are not expected to be byte-identical across replay.",
         ),
     )
 

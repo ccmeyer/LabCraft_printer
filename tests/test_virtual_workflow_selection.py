@@ -296,18 +296,15 @@ def test_git_discovery_combines_tracked_and_untracked_paths(monkeypatch):
     )
 
 
-def test_cli_selection_modes_are_mutually_exclusive_and_suite_execution_waits(
-    capsys,
-):
+def test_cli_selection_modes_are_mutually_exclusive_and_execution_is_available():
     parser = _parser()
     with pytest.raises(SystemExit) as conflict:
         parser.parse_args(["--suite", "standard", "--capability", "x"])
     assert conflict.value.code == 2
 
-    with pytest.raises(SystemExit) as execution:
-        main(["--suite", "standard"])
-    assert execution.value.code == 2
-    assert "require --dry-run" in capsys.readouterr().err
+    args = parser.parse_args(["--suite", "standard"])
+    assert args.suite == "standard"
+    assert args.dry_run is False
 
 
 def test_cli_planning_prints_json_without_dispatch_or_artifact_writes(

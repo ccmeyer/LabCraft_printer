@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -47,11 +49,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     selector.add_argument(
         "--suite",
-        help="Select a validated manifest suite (dry-run only in Slice 2).",
+        help="Plan or execute a validated manifest suite.",
     )
     selector.add_argument(
         "--capability",
-        help="Select a covered/partial capability (dry-run only in Slice 2).",
+        help="Plan or execute a covered/partial capability.",
     )
     selector.add_argument(
         "--list",
@@ -203,6 +205,75 @@ def _planning_request(
     )
 
 
+def _aggregate_replay_command(
+    args: argparse.Namespace,
+    raw_argv: list[str],
+    output_root: Path,
+) -> tuple[str, ...]:
+    selector_option = "--suite" if args.suite is not None else "--capability"
+    selector_id = args.suite if args.suite is not None else args.capability
+    command = [
+        r".\env\Scripts\python.exe",
+        r"tools\run_virtual_workflow.py",
+        selector_option,
+        str(selector_id),
+        "--output-root",
+        str(output_root),
+        "--seed",
+        str(args.seed),
+        "--speed-multiplier",
+        f"{args.speed_multiplier:g}",
+    ]
+    if _option_was_supplied(raw_argv, "--timeout-seconds"):
+        command.extend(["--timeout-seconds", str(args.timeout_seconds)])
+    if args.visible:
+        command.append("--visible")
+    else:
+        command.extend(["--qt-platform", args.qt_platform])
+    return tuple(command)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _reject_aggregate_option_conflicts(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    raw_argv: list[str],
+) -> None:
+    if (
+        args.target_pi
+        or args.pi_preflight is not None
+        or args.pi_hardware_proof is not None
+    ):
+        parser.error("Pi suite execution is deferred to Milestone 8 Slice 7")
+    conflicts = []
+    if args.inject_ui_stall_ms != 0 or args.inject_after_completion != 48:
+        conflicts.append("fault injection")
+    if args.warmup_runs != 0 or args.measured_runs != 1:
+        conflicts.append("run repetition")
+    if args.host_label is not None:
+        conflicts.append("--host-label")
+    if args.emit_report_set:
+        conflicts.append("--emit-report-set")
+    if args.accept_baseline is not None or args.replace_accepted_baseline:
+        conflicts.append("baseline creation")
+    if _option_was_supplied(raw_argv, "--threshold-maturity"):
+        conflicts.append("--threshold-maturity")
+    if args.compare is not None:
+        conflicts.append("--compare")
+    if conflicts:
+        parser.error(
+            "suite/capability execution does not support: "
+            + ", ".join(conflicts)
+        )
+
+
 def _comparison_exit_code(comparison: dict[str, object]) -> int:
     classification = comparison["classification"]
     assert isinstance(classification, dict)
@@ -311,11 +382,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(raw_argv)
     if args.changed_path and not args.recommend_changed:
         parser.error("--changed-path requires --recommend-changed")
-    if (args.suite is not None or args.capability is not None) and not args.dry_run:
-        parser.error(
-            "--suite and --capability require --dry-run in Milestone 8 Slice 2; "
-            "multi-scenario execution begins in Slice 3"
-        )
     if args.dry_run and (args.list_section or args.recommend_changed):
         parser.error("--dry-run cannot be combined with listing or recommendations")
     planning_mode = bool(
@@ -350,6 +416,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--visible and an explicit non-default --qt-platform conflict")
     if args.target_pi and args.visible:
         parser.error("--target-pi is headless and cannot be combined with --visible")
+    aggregate_execution = (
+        not args.dry_run
+        and (args.suite is not None or args.capability is not None)
+    )
+    if aggregate_execution:
+        _reject_aggregate_option_conflicts(parser, args, raw_argv)
     pi_evidence = (args.pi_preflight, args.pi_hardware_proof)
     if args.target_pi and any(value is None for value in pi_evidence):
         parser.error(
@@ -381,6 +453,48 @@ def main(argv: list[str] | None = None) -> int:
                 f"selection evidence validation failed: "
                 f"{type(exc).__name__}: {exc}"
             )
+
+    if aggregate_execution:
+        aggregate_output_root = (
+            args.output_root
+            if _option_was_supplied(raw_argv, "--output-root")
+            else REPO_ROOT / "verification_reports" / "suites"
+        )
+        if not math.isfinite(args.speed_multiplier) or args.speed_multiplier <= 0:
+            parser.error("--speed-multiplier must be finite and greater than zero")
+        try:
+            plan = resolve_selection(_planning_request(args, raw_argv))
+        except (ManifestValidationError, SelectionError) as exc:
+            parser.error(str(exc))
+        try:
+            from tools.virtual_workflows.suite_runner import (
+                AggregateRunConfig,
+                execute_host_selection,
+            )
+
+            result = execute_host_selection(
+                AggregateRunConfig(
+                    plan=plan,
+                    output_root=aggregate_output_root,
+                    speed_multiplier=args.speed_multiplier,
+                    visible=args.visible,
+                    qt_platform=args.qt_platform,
+                    replay_command=_aggregate_replay_command(
+                        args, raw_argv, aggregate_output_root
+                    ),
+                )
+            )
+            print(result.summary_path.read_text(encoding="utf-8"), end="")
+            print(f"Aggregate: {result.aggregate_path}")
+            print(f"Aggregate SHA-256: {_file_sha256(result.aggregate_path)}")
+            return result.exit_code
+        except Exception as exc:
+            print(
+                "Virtual workflow aggregate failed: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 3
 
     scenario_definition = get_registered_scenario(args.scenario)
     if args.compare is not None:

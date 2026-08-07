@@ -1,6 +1,6 @@
 # Milestone 8 Slice 3 — Isolated Host Suite Execution and Aggregation
 
-Status: approved for implementation (2026-08-07)
+Status: implemented and qualified (2026-08-07)
 
 ## Scope and call path
 

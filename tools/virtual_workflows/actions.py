@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -1639,6 +1639,60 @@ def _ensure_editor_deadline(
         )
 
 
+def _wait_for_editor_progress_dialogs(
+    context: ScenarioContext,
+    QtTest: Any,
+    action_id: str,
+) -> None:
+    """Wait for the editor's expected transient progress dialog to settle."""
+
+    from PySide6 import QtWidgets
+
+    quiet_since: float | None = None
+    while True:
+        QtWidgets.QApplication.sendPostedEvents(
+            None, context.qt_core.QEvent.Type.DeferredDelete
+        )
+        context.app.processEvents()
+        visible = [
+            widget
+            for widget in context.app.topLevelWidgets()
+            if isinstance(widget, QtWidgets.QProgressDialog)
+            and widget.isVisible()
+        ]
+        if visible:
+            quiet_since = None
+        elif quiet_since is None:
+            quiet_since = time.monotonic()
+        elif time.monotonic() - quiet_since >= 0.05:
+            return
+        if context.deadline.remaining_seconds() <= 0:
+            raise ScenarioActionError(
+                action_id,
+                "editor progress dialog did not close before the deadline",
+                stage="timeout",
+                evidence={
+                    "progress_dialogs": [
+                        widget.windowTitle() for widget in visible
+                    ]
+                },
+            )
+        QtTest.QTest.qWait(5)
+
+
+@contextmanager
+def _expected_editor_progress_dialog(context: ScenarioContext):
+    registry = getattr(context.app, "_sil_expected_dialog_specs", [])
+    setattr(context.app, "_sil_expected_dialog_specs", registry)
+    entry = {"title": "Please wait", "type": "QProgressDialog"}
+    registry.append(entry)
+    try:
+        yield
+    finally:
+        if entry in registry:
+            registry.remove(entry)
+
+
 def _qt_replace_text(QtCore: Any, QtTest: Any, widget: Any, value: Any) -> None:
     widget.setFocus()
     QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
@@ -2024,7 +2078,13 @@ def drive_editor_create_finalize(
             )
 
             def generate() -> Mapping[str, Any]:
-                click(dialog.run_btn)
+                with _expected_editor_progress_dialog(context):
+                    click(dialog.run_btn)
+                    _wait_for_editor_progress_dialogs(
+                        context,
+                        QtTest,
+                        "editor.optimize_generate_via_ui",
+                    )
                 _ensure_editor_deadline(
                     context, "editor.optimize_generate_via_ui", "generated"
                 )
@@ -2505,7 +2565,13 @@ def drive_editor_prestart_rename_refinalize(
             )
 
             def regenerate() -> Mapping[str, Any]:
-                click(dialog.run_btn)
+                with _expected_editor_progress_dialog(context):
+                    click(dialog.run_btn)
+                    _wait_for_editor_progress_dialogs(
+                        context,
+                        QtTest,
+                        "editor.regenerate_prepared_design_via_ui",
+                    )
                 _ensure_editor_deadline(
                     context,
                     "editor.regenerate_prepared_design_via_ui",

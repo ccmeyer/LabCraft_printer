@@ -604,8 +604,9 @@ def _drive_editor_post_start_lock_and_copy(
     from View import ExperimentDesignDialog
     from tools.virtual_workflows.actions import (
         ScenarioActionError, _ensure_editor_deadline, _qt_replace_text,
-        _qt_set_spin_value, capture_failure_screenshot, capture_milestone,
-        execute_action,
+        _qt_set_spin_value, _expected_editor_progress_dialog,
+        _wait_for_editor_progress_dialogs,
+        capture_failure_screenshot, capture_milestone, execute_action,
     )
 
     QtCore = context.qt_core
@@ -905,7 +906,13 @@ def _drive_editor_post_start_lock_and_copy(
                     abs_tol=1e-9,
                 ):
                     raise RuntimeError("copy tolerance edit was not retained")
-                click(dialog.run_btn)
+                with _expected_editor_progress_dialog(context):
+                    click(dialog.run_btn)
+                    _wait_for_editor_progress_dialogs(
+                        context,
+                        QtTest,
+                        "editor.edit_copy_via_ui",
+                    )
                 if dialog._design_optimization_dirty:
                     raise RuntimeError("copy design remained dirty")
                 return {
@@ -1007,7 +1014,11 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
         button = self.view.well_plate_widget.design_experiment_button
         if not button.isVisible() or not button.isEnabled():
             raise RuntimeError("Experiment Editor control is not visible and enabled")
-        state: dict[str, Any] = {"error": None, "loaded": None, "activated": None}
+        state: dict[str, Any] = {
+            "error": None,
+            "loaded": None,
+            "activated": None,
+        }
 
         def fail(exc: BaseException, modal=None) -> None:
             state["error"] = exc
@@ -1020,6 +1031,13 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
         def choose_directory(editor) -> None:
             modal = self.app.activeModalWidget()
             try:
+                if modal is None:
+                    if self.context.deadline.remaining_seconds() <= 0:
+                        raise RuntimeError(
+                            f"{purpose} folder dialog deadline expired"
+                        )
+                    QtCore.QTimer.singleShot(5, lambda: choose_directory(editor))
+                    return
                 if not isinstance(modal, QtWidgets.QFileDialog):
                     raise RuntimeError(
                         f"unexpected modal while selecting {purpose} folder: "
@@ -1029,15 +1047,64 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                     raise RuntimeError(
                         f"unexpected file dialog title: {modal.windowTitle()!r}"
                     )
-                modal.setDirectory(str(directory))
+                modal.setDirectory(str(directory.parent))
                 self.context.pump_events()
+                view = modal.findChild(QtWidgets.QTreeView, "treeView")
+                if view is None or not view.isVisible():
+                    raise RuntimeError(
+                        f"{purpose} folder dialog has no visible directory view"
+                    )
+
+                def target_index():
+                    model = view.model()
+                    parent = view.rootIndex()
+                    for row in range(model.rowCount(parent)):
+                        index = model.index(row, 0, parent)
+                        if str(index.data() or "") == directory.name:
+                            return index
+                    return QtCore.QModelIndex()
+
+                self.wait_until(
+                    lambda: target_index().isValid(),
+                    f"{purpose} folder row",
+                    timeout_seconds=5.0,
+                )
+                index = target_index()
+                view.scrollTo(index)
+                self.context.pump_events()
+                rect = view.visualRect(index)
+                if not rect.isValid():
+                    raise RuntimeError(
+                        f"{purpose} folder row has invalid geometry"
+                    )
+                QtTest.QTest.mouseClick(
+                    view.viewport(),
+                    QtCore.Qt.MouseButton.LeftButton,
+                    pos=rect.center(),
+                )
+                self.context.pump_events()
+                selected = [
+                    Path(item).resolve() for item in modal.selectedFiles()
+                ]
+                if directory not in selected:
+                    raise RuntimeError(
+                        f"{purpose} folder selection retained {selected!r}; "
+                        f"expected {directory}"
+                    )
                 box = modal.findChild(QtWidgets.QDialogButtonBox)
                 accept = box.button(QtWidgets.QDialogButtonBox.Open) if box else None
                 if accept is None and box is not None:
                     accept = box.button(QtWidgets.QDialogButtonBox.Ok)
                 if accept is None:
                     raise RuntimeError(f"{purpose} folder dialog has no accept button")
-                self.click(accept)
+                if not accept.isVisible() or not accept.isEnabled():
+                    raise RuntimeError(
+                        f"{purpose} folder accept control is unavailable"
+                    )
+                accept.setFocus()
+                QtTest.QTest.mouseClick(
+                    accept, QtCore.Qt.MouseButton.LeftButton
+                )
             except BaseException as exc:
                 fail(exc, modal)
 
@@ -1046,6 +1113,9 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             try:
                 if self.context.deadline.remaining_seconds() <= 0:
                     raise RuntimeError(f"{purpose} reload deadline expired")
+                if modal is None:
+                    QtCore.QTimer.singleShot(5, drive_editor)
+                    return
                 if not isinstance(modal, ExperimentDesignDialog):
                     raise RuntimeError(
                         f"unexpected modal while opening {purpose} editor: "
@@ -1062,7 +1132,12 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 fail(exc, modal)
 
         QtCore.QTimer.singleShot(0, drive_editor)
-        self.click(button)
+        with _expected_dialogs(
+            self.app,
+            ("Experiment Design (v2)", "ExperimentDesignDialog"),
+            ("Select Experiment Folder", "QFileDialog"),
+        ):
+            self.click(button)
         if state["error"] is not None:
             raise state["error"]
         if state["loaded"] is None or (on_activated and state["activated"] is None):

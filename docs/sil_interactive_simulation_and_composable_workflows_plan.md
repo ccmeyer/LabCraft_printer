@@ -1193,7 +1193,7 @@ Completion evidence:
 
 #### Milestone 8 Slice 3: Host suite execution and aggregation
 
-Status: `planned`
+Status: `complete` (2026-08-07)
 
 - run each manually selected Windows journey in a fresh child process so Qt
   state cannot leak between journeys;
@@ -1203,6 +1203,17 @@ Status: `planned`
   but classify the aggregate fail-closed;
 - keep regression and stress explicitly selected rather than implied by the
   standard lane.
+- Windows suite/capability execution now resolves the Slice 2 plan before any
+  writes, launches every scenario sequentially in a fresh Python process, and
+  retains a validated `labcraft.virtual_workflow_aggregate` v1 document with
+  plan, process, report, source, hash, timeout, and replay evidence;
+- the qualification standard suite, mixed-mode capability, eight-child
+  lifecycle suite, visible standard suite, and its exact replay all passed.
+  The lifecycle qualification also exposed and corrected bounded SIL-harness
+  defects in expected editor-dialog synchronization and the soft-stop report
+  builder; no production MVC or simulator behavior changed;
+- focused unit/contract and real-process system tests passed. The complete
+  Python suite remains deferred to Slice 8.
 
 #### Milestone 8 Slice 4: Capability coverage and source freshness
 
@@ -1653,10 +1664,11 @@ This effort is complete when:
 ## Current Next Action
 
 Milestone 7 is complete and the eight-slice Milestone 8 direction is approved.
-Milestone 8 Slices 1 and 2 are complete. The operator can now list the tracked
-portfolio, dry-run suite/capability/direct-scenario plans, and request
-changed-source recommendations without launching Qt or writing reports. Create
-a concrete implementation plan for Milestone 8 Slice 3: fresh-process host
-suite execution and aggregate reports. Do not begin matrices, seeded sequence
+Milestone 8 Slices 1 through 3 are complete. The operator can list the tracked
+portfolio, dry-run suite/capability/direct-scenario plans, request
+changed-source recommendations, and explicitly execute Windows suite or
+capability plans as isolated fresh processes with hashed aggregate evidence.
+Create a concrete implementation plan for Milestone 8 Slice 4: capability
+coverage and source freshness. Do not begin matrices, seeded sequence
 exploration, remote Pi operations, firmware/protocol work, or hardware work
 until their respective later slices are separately planned and approved.
