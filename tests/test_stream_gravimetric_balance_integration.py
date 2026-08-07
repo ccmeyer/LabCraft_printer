@@ -2,7 +2,7 @@ from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 
-from PySide6 import QtCore, QtGui
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from ApplicationComposition import ExperimentalFeatures
 from BalanceProtocol import (
@@ -219,6 +219,39 @@ def test_group_discovers_without_connecting_and_requires_button_click(qapp):
     group.connection_button.click()
     assert controller.connect_calls == [descriptor.device_path]
     assert controller.disconnect_calls == 0
+
+
+def test_long_persistent_port_label_does_not_expand_balance_panel(qapp):
+    short_controller = _UiController((_port("/dev/ttyUSB1"),))
+    long_path = "/dev/serial/by-id/" + ("usb-Prolific_balance_adapter_" * 20)
+    long_descriptor = _port(long_path)
+    long_controller = _UiController((long_descriptor,))
+
+    short_group = ExperimentalBalanceConnectionGroup(short_controller)
+    long_group = ExperimentalBalanceConnectionGroup(long_controller)
+    short_group.ensurePolished()
+    long_group.ensurePolished()
+
+    assert long_group.port_combo.currentData() == long_path
+    assert len(long_group.port_combo.currentText()) <= 56
+    assert long_group.port_combo.currentText() != long_descriptor.display_label
+    assert long_group.port_combo.toolTip() == long_descriptor.display_label
+    assert (
+        long_group.port_combo.itemData(
+            0,
+            QtCore.Qt.ItemDataRole.ToolTipRole,
+        )
+        == long_descriptor.display_label
+    )
+    assert (
+        long_group.port_combo.sizeAdjustPolicy()
+        == QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+    )
+    assert (
+        long_group.port_combo.sizeHint().width()
+        == short_group.port_combo.sizeHint().width()
+    )
+    assert long_group.sizeHint().width() == short_group.sizeHint().width()
 
 
 def test_group_follows_typed_states_and_restores_last_reading(qapp):

@@ -1965,6 +1965,18 @@ class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
     """Explicit connection controls for the opt-in HPB balance service."""
 
     _BUSY_STATES = {"connecting", "streaming", "disconnecting"}
+    _PORT_LABEL_MAX_CHARS = 56
+
+    @classmethod
+    def _compact_port_display_label(cls, label):
+        text = str(label or "")
+        if len(text) <= cls._PORT_LABEL_MAX_CHARS:
+            return text
+        separator = " ... "
+        remaining = cls._PORT_LABEL_MAX_CHARS - len(separator)
+        leading = remaining // 2
+        trailing = remaining - leading
+        return f"{text[:leading]}{separator}{text[-trailing:]}"
 
     def __init__(self, controller, *, preselected_port="", parent=None):
         super().__init__("Experimental Balance", parent)
@@ -1974,10 +1986,20 @@ class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
         self._stream_capture_status = "idle"
 
         layout = QtWidgets.QGridLayout(self)
+        layout.setColumnStretch(1, 1)
         self.port_combo = QtWidgets.QComboBox()
+        self.port_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.port_combo.setMinimumContentsLength(18)
+        self.port_combo.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         self.refresh_button = QtWidgets.QPushButton("Refresh")
         self.connection_button = QtWidgets.QPushButton("Connect")
         self.connection_state_label = QtWidgets.QLabel("Disconnected")
+        self.connection_state_label.setWordWrap(True)
         self.last_reading_label = QtWidgets.QLabel("Last reading: —")
         self.stream_opt_in_checkbox = QtWidgets.QCheckBox(
             "Use connected balance for stream capture"
@@ -2016,6 +2038,9 @@ class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
         self.refresh_button.clicked.connect(self.refresh_ports)
         self.connection_button.clicked.connect(self._toggle_connection)
         self.port_combo.currentIndexChanged.connect(self._update_controls)
+        self.port_combo.currentIndexChanged.connect(
+            self._update_selected_port_tooltip
+        )
         self.stream_opt_in_checkbox.toggled.connect(self._toggle_stream_opt_in)
         self.cancel_reading_button.clicked.connect(
             controller.cancel_stream_gravimetric_starting_mass
@@ -2068,16 +2093,30 @@ class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
         descriptors = self.controller.list_experimental_balance_ports()
         self.port_combo.clear()
         for descriptor in descriptors:
+            display_label = str(descriptor.display_label)
             self.port_combo.addItem(
-                descriptor.display_label,
+                self._compact_port_display_label(display_label),
                 descriptor.device_path,
+            )
+            self.port_combo.setItemData(
+                self.port_combo.count() - 1,
+                display_label,
+                QtCore.Qt.ItemDataRole.ToolTipRole,
             )
         preferred = self._preselected_port or previous
         if preferred:
             index = self.port_combo.findData(preferred)
             if index >= 0:
                 self.port_combo.setCurrentIndex(index)
+        self._update_selected_port_tooltip()
         self._update_controls()
+
+    def _update_selected_port_tooltip(self, *_args):
+        full_label = self.port_combo.itemData(
+            self.port_combo.currentIndex(),
+            QtCore.Qt.ItemDataRole.ToolTipRole,
+        )
+        self.port_combo.setToolTip(str(full_label or ""))
 
     def _toggle_connection(self):
         if self._state in {"streaming", "error"}:
