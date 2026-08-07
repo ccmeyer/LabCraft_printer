@@ -11,7 +11,9 @@ from tools.virtual_workflows.assertions import (
     exact_action_sequence_assertion,
     evaluate_assertion,
     multi_stock_artifacts_assertion,
+    regression_evidence_assertions,
     soft_stop_paused_assertions,
+    synthetic_calibration_contract,
 )
 
 import pytest
@@ -145,6 +147,99 @@ def test_cleanup_assertion_requires_close_and_removed_lock():
     assert cleanup_assertion(
         {"evidence": {"close_succeeded": True, "session_lock_present": True}}
     ).decision == "fail"
+
+
+def test_regression_assertions_fail_closed_on_missing_responsiveness_metric():
+    intent = {"intent_id": "intent-1"}
+    snapshot = {
+        "observer": {
+            "restored": True,
+            "lifecycle": {
+                "begins": [intent],
+                "attachments": [intent],
+                "completions": ["intent-1"],
+                "discard_batches": [],
+            },
+            "progress_snapshot": {
+                "mode_counts": {"full_rebuild": 0, "cached_update": 1}
+            },
+        },
+        "authoritative_io": {
+            "resume_save_fsync_count": 3,
+            "resume_save_replace_count": 3,
+        },
+        "queue": {"unexpected_starvation_count": 0},
+        "calibration_contract": {"valid": True},
+        "injected_stall_assessment": {"decision": "not_requested"},
+        "responsiveness": {
+            "scheduling_lateness_ms": {"count": 1},
+            "event_loop_gap_ms": {"count": 1},
+            "phase_timings": {
+                "duration_by_name_ms": {
+                    "persistence.write_progress": {"count": 1},
+                    "persistence.complete_intent": {"count": 1},
+                    "controller.well_completion": {"count": 1},
+                }
+            },
+            "shutdown": {
+                "timer_active": False,
+                "observer_thread_alive": False,
+            },
+        },
+    }
+
+    passing = regression_evidence_assertions(
+        expected_well_ids=("A1",),
+        completed_well_ids=("A1",),
+        snapshot=snapshot,
+    )
+    assert {result.decision for result in passing} == {"pass"}
+
+    snapshot["responsiveness"]["event_loop_gap_ms"] = {"count": 0}
+    failed = regression_evidence_assertions(
+        expected_well_ids=("A1",),
+        completed_well_ids=("A1",),
+        snapshot=snapshot,
+    )
+    decision = {result.assertion_id: result.decision for result in failed}
+    assert decision["ui.responsiveness_metrics_present"] == "fail"
+
+
+def test_synthetic_calibration_contract_uses_the_pulse_aware_result():
+    fixture = {
+        "stock": {
+            "printing_mode": "droplet",
+            "prepared_droplet_volume_nL": 5.0,
+            "droplet_volume_nL": 10.0,
+        },
+        "printer_head": {
+            "print_pulse_width_us": 1300,
+            "print_pressure_psi": 1.2,
+        },
+    }
+    actions = [
+        {
+            "action_id": "calibration.select_via_ui",
+            "evidence": {
+                "source_volume_nL": 5.0,
+                "mean_nL": 9.0,
+                "pw_us": 1300,
+                "pressure_psi": 1.2005,
+            },
+        },
+        {
+            "action_id": "calibration.apply_via_ui",
+            "evidence": {
+                "preview": {"payload": {"new_droplet_nL": 9.0}}
+            },
+        },
+    ]
+
+    evidence = synthetic_calibration_contract(fixture, actions)
+    assert evidence["valid"] is True
+    assert evidence["prepared_volume_nL"] == 5.0
+    assert evidence["fixture_design_volume_nL"] == 10.0
+    assert evidence["expected_synthetic_measured_volume_nL"] == 9.0
 
 
 def test_editor_artifact_assertion_requires_exact_nonempty_screenshots_and_cleanup(

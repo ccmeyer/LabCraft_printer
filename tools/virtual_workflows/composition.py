@@ -48,6 +48,7 @@ class SemanticStep:
 
 FixtureLoader = Callable[[], tuple[dict[str, Any], Path]]
 JourneyBody = Callable[["JourneyRuntime"], None]
+EvidenceProfileFactory = Callable[["JourneyRuntime"], Any]
 ArtifactAssertion = Callable[["JourneyRuntime", Mapping[str, Any]], Any]
 PayloadBuilder = Callable[
     ["JourneyRuntime", Mapping[str, Any]], ComposedReportPayload
@@ -72,6 +73,10 @@ class JourneyDefinition:
     artifact_assertion: ArtifactAssertion = field(repr=False, compare=False)
     payload_builder: PayloadBuilder = field(repr=False, compare=False)
     summary_builder: SummaryBuilder = field(repr=False, compare=False)
+    evidence_profile_factory: EvidenceProfileFactory | None = field(
+        default=None, repr=False, compare=False
+    )
+    midpoint_completion_count: int | None = None
 
     def __post_init__(self) -> None:
         identities = (
@@ -102,6 +107,15 @@ class JourneyDefinition:
         ):
             if not callable(callback):
                 raise ValueError("journey callbacks must be callable")
+        if self.evidence_profile_factory is not None and not callable(
+            self.evidence_profile_factory
+        ):
+            raise ValueError("journey evidence profile factory must be callable")
+        if (
+            self.midpoint_completion_count is not None
+            and self.midpoint_completion_count < 1
+        ):
+            raise ValueError("journey midpoint completion count must be positive")
 
 
 @dataclass
@@ -190,6 +204,15 @@ def replay_command(harness: AutomationHarness, workload_id: str) -> list[str]:
     ]
     if harness.config.visible:
         command.append("--visible")
+    if harness.config.inject_ui_stall_ms:
+        command.extend(
+            [
+                "--inject-ui-stall-ms",
+                str(harness.config.inject_ui_stall_ms),
+                "--inject-after-completion",
+                str(harness.config.inject_after_completion),
+            ]
+        )
     return command
 
 
@@ -213,6 +236,10 @@ class JourneyExecutor:
                 speed_multiplier=config.speed_multiplier,
                 timeout_seconds=config.timeout_seconds,
                 run_id=config.run_id,
+                inject_ui_stall_ms=config.inject_ui_stall_ms,
+                inject_after_completion=config.inject_after_completion,
+                pi_preflight_path=config.pi_preflight_path,
+                pi_hardware_proof_path=config.pi_hardware_proof_path,
             )
         )
         runtime = JourneyRuntime(

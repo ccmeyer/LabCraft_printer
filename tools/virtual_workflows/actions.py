@@ -1541,7 +1541,7 @@ def drive_editor_create_finalize(
                         pos=active.grid._cell_rect(row, column).center(),
                     )
                 observed = active.selected_well_ids()
-                if observed != well_ids:
+                if len(observed) != len(well_ids) or set(observed) != set(well_ids):
                     raise RuntimeError(
                         f"printable wells retained {observed!r}; "
                         f"expected {well_ids!r}"
@@ -1562,7 +1562,8 @@ def drive_editor_create_finalize(
         if not selection_state["entered"]:
             raise RuntimeError("Printable Wells dialog did not open")
         selected = dialog.model.get_auto_assignment_included_wells()
-        if list(selected or []) != well_ids:
+        retained = list(selected or [])
+        if len(retained) != len(well_ids) or set(retained) != set(well_ids):
             raise RuntimeError(
                 f"editor retained printable wells {selected!r}; "
                 f"expected {well_ids!r}"

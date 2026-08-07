@@ -67,6 +67,9 @@ class ComposedReportPayload:
     resources: Mapping[str, Any] = field(
         default_factory=lambda: {"status": "not_applicable", "values": {}}
     )
+    responsiveness: Mapping[str, Any] = field(
+        default_factory=lambda: {"status": "not_applicable", "values": {}}
+    )
     limitations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -94,6 +97,9 @@ class ComposedReportAdapter:
     ) -> dict[str, Any]:
         harness = self.harness
         identity = collect_environment_identity(self.repo_root)
+        report_identity = dict(getattr(harness, "report_identity", {}) or {})
+        if report_identity.get("target_pi") is not None:
+            identity["environment"]["target_pi"] = report_identity["target_pi"]
         failure_text = str(harness.failure) if harness.failure is not None else None
         classification = "pass" if passed and failure_text is None else "fail"
         roots = getattr(harness.session, "application_roots", None)
@@ -115,10 +121,8 @@ class ComposedReportAdapter:
                 "run_id": harness.run_id,
                 "scenario_name": str(scenario_name),
                 "scenario_version": str(scenario_version),
-                "run_mode": (
-                    "visible_windows_sil"
-                    if harness.config.visible
-                    else "offscreen_windows_sil"
+                "run_mode": report_identity.get("run_mode") or (
+                    "visible_windows_sil" if harness.config.visible else "offscreen_windows_sil"
                 ),
                 "timing_policy": (
                     "simulated_command_durations_x"
@@ -151,6 +155,11 @@ class ComposedReportAdapter:
                 "scenario_root": str(harness.scenario_root),
                 "report_dir": str(harness.report_dir),
                 "root_containment_valid": contained,
+                **(
+                    {"pi_sil": report_identity["pi_sil"]}
+                    if report_identity.get("pi_sil") is not None
+                    else {}
+                ),
             },
             "artifacts": {
                 "report_json": "report.json",
@@ -159,6 +168,11 @@ class ComposedReportAdapter:
                 "action_ledger": "action_ledger.json",
                 "assertion_ledger": "assertion_ledger.json",
                 "evidence_manifest": "evidence_manifest.json",
+                "stall_stacks": (
+                    "stall_stacks.txt"
+                    if (harness.report_dir / "stall_stacks.txt").is_file()
+                    else None
+                ),
                 "failure_traceback": (
                     "failure_traceback.txt" if harness.failure is not None else None
                 ),
@@ -224,10 +238,7 @@ class ComposedReportAdapter:
             {
                 "workload": dict(payload.workload),
                 "metrics": {
-                    "responsiveness": {
-                        "status": "not_applicable",
-                        "values": {},
-                    },
+                    "responsiveness": dict(payload.responsiveness),
                     "workflow": {
                         "status": payload.workflow_status,
                         "values": common_workflow_values,

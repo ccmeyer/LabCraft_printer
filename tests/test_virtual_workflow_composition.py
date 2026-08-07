@@ -13,6 +13,7 @@ from tools.virtual_workflows.composition import (
     JourneyRuntime,
     SemanticStep,
     normalized_steps,
+    replay_command,
 )
 
 
@@ -99,6 +100,41 @@ def test_definition_rejects_duplicate_assertions_and_non_ui_membership():
         _definition(
             required_ui_action_ids=frozenset({"machine.connect_via_ui"})
         )
+
+
+def test_definition_validates_optional_evidence_profile_and_midpoint():
+    with pytest.raises(ValueError, match="evidence profile"):
+        _definition(evidence_profile_factory="not-callable")
+    with pytest.raises(ValueError, match="midpoint"):
+        _definition(midpoint_completion_count=0)
+
+    profile_factory = lambda runtime: runtime
+    definition = _definition(
+        evidence_profile_factory=profile_factory,
+        midpoint_completion_count=48,
+    )
+    assert definition.evidence_profile_factory is profile_factory
+    assert definition.midpoint_completion_count == 48
+
+
+def test_replay_command_retains_requested_stall_controls(tmp_path):
+    config = SimpleNamespace(
+        output_root=tmp_path,
+        seed=7,
+        speed_multiplier=1000.0,
+        timeout_seconds=60.0,
+        visible=False,
+        inject_ui_stall_ms=300,
+        inject_after_completion=48,
+    )
+    command = replay_command(SimpleNamespace(config=config), "scenario")
+
+    assert command[-4:] == [
+        "--inject-ui-stall-ms",
+        "300",
+        "--inject-after-completion",
+        "48",
+    ]
 
 
 def test_runtime_executes_steps_through_harness_and_records_assertions(tmp_path):

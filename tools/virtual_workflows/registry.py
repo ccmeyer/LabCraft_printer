@@ -85,6 +85,7 @@ _SCENARIO_DEFINITIONS = {
         workload_id="virtual_print_array_96_v1",
         fixture_path=_FIXTURE_ROOT / "virtual_print_array_96_v1.json",
         expected_completion_count=96,
+        runner_family="composed_journey",
     ),
     "virtual_print_array_384x10_v1": ScenarioDefinition(
         registry_id="virtual_print_array_384x10_v1",
@@ -219,18 +220,28 @@ def run_registered_scenario(
 
     # Keep CLI help and registry inspection independent of Qt/application imports.
     if definition.runner_family == "composed_journey":
-        injected_ms = int(config_values.pop("inject_ui_stall_ms", 0))
-        injected_after = int(config_values.pop("inject_after_completion", 48))
-        pi_preflight = config_values.pop("pi_preflight_path", None)
-        pi_proof = config_values.pop("pi_hardware_proof_path", None)
-        if injected_ms != 0 or injected_after != 48:
+        injected_ms = int(config_values.get("inject_ui_stall_ms", 0))
+        injected_after = int(config_values.get("inject_after_completion", 48))
+        pi_preflight = config_values.get("pi_preflight_path")
+        pi_proof = config_values.get("pi_hardware_proof_path")
+        if not definition.supports_injected_stall and (
+            injected_ms != 0 or injected_after != 48
+        ):
             raise RegistryError(
                 "composed journeys do not support fault injection"
             )
-        if pi_preflight is not None or pi_proof is not None:
+        if not definition.supports_pi_evidence and (
+            pi_preflight is not None or pi_proof is not None
+        ):
             raise RegistryError(
                 "composed journeys do not support Pi evidence"
             )
+        if not definition.supports_injected_stall:
+            config_values.pop("inject_ui_stall_ms", None)
+            config_values.pop("inject_after_completion", None)
+        if not definition.supports_pi_evidence:
+            config_values.pop("pi_preflight_path", None)
+            config_values.pop("pi_hardware_proof_path", None)
         from tools.virtual_workflows.journeys import (
             JourneyRunConfig,
             run_composed_journey,

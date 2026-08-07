@@ -47,6 +47,10 @@ class AutomationHarnessConfig:
     speed_multiplier: float = 1.0
     timeout_seconds: float = 180.0
     run_id: str | None = None
+    inject_ui_stall_ms: int = 0
+    inject_after_completion: int = 48
+    pi_preflight_path: Path | None = None
+    pi_hardware_proof_path: Path | None = None
 
     def __post_init__(self) -> None:
         if not str(self.scenario_id).strip() or not str(self.workload_id).strip():
@@ -57,7 +61,21 @@ class AutomationHarnessConfig:
             raise ValueError("speed_multiplier must be greater than zero")
         if float(self.timeout_seconds) <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
+        if int(self.inject_ui_stall_ms) < 0:
+            raise ValueError("inject_ui_stall_ms must be non-negative")
+        if int(self.inject_after_completion) < 1:
+            raise ValueError("inject_after_completion must be positive")
+        if (self.pi_preflight_path is None) != (
+            self.pi_hardware_proof_path is None
+        ):
+            raise ValueError(
+                "pi_preflight_path and pi_hardware_proof_path must be provided together"
+            )
         object.__setattr__(self, "output_root", Path(self.output_root).resolve())
+        for name in ("pi_preflight_path", "pi_hardware_proof_path"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, Path(value).resolve())
 
 
 class AutomationHarness:
@@ -75,6 +93,7 @@ class AutomationHarness:
         self.session_id: str | None = None
         self.application_sessions: list[dict[str, Any]] = []
         self.closed = False
+        self.report_identity: dict[str, Any] = {}
 
         self.report_dir = (
             config.output_root / config.workload_id / f"{_run_stamp()}_composed"

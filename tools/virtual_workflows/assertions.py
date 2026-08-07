@@ -851,6 +851,180 @@ def terminal_execution_assertion(
     )
 
 
+def regression_evidence_assertions(
+    *,
+    expected_well_ids: tuple[str, ...],
+    completed_well_ids: tuple[str, ...],
+    snapshot: Mapping[str, Any],
+) -> tuple[AssertionResult, ...]:
+    """Evaluate reusable completion, durability, queue, and UI evidence."""
+
+    expected_count = len(expected_well_ids)
+    observer = snapshot["observer"]
+    lifecycle = observer.get("lifecycle", {})
+    begins = list(lifecycle.get("begins") or ())
+    attachments = list(lifecycle.get("attachments") or ())
+    completions = list(lifecycle.get("completions") or ())
+    begin_ids = [row.get("intent_id") for row in begins]
+    attach_ids = [row.get("intent_id") for row in attachments]
+    progress = observer.get("progress_snapshot", {})
+    authoritative_io = snapshot["authoritative_io"]
+    durability_ok = (
+        len(begins) == len(attachments) == len(completions) == expected_count
+        and len(set(begin_ids)) == expected_count
+        and Counter(attach_ids) == Counter(begin_ids)
+        and Counter(completions) == Counter(begin_ids)
+        and not lifecycle.get("discard_batches")
+        and progress.get("mode_counts")
+        == {"full_rebuild": 0, "cached_update": expected_count}
+        and authoritative_io["resume_save_fsync_count"] == expected_count * 3
+        and authoritative_io["resume_save_replace_count"] == expected_count * 3
+        and observer.get("restored") is True
+        and snapshot.get("calibration_contract", {}).get("valid") is True
+    )
+    responsiveness = snapshot["responsiveness"]
+    phase_values = responsiveness.get("phase_timings", {}).get(
+        "duration_by_name_ms", {}
+    )
+    required_phase_counts = {
+        name: phase_values.get(name, {}).get("count", 0)
+        for name in (
+            "persistence.write_progress",
+            "persistence.complete_intent",
+            "controller.well_completion",
+        )
+    }
+    metrics_ok = (
+        responsiveness.get("scheduling_lateness_ms", {}).get("count", 0) > 0
+        and responsiveness.get("event_loop_gap_ms", {}).get("count", 0) > 0
+        and all(count == expected_count for count in required_phase_counts.values())
+        and responsiveness.get("shutdown")
+        == {"timer_active": False, "observer_thread_alive": False}
+    )
+    injected = snapshot["injected_stall_assessment"]
+
+    def result(
+        assertion_id: str,
+        passed: bool,
+        evidence: Mapping[str, Any],
+        sources: tuple[str, ...],
+    ) -> AssertionResult:
+        return AssertionResult(
+            assertion_id=assertion_id,
+            checkpoint="terminal",
+            decision="pass" if passed else "fail",
+            observable_sources=sources,
+            evidence=dict(evidence),
+            message=(
+                None
+                if passed
+                else "regression evidence did not satisfy the contract"
+            ),
+        )
+
+    return (
+        result(
+            "execution.expected_completions",
+            completed_well_ids == expected_well_ids,
+            {
+                "expected_count": expected_count,
+                "observed_count": len(completed_well_ids),
+                "completed_well_ids": list(completed_well_ids),
+            },
+            ("ui", "model"),
+        ),
+        result(
+            "execution.no_queue_starvation",
+            int(snapshot["queue"].get("unexpected_starvation_count", 0)) == 0,
+            snapshot["queue"],
+            ("simulator", "controller"),
+        ),
+        result(
+            "execution.intent_durability_exact",
+            durability_ok,
+            {
+                "begin_count": len(begins),
+                "attachment_count": len(attachments),
+                "completion_count": len(completions),
+                "progress_snapshot": progress,
+                "authoritative_io": authoritative_io,
+                "observer_restored": observer.get("restored"),
+                "calibration_contract": snapshot.get("calibration_contract", {}),
+            },
+            ("model", "persistence"),
+        ),
+        result(
+            "ui.injected_stall_detected",
+            injected.get("decision") in {"not_requested", "detected"},
+            injected,
+            ("ui", "harness"),
+        ),
+        result(
+            "ui.responsiveness_metrics_present",
+            metrics_ok,
+            {
+                "event_loop_gap_ms": responsiveness.get("event_loop_gap_ms"),
+                "scheduling_lateness_ms": responsiveness.get(
+                    "scheduling_lateness_ms"
+                ),
+                "required_phase_counts": required_phase_counts,
+                "shutdown": responsiveness.get("shutdown"),
+            },
+            ("ui", "harness"),
+        ),
+    )
+
+
+def synthetic_calibration_contract(
+    fixture: Mapping[str, Any], action_results: list[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Project the selected normal-UI synthetic result without mutation."""
+
+    def action_evidence(action_id: str) -> dict[str, Any]:
+        return next(
+            (
+                dict(row.get("evidence") or {})
+                for row in action_results
+                if row.get("action_id") == action_id
+            ),
+            {},
+        )
+
+    selected = action_evidence("calibration.select_via_ui")
+    applied = action_evidence("calibration.apply_via_ui")
+    preview = dict(applied.get("preview") or {}).get("payload") or {}
+    stock = fixture["stock"]
+    head = fixture["printer_head"]
+    from tools.sil.ejection_response import PulseAwareSyntheticEjectionModelV1
+
+    expected_measured = PulseAwareSyntheticEjectionModelV1().predict_volume_nl(
+        stock["printing_mode"], head["print_pulse_width_us"]
+    )
+    evidence = {
+        "prepared_volume_nL": stock["prepared_droplet_volume_nL"],
+        "fixture_design_volume_nL": stock["droplet_volume_nL"],
+        "expected_synthetic_measured_volume_nL": expected_measured,
+        "selected_source_volume_nL": selected.get("source_volume_nL"),
+        "selected_measured_volume_nL": selected.get("mean_nL"),
+        "selected_pulse_width_us": selected.get("pw_us"),
+        "selected_pressure_psi": selected.get("pressure_psi"),
+        "applied_volume_nL": preview.get("new_droplet_nL"),
+    }
+    evidence["valid"] = (
+        float(selected.get("source_volume_nL", -1))
+        == float(stock["prepared_droplet_volume_nL"])
+        and int(selected.get("pw_us", -1)) == int(head["print_pulse_width_us"])
+        and abs(
+            float(selected.get("pressure_psi", -1))
+            - float(head["print_pressure_psi"])
+        )
+        <= 0.001
+        and float(selected.get("mean_nL", -1)) == expected_measured
+        and float(preview.get("new_droplet_nL", -1)) == expected_measured
+    )
+    return evidence
+
+
 def cleanup_assertion(teardown: Mapping[str, Any]) -> AssertionResult:
     def inspect() -> tuple[bool, Mapping[str, Any]]:
         evidence = dict(teardown.get("evidence") or {})
@@ -1630,6 +1804,8 @@ __all__ = [
     "prepared_execution_assertion",
     "rack_head_assertion",
     "real_application_assertion",
+    "regression_evidence_assertions",
     "simulation_identity_assertion",
+    "synthetic_calibration_contract",
     "terminal_execution_assertion",
 ]

@@ -39,6 +39,25 @@ def test_harness_config_fails_closed(field, value, tmp_path):
         AutomationHarness(_config(tmp_path, **{field: value}))
 
 
+def test_harness_config_validates_optional_regression_controls(tmp_path):
+    with pytest.raises(ValueError, match="inject_ui_stall_ms"):
+        _config(tmp_path, inject_ui_stall_ms=-1)
+    with pytest.raises(ValueError, match="inject_after_completion"):
+        _config(tmp_path, inject_after_completion=0)
+    with pytest.raises(ValueError, match="provided together"):
+        _config(tmp_path, pi_preflight_path=tmp_path / "preflight.json")
+
+    config = _config(
+        tmp_path,
+        inject_ui_stall_ms=300,
+        inject_after_completion=48,
+        pi_preflight_path=tmp_path / "preflight.json",
+        pi_hardware_proof_path=tmp_path / "proof.json",
+    )
+    assert config.pi_preflight_path == (tmp_path / "preflight.json").resolve()
+    assert config.pi_hardware_proof_path == (tmp_path / "proof.json").resolve()
+
+
 def test_harness_uses_external_session_root_and_hashes_retained_evidence(tmp_path):
     harness = AutomationHarness(_config(tmp_path))
     assert harness.report_dir.is_relative_to(tmp_path.resolve())

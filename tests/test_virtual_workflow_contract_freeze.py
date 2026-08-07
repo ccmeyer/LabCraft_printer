@@ -28,6 +28,9 @@ from tools.virtual_workflows.journeys import (
     EDITOR_REVISION_REQUIRED_UI_ACTIONS,
     SOFT_STOP_REQUIRED_ASSERTIONS,
     SOFT_STOP_REQUIRED_UI_ACTIONS,
+    REGRESSION_REQUIRED_ASSERTIONS,
+    REGRESSION_WORKLOAD_ID,
+    get_journey_definition,
 )
 from tools.virtual_workflows.scenarios import (
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
@@ -117,6 +120,33 @@ def test_multi_stock_v4_composed_contract_is_frozen():
         stock["printer_head"]["print_pulse_width_us"]
         for stock in fixture["stocks"]
     ] == [1300, 1800]
+
+
+def test_96_well_regression_uses_the_shared_composed_one_stock_contract():
+    from tools.virtual_workflows import journeys
+
+    registry_definition = get_registered_scenario(REGRESSION_WORKLOAD_ID)
+    regression = get_journey_definition(REGRESSION_WORKLOAD_ID)
+    smoke = get_journey_definition(journeys.SMOKE_WORKLOAD_ID)
+
+    assert registry_definition.runner_family == "composed_journey"
+    assert registry_definition.supports_injected_stall is True
+    assert registry_definition.supports_pi_evidence is True
+    assert registry_definition.supports_report_sets is True
+    assert regression.body is smoke.body
+    assert regression.payload_builder is smoke.payload_builder
+    assert regression.required_action_ids == smoke.required_action_ids
+    assert regression.required_ui_action_ids == smoke.required_ui_action_ids
+    assert regression.midpoint_completion_count == 48
+    assert regression.required_assertion_ids == REGRESSION_REQUIRED_ASSERTIONS
+    assert regression.required_screenshots == {
+        "editor_opened",
+        "generated",
+        "ready",
+        "printing",
+        "mid_array",
+        "completed",
+    }
 
 
 def test_prepared_editor_refinalize_composed_contract_is_frozen():

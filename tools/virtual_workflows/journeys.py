@@ -56,6 +56,7 @@ from tools.virtual_workflows.journey_phases import (
     PostStartLockCopySpec,
     StockPassSpec,
     SoftStopResumeSpec,
+    capture_completion_midpoint,
     head_identity_step,
     machine_startup_steps,
     run_editor_preparation,
@@ -71,6 +72,7 @@ from tools.virtual_workflows.report import ComposedReportPayload
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SMOKE_WORKLOAD_ID = "virtual_print_array_24_v1"
+REGRESSION_WORKLOAD_ID = "virtual_print_array_96_v1"
 SMOKE_SCENARIO_NAME = "virtual_print_array"
 SMOKE_SCENARIO_VERSION = "1"
 EDITOR_WORKLOAD_ID = "experiment_editor_create_finalize_v1"
@@ -98,6 +100,18 @@ SMOKE_REQUIRED_ASSERTIONS = (
     "execution.applied_calibration_valid",
     "execution.terminal_bundle_valid",
     "artifacts.cleanup_complete",
+)
+REGRESSION_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "sil.pi_evidence_valid",
+    "ui.real_app_constructed",
+    "execution.expected_completions",
+    "execution.no_queue_starvation",
+    "execution.intent_durability_exact",
+    "execution.terminal_bundle_valid",
+    "artifacts.required_present",
+    "ui.injected_stall_detected",
+    "ui.responsiveness_metrics_present",
 )
 EDITOR_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -322,11 +336,36 @@ class JourneyRunConfig:
     speed_multiplier: float = 1.0
     timeout_seconds: float = 180.0
     run_id: str | None = None
+    inject_ui_stall_ms: int = 0
+    inject_after_completion: int = 48
+    pi_preflight_path: Path | None = None
+    pi_hardware_proof_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.scenario_id not in JOURNEY_DEFINITION_IDS:
             raise ValueError(f"unsupported composed journey: {self.scenario_id!r}")
         object.__setattr__(self, "output_root", Path(self.output_root).resolve())
+        if self.inject_ui_stall_ms < 0:
+            raise ValueError("inject_ui_stall_ms must be non-negative")
+        if self.inject_after_completion < 1:
+            raise ValueError("inject_after_completion must be positive")
+        if (
+            self.scenario_id == REGRESSION_WORKLOAD_ID
+            and self.inject_after_completion > 96
+        ):
+            raise ValueError(
+                "inject_after_completion cannot exceed the 96-well workload"
+            )
+        if (self.pi_preflight_path is None) != (
+            self.pi_hardware_proof_path is None
+        ):
+            raise ValueError(
+                "pi_preflight_path and pi_hardware_proof_path must be provided together"
+            )
+        for name in ("pi_preflight_path", "pi_hardware_proof_path"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, Path(value).resolve())
 
 
 def _print_fixture(workload_id: str) -> tuple[dict[str, Any], Path]:
@@ -338,6 +377,16 @@ def _print_fixture(workload_id: str) -> tuple[dict[str, Any], Path]:
 
 def _smoke_fixture() -> tuple[dict[str, Any], Path]:
     return _print_fixture(SMOKE_WORKLOAD_ID)
+
+
+def _regression_fixture() -> tuple[dict[str, Any], Path]:
+    return _print_fixture(REGRESSION_WORKLOAD_ID)
+
+
+def _regression_profile(runtime: JourneyRuntime) -> Any:
+    from tools.virtual_workflows.regression_evidence import RegressionEvidenceProfile
+
+    return RegressionEvidenceProfile(runtime)
 
 
 def _multi_fixture() -> tuple[dict[str, Any], Path]:
@@ -395,10 +444,22 @@ def _stock_id(stock: Mapping[str, Any]) -> str:
     return f"{stock['factor_name']}_{float(stock['concentration']):.2f}_{stock['units']}"
 
 
+def _fixture_stocks(fixture: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    if int(fixture["schema_version"]) == 1:
+        return (
+            {
+                **dict(fixture["stock"]),
+                "target_concentration": float(fixture["stock"]["concentration"]),
+                "printer_head": dict(fixture["printer_head"]),
+            },
+        )
+    return tuple(dict(stock) for stock in fixture["stocks"])
+
+
 def _editor_specification(
     fixture: Mapping[str, Any], expected_wells: tuple[str, ...]
 ) -> dict[str, Any]:
-    stocks = tuple(fixture["stocks"])
+    stocks = _fixture_stocks(fixture)
     printed_volume = sum(float(stock["droplet_volume_nL"]) for stock in stocks)
     reagents = [
         {
@@ -409,7 +470,7 @@ def _editor_specification(
             "targets": [float(stock["target_concentration"])],
             "units": stock["units"],
             "fixed_stock_concentration": float(stock["concentration"]),
-            "droplet_volume_nL": float(stock["droplet_volume_nL"]),
+            "droplet_volume_nL": float(stock["prepared_droplet_volume_nL"]),
         }
         for stock in stocks
     ]
@@ -528,7 +589,7 @@ def _connect_execution_signals(
 
 def _smoke_pass(runtime: JourneyRuntime) -> StockPassSpec:
     fixture = runtime.fixture
-    stock = fixture["stocks"][0]
+    stock = _fixture_stocks(fixture)[0]
     head = stock["printer_head"]
     return StockPassSpec(
         stock_id=_stock_id(stock),
@@ -543,7 +604,7 @@ def _smoke_pass(runtime: JourneyRuntime) -> StockPassSpec:
         ready_milestone="ready",
         printing_milestone="printing",
         completed_milestone="completed",
-        staging_slot=int(fixture["simulation"]["staging_slot"]),
+        staging_slot=int(fixture["simulation"].get("staging_slot", 0)),
         enable_pressure_regulation=True,
     )
 
@@ -601,10 +662,17 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
 def _smoke_body(runtime: JourneyRuntime) -> None:
     expected_wells = _well_ids(runtime.fixture)
     runtime.observations["expected_wells"] = expected_wells
-    _connect_execution_signals(runtime, array_complete=False, machine_errors=False)
+    _connect_execution_signals(runtime, array_complete=True, machine_errors=False)
     runtime.add_assertion(simulation_identity_assertion(runtime.context))
+    profile = None
+    if runtime.definition.evidence_profile_factory is not None:
+        profile = runtime.definition.evidence_profile_factory(runtime)
+        runtime.observations["evidence_profile"] = profile
+        runtime.add_assertion(profile.pi_assertion())
+        runtime.add_assertion(real_application_assertion(runtime.context))
     runtime.run_steps(machine_startup_steps())
-    runtime.add_assertion(machine_ready_assertion(runtime.context))
+    if profile is None:
+        runtime.add_assertion(machine_ready_assertion(runtime.context))
     run_editor_preparation(
         runtime,
         EditorPreparationSpec(
@@ -612,20 +680,38 @@ def _smoke_body(runtime: JourneyRuntime) -> None:
             snapshot_finish=True,
         ),
     )
-    runtime.add_assertion(
-        prepared_execution_assertion(runtime.context, len(expected_wells))
-    )
-    stock_pass = _smoke_pass(runtime)
-    run_stock_passes(runtime, (stock_pass,))
-    runtime.add_assertion(rack_head_assertion(runtime.context))
-    runtime.add_assertion(
-        calibration_assertion(
-            runtime.context,
-            expected_volume_nL=stock_pass.expected_volume_nL,
-            expected_pulse_width_us=stock_pass.pulse_width_us,
-            expected_pressure_psi=stock_pass.pressure_psi,
+    if profile is None:
+        runtime.add_assertion(
+            prepared_execution_assertion(runtime.context, len(expected_wells))
         )
+    else:
+        profile.install()
+        runtime.register_restorable("regression", profile)
+    stock_pass = _smoke_pass(runtime)
+    midpoint = runtime.definition.midpoint_completion_count
+
+    def midpoint_phase(_runtime: JourneyRuntime, _spec: StockPassSpec) -> None:
+        capture_completion_midpoint(runtime, int(midpoint))
+
+    run_stock_passes(
+        runtime,
+        (stock_pass,),
+        active_phase=midpoint_phase if midpoint is not None else None,
     )
+    if profile is None:
+        runtime.add_assertion(rack_head_assertion(runtime.context))
+        runtime.add_assertion(
+            calibration_assertion(
+                runtime.context,
+                expected_volume_nL=stock_pass.expected_volume_nL,
+                expected_pulse_width_us=stock_pass.pulse_width_us,
+                expected_pressure_psi=stock_pass.pressure_psi,
+            )
+        )
+    else:
+        runtime.restore_all()
+        for assertion in profile.terminal_assertions():
+            runtime.add_assertion(assertion)
     runtime.add_assertion(
         terminal_execution_assertion(
             runtime.context,
@@ -1175,6 +1261,55 @@ def _observer_persistence(observer: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _regression_persistence_values(
+    snapshot: Mapping[str, Any],
+    *,
+    decisions: Mapping[str, str],
+    terminal: Mapping[str, Any],
+) -> dict[str, Any]:
+    observer = snapshot["observer"]
+    lifecycle = observer["lifecycle"]
+    observations = list(lifecycle.get("checkpoint_observations") or ())
+    attachments = list(lifecycle.get("attachments") or ())
+    transitions = list(lifecycle.get("terminal_transitions") or ())
+    return {
+        "assertion_decisions": dict(decisions),
+        "terminal": dict(terminal),
+        "intent_count": len(lifecycle.get("completions") or ()),
+        "stock_well_completion_count": len(lifecycle.get("begins") or ()),
+        "stock_pass_count": 1,
+        "observed_completed_intent_count": len(
+            lifecycle.get("completions") or ()
+        ),
+        "checkpoint_retained_intent_count": int(
+            terminal.get("checkpoint_intent_count", 0)
+        ),
+        "checkpoint_pending_intent_count": int(
+            terminal.get("checkpoint_intent_count", 0)
+        ),
+        "checkpoint_max_observed_intent_count": max(
+            (
+                int(item.get("retained_intent_count", 0))
+                for item in observations
+            ),
+            default=0,
+        ),
+        "checkpoint_observations": observations,
+        "intent_command_sequences": [
+            item.get("command_seq32") for item in attachments
+        ],
+        "terminal_plan_state": terminal.get("plan_state"),
+        "terminal_plan_revision": terminal.get("plan_revision"),
+        "phase_timings": observer["phase_timings"],
+        "terminal_transition": {
+            "count": len(transitions),
+            "records": transitions,
+        },
+        "authoritative_io": snapshot["authoritative_io"],
+        "progress_snapshot": observer["progress_snapshot"],
+    }
+
+
 def _smoke_payload(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> ComposedReportPayload:
@@ -1183,13 +1318,17 @@ def _smoke_payload(
     completed = runtime.observations["completed_wells"]
     decisions = _decisions(runtime)
     evidence = _assertion_evidence(runtime)
-    passed = all(decisions.get(item) == "pass" for item in SMOKE_REQUIRED_ASSERTIONS)
+    required = runtime.definition.required_assertion_ids
+    passed = all(decisions.get(item) == "pass" for item in required)
+    stocks = _fixture_stocks(fixture)
     workload = {
         **_base_workload(runtime),
         "plate_name": fixture["plate"]["name"],
         "plate_rows": fixture["plate"]["rows"],
         "plate_columns": fixture["plate"]["columns"],
         "well_ids": list(expected),
+        "stock_id": _stock_id(stocks[0]),
+        "stock_ids": [_stock_id(stock) for stock in stocks],
         "stock_count": 1,
         "array_passes": 1,
         "target_dispenses_per_well": 1,
@@ -1197,6 +1336,7 @@ def _smoke_payload(
         "speed_multiplier": runtime.harness.config.speed_multiplier,
         "timeout_seconds": runtime.harness.config.timeout_seconds,
     }
+    profile_snapshot = runtime.observations.get("regression_snapshot")
     return ComposedReportPayload(
         workload=workload,
         workflow_values={
@@ -1207,9 +1347,13 @@ def _smoke_payload(
             "completed_well_ids": list(completed),
             "well_update_count": len(completed),
             "array_states": list(runtime.context.array_states),
+            "array_complete_count": len(runtime.observations.get("array_completions", ())),
             "cleanup_results": [dict(teardown)],
         },
-        queue={
+        queue=(
+            {"status": "measured", "values": profile_snapshot["queue"]}
+            if profile_snapshot is not None
+            else {
             "status": "measured",
             "values": {
                 "queue_drained_at_terminal": bool(
@@ -1218,14 +1362,36 @@ def _smoke_payload(
                     )
                 )
             },
-        },
-        persistence={
+        }),
+        persistence=(
+            {
+                "status": "measured" if passed else "partial",
+                "values": _regression_persistence_values(
+                    profile_snapshot,
+                    decisions=decisions,
+                    terminal=evidence.get(
+                        "execution.terminal_bundle_valid", {}
+                    ),
+                ),
+            }
+            if profile_snapshot is not None
+            else {
             "status": "measured" if passed else "partial",
             "values": {
                 "assertion_decisions": decisions,
                 "terminal": evidence.get("execution.terminal_bundle_valid", {}),
             },
-        },
+        }),
+        responsiveness=(
+            {"status": "measured", "values": profile_snapshot["responsiveness"]}
+            if profile_snapshot is not None
+            else {"status": "not_applicable", "values": {}}
+        ),
+        resources=(
+            profile_snapshot["resources"]
+            if profile_snapshot is not None
+            else {"status": "not_applicable", "values": {}}
+        ),
         limitations=(
             "The simulator verifies the application-facing contract, not firmware framing or ACK behavior.",
             "No physical motion, collision safety, pressure response, camera analysis, balance behavior, or droplet quality is modeled.",
@@ -1568,10 +1734,20 @@ def _authoritative_reload_artifact(
     )
 
 
+def _regression_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return multi_stock_artifacts_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(runtime.definition.required_screenshots),
+        teardown=teardown,
+    )
+
+
 def _smoke_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> str:
     values = report["metrics"]["workflow"]["values"]
     return (
-        "Milestone 6 composed 24-well smoke\n"
+        f"Composed one-stock {len(runtime.observations['expected_wells'])}-well journey\n"
         f"Status: {report['classification']['status']}\n"
         f"Completions: {values['completed_stock_well_count']} / {report['workload']['expected_completion_count']}\n"
         f"Seed: {report['run']['seed']}\n"
@@ -1664,6 +1840,25 @@ SMOKE_DEFINITION = JourneyDefinition(
     artifact_assertion=_cleanup_artifact,
     payload_builder=_smoke_payload,
     summary_builder=_smoke_summary,
+)
+REGRESSION_DEFINITION = JourneyDefinition(
+    registry_id=REGRESSION_WORKLOAD_ID,
+    scenario_name=SMOKE_SCENARIO_NAME,
+    scenario_version=SMOKE_SCENARIO_VERSION,
+    workload_id=REGRESSION_WORKLOAD_ID,
+    required_action_ids=_COMMON_ACTIONS | _EDITOR_ACTIONS | _PRINT_ACTIONS,
+    required_ui_action_ids=SMOKE_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=REGRESSION_REQUIRED_ASSERTIONS,
+    required_screenshots=frozenset(
+        {"editor_opened", "generated", "ready", "printing", "mid_array", "completed"}
+    ),
+    fixture_loader=_regression_fixture,
+    body=_smoke_body,
+    artifact_assertion=_regression_artifact,
+    payload_builder=_smoke_payload,
+    summary_builder=_smoke_summary,
+    evidence_profile_factory=_regression_profile,
+    midpoint_completion_count=48,
 )
 EDITOR_DEFINITION = JourneyDefinition(
     registry_id=EDITOR_WORKLOAD_ID,
@@ -1802,6 +1997,7 @@ JOURNEY_DEFINITIONS = {
     definition.registry_id: definition
     for definition in (
         SMOKE_DEFINITION,
+        REGRESSION_DEFINITION,
         EDITOR_DEFINITION,
         EDITOR_REVISION_DEFINITION,
         POST_START_LOCK_DEFINITION,

@@ -321,6 +321,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
     assert len(captured) == 1
     config = captured[0]
     if scenario_id in {
+        WORKLOAD_ID,
         SMOKE_WORKLOAD_ID,
         EDITOR_WORKLOAD_ID,
         EDITOR_RENAME_WORKLOAD_ID,
@@ -335,6 +336,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
         assert isinstance(config, VirtualPrintArrayScenarioConfig)
     assert config.scenario_id == scenario_id
     if scenario_id not in {
+        WORKLOAD_ID,
         SMOKE_WORKLOAD_ID,
         EDITOR_WORKLOAD_ID,
         EDITOR_RENAME_WORKLOAD_ID,

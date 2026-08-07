@@ -20,14 +20,23 @@ class ExecutionObserver:
         experiment_dir: str | Path,
         completed_count: Callable[[], int],
         pass_context: Callable[[], Mapping[str, Any] | None] | None = None,
+        phase_recorder: NamedPhaseRecorder | None = None,
+        inject_ms: int = 0,
+        inject_after_completion: int = 1,
+        pressure_rendered: Callable[[], None] | None = None,
         max_phase_records: int = 50_000,
     ) -> None:
         self.context = context
-        self.phases = NamedPhaseRecorder(max_records=max_phase_records)
+        self.phases = phase_recorder or NamedPhaseRecorder(
+            max_records=max_phase_records
+        )
         self.io = PersistenceIoObserver(experiment_dir)
         self.progress = ProgressSnapshotObserver(context.experiment_model)
         self.completed_count = completed_count
         self.pass_context = pass_context or (lambda: None)
+        self.inject_ms = int(inject_ms)
+        self.inject_after_completion = int(inject_after_completion)
+        self.pressure_rendered = pressure_rendered
         self.instrumentation: Any = None
         self._installed = False
         self._restored = False
@@ -44,10 +53,11 @@ class ExecutionObserver:
             well_plate_widget=self.context.view.well_plate_widget,
             pressure_plot_widget=self.context.view.pressure_box,
             experiment_task_list=self.context.view.experiment_task_list,
-            inject_ms=0,
-            inject_after_completion=1,
+            inject_ms=self.inject_ms,
+            inject_after_completion=self.inject_after_completion,
             completed_count=self.completed_count,
             io_observer=self.io,
+            pressure_rendered=self.pressure_rendered,
             pass_context=lambda: dict(self.pass_context() or {}),
         )
         try:

@@ -848,11 +848,12 @@ Prerequisites:
 
 ### SIL scenario registry and capability manifest
 
-The 24-well smoke, existing 96-well regression, and 384x10 stress IDs are
+The 24-well smoke, 96-well regression, and 384x10 stress IDs are
 registered in
 `tools/virtual_workflows/registry.py`. The CLI obtains its `--scenario`
-choices from that registry, but continues to construct the existing
-`VirtualPrintArrayScenarioConfig` and execute the existing scenario runner.
+choices from that registry. The 24- and 96-well IDs dispatch through the
+generic composed journey; 384x10 retains the compatibility
+`VirtualPrintArrayScenarioConfig` runner.
 For compatibility, the CLI default remains `virtual_print_array_96_v1`;
 suite selection is not a CLI feature yet.
 
@@ -921,6 +922,7 @@ Longer composed SIL tiers are opt-in:
 
 ```powershell
 .\env\Scripts\python.exe -m pytest -q --run-sil-regression `
+  tests\system\test_virtual_print_array_96_composed.py `
   tests\system\test_virtual_print_array_workflow.py
 
 .\env\Scripts\python.exe -m pytest -q --run-sil-stress `
@@ -1047,6 +1049,43 @@ identity-bearing hashes may differ. If a Qt node materially exceeds its
 normal bounded runtime, rerun that exact node with a fresh `--basetemp` below
 `$env:TEMP\LabCraft`. The complete Python suite remains deferred until the
 final Milestone 7 validation.
+
+Milestone 7 Slice 7 migrates the default `virtual_print_array_96_v1`
+regression to the same shared one-stock composed journey as the 24-well
+smoke. The normal editor selects A1-D24, machine/rack/calibration/array
+controls report truthful UI surfaces, and a reusable regression evidence
+profile adds the 48-completion midpoint, responsiveness, resources,
+persistence I/O, queue-starvation, injected-stall, report-set, comparison,
+and paired local Pi-evidence contracts. The 384x10 stress runner remains
+unchanged.
+
+The frozen fixture still describes a 5 nL prepared design value and a 10 nL
+design target at 1300 us and 1.2 psi. The application-owned pulse-aware SIL
+calibration model deterministically measures 9 nL at 1300 us; the normal
+calibration dialog therefore applies 9 nL. Slice 7 records and validates the
+5-to-9 nL selected/applied result while preserving the fixture bytes and the
+10 nL design target. This is synthetic application-path evidence, not a
+physical volume-accuracy claim.
+
+Run the composed/direct parity and retained failure gates with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q --run-sil-regression `
+  tests\system\test_virtual_print_array_96_composed.py `
+  tests\system\test_virtual_print_array_workflow.py
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario virtual_print_array_96_v1 `
+  --output-root verification_reports\milestone7-slice7-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 90
+```
+
+Inspect the six named screenshots (`editor_opened`, `generated`, `ready`,
+`printing`, `mid_array`, and `completed`) and execute the exact retained
+`run.replay_command`. A calibration-dialog timeout fails closed with retained
+evidence; retry that exact run once in a fresh output root. Two consecutive
+failures block the migration. The complete Python suite remains deferred to
+the final Milestone 7 validation.
 
 Before the first pressure-sweep, stream-volume, droplet `Calibrate All`, or
 stream `Calibrate All` start while the authoritative plan is still

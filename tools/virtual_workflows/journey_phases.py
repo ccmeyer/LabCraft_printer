@@ -888,6 +888,34 @@ def run_stock_passes(
         pressure_enabled = pressure_enabled or spec.enable_pressure_regulation
 
 
+def capture_completion_midpoint(
+    runtime: JourneyRuntime,
+    completion_count: int,
+    *,
+    milestone: str = "mid_array",
+) -> Mapping[str, Any]:
+    """Wait through the harness, then capture one named completion midpoint."""
+
+    if completion_count < 1:
+        raise ValueError("completion midpoint must be positive")
+    from tools.virtual_workflows.actions import wait_for_completions
+
+    wait_for_completions(
+        runtime.context,
+        completed_count=lambda: len(runtime.observations["completed_wells"]),
+        target_count=completion_count,
+        timeout_seconds=min(30.0, runtime.context.deadline.remaining_seconds()),
+        label=f"{milestone} completion",
+    )
+    return capture_milestone(
+        runtime.context,
+        milestone,
+        evidence={
+            "completion_count": len(runtime.observations["completed_wells"])
+        },
+    )
+
+
 def _run_stock_pass(
     runtime: JourneyRuntime,
     spec: StockPassSpec,
@@ -1098,6 +1126,16 @@ def wait_for_execution_boundary(
     context = runtime.context
     completed_wells = runtime.observations["completed_wells"]
     deadline = context.clock() + context.deadline.remaining_seconds()
+
+    def visible_progress_settled() -> bool:
+        guide = context.view.experiment_task_list
+        expected_text = f"{int(expected_count)}/{int(expected_count)} wells"
+        return any(
+            expected_text in str(section.get("button").text())
+            for section in getattr(guide, "_sections", {}).values()
+            if section.get("button") is not None
+        )
+
     while context.clock() < deadline:
         context.pump_events()
         plan = context.experiment_model.get_execution_plan_snapshot()
@@ -1106,6 +1144,7 @@ def wait_for_execution_boundary(
             and str(plan.state.value) == str(expected_plan_state)
             and context.machine.check_if_all_completed()
             and (not strict or context.controller.get_array_run_state() == "idle")
+            and visible_progress_settled()
         ):
             if strict:
                 return {
@@ -1185,6 +1224,7 @@ __all__ = [
     "StockPassSpec",
     "SoftStopResumeSpec",
     "bind_head_identities",
+    "capture_completion_midpoint",
     "head_identity_step",
     "machine_startup_steps",
     "normalized_stock_pass_steps",

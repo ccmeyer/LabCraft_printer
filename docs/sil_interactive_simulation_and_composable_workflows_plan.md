@@ -1011,7 +1011,7 @@ Rollback:
 
 ### Milestone 7: Journey portfolio and legacy-runner migration
 
-Status: `in progress - Slices 1 through 5 complete`
+Status: `in progress - Slices 1 through 7 complete; Slice 8 planned`
 
 Goal:
 
@@ -1047,8 +1047,8 @@ Migration order:
 5. soft stop/resume - complete in Slice 4; code-growth variance explicitly accepted;
 6. authoritative reload/resume - complete in Slice 5;
 7. post-start lock/copy - complete in Slice 6;
-8. 96-well regression - next candidate, not yet planned;
-9. 384x10 stress;
+8. 96-well regression - complete in Slice 7;
+9. 384x10 stress - Slice 8 planned, awaiting approval;
 10. disconnect scenario according to the Milestone 0 decision.
 
 Gate per migration:
@@ -1472,17 +1472,17 @@ This effort is complete when:
 
 ## Current Next Action
 
-Milestone 7 Slice 6 is complete; see
-`docs/sil_interactive_simulation_milestone_7_slice_6_completion_record.md`.
-`experiment_editor_post_start_lock_v1` now uses the generic composed runner.
-The page driver owns the bounded locked-editor/copy QTest mechanics, while
-shared evidence and assertions prove the zero-progress ACTIVE source,
-byte-identical source persistence, fresh PREPARED copy, and inactive prepared
-reload. The deliberate activation and `printing_started` lock report `model`,
-not UI. Focused success, parity, controlled-failure, visible, and exact replay
-gates passed. Create a separate plan before migrating the 96-well regression.
-Keep targeted tests per remaining slice and defer the complete Python suite
-until the final Milestone 7 validation. Do not begin active parameter
-matrices, seeded exploration, production fault injection, performance
-remediation, firmware, protocol, Pi operations, or hardware work without
+Milestone 7 Slice 8 is planned in
+`docs/sil_interactive_simulation_milestone_7_slice_8_implementation_plan.md`
+and awaits approval. The bounded slice migrates only
+`virtual_print_array_384x10_v1` onto the shared cardinality-neutral multi-stock
+composition plus the generalized Slice 7 sustained-evidence profile. It keeps
+the stress fixture byte-identical, requires a preparation-only proof of exactly
+3,840 normal-UI stock/well pairs before dispatch changes, preserves existing
+informational warning/failure thresholds, and leaves the direct runner
+callable as a parity oracle. Keep targeted tests for Slice 8 and defer the
+complete Python suite until final Milestone 7 validation. Do not implement
+Slice 8, begin disconnect work, accept/remediate performance, activate
+parameter matrices or seeded exploration, add product fault injection, run
+remote Pi operations, or begin firmware, protocol, or hardware work without
 separate approval.

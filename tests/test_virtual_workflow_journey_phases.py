@@ -10,6 +10,7 @@ from tools.virtual_workflows.journey_phases import (
     PreparedEditorRevisionSpec,
     SoftStopResumeSpec,
     StockPassSpec,
+    capture_completion_midpoint,
     machine_startup_steps,
     normalized_prepared_revision_steps,
     normalized_stock_pass_steps,
@@ -61,6 +62,11 @@ def test_machine_startup_is_one_normalized_reusable_ui_phase():
         },
         {"action_id": "machine.home_via_ui", "interaction_surface": "ui"},
     ]
+
+
+def test_completion_midpoint_rejects_an_unbounded_target():
+    with pytest.raises(ValueError, match="midpoint"):
+        capture_completion_midpoint(object(), 0)
 
 
 def test_two_stock_plan_has_exact_repeated_groups_and_truthful_surfaces():
