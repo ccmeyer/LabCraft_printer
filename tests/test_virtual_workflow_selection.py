@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -305,6 +306,71 @@ def test_cli_selection_modes_are_mutually_exclusive_and_execution_is_available()
     args = parser.parse_args(["--suite", "standard"])
     assert args.suite == "standard"
     assert args.dry_run is False
+
+    with pytest.raises(SystemExit) as coverage_conflict:
+        parser.parse_args(
+            ["--coverage-from", "aggregate.json", "--suite", "standard"]
+        )
+    assert coverage_conflict.value.code == 2
+
+
+def test_cli_coverage_mode_is_explicit_repeatable_and_qt_free(
+    tmp_path, monkeypatch, capsys
+):
+    import tools.virtual_workflows.coverage as coverage
+
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text("{}\n", encoding="utf-8")
+    second.write_text("{}\n", encoding="utf-8")
+    output = tmp_path / "output"
+    evaluation_path = tmp_path / "coverage.json"
+    summary_path = tmp_path / "summary.txt"
+    evaluation_path.write_text("{}\n", encoding="utf-8")
+    summary_path.write_text("coverage summary\n", encoding="utf-8")
+    captured = {}
+
+    def fake_execute(config):
+        captured["config"] = config
+        return SimpleNamespace(
+            evaluation_path=evaluation_path,
+            summary_path=summary_path,
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(coverage, "execute_coverage_evaluation", fake_execute)
+    assert main(
+        [
+            "--coverage-from", str(first),
+            "--coverage-from", str(second),
+            "--output-root", str(output),
+        ]
+    ) == 0
+    config = captured["config"]
+    assert config.aggregate_paths == (first, second)
+    assert config.output_root == output
+    assert config.replay_command.count("--coverage-from") == 2
+    rendered = capsys.readouterr().out
+    assert "coverage summary" in rendered
+    assert f"Coverage: {evaluation_path}" in rendered
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--seed", "2"],
+        ["--speed-multiplier", "1000"],
+        ["--timeout-seconds", "1"],
+        ["--visible"],
+        ["--dry-run"],
+        ["--target-pi"],
+        ["--compare", "a.json", "b.json"],
+    ],
+)
+def test_cli_coverage_rejects_execution_planning_and_comparison_controls(extra):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--coverage-from", "aggregate.json", *extra])
+    assert exc_info.value.code == 2
 
 
 def test_cli_planning_prints_json_without_dispatch_or_artifact_writes(

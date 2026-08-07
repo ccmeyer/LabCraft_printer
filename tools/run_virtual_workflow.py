@@ -66,6 +66,17 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Recommend affected scenarios without executing them.",
     )
+    selector.add_argument(
+        "--coverage-from",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="AGGREGATE",
+        help=(
+            "Evaluate one retained aggregate against the capability manifest; "
+            "repeat to provide additional explicit evidence."
+        ),
+    )
     parser.add_argument(
         "--changed-path",
         action="append",
@@ -274,6 +285,36 @@ def _reject_aggregate_option_conflicts(
         )
 
 
+def _reject_coverage_option_conflicts(
+    parser: argparse.ArgumentParser, raw_argv: list[str]
+) -> None:
+    allowed = {"--coverage-from", "--output-root"}
+    supplied = {
+        value.split("=", 1)[0]
+        for value in raw_argv
+        if value.startswith("--")
+    }
+    conflicts = sorted(supplied - allowed)
+    if conflicts:
+        parser.error(
+            "coverage evaluation accepts only --coverage-from and "
+            "--output-root; unsupported: " + ", ".join(conflicts)
+        )
+
+
+def _coverage_replay_command(
+    aggregate_paths: list[Path], output_root: Path
+) -> tuple[str, ...]:
+    command = [
+        r".\env\Scripts\python.exe",
+        r"tools\run_virtual_workflow.py",
+    ]
+    for path in aggregate_paths:
+        command.extend(["--coverage-from", str(path.resolve())])
+    command.extend(["--output-root", str(output_root.resolve())])
+    return tuple(command)
+
+
 def _comparison_exit_code(comparison: dict[str, object]) -> int:
     classification = comparison["classification"]
     assert isinstance(classification, dict)
@@ -380,6 +421,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(raw_argv)
+    coverage_mode = bool(args.coverage_from)
+    if coverage_mode:
+        _reject_coverage_option_conflicts(parser, raw_argv)
     if args.changed_path and not args.recommend_changed:
         parser.error("--changed-path requires --recommend-changed")
     if args.dry_run and (args.list_section or args.recommend_changed):
@@ -407,6 +451,39 @@ def main(argv: list[str] | None = None) -> int:
             return 0
     except (ManifestValidationError, SelectionError) as exc:
         parser.error(str(exc))
+
+    if coverage_mode:
+        coverage_output_root = (
+            args.output_root
+            if _option_was_supplied(raw_argv, "--output-root")
+            else REPO_ROOT / "verification_reports" / "suites"
+        )
+        try:
+            from tools.virtual_workflows.coverage import (
+                CoverageRunConfig,
+                execute_coverage_evaluation,
+            )
+
+            result = execute_coverage_evaluation(
+                CoverageRunConfig(
+                    aggregate_paths=tuple(args.coverage_from),
+                    output_root=coverage_output_root,
+                    replay_command=_coverage_replay_command(
+                        args.coverage_from, coverage_output_root
+                    ),
+                )
+            )
+            print(result.summary_path.read_text(encoding="utf-8"), end="")
+            print(f"Coverage: {result.evaluation_path}")
+            print(f"Coverage SHA-256: {_file_sha256(result.evaluation_path)}")
+            return result.exit_code
+        except Exception as exc:
+            print(
+                "SIL capability coverage evaluation failed: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 3
 
     if args.warmup_runs < 0 or args.measured_runs < 1:
         parser.error("--warmup-runs must be >= 0 and --measured-runs must be >= 1")

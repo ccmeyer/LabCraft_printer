@@ -1,13 +1,50 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 from tools.virtual_workflows.report import (
     ComposedReportAdapter,
     ComposedReportPayload,
+    collect_source_tree_identity,
     composed_report_contract_projection,
 )
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+    )
+
+
+def test_source_tree_identity_changes_for_code_but_not_documentation(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    (repo / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "README.md").write_text("first\n", encoding="utf-8")
+    docs = repo / "docs"
+    docs.mkdir()
+    (docs / "plan.txt").write_text("first\n", encoding="utf-8")
+    _git(repo, "add", ".")
+
+    initial = collect_source_tree_identity(repo)
+    assert initial["error"] is None
+    assert initial["file_count"] == 1
+
+    (repo / "README.md").write_text("second\n", encoding="utf-8")
+    (docs / "plan.txt").write_text("second\n", encoding="utf-8")
+    documentation_only = collect_source_tree_identity(repo)
+    assert documentation_only["sha256"] == initial["sha256"]
+
+    (repo / "source.py").write_text("VALUE = 2\n", encoding="utf-8")
+    code_changed = collect_source_tree_identity(repo)
+    assert code_changed["sha256"] != initial["sha256"]
+
+    (repo / "new_source.py").write_text("NEW = True\n", encoding="utf-8")
+    untracked_changed = collect_source_tree_identity(repo)
+    assert untracked_changed["sha256"] != code_changed["sha256"]
 
 
 def test_composed_report_adapter_builds_common_truthful_envelope(tmp_path):

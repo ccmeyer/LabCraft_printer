@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import os
 import platform
@@ -45,6 +46,19 @@ METRIC_STATUSES = {
 CLASSIFICATION_STATUSES = {"pass", "warning", "fail"}
 THRESHOLD_MATURITIES = {"informational", "candidate", "acceptance"}
 INTERACTION_SURFACES = {"ui", "controller", "model", "simulator", "harness"}
+SOURCE_TREE_SCHEMA = "labcraft.source_tree_identity"
+SOURCE_TREE_VERSION = 1
+SOURCE_TREE_SCOPE = "git_tracked_and_nonignored_execution_inputs_v1"
+_SOURCE_TREE_EXCLUDED_PARTS = {
+    ".agents_tmp",
+    ".git",
+    ".pytest_cache",
+    "__pycache__",
+    "documentation",
+    "docs",
+    "verification_reports",
+}
+_SOURCE_TREE_EXCLUDED_NAMES = {"agents.md"}
 
 
 class ReportValidationError(ValueError):
@@ -384,6 +398,169 @@ def _git(repo_root: Path, *args: str) -> tuple[str | None, str | None]:
     return result.stdout.strip(), None
 
 
+def _git_bytes(repo_root: Path, *args: str) -> tuple[bytes | None, str | None]:
+    command = [
+        "git",
+        "-c",
+        f"safe.directory={repo_root.as_posix()}",
+        *args,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, str(exc)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).decode(
+            "utf-8", errors="replace"
+        ).strip()
+        return None, detail or "git command failed"
+    return result.stdout, None
+
+
+def _source_path_in_scope(relative_path: str) -> bool:
+    path = Path(relative_path)
+    lowered_parts = {part.lower() for part in path.parts}
+    if lowered_parts & _SOURCE_TREE_EXCLUDED_PARTS:
+        return False
+    if path.name.lower() in _SOURCE_TREE_EXCLUDED_NAMES:
+        return False
+    if path.suffix.lower() == ".md" or path.name.lower().startswith("readme"):
+        return False
+    return True
+
+
+def collect_source_tree_identity(repo_root: str | Path) -> dict[str, Any]:
+    """Hash executable/verification inputs without retaining their contents."""
+
+    root = Path(repo_root).resolve()
+    tracked, tracked_error = _git_bytes(root, "ls-files", "--stage", "-z")
+    untracked, untracked_error = _git_bytes(
+        root, "ls-files", "--others", "--exclude-standard", "-z"
+    )
+    error = tracked_error or untracked_error
+    if error is not None or tracked is None or untracked is None:
+        return {
+            "schema_name": SOURCE_TREE_SCHEMA,
+            "schema_version": SOURCE_TREE_VERSION,
+            "scope": SOURCE_TREE_SCOPE,
+            "sha256": None,
+            "file_count": None,
+            "error": error or "source-tree discovery failed",
+        }
+
+    entries: dict[str, bytes] = {}
+    for raw_entry in tracked.split(b"\0"):
+        if not raw_entry:
+            continue
+        try:
+            metadata, raw_path = raw_entry.split(b"\t", 1)
+            relative = raw_path.decode("utf-8", errors="surrogateescape")
+        except (ValueError, UnicodeDecodeError) as exc:
+            error = f"invalid tracked source entry: {exc}"
+            break
+        if _source_path_in_scope(relative):
+            entries[relative] = metadata
+
+    if error is None:
+        for raw_path in untracked.split(b"\0"):
+            if not raw_path:
+                continue
+            try:
+                relative = raw_path.decode("utf-8", errors="surrogateescape")
+            except UnicodeDecodeError as exc:
+                error = f"invalid untracked source path: {exc}"
+                break
+            if _source_path_in_scope(relative):
+                entries.setdefault(relative, b"untracked")
+
+    digest = hashlib.sha256()
+    file_count = 0
+    if error is None:
+        for relative in sorted(entries):
+            path = root / Path(relative)
+            try:
+                if path.is_symlink():
+                    kind = b"symlink"
+                    content = os.readlink(path).encode(
+                        "utf-8", errors="surrogateescape"
+                    )
+                elif path.is_file():
+                    kind = b"file"
+                    content = path.read_bytes()
+                elif path.is_dir():
+                    # Gitlinks are separately versioned repositories. Retain
+                    # their root index identity and, when initialized, their
+                    # current commit and dirty state without recursively
+                    # retaining submodule contents.
+                    if not (path / ".git").exists():
+                        kind = b"gitlink-uninitialized"
+                        content = entries[relative]
+                    else:
+                        commit, commit_error = _git(path, "rev-parse", "HEAD")
+                        status, status_error = _git(
+                            path,
+                            "status",
+                            "--porcelain",
+                            "--untracked-files=all",
+                        )
+                        if commit_error or status_error:
+                            kind = b"gitlink-error"
+                            content = entries[relative]
+                        else:
+                            kind = b"gitlink"
+                            content = b"\0".join(
+                                (
+                                    entries[relative],
+                                    str(commit).encode("ascii"),
+                                    str(status).encode("utf-8"),
+                                )
+                            )
+                else:
+                    kind = b"missing"
+                    content = b""
+            except OSError as exc:
+                error = f"could not hash {relative}: {exc}"
+                break
+            relative_bytes = relative.encode("utf-8", errors="surrogateescape")
+            digest.update(len(relative_bytes).to_bytes(8, "big"))
+            digest.update(relative_bytes)
+            digest.update(len(kind).to_bytes(2, "big"))
+            digest.update(kind)
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+            file_count += 1
+
+    return {
+        "schema_name": SOURCE_TREE_SCHEMA,
+        "schema_version": SOURCE_TREE_VERSION,
+        "scope": SOURCE_TREE_SCOPE,
+        "sha256": digest.hexdigest() if error is None else None,
+        "file_count": file_count if error is None else None,
+        "error": error,
+    }
+
+
+def collect_source_identity(repo_root: str | Path) -> dict[str, Any]:
+    """Collect Git provenance plus a Qt-free source-tree fingerprint."""
+
+    root = Path(repo_root).resolve()
+    commit, commit_error = _git(root, "rev-parse", "HEAD")
+    status, status_error = _git(root, "status", "--porcelain", "--untracked-files=all")
+    return {
+        "git_commit": commit,
+        "git_short_commit": commit[:12] if commit else None,
+        "dirty_worktree": bool(status) if status is not None else None,
+        "git_error": commit_error or status_error,
+        "source_tree": collect_source_tree_identity(root),
+    }
+
+
 def _qt_identity() -> dict[str, Any]:
     result: dict[str, Any] = {
         "binding": "missing",
@@ -421,15 +598,7 @@ def _qt_identity() -> dict[str, Any]:
 def collect_environment_identity(repo_root: str | Path) -> dict[str, dict[str, Any]]:
     """Collect source and host identity without initializing a Qt application."""
     root = Path(repo_root).resolve()
-    commit, commit_error = _git(root, "rev-parse", "HEAD")
-    status, status_error = _git(root, "status", "--porcelain", "--untracked-files=all")
-    git_error = commit_error or status_error
-    source = {
-        "git_commit": commit,
-        "git_short_commit": commit[:12] if commit else None,
-        "dirty_worktree": bool(status) if status is not None else None,
-        "git_error": git_error,
-    }
+    source = collect_source_identity(root)
     environment = {
         "operating_system": platform.system(),
         "os_release": platform.release(),

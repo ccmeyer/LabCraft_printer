@@ -1509,6 +1509,47 @@ Use direct `--scenario` execution for supported single-scenario controls. For
 visible qualification, set `QT_QPA_PLATFORM=windows`, add `--visible`, and run
 the exact replay command printed by the aggregate summary.
 
+### Capability coverage and source freshness
+
+Milestone 8 Slice 4 adds an offline, operator-invoked join from retained Slice
+3 aggregates to the tracked capability manifest. It does not schedule or run a
+workflow. Name every input explicitly; the evaluator validates the aggregate,
+its selection plan, child reports, and all referenced hashes before assessing
+required scenarios, assertions, semantic actions, declared interaction
+surfaces, verification layers, and source identity:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --coverage-from verification_reports\suites\capability__execution.mixed_droplet_stream_lifecycle\<run>\aggregate.json `
+  --output-root verification_reports\suites
+```
+
+Repeat `--coverage-from` to supply an explicit multi-aggregate evidence set.
+Coverage mode rejects scenario/suite execution, planning, Pi, visibility,
+timing, repetition, fault injection, baseline, and comparison controls. It
+never scans for a convenient latest result and never writes generated status
+back into the tracked manifest.
+
+Each evaluation creates
+`verification_reports/suites/coverage/<timestamp>_<run-id>/coverage.json` and
+`summary.txt`. Capabilities are classified as `pass`, `fail`, `incomplete`,
+`missing`, or `stale`. A narrower suite cannot claim a whole capability when
+other manifest-active scenarios are absent, and an action recorded through a
+different interaction surface cannot satisfy a UI claim. Exit code 0 means all
+in-scope capabilities passed, 2 means the evaluation completed with at least
+one non-pass capability, and 3 means input validation or artifact writing
+failed.
+
+Report-v1 source identity now includes a versioned source-tree fingerprint.
+It covers Git-tracked and non-ignored execution/verification inputs while
+excluding documentation, retained reports, caches, and runtime artifacts.
+This makes intentionally uncommitted but byte-matching evidence comparable
+without letting a later source change appear current. Legacy reports remain
+readable, but without the fingerprint they are `incomplete`; a complete
+otherwise-passing report with a different fingerprint is `stale`. Evidence
+age is always retained as informational metadata and does not schedule or gate
+manual testing.
+
 The report's responsiveness phase timings include `ui.pressure_render`, the
 count and duration distribution for the real pressure-plot update slot. The
 text summary shows its count, p95, and maximum. This diagnostic covers the

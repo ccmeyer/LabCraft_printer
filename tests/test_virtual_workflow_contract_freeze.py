@@ -24,6 +24,10 @@ from tools.virtual_workflows.suite_runner import (
     AGGREGATE_SCHEMA_NAME,
     AGGREGATE_SCHEMA_VERSION,
 )
+from tools.virtual_workflows.coverage import (
+    COVERAGE_SCHEMA_NAME,
+    COVERAGE_SCHEMA_VERSION,
+)
 from tools.virtual_workflows.registry import get_registered_scenario
 from tools.virtual_workflows.journeys import (
     AUTHORITATIVE_RELOAD_REQUIRED_ASSERTIONS,
@@ -379,6 +383,8 @@ def test_legacy_cli_surface_remains_additively_compatible():
 def test_host_selection_aggregate_schema_is_frozen():
     assert AGGREGATE_SCHEMA_NAME == "labcraft.virtual_workflow_aggregate"
     assert AGGREGATE_SCHEMA_VERSION == 1
+    assert COVERAGE_SCHEMA_NAME == "labcraft.sil_capability_evaluation"
+    assert COVERAGE_SCHEMA_VERSION == 1
 
 
 def test_legacy_scenario_api_remains_additively_compatible():

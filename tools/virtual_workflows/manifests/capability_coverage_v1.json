@@ -668,17 +668,19 @@
     "pi_required_evidence": ["preflight", "hardware_proof"],
     "path_policy": "repository_relative_posix",
     "generated_evidence_updates_manifest": false,
-    "coverage_join_status": "deferred_to_slice_6",
+    "coverage_join_status": "implemented_milestone_8_slice_4",
     "action_catalog": [
       {
         "id": "fixture.prepare_authoritative",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "app.launch_simulated",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "machine.connect_via_ui",
@@ -767,77 +769,92 @@
       {
         "id": "machine.connect_ready",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "simulator"
       },
       {
         "id": "head.stage_virtual",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "model"
       },
       {
         "id": "pressure.enable_regulation",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "controller"
       },
       {
         "id": "array.start_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "array.wait_for_completions",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "array.wait_for_state",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "editor.open_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.new_experiment_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.configure_design_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.optimize_generate_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.finish_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.rename_prepared_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.edit_prepared_design_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.regenerate_prepared_design_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.refinalize_prepared_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "experiment.activate_authoritative",
@@ -854,62 +871,74 @@
       {
         "id": "editor.inspect_active_lock_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.reject_in_place_edit_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.create_editable_copy_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.edit_copy_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.finalize_copy_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "artifact.capture_milestone",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "validation.prepared_bundle",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "validation.refinalized_bundle",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "experiment.reload_authoritative",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "validation.terminal_bundle",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "array.request_soft_stop_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "array.observe_stopped_quiescence",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "machine.disconnect_via_ui",
@@ -920,47 +949,56 @@
       {
         "id": "array.observe_disconnected_quiescence",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "array.resume_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "validation.paused_bundle",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "app.close_simulated_session",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "experiment.load_authoritative_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "experiment.activate_authoritative_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "validation.reload_boundary",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "validation.stock_pass_boundary",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "scenario.teardown",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       }
     ],
     "assertion_catalog": [

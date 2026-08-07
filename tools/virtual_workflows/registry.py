@@ -545,7 +545,7 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
         raise ManifestValidationError(
             "generated evidence must not update the tracked manifest"
         )
-    if policy["coverage_join_status"] != "deferred_to_slice_6":
+    if policy["coverage_join_status"] != "implemented_milestone_8_slice_4":
         raise ManifestValidationError(
             "manifest.policy.coverage_join_status is unsupported"
         )

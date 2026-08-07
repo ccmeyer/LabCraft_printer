@@ -43,6 +43,7 @@ from tools.virtual_workflows.editor_scenarios import (
     RENAME_WORKLOAD_ID as EDITOR_RENAME_WORKLOAD_ID,
     WORKLOAD_ID as EDITOR_WORKLOAD_ID,
 )
+from tools.virtual_workflows.actions import ACTION_INTERACTION_SURFACES
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -104,6 +105,16 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert {
         scenario["registry_id"] for scenario in payload["scenarios"]
     } == set(registered_scenario_ids())
+    assert payload["policy"]["coverage_join_status"] == (
+        "implemented_milestone_8_slice_4"
+    )
+    assert {
+        row["id"]: row["interaction_surface"]
+        for row in payload["policy"]["action_catalog"]
+    } == {
+        action_id: surface.value
+        for action_id, surface in ACTION_INTERACTION_SURFACES.items()
+    }
 
     standard = _row(payload, "suites", "standard")
     lifecycle = _row(payload, "suites", "lifecycle")
@@ -281,7 +292,9 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         schedule["id"] == f"{schedule['suite_id']}_on_demand"
         for schedule in payload["schedules"]
     )
-    assert payload["policy"]["coverage_join_status"] == "deferred_to_slice_6"
+    assert payload["policy"]["coverage_join_status"] == (
+        "implemented_milestone_8_slice_4"
+    )
     assert payload["policy"]["generated_evidence_updates_manifest"] is False
 
 

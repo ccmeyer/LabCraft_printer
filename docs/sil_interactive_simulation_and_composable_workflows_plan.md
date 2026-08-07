@@ -1217,7 +1217,7 @@ Status: `complete` (2026-08-07)
 
 #### Milestone 8 Slice 4: Capability coverage and source freshness
 
-Status: `planned`
+Status: `complete` (2026-08-07)
 
 - join retained reports to manifest capabilities, required assertions, action
   surfaces, and source identities;
@@ -1227,6 +1227,19 @@ Status: `planned`
   tracked manifest from generated evidence;
 - treat evidence age as informational under the manual policy and source
   identity as the primary freshness boundary.
+- the explicit, repeatable `--coverage-from` selector now validates retained
+  aggregate/report hashes and joins them to manifest scenarios, required
+  assertions, semantic actions, declared interaction surfaces, verification
+  layers, and source-tree identities without importing Qt or executing a
+  workflow;
+- the versioned JSON/text evaluation distinguishes `pass`, `fail`,
+  `incomplete`, `missing`, and `stale`, retains exact inputs and replay, and
+  writes only new evidence beneath `verification_reports/suites/coverage`;
+- one fresh mixed-mode capability evaluation and its exact replay passed as
+  source-current; a retained pre-fingerprint aggregate remained readable but
+  was correctly classified incomplete rather than accepted as fresh;
+- 138 focused unit/contract tests and two real-process system tests passed.
+  The complete Python suite remains deferred to Slice 8.
 
 #### Milestone 8 Slice 5: Parameterized scenario matrices
 
@@ -1664,11 +1677,13 @@ This effort is complete when:
 ## Current Next Action
 
 Milestone 7 is complete and the eight-slice Milestone 8 direction is approved.
-Milestone 8 Slices 1 through 3 are complete. The operator can list the tracked
+Milestone 8 Slices 1 through 4 are complete. The operator can list the tracked
 portfolio, dry-run suite/capability/direct-scenario plans, request
 changed-source recommendations, and explicitly execute Windows suite or
 capability plans as isolated fresh processes with hashed aggregate evidence.
-Create a concrete implementation plan for Milestone 8 Slice 4: capability
-coverage and source freshness. Do not begin matrices, seeded sequence
+The operator can also explicitly join retained aggregates to the tracked
+manifest and receive a source-current five-state capability evaluation without
+running another workflow. Create a concrete implementation plan for Milestone
+8 Slice 5: parameterized scenario matrices. Do not begin seeded sequence
 exploration, remote Pi operations, firmware/protocol work, or hardware work
 until their respective later slices are separately planned and approved.
