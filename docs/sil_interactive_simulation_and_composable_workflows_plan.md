@@ -1011,7 +1011,7 @@ Rollback:
 
 ### Milestone 7: Journey portfolio and legacy-runner migration
 
-Status: `in progress — Slices 1, 2, 2.5, 3, and 3.5 complete`
+Status: `in progress — Slices 1, 2, 2.5, 3, and 3.5 complete; Slice 4 functionally validated with its code-growth gate open`
 
 Goal:
 
@@ -1044,7 +1044,7 @@ Migration order:
 2. editor create/finalize — complete in Slice 1;
 3. multi-stock 24x2 — complete in Slice 2;
 4. prepared edit/refinalize — complete in Slice 3;
-5. soft stop/resume;
+5. soft stop/resume — functionally validated in Slice 4; code-growth gate open;
 6. authoritative reload/resume;
 7. post-start lock/copy;
 8. 96-well regression;
@@ -1472,12 +1472,14 @@ This effort is complete when:
 
 ## Current Next Action
 
-Review the Milestone 7 Slice 3.5 completion record, including the measured
-code-shape amendment and completed post-start dialog-width correction. Create
-and approve a concrete Slice 4 plan before migrating soft stop/resume, using
-the shared snapshot and typed composition boundaries. Continue targeted tests
-per slice and defer the complete Python suite until the final Milestone 7
-validation. Do not begin authoritative-reload migration, post-start lock/copy
-migration, active parameter matrices, seeded exploration, production fault
-injection, performance remediation, firmware, protocol, Pi operations, or
-hardware work without separate approval.
+Milestone 7 Slice 4 is functionally validated, with its planned total
+runtime-growth gate still open; see
+`docs/sil_interactive_simulation_milestone_7_slice_4_completion_record.md`.
+Address or explicitly review that bounded consolidation issue before planning
+the next migration, authoritative reload/resume. That migration also requires
+a separate concrete plan and approval before implementation. Keep
+targeted tests per remaining slice and defer the complete Python suite until
+the final Milestone 7 validation. Do not begin post-start lock/copy migration,
+active parameter matrices, seeded exploration, production fault injection,
+performance remediation, firmware, protocol, Pi operations, or hardware work
+without separate approval.

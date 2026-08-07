@@ -150,6 +150,7 @@ _SCENARIO_DEFINITIONS = {
         ),
         expected_completion_count=24,
         scenario_name="print_array_soft_stop_resume",
+        runner_family="composed_journey",
         supports_pi_evidence=False,
         supports_injected_stall=False,
         supports_report_sets=False,

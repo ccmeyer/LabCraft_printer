@@ -21,6 +21,7 @@ def test_execution_observer_installs_and_restores_every_hook(tmp_path, monkeypat
                 "checkpoint_observations": [],
                 "pass_starts": [],
                 "terminal_transitions": [],
+                "soft_stop_events": [{"event": "watermark_observed"}],
             }
 
     from tools.virtual_workflows import scenarios
@@ -56,4 +57,7 @@ def test_execution_observer_installs_and_restores_every_hook(tmp_path, monkeypat
     assert snapshot["restored"] is True
     assert snapshot["progress_snapshot"]["observer_restored"] is True
     assert snapshot["authoritative_reads"]["observer_restored"] is True
+    assert snapshot["lifecycle"]["soft_stop_events"] == [
+        {"event": "watermark_observed"}
+    ]
     assert restored == ["instrumentation"]

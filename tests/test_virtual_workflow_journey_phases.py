@@ -7,10 +7,12 @@ import pytest
 from tools.virtual_workflows.composition import normalized_steps
 from tools.virtual_workflows.journey_phases import (
     PreparedEditorRevisionSpec,
+    SoftStopResumeSpec,
     StockPassSpec,
     machine_startup_steps,
     normalized_prepared_revision_steps,
     normalized_stock_pass_steps,
+    normalized_soft_stop_resume_steps,
 )
 
 
@@ -131,6 +133,35 @@ def test_stock_pass_contract_rejects_invalid_boundary_values():
             printing_milestone="printing",
             completed_milestone="completed",
         )
+
+
+def test_soft_stop_resume_plan_is_short_typed_and_parameterized():
+    first = normalized_soft_stop_resume_steps(SoftStopResumeSpec(6, 2, 250))
+    second = normalized_soft_stop_resume_steps(SoftStopResumeSpec(12, 3, 500))
+
+    expected = [
+        "array.request_soft_stop_via_ui",
+        "artifact.capture_milestone",
+        "array.wait_for_state",
+        "artifact.capture_milestone",
+        "array.observe_stopped_quiescence",
+        "array.resume_via_ui",
+        "artifact.capture_milestone",
+    ]
+    assert [row["action_id"] for row in first] == expected
+    assert [row["action_id"] for row in second] == expected
+    assert {row["request_after_completion_count"] for row in first} == {6}
+    assert {row["request_after_completion_count"] for row in second} == {12}
+    assert next(row for row in first if row["action_id"] == "array.resume_via_ui")[
+        "interaction_surface"
+    ] == "ui"
+
+
+def test_soft_stop_resume_spec_rejects_unbounded_values():
+    with pytest.raises(ValueError, match="trigger count"):
+        SoftStopResumeSpec(0, 2, 250)
+    with pytest.raises(ValueError, match="quiescence"):
+        SoftStopResumeSpec(6, 2, 0)
 
 
 def _prepared_revision(**values) -> PreparedEditorRevisionSpec:

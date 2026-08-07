@@ -4,12 +4,14 @@ from tools.virtual_workflows.assertions import (
     ActionSequenceExpectation,
     AssertionResult,
     ExecutionLifecycleExpectation,
+    SoftStopResumeExpectation,
     cleanup_assertion,
     editor_artifacts_cleanup_assertion,
     editor_prepared_revision_failure_assertion,
     exact_action_sequence_assertion,
     evaluate_assertion,
     multi_stock_artifacts_assertion,
+    soft_stop_paused_assertions,
 )
 
 import pytest
@@ -29,6 +31,52 @@ def test_execution_lifecycle_expectation_rejects_ambiguous_identity_sets():
         ExecutionLifecycleExpectation({}, ("A1", "A1"), ("stock-1",))
     with pytest.raises(ValueError, match="stock IDs must be unique"):
         ExecutionLifecycleExpectation({}, ("A1",), ("stock-1", "stock-1"))
+
+
+def test_soft_stop_paused_assertions_project_one_shared_oracle(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from tools.virtual_workflows import scenarios
+
+    checks = {
+        "request_trigger_exact": True,
+        "completion_catchup_bounded": True,
+        "plan_remains_active": True,
+    }
+    monkeypatch.setattr(
+        scenarios,
+        "_validate_soft_stop_paused_scenario",
+        lambda **_values: {"checks": checks, "checkpoint_state": "paused"},
+    )
+    context = SimpleNamespace(
+        experiment_model=object(),
+        controller=object(),
+        machine=object(),
+        errors=[],
+        unexpected_dialogs=[],
+    )
+    results = soft_stop_paused_assertions(
+        context,
+        expectation=SoftStopResumeExpectation(
+            tmp_path, "plan", ("A1",), ("stock",), 1
+        ),
+        request_evidence={"trigger_count": 1},
+        completed_count=2,
+        intent_lifecycle={},
+        quiescence={
+            "starting_completion_count": 2,
+            "ending_completion_count": 2,
+            "starting_progress_count": 2,
+            "ending_progress_count": 2,
+            "simulator_queue_empty": True,
+        },
+    )
+
+    assert [result.assertion_id for result in results] == [
+        "execution.soft_stop_requested",
+        "execution.soft_stop_boundary_valid",
+        "execution.stopped_boundary_quiescent",
+    ]
+    assert {result.decision for result in results} == {"pass"}
 
 
 def test_exact_action_sequence_uses_only_the_explicit_ledger_window():

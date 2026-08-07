@@ -92,6 +92,7 @@ class ExecutionObserver:
                 "checkpoint_observations": [],
                 "pass_starts": [],
                 "terminal_transitions": [],
+                "soft_stop_events": [],
             }
         )
         phase_snapshot = self.phases.snapshot()

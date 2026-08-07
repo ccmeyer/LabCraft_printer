@@ -27,6 +27,9 @@ from tools.virtual_workflows.assertions import (
     rack_head_assertion,
     real_application_assertion,
     simulation_identity_assertion,
+    SoftStopResumeExpectation,
+    soft_stop_paused_assertions,
+    soft_stop_terminal_assertions,
     terminal_execution_assertion,
 )
 from tools.virtual_workflows.composition import (
@@ -44,11 +47,13 @@ from tools.virtual_workflows.journey_phases import (
     EditorPreparationSpec,
     PreparedEditorRevisionSpec,
     StockPassSpec,
+    SoftStopResumeSpec,
     head_identity_step,
     machine_startup_steps,
     run_editor_preparation,
     run_prepared_editor_revision,
     run_stock_passes,
+    run_soft_stop_resume,
 )
 from tools.virtual_workflows.page_drivers import ExperimentLoaderDriver
 from tools.virtual_workflows.report import ComposedReportPayload
@@ -67,6 +72,9 @@ EDITOR_REVISION_SCENARIO_VERSION = "1"
 MULTI_STOCK_WORKLOAD_ID = "print_array_multi_stock_24x2_v1"
 MULTI_STOCK_SCENARIO_NAME = "print_array_multi_stock_head_exchange"
 MULTI_STOCK_SCENARIO_VERSION = "1"
+SOFT_STOP_WORKLOAD_ID = "print_array_soft_stop_resume_24_v1"
+SOFT_STOP_SCENARIO_NAME = "print_array_soft_stop_resume"
+SOFT_STOP_SCENARIO_VERSION = "1"
 
 SMOKE_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -109,6 +117,18 @@ MULTI_STOCK_REQUIRED_ASSERTIONS = (
     "execution.no_queue_starvation",
     "execution.intent_durability_exact",
     "execution.event_history_bounded",
+    "execution.terminal_bundle_valid",
+    "artifacts.required_present",
+)
+SOFT_STOP_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "execution.soft_stop_requested",
+    "execution.soft_stop_boundary_valid",
+    "execution.stopped_boundary_quiescent",
+    "execution.resume_exactly_once",
+    "execution.expected_completions",
+    "execution.intent_durability_exact",
     "execution.terminal_bundle_valid",
     "artifacts.required_present",
 )
@@ -155,6 +175,9 @@ EDITOR_REVISION_REQUIRED_UI_ACTIONS = EDITOR_REQUIRED_UI_ACTIONS | frozenset(
 MULTI_STOCK_REQUIRED_UI_ACTIONS = SMOKE_REQUIRED_UI_ACTIONS | frozenset(
     {"head.return_via_ui"}
 )
+SOFT_STOP_REQUIRED_UI_ACTIONS = SMOKE_REQUIRED_UI_ACTIONS | frozenset(
+    {"array.request_soft_stop_via_ui", "array.resume_via_ui"}
+)
 EDITOR_REQUIRED_SCREENSHOTS = frozenset(
     {"editor_opened", "generated", "finalized", "reloaded", "validated"}
 )
@@ -181,6 +204,18 @@ MULTI_STOCK_REQUIRED_SCREENSHOTS = frozenset(
         "stock_1_completed",
         "stock_2_staged",
         "stock_2_printing",
+        "completed",
+    }
+)
+SOFT_STOP_REQUIRED_SCREENSHOTS = frozenset(
+    {
+        "editor_opened",
+        "generated",
+        "ready",
+        "printing",
+        "stop_requested",
+        "stopped",
+        "resumed",
         "completed",
     }
 )
@@ -245,6 +280,10 @@ def _smoke_fixture() -> tuple[dict[str, Any], Path]:
 
 def _multi_fixture() -> tuple[dict[str, Any], Path]:
     return _print_fixture(MULTI_STOCK_WORKLOAD_ID)
+
+
+def _soft_stop_fixture() -> tuple[dict[str, Any], Path]:
+    return _print_fixture(SOFT_STOP_WORKLOAD_ID)
 
 
 def _editor_fixture() -> tuple[dict[str, Any], Path]:
@@ -429,6 +468,18 @@ def _smoke_pass(runtime: JourneyRuntime) -> StockPassSpec:
         completed_milestone="completed",
         staging_slot=int(fixture["simulation"]["staging_slot"]),
         enable_pressure_regulation=True,
+    )
+
+
+def _soft_stop_spec(runtime: JourneyRuntime) -> SoftStopResumeSpec:
+    lifecycle = runtime.fixture["lifecycle"]
+    return SoftStopResumeSpec(
+        request_after_completion_count=int(
+            lifecycle["request_after_completion_count"]
+        ),
+        maximum_completion_catchup=int(lifecycle["maximum_completion_catchup"]),
+        quiescence_observation_ms=int(lifecycle["quiescence_observation_ms"]),
+        timeout_seconds=min(20.0, runtime.context.deadline.remaining_seconds()),
     )
 
 
@@ -705,6 +756,85 @@ def _multi_body(runtime: JourneyRuntime) -> None:
         runtime.add_assertion(assertion)
 
 
+def _soft_stop_body(runtime: JourneyRuntime) -> None:
+    context = runtime.context
+    fixture = runtime.fixture
+    expected_wells = _well_ids(fixture)
+    stock_ids = tuple(_stock_id(stock) for stock in fixture["stocks"])
+    runtime.observations.update(
+        {
+            "expected_wells": expected_wells,
+            "starvation_events": [],
+            "current_pass": {"index": -1, "starting_count": 0, "stock_id": None},
+        }
+    )
+    _connect_execution_signals(runtime, array_complete=True, machine_errors=True)
+    runtime.add_assertion(simulation_identity_assertion(context))
+    runtime.add_assertion(real_application_assertion(context))
+    runtime.run_steps(machine_startup_steps())
+    run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(_editor_specification(fixture, expected_wells)),
+    )
+    plan = context.experiment_model.get_execution_plan_snapshot()
+    expectation = SoftStopResumeExpectation(
+        experiment_dir=Path(context.experiment_model.experiment_dir_path),
+        plan_id=str(plan.plan_id),
+        well_ids=expected_wells,
+        stock_ids=stock_ids,
+        target_dispenses_per_stock=int(
+            fixture["workload"]["target_dispenses_per_stock_per_well"]
+        ),
+    )
+    observer = ExecutionObserver(
+        context,
+        experiment_dir=expectation.experiment_dir,
+        completed_count=lambda: len(runtime.observations["completed_wells"]),
+        pass_context=lambda: _current_pass_context(runtime),
+    )
+    runtime.observations["execution_observer"] = observer
+    runtime.register_restorable("execution", observer)
+    observer.install()
+    _install_starvation_observer(runtime)
+
+    def validate_paused(_runtime: JourneyRuntime) -> None:
+        paused_snapshot = runtime.observations["paused_execution_snapshot"]
+        results = soft_stop_paused_assertions(
+            context,
+            expectation=expectation,
+            request_evidence=runtime.observations["soft_stop_request"],
+            completed_count=len(runtime.observations["completed_wells"]),
+            intent_lifecycle=paused_snapshot["lifecycle"],
+            quiescence=runtime.observations["stopped_quiescence"],
+        )
+        runtime.observations["paused_validation"] = dict(results[1].evidence)
+        for result in results:
+            runtime.add_assertion(result)
+
+    run_stock_passes(
+        runtime,
+        (_smoke_pass(runtime),),
+        active_phase=lambda _runtime, _spec: run_soft_stop_resume(
+            runtime,
+            _soft_stop_spec(runtime),
+            paused_callback=validate_paused,
+        ),
+    )
+    runtime.restore_all()
+    terminal_snapshot = runtime.observations["execution_snapshot"]
+    for result in soft_stop_terminal_assertions(
+        context,
+        expectation=expectation,
+        completed_wells=runtime.observations["completed_wells"],
+        array_complete_count=len(runtime.observations["array_completions"]),
+        intent_lifecycle=terminal_snapshot["lifecycle"],
+        paused_validation=runtime.observations["paused_validation"],
+        quiescence=runtime.observations["stopped_quiescence"],
+        starvation_events=runtime.observations["starvation_events"],
+    ):
+        runtime.add_assertion(result)
+
+
 def _current_pass_context(runtime: JourneyRuntime) -> Mapping[str, Any] | None:
     current = runtime.observations["current_pass"]
     if int(current["index"]) < 0:
@@ -759,6 +889,31 @@ def _base_workload(runtime: JourneyRuntime) -> dict[str, Any]:
         "fixture_schema_version": runtime.fixture["schema_version"],
         "fixture_path": runtime.fixture_path.relative_to(REPO_ROOT).as_posix(),
         "fixture_sha256": hashlib.sha256(runtime.fixture_path.read_bytes()).hexdigest(),
+    }
+
+
+def _observer_persistence(observer: Mapping[str, Any]) -> dict[str, Any]:
+    durable = dict(observer.get("durable_io_samples_ms") or {})
+
+    def count(kind: str, phase: str) -> int:
+        return len(durable.get(kind, {}).get(phase, []))
+
+    return {
+        "progress_snapshot": dict(observer.get("progress_snapshot") or {}),
+        "authoritative_io": {
+            "resume_save_fsync_count": count("fsync", "persistence.save_resume"),
+            "resume_save_replace_count": count(
+                "atomic_replace", "persistence.save_resume"
+            ),
+            "progress_write_fsync_count": count(
+                "fsync", "persistence.write_progress"
+            ),
+            "progress_write_replace_count": count(
+                "atomic_replace", "persistence.write_progress"
+            ),
+            "read_opens": dict(observer.get("authoritative_reads") or {}),
+            "observer_restored": bool(observer.get("restored")),
+        },
     }
 
 
@@ -865,16 +1020,7 @@ def _multi_payload(
     )
     multi = evidence.get("execution.multi_stock_head_exchange", {})
     observer = dict(observations.get("execution_snapshot") or {})
-    progress = dict(observer.get("progress_snapshot") or {})
-    durable = dict(observer.get("durable_io_samples_ms") or {})
-    authoritative_io = {
-        "resume_save_fsync_count": len(durable.get("fsync", {}).get("persistence.save_resume", [])),
-        "resume_save_replace_count": len(durable.get("atomic_replace", {}).get("persistence.save_resume", [])),
-        "progress_write_fsync_count": len(durable.get("fsync", {}).get("persistence.write_progress", [])),
-        "progress_write_replace_count": len(durable.get("atomic_replace", {}).get("persistence.write_progress", [])),
-        "read_opens": dict(observer.get("authoritative_reads") or {}),
-        "observer_restored": bool(observer.get("restored")),
-    }
+    observer_persistence = _observer_persistence(observer)
     boundaries = observations.get("pass_boundaries", [])
     starvation = observations.get("starvation_events", [])
     return ComposedReportPayload(
@@ -927,14 +1073,63 @@ def _multi_payload(
                 "assertion_decisions": decisions,
                 "multi_stock_head_exchange": multi,
                 "stock_well_completion_count": len(completed),
-                "progress_snapshot": progress,
-                "authoritative_io": authoritative_io,
+                **observer_persistence,
             },
         },
         limitations=(
             "The two-stock lifecycle uses an in-process simulator and normal Qt controls; it does not validate physical head handling or output.",
             "The simulator does not validate firmware, protocol framing, motion, pressure response, cameras, balance behavior, or droplet quality.",
             "Generated plan IDs, timestamps, durations, paths, and calibration identities are not expected to be byte-identical across replay.",
+        ),
+    )
+
+
+def _soft_stop_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    fixture = runtime.fixture
+    observed = runtime.observations
+    expected, completed = observed["expected_wells"], observed["completed_wells"]
+    decisions = _decisions(runtime)
+    evidence = _assertion_evidence(runtime)
+    observer = dict(observed.get("execution_snapshot") or {})
+    lifecycle = dict(observer.get("lifecycle") or {})
+    request = observed.get("soft_stop_request", {})
+    paused = observed.get("paused_validation", {})
+    quiescence = observed.get("stopped_quiescence", {})
+    terminal = evidence.get("execution.terminal_bundle_valid", {})
+    passed = all(
+        decisions.get(item) == "pass" for item in SOFT_STOP_REQUIRED_ASSERTIONS
+    )
+    status = "measured" if passed else "partial"
+    intent_reconciliation = {
+        "completed_count": terminal.get("intent_count"),
+        "discarded_count": terminal.get("discarded_intent_count"),
+        "begin_count": terminal.get("begin_intent_count"),
+        "discard_batch_count": terminal.get("discard_batch_count"),
+    }
+    return ComposedReportPayload(
+        workload={
+            **_base_workload(runtime),
+            "plate_name": fixture["plate"]["name"],
+            "plate_rows": fixture["plate"]["rows"],
+            "plate_columns": fixture["plate"]["columns"],
+            "well_ids": list(expected),
+            "stock_count": 1,
+            "array_passes": 1,
+            "target_dispenses_per_well": 1,
+            "expected_completion_count": len(expected),
+            "speed_multiplier": runtime.harness.config.speed_multiplier,
+            "timeout_seconds": runtime.harness.config.timeout_seconds,
+        },
+        workflow_status=status,
+        workflow_values={"expected_well_count": len(expected), "completed_well_count": len(completed), "expected_stock_well_completion_count": len(expected), "completed_stock_well_count": len(completed), "completed_well_ids": list(completed), "well_update_count": len(completed), "array_states": list(runtime.context.array_states), "array_complete_count": len(observed.get("array_completions", [])), "cleanup_results": [dict(teardown)]},
+        queue={"status": status, "values": {"unexpected_starvation_count": len(observed.get("starvation_events", [])), "queue_drained_at_terminal": decisions.get("execution.terminal_bundle_valid") == "pass"}},
+        persistence={"status": status, "values": {"assertion_decisions": decisions, "soft_stop_resume": {"request": request, "stopped_checkpoint": paused, "quiescence": quiescence, "intent_reconciliation": intent_reconciliation}, "paused_boundary": paused, "quiescence": quiescence, "intent_durability": evidence.get("execution.intent_durability_exact", {}), "terminal": terminal, "terminal_plan_state": terminal.get("terminal_plan_state"), "stock_well_completion_count": terminal.get("stock_well_completion_count"), "intent_count": len(lifecycle.get("completions", [])), "discard_batch_count": len(lifecycle.get("discard_batches", [])), **_observer_persistence(observer)}},
+        limitations=(
+            "The soft-stop lifecycle uses an in-process simulator and normal Qt controls; it does not validate physical stopping distance.",
+            "The simulator does not validate firmware, protocol framing, motion, pressure response, cameras, balance behavior, or droplet quality.",
+            "Generated identities, timestamps, durations, paths, and calibration identities are not expected to be byte-identical across replay.",
         ),
     )
 
@@ -965,6 +1160,16 @@ def _multi_artifact(runtime: JourneyRuntime, teardown: Mapping[str, Any]) -> Any
     return multi_stock_artifacts_assertion(
         screenshots=runtime.context.screenshots,
         required_screenshots=set(MULTI_STOCK_REQUIRED_SCREENSHOTS),
+        teardown=teardown,
+    )
+
+
+def _soft_stop_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return multi_stock_artifacts_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(SOFT_STOP_REQUIRED_SCREENSHOTS),
         teardown=teardown,
     )
 
@@ -1011,6 +1216,16 @@ def _multi_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> str:
         "Milestone 7 composed two-stock 24x2 lifecycle\n"
         f"Status: {report['classification']['status']}\n"
         f"Completions: {len(runtime.observations['completed_wells'])} / 48\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _soft_stop_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> str:
+    return (
+        "Milestone 7 composed 24-well soft-stop/resume lifecycle\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Completions: {len(runtime.observations['completed_wells'])} / 24\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
     )
@@ -1088,6 +1303,33 @@ MULTI_STOCK_DEFINITION = JourneyDefinition(
     payload_builder=_multi_payload,
     summary_builder=_multi_summary,
 )
+SOFT_STOP_DEFINITION = JourneyDefinition(
+    registry_id=SOFT_STOP_WORKLOAD_ID,
+    scenario_name=SOFT_STOP_SCENARIO_NAME,
+    scenario_version=SOFT_STOP_SCENARIO_VERSION,
+    workload_id=SOFT_STOP_WORKLOAD_ID,
+    required_action_ids=(
+        _COMMON_ACTIONS
+        | _EDITOR_ACTIONS
+        | _PRINT_ACTIONS
+        | frozenset(
+            {
+                "array.request_soft_stop_via_ui",
+                "array.wait_for_state",
+                "array.observe_stopped_quiescence",
+                "array.resume_via_ui",
+            }
+        )
+    ),
+    required_ui_action_ids=SOFT_STOP_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=SOFT_STOP_REQUIRED_ASSERTIONS,
+    required_screenshots=SOFT_STOP_REQUIRED_SCREENSHOTS,
+    fixture_loader=_soft_stop_fixture,
+    body=_soft_stop_body,
+    artifact_assertion=_soft_stop_artifact,
+    payload_builder=_soft_stop_payload,
+    summary_builder=_soft_stop_summary,
+)
 
 JOURNEY_DEFINITIONS = {
     definition.registry_id: definition
@@ -1096,6 +1338,7 @@ JOURNEY_DEFINITIONS = {
         EDITOR_DEFINITION,
         EDITOR_REVISION_DEFINITION,
         MULTI_STOCK_DEFINITION,
+        SOFT_STOP_DEFINITION,
     )
 }
 JOURNEY_DEFINITION_IDS = frozenset(JOURNEY_DEFINITIONS)
@@ -1124,6 +1367,10 @@ def run_multi_stock_24x2_journey(config: JourneyRunConfig) -> dict[str, Any]:
     return JourneyExecutor().run(MULTI_STOCK_DEFINITION, config)
 
 
+def run_soft_stop_resume_24_journey(config: JourneyRunConfig) -> dict[str, Any]:
+    return JourneyExecutor().run(SOFT_STOP_DEFINITION, config)
+
+
 __all__ = [
     "EDITOR_WORKLOAD_ID",
     "JOURNEY_DEFINITIONS",
@@ -1132,9 +1379,13 @@ __all__ = [
     "MULTI_STOCK_REQUIRED_UI_ACTIONS",
     "MULTI_STOCK_WORKLOAD_ID",
     "SMOKE_WORKLOAD_ID",
+    "SOFT_STOP_REQUIRED_ASSERTIONS",
+    "SOFT_STOP_REQUIRED_UI_ACTIONS",
+    "SOFT_STOP_WORKLOAD_ID",
     "get_journey_definition",
     "run_composed_journey",
     "run_editor_create_finalize_journey",
     "run_multi_stock_24x2_journey",
+    "run_soft_stop_resume_24_journey",
     "run_virtual_print_array_24_journey",
 ]

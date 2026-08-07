@@ -113,12 +113,21 @@ COMPOSED_MULTI_STOCK_ACTION_IDS = COMPOSED_SMOKE_ACTION_IDS | frozenset(
         "validation.stock_pass_boundary",
     }
 )
+COMPOSED_SOFT_STOP_ACTION_IDS = COMPOSED_SMOKE_ACTION_IDS | frozenset(
+    {
+        "array.request_soft_stop_via_ui",
+        "array.observe_stopped_quiescence",
+        "array.resume_via_ui",
+        "array.wait_for_state",
+    }
+)
 ACTION_IDS = (
     AUTHORITATIVE_RELOAD_ACTION_IDS
     | MULTI_STOCK_LIFECYCLE_ACTION_IDS
     | EDITOR_LIFECYCLE_ACTION_IDS
     | COMPOSED_SMOKE_ACTION_IDS
     | COMPOSED_MULTI_STOCK_ACTION_IDS
+    | COMPOSED_SOFT_STOP_ACTION_IDS
 )
 
 
@@ -143,6 +152,7 @@ ACTION_INTERACTION_SURFACES.update(
         "pressure.enable_regulation": InteractionSurface.CONTROLLER,
         "array.start_via_ui": InteractionSurface.UI,
         "array.request_soft_stop_via_ui": InteractionSurface.UI,
+        "array.resume_via_ui": InteractionSurface.UI,
         "experiment.load_authoritative_via_ui": InteractionSurface.UI,
         "experiment.activate_authoritative_via_ui": InteractionSurface.UI,
         **{
@@ -959,7 +969,7 @@ def start_array_via_ui(
         )
 
     def run() -> Mapping[str, Any]:
-        from PySide6 import QtTest
+        from tools.virtual_workflows.page_drivers import ArrayDriver
 
         button = context.view.well_plate_widget.start_print_array_button
         wait_until(
@@ -985,13 +995,7 @@ def start_array_via_ui(
                 ),
             },
         )
-        context.view.activateWindow()
-        button.setFocus()
-        context.app.processEvents()
-        QtTest.QTest.mouseClick(
-            button,
-            context.qt_core.Qt.MouseButton.LeftButton,
-        )
+        ArrayDriver(context).click_start()
         wait_until(
             context,
             lambda: (
@@ -1117,9 +1121,10 @@ def request_soft_stop_via_ui(
         )
 
     def run() -> Mapping[str, Any]:
-        from PySide6 import QtTest
+        from tools.virtual_workflows.page_drivers import ArrayDriver
 
         button = context.view.well_plate_widget.start_print_array_button
+        driver = ArrayDriver(context)
         observed: dict[str, Any] = {
             "trigger_count": int(trigger_count),
             "click_queued": False,
@@ -1138,17 +1143,13 @@ def request_soft_stop_via_ui(
 
             def click() -> None:
                 observed["clicked_count"] = int(completed_count())
-                observed["button_text_before"] = button.text()
-                if button.text() != "Stop After Well" or not button.isEnabled():
+                try:
+                    observed.update(driver.request_soft_stop())
+                except RuntimeError:
                     observed["invalid_control"] = {
                         "text": button.text(),
                         "enabled": bool(button.isEnabled()),
                     }
-                    return
-                QtTest.QTest.mouseClick(
-                    button,
-                    context.qt_core.Qt.MouseButton.LeftButton,
-                )
 
             context.qt_core.QTimer.singleShot(0, click)
 
@@ -1209,6 +1210,37 @@ def request_soft_stop_via_ui(
     return execute_action(
         context,
         "array.request_soft_stop_via_ui",
+        run,
+        precondition=precondition,
+    )
+
+
+def resume_array_via_ui(context: ScenarioContext) -> dict[str, Any]:
+    """Resume a paused array through the normal Qt control."""
+
+    def precondition():
+        state = (
+            context.controller.get_array_run_state()
+            if context.controller is not None
+            else None
+        )
+        return (
+            context.view is not None
+            and context.controller is not None
+            and context.app is not None
+            and state == "resume_ready",
+            "array resume requires resume_ready",
+            {"array_state": state},
+        )
+
+    def run() -> Mapping[str, Any]:
+        from tools.virtual_workflows.page_drivers import ArrayDriver
+
+        return ArrayDriver(context).resume()
+
+    return execute_action(
+        context,
+        "array.resume_via_ui",
         run,
         precondition=precondition,
     )
@@ -3506,6 +3538,7 @@ def teardown_scenario(context: ScenarioContext) -> dict[str, Any]:
 
 __all__ = [
     "COMPOSED_MULTI_STOCK_ACTION_IDS",
+    "COMPOSED_SOFT_STOP_ACTION_IDS",
     "ACTION_INTERACTION_SURFACES",
     "ACTION_IDS",
     "AUTHORITATIVE_RELOAD_ACTION_IDS",
@@ -3536,6 +3569,7 @@ __all__ = [
     "launch_simulated_application",
     "prepare_authoritative_fixture",
     "request_soft_stop_via_ui",
+    "resume_array_via_ui",
     "reload_authoritative_experiment",
     "lock_execution_for_printing",
     "stage_virtual_head",

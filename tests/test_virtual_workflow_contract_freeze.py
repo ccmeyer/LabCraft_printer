@@ -24,6 +24,8 @@ from tools.virtual_workflows.registry import get_registered_scenario
 from tools.virtual_workflows.journeys import (
     EDITOR_REVISION_REQUIRED_ASSERTIONS,
     EDITOR_REVISION_REQUIRED_UI_ACTIONS,
+    SOFT_STOP_REQUIRED_ASSERTIONS,
+    SOFT_STOP_REQUIRED_UI_ACTIONS,
 )
 from tools.virtual_workflows.scenarios import (
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
@@ -119,7 +121,6 @@ def test_prepared_editor_refinalize_composed_contract_is_frozen():
     definition = get_registered_scenario(
         "experiment_editor_prestart_rename_refinalize_v1"
     )
-
     assert definition.runner_family == "composed_journey"
     assert EDITOR_REVISION_REQUIRED_ASSERTIONS == (
         "sil.host_hardware_disabled",
@@ -135,6 +136,27 @@ def test_prepared_editor_refinalize_composed_contract_is_frozen():
     )
     assert "experiment.load_authoritative_via_ui" in (
         EDITOR_REVISION_REQUIRED_UI_ACTIONS
+    )
+
+
+def test_soft_stop_composed_contract_is_frozen():
+    definition = get_registered_scenario("print_array_soft_stop_resume_24_v1")
+
+    assert definition.runner_family == "composed_journey"
+    assert SOFT_STOP_REQUIRED_ASSERTIONS == (
+        "sil.host_hardware_disabled",
+        "ui.real_app_constructed",
+        "execution.soft_stop_requested",
+        "execution.soft_stop_boundary_valid",
+        "execution.stopped_boundary_quiescent",
+        "execution.resume_exactly_once",
+        "execution.expected_completions",
+        "execution.intent_durability_exact",
+        "execution.terminal_bundle_valid",
+        "artifacts.required_present",
+    )
+    assert {"array.request_soft_stop_via_ui", "array.resume_via_ui"} <= (
+        SOFT_STOP_REQUIRED_UI_ACTIONS
     )
 
 

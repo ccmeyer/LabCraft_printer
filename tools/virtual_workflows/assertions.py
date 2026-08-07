@@ -53,6 +53,28 @@ class ExecutionLifecycleExpectation:
 
 
 @dataclass(frozen=True)
+class SoftStopResumeExpectation:
+    experiment_dir: Path
+    plan_id: str
+    well_ids: tuple[str, ...]
+    stock_ids: tuple[str, ...]
+    target_dispenses_per_stock: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "experiment_dir", Path(self.experiment_dir))
+        if not self.plan_id or not self.well_ids or not self.stock_ids:
+            raise ValueError("soft-stop expectation identities must be non-empty")
+        if self.target_dispenses_per_stock <= 0:
+            raise ValueError("soft-stop target dispenses must be positive")
+
+    def fixture_info(self) -> dict[str, Any]:
+        return {name: getattr(self, name) for name in (
+            "experiment_dir", "plan_id", "well_ids", "stock_ids",
+            "target_dispenses_per_stock",
+        )}
+
+
+@dataclass(frozen=True)
 class ActionSequenceExpectation:
     action_ids: tuple[str, ...]
     interaction_surfaces: tuple[str, ...]
@@ -94,6 +116,105 @@ def evaluate_assertion(
         evidence=dict(evidence),
         message=None if passed else "observable state did not satisfy the assertion",
     )
+
+
+def _policy_assertion(
+    assertion_id: str,
+    checkpoint: str,
+    evidence: Mapping[str, Any],
+    check_names: tuple[str, ...],
+    sources: tuple[str, ...],
+) -> AssertionResult:
+    checks = dict(evidence.get("checks") or {})
+    selected = {name: bool(checks.get(name)) for name in check_names}
+    passed = bool(selected) and all(selected.values())
+    return AssertionResult(
+        assertion_id, checkpoint, "pass" if passed else "fail", sources,
+        evidence={"checks": selected, **dict(evidence)},
+        message=None if passed else "soft-stop policy failed",
+    )
+
+
+def soft_stop_paused_assertions(
+    context: Any,
+    *,
+    expectation: SoftStopResumeExpectation,
+    request_evidence: Mapping[str, Any],
+    completed_count: int,
+    intent_lifecycle: Mapping[str, Any],
+    quiescence: Mapping[str, Any],
+) -> tuple[AssertionResult, ...]:
+    """Evaluate the legacy oracle once and project the paused assertions."""
+
+    from tools.virtual_workflows.scenarios import _validate_soft_stop_paused_scenario
+
+    evidence = _validate_soft_stop_paused_scenario(
+        experiment_model=context.experiment_model,
+        fixture_info=expectation.fixture_info(),
+        controller=context.controller,
+        machine=context.machine,
+        request_evidence=dict(request_evidence),
+        completed_count=int(completed_count),
+        errors=list(context.errors),
+        unexpected_dialogs=list(context.unexpected_dialogs),
+        intent_lifecycle=dict(intent_lifecycle),
+    )
+    quiescent = all((
+        quiescence.get("starting_completion_count") == quiescence.get("ending_completion_count"),
+        quiescence.get("starting_progress_count") == quiescence.get("ending_progress_count"),
+        quiescence.get("simulator_queue_empty") is True,
+    ))
+    return (
+        _policy_assertion("execution.soft_stop_requested", "stop_requested", evidence, ("request_trigger_exact",), ("ui", "controller")),
+        _policy_assertion("execution.soft_stop_boundary_valid", "stopped", evidence, tuple(name for name in evidence["checks"] if name != "request_trigger_exact"), ("controller", "model", "simulator", "persistence")),
+        AssertionResult("execution.stopped_boundary_quiescent", "stopped", "pass" if quiescent else "fail", ("controller", "model", "simulator"), dict(quiescence), None if quiescent else "paused execution advanced"),
+    )
+
+
+def soft_stop_terminal_assertions(
+    context: Any,
+    *,
+    expectation: SoftStopResumeExpectation,
+    completed_wells: list[str],
+    array_complete_count: int,
+    intent_lifecycle: Mapping[str, Any],
+    paused_validation: Mapping[str, Any],
+    quiescence: Mapping[str, Any],
+    starvation_events: list[Mapping[str, Any]],
+) -> tuple[AssertionResult, ...]:
+    """Evaluate the shared terminal oracle and project its four assertions."""
+
+    from tools.virtual_workflows.scenarios import _validate_soft_stop_completed_scenario
+
+    evidence = _validate_soft_stop_completed_scenario(
+        experiment_model=context.experiment_model,
+        fixture_info=expectation.fixture_info(),
+        well_updates=list(completed_wells),
+        array_states=list(context.array_states),
+        array_complete_count=int(array_complete_count),
+        errors=list(context.errors),
+        unexpected_dialogs=list(context.unexpected_dialogs),
+        starvation_events=list(starvation_events),
+        intent_lifecycle=dict(intent_lifecycle),
+        paused_validation=dict(paused_validation),
+        quiescence=dict(quiescence),
+    )
+    groups = (
+        ("execution.resume_exactly_once", ("ui_resumed_once", "audit_lifecycle_ordered"), ("ui", "controller", "persistence")),
+        ("execution.expected_completions", ("completed_pairs_exactly_once", "completion_count_exact", "well_updates_exact", "progress_targets_exact", "array_completed_once"), ("ui", "model", "persistence")),
+        ("execution.intent_durability_exact", ("checkpoint_clean", "checkpoint_empty", "begun_intent_occurrences_reconcilable", "attachments_exact", "sequences_unique_monotonic", "terminal_intent_partition_exact", "discarded_pairs_reissued"), ("controller", "model", "persistence")),
+    )
+    projected = [
+        _policy_assertion(assertion_id, "terminal", evidence, checks, sources)
+        for assertion_id, checks, sources in groups
+    ]
+    grouped = {name for _, checks, _ in groups for name in checks}
+    projected.append(_policy_assertion(
+        "execution.terminal_bundle_valid", "terminal", evidence,
+        tuple(name for name in evidence["checks"] if name not in grouped),
+        ("controller", "model", "simulator", "persistence"),
+    ))
+    return tuple(projected)
 
 
 def simulation_identity_assertion(context: Any) -> AssertionResult:

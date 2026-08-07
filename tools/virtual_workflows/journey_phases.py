@@ -5,9 +5,16 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
-from tools.virtual_workflows.actions import InteractionSurface, capture_milestone
+from tools.virtual_workflows.actions import (
+    InteractionSurface,
+    capture_milestone,
+    observe_stopped_quiescence,
+    request_soft_stop_via_ui,
+    resume_array_via_ui,
+    wait_for_array_state,
+)
 from tools.virtual_workflows.composition import JourneyRuntime, SemanticStep
 from tools.virtual_workflows.page_drivers import (
     ArrayDriver,
@@ -147,6 +154,25 @@ class StockPassSpec:
             )
         ):
             raise ValueError("stock-pass milestone names must be non-empty")
+
+
+@dataclass(frozen=True)
+class SoftStopResumeSpec:
+    request_after_completion_count: int
+    maximum_completion_catchup: int
+    quiescence_observation_ms: int
+    timeout_seconds: float = 20.0
+
+    def __post_init__(self) -> None:
+        positive = {
+            "trigger count": self.request_after_completion_count,
+            "catchup": self.maximum_completion_catchup,
+            "quiescence window": self.quiescence_observation_ms,
+            "timeout": self.timeout_seconds,
+        }
+        invalid = next((name for name, value in positive.items() if value <= 0), None)
+        if invalid:
+            raise ValueError(f"soft-stop {invalid} must be positive")
 
 
 def machine_startup_steps(
@@ -334,11 +360,115 @@ def normalized_stock_pass_steps(
     return normalized
 
 
+def normalized_soft_stop_resume_steps(
+    spec: SoftStopResumeSpec,
+) -> list[dict[str, Any]]:
+    """Return the stable stop/resume action window without constructing Qt."""
+
+    action_ids = (
+        "array.request_soft_stop_via_ui", "artifact.capture_milestone",
+        "array.wait_for_state", "artifact.capture_milestone",
+        "array.observe_stopped_quiescence", "array.resume_via_ui",
+        "artifact.capture_milestone",
+    )
+    return [
+        {
+            "action_id": action_id,
+            "interaction_surface": (
+                "ui" if action_id in {
+                    "array.request_soft_stop_via_ui", "array.resume_via_ui"
+                } else "harness"
+            ),
+            "request_after_completion_count": spec.request_after_completion_count,
+        }
+        for action_id in action_ids
+    ]
+
+
+def run_soft_stop_resume(
+    runtime: JourneyRuntime,
+    spec: SoftStopResumeSpec,
+    *,
+    paused_callback: Callable[[JourneyRuntime], Any] | None = None,
+) -> Mapping[str, Any]:
+    """Exercise and observe one paused boundary, then resume through the UI."""
+
+    evidence = dict(run_soft_stop_boundary(runtime, spec))
+    if paused_callback is not None:
+        paused_callback(runtime)
+    evidence["resume"] = resume_soft_stopped_array(runtime)
+    return evidence
+
+
+def run_soft_stop_boundary(
+    runtime: JourneyRuntime,
+    spec: SoftStopResumeSpec,
+) -> Mapping[str, Any]:
+    """Request a bounded stop and retain paused/quiescence evidence."""
+
+    context, observed = runtime.context, runtime.observations
+    completed = observed["completed_wells"]
+    request = request_soft_stop_via_ui(
+        context,
+        completed_count=lambda: len(completed),
+        trigger_count=spec.request_after_completion_count,
+        timeout_seconds=spec.timeout_seconds,
+    )
+    request_evidence = dict(request.get("evidence") or {})
+    request_evidence["maximum_completion_catchup"] = spec.maximum_completion_catchup
+    observed["soft_stop_request"] = request_evidence
+    capture_milestone(context, "stop_requested", evidence=request_evidence)
+    wait_for_array_state(
+        context,
+        state="resume_ready",
+        timeout_seconds=spec.timeout_seconds,
+        label="soft-stop resume-ready boundary",
+    )
+    observed["paused_execution_snapshot"] = observed["execution_observer"].snapshot()
+    capture_milestone(
+        context,
+        "stopped",
+        evidence={
+            "completed_count": len(completed),
+            "array_state": context.controller.get_array_run_state(),
+        },
+    )
+    quiescence_row = observe_stopped_quiescence(
+        context,
+        completed_count=lambda: len(completed),
+        progress_count=lambda: sum(
+            int(reagent.get("added_droplets", 0))
+            for well in (context.experiment_model.progress_data or {}).values()
+            for reagent in (well.get("reagents") or {}).values()
+        ),
+        observation_ms=spec.quiescence_observation_ms,
+    )
+    quiescence = dict(quiescence_row.get("evidence") or {})
+    observed["stopped_quiescence"] = quiescence
+    return {"request": request_evidence, "quiescence": quiescence}
+
+
+def resume_soft_stopped_array(runtime: JourneyRuntime) -> Mapping[str, Any]:
+    """Resume an already validated paused boundary through the normal UI."""
+
+    context = runtime.context
+    resume = resume_array_via_ui(context)
+    evidence = dict(resume.get("evidence") or {})
+    runtime.observations["resume_evidence"] = evidence
+    capture_milestone(
+        context,
+        "resumed",
+        evidence={"array_state": context.controller.get_array_run_state()},
+    )
+    return evidence
+
+
 def run_stock_passes(
     runtime: JourneyRuntime,
     pass_specs: Sequence[StockPassSpec],
     *,
     bind_identities: bool = True,
+    active_phase: Callable[[JourneyRuntime, StockPassSpec], Any] | None = None,
 ) -> None:
     """Execute ordered head passes through existing page drivers and QTest."""
 
@@ -372,6 +502,7 @@ def run_stock_passes(
             pass_boundaries=pass_boundaries,
             head_staging=head_staging,
             returned_head_ids=returned_head_ids,
+            active_phase=active_phase,
         )
         pressure_enabled = pressure_enabled or spec.enable_pressure_regulation
 
@@ -385,6 +516,7 @@ def _run_stock_pass(
     pass_boundaries: list[dict[str, Any]],
     head_staging: list[dict[str, Any]],
     returned_head_ids: list[str],
+    active_phase: Callable[[JourneyRuntime, StockPassSpec], Any] | None,
 ) -> None:
     context = runtime.context
     machine = MachineControlsDriver(context)
@@ -570,6 +702,8 @@ def _run_stock_pass(
         spec.printing_milestone,
         evidence={"stock_id": spec.stock_id} if spec.detailed_evidence else None,
     )
+    if active_phase is not None:
+        active_phase(runtime, spec)
     runtime.run_steps(
         (
             SemanticStep(
@@ -732,12 +866,17 @@ __all__ = [
     "EditorPreparationSpec",
     "MachineStartupSpec",
     "StockPassSpec",
+    "SoftStopResumeSpec",
     "bind_head_identities",
     "head_identity_step",
     "machine_startup_steps",
     "normalized_stock_pass_steps",
+    "normalized_soft_stop_resume_steps",
     "run_editor_preparation",
+    "run_soft_stop_boundary",
+    "resume_soft_stopped_array",
     "run_stock_passes",
+    "run_soft_stop_resume",
     "validate_stock_pass_boundary",
     "wait_for_execution_boundary",
 ]

@@ -628,6 +628,46 @@ targeted gates with:
 
 The complete Python suite remains deferred until the final Milestone 7 gate.
 
+Milestone 7 Slice 4 migrates `print_array_soft_stop_resume_24_v1` to the
+generic composed runner. The normal editor, machine, rack, calibration, and
+array controls create the A1-A24 design, start printing, request `Stop After
+Well` at completion 6, prove the paused empty checkpoint and 250 ms
+quiescence window, and confirm `Resume Print Array` before completing all 24
+wells. `ArrayDriver` owns the bounded QTest start/stop/resume mechanics;
+`SoftStopResumeSpec` and the stop-boundary/resume phases are reusable by the
+later authoritative-reload journey. The legacy runner remains directly
+callable only as a parity oracle and for the still-unmigrated reload workflow.
+
+Run the composed lifecycle offscreen or visibly, then execute the exact replay
+command from `report.json`:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_soft_stop_resume_24_v1 `
+  --output-root verification_reports\milestone7-slice4 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 60
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_soft_stop_resume_24_v1 `
+  --output-root verification_reports\milestone7-slice4-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 60
+```
+
+The report retains eight screenshots (`editor_opened`, `generated`, `ready`,
+`printing`, `stop_requested`, `stopped`, `resumed`, and `completed`), exact UI
+action surfaces, paused and terminal oracle evidence, action/assertion
+ledgers, hashes, seed, replay command, and clean teardown. A direct run with
+`--speed-multiplier 1000` is useful for automation; use a smaller multiplier
+when visually inspecting transitions. If several Qt lifecycle tests share one
+process and a parity node is transiently incomplete, rerun that exact node in
+a fresh process/root before diagnosing the workflow. The full Python suite is
+still deferred until the final Milestone 7 validation.
+
+The functional migration is validated, but the Slice 4 completion record
+retains one open review item: touched runtime growth is net 598 physical lines
+against the planned 450-line consolidation gate. Do not start the next
+migration until that variance is consolidated or explicitly accepted.
+
 The final retained Windows evidence is:
 
 ```text

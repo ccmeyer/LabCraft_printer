@@ -6,6 +6,7 @@ import pytest
 from PySide6 import QtCore, QtWidgets
 
 from tools.virtual_workflows.page_drivers import (
+    ArrayDriver,
     ExperimentEditorDriver,
     ExperimentLoaderDriver,
     MainWindowDriver,
@@ -60,6 +61,45 @@ def test_dialog_sequence_rejects_unexpected_title(qapp):
             [("Expected title", QtWidgets.QMessageBox.StandardButton.Yes)],
         )
     view.close()
+
+
+def test_array_driver_owns_soft_stop_and_resume_qtest_mechanics(qapp):
+    window = QtWidgets.QWidget()
+    button = QtWidgets.QPushButton("Stop After Well", window)
+    state = {"value": "running"}
+
+    def drive_control():
+        if state["value"] == "running":
+            state["value"] = "resume_ready"
+            button.setText("Stop Pending")
+            button.setEnabled(False)
+            return
+        answer = QtWidgets.QMessageBox.question(
+            window, "Resume Print Array", "Resume?"
+        )
+        if answer == QtWidgets.QMessageBox.StandardButton.Yes:
+            state["value"] = "running"
+            button.setText("Stop After Well")
+
+    button.clicked.connect(drive_control)
+    window.show()
+    qapp.processEvents()
+    context = _context(qapp, SimpleNamespace(
+        well_plate_widget=SimpleNamespace(start_print_array_button=button)
+    ))
+    context.controller = SimpleNamespace(
+        get_array_run_state=lambda: state["value"]
+    )
+    driver = ArrayDriver(context)
+
+    stop = driver.request_soft_stop()
+    assert stop["button_text_after"] == "Stop Pending"
+    button.setText("Resume Print")
+    button.setEnabled(True)
+    resumed = driver.resume()
+    assert resumed["array_state"] == "running"
+    assert [row["title"] for row in resumed["dialogs"]] == ["Resume Print Array"]
+    window.close()
 
 
 def test_prepared_loader_rejects_directory_outside_session_root(qapp, tmp_path):

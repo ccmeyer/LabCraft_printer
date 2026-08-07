@@ -138,6 +138,18 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert soft_stop["status"] == "active"
     assert soft_stop["suite_ids"] == ["lifecycle"]
     assert soft_stop["registry_id"] == SOFT_STOP_RESUME_WORKLOAD_ID
+    assert "fixture.prepare_authoritative" not in soft_stop["action_ids"]
+    assert "array.resume_via_ui" in soft_stop["action_ids"]
+    assert soft_stop["required_artifacts"] == [
+        "report_json",
+        "summary_text",
+        "event_trace",
+        "action_ledger",
+        "assertion_ledger",
+        "evidence_manifest",
+        "screenshots",
+        "scenario_root",
+    ]
     authoritative_reload = _row(
         payload,
         "scenarios",
@@ -313,6 +325,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
         SMOKE_WORKLOAD_ID,
         EDITOR_WORKLOAD_ID,
         EDITOR_RENAME_WORKLOAD_ID,
+        SOFT_STOP_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
     }:
         from tools.virtual_workflows.journeys import JourneyRunConfig
@@ -325,6 +338,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
         SMOKE_WORKLOAD_ID,
         EDITOR_WORKLOAD_ID,
         EDITOR_RENAME_WORKLOAD_ID,
+        SOFT_STOP_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
     }:
         assert config.fixture_path == SCENARIO_FIXTURES[scenario_id].resolve()

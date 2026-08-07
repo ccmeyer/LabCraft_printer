@@ -13,6 +13,7 @@ from tools.virtual_workflows.actions import (
     ACTION_IDS,
     COMPOSED_SMOKE_ACTION_IDS,
     COMPOSED_MULTI_STOCK_ACTION_IDS,
+    COMPOSED_SOFT_STOP_ACTION_IDS,
     InteractionSurface,
     ScenarioActionError,
     ScenarioContext,
@@ -42,6 +43,16 @@ def test_composed_multi_stock_actions_report_truthful_surfaces():
     assert COMPOSED_SMOKE_ACTION_IDS < COMPOSED_MULTI_STOCK_ACTION_IDS
     assert ACTION_INTERACTION_SURFACES["head.bind_identity"] is (
         InteractionSurface.MODEL
+    )
+
+
+def test_composed_soft_stop_actions_add_one_truthful_resume_contract():
+    assert COMPOSED_SMOKE_ACTION_IDS < COMPOSED_SOFT_STOP_ACTION_IDS
+    assert ACTION_INTERACTION_SURFACES["array.resume_via_ui"] is (
+        InteractionSurface.UI
+    )
+    assert ACTION_INTERACTION_SURFACES["array.observe_stopped_quiescence"] is (
+        InteractionSurface.HARNESS
     )
     assert ACTION_INTERACTION_SURFACES["head.return_via_ui"] is (
         InteractionSurface.UI

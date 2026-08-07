@@ -195,6 +195,7 @@ def test_named_journeys_meet_concision_and_generic_dispatch_gates():
         journeys.run_virtual_print_array_24_journey,
         journeys.run_editor_create_finalize_journey,
         journeys.run_multi_stock_24x2_journey,
+        journeys.run_soft_stop_resume_24_journey,
     ):
         source = inspect.getsource(runner)
         assert len(
@@ -211,6 +212,8 @@ def test_named_journeys_meet_concision_and_generic_dispatch_gates():
     assert lengths["_editor_body"] <= 120
     assert lengths["_editor_revision_body"] <= 120
     assert lengths["_multi_body"] <= 120
+    assert lengths["_soft_stop_body"] <= 120
+    assert lengths["_soft_stop_payload"] <= 90
     dispatch_source = inspect.getsource(registry.run_registered_scenario)
     assert "definition.workload_id == EDITOR_WORKLOAD_ID" not in dispatch_source
     assert "definition.workload_id == MULTI_STOCK_WORKLOAD_ID" not in dispatch_source

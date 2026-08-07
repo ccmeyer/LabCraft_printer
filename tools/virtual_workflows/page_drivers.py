@@ -530,12 +530,27 @@ class RackDriver(_QTestSurfaceDriver):
 class ArrayDriver(_QTestSurfaceDriver):
     """QTest mechanics for the normal print-array surface."""
 
+    @property
+    def control(self):
+        return self.view.well_plate_widget.start_print_array_button
+
+    def _require_control(self, text: str, *, enabled: bool = True) -> None:
+        button = self.control
+        if button.text() != text or bool(button.isEnabled()) is not bool(enabled):
+            raise RuntimeError(
+                f"expected {text!r} array control (enabled={enabled}); observed "
+                f"{button.text()!r} (enabled={button.isEnabled()})"
+            )
+
+    def click_start(self) -> None:
+        self.click(self.control)
+
     def start(
         self,
         expected_dialogs: list[tuple[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         return self.click_with_message_boxes(
-            self.view.well_plate_widget.start_print_array_button,
+            self.control,
             expected_dialogs or [
                 ("Start Print Array", QtWidgets.QMessageBox.StandardButton.Yes),
                 (
@@ -544,6 +559,41 @@ class ArrayDriver(_QTestSurfaceDriver):
                 ),
             ],
         )
+
+    def request_soft_stop(self) -> dict[str, Any]:
+        """Click the running array control; trigger timing remains journey policy."""
+
+        self._require_control("Stop After Well")
+        before = self.control.text()
+        self.click(self.control)
+        self.wait_until(
+            lambda: self.control.text() == "Stop Pending"
+            and not self.control.isEnabled(),
+            "soft-stop pending control",
+        )
+        return {
+            "button_text_before": before,
+            "button_text_after": self.control.text(),
+            "button_enabled_after": bool(self.control.isEnabled()),
+        }
+
+    def resume(self) -> dict[str, Any]:
+        """Resume a paused array through the normal control and confirmation."""
+
+        self._require_control("Resume Print")
+        dialogs = self.click_with_message_boxes(
+            self.control,
+            [("Resume Print Array", QtWidgets.QMessageBox.StandardButton.Yes)],
+        )
+        self.wait_until(
+            lambda: self.context.controller.get_array_run_state() == "running",
+            "resumed array running state",
+        )
+        return {
+            "dialogs": dialogs,
+            "array_state": self.context.controller.get_array_run_state(),
+            "button_text": self.control.text(),
+        }
 
 
 class CalibrationDialogDriver:
