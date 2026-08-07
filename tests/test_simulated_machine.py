@@ -276,6 +276,67 @@ def test_completion_handler_can_extend_queue_and_runs_once(qapp, test_profile):
     assert drains == ["done"]
 
 
+@pytest.mark.parametrize(
+    ("speed_multiplier", "completion_delay_ms"),
+    ((100.0, 0.0), (1000.0, 0.0), (1000.0, 0.25)),
+)
+def test_two_well_lookahead_soak_never_loses_handler_driven_work(
+    qapp,
+    test_profile,
+    speed_multiplier,
+    completion_delay_ms,
+):
+    total = 4000
+    config = SimulationConfig(
+        timing=SimulationTimingPolicy(
+            speed_multiplier=speed_multiplier,
+            duration_overrides={"WAIT": 200},
+        ),
+        completed_history_limit=8,
+        event_history_limit=32,
+    )
+    machine = _make_machine(qapp, test_profile, config=config)
+    created = 0
+    completed = []
+    pending = {}
+    drains = []
+    machine.command_queue.commands_completed.connect(lambda: drains.append(len(completed)))
+
+    def queue_one():
+        nonlocal created
+        created += 1
+        intent_id = f"intent-{created}"
+
+        def finish():
+            if completion_delay_ms:
+                deadline = time.perf_counter() + completion_delay_ms / 1000.0
+                while time.perf_counter() < deadline:
+                    pass
+            completed.append(intent_id)
+            pending.pop(intent_id)
+            if created < total:
+                queue_one()
+
+        command = machine.wait_ms(1, handler=finish)
+        pending[intent_id] = command.command_number
+
+    queue_one()
+    queue_one()
+    _wait_until(
+        qapp,
+        lambda: len(completed) == total and machine.check_if_all_completed(),
+        timeout_ms=30000,
+    )
+
+    assert created == total
+    assert completed == [f"intent-{index}" for index in range(1, total + 1)]
+    assert pending == {}
+    assert drains == [total]
+    assert machine.state.last_completed == total
+    assert machine.state.last_accepted == total
+    assert machine.state.last_retired == total
+
+
 def test_immediate_pause_finishes_active_then_resume_continues(qapp, test_profile):
     config = SimulationConfig(
         timing=SimulationTimingPolicy(

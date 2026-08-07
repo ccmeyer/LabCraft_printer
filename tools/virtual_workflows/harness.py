@@ -78,6 +78,57 @@ class AutomationHarnessConfig:
                 object.__setattr__(self, name, Path(value).resolve())
 
 
+class _UnexpectedDialogGuard:
+    """Reject unhandled action dialogs even inside a nested Qt event loop."""
+
+    def __init__(self, harness: "AutomationHarness", allowed_dialogs: tuple[Any, ...]):
+        self.harness = harness
+        self.allowed_dialogs = allowed_dialogs
+        self.timer = None
+        self.error: RuntimeError | None = None
+
+    def start(self) -> None:
+        app = self.harness.context.app
+        if app is None:
+            return
+        from PySide6 import QtCore
+
+        timer = QtCore.QTimer(app)
+        timer.setInterval(10)
+        timer.timeout.connect(self._inspect)
+        timer.start()
+        self.timer = timer
+
+    def _inspect(self) -> None:
+        if self.error is not None:
+            return
+        visible = self.harness._visible_unexpected_dialogs(
+            allowed_dialogs=self.allowed_dialogs
+        )
+        if not visible:
+            return
+        entries = self.harness._reject_unexpected_dialogs(visible)
+        self.error = RuntimeError(
+            f"unexpected dialog(s) opened during action: {entries}"
+        )
+
+    def raise_if_failed(self) -> None:
+        if self.error is not None:
+            raise self.error
+
+    def stop(self) -> None:
+        timer = self.timer
+        self.timer = None
+        if timer is None:
+            return
+        timer.stop()
+        try:
+            timer.timeout.disconnect(self._inspect)
+        except (RuntimeError, TypeError):
+            pass
+        timer.deleteLater()
+
+
 class AutomationHarness:
     """Own composed application sessions and their generic evidence."""
 
@@ -319,8 +370,11 @@ class AutomationHarness:
         | None = None,
         allowed_dialogs: tuple[Any, ...] = (),
     ) -> dict[str, Any]:
+        dialog_guard = _UnexpectedDialogGuard(self, allowed_dialogs)
+
         def bounded_operation() -> Mapping[str, Any] | None:
             evidence = operation()
+            dialog_guard.raise_if_failed()
             self.assert_no_unexpected_dialog(allowed_dialogs=allowed_dialogs)
             if self.session is not None and self.session.recorder is not None:
                 health = self.session.recorder.health_snapshot()
@@ -337,6 +391,7 @@ class AutomationHarness:
                 )
             return evidence
 
+        dialog_guard.start()
         try:
             result = execute_action(
                 self.context,
@@ -350,21 +405,36 @@ class AutomationHarness:
             if self.failure is None:
                 self.failure = exc
             raise
+        finally:
+            dialog_guard.stop()
 
-    def assert_no_unexpected_dialog(
+    def _visible_unexpected_dialogs(
         self,
         *,
         allowed_dialogs: tuple[Any, ...] = (),
-    ) -> None:
+    ) -> list[Any]:
         if self.context.app is None:
-            return
+            return []
         from PySide6 import QtWidgets
 
-        visible = [
+        expected_specs = tuple(
+            getattr(self.context.app, "_sil_expected_dialog_specs", ())
+        )
+
+        def expected_by_driver(widget: Any) -> bool:
+            return any(
+                str(spec.get("title") or "") == widget.windowTitle()
+                and str(spec.get("type") or "") == type(widget).__name__
+                for spec in expected_specs
+                if isinstance(spec, Mapping)
+            )
+
+        return [
             widget
             for widget in self.context.app.topLevelWidgets()
             if isinstance(widget, QtWidgets.QDialog) and widget.isVisible()
             and widget not in allowed_dialogs
+            and not expected_by_driver(widget)
             and widget
             is not getattr(
                 getattr(self.context.view, "pressure_box", None),
@@ -372,8 +442,8 @@ class AutomationHarness:
                 None,
             )
         ]
-        if not visible:
-            return
+
+    def _reject_unexpected_dialogs(self, visible: list[Any]) -> list[dict[str, str]]:
         entries = [
             {"type": type(widget).__name__, "title": widget.windowTitle()}
             for widget in visible
@@ -381,6 +451,17 @@ class AutomationHarness:
         self.context.unexpected_dialogs.extend(entries)
         for widget in visible:
             widget.reject()
+        return entries
+
+    def assert_no_unexpected_dialog(
+        self,
+        *,
+        allowed_dialogs: tuple[Any, ...] = (),
+    ) -> None:
+        visible = self._visible_unexpected_dialogs(allowed_dialogs=allowed_dialogs)
+        if not visible:
+            return
+        entries = self._reject_unexpected_dialogs(visible)
         raise RuntimeError(f"unexpected dialog(s) remained visible: {entries}")
 
     def add_assertion_result(self, result: Mapping[str, Any]) -> None:

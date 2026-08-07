@@ -1011,7 +1011,7 @@ Rollback:
 
 ### Milestone 7: Journey portfolio and legacy-runner migration
 
-Status: `in progress - Slices 1 through 7 complete; Slice 8 planned`
+Status: `in progress - Slices 1 through 8 complete`
 
 Goal:
 
@@ -1048,7 +1048,13 @@ Migration order:
 6. authoritative reload/resume - complete in Slice 5;
 7. post-start lock/copy - complete in Slice 6;
 8. 96-well regression - complete in Slice 7;
-9. 384x10 stress - Slice 8 planned, awaiting approval;
+9. 384x10 stress - Slice 8, its bounded ACTIVE-plan cache amendment, diagnostic
+   decomposition, and guarded calibration-revision append are implemented.
+   The final composed and direct nodes complete all 3,840 pairs; the unchanged
+   responsiveness gate passes. A focused real-session rack-only regression
+   identified Qt's post-open mouse-release guard; the reusable mouse driver now
+   waits out that bounded guard. Visible and exact-replay runs both complete
+   all 3,840 pairs with every required assertion passing and zero starvation;
 10. disconnect scenario according to the Milestone 0 decision.
 
 Gate per migration:
@@ -1472,17 +1478,21 @@ This effort is complete when:
 
 ## Current Next Action
 
-Milestone 7 Slice 8 is planned in
-`docs/sil_interactive_simulation_milestone_7_slice_8_implementation_plan.md`
-and awaits approval. The bounded slice migrates only
-`virtual_print_array_384x10_v1` onto the shared cardinality-neutral multi-stock
-composition plus the generalized Slice 7 sustained-evidence profile. It keeps
-the stress fixture byte-identical, requires a preparation-only proof of exactly
-3,840 normal-UI stock/well pairs before dispatch changes, preserves existing
-informational warning/failure thresholds, and leaves the direct runner
-callable as a parity oracle. Keep targeted tests for Slice 8 and defer the
-complete Python suite until final Milestone 7 validation. Do not implement
-Slice 8, begin disconnect work, accept/remediate performance, activate
-parameter matrices or seeded exploration, add product fault injection, run
-remote Pi operations, or begin firmware, protocol, or hardware work without
-separate approval.
+Milestone 7 Slice 8 now uses a guarded calibration-specific authoritative
+transaction. During a healthy active session it validates one successor
+against the in-memory validated history and brackets the unchanged atomic
+writes with the existing file-identity guards. Cold activation, recovery, and
+terminal closeout still validate the entire immutable chain.
+
+The final composed node passed all 3,840 operations in 383.65 seconds with
+zero starvation, a 685.460 ms maximum event-loop gap, 81.616 ms
+scheduling-lateness p99, and a 252.072 ms active pressure-render maximum. Nine
+cached calibration commits had a maximum of 181.185 ms, and terminal closeout
+retained one full-chain validation. The direct parity node also passed.
+
+The focused rack-only node isolated Qt's post-open mouse-release guard without
+printing and passed in three fresh visible processes after the shared bounded
+mouse correction. A fresh full visible run and its exact emitted replay then
+completed all 3,840 operations with zero failed actions, failed assertions, or
+starvation and drained terminal queues. Slice 8 is complete; keep the full
+Python suite deferred until final Milestone 7 validation.

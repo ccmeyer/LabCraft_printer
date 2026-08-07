@@ -8,8 +8,10 @@ import pytest
 import Model as model_module
 from ExecutionCalibrationStore import (
     ExecutionCalibrationDocument,
+    load_execution_calibrations,
     save_execution_calibrations,
 )
+from ExecutionPlanRevision import validate_revision_history
 from ExecutionResumeStore import (
     load_execution_resume,
     progress_fingerprint,
@@ -87,6 +89,47 @@ def _complete_one(model, experiment_model, well_spec, dispense, *, command=41):
     return intent_id
 
 
+def _apply_cached_calibration(
+    experiment_model,
+    *,
+    effective_volume_nL=9.0,
+    run_id="cache-calibration-1",
+    timestamp_utc="2099-08-07T12:00:00Z",
+):
+    plan = experiment_model.get_execution_plan_snapshot()
+    stock = next(
+        item
+        for item in plan.stocks
+        if item.units != "--"
+    )
+    return experiment_model.apply_execution_calibration(
+        stock_id=stock.stock_id,
+        new_effective_volume_nL=float(effective_volume_nL),
+        printing_mode=stock.printing_mode,
+        printer_head_id="cache-calibration-head",
+        factor_name=stock.factor_name,
+        option_name=stock.option_name,
+        is_fill=False,
+        calibration_payload={
+            "measured_volume_nL": float(effective_volume_nL),
+            "pw_us": 1200,
+            "pressure_psi": 0.8,
+            "run_id": run_id,
+            "phase": "cache_test",
+            "timestamp": timestamp_utc,
+            "source_row_fingerprint": (
+                run_id,
+                1200,
+                0.8,
+                stock.printing_mode,
+                float(effective_volume_nL),
+            ),
+            "original_printing_mode": stock.printing_mode,
+        },
+        timestamp_utc=timestamp_utc,
+    )
+
+
 def test_hot_path_uses_cache_and_preserves_four_durable_writes(
     experiment_model_factory,
     monkeypatch,
@@ -162,6 +205,209 @@ def test_hot_path_uses_cache_and_preserves_four_durable_writes(
         "ready_to_resume",
         "complete",
     }
+
+
+def test_active_plan_lock_uses_guarded_cache_without_recovery_or_writes(
+    experiment_model_factory,
+    monkeypatch,
+):
+    _model, experiment_model, _well_spec, _dispense = _active_runtime(
+        experiment_model_factory
+    )
+    cached = experiment_model.get_execution_plan_snapshot()
+    calls = {"guard": 0}
+    original_guard = experiment_model._guard_authoritative_runtime_session
+
+    def observed_guard():
+        calls["guard"] += 1
+        return original_guard()
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("guarded ACTIVE lock used the recovery/write path")
+
+    monkeypatch.setattr(
+        experiment_model,
+        "_guard_authoritative_runtime_session",
+        observed_guard,
+    )
+    for method_name in (
+        "_recover_persisted_execution_plan_for_transition",
+        "_write_progress_for_execution_plan",
+        "synchronize_execution_resume_revision",
+    ):
+        monkeypatch.setattr(experiment_model, method_name, unexpected)
+
+    assert experiment_model.lock_execution_plan("calibration_started") is cached
+    assert calls == {"guard": 1}
+
+
+def test_calibration_revision_uses_guarded_successor_without_full_history_reload(
+    experiment_model_factory,
+    monkeypatch,
+):
+    _model, experiment_model, _well_spec, _dispense = _active_runtime(
+        experiment_model_factory
+    )
+    starting_revision = experiment_model.get_execution_plan_snapshot().plan_revision
+    calls = {"inspect": 0, "full_history": 0}
+
+    def forbidden_inspect(*_args, **_kwargs):
+        calls["inspect"] += 1
+        raise AssertionError("cached calibration performed full bundle inspection")
+
+    def forbidden_history(*_args, **_kwargs):
+        calls["full_history"] += 1
+        raise AssertionError("cached calibration reread immutable history")
+
+    monkeypatch.setattr(model_module, "inspect_authoritative_execution", forbidden_inspect)
+    monkeypatch.setattr(model_module, "validate_revision_history", forbidden_history)
+
+    first = _apply_cached_calibration(experiment_model)
+    second = _apply_cached_calibration(
+        experiment_model,
+        effective_volume_nL=8.5,
+        run_id="cache-calibration-2",
+        timestamp_utc="2099-08-07T12:01:00Z",
+    )
+
+    assert calls == {"inspect": 0, "full_history": 0}
+    assert first["status"] == second["status"] == "created"
+    assert second["plan"].plan_revision == starting_revision + 2
+    session = experiment_model._guard_authoritative_runtime_session()
+    assert session.bundle.plan == second["plan"]
+    assert session.bundle.history[-2:] == (first["plan"], second["plan"])
+    assert session.resume.plan_revision == second["plan"].plan_revision
+    assert session.revision_names[-2:] == (
+        f"revision_{starting_revision + 1:06d}.json",
+        f"revision_{starting_revision + 2:06d}.json",
+    )
+    assert experiment_model._last_authoritative_calibration_transition == {
+        "cache_path": "cached_revision",
+        "starting_plan_revision": starting_revision + 1,
+        "final_plan_revision": starting_revision + 2,
+        "created_revision": f"revision_{starting_revision + 2:06d}.json",
+        "full_validation_count": 0,
+        "prior_revision_body_read_count": 0,
+    }
+    document = load_execution_calibrations(
+        experiment_model.execution_calibrations_file_path
+    )
+    assert set(document.records) == {
+        first["record"]["record_id"],
+        second["record"]["record_id"],
+    }
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "_write_authoritative_calibration_document",
+        "_persist_authoritative_calibration_immutable_revision",
+        "_write_authoritative_calibration_current_plan",
+        "_write_authoritative_calibration_progress",
+        "_write_authoritative_calibration_resume",
+        "_write_execution_plan_exports",
+        "_accept_authoritative_calibration_writes",
+    ],
+)
+def test_calibration_partial_write_failure_invalidates_cache_and_full_retry_recovers(
+    experiment_model_factory,
+    monkeypatch,
+    method_name,
+):
+    _model, experiment_model, _well_spec, _dispense = _active_runtime(
+        experiment_model_factory
+    )
+    revision_dir = Path(experiment_model.execution_plan_revisions_dir_path)
+    original = getattr(experiment_model, method_name)
+    calls = {"count": 0}
+
+    def fail_once(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise OSError(f"{method_name} failed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(experiment_model, method_name, fail_once)
+    with pytest.raises(RuntimeError, match=f"{method_name} failed"):
+        _apply_cached_calibration(experiment_model)
+
+    immutable_after_failure = {
+        path.name: path.read_bytes()
+        for path in revision_dir.glob("revision_*.json")
+    }
+    assert experiment_model._active_authoritative_execution_session is None
+    assert method_name in experiment_model.get_execution_plan_sync_error()
+
+    recovered = _apply_cached_calibration(experiment_model)
+
+    assert recovered["status"] in {"created", "reused"}
+    assert experiment_model.get_execution_plan_sync_error() is None
+    for name, payload in immutable_after_failure.items():
+        assert (revision_dir / name).read_bytes() == payload
+    history = validate_revision_history(
+        revision_dir,
+        latest_plan=recovered["plan"],
+        calibration_record_ids=set(
+            load_execution_calibrations(
+                experiment_model.execution_calibrations_file_path
+            ).records
+        ),
+    )
+    assert history[-1] == recovered["plan"]
+
+
+def test_active_plan_lock_with_sync_error_uses_existing_recovery_path(
+    experiment_model_factory,
+    monkeypatch,
+):
+    _model, experiment_model, _well_spec, _dispense = _active_runtime(
+        experiment_model_factory
+    )
+    experiment_model.set_execution_plan_sync_error("repair required")
+    monkeypatch.setattr(
+        experiment_model,
+        "_recover_persisted_execution_plan_for_transition",
+        lambda _plan: (_ for _ in ()).throw(RuntimeError("recovery invoked")),
+    )
+
+    with pytest.raises(RuntimeError, match="recovery invoked"):
+        experiment_model.lock_execution_plan("calibration_started")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["replace", "in_place", "delete", "revision_addition"],
+)
+def test_active_plan_lock_fails_closed_on_external_change(
+    experiment_model_factory,
+    mutation,
+):
+    _model, experiment_model, _well_spec, _dispense = _active_runtime(
+        experiment_model_factory
+    )
+    resume_path = Path(experiment_model.execution_resume_file_path)
+    before = resume_path.read_bytes()
+
+    if mutation == "replace":
+        replacement = resume_path.with_name("external-lock-replacement.json")
+        replacement.write_bytes(before)
+        os.replace(replacement, resume_path)
+    elif mutation == "in_place":
+        payload = json.loads(before)
+        payload["updated_at_utc"] = "2099-01-01T00:00:00Z"
+        resume_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    elif mutation == "delete":
+        resume_path.unlink()
+    else:
+        revision_dir = Path(experiment_model.execution_plan_revisions_dir_path)
+        (revision_dir / "revision_999999.json").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="changed outside the active runtime"):
+        experiment_model.lock_execution_plan("calibration_started")
+
+    assert experiment_model._active_authoritative_execution_session is None
+    assert "Reload and explicitly reactivate" in experiment_model.get_execution_plan_sync_error()
 
 
 def test_explicit_activation_compacts_valid_legacy_completed_intents(

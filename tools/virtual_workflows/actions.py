@@ -1034,25 +1034,90 @@ def wait_for_completions(
     target_count: int,
     timeout_seconds: float,
     label: str,
+    no_progress_timeout_seconds: float | None = None,
+    no_progress_evidence: Callable[[int, float], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     def run() -> Mapping[str, Any]:
-        wait_until(
-            context,
-            lambda: completed_count() >= int(target_count) or bool(context.errors),
-            timeout_seconds,
-            label,
-            action_id="array.wait_for_completions",
-            evidence=lambda: {
-                "target_count": int(target_count),
-                "observed_count": int(completed_count()),
-                "errors": list(context.errors),
-            },
-        )
+        allowed = context.deadline.remaining_seconds(timeout_seconds)
+        if allowed <= 0:
+            raise ScenarioActionError(
+                "array.wait_for_completions",
+                f"timed out waiting for {label}",
+                stage="timeout",
+                evidence={
+                    "label": label,
+                    "target_count": int(target_count),
+                    "observed_count": int(completed_count()),
+                    "errors": list(context.errors),
+                    "elapsed_seconds": context.deadline.elapsed_seconds(),
+                },
+            )
+        progress_timeout = None
+        if no_progress_timeout_seconds is not None:
+            progress_timeout = float(no_progress_timeout_seconds)
+            if not math.isfinite(progress_timeout) or progress_timeout <= 0:
+                raise ValueError(
+                    "no-progress timeout must be finite and greater than zero"
+                )
+        local_deadline = context.clock() + allowed
+        observed = int(completed_count())
+        last_progress_count = observed
+        last_progress_at = context.clock()
+        while context.clock() < local_deadline:
+            context.pump_events()
+            observed = int(completed_count())
+            if observed >= int(target_count) or context.errors:
+                break
+            if observed > last_progress_count:
+                last_progress_count = observed
+                last_progress_at = context.clock()
+            stalled_seconds = context.clock() - last_progress_at
+            if progress_timeout is not None and stalled_seconds >= progress_timeout:
+                diagnostic: dict[str, Any] = {}
+                if no_progress_evidence is not None:
+                    try:
+                        diagnostic = dict(
+                            no_progress_evidence(observed, stalled_seconds) or {}
+                        )
+                    except Exception as exc:
+                        diagnostic = {
+                            "capture_error": f"{type(exc).__name__}: {exc}"
+                        }
+                raise ScenarioActionError(
+                    "array.wait_for_completions",
+                    f"no progress while waiting for {label}",
+                    stage="no_progress",
+                    evidence={
+                        "label": label,
+                        "target_count": int(target_count),
+                        "observed_count": observed,
+                        "last_progress_count": last_progress_count,
+                        "stalled_seconds": stalled_seconds,
+                        "errors": list(context.errors),
+                        "liveness": diagnostic,
+                    },
+                )
+            context.sleep(0.001)
+        context.pump_events()
+        observed = int(completed_count())
+        if observed < int(target_count) and not context.errors:
+            raise ScenarioActionError(
+                "array.wait_for_completions",
+                f"timed out waiting for {label}",
+                stage="timeout",
+                evidence={
+                    "label": label,
+                    "target_count": int(target_count),
+                    "observed_count": observed,
+                    "errors": list(context.errors),
+                    "elapsed_seconds": context.deadline.elapsed_seconds(),
+                },
+            )
         if context.errors:
             raise RuntimeError(f"array execution emitted an error: {context.errors[-1]}")
         return {
             "target_count": int(target_count),
-            "observed_count": int(completed_count()),
+            "observed_count": observed,
         }
 
     return execute_action(context, "array.wait_for_completions", run)

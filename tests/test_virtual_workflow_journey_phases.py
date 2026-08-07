@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 from collections import Counter
+import inspect
 
 import pytest
 
@@ -10,12 +12,32 @@ from tools.virtual_workflows.journey_phases import (
     PreparedEditorRevisionSpec,
     SoftStopResumeSpec,
     StockPassSpec,
+    _run_stock_pass,
     capture_completion_midpoint,
     machine_startup_steps,
     normalized_prepared_revision_steps,
     normalized_stock_pass_steps,
     normalized_soft_stop_resume_steps,
 )
+
+
+def test_final_stock_pass_wait_uses_the_outer_scenario_deadline():
+    tree = ast.parse(inspect.getsource(_run_stock_pass))
+    waits = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "wait_for_completions"
+    ]
+
+    assert len(waits) == 1
+    timeout = next(
+        keyword.value
+        for keyword in waits[0].keywords
+        if keyword.arg == "timeout_seconds"
+    )
+    assert ast.unparse(timeout) == "context.deadline.remaining_seconds()"
 
 
 def _stock(
@@ -102,6 +124,31 @@ def test_two_stock_plan_has_exact_repeated_groups_and_truthful_surfaces():
         for row in plan
         if row["action_id"] == "array.wait_for_completions"
     } == {"harness"}
+
+
+def test_ten_stock_compact_plan_retains_only_six_named_milestones():
+    specs = tuple(
+        StockPassSpec(
+            stock_id=f"stock-{index}", printer_head_id=f"head-{index}",
+            pulse_width_us=1300 + index * 10, pressure_psi=1.2,
+            frequency_hz=20, initial_volume_uL=1000.0,
+            expected_volume_nL=9.0, expected_completion_count=384 * (index + 1),
+            expected_plan_state="completed" if index == 9 else "active",
+            ready_milestone="ready" if index == 0 else None,
+            printing_milestone="printing" if index == 0 else None,
+            completed_milestone=("mid_array" if index == 4 else "completed" if index == 9 else None),
+            staging_slot=0, bind_identity=True, enable_pressure_regulation=index == 0,
+            validate_pass_boundary=True, return_head=True,
+        )
+        for index in range(10)
+    )
+    plan = normalized_stock_pass_steps(specs)
+    action_ids = [row["action_id"] for row in plan]
+
+    assert action_ids.count("machine.configure_print_settings_via_ui") == 10
+    assert action_ids.count("array.start_via_ui") == 10
+    assert action_ids.count("validation.stock_pass_boundary") == 10
+    assert action_ids.count("artifact.capture_milestone") == 4
 
 
 def test_stock_values_and_order_vary_without_new_runner_code():

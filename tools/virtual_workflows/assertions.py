@@ -42,6 +42,8 @@ class ExecutionLifecycleExpectation:
     fixture: Mapping[str, Any]
     expected_well_ids: tuple[str, ...]
     expected_stock_ids: tuple[str, ...]
+    expected_pulse_widths_us: tuple[int, ...] = ()
+    expected_volumes_nL: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.expected_well_ids or not self.expected_stock_ids:
@@ -50,6 +52,12 @@ class ExecutionLifecycleExpectation:
             raise ValueError("expected well IDs must be unique")
         if len(set(self.expected_stock_ids)) != len(self.expected_stock_ids):
             raise ValueError("expected stock IDs must be unique")
+        for label, values in (
+            ("pulse widths", self.expected_pulse_widths_us),
+            ("volumes", self.expected_volumes_nL),
+        ):
+            if values and len(values) != len(self.expected_stock_ids):
+                raise ValueError(f"expected {label} must match stock cardinality")
 
 
 @dataclass(frozen=True)
@@ -438,10 +446,24 @@ def multi_stock_prepared_assertion(
                 context.experiment_model.is_authoritative_execution_runtime_active()
             ),
         }
+        targets = [
+            int(target.target_dispenses)
+            for well in plan.wells
+            for target in well.dispenses
+        ]
+        expected_entries = len(expected_well_ids) * len(expected_stock_ids)
+        evidence.update({
+            "target_entry_count": len(targets),
+            "target_dispense_count": sum(targets),
+            "target_dispenses_per_entry": sorted(set(targets)),
+        })
         return (
             len(observed_wells) == len(expected_well_ids)
             and set(observed_wells) == set(expected_well_ids)
             and observed_stock_ids == expected_stock_ids
+            and len(targets) == expected_entries
+            and sum(targets) == expected_entries
+            and set(targets) == {1}
             and str(plan.state.value) == "prepared"
             and not evidence["runtime_active"],
             evidence,
@@ -465,7 +487,7 @@ def execution_lifecycle_assertions(
     starvation_events: list[Mapping[str, Any]],
     observer: Mapping[str, Any],
 ) -> tuple[AssertionResult, ...]:
-    """Return the eight read-only execution assertions for the 24x2 journey."""
+    """Return cardinality-neutral read-only multi-stock execution assertions."""
 
     fixture = expectation.fixture
     expected_well_ids = expectation.expected_well_ids
@@ -489,6 +511,11 @@ def execution_lifecycle_assertions(
     progress = dict(observer.get("progress_snapshot") or {})
     durable = dict(observer.get("durable_io_samples_ms") or {})
     expected_count = int(fixture["workload"]["completion_count"])
+    stock_count = len(expected_stock_ids)
+    boundary_counts = [
+        len(expected_well_ids) * (index + 1) for index in range(stock_count)
+    ]
+    boundary_states = ["active"] * max(0, stock_count - 1) + ["completed"]
     expected_pairs = {
         (stock_id, well_id)
         for stock_id in expected_stock_ids
@@ -521,37 +548,50 @@ def execution_lifecycle_assertions(
         "pass_boundaries": [dict(item) for item in pass_boundaries],
     }
     exchange_ok = (
-        len(head_staging) == 2
+        len(head_staging) == stock_count
         and [row.get("printer_head_id") for row in head_staging]
         == expected_head_ids
         and all(row.get("array_state_before") == "idle" for row in head_staging)
         and all(row.get("queue_drained_before") is True for row in head_staging)
         and head_staging[0].get("returned_previous") is False
-        and head_staging[1].get("returned_previous") is True
+        and all(row.get("returned_previous") is True for row in head_staging[1:])
     )
 
     boundary_ok = (
-        len(pass_boundaries) == 2
+        len(pass_boundaries) == stock_count
         and [row.get("observed_completed_count") for row in pass_boundaries]
-        == [len(expected_well_ids), expected_count]
+        == boundary_counts
         and [row.get("plan_state") for row in pass_boundaries]
-        == ["active", "completed"]
+        == boundary_states
         and all(row.get("controller_state") == "idle" for row in pass_boundaries)
         and all(row.get("queue_drained") is True for row in pass_boundaries)
         and all(row.get("checkpoint_state") == "clean" for row in pass_boundaries)
         and all(row.get("outstanding_intent_count") == 0 for row in pass_boundaries)
     )
 
+    from tools.sil.ejection_response import PulseAwareSyntheticEjectionModelV1
+    response = PulseAwareSyntheticEjectionModelV1()
+    expected_pulses = expectation.expected_pulse_widths_us or tuple(
+        int(stock["printer_head"]["print_pulse_width_us"])
+        for stock in fixture["stocks"]
+    )
+    expected_volumes = expectation.expected_volumes_nL or tuple(
+        response.predict_volume_nl(str(stock["printing_mode"]), expected_pulses[index])
+        for index, stock in enumerate(fixture["stocks"])
+    )
     settings = [
         {
-            "print_pulse_width_us": int(stock["printer_head"]["print_pulse_width_us"]),
+            "print_pulse_width_us": int(expected_pulses[index]),
+            "fixture_print_pulse_width_us": int(stock["printer_head"]["print_pulse_width_us"]),
             "print_pressure_psi": float(stock["printer_head"]["print_pressure_psi"]),
-            "effective_volume_nL": float(stock["droplet_volume_nL"]),
+            "prepared_volume_nL": float(stock["prepared_droplet_volume_nL"]),
+            "fixture_design_volume_nL": float(stock["droplet_volume_nL"]),
+            "effective_volume_nL": float(expected_volumes[index]),
         }
-        for stock in fixture["stocks"]
+        for index, stock in enumerate(fixture["stocks"])
     ]
     plan_stocks = {stock.stock_id: stock for stock in plan.stocks}
-    settings_ok = len(plan_stocks) == 2 and all(
+    settings_ok = len(plan_stocks) == stock_count and len(head_staging) == stock_count and all(
         stock_id in plan_stocks
         and bool(plan_stocks[stock_id].calibration_record_key)
         and abs(
@@ -572,7 +612,8 @@ def execution_lifecycle_assertions(
     observed = [well for well in completed_wells if well in set(expected_well_ids)]
     completion_ok = (
         len(observed) == expected_count
-        and Counter(observed) == Counter({well: 2 for well in expected_well_ids})
+        and Counter(observed)
+        == Counter({well: stock_count for well in expected_well_ids})
     )
     begin_ids = [row.get("intent_id") for row in begins]
     attach_ids = [row.get("intent_id") for row in attachments]
@@ -597,6 +638,12 @@ def execution_lifecycle_assertions(
             durable.get("atomic_replace", {}).get("persistence.save_resume", [])
         )
         == expected_count * 3
+        and len(durable.get("fsync", {}).get("persistence.write_progress", []))
+        == expected_count
+        and len(
+            durable.get("atomic_replace", {}).get("persistence.write_progress", [])
+        )
+        == expected_count
         and observer.get("restored") is True
     )
     durability = {
@@ -975,54 +1022,140 @@ def regression_evidence_assertions(
     )
 
 
+def sustained_evidence_assertions(
+    *, snapshot: Mapping[str, Any], expected_count: int
+) -> tuple[AssertionResult, ...]:
+    """Evaluate the frozen stress thresholds without turning warnings into failures."""
+
+    responsiveness = dict(snapshot.get("responsiveness") or {})
+    event_gap = dict(responsiveness.get("event_loop_gap_ms") or {})
+    scheduling = dict(responsiveness.get("scheduling_lateness_ms") or {})
+    pressure = dict(
+        (responsiveness.get("pressure_render_assessment") or {}).get(
+            "active_render_interval_ms"
+        ) or {}
+    )
+    metrics_present = (
+        event_gap.get("count", 0) > 0
+        and scheduling.get("count", 0) > 0
+        and pressure.get("count", 0) > 0
+        and responsiveness.get("shutdown")
+        == {"timer_active": False, "observer_thread_alive": False}
+    )
+    fail_reasons = []
+    if float(event_gap.get("maximum", 0.0)) > 1000.0:
+        fail_reasons.append("event_loop_gap_over_1000_ms")
+    if float(pressure.get("maximum", 0.0)) > 1000.0:
+        fail_reasons.append("pressure_render_gap_over_1000_ms")
+    if float(scheduling.get("p99", 0.0)) > 250.0:
+        fail_reasons.append("scheduling_p99_over_250_ms")
+    warning_reasons = []
+    if not fail_reasons and float(event_gap.get("maximum", 0.0)) > 250.0:
+        warning_reasons.append("event_loop_gap_over_250_ms")
+    if not fail_reasons and float(pressure.get("maximum", 0.0)) > 250.0:
+        warning_reasons.append("pressure_render_gap_over_250_ms")
+    assessment = {
+        "decision": "fail" if fail_reasons else "warning" if warning_reasons else "pass",
+        "failure_reasons": fail_reasons,
+        "warning_reasons": warning_reasons,
+        "event_loop_gap_ms": event_gap,
+        "scheduling_lateness_ms": scheduling,
+        "pressure_render_interval_ms": pressure,
+        "expected_completion_count": int(expected_count),
+    }
+    resources = dict(snapshot.get("resources") or {})
+    resource_values = dict(resources.get("values") or {})
+    growth = resource_values.get("rss_growth_bytes")
+    ratio = resource_values.get("rss_growth_ratio")
+    resource_warning = bool(
+        growth is not None and ratio is not None
+        and int(growth) > 100 * 1024 * 1024 and float(ratio) > 1.25
+    )
+    resource_evidence = {
+        **resources,
+        "growth_assessment": {
+            "decision": "warning" if resource_warning else "pass",
+            "threshold_bytes": 100 * 1024 * 1024,
+            "threshold_ratio": 1.25,
+        },
+    }
+
+    def result(assertion_id: str, passed: bool, evidence: Mapping[str, Any], sources: tuple[str, ...]) -> AssertionResult:
+        return AssertionResult(
+            assertion_id, "terminal", "pass" if passed else "fail", sources,
+            dict(evidence), None if passed else "sustained evidence did not satisfy the frozen contract"
+        )
+
+    injected = dict(snapshot.get("injected_stall_assessment") or {})
+    return (
+        result("ui.injected_stall_detected", injected.get("decision") in {"not_requested", "detected"}, injected, ("ui", "harness")),
+        result("ui.responsiveness_metrics_present", metrics_present, {**assessment, "shutdown": responsiveness.get("shutdown")}, ("ui", "harness")),
+        result("ui.sustained_responsiveness_acceptable", metrics_present and not fail_reasons, assessment, ("ui", "harness")),
+        result("resources.metrics_present", resources.get("status") in {"measured", "partial"} and resource_values.get("sample_count", 0) > 0, resource_evidence, ("harness",)),
+    )
+
+
 def synthetic_calibration_contract(
-    fixture: Mapping[str, Any], action_results: list[Mapping[str, Any]]
+    fixture: Mapping[str, Any],
+    action_results: list[Mapping[str, Any]],
+    *,
+    expected_pulse_widths_us: tuple[int, ...] = (),
 ) -> dict[str, Any]:
     """Project the selected normal-UI synthetic result without mutation."""
 
-    def action_evidence(action_id: str) -> dict[str, Any]:
-        return next(
-            (
-                dict(row.get("evidence") or {})
-                for row in action_results
-                if row.get("action_id") == action_id
-            ),
-            {},
-        )
+    def action_evidence(action_id: str) -> list[dict[str, Any]]:
+        return [
+            dict(row.get("evidence") or {})
+            for row in action_results if row.get("action_id") == action_id
+        ]
 
-    selected = action_evidence("calibration.select_via_ui")
-    applied = action_evidence("calibration.apply_via_ui")
-    preview = dict(applied.get("preview") or {}).get("payload") or {}
-    stock = fixture["stock"]
-    head = fixture["printer_head"]
+    selected_rows = action_evidence("calibration.select_via_ui")
+    applied_rows = action_evidence("calibration.apply_via_ui")
+    stocks = list(fixture.get("stocks") or [fixture["stock"]])
     from tools.sil.ejection_response import PulseAwareSyntheticEjectionModelV1
-
-    expected_measured = PulseAwareSyntheticEjectionModelV1().predict_volume_nl(
-        stock["printing_mode"], head["print_pulse_width_us"]
-    )
-    evidence = {
-        "prepared_volume_nL": stock["prepared_droplet_volume_nL"],
-        "fixture_design_volume_nL": stock["droplet_volume_nL"],
-        "expected_synthetic_measured_volume_nL": expected_measured,
-        "selected_source_volume_nL": selected.get("source_volume_nL"),
-        "selected_measured_volume_nL": selected.get("mean_nL"),
-        "selected_pulse_width_us": selected.get("pw_us"),
-        "selected_pressure_psi": selected.get("pressure_psi"),
-        "applied_volume_nL": preview.get("new_droplet_nL"),
-    }
-    evidence["valid"] = (
-        float(selected.get("source_volume_nL", -1))
-        == float(stock["prepared_droplet_volume_nL"])
-        and int(selected.get("pw_us", -1)) == int(head["print_pulse_width_us"])
-        and abs(
-            float(selected.get("pressure_psi", -1))
-            - float(head["print_pressure_psi"])
+    model = PulseAwareSyntheticEjectionModelV1()
+    contracts = []
+    for index, stock in enumerate(stocks):
+        selected = selected_rows[index] if index < len(selected_rows) else {}
+        applied = applied_rows[index] if index < len(applied_rows) else {}
+        preview = dict(applied.get("preview") or {}).get("payload") or {}
+        head = stock.get("printer_head") or fixture.get("printer_head") or {}
+        expected_pulse = (
+            int(expected_pulse_widths_us[index])
+            if index < len(expected_pulse_widths_us)
+            else int(head["print_pulse_width_us"])
         )
-        <= 0.001
-        and float(selected.get("mean_nL", -1)) == expected_measured
-        and float(preview.get("new_droplet_nL", -1)) == expected_measured
-    )
-    return evidence
+        expected_measured = model.predict_volume_nl(
+            stock["printing_mode"], expected_pulse
+        )
+        evidence = {
+            "stock_id": (
+                f"{stock['factor_name']}_{float(stock['concentration']):.2f}_{stock['units']}"
+                if all(key in stock for key in ("factor_name", "concentration", "units"))
+                else None
+            ),
+            "prepared_volume_nL": stock["prepared_droplet_volume_nL"],
+            "fixture_design_volume_nL": stock["droplet_volume_nL"],
+            "fixture_print_pulse_width_us": head["print_pulse_width_us"],
+            "expected_synthetic_measured_volume_nL": expected_measured,
+            "selected_source_volume_nL": selected.get("source_volume_nL"),
+            "selected_measured_volume_nL": selected.get("mean_nL"),
+            "selected_pulse_width_us": selected.get("pw_us"),
+            "selected_pressure_psi": selected.get("pressure_psi"),
+            "applied_volume_nL": preview.get("new_droplet_nL"),
+        }
+        evidence["valid"] = (
+            float(selected.get("source_volume_nL", -1)) == float(stock["prepared_droplet_volume_nL"])
+            and int(selected.get("pw_us", -1)) == expected_pulse
+            and abs(float(selected.get("pressure_psi", -1)) - float(head["print_pressure_psi"])) <= 0.001
+            and float(selected.get("mean_nL", -1)) == expected_measured
+            and float(preview.get("new_droplet_nL", -1)) == expected_measured
+        )
+        contracts.append(evidence)
+    if len(contracts) == 1:
+        return contracts[0]
+    return {"valid": len(contracts) == len(stocks) and all(row["valid"] for row in contracts),
+            "stocks": contracts}
 
 
 def cleanup_assertion(teardown: Mapping[str, Any]) -> AssertionResult:

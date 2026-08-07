@@ -22,6 +22,24 @@ from tools.virtual_workflows.metrics import (
 from tools.virtual_workflows.progress_snapshot import non_durable_progress_samples
 
 
+def active_pressure_render_intervals_ms(
+    samples: list[Mapping[str, Any]],
+) -> tuple[list[float], int]:
+    """Return only adjacent render intervals within one active stock pass."""
+
+    intervals: list[float] = []
+    excluded_boundaries = 0
+    for left, right in zip(samples, samples[1:]):
+        if left.get("pass_index") != right.get("pass_index"):
+            excluded_boundaries += 1
+            continue
+        intervals.append(
+            (int(right["timestamp_ns"]) - int(left["timestamp_ns"]))
+            / 1_000_000.0
+        )
+    return intervals, excluded_boundaries
+
+
 def _result(
     assertion_id: str,
     passed: bool,
@@ -47,7 +65,11 @@ class RegressionEvidenceProfile:
         self.runtime = runtime
         self.context = runtime.context
         self.config = runtime.harness.config
-        expected_count = len(runtime.observations["expected_wells"])
+        expected_count = int(
+            runtime.fixture.get("workload", {}).get(
+                "completion_count", len(runtime.observations["expected_wells"])
+            )
+        )
         self.expected_count = expected_count
         self.phases = NamedPhaseRecorder(max_records=max(50_000, expected_count * 24))
         self.resources = ProcessResourceSampler(max_samples=100_000)
@@ -66,7 +88,7 @@ class RegressionEvidenceProfile:
         self.maximum_queue_depth: int | None = None
         self.starvation_events: list[dict[str, Any]] = []
         self.pressure_update_signal_count = 0
-        self.pressure_render_timestamps_ns: list[int] = []
+        self.pressure_render_samples: list[dict[str, int]] = []
         self.paint_event_count = 0
         self._paint_filter: Any = None
         self._connections: list[tuple[Any, Any]] = []
@@ -143,7 +165,13 @@ class RegressionEvidenceProfile:
 
         def pressure_rendered() -> None:
             if context.controller.get_array_run_state() == "running":
-                self.pressure_render_timestamps_ns.append(time.perf_counter_ns())
+                current_pass = self.runtime.observations.get("current_pass") or {}
+                self.pressure_render_samples.append(
+                    {
+                        "timestamp_ns": time.perf_counter_ns(),
+                        "pass_index": int(current_pass.get("index", -1)),
+                    }
+                )
 
         self.observer = ExecutionObserver(
             context,
@@ -153,6 +181,10 @@ class RegressionEvidenceProfile:
             inject_ms=self.config.inject_ui_stall_ms,
             inject_after_completion=self.config.inject_after_completion,
             pressure_rendered=pressure_rendered,
+            pass_context=lambda: {
+                "pass_index": int(self.runtime.observations.get("current_pass", {}).get("index", -1)) + 1,
+                "stock_id": self.runtime.observations.get("current_pass", {}).get("stock_id"),
+            } if int(self.runtime.observations.get("current_pass", {}).get("index", -1)) >= 0 else None,
             max_phase_records=max(50_000, self.expected_count * 24),
         )
         self.observer.install()
@@ -351,13 +383,9 @@ class RegressionEvidenceProfile:
             ),
         }
         pressure = phase_values.get("ui.pressure_render", {})
-        intervals = [
-            (right - left) / 1_000_000.0
-            for left, right in zip(
-                self.pressure_render_timestamps_ns,
-                self.pressure_render_timestamps_ns[1:],
-            )
-        ]
+        intervals, excluded_boundaries = active_pressure_render_intervals_ms(
+            self.pressure_render_samples
+        )
         responsiveness["well_plate_paint_event_count"] = self.paint_event_count
         responsiveness["pressure_render_assessment"] = {
             "update_signal_count": self.pressure_update_signal_count,
@@ -369,6 +397,7 @@ class RegressionEvidenceProfile:
                 self.context.view.pressure_box._pressure_render_timer.interval()
             ),
             "timer_active_after_teardown": False,
+            "excluded_inactive_pass_boundary_count": excluded_boundaries,
             "duration_ms": pressure,
             "active_render_interval_ms": summarize_samples(
                 intervals, bands_ms=(250.0, 1000.0)
@@ -392,7 +421,11 @@ class RegressionEvidenceProfile:
             },
             "injected_stall_assessment": injected,
             "calibration_contract": synthetic_calibration_contract(
-                self.runtime.fixture, self.context.action_results
+                self.runtime.fixture,
+                self.context.action_results,
+                expected_pulse_widths_us=tuple(
+                    self.runtime.observations.get("expected_pulse_widths_us", ())
+                ),
             ),
             "pi_evidence": dict(self.pi_evidence),
         }

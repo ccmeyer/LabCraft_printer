@@ -9,11 +9,13 @@ from typing import Any, Callable, Mapping, Sequence
 
 from tools.virtual_workflows.actions import (
     InteractionSurface,
+    ScenarioActionError,
     capture_milestone,
     observe_stopped_quiescence,
     request_soft_stop_via_ui,
     resume_array_via_ui,
     wait_for_array_state,
+    wait_for_completions,
 )
 from tools.virtual_workflows.composition import JourneyRuntime, SemanticStep
 from tools.virtual_workflows.page_drivers import (
@@ -134,9 +136,9 @@ class StockPassSpec:
     expected_volume_nL: float
     expected_completion_count: int
     expected_plan_state: str
-    ready_milestone: str
-    printing_milestone: str
-    completed_milestone: str
+    ready_milestone: str | None
+    printing_milestone: str | None
+    completed_milestone: str | None
     staging_slot: int | None = None
     start_dialog_titles: tuple[str, ...] = (
         "Start Print Array",
@@ -148,6 +150,7 @@ class StockPassSpec:
     return_head: bool = False
     detailed_evidence: bool = False
     include_frequency_evidence: bool = True
+    no_progress_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not self.stock_id or not self.printer_head_id:
@@ -164,15 +167,18 @@ class StockPassSpec:
             raise ValueError("staging slot must be non-negative")
         if not self.start_dialog_titles:
             raise ValueError("at least one start dialog is required")
-        if any(
-            not value
-            for value in (
-                self.ready_milestone,
-                self.printing_milestone,
-                self.completed_milestone,
+        if any(value is not None and not value for value in (
+            self.ready_milestone, self.printing_milestone, self.completed_milestone
+        )):
+            raise ValueError("stock-pass milestone names must be non-empty when present")
+        if (
+            self.no_progress_timeout_seconds is not None
+            and (
+                not math.isfinite(float(self.no_progress_timeout_seconds))
+                or float(self.no_progress_timeout_seconds) <= 0
             )
         ):
-            raise ValueError("stock-pass milestone names must be non-empty")
+            raise ValueError("no-progress timeout must be finite and positive")
 
 
 @dataclass(frozen=True)
@@ -404,8 +410,19 @@ def bind_head_identities(
     rack = RackDriver(runtime.context)
     bindings: list[dict[str, Any]] = []
     for spec in pass_specs:
-        slot = rack.find_slot_for_stock(spec.stock_id)
-        head = runtime.context.model.rack_model.slots[slot].printer_head
+        slot = rack.assigned_slot_for_stock(spec.stock_id)
+        if slot is not None:
+            head = runtime.context.model.rack_model.slots[slot].printer_head
+        else:
+            candidates = [
+                head for head in runtime.context.model.printer_head_manager.printer_heads
+                if str(head.get_stock_id()) == str(spec.stock_id)
+            ]
+            if len(candidates) != 1:
+                raise RuntimeError(
+                    f"expected one printer head for stock {spec.stock_id!r}; observed {len(candidates)}"
+                )
+            head = candidates[0]
         metadata = dict(head.get_identity_metadata())
         metadata["printer_head_id"] = spec.printer_head_id
         head.set_identity_metadata(**metadata)
@@ -459,15 +476,18 @@ def normalized_stock_pass_steps(
                 "calibration.generate_via_ui",
                 "calibration.select_via_ui",
                 "calibration.apply_via_ui",
-                "artifact.capture_milestone",
                 "array.start_via_ui",
-                "artifact.capture_milestone",
                 "array.wait_for_completions",
             ]
         )
+        if spec.ready_milestone:
+            action_ids.insert(action_ids.index("array.start_via_ui"), "artifact.capture_milestone")
+        if spec.printing_milestone:
+            action_ids.insert(action_ids.index("array.wait_for_completions"), "artifact.capture_milestone")
         if spec.validate_pass_boundary:
             action_ids.append("validation.stock_pass_boundary")
-        action_ids.append("artifact.capture_milestone")
+        if spec.completed_milestone:
+            action_ids.append("artifact.capture_milestone")
         if spec.return_head:
             action_ids.append("head.return_via_ui")
         normalized.extend(
@@ -611,11 +631,11 @@ def _stage_stock_head(
     context = runtime.context
     machine = MachineControlsDriver(context)
     rack = RackDriver(context)
-    slot = (
-        int(spec.staging_slot)
-        if spec.staging_slot is not None
-        else rack.find_slot_for_stock(spec.stock_id)
-    )
+    assigned_slot = rack.assigned_slot_for_stock(spec.stock_id)
+    slot = assigned_slot if assigned_slot is not None else spec.staging_slot
+    if slot is None:
+        raise RuntimeError(f"stock {spec.stock_id!r} is unassigned and has no staging slot")
+    slot = int(slot)
 
     def configure(_runtime: JourneyRuntime) -> Mapping[str, Any]:
         machine.configure_print_settings(
@@ -632,8 +652,11 @@ def _stage_stock_head(
         return evidence
 
     def set_volume(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        swap = None
+        if rack.assigned_slot_for_stock(spec.stock_id) is None:
+            swap = rack.swap_unassigned_head(slot, spec.stock_id)
         rack.set_slot_volume(slot, spec.initial_volume_uL)
-        return {"slot": slot, "volume_uL": spec.initial_volume_uL}
+        return {"slot": slot, "volume_uL": spec.initial_volume_uL, "swap": swap}
 
     def stage(_runtime: JourneyRuntime) -> Mapping[str, Any]:
         state_before = context.controller.get_array_run_state()
@@ -954,6 +977,28 @@ def _run_stock_pass(
         dialog_state["dialog"] = machine.open_calibration_dialog()
         return {"window_title": dialog_state["dialog"].windowTitle()}
 
+    returned_before_boundary = False
+
+    def return_active_head(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        rack.wait_until(
+            lambda: context.controller.get_array_run_state() == "idle"
+            and context.machine.check_if_all_completed(),
+            "idle drained stock-pass return boundary",
+            timeout_seconds=min(20.0, context.deadline.remaining_seconds()),
+        )
+        active = context.model.rack_model.get_gripper_printer_head()
+        head_id = str(active.printer_head_id)
+        stock_id = str(active.get_stock_id())
+        state_before = context.controller.get_array_run_state()
+        drained_before = bool(context.machine.check_if_all_completed())
+        rack.unload(slot)
+        returned_head_ids.append(head_id)
+        return {
+            "slot": slot, "stock_id": stock_id, "printer_head_id": head_id,
+            "array_state_before": state_before,
+            "queue_drained_before": drained_before, "returned": True,
+        }
+
     runtime.run_steps(
         (
             SemanticStep(
@@ -1013,16 +1058,12 @@ def _run_stock_pass(
             ),
         )
     )
-    capture_milestone(
-        context,
-        spec.ready_milestone,
-        evidence={
-            "stock_id": spec.stock_id,
-            "printer_head_id": spec.printer_head_id,
-        }
-        if spec.detailed_evidence
-        else None,
-    )
+    if spec.ready_milestone:
+        capture_milestone(
+            context, spec.ready_milestone,
+            evidence={"stock_id": spec.stock_id, "printer_head_id": spec.printer_head_id}
+            if spec.detailed_evidence else None,
+        )
 
     from PySide6 import QtWidgets
 
@@ -1040,13 +1081,43 @@ def _run_stock_pass(
             ),
         )
     )
-    capture_milestone(
-        context,
-        spec.printing_milestone,
-        evidence={"stock_id": spec.stock_id} if spec.detailed_evidence else None,
-    )
+    if spec.printing_milestone:
+        capture_milestone(
+            context, spec.printing_milestone,
+            evidence={"stock_id": spec.stock_id} if spec.detailed_evidence else None,
+        )
     if active_phase is not None:
         active_phase(runtime, spec)
+    if spec.return_head and spec.expected_plan_state == "completed":
+        from tools.virtual_workflows.execution_observer import (
+            capture_execution_liveness_snapshot,
+        )
+
+        wait_for_completions(
+            context,
+            completed_count=lambda: len(runtime.observations["completed_wells"]),
+            target_count=spec.expected_completion_count,
+            timeout_seconds=context.deadline.remaining_seconds(),
+            label="final stock-pass completion",
+            no_progress_timeout_seconds=spec.no_progress_timeout_seconds,
+            no_progress_evidence=lambda observed, stalled: (
+                capture_execution_liveness_snapshot(
+                    context,
+                    completed_count=observed,
+                    target_count=spec.expected_completion_count,
+                    stalled_seconds=stalled,
+                    pass_context={
+                        "pass_index": index + 1,
+                        "stock_id": spec.stock_id,
+                        "head_id": spec.printer_head_id,
+                    },
+                )
+            ),
+        )
+        runtime.run_steps((SemanticStep(
+            "head.return_via_ui", InteractionSurface.UI, return_active_head
+        ),))
+        returned_before_boundary = True
     runtime.run_steps(
         (
             SemanticStep(
@@ -1057,6 +1128,7 @@ def _run_stock_pass(
                     expected_count=spec.expected_completion_count,
                     expected_plan_state=spec.expected_plan_state,
                     strict=spec.validate_pass_boundary,
+                    no_progress_timeout_seconds=spec.no_progress_timeout_seconds,
                 ),
             ),
         )
@@ -1076,41 +1148,21 @@ def _run_stock_pass(
                 ),
             )
         )
-    capture_milestone(
-        context,
-        spec.completed_milestone,
-        evidence={
-            "stock_id": spec.stock_id,
-            "completion_count": spec.expected_completion_count,
-        }
-        if spec.detailed_evidence
-        else None,
-    )
+    if spec.completed_milestone:
+        capture_milestone(
+            context, spec.completed_milestone,
+            evidence={"stock_id": spec.stock_id,
+                      "completion_count": spec.expected_completion_count}
+            if spec.detailed_evidence else None,
+        )
 
-    if spec.return_head:
-        def return_head(_runtime: JourneyRuntime) -> Mapping[str, Any]:
-            active = context.model.rack_model.get_gripper_printer_head()
-            head_id = str(active.printer_head_id)
-            stock_id = str(active.get_stock_id())
-            state_before = context.controller.get_array_run_state()
-            drained_before = bool(context.machine.check_if_all_completed())
-            rack.unload(slot)
-            returned_head_ids.append(head_id)
-            return {
-                "slot": slot,
-                "stock_id": stock_id,
-                "printer_head_id": head_id,
-                "array_state_before": state_before,
-                "queue_drained_before": drained_before,
-                "returned": True,
-            }
-
+    if spec.return_head and not returned_before_boundary:
         runtime.run_steps(
             (
                 SemanticStep(
                     "head.return_via_ui",
                     InteractionSurface.UI,
-                    return_head,
+                    return_active_head,
                 ),
             )
         )
@@ -1122,14 +1174,18 @@ def wait_for_execution_boundary(
     expected_count: int,
     expected_plan_state: str,
     strict: bool,
+    no_progress_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     context = runtime.context
     completed_wells = runtime.observations["completed_wells"]
     deadline = context.clock() + context.deadline.remaining_seconds()
+    last_progress_count = len(completed_wells)
+    last_progress_at = context.clock()
 
     def visible_progress_settled() -> bool:
         guide = context.view.experiment_task_list
-        expected_text = f"{int(expected_count)}/{int(expected_count)} wells"
+        pass_well_count = len(runtime.observations.get("expected_wells", ()))
+        expected_text = f"{pass_well_count}/{pass_well_count} wells"
         return any(
             expected_text in str(section.get("button").text())
             for section in getattr(guide, "_sections", {}).values()
@@ -1138,6 +1194,42 @@ def wait_for_execution_boundary(
 
     while context.clock() < deadline:
         context.pump_events()
+        observed_count = len(completed_wells)
+        if observed_count > last_progress_count:
+            last_progress_count = observed_count
+            last_progress_at = context.clock()
+        stalled_seconds = context.clock() - last_progress_at
+        if (
+            no_progress_timeout_seconds is not None
+            and observed_count < int(expected_count)
+            and stalled_seconds >= float(no_progress_timeout_seconds)
+        ):
+            from tools.virtual_workflows.execution_observer import (
+                capture_execution_liveness_snapshot,
+            )
+
+            current_pass = dict(runtime.observations.get("current_pass") or {})
+            raise ScenarioActionError(
+                "array.wait_for_completions",
+                "no progress while waiting for stock-pass execution boundary",
+                stage="no_progress",
+                evidence={
+                    "target_count": int(expected_count),
+                    "observed_count": observed_count,
+                    "last_progress_count": last_progress_count,
+                    "stalled_seconds": stalled_seconds,
+                    "liveness": capture_execution_liveness_snapshot(
+                        context,
+                        completed_count=observed_count,
+                        target_count=expected_count,
+                        stalled_seconds=stalled_seconds,
+                        pass_context={
+                            "pass_index": int(current_pass.get("index", -1)) + 1,
+                            "stock_id": current_pass.get("stock_id"),
+                        },
+                    ),
+                },
+            )
         plan = context.experiment_model.get_execution_plan_snapshot()
         if (
             len(completed_wells) == int(expected_count)
@@ -1194,8 +1286,8 @@ def validate_stock_pass_boundary(
         "queue_drained": bool(context.machine.check_if_all_completed()),
         "expected_plan_state": spec.expected_plan_state,
         "plan_state": str(plan.state.value),
-        "active_stock_id": str(active.get_stock_id()),
-        "active_printer_head_id": str(active.printer_head_id),
+        "active_stock_id": str(active.get_stock_id()) if active is not None else None,
+        "active_printer_head_id": str(active.printer_head_id) if active is not None else None,
         "checkpoint_state": str(resume.state),
         "outstanding_intent_count": len(resume.intents),
     }
@@ -1205,8 +1297,10 @@ def validate_stock_pass_boundary(
             evidence["controller_state"] == "idle",
             evidence["queue_drained"],
             evidence["plan_state"] == spec.expected_plan_state,
-            evidence["active_stock_id"] == spec.stock_id,
-            evidence["active_printer_head_id"] == spec.printer_head_id,
+            (
+                evidence["active_stock_id"] == spec.stock_id
+                and evidence["active_printer_head_id"] == spec.printer_head_id
+            ) if spec.expected_plan_state != "completed" else active is None,
             evidence["checkpoint_state"] == "clean",
             evidence["outstanding_intent_count"] == 0,
         )

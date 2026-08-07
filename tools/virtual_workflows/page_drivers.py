@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import math
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from PySide6 import QtCore, QtTest, QtWidgets
+
+
+@contextmanager
+def _expected_dialogs(app: Any, *specs: tuple[str, str]):
+    """Temporarily register dialogs that one driver is actively controlling."""
+
+    registry = getattr(app, "_sil_expected_dialog_specs", [])
+    setattr(app, "_sil_expected_dialog_specs", registry)
+    entries = [{"title": str(title), "type": str(kind)} for title, kind in specs]
+    registry.extend(entries)
+    try:
+        yield
+    finally:
+        for entry in entries:
+            if entry in registry:
+                registry.remove(entry)
 
 
 class _QTestSurfaceDriver:
@@ -43,6 +60,187 @@ class _QTestSurfaceDriver:
         widget.setFocus()
         QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
         self.context.pump_events()
+
+    def select_combo_index(
+        self, combo: Any, index: int, *, selected: Callable[[], bool] | None = None
+    ) -> None:
+        """Select one popup item with one safe retry when no write occurs."""
+
+        target_index = int(index)
+        if combo is None or not combo.isVisible() or not combo.isEnabled():
+            raise RuntimeError("requested combobox is not visible and enabled")
+        if target_index < 0 or target_index >= combo.count():
+            raise RuntimeError(f"combobox index is out of range: {target_index}")
+        target_text = str(combo.itemText(target_index))
+        activations: list[int] = []
+        record_activation = lambda value: activations.append(int(value))
+        combo.activated.connect(record_activation)
+        last_attempt = "not started"
+
+        def close_popup(popup: Any, description: str) -> None:
+            combo.hidePopup()
+            self.context.pump_events()
+            self.wait_until(
+                lambda: not popup.isVisible(),
+                description,
+                timeout_seconds=1.0,
+            )
+
+        def popup_diagnostics(
+            popup: Any,
+            rect: Any,
+            *,
+            attempt: int,
+            index: int,
+            attempt_activations: list[int],
+            postcondition_met: bool,
+        ) -> str:
+            active = self.app.activeWindow()
+            active_name = type(active).__name__ if active is not None else None
+            global_center = (
+                popup.viewport().mapToGlobal(rect.center()) if rect.isValid() else None
+            )
+            widget_at_target = (
+                self.app.widgetAt(global_center) if global_center is not None else None
+            )
+            focus = self.app.focusWidget()
+            return (
+                f"attempt={attempt}, index={index}, "
+                f"current_index={combo.currentIndex()}, "
+                f"current_text={combo.currentText()!r}, "
+                f"activations={attempt_activations}, "
+                f"postcondition={postcondition_met}, "
+                f"popup_visible={popup.isVisible()}, "
+                f"popup_geometry={popup.geometry().getRect()}, "
+                f"viewport_geometry={popup.viewport().rect().getRect()}, "
+                f"target_rect={rect.getRect() if rect.isValid() else None}, "
+                f"target_global_center="
+                f"{(global_center.x(), global_center.y()) if global_center else None}, "
+                f"widget_at_target="
+                f"{type(widget_at_target).__name__ if widget_at_target else None}, "
+                f"target_is_viewport={widget_at_target is popup.viewport()}, "
+                f"index_at_target={popup.indexAt(rect.center()).row()}, "
+                f"popup_current_index={popup.currentIndex().row()}, "
+                f"focus_widget={type(focus).__name__ if focus else None}, "
+                f"active_window={active_name}"
+            )
+
+        try:
+            for attempt in (1, 2):
+                if selected is not None and selected():
+                    return
+                popup = combo.view()
+                if popup.isVisible():
+                    close_popup(popup, "stale combobox popup cleanup")
+                matches = [
+                    index
+                    for index in range(combo.count())
+                    if combo.itemText(index) == target_text
+                ]
+                if len(matches) != 1:
+                    raise RuntimeError(
+                        f"combobox target changed: {target_text!r}; indices={matches}"
+                    )
+                target_index = matches[0]
+                activation_offset = len(activations)
+                QtTest.QTest.mouseClick(combo, QtCore.Qt.MouseButton.LeftButton)
+                self.context.pump_events()
+                self.wait_until(popup.isVisible, "combobox popup")
+                model_index = combo.model().index(
+                    target_index,
+                    combo.modelColumn(),
+                    combo.rootModelIndex(),
+                )
+                popup.scrollTo(model_index)
+                self.context.pump_events()
+                self.wait_until(
+                    lambda: popup.visualRect(model_index).isValid()
+                    and popup.visualRect(model_index).intersects(
+                        popup.viewport().rect()
+                    ),
+                    "combobox target geometry",
+                    timeout_seconds=1.0,
+                )
+                rect = popup.visualRect(model_index)
+                if not rect.isValid():
+                    raise RuntimeError(f"combobox item is not visible: {target_index}")
+                popup.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
+                self.context.pump_events()
+                # QComboBox's popup container suppresses mouse releases for the
+                # application's double-click interval after a click opens it.
+                # Wait out that bounded guard so the distinct item click is not
+                # mistaken for the release that opened the popup.
+                release_guard_ms = min(
+                    max(int(self.app.doubleClickInterval()), 0) + 25,
+                    750,
+                )
+                QtTest.QTest.qWait(release_guard_ms)
+                viewport_rect = popup.viewport().rect()
+                neutral = (
+                    viewport_rect.topLeft()
+                    if rect.contains(viewport_rect.bottomRight())
+                    else viewport_rect.bottomRight()
+                )
+                QtTest.QTest.mouseMove(popup.viewport(), neutral)
+                QtTest.QTest.qWait(25)
+                QtTest.QTest.mouseMove(popup.viewport(), rect.center())
+                QtTest.QTest.qWait(25)
+                QtTest.QTest.mousePress(
+                    popup.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=rect.center()
+                )
+                QtTest.QTest.qWait(25)
+                QtTest.QTest.mouseRelease(
+                    popup.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=rect.center()
+                )
+                self.context.pump_events()
+
+                settle_deadline = (
+                    time.monotonic()
+                    + self.context.deadline.remaining_seconds(1.0)
+                )
+                while time.monotonic() < settle_deadline:
+                    self.context.pump_events()
+                    new_activations = activations[activation_offset:]
+                    postcondition_met = (
+                        bool(selected()) if selected is not None else False
+                    )
+                    if postcondition_met or new_activations:
+                        break
+                    QtTest.QTest.qWait(5)
+                self.context.pump_events()
+                new_activations = activations[activation_offset:]
+                postcondition_met = (
+                    bool(selected()) if selected is not None else False
+                )
+                last_attempt = popup_diagnostics(
+                    popup,
+                    rect,
+                    attempt=attempt,
+                    index=target_index,
+                    attempt_activations=new_activations,
+                    postcondition_met=postcondition_met,
+                )
+                if postcondition_met or (
+                    selected is None and target_index in new_activations
+                ):
+                    close_popup(popup, "combobox popup cleanup after selection")
+                    return
+                if new_activations:
+                    close_popup(popup, "combobox popup cleanup after ambiguous write")
+                    raise RuntimeError(
+                        "combobox activation had no postcondition: "
+                        f"target={target_text!r}; {last_attempt}"
+                    )
+                close_popup(popup, "combobox popup cleanup before retry")
+            raise RuntimeError(
+                "combobox selection produced no activation: "
+                f"target={target_text!r}; {last_attempt}"
+            )
+        finally:
+            try:
+                combo.activated.disconnect(record_activation)
+            except (RuntimeError, TypeError):
+                pass
 
     def replace_spin_value(self, widget: Any, value: int | float) -> None:
         if not widget.isVisible() or not widget.isEnabled():
@@ -112,9 +310,13 @@ class _QTestSurfaceDriver:
             if len(handled) < len(expected):
                 QtCore.QTimer.singleShot(0, inspect)
 
-        QtCore.QTimer.singleShot(0, inspect)
-        self.click(widget)
-        self.context.pump_events()
+        with _expected_dialogs(
+            self.app,
+            *((title, "QMessageBox") for title, _button in expected),
+        ):
+            QtCore.QTimer.singleShot(0, inspect)
+            self.click(widget)
+            self.context.pump_events()
         if state["error"] is not None:
             raise state["error"]
         if len(handled) != len(expected):
@@ -198,6 +400,7 @@ class MachineControlsDriver(_QTestSurfaceDriver):
             ),
             "print-pressure regulation",
         )
+        self.wait_until(self.context.machine.check_if_all_completed, "pressure regulation command queue")
 
     def open_calibration_dialog(self) -> Any:
         button = self.view.pressure_box.calibrate_pressure_button
@@ -1066,11 +1269,12 @@ class RackDriver(_QTestSurfaceDriver):
                 if isinstance(active, QtWidgets.QDialog) and active.isVisible():
                     active.reject()
 
-        QtCore.QTimer.singleShot(0, drive_dialog)
-        QtTest.QTest.mouseDClick(
-            volume_label,
-            QtCore.Qt.MouseButton.LeftButton,
-        )
+        with _expected_dialogs(self.app, ("Edit Volume", "VolumeDialog")):
+            QtCore.QTimer.singleShot(0, drive_dialog)
+            QtTest.QTest.mouseDClick(
+                volume_label,
+                QtCore.Qt.MouseButton.LeftButton,
+            )
         if state["error"] is not None:
             raise state["error"]
         if not state["entered"]:
@@ -1114,6 +1318,72 @@ class RackDriver(_QTestSurfaceDriver):
             )
         return matches[0]
 
+    def assigned_slot_for_stock(self, stock_id: str) -> int | None:
+        matches = [
+            index
+            for index, slot in enumerate(self.context.model.rack_model.slots)
+            if slot.printer_head is not None
+            and str(slot.printer_head.get_stock_id()) == str(stock_id)
+        ]
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"expected at most one rack slot for stock {stock_id!r}; observed {matches}"
+            )
+        return matches[0] if matches else None
+
+    def swap_unassigned_head(self, slot_index: int, stock_id: str) -> Mapping[str, Any]:
+        """Select one unassigned stock head through the normal Swap combobox."""
+
+        slot_index = int(slot_index)
+        rack_model = self.context.model.rack_model
+        if rack_model.get_gripper_printer_head() is not None:
+            raise RuntimeError("cannot swap a rack head while the gripper is occupied")
+        if self.context.controller.get_array_run_state() not in {"idle", "resume_ready"}:
+            raise RuntimeError("cannot swap a rack head while the array is active")
+        if not self.context.machine.check_if_all_completed():
+            raise RuntimeError("cannot swap a rack head before the command queue drains")
+
+        manager = self.context.model.printer_head_manager
+        matches = [
+            head
+            for head in manager.get_unassigned_printer_heads()
+            if str(head.get_stock_id()) == str(stock_id)
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"expected one unassigned head for stock {stock_id!r}; observed {len(matches)}"
+            )
+        target = matches[0]
+        previous = rack_model.slots[slot_index].printer_head
+        combo = self.view.rack_box.slot_widgets[slot_index][3]
+        label = target.get_display_stock_name()
+        indices = [index for index in range(combo.count()) if combo.itemText(index) == label]
+        if len(indices) != 1:
+            raise RuntimeError(
+                f"expected one Swap option for stock {stock_id!r}; observed {indices}"
+            )
+        if not combo.isVisible() or not combo.isEnabled():
+            raise RuntimeError("rack Swap control must be visible and enabled")
+
+        self.select_combo_index(
+            combo,
+            indices[0],
+            selected=lambda: rack_model.slots[slot_index].printer_head is target,
+        )
+        self.wait_until(
+            lambda: rack_model.slots[slot_index].printer_head is target,
+            "rack head swap",
+        )
+        return {
+            "slot": slot_index,
+            "stock_id": str(stock_id),
+            "printer_head_id": str(target.printer_head_id),
+            "replaced_printer_head_id": (
+                str(previous.printer_head_id) if previous is not None else None
+            ),
+            "control": "rack_swap_combobox",
+        }
+
     def unload(self, slot_index: int) -> None:
         rack = self.view.rack_box
         button = rack.slot_widgets[int(slot_index)][2]
@@ -1153,7 +1423,7 @@ class ArrayDriver(_QTestSurfaceDriver):
         self,
         expected_dialogs: list[tuple[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        return self.click_with_message_boxes(
+        dialogs = self.click_with_message_boxes(
             self.control,
             expected_dialogs or [
                 ("Start Print Array", QtWidgets.QMessageBox.StandardButton.Yes),
@@ -1163,6 +1433,11 @@ class ArrayDriver(_QTestSurfaceDriver):
                 ),
             ],
         )
+        self.wait_until(
+            lambda: self.context.controller.get_array_run_state() == "running",
+            "started array running state",
+        )
+        return dialogs
 
     def request_soft_stop(self) -> dict[str, Any]:
         """Click the running array control; trigger timing remains journey policy."""
@@ -1303,9 +1578,16 @@ class CalibrationDialogDriver:
         profile_id = str(button.property("synthetic_profile_id") or "")
         availability = getattr(self.dialog, "synthetic_availability_callback", None)
         readiness = dict(availability(profile_id) or {}) if callable(availability) else {}
-        if readiness.get("correctable"):
-            self._schedule_profile_preflight_acceptance(print_profile_id)
-        QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+        preflight_expected = bool(readiness.get("correctable"))
+        with _expected_dialogs(
+            self.app,
+            *(("Calibration Settings Check", "CalibrationModePreflightDialog"),)
+            if preflight_expected
+            else (),
+        ):
+            if preflight_expected:
+                self._schedule_profile_preflight_acceptance(print_profile_id)
+            QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
 
         generated: dict[str, Any] = {}
 
@@ -1440,11 +1722,15 @@ class CalibrationDialogDriver:
             if steps:
                 QtCore.QTimer.singleShot(0, handle_modal)
 
-        QtCore.QTimer.singleShot(0, handle_modal)
-        QtTest.QTest.mouseClick(
-            self.dialog.bridge_apply_btn,
-            QtCore.Qt.MouseButton.LeftButton,
-        )
+        with _expected_dialogs(
+            self.app,
+            *((title, "QMessageBox") for title, _button in steps),
+        ):
+            QtCore.QTimer.singleShot(0, handle_modal)
+            QtTest.QTest.mouseClick(
+                self.dialog.bridge_apply_btn,
+                QtCore.Qt.MouseButton.LeftButton,
+            )
         if state["error"] is not None:
             raise state["error"]
         if steps:

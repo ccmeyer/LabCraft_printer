@@ -235,6 +235,93 @@ def test_wait_action_uses_one_global_deadline_and_records_timeout(tmp_path):
     assert context.action_results[0]["failure_stage"] == "timeout"
 
 
+def test_completion_wait_resets_rolling_no_progress_deadline(tmp_path):
+    context, clock, _ = _context(tmp_path, timeout_seconds=1.0)
+    completed = {"value": 0}
+
+    def advancing_sleep(seconds):
+        clock.sleep(seconds)
+        if clock.value >= 100.004:
+            completed["value"] = 1
+        if clock.value >= 100.008:
+            completed["value"] = 2
+
+    context.sleep = advancing_sleep
+    result = wait_for_completions(
+        context,
+        completed_count=lambda: completed["value"],
+        target_count=2,
+        timeout_seconds=1.0,
+        label="rolling progress",
+        no_progress_timeout_seconds=0.005,
+    )
+
+    assert result["status"] == "pass"
+    assert result["evidence"]["observed_count"] == 2
+
+
+def test_completion_wait_fails_closed_with_no_progress_evidence(tmp_path):
+    context, _, _ = _context(tmp_path, timeout_seconds=1.0)
+
+    with pytest.raises(ScenarioActionError, match="no progress") as caught:
+        wait_for_completions(
+            context,
+            completed_count=lambda: 7,
+            target_count=8,
+            timeout_seconds=1.0,
+            label="stalled completion",
+            no_progress_timeout_seconds=0.005,
+            no_progress_evidence=lambda observed, stalled: {
+                "observed": observed,
+                "stalled": stalled,
+            },
+        )
+
+    assert caught.value.stage == "no_progress"
+    assert caught.value.evidence["last_progress_count"] == 7
+    assert caught.value.evidence["stalled_seconds"] >= 0.005
+    assert caught.value.evidence["liveness"]["observed"] == 7
+    assert context.action_results[-1]["failure_stage"] == "no_progress"
+
+
+def test_completion_wait_preserves_stall_when_evidence_capture_fails(tmp_path):
+    context, _, _ = _context(tmp_path, timeout_seconds=1.0)
+
+    with pytest.raises(ScenarioActionError) as caught:
+        wait_for_completions(
+            context,
+            completed_count=lambda: 0,
+            target_count=1,
+            timeout_seconds=1.0,
+            label="stalled completion",
+            no_progress_timeout_seconds=0.003,
+            no_progress_evidence=lambda *_args: (_ for _ in ()).throw(
+                RuntimeError("snapshot unavailable")
+            ),
+        )
+
+    assert caught.value.stage == "no_progress"
+    assert caught.value.evidence["liveness"] == {
+        "capture_error": "RuntimeError: snapshot unavailable"
+    }
+
+
+def test_completion_wait_outer_deadline_precedes_long_progress_timeout(tmp_path):
+    context, _, _ = _context(tmp_path, timeout_seconds=0.004)
+
+    with pytest.raises(ScenarioActionError) as caught:
+        wait_for_completions(
+            context,
+            completed_count=lambda: 0,
+            target_count=1,
+            timeout_seconds=1.0,
+            label="outer deadline",
+            no_progress_timeout_seconds=10.0,
+        )
+
+    assert caught.value.stage == "timeout"
+
+
 def test_soft_stop_action_rejects_incorrect_array_state(tmp_path):
     context, _, _ = _context(tmp_path)
     context.app = object()

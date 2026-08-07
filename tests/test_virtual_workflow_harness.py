@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 from tools.virtual_workflows.harness import AutomationHarness, AutomationHarnessConfig
 from tools.virtual_workflows.journeys import (
@@ -90,6 +90,41 @@ def test_unexpected_dialog_check_allows_only_explicit_active_dialog(qapp, tmp_pa
     ]
     assert allowed.isVisible() is False
     allowed.deleteLater()
+
+
+def test_action_guard_rejects_blocking_unexpected_dialog_inside_exec(qapp, tmp_path):
+    harness = AutomationHarness(_config(tmp_path))
+    harness.context.app = qapp
+    harness.context.view = QtWidgets.QWidget()
+    harness.context.view.show()
+    fallback_fired = []
+
+    def reject_fallback():
+        active = qapp.activeModalWidget()
+        if isinstance(active, QtWidgets.QDialog):
+            fallback_fired.append(True)
+            active.reject()
+
+    def operation():
+        QtCore.QTimer.singleShot(1000, reject_fallback)
+        dialog = QtWidgets.QMessageBox(
+            QtWidgets.QMessageBox.Icon.Warning,
+            "Blocking unexpected dialog",
+            "The action guard must close this nested modal.",
+            parent=harness.context.view,
+        )
+        dialog.exec()
+        return {"returned": True}
+
+    with pytest.raises(RuntimeError, match="opened during action"):
+        harness.run_action("machine.connect_via_ui", operation)
+
+    assert fallback_fired == []
+    assert harness.context.unexpected_dialogs == [
+        {"type": "QMessageBox", "title": "Blocking unexpected dialog"}
+    ]
+    assert harness.context.action_results[-1]["status"] == "fail"
+    harness.context.view.close()
 
 
 def test_harness_reopens_fresh_application_on_same_retained_session(qapp, tmp_path):

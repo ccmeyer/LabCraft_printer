@@ -1,6 +1,6 @@
 # Milestone 7 Slice 8 - Composed 384x10 Stress Characterization
 
-Status: `planned - awaiting approval`
+Status: `revision-history remediation verified; visible rack validation blocked`
 
 Planning baseline: `af4ae5a7f5e5df7d7932b3f9936e164007b84715` with
 Milestone 7 Slice 7 present in the intentionally uncommitted worktree. Before
@@ -30,6 +30,21 @@ seeded exploration, add product/simulator fault injection, run a remote Pi
 operation, change production MVC or simulator responses, change firmware or
 protocol, or operate physical hardware. The complete Python suite remains
 reserved for final Milestone 7 validation.
+
+## Approved Performance Amendment
+
+The user separately approved one bounded exception to the original production
+MVC/performance exclusions. `ExperimentModel.lock_execution_plan()` may return
+an already-validated ACTIVE plan only after the active runtime session passes
+its existing file-identity and immutable-revision guard, the cached and current
+plans match, and no synchronization error exists. Otherwise the existing full
+recovery path remains authoritative. Calibration revision persistence, fsyncs,
+exports, runtime projection, and post-commit validation are unchanged.
+
+This amendment permits at most 25 net production lines in `Model.py`; the
+implemented branch adds 18. It does not authorize Qt event pumping, background
+or deferred persistence, batching, durability changes, threshold changes, or
+further remediation if the terminal gate remains blocked.
 
 ## Audit Baseline
 
@@ -63,6 +78,134 @@ reserved for final Milestone 7 validation.
 - No tracked stress baseline exists to rewrite. The 96-well Windows and Pi
   accepted baselines and both print-array fixtures are compatibility inputs.
 - The full Python suite was not run during this audit and remains deferred.
+
+## Feasibility Gate Result And Required Amendment
+
+The approved Step 1 preparation-only diagnostic ran through the normal Qt
+machine and Experiment Editor controls without changing runtime code or
+registry dispatch. With the original shared editor projection, the generated
+PREPARED plan contained 384 wells and ten stocks but each stock/well entry
+targeted two dispenses:
+
+```text
+stock/well entries:     3,840
+target dispenses/entry: 2
+target dispense total:  7,680
+```
+
+This is explained by the projection's 100 nL printed-volume basis (ten fixture
+design targets of 10 nL) combined with ten prepared 5 nL stock values. The
+result violates the frozen 3,840-completion contract, so implementation stopped
+before any runtime or dispatch edit as required by Decision 3.
+
+A second preparation-only diagnostic changed only the in-memory editor volume
+basis to the sum of prepared stock values: `10 * 5 nL = 50 nL`. It produced:
+
+```text
+well count:             384
+stock count:            10
+stock/well entries:     3,840
+target dispenses/entry: 1
+target dispense total:  3,840
+plan state:             PREPARED
+```
+
+The proposed amendment is therefore:
+
+- derive a schema-v2 prepared editor plan's printed/final volume basis from
+  `prepared_droplet_volume_nL`, not its post-calibration design target;
+- retain `droplet_volume_nL` as the separately reported fixture design target;
+- keep all 384x10 fixture bytes, identities, concentrations, target values,
+  and the 3,840-completion contract unchanged;
+- let the normal calibration UI apply the fixed stress calibration described
+  by the subsequently approved calibration amendment below; and
+- add regression tests proving the existing schema-v2 24-well and 24x2
+  fixtures are unchanged because their prepared and design volumes are already
+  equal, while the 96-well schema-v1 projection remains on its existing path.
+
+This matches the legacy stress oracle's prepared bundle, which explicitly
+builds one target per stock/well using the 5 nL prepared stock rows before its
+canned calibration step. It requires no fixture, production MVC, simulator,
+report-schema, threshold, Pi, firmware, protocol, or hardware change and does
+not expand the exact implementation file set. The remaining implementation
+steps remained paused until this amendment was approved on 2026-08-07.
+
+The prepared-volume amendment was approved on 2026-08-07. A subsequent
+read-only rack feasibility audit found one additional file-set requirement
+before runtime editing:
+
+- the application exposes four ordinary rack slots for ten stress heads;
+- Experiment Editor creates all ten heads, assigns stocks 1-4, and leaves
+  stocks 5-10 in the printer-head manager's unassigned collection;
+- every normal rack `Swap` combobox exposes all six unassigned stress heads;
+  therefore the operator path can safely replace a returned head before the
+  next pass without direct Model/controller mutation; and
+- the shared `RackDriver` currently supports volume, Confirm/Load, and Unload,
+  but does not yet expose the existing Swap control.
+
+The second proposed amendment adds one reusable bounded
+`RackDriver.swap_unassigned_head()` interaction and its unit tests. The typed
+stock-pass phase will invoke it only when `find_slot_for_stock()` proves the
+requested stock is not already assigned, after the previous head has returned
+and while the array is idle and the queue is drained. The action remains part
+of `head.stage_via_ui`, so the ledger truthfully reports `ui`; it does not add
+a new scenario action, Model shortcut, page-driver family, protocol, or
+physical claim.
+
+This expands the exact file set only by:
+
+- `tools/virtual_workflows/page_drivers.py`
+- `tests/test_virtual_workflow_page_drivers.py`
+
+The plan's prohibition changes from “no page-driver edit” to “no new raw QTest
+outside the existing reusable `RackDriver`.” All other code-shape, scope,
+fixture, and validation gates remained unchanged. Runtime work remained paused
+until this second amendment was approved on 2026-08-07.
+
+The rack-driver amendment was approved on 2026-08-07 and implemented in the
+existing reusable `RackDriver`.
+
+## Approved Closeout-Correction Amendment
+
+The first post-diagnosis closeout run completed five passes and then proved
+that a single mouse selection was not sufficient coverage: after the rack
+callback repopulated every Swap combobox, the next popup retained its prior
+pointer position and produced no activation. The run failed closed at
+1,920/3,840 completions with stock 5 still in slot 1 and no unexpected dialog,
+queue backlog, simulator error, or hardware access.
+
+The approved correction keeps selection mouse-only, observes the selected
+head postcondition and QComboBox activation, resets the popup pointer before
+each item click, closes a callback-rebuilt popup, and permits exactly one
+retry only when neither activation nor the postcondition occurred. An
+activation without the expected rack result fails immediately as an ambiguous
+write. The unit fixture now performs consecutive swaps while clearing and
+repopulating the combobox and deliberately swallows the first item click.
+
+The separately approved action-scoped dialog guard and this reusable mouse
+correction increase the total runtime diff beyond the original 500-line gate.
+The amended cap is 575 net physical lines; all prohibitions on new journey
+bodies, scenario-specific drivers, direct Model mutation for UI coverage,
+weakened thresholds, production MVC, simulator response, firmware, protocol,
+Pi operation, and hardware changes remain in force.
+
+## Approved Fixed-Calibration Amendment
+
+The first composed stress execution exposed a second feasibility boundary.
+Normal calibration application recalculates concentration-derived target
+counts. Pulse-aware results above the fixture's 10 nL design boundary reduce
+stocks 7-10 from one target dispense to zero, so the run correctly stopped at
+2,304 completions when stock 7 had no remaining droplets. The fixture bytes,
+3,840-pair contract, and varying 9.00-10.62 nL applied results cannot all be
+preserved through the normal calibration UI.
+
+The user approved preserving the byte-identical fixture, fixed 10 nL design
+target, and 3,840 normal-UI operations by using one fixed stress calibration
+for all ten heads. The integer-only pulse-aware SIL model's nearest safe value
+is 1,355 us, which truthfully selects and applies 9.99 nL while the unchanged
+fixture design target remains reported as 10 nL. This is a deterministic SIL
+quantization detail, not a physical-volume claim. It changes no production
+MVC, simulator response, fixture, firmware, protocol, or hardware behavior.
 
 ## Current And Target Call Paths
 
@@ -121,12 +264,12 @@ changed.
    alter the fixture, concentrations, target values, or expected count in this
    slice.
 4. **Truthful calibration evidence.** The fixture retains its 5 nL prepared
-   values and 10 nL design targets. The normal pulse-aware SIL model is
-   authoritative for applied synthetic results: 1300-1390 us predicts
-   9.00, 9.18, 9.36, 9.54, 9.72, 9.90, 10.08, 10.26, 10.44, and 10.62 nL.
-   Assertions compare selected/applied/runtime values with that model while
-   reporting the unchanged design target separately. This makes no physical
-   volume-accuracy claim.
+   values, 10 nL design targets, and original per-head metadata. The composed
+   stress recipe uses 1,355 us for every normal calibration/print pass; the
+   pulse-aware SIL model therefore selects and applies 9.99 nL for every
+   stock. Assertions compare selected/applied/runtime values with that model
+   and report the unchanged 10 nL design target and original fixture pulse
+   separately. This makes no physical volume-accuracy claim.
 5. **Truthful interaction surfaces.** Editor, settings, volume, rack,
    calibration, pressure, start, and head-return operations remain QTest/UI
    actions. Deterministic head identity binding remains an explicit `model`
@@ -215,7 +358,8 @@ comparison-compatible responsiveness paths remain inspectable.
   generalization add at most 220 net physical lines;
 - sustained-profile and stress classification/report generalization add at
   most 250 net physical lines after moved/replaced code is subtracted;
-- total touched runtime net growth is at most 500 physical lines;
+- total touched runtime net growth is at most 575 physical lines, including
+  the approved reusable dialog and consecutive-rack-selection corrections;
 - the 24x2 and 384x10 definitions reference the same body, pass phase,
   lifecycle assertion function, payload builder, and UI action set;
 - `page_drivers.py` and `actions.py` gain no raw QTest or scenario-specific
@@ -234,6 +378,7 @@ logic or weaken coverage.
 Required runtime files:
 
 - `tools/virtual_workflows/regression_evidence.py`
+- `tools/virtual_workflows/page_drivers.py`
 - `tools/virtual_workflows/composition.py`
 - `tools/virtual_workflows/journey_phases.py`
 - `tools/virtual_workflows/journeys.py`
@@ -245,6 +390,7 @@ Required runtime files:
 Required focused tests:
 
 - `tests/test_virtual_workflow_journey_phases.py`
+- `tests/test_virtual_workflow_page_drivers.py`
 - `tests/test_virtual_workflow_assertions.py`
 - `tests/test_virtual_workflow_composition.py`
 - `tests/test_virtual_workflow_report.py`
@@ -378,8 +524,8 @@ The composed success gate must prove:
 - normal editor creation of ten ordered reagents and 384 serpentine wells;
 - ten normal UI calibration/start cycles, ten deterministic staged heads,
   nine safe between-pass exchanges, and no ambiguous calibration selection;
-- pulse-aware selected/applied volumes for every stock while the fixture's
-  10 nL design targets remain visible and unchanged;
+- fixed 1,355 us / 9.99 nL selected/applied values for every stock while the
+  fixture's 10 nL design targets remain visible and unchanged;
 - cumulative completion boundaries 384 through 3,840, `ACTIVE` through pass 9,
   one final `COMPLETED`, ten array-complete signals, zero starvation/errors,
   exact intents/durable writes, bounded histories, and compact progress;
@@ -394,8 +540,8 @@ stock order, 3,840 completion cardinality, pass boundaries/states, queue and
 persistence invariants, terminal state, responsiveness/resource metric shape,
 stress classification, Pi safety projection, report-set compatibility, and
 cleanup. It explicitly permits the composed path's broader truthful UI ledger,
-editor screenshots, pulse-aware calibration values versus the direct oracle's
-canned 10 nL shortcut, seed/replay fields, generated identities/paths/times,
+editor screenshots, fixed 9.99 nL normal-UI calibration values versus the
+direct oracle's canned 10 nL shortcut, seed/replay fields, generated identities/paths/times,
 measured performance values, and identity-bearing hashes to differ.
 
 At minimum, tests fail closed for preparation cardinality drift, wrong stock or
@@ -428,7 +574,7 @@ hardware-isolated.
 Then execute the exact `run.replay_command` emitted by that report into the
 same output root. Require equal stable projection for fixture hash/seed,
 action IDs/multiplicity/surfaces/statuses, assertion decisions, dialogs,
-well/stock/completion order, pulse-aware calibration results, milestone and
+well/stock/completion order, fixed calibration results, milestone and
 screenshot names, persistence relationships, metric shape, classification,
 and cleanup. Ignore only documented generated identities, paths, timestamps,
 durations, measured timing/resource values, and hashes bearing those values.
@@ -486,3 +632,26 @@ report-schema revision, disconnect migration, performance remediation, active
 matrix, seeded exploration, new product fault injection, remote Pi operation,
 firmware/protocol change, or hardware work requires an amended plan and
 separate approval.
+
+## Diagnostic Closeout Update - 2026-08-07
+
+The separately approved diagnostic decomposition is recorded in
+`docs/sil_interactive_simulation_milestone_7_slice_8_diagnostic_closeout_plan.md`.
+Its 100x/1,000x simulated queue soak and 4,000-operation Controller lookahead
+soak passed, and a real 384-completion persistence characterization found a
+12.573 ms maximum per-completion cost. No simulator or Controller correction
+was justified.
+
+Two fresh composed stress runs completed all 3,840 stock/well pairs without
+failed actions or starvation. The first proved that nine apparent pressure
+render stalls were inactive between-pass intervals; the approved observer
+correction now excludes only cross-pass intervals and retains active render
+durations. The corrected run recorded a 256.192 ms active pressure-render
+maximum but failed the unchanged responsiveness threshold on one 1,064.585 ms
+event-loop gap. The retained stack is inside pass-10 calibration revision
+commit while `validate_revision_history()` reloads the growing immutable
+revision history.
+
+The diagnostic plan's one-correction limit is exhausted. Direct parity,
+visible, and replay gates remain blocked. Do not proceed to Slice 9 or make a
+second Model/performance change without a separately reviewed plan.

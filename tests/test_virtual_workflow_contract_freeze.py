@@ -30,6 +30,8 @@ from tools.virtual_workflows.journeys import (
     SOFT_STOP_REQUIRED_UI_ACTIONS,
     REGRESSION_REQUIRED_ASSERTIONS,
     REGRESSION_WORKLOAD_ID,
+    STRESS_REQUIRED_ASSERTIONS,
+    STRESS_REQUIRED_SCREENSHOTS,
     get_journey_definition,
 )
 from tools.virtual_workflows.scenarios import (
@@ -147,6 +149,24 @@ def test_96_well_regression_uses_the_shared_composed_one_stock_contract():
         "mid_array",
         "completed",
     }
+
+
+def test_384x10_stress_uses_shared_multi_stock_composition():
+    from tools.virtual_workflows import journeys
+
+    registry = get_registered_scenario(STRESS_WORKLOAD_ID)
+    stress = get_journey_definition(STRESS_WORKLOAD_ID)
+    multi = get_journey_definition(MULTI_STOCK_WORKLOAD_ID)
+
+    assert registry.runner_family == "composed_journey"
+    assert stress.body is multi.body
+    assert stress.payload_builder is multi.payload_builder
+    assert stress.artifact_assertion is multi.artifact_assertion
+    assert stress.required_ui_action_ids == multi.required_ui_action_ids
+    assert stress.required_assertion_ids == STRESS_REQUIRED_ASSERTIONS
+    assert stress.required_screenshots == STRESS_REQUIRED_SCREENSHOTS
+    assert stress.midpoint_completion_count == 1920
+    assert journeys.STRESS_FIXED_CALIBRATION_PULSE_WIDTH_US == 1355
 
 
 def test_prepared_editor_refinalize_composed_contract_is_frozen():

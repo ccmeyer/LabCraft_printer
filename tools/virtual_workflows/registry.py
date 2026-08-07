@@ -92,6 +92,7 @@ _SCENARIO_DEFINITIONS = {
         workload_id="virtual_print_array_384x10_v1",
         fixture_path=_FIXTURE_ROOT / "virtual_print_array_384x10_v1.json",
         expected_completion_count=3840,
+        runner_family="composed_journey",
     ),
     "virtual_print_array_24_v1": ScenarioDefinition(
         registry_id="virtual_print_array_24_v1",

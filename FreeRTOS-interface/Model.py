@@ -534,6 +534,7 @@ class ExperimentModel(QObject):
         self._active_authoritative_execution_session = None
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
+        self._last_authoritative_calibration_transition = None
         self._last_authoritative_terminal_transition = None
         self._progress_execution_reference: ProgressExecutionReference | None = None
         self._prepared_execution_replacement_context: dict[str, Any] | None = None
@@ -7229,6 +7230,7 @@ class ExperimentModel(QObject):
         self._active_authoritative_execution_session = None
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
+        self._last_authoritative_calibration_transition = None
         self._last_authoritative_terminal_transition = None
         self._progress_execution_reference = None
         self._prepared_execution_replacement_context = None
@@ -7322,6 +7324,7 @@ class ExperimentModel(QObject):
         self._active_authoritative_execution_session = None
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
+        self._last_authoritative_calibration_transition = None
         self._last_authoritative_terminal_transition = None
         self._progress_execution_reference = None
         self._prepared_execution_replacement_context = None
@@ -7937,6 +7940,208 @@ class ExperimentModel(QObject):
             )
         self._start_authoritative_runtime_session(bundle)
         return True
+
+    @staticmethod
+    def _advance_authoritative_calibration_bundle(
+        bundle,
+        *,
+        calibration_document,
+        candidate_plan,
+        progress_payload,
+        resume,
+    ):
+        return advance_authoritative_execution_revision(
+            replace(bundle, calibrations=calibration_document),
+            candidate_plan=candidate_plan,
+            progress_payload=progress_payload,
+            resume=resume,
+        )
+
+    def _guard_authoritative_calibration_files(
+        self,
+        *,
+        expected_identities: dict[str, _AuthoritativeFileIdentity],
+        expected_revision_names: tuple[str, ...],
+        detail: str,
+    ) -> tuple[
+        dict[str, _AuthoritativeFileIdentity],
+        tuple[str, ...],
+    ]:
+        return self._guard_authoritative_transition_files(
+            expected_identities=expected_identities,
+            expected_revision_names=expected_revision_names,
+            detail=detail,
+        )
+
+    def _accept_authoritative_calibration_writes(
+        self,
+        *,
+        expected_identities: dict[str, _AuthoritativeFileIdentity],
+        expected_revision_names: tuple[str, ...],
+        changed_names: set[str],
+        resulting_revision_names: tuple[str, ...],
+    ) -> tuple[
+        dict[str, _AuthoritativeFileIdentity],
+        tuple[str, ...],
+    ]:
+        return self._accept_authoritative_transition_writes(
+            expected_identities=expected_identities,
+            expected_revision_names=expected_revision_names,
+            changed_names=changed_names,
+            resulting_revision_names=resulting_revision_names,
+            detail="calibration revision persistence",
+        )
+
+    def _write_authoritative_calibration_document(
+        self,
+        document: ExecutionCalibrationDocument,
+    ) -> None:
+        save_execution_calibrations(
+            self.execution_calibrations_file_path,
+            document,
+        )
+
+    def _persist_authoritative_calibration_immutable_revision(
+        self,
+        candidate_plan,
+    ) -> None:
+        self._persist_authoritative_transition_immutable_revision(candidate_plan)
+
+    def _write_authoritative_calibration_current_plan(self, candidate_plan) -> None:
+        self._write_authoritative_transition_current_plan(candidate_plan)
+
+    def _write_authoritative_calibration_progress(self, progress_payload) -> None:
+        self._write_authoritative_transition_progress(progress_payload)
+
+    def _write_authoritative_calibration_resume(self, resume) -> None:
+        self._write_authoritative_transition_resume(resume)
+
+    def _install_authoritative_calibration_bundle(
+        self,
+        bundle,
+        *,
+        identities: dict[str, _AuthoritativeFileIdentity],
+        revision_names: tuple[str, ...],
+    ) -> None:
+        if not bundle.valid or bundle.plan is None or bundle.resume is None:
+            raise RuntimeError(
+                "The post-calibration authoritative bundle is incomplete."
+            )
+        self._active_authoritative_execution_session = (
+            _ActiveAuthoritativeExecutionSession(
+                bundle=bundle,
+                resume=bundle.resume,
+                progress_payload=dict(bundle.progress_payload),
+                file_identities=identities,
+                revision_names=revision_names,
+            )
+        )
+        self._authoritative_execution_bundle = bundle
+        self._execution_plan_snapshot = bundle.plan
+        self.progress_data = dict(bundle.progress_wells)
+        self._progress_execution_reference = ProgressExecutionReference(
+            plan_id=bundle.plan.plan_id,
+            plan_revision=bundle.plan.plan_revision,
+        )
+        self._authoritative_runtime_active = True
+
+    def _commit_authoritative_calibration_revision(
+        self,
+        previous_plan,
+        candidate_plan,
+        *,
+        calibration_document: ExecutionCalibrationDocument,
+        design_payload: dict,
+    ) -> str:
+        """Append one guarded calibration successor without rereading its prefix."""
+        self._last_authoritative_calibration_transition = None
+        write_started = False
+        try:
+            session = self._guard_authoritative_runtime_session()
+            bundle = session.bundle
+            if bundle.plan != previous_plan:
+                raise self._authoritative_runtime_conflict(
+                    "cached execution plan differs from the calibration predecessor"
+                )
+            if calibration_document.plan_id != previous_plan.plan_id:
+                raise self._authoritative_runtime_conflict(
+                    "execution_calibrations.json references a different plan"
+                )
+
+            progress_payload = self._progress_payload_for_plan(
+                candidate_plan,
+                existing_payload=session.progress_payload,
+                existing_plan=previous_plan,
+            )
+            progress = decode_execution_progress(candidate_plan, progress_payload)
+            updated_resume = synchronize_checkpoint(
+                session.resume,
+                plan_revision=candidate_plan.plan_revision,
+                progress_wells=progress.progress_wells,
+            )
+            advanced = self._advance_authoritative_calibration_bundle(
+                bundle,
+                calibration_document=calibration_document,
+                candidate_plan=candidate_plan,
+                progress_payload=progress.payload,
+                resume=updated_resume,
+            )
+
+            expected_identities = dict(session.file_identities)
+            expected_revision_names = tuple(session.revision_names)
+            expected_identities, expected_revision_names = (
+                self._guard_authoritative_calibration_files(
+                    expected_identities=expected_identities,
+                    expected_revision_names=expected_revision_names,
+                    detail=f"calibration revision {candidate_plan.plan_revision} persistence",
+                )
+            )
+            revision_name = revision_file_name(candidate_plan.plan_revision)
+            if revision_name in expected_revision_names:
+                raise self._authoritative_runtime_conflict(
+                    f"{revision_name} unexpectedly already exists"
+                )
+
+            changed_names = {
+                "execution_calibrations.json",
+                f"{REVISION_DIRECTORY_NAME}/{revision_name}",
+                "execution_plan.json",
+                "progress.json",
+                "execution_resume.json",
+            }
+            write_started = True
+            self._write_authoritative_calibration_document(calibration_document)
+            self._persist_authoritative_calibration_immutable_revision(candidate_plan)
+            self._write_authoritative_calibration_current_plan(candidate_plan)
+            self._write_authoritative_calibration_progress(progress.payload)
+            self._write_authoritative_calibration_resume(updated_resume)
+            self._write_execution_plan_exports(candidate_plan, design_payload)
+
+            resulting_revision_names = (*expected_revision_names, revision_name)
+            identities, revision_names = self._accept_authoritative_calibration_writes(
+                expected_identities=expected_identities,
+                expected_revision_names=expected_revision_names,
+                changed_names=changed_names,
+                resulting_revision_names=resulting_revision_names,
+            )
+            self._install_authoritative_calibration_bundle(
+                advanced,
+                identities=identities,
+                revision_names=revision_names,
+            )
+            self._last_authoritative_calibration_transition = {
+                "cache_path": "cached_revision",
+                "starting_plan_revision": previous_plan.plan_revision,
+                "final_plan_revision": candidate_plan.plan_revision,
+                "created_revision": revision_name,
+                "full_validation_count": 0,
+                "prior_revision_body_read_count": 0,
+            }
+            return "created"
+        except Exception:
+            if write_started:
+                self._invalidate_authoritative_runtime_session()
+            raise
 
     def _refresh_authoritative_execution_bundle(self):
         if not self.experiment_dir_path or not self.experiment_file_path:
@@ -8684,9 +8889,19 @@ class ExperimentModel(QObject):
                 )
         decode_execution_progress(reference_plan, payload)
 
-    def _progress_payload_for_plan(self, plan) -> dict:
+    def _progress_payload_for_plan(
+        self,
+        plan,
+        *,
+        existing_payload: dict | None = None,
+        existing_plan=None,
+    ) -> dict:
         existing = {}
-        if self.progress_file_path and os.path.isfile(self.progress_file_path):
+        if existing_payload is not None:
+            if not isinstance(existing_payload, dict):
+                raise RuntimeError("progress.json must contain an object.")
+            existing = dict(existing_payload)
+        elif self.progress_file_path and os.path.isfile(self.progress_file_path):
             with open(self.progress_file_path, "r", encoding="utf-8") as handle:
                 loaded = json.load(handle)
             if not isinstance(loaded, dict):
@@ -8700,17 +8915,27 @@ class ExperimentModel(QObject):
                 )
             reference_plan = plan
             if reference.plan_revision != plan.plan_revision:
-                history = validate_revision_history(
-                    self.execution_plan_revisions_dir_path
-                )
-                reference_plan = next(
-                    (
-                        item
-                        for item in history
-                        if item.plan_revision == reference.plan_revision
-                    ),
-                    None,
-                )
+                if existing_plan is not None:
+                    reference_plan = existing_plan
+                    if (
+                        reference_plan.plan_id != reference.plan_id
+                        or reference_plan.plan_revision != reference.plan_revision
+                    ):
+                        raise RuntimeError(
+                            "Cached progress does not reference its supplied execution plan."
+                        )
+                else:
+                    history = validate_revision_history(
+                        self.execution_plan_revisions_dir_path
+                    )
+                    reference_plan = next(
+                        (
+                            item
+                            for item in history
+                            if item.plan_revision == reference.plan_revision
+                        ),
+                        None,
+                    )
                 if reference_plan is None:
                     raise RuntimeError(
                         "progress.json references an unavailable execution-plan revision."
@@ -8924,6 +9149,24 @@ class ExperimentModel(QObject):
                 "The persisted execution is analysis only until it is explicitly activated "
                 "before calibration or printing."
             )
+        session = getattr(self, "_active_authoritative_execution_session", None)
+        if (
+            session is not None
+            and plan.state is ExecutionPlanState.ACTIVE
+            and not self.get_execution_plan_sync_error()
+        ):
+            try:
+                cached_plan = self._guard_authoritative_runtime_session().bundle.plan
+                if cached_plan != plan:
+                    raise self._authoritative_runtime_conflict(
+                        "cached execution plan differs from the active snapshot"
+                    )
+            except Exception as exc:
+                self.set_execution_plan_sync_error(exc)
+                raise RuntimeError(
+                    f"Could not durably lock the execution plan: {exc}"
+                ) from exc
+            return cached_plan
         try:
             self._validate_plan_design_link(plan)
             repairing_partial_commit = bool(self.get_execution_plan_sync_error())
@@ -9586,6 +9829,7 @@ class ExperimentModel(QObject):
         timestamp_utc: str | None = None,
     ) -> dict:
         printing_mode = normalize_printing_mode(printing_mode)
+        self._last_authoritative_calibration_transition = None
         if (
             self.get_execution_plan_snapshot() is not None
             and self._added_droplets_for_stock(stock_id) > 0
@@ -9720,6 +9964,13 @@ class ExperimentModel(QObject):
             self._project_reconstructed_execution_plan(plan)
             self._apply_plan_targets_to_runtime(plan)
             self._restore_authoritative_session_after_full_revision()
+            self._last_authoritative_calibration_transition = {
+                "cache_path": "reused_full_sync",
+                "starting_plan_revision": plan.plan_revision,
+                "final_plan_revision": plan.plan_revision,
+                "created_revision": None,
+                "full_validation_count": 1,
+            }
             self.set_execution_plan_sync_error(None)
             return {"plan": plan, "record": record.to_dict(), "status": "reused"}
 
@@ -9734,16 +9985,29 @@ class ExperimentModel(QObject):
             target_counts_by_well=target_counts,
             timestamp_utc=record.recorded_at_utc,
         )
+        cached_commit = bool(
+            getattr(self, "_active_authoritative_execution_session", None)
+            is not None
+            and not self.get_execution_plan_sync_error()
+        )
         try:
             existing_record = document.records.get(record_id)
             if existing_record is not None and existing_record != record:
                 raise RuntimeError("Calibration record ID collides with different content.")
             document.records[record_id] = record
-            save_execution_calibrations(self.execution_calibrations_file_path, document)
-            self._commit_plan_revision(plan, candidate)
-            self._write_progress_for_execution_plan(candidate)
-            self.synchronize_execution_resume_revision(candidate)
-            self._write_execution_plan_exports(candidate, design_payload)
+            if cached_commit:
+                status = self._commit_authoritative_calibration_revision(
+                    plan,
+                    candidate,
+                    calibration_document=document,
+                    design_payload=design_payload,
+                )
+            else:
+                save_execution_calibrations(self.execution_calibrations_file_path, document)
+                status = self._commit_plan_revision(plan, candidate)
+                self._write_progress_for_execution_plan(candidate)
+                self.synchronize_execution_resume_revision(candidate)
+                self._write_execution_plan_exports(candidate, design_payload)
         except Exception as exc:
             self.set_execution_plan_sync_error(exc)
             raise RuntimeError(f"Could not commit calibrated execution-plan revision: {exc}") from exc
@@ -9768,7 +10032,15 @@ class ExperimentModel(QObject):
             raise RuntimeError(
                 f"The calibration revision was committed, but its refuel-check state could not be synchronized: {exc}"
             ) from exc
-        self._restore_authoritative_session_after_full_revision()
+        if not cached_commit:
+            restored = self._restore_authoritative_session_after_full_revision()
+            self._last_authoritative_calibration_transition = {
+                "cache_path": "full_revision",
+                "starting_plan_revision": plan.plan_revision,
+                "final_plan_revision": candidate.plan_revision,
+                "created_revision": revision_file_name(candidate.plan_revision),
+                "full_validation_count": 1 if restored else 0,
+            }
         self.set_execution_plan_sync_error(None)
         self.applied_imaging_calibration_changed.emit(record.to_dict())
         self._audit_execution_plan_event(
@@ -9784,7 +10056,7 @@ class ExperimentModel(QObject):
                 "new_effective_volume_nL": float(new_effective_volume_nL),
             },
         )
-        return {"plan": candidate, "record": record.to_dict(), "status": "created"}
+        return {"plan": candidate, "record": record.to_dict(), "status": status}
 
     def _project_reconstructed_execution_plan(self, plan):
         fill_name = str(self.metadata.get("fill_reagent_name", "Water"))
@@ -11817,6 +12089,7 @@ class ExperimentModel(QObject):
         self._active_authoritative_execution_session = None
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
+        self._last_authoritative_calibration_transition = None
         self._progress_execution_reference = None
         self._prepared_execution_replacement_context = None
 

@@ -3,13 +3,14 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
 from tools.virtual_workflows.page_drivers import (
     ArrayDriver,
     ExperimentEditorDriver,
     ExperimentLoaderDriver,
     MainWindowDriver,
+    MachineControlsDriver,
     RackDriver,
 )
 
@@ -105,6 +106,64 @@ def test_array_driver_owns_soft_stop_and_resume_qtest_mechanics(qapp):
     resumed = driver.resume()
     assert resumed["array_state"] == "running"
     assert [row["title"] for row in resumed["dialogs"]] == ["Resume Print Array"]
+    window.close()
+
+
+def test_array_driver_start_waits_for_running_state(qapp):
+    window = QtWidgets.QWidget()
+    button = QtWidgets.QPushButton("Start Array", window)
+    state = {"value": "idle"}
+
+    def drive_control():
+        answer = QtWidgets.QMessageBox.question(
+            window, "Start Print Array", "Start?"
+        )
+        if answer == QtWidgets.QMessageBox.StandardButton.Yes:
+            state["value"] = "running"
+
+    button.clicked.connect(drive_control)
+    window.show()
+    qapp.processEvents()
+    context = _context(qapp, SimpleNamespace(
+        well_plate_widget=SimpleNamespace(start_print_array_button=button)
+    ))
+    context.controller = SimpleNamespace(
+        get_array_run_state=lambda: state["value"]
+    )
+
+    dialogs = ArrayDriver(context).start(
+        [("Start Print Array", QtWidgets.QMessageBox.StandardButton.Yes)]
+    )
+
+    assert state["value"] == "running"
+    assert [row["title"] for row in dialogs] == ["Start Print Array"]
+    window.close()
+
+
+def test_pressure_regulation_waits_for_the_simulated_command_queue(qapp):
+    window = QtWidgets.QWidget()
+    button = QtWidgets.QPushButton("Regulate Pressure", window)
+    machine_model = SimpleNamespace(regulating_print_pressure=False)
+    button.clicked.connect(
+        lambda: setattr(machine_model, "regulating_print_pressure", True)
+    )
+    queue_checks = []
+
+    def queue_drained():
+        queue_checks.append(True)
+        return len(queue_checks) >= 2
+
+    window.show()
+    qapp.processEvents()
+    context = _context(qapp, SimpleNamespace(
+        pressure_box=SimpleNamespace(pressure_regulation_button=button)
+    ))
+    context.model = SimpleNamespace(machine_model=machine_model)
+    context.machine = SimpleNamespace(check_if_all_completed=queue_drained)
+
+    MachineControlsDriver(context).enable_pressure_regulation()
+
+    assert len(queue_checks) >= 2
     window.close()
 
 
@@ -225,6 +284,220 @@ def test_rack_driver_requires_one_unambiguous_stock_slot(qapp):
     assert driver.find_slot_for_stock("stock-1") == 0
     with pytest.raises(RuntimeError, match="expected one rack slot"):
         driver.find_slot_for_stock("missing")
+
+
+def test_rack_driver_swaps_consecutive_heads_through_repopulated_combobox(
+    qapp, monkeypatch
+):
+    class Head:
+        def __init__(self, stock_id, head_id):
+            self.stock_id = stock_id
+            self.printer_head_id = head_id
+
+        def get_stock_id(self):
+            return self.stock_id
+
+        def get_display_stock_name(self):
+            return self.stock_id
+
+    previous = Head("stock-old", "head-old")
+    first_target = Head("stock-new-1", "head-new-1")
+    second_target = Head("stock-new-2", "head-new-2")
+    slot = SimpleNamespace(printer_head=previous)
+    manager = SimpleNamespace(
+        unassigned=[first_target, second_target],
+        get_unassigned_printer_heads=lambda: manager.unassigned,
+    )
+    rack_model = SimpleNamespace(
+        slots=[slot], get_gripper_printer_head=lambda: None
+    )
+    window = QtWidgets.QWidget()
+    combo = QtWidgets.QComboBox(window)
+    shortcut_activations = []
+    shortcut = QtGui.QShortcut(QtGui.QKeySequence("Down"), window)
+    shortcut.activated.connect(lambda: shortcut_activations.append(True))
+
+    def repopulate():
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Swap")
+        for head in manager.unassigned:
+            combo.addItem(head.get_display_stock_name())
+        combo.blockSignals(False)
+
+    def swap(index):
+        if index <= 0:
+            return
+        selected_text = combo.itemText(index)
+        matches = [
+            head
+            for head in manager.unassigned
+            if head.get_display_stock_name() == selected_text
+        ]
+        if len(matches) != 1:
+            return
+        target = matches[0]
+        manager.unassigned.remove(target)
+        manager.unassigned.append(slot.printer_head)
+        slot.printer_head = target
+        repopulate()
+
+    combo.currentIndexChanged.connect(swap)
+    repopulate()
+    window.show()
+    qapp.processEvents()
+    context = _context(qapp, SimpleNamespace(
+        rack_box=SimpleNamespace(slot_widgets=[(None, None, None, combo)])
+    ))
+    context.model = SimpleNamespace(
+        rack_model=rack_model, printer_head_manager=manager
+    )
+    context.controller = SimpleNamespace(get_array_run_state=lambda: "idle")
+    context.machine = SimpleNamespace(check_if_all_completed=lambda: True)
+
+    real_mouse_press = QtTest.QTest.mousePress
+    real_mouse_release = QtTest.QTest.mouseRelease
+    item_clicks = []
+    swallow = {"first": True}
+
+    def swallow_first_item_press(widget, *args, **kwargs):
+        if widget is combo.view().viewport() and swallow["first"]:
+            item_clicks.append(combo.itemText(1))
+            return None
+        return real_mouse_press(widget, *args, **kwargs)
+
+    def swallow_first_item_release(widget, *args, **kwargs):
+        if widget is combo.view().viewport():
+            if swallow["first"]:
+                swallow["first"] = False
+                return None
+            item_clicks.append(combo.itemText(1))
+        return real_mouse_release(widget, *args, **kwargs)
+
+    monkeypatch.setattr(QtTest.QTest, "mousePress", swallow_first_item_press)
+    monkeypatch.setattr(QtTest.QTest, "mouseRelease", swallow_first_item_release)
+
+    driver = RackDriver(context)
+    combo.showPopup()
+    qapp.processEvents()
+    assert combo.view().isVisible()
+    first_evidence = driver.swap_unassigned_head(0, "stock-new-1")
+    second_evidence = driver.swap_unassigned_head(0, "stock-new-2")
+
+    assert slot.printer_head is second_target
+    assert manager.unassigned == [previous, first_target]
+    assert item_clicks == ["stock-new-1", "stock-new-1", "stock-new-2"]
+    assert shortcut_activations == []
+    assert first_evidence == {
+        "slot": 0,
+        "stock_id": "stock-new-1",
+        "printer_head_id": "head-new-1",
+        "replaced_printer_head_id": "head-old",
+        "control": "rack_swap_combobox",
+    }
+    assert second_evidence == {
+        "slot": 0,
+        "stock_id": "stock-new-2",
+        "printer_head_id": "head-new-2",
+        "replaced_printer_head_id": "head-new-1",
+        "control": "rack_swap_combobox",
+    }
+    shortcut.setEnabled(False)
+    window.close()
+
+
+def test_rack_driver_waits_for_delayed_mouse_release(qapp, monkeypatch):
+    class Head:
+        printer_head_id = "head-new"
+
+        def get_stock_id(self):
+            return "stock-new"
+
+        def get_display_stock_name(self):
+            return "stock-new"
+
+    target = Head()
+    previous = SimpleNamespace(printer_head_id="head-old")
+    slot = SimpleNamespace(printer_head=previous)
+    manager = SimpleNamespace(
+        get_unassigned_printer_heads=lambda: [target],
+    )
+    rack_model = SimpleNamespace(
+        slots=[slot], get_gripper_printer_head=lambda: None
+    )
+    window = QtWidgets.QWidget()
+    combo = QtWidgets.QComboBox(window)
+    combo.addItems(["Swap", "stock-new"])
+    combo.currentIndexChanged.connect(
+        lambda index: setattr(slot, "printer_head", target) if index == 1 else None
+    )
+    window.show()
+    qapp.processEvents()
+    context = _context(qapp, SimpleNamespace(
+        rack_box=SimpleNamespace(slot_widgets=[(None, None, None, combo)])
+    ))
+    context.model = SimpleNamespace(
+        rack_model=rack_model, printer_head_manager=manager
+    )
+    context.controller = SimpleNamespace(get_array_run_state=lambda: "idle")
+    context.machine = SimpleNamespace(check_if_all_completed=lambda: True)
+
+    real_mouse_release = QtTest.QTest.mouseRelease
+    deferred = {"scheduled": False}
+
+    def delay_first_release(widget, *args, **kwargs):
+        if widget is combo.view().viewport() and not deferred["scheduled"]:
+            deferred["scheduled"] = True
+            QtCore.QTimer.singleShot(
+                50, lambda: real_mouse_release(widget, *args, **kwargs)
+            )
+            return None
+        return real_mouse_release(widget, *args, **kwargs)
+
+    monkeypatch.setattr(QtTest.QTest, "mouseRelease", delay_first_release)
+
+    evidence = RackDriver(context).swap_unassigned_head(0, "stock-new")
+
+    assert deferred["scheduled"] is True
+    assert slot.printer_head is target
+    assert evidence["printer_head_id"] == "head-new"
+    assert not combo.view().isVisible()
+    window.close()
+
+
+def test_rack_driver_rejects_activation_without_rack_postcondition(qapp):
+    target = SimpleNamespace(
+        printer_head_id="head-new",
+        get_stock_id=lambda: "stock-new",
+        get_display_stock_name=lambda: "stock-new",
+    )
+    previous = SimpleNamespace(printer_head_id="head-old")
+    slot = SimpleNamespace(printer_head=previous)
+    window = QtWidgets.QWidget()
+    combo = QtWidgets.QComboBox(window)
+    combo.addItems(["Swap", "stock-new"])
+    window.show()
+    qapp.processEvents()
+    context = _context(qapp, SimpleNamespace(
+        rack_box=SimpleNamespace(slot_widgets=[(None, None, None, combo)])
+    ))
+    context.model = SimpleNamespace(
+        rack_model=SimpleNamespace(
+            slots=[slot], get_gripper_printer_head=lambda: None
+        ),
+        printer_head_manager=SimpleNamespace(
+            get_unassigned_printer_heads=lambda: [target]
+        ),
+    )
+    context.controller = SimpleNamespace(get_array_run_state=lambda: "idle")
+    context.machine = SimpleNamespace(check_if_all_completed=lambda: True)
+
+    with pytest.raises(RuntimeError, match="activation had no postcondition"):
+        RackDriver(context).swap_unassigned_head(0, "stock-new")
+
+    assert slot.printer_head is previous
+    assert not combo.view().isVisible()
+    window.close()
 
 
 def test_editor_revision_driver_delegates_to_existing_bounded_mechanics(

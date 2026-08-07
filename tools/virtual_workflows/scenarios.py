@@ -883,6 +883,14 @@ class _InstanceInstrumentation:
                             )
                             or {}
                         ),
+                        "calibration": dict(
+                            getattr(
+                                experiment_model,
+                                "_last_authoritative_calibration_transition",
+                                None,
+                            )
+                            or {}
+                        ),
                     }
                 )
 
@@ -1258,6 +1266,46 @@ def _install_instrumentation(
         ("_write_authoritative_pass_progress", "pass_start.progress_write"),
         ("_write_authoritative_pass_resume", "pass_start.resume_write"),
         ("_create_authoritative_pass_checkpoint", "pass_start.checkpoint_create"),
+        (
+            "_commit_authoritative_calibration_revision",
+            "pass_start.calibration_cached_commit",
+        ),
+        (
+            "_advance_authoritative_calibration_bundle",
+            "pass_start.calibration_successor_validation",
+        ),
+        (
+            "_guard_authoritative_calibration_files",
+            "pass_start.calibration_prewrite_guard",
+        ),
+        (
+            "_write_authoritative_calibration_document",
+            "pass_start.calibration_document_write",
+        ),
+        (
+            "_persist_authoritative_calibration_immutable_revision",
+            "pass_start.calibration_immutable_revision_write",
+        ),
+        (
+            "_write_authoritative_calibration_current_plan",
+            "pass_start.calibration_current_plan_write",
+        ),
+        (
+            "_write_authoritative_calibration_progress",
+            "pass_start.calibration_progress_write",
+        ),
+        (
+            "_write_authoritative_calibration_resume",
+            "pass_start.calibration_resume_write",
+        ),
+        (
+            "_accept_authoritative_calibration_writes",
+            "pass_start.calibration_post_write_acceptance",
+        ),
+        (
+            "_install_authoritative_calibration_bundle",
+            "pass_start.calibration_cache_install",
+        ),
         (
             "_complete_authoritative_execution_cached",
             "terminal_transition.cached_commit",

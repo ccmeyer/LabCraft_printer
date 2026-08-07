@@ -874,6 +874,55 @@ def test_print_array_prefetches_one_lookahead_well():
     assert c.get_array_run_state() == "running"
 
 
+def test_controller_two_well_lookahead_soak_preserves_intent_order():
+    total = 4000
+    wells = [FakeWell(f"A{index}", 1) for index in range(1, total + 1)]
+    c = _make_controller(
+        well_plate=FakeWellPlate(wells),
+        printer_head=_make_printer_head(),
+    )
+    experiment = c.model.experiment_model
+    created = []
+    attached = []
+    completed = []
+    experiment.uses_durable_execution_checkpoint = Mock(return_value=True)
+
+    def begin(**values):
+        intent_id = f"intent-{len(created) + 1}"
+        created.append((intent_id, values["well_id"]))
+        return intent_id
+
+    experiment.begin_execution_print_intent = Mock(side_effect=begin)
+    experiment.attach_execution_print_command = Mock(
+        side_effect=lambda intent_id, sequence: attached.append((intent_id, sequence))
+    )
+    experiment.complete_execution_print_intent = Mock(
+        side_effect=lambda intent_id: completed.append(intent_id)
+    )
+    c._enqueue_array_finalize = Mock()
+
+    Controller.print_array(c)
+    maximum_lookahead = len(c._array_context["queued_wells"])
+    call_index = 0
+    while call_index < len(c.print_droplets.call_args_list):
+        call_args = c.print_droplets.call_args_list[call_index]
+        call_index += 1
+        call_args.kwargs["handler"](**call_args.kwargs["kwargs"])
+        maximum_lookahead = max(
+            maximum_lookahead, len(c._array_context["queued_wells"])
+        )
+
+    expected_intents = [f"intent-{index}" for index in range(1, total + 1)]
+    assert [item[0] for item in created] == expected_intents
+    assert [item[1] for item in created] == [f"A{index}" for index in range(1, total + 1)]
+    assert [item[0] for item in attached] == expected_intents
+    assert [item[1] for item in attached] == sorted(item[1] for item in attached)
+    assert completed == expected_intents
+    assert maximum_lookahead == 2
+    assert c._array_context["queued_wells"] == []
+    c._enqueue_array_finalize.assert_called_once_with("completed")
+
+
 def test_print_array_uses_serpentine_order_by_default():
     a1 = FakeWell("A1", 1, {"X": 10, "Y": 0, "Z": 30})
     a2 = FakeWell("A2", 1, {"X": 20, "Y": 0, "Z": 30})

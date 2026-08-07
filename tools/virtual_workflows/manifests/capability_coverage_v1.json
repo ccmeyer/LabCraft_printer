@@ -360,13 +360,13 @@
       "suite_ids": ["host_stress", "pi_stress"],
       "supported_platforms": ["windows_sil", "pi_sil"],
       "timeout_seconds": 1800,
-      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.wait_for_completions", "array.wait_for_state", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
-      "assertion_ids": ["sil.host_hardware_disabled", "sil.pi_evidence_valid", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "execution.multi_stock_head_exchange", "artifacts.required_present", "ui.responsiveness_metrics_present", "resources.metrics_present"],
-      "capability_ids": ["sil.hardware_isolation.host", "sil.hardware_isolation.pi", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle", "execution.multi_stock_head_exchange", "ui.sustained_responsiveness.windows", "ui.sustained_responsiveness.pi", "resources.sustained_growth.windows", "resources.sustained_growth.pi"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "screenshots", "scenario_root"],
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "machine.configure_print_settings_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "head.bind_identity", "head.set_volume_via_ui", "head.stage_via_ui", "head.return_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.wait_for_completions", "artifact.capture_milestone", "validation.stock_pass_boundary", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "sil.pi_evidence_valid", "ui.real_app_constructed", "execution.multi_stock_head_exchange", "execution.stock_pass_boundaries_valid", "execution.stock_head_settings_match", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.event_history_bounded", "execution.terminal_bundle_valid", "artifacts.required_present", "ui.injected_stall_detected", "ui.responsiveness_metrics_present", "ui.sustained_responsiveness_acceptable", "resources.metrics_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "sil.hardware_isolation.pi", "ui.real_app_construction", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle", "execution.multi_stock_head_exchange", "ui.event_loop_stall_detection", "ui.sustained_responsiveness.windows", "ui.sustained_responsiveness.pi", "resources.sustained_growth.windows", "resources.sustained_growth.pi"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "informational",
       "limitations": ["Stress findings are verification evidence and do not authorize production optimization."],
-      "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_tracked_384x10_fixture_is_exact_and_serpentine", "tests/system/test_virtual_print_array_384x10_workflow.py::test_cli_exposes_stress_scenario_and_single_report_set", "tests/system/test_virtual_print_array_384x10_workflow.py::test_stress_scenario_source_stays_hardware_isolated"],
+      "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_tracked_384x10_fixture_is_exact_and_serpentine", "tests/system/test_virtual_print_array_384x10_workflow.py::test_cli_exposes_stress_scenario_and_single_report_set", "tests/system/test_virtual_print_array_384x10_workflow.py::test_stress_scenario_source_stays_hardware_isolated", "tests/system/test_virtual_print_array_384x10_composed.py::test_composed_384x10_contract_uses_shared_multi_stock_journey", "tests/system/test_virtual_print_array_384x10_composed.py::test_composed_384x10_success_and_direct_parity"],
       "pi_safety_evidence": ["preflight", "hardware_proof"]
     },
     {
@@ -1002,6 +1002,12 @@
         "evidence_kind": "report_path",
         "evidence_path": "metrics.responsiveness",
         "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report"]
+      },
+      {
+        "id": "ui.sustained_responsiveness_acceptable",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_print_array_384x10_composed.py::test_composed_384x10_success_and_direct_parity"]
       },
       {
         "id": "resources.metrics_present",

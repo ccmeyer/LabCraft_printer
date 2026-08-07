@@ -851,9 +851,10 @@ Prerequisites:
 The 24-well smoke, 96-well regression, and 384x10 stress IDs are
 registered in
 `tools/virtual_workflows/registry.py`. The CLI obtains its `--scenario`
-choices from that registry. The 24- and 96-well IDs dispatch through the
-generic composed journey; 384x10 retains the compatibility
-`VirtualPrintArrayScenarioConfig` runner.
+choices from that registry. All three IDs dispatch through generic composed
+journeys. The 384x10 legacy `VirtualPrintArrayScenarioConfig` runner remains
+directly callable as a parity oracle while Slice 8 terminal validation is
+pending.
 For compatibility, the CLI default remains `virtual_print_array_96_v1`;
 suite selection is not a CLI feature yet.
 
@@ -1203,8 +1204,13 @@ verification_reports/virtual_workflows/virtual_print_array_96_v1/<UTC>_<commit>/
 simulator, and authoritative persistence path for ten sequential stock passes
 over all 384 wells. The fixture contains ten calibrated droplet-mode heads and
 3,840 distinct stock/well completions. Between passes, the scenario performs a
-virtual operator head exchange while the command queue is idle; no physical
-head, port, camera, or other hardware dependency is used.
+virtual operator head exchange through the reusable rack Swap/Load/Unload
+driver while the command queue is idle; no physical head, port, camera, or
+other hardware dependency is used. The byte-identical fixture retains its
+10 nL design target and original head metadata. The composed recipe uses a
+fixed 1,355 us synthetic calibration, whose integer pulse-aware model result is
+9.99 nL, to preserve one normal-UI dispense per stock/well. This is synthetic
+application-path evidence, not a physical calibration claim.
 
 This is an opt-in characterization, not part of routine pytest or the accepted
 96-well comparison baseline:
@@ -1244,6 +1250,61 @@ roots, and ready/printing/mid-array/completed screenshots. Failed runs retain a
 traceback and failure screenshot when possible. Generated reports are ignored
 by Git and are machine-specific.
 
+Slice 8 implementation, offscreen terminal validation, visible Windows
+qualification, and exact replay validation are complete.
+The reusable rack, final-pass deadline, pressure-readiness, and guarded
+ACTIVE-plan cache corrections remain in place. The diagnostic closeout adds a
+rolling 120-second no-progress watchdog with bounded Controller/simulator/
+checkpoint evidence and separates the composed and legacy-direct stress test
+nodes. Focused 100x/1,000x simulator and Controller soaks each preserved 4,000
+handler-driven lookahead operations, so no scheduler correction was made.
+
+An isolated real 384-completion persistence run completed in 4.009 seconds
+with a 12.573 ms maximum per completion, all 1,536 `fsync` and replacement
+calls, zero hot-path reads, and zero full progress rebuilds. Two subsequent
+composed stress runs each completed all 3,840 operations without failed actions
+or queue starvation. The first proved that nine apparent pressure-render gaps
+were the nine intentional inactive windows between stock passes. Active render
+intervals are now segmented by pass; the corrected run excluded those nine
+boundaries and measured a 256.192 ms maximum.
+
+The follow-up revision-history remediation now validates one calibration
+successor against the active session's already validated in-memory history.
+It preserves the existing atomic writes and pre/post-write file-identity
+guards; cold activation, partial-commit recovery, and terminal closeout still
+validate the complete immutable chain. Seven injected write failures prove
+that partial commits never advance the cache and recover through the existing
+full-validation path.
+
+The final composed 384x10 node passed all 3,840 operations in 383.65 seconds
+with zero starvation. Maximum event-loop gap was 685.460 ms,
+scheduling-lateness p99 was 81.616 ms, and active pressure-render maximum was
+252.072 ms. Nine cached calibration commits had a maximum of 181.185 ms and
+performed no full bundle refresh; terminal closeout retained one full-chain
+validation. The separate direct-parity node also passed.
+
+The retained pre-correction visible run and exact replay failed closed at
+1,536 operations on the same fifth-head rack Swap interaction. A focused
+real-session test now reaches that UI boundary without printing: it seeds ten
+heads, assigns four slots, and cycles the remaining six through the real rack
+Swap combobox. Diagnostics showed that Qt highlighted the correct popup row
+but suppressed the release inside its post-open double-click guard. The shared
+mouse-only driver now waits out that bounded guard before the item click.
+
+Run the fast rack-only gate headlessly or with a real Windows window:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle tests/system/test_virtual_workflow_rack_swap.py
+$env:QT_QPA_PLATFORM = "windows"
+.\env\Scripts\python.exe -m pytest -q -s --run-sil-lifecycle tests/system/test_virtual_workflow_rack_swap.py
+```
+
+Three fresh visible rack-only processes passed all six swaps in under nine
+seconds each. The subsequent full visible workflow and its exact emitted
+replay both completed 3,840/3,840 operations with zero failed actions, failed
+assertions, or starvation and drained terminal queues. Slice 8 is complete;
+the full pytest suite remains deferred to final Milestone 7 validation.
+
 The report's responsiveness phase timings include `ui.pressure_render`, the
 count and duration distribution for the real pressure-plot update slot. The
 text summary shows its count, p95, and maximum. This diagnostic covers the
@@ -1252,7 +1313,8 @@ compositor work, and it is not yet a performance gate. Pressure update signals
 are coalesced through a 100 ms single-shot timer, so the chart redraws at no
 more than approximately 10 Hz while always reading the latest model state.
 `pressure_render_assessment` records incoming signals, actual renders,
-coalesced updates, their ratio, the interval, and timer teardown state.
+coalesced updates, their ratio, the interval, excluded inactive pass
+boundaries, and timer teardown state.
 
 Individual well-state signals update only the named well label. Experiment
 loads, reagent changes, clears, plate changes, unknown well IDs, and explicit

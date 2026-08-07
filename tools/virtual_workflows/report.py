@@ -70,6 +70,7 @@ class ComposedReportPayload:
     responsiveness: Mapping[str, Any] = field(
         default_factory=lambda: {"status": "not_applicable", "values": {}}
     )
+    classification: Mapping[str, Any] | None = None
     limitations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -250,6 +251,18 @@ class ComposedReportAdapter:
                 "limitations": list(payload.limitations),
             }
         )
+        if report["classification"]["status"] == "pass" and payload.classification:
+            requested = dict(payload.classification)
+            status = requested.get("status")
+            reasons = requested.get("reasons", [])
+            if status not in {"pass", "warning"}:
+                raise ValueError("successful composed classification must be pass or warning")
+            if not isinstance(reasons, list) or any(not isinstance(item, str) for item in reasons):
+                raise ValueError("composed classification reasons must be a list of strings")
+            report["classification"].update(
+                {"status": status, "reasons": reasons,
+                 "threshold_maturity": "informational"}
+            )
         actions = report["metrics"]["workflow"]["values"]["action_results"]
         observed = {str(row.get("action_id")) for row in actions}
         validate_interaction_surface_claims(

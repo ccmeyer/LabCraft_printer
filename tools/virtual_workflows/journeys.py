@@ -28,6 +28,7 @@ from tools.virtual_workflows.assertions import (
     rack_head_assertion,
     real_application_assertion,
     simulation_identity_assertion,
+    sustained_evidence_assertions,
     SoftStopResumeExpectation,
     authoritative_reload_terminal_assertions,
     soft_stop_paused_assertions,
@@ -84,6 +85,8 @@ EDITOR_REVISION_SCENARIO_VERSION = "1"
 MULTI_STOCK_WORKLOAD_ID = "print_array_multi_stock_24x2_v1"
 MULTI_STOCK_SCENARIO_NAME = "print_array_multi_stock_head_exchange"
 MULTI_STOCK_SCENARIO_VERSION = "1"
+STRESS_WORKLOAD_ID = "virtual_print_array_384x10_v1"
+STRESS_FIXED_CALIBRATION_PULSE_WIDTH_US = 1355
 SOFT_STOP_WORKLOAD_ID = "print_array_soft_stop_resume_24_v1"
 SOFT_STOP_SCENARIO_NAME = "print_array_soft_stop_resume"
 SOFT_STOP_SCENARIO_VERSION = "1"
@@ -147,6 +150,16 @@ MULTI_STOCK_REQUIRED_ASSERTIONS = (
     "execution.event_history_bounded",
     "execution.terminal_bundle_valid",
     "artifacts.required_present",
+)
+STRESS_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled", "sil.pi_evidence_valid",
+    "ui.real_app_constructed", "execution.multi_stock_head_exchange",
+    "execution.stock_pass_boundaries_valid", "execution.stock_head_settings_match",
+    "execution.expected_completions", "execution.no_queue_starvation",
+    "execution.intent_durability_exact", "execution.event_history_bounded",
+    "execution.terminal_bundle_valid", "artifacts.required_present",
+    "ui.injected_stall_detected", "ui.responsiveness_metrics_present",
+    "ui.sustained_responsiveness_acceptable", "resources.metrics_present",
 )
 SOFT_STOP_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -267,6 +280,9 @@ MULTI_STOCK_REQUIRED_SCREENSHOTS = frozenset(
         "completed",
     }
 )
+STRESS_REQUIRED_SCREENSHOTS = frozenset(
+    {"editor_opened", "generated", "ready", "printing", "mid_array", "completed"}
+)
 SOFT_STOP_REQUIRED_SCREENSHOTS = frozenset(
     {
         "editor_opened",
@@ -349,12 +365,18 @@ class JourneyRunConfig:
             raise ValueError("inject_ui_stall_ms must be non-negative")
         if self.inject_after_completion < 1:
             raise ValueError("inject_after_completion must be positive")
-        if (
-            self.scenario_id == REGRESSION_WORKLOAD_ID
-            and self.inject_after_completion > 96
-        ):
+        maximum_injection = {
+            REGRESSION_WORKLOAD_ID: 96,
+            STRESS_WORKLOAD_ID: 3840,
+        }.get(self.scenario_id)
+        if maximum_injection is not None and self.inject_after_completion > maximum_injection:
+            workload_label = (
+                "96-well workload"
+                if self.scenario_id == REGRESSION_WORKLOAD_ID
+                else "workload completion count"
+            )
             raise ValueError(
-                "inject_after_completion cannot exceed the 96-well workload"
+                f"inject_after_completion cannot exceed the {workload_label}"
             )
         if (self.pi_preflight_path is None) != (
             self.pi_hardware_proof_path is None
@@ -391,6 +413,10 @@ def _regression_profile(runtime: JourneyRuntime) -> Any:
 
 def _multi_fixture() -> tuple[dict[str, Any], Path]:
     return _print_fixture(MULTI_STOCK_WORKLOAD_ID)
+
+
+def _stress_fixture() -> tuple[dict[str, Any], Path]:
+    return _print_fixture(STRESS_WORKLOAD_ID)
 
 
 def _soft_stop_fixture() -> tuple[dict[str, Any], Path]:
@@ -460,7 +486,12 @@ def _editor_specification(
     fixture: Mapping[str, Any], expected_wells: tuple[str, ...]
 ) -> dict[str, Any]:
     stocks = _fixture_stocks(fixture)
-    printed_volume = sum(float(stock["droplet_volume_nL"]) for stock in stocks)
+    volume_field = (
+        "prepared_droplet_volume_nL"
+        if int(fixture["schema_version"]) >= 2
+        else "droplet_volume_nL"
+    )
+    printed_volume = sum(float(stock[volume_field]) for stock in stocks)
     reagents = [
         {
             "stock_label": stock["factor_name"],
@@ -624,25 +655,48 @@ def _soft_stop_spec(runtime: JourneyRuntime) -> SoftStopResumeSpec:
 def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
     fixture = runtime.fixture
     well_count = len(_well_ids(fixture))
+    stock_count = len(fixture["stocks"])
+    compact = runtime.definition.registry_id == STRESS_WORKLOAD_ID
+    from tools.sil.ejection_response import PulseAwareSyntheticEjectionModelV1
+    response = PulseAwareSyntheticEjectionModelV1()
     result = []
     for index, stock in enumerate(fixture["stocks"]):
         head = stock["printer_head"]
+        pulse_width_us = (
+            STRESS_FIXED_CALIBRATION_PULSE_WIDTH_US
+            if compact else int(head["print_pulse_width_us"])
+        )
         result.append(
             StockPassSpec(
                 stock_id=_stock_id(stock),
                 printer_head_id=str(head["printer_head_id"]),
-                pulse_width_us=int(head["print_pulse_width_us"]),
+                pulse_width_us=pulse_width_us,
                 pressure_psi=float(head["print_pressure_psi"]),
                 frequency_hz=int(fixture["simulation"]["dispense_frequency_hz"]),
                 initial_volume_uL=float(head["initial_volume_uL"]),
-                expected_volume_nL=float(stock["droplet_volume_nL"]),
-                expected_completion_count=well_count * (index + 1),
-                expected_plan_state="active" if index == 0 else "completed",
-                ready_milestone="stock_1_ready" if index == 0 else "stock_2_staged",
-                printing_milestone=(
-                    "stock_1_printing" if index == 0 else "stock_2_printing"
+                expected_volume_nL=(
+                    response.predict_volume_nl(str(stock["printing_mode"]), pulse_width_us)
+                    if compact else float(stock["droplet_volume_nL"])
                 ),
-                completed_milestone="stock_1_completed" if index == 0 else "completed",
+                expected_completion_count=well_count * (index + 1),
+                expected_plan_state=("completed" if index == stock_count - 1 else "active"),
+                ready_milestone=(
+                    ("ready" if index == 0 else None) if compact
+                    else ("stock_1_ready" if index == 0 else "stock_2_staged")
+                ),
+                printing_milestone=(
+                    ("printing" if index == 0 else None) if compact
+                    else ("stock_1_printing" if index == 0 else "stock_2_printing")
+                ),
+                completed_milestone=(
+                    ("mid_array" if index == stock_count // 2 - 1 else
+                     "completed" if index == stock_count - 1 else None)
+                    if compact else ("stock_1_completed" if index == 0 else "completed")
+                ),
+                staging_slot=(
+                    int(fixture["simulation"].get("staging_slot", 0))
+                    if compact else None
+                ),
                 start_dialog_titles=(
                     ("Start Print Array", "Evaporation Plate Dock Check")
                     if index == 0
@@ -654,6 +708,7 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
                 return_head=True,
                 detailed_evidence=True,
                 include_frequency_evidence=False,
+                no_progress_timeout_seconds=120.0 if compact else None,
             )
         )
     return tuple(result)
@@ -959,6 +1014,11 @@ def _multi_body(runtime: JourneyRuntime) -> None:
     _connect_execution_signals(runtime, array_complete=True, machine_errors=True)
     runtime.add_assertion(simulation_identity_assertion(context))
     runtime.add_assertion(real_application_assertion(context))
+    profile = None
+    if runtime.definition.evidence_profile_factory is not None:
+        profile = runtime.definition.evidence_profile_factory(runtime)
+        runtime.observations["evidence_profile"] = profile
+        runtime.add_assertion(profile.pi_assertion())
     runtime.run_steps(machine_startup_steps())
     run_editor_preparation(
         runtime,
@@ -972,33 +1032,63 @@ def _multi_body(runtime: JourneyRuntime) -> None:
     if prepared.decision != "pass":
         raise RuntimeError(f"prepared multi-stock bundle was invalid: {prepared.evidence}")
     pass_specs = _multi_passes(runtime)
-    runtime.run_steps((head_identity_step(pass_specs),))
-    observer = ExecutionObserver(
-        context,
-        experiment_dir=Path(context.experiment_model.experiment_dir_path),
-        completed_count=lambda: len(runtime.observations["completed_wells"]),
-        pass_context=lambda: _current_pass_context(runtime),
+    runtime.observations["expected_pulse_widths_us"] = tuple(
+        spec.pulse_width_us for spec in pass_specs
     )
-    runtime.register_restorable("execution", observer)
-    observer.install()
-    _install_starvation_observer(runtime)
+    runtime.observations["expected_volumes_nL"] = tuple(
+        spec.expected_volume_nL for spec in pass_specs
+    )
+    runtime.run_steps((head_identity_step(pass_specs),))
+    if profile is None:
+        observer = ExecutionObserver(
+            context,
+            experiment_dir=Path(context.experiment_model.experiment_dir_path),
+            completed_count=lambda: len(runtime.observations["completed_wells"]),
+            pass_context=lambda: _current_pass_context(runtime),
+        )
+        runtime.register_restorable("execution", observer)
+        observer.install()
+        _install_starvation_observer(runtime)
+    else:
+        runtime.register_restorable("sustained_evidence", profile)
+        profile.install()
     run_stock_passes(runtime, pass_specs, bind_identities=False)
     runtime.restore_all()
-    snapshot = runtime.observations["execution_snapshot"]
+    if profile is None:
+        snapshot = runtime.observations["execution_snapshot"]
+        starvation_events = runtime.observations["starvation_events"]
+    else:
+        profile_snapshot = profile.snapshot()
+        runtime.observations["sustained_evidence_snapshot"] = profile_snapshot
+        snapshot = dict(profile_snapshot["observer"])
+        runtime.observations["execution_snapshot"] = snapshot
+        starvation_events = list(profile_snapshot["queue"]["unexpected_starvation_events"])
     for assertion in execution_lifecycle_assertions(
         context,
         expectation=ExecutionLifecycleExpectation(
             fixture=fixture,
             expected_well_ids=expected_wells,
             expected_stock_ids=expected_stock_ids,
+            expected_pulse_widths_us=tuple(
+                runtime.observations["expected_pulse_widths_us"]
+            ),
+            expected_volumes_nL=tuple(
+                runtime.observations["expected_volumes_nL"]
+            ),
         ),
         completed_wells=runtime.observations["completed_wells"],
         pass_boundaries=runtime.observations["pass_boundaries"],
         head_staging=runtime.observations["head_staging"],
-        starvation_events=runtime.observations["starvation_events"],
+        starvation_events=starvation_events,
         observer=snapshot,
     ):
         runtime.add_assertion(assertion)
+    if profile is not None:
+        for assertion in sustained_evidence_assertions(
+            snapshot=profile_snapshot,
+            expected_count=int(fixture["workload"]["completion_count"]),
+        ):
+            runtime.add_assertion(assertion)
 
 
 def _soft_stop_body(runtime: JourneyRuntime) -> None:
@@ -1480,13 +1570,25 @@ def _multi_payload(
     decisions = _decisions(runtime)
     evidence = _assertion_evidence(runtime)
     passed = all(
-        decisions.get(item) == "pass" for item in MULTI_STOCK_REQUIRED_ASSERTIONS
+        decisions.get(item) == "pass" for item in runtime.definition.required_assertion_ids
     )
+    stock_count = len(fixture["stocks"])
+    expected_count = int(fixture["workload"]["completion_count"])
     multi = evidence.get("execution.multi_stock_head_exchange", {})
     observer = dict(observations.get("execution_snapshot") or {})
     observer_persistence = _observer_persistence(observer)
     boundaries = observations.get("pass_boundaries", [])
-    starvation = observations.get("starvation_events", [])
+    profile = dict(observations.get("sustained_evidence_snapshot") or {})
+    starvation = (
+        profile.get("queue", {}).get("unexpected_starvation_events", [])
+        if profile else observations.get("starvation_events", [])
+    )
+    sustained = evidence.get("ui.sustained_responsiveness_acceptable", {})
+    resource_evidence = evidence.get("resources.metrics_present", {})
+    warning_reasons = list(sustained.get("warning_reasons") or [])
+    growth = dict(resource_evidence.get("growth_assessment") or {})
+    if growth.get("decision") == "warning":
+        warning_reasons.append("rss_growth_over_100_mib_and_1_25_ratio")
     return ComposedReportPayload(
         workload={
             **_base_workload(runtime),
@@ -1494,10 +1596,10 @@ def _multi_payload(
             "plate_rows": fixture["plate"]["rows"],
             "plate_columns": fixture["plate"]["columns"],
             "well_ids": list(expected),
-            "stock_count": 2,
-            "array_passes": 2,
+            "stock_count": stock_count,
+            "array_passes": stock_count,
             "target_dispenses_per_well": 1,
-            "expected_completion_count": 48,
+            "expected_completion_count": expected_count,
             "speed_multiplier": runtime.harness.config.speed_multiplier,
             "timeout_seconds": runtime.harness.config.timeout_seconds,
         },
@@ -1505,7 +1607,7 @@ def _multi_payload(
         workflow_values={
             "expected_well_count": len(expected),
             "completed_well_count": len(set(completed)),
-            "expected_stock_well_completion_count": 48,
+            "expected_stock_well_completion_count": expected_count,
             "completed_stock_well_count": len(completed),
             "completed_well_ids": completed,
             "well_update_count": len(completed),
@@ -1540,8 +1642,20 @@ def _multi_payload(
                 **observer_persistence,
             },
         },
+        responsiveness=(
+            {"status": "measured", "values": dict(profile.get("responsiveness") or {})}
+            if profile else {"status": "not_applicable", "values": {}}
+        ),
+        resources=(
+            dict(profile.get("resources") or {"status": "not_available", "values": {}})
+            if profile else {"status": "not_applicable", "values": {}}
+        ),
+        classification={
+            "status": "warning" if warning_reasons else "pass",
+            "reasons": warning_reasons,
+        } if profile else None,
         limitations=(
-            "The two-stock lifecycle uses an in-process simulator and normal Qt controls; it does not validate physical head handling or output.",
+            "The multi-stock lifecycle uses an in-process simulator and normal Qt controls; it does not validate physical head handling or output.",
             "The simulator does not validate firmware, protocol framing, motion, pressure response, cameras, balance behavior, or droplet quality.",
             "Generated plan IDs, timestamps, durations, paths, and calibration identities are not expected to be byte-identical across replay.",
         ),
@@ -1709,7 +1823,7 @@ def _post_start_lock_artifact(
 def _multi_artifact(runtime: JourneyRuntime, teardown: Mapping[str, Any]) -> Any:
     return multi_stock_artifacts_assertion(
         screenshots=runtime.context.screenshots,
-        required_screenshots=set(MULTI_STOCK_REQUIRED_SCREENSHOTS),
+        required_screenshots=set(runtime.definition.required_screenshots),
         teardown=teardown,
     )
 
@@ -1794,10 +1908,11 @@ def _post_start_lock_summary(report: Mapping[str, Any], runtime: JourneyRuntime)
 
 
 def _multi_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> str:
+    expected = int(runtime.fixture["workload"]["completion_count"])
     return (
-        "Milestone 7 composed two-stock 24x2 lifecycle\n"
+        f"Milestone 7 composed {len(runtime.fixture['stocks'])}-stock lifecycle\n"
         f"Status: {report['classification']['status']}\n"
-        f"Completions: {len(runtime.observations['completed_wells'])} / 48\n"
+        f"Completions: {len(runtime.observations['completed_wells'])} / {expected}\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
     )
@@ -1947,6 +2062,26 @@ MULTI_STOCK_DEFINITION = JourneyDefinition(
     payload_builder=_multi_payload,
     summary_builder=_multi_summary,
 )
+STRESS_DEFINITION = JourneyDefinition(
+    registry_id=STRESS_WORKLOAD_ID,
+    scenario_name=SMOKE_SCENARIO_NAME,
+    scenario_version=SMOKE_SCENARIO_VERSION,
+    workload_id=STRESS_WORKLOAD_ID,
+    required_action_ids=(
+        _COMMON_ACTIONS | _EDITOR_ACTIONS | _PRINT_ACTIONS
+        | frozenset({"head.bind_identity", "head.return_via_ui", "validation.stock_pass_boundary"})
+    ),
+    required_ui_action_ids=MULTI_STOCK_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=STRESS_REQUIRED_ASSERTIONS,
+    required_screenshots=STRESS_REQUIRED_SCREENSHOTS,
+    fixture_loader=_stress_fixture,
+    body=_multi_body,
+    artifact_assertion=_multi_artifact,
+    payload_builder=_multi_payload,
+    summary_builder=_multi_summary,
+    evidence_profile_factory=_regression_profile,
+    midpoint_completion_count=1920,
+)
 SOFT_STOP_DEFINITION = JourneyDefinition(
     registry_id=SOFT_STOP_WORKLOAD_ID,
     scenario_name=SOFT_STOP_SCENARIO_NAME,
@@ -2002,6 +2137,7 @@ JOURNEY_DEFINITIONS = {
         EDITOR_REVISION_DEFINITION,
         POST_START_LOCK_DEFINITION,
         MULTI_STOCK_DEFINITION,
+        STRESS_DEFINITION,
         SOFT_STOP_DEFINITION,
         AUTHORITATIVE_RELOAD_DEFINITION,
     )
@@ -2046,6 +2182,9 @@ __all__ = [
     "MULTI_STOCK_REQUIRED_ASSERTIONS",
     "MULTI_STOCK_REQUIRED_UI_ACTIONS",
     "MULTI_STOCK_WORKLOAD_ID",
+    "STRESS_REQUIRED_ASSERTIONS",
+    "STRESS_REQUIRED_SCREENSHOTS",
+    "STRESS_WORKLOAD_ID",
     "POST_START_LOCK_REQUIRED_ASSERTIONS",
     "POST_START_LOCK_REQUIRED_SCREENSHOTS",
     "POST_START_LOCK_REQUIRED_UI_ACTIONS",

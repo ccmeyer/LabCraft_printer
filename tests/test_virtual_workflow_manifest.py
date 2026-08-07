@@ -24,8 +24,9 @@ from tools.virtual_workflows.registry import (
     validate_capability_manifest,
 )
 from tools.virtual_workflows.scenarios import (
-    AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
-    MULTI_STOCK_WORKLOAD_ID,
+            AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+            MULTI_STOCK_WORKLOAD_ID,
+            STRESS_WORKLOAD_ID,
     SCENARIO_COMPLETION_COUNTS,
     SCENARIO_FIXTURES,
     SOFT_STOP_RESUME_WORKLOAD_ID,
@@ -183,6 +184,15 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         "screenshots",
         "scenario_root",
     ]
+    stress = _row(payload, "scenarios", "print_array_stress_384x10_v1")
+    assert "fixture.prepare_authoritative" not in stress["action_ids"]
+    assert "head.stage_virtual" not in stress["action_ids"]
+    assert {"head.bind_identity", "head.stage_via_ui", "head.return_via_ui",
+            "validation.stock_pass_boundary"} <= set(stress["action_ids"])
+    assert "ui.sustained_responsiveness_acceptable" in stress["assertion_ids"]
+    assert {"action_ledger", "assertion_ledger", "evidence_manifest"} <= set(
+        stress["required_artifacts"]
+    )
 
     smoke = _row(payload, "scenarios", "print_array_smoke_24_v1")
     assert smoke["registry_id"] == SMOKE_WORKLOAD_ID
@@ -328,6 +338,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
         SOFT_STOP_RESUME_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
+        STRESS_WORKLOAD_ID,
     }:
         from tools.virtual_workflows.journeys import JourneyRunConfig
 
@@ -343,6 +354,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
         SOFT_STOP_RESUME_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
+        STRESS_WORKLOAD_ID,
     }:
         assert config.fixture_path == SCENARIO_FIXTURES[scenario_id].resolve()
     assert config.output_root == tmp_path.resolve()
