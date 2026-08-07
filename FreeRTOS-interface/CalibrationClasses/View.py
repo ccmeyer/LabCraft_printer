@@ -1971,6 +1971,7 @@ class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
         self.controller = controller
         self._preselected_port = str(preselected_port or "").strip()
         self._state = "disconnected"
+        self._stream_capture_status = "idle"
 
         layout = QtWidgets.QGridLayout(self)
         self.port_combo = QtWidgets.QComboBox()
@@ -1978,6 +1979,24 @@ class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
         self.connection_button = QtWidgets.QPushButton("Connect")
         self.connection_state_label = QtWidgets.QLabel("Disconnected")
         self.last_reading_label = QtWidgets.QLabel("Last reading: —")
+        self.stream_opt_in_checkbox = QtWidgets.QCheckBox(
+            "Use connected balance for stream capture"
+        )
+        self.measurement_status_label = QtWidgets.QLabel(
+            "Starting-mass measurement: inactive"
+        )
+        self.measurement_status_label.setWordWrap(True)
+        self.measurement_progress_label = QtWidgets.QLabel("")
+        self.measurement_progress_label.setWordWrap(True)
+        self.candidate_mass_label = QtWidgets.QLabel("Candidate starting mass: —")
+        self.cancel_reading_button = QtWidgets.QPushButton("Cancel Reading")
+        self.retry_reading_button = QtWidgets.QPushButton("Read Again")
+        self.manual_starting_mass_button = QtWidgets.QPushButton(
+            "Use Manual Starting Mass"
+        )
+        self.confirm_starting_mass_button = QtWidgets.QPushButton(
+            "Confirm Starting Mass & Begin"
+        )
 
         layout.addWidget(QtWidgets.QLabel("Balance port:"), 0, 0)
         layout.addWidget(self.port_combo, 0, 1)
@@ -1985,16 +2004,46 @@ class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
         layout.addWidget(self.connection_button, 1, 0, 1, 3)
         layout.addWidget(self.connection_state_label, 2, 0, 1, 3)
         layout.addWidget(self.last_reading_label, 3, 0, 1, 3)
+        layout.addWidget(self.stream_opt_in_checkbox, 4, 0, 1, 3)
+        layout.addWidget(self.measurement_status_label, 5, 0, 1, 3)
+        layout.addWidget(self.measurement_progress_label, 6, 0, 1, 3)
+        layout.addWidget(self.candidate_mass_label, 7, 0, 1, 3)
+        layout.addWidget(self.cancel_reading_button, 8, 0, 1, 3)
+        layout.addWidget(self.retry_reading_button, 9, 0, 1, 3)
+        layout.addWidget(self.manual_starting_mass_button, 10, 0, 1, 3)
+        layout.addWidget(self.confirm_starting_mass_button, 11, 0, 1, 3)
 
         self.refresh_button.clicked.connect(self.refresh_ports)
         self.connection_button.clicked.connect(self._toggle_connection)
         self.port_combo.currentIndexChanged.connect(self._update_controls)
+        self.stream_opt_in_checkbox.toggled.connect(self._toggle_stream_opt_in)
+        self.cancel_reading_button.clicked.connect(
+            controller.cancel_stream_gravimetric_starting_mass
+        )
+        self.retry_reading_button.clicked.connect(
+            controller.retry_stream_gravimetric_starting_mass
+        )
+        self.manual_starting_mass_button.clicked.connect(
+            controller.use_manual_stream_gravimetric_starting_mass
+        )
+        self.confirm_starting_mass_button.clicked.connect(
+            controller.confirm_stream_gravimetric_starting_mass
+        )
         controller.experimental_balance_connection_changed.connect(
             self._on_connection_changed
         )
         controller.experimental_balance_reading_received.connect(
             self._on_reading_received
         )
+        controller.experimental_balance_stream_opt_in_changed.connect(
+            self._on_stream_opt_in_changed
+        )
+
+        self.stream_opt_in_checkbox.blockSignals(True)
+        self.stream_opt_in_checkbox.setChecked(
+            bool(controller.experimental_balance_stream_opt_in)
+        )
+        self.stream_opt_in_checkbox.blockSignals(False)
 
         self.refresh_ports()
         cached_reading = controller.get_experimental_balance_last_reading()
@@ -2005,6 +2054,7 @@ class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
             self._on_connection_changed(cached_snapshot)
         else:
             self._update_controls()
+        self.update_stream_capture_state({"status": "idle"})
 
     @staticmethod
     def _state_name(snapshot) -> str:
@@ -2062,6 +2112,90 @@ class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
             f"Last reading: {mass} mg ({stability})"
         )
 
+    def _toggle_stream_opt_in(self, checked):
+        if self.controller.set_experimental_balance_stream_opt_in(bool(checked)):
+            return
+        self.stream_opt_in_checkbox.blockSignals(True)
+        self.stream_opt_in_checkbox.setChecked(
+            bool(self.controller.experimental_balance_stream_opt_in)
+        )
+        self.stream_opt_in_checkbox.blockSignals(False)
+
+    def _on_stream_opt_in_changed(self, enabled):
+        self.stream_opt_in_checkbox.blockSignals(True)
+        self.stream_opt_in_checkbox.setChecked(bool(enabled))
+        self.stream_opt_in_checkbox.blockSignals(False)
+        self._update_controls()
+
+    def update_stream_capture_state(self, state):
+        state = dict(state or {})
+        self._stream_capture_status = str(state.get("status") or "idle")
+        request_status = str(state.get("balance_request_status") or "inactive")
+        message = str(state.get("balance_status_message") or "").strip()
+        self.measurement_status_label.setText(
+            message
+            or f"Starting-mass measurement: {request_status.replace('_', ' ')}"
+        )
+        progress = dict(state.get("balance_progress") or {})
+        if progress:
+            elapsed_s = float(int(progress.get("elapsed_ms") or 0)) / 1000.0
+            samples = int(progress.get("retained_sample_count") or 0)
+            mass = progress.get("latest_mass_mg", "?")
+            stability = (
+                "stable" if progress.get("latest_device_stable") else "unstable"
+            )
+            self.measurement_progress_label.setText(
+                f"{elapsed_s:.1f} s | {samples} retained samples | "
+                f"{mass} mg ({stability})"
+            )
+        else:
+            self.measurement_progress_label.setText("")
+        capture = dict(state.get("starting_mass_capture") or {})
+        candidate_mass = capture.get("stable_mass_mg")
+        self.candidate_mass_label.setText(
+            "Candidate starting mass: —"
+            if candidate_mass in (None, "")
+            else f"Candidate starting mass: {candidate_mass} mg"
+        )
+
+        waiting = (
+            self._stream_capture_status == "awaiting_starting_balance_mass"
+            and request_status in {"requesting", "waiting", "cancelling"}
+        )
+        retryable = (
+            self._stream_capture_status
+            in {
+                "awaiting_starting_balance_mass",
+                "awaiting_starting_balance_confirmation",
+            }
+            and request_status
+            in {"stable_candidate", "timeout", "cancelled", "error", "rejected"}
+        )
+        pending = self._stream_capture_status in {
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
+        }
+        confirming = (
+            self._stream_capture_status == "awaiting_starting_balance_confirmation"
+            and request_status == "stable_candidate"
+        )
+        self.cancel_reading_button.setVisible(waiting)
+        self.cancel_reading_button.setEnabled(
+            waiting and request_status != "cancelling"
+        )
+        self.retry_reading_button.setVisible(retryable)
+        self.retry_reading_button.setEnabled(
+            retryable and self._state == "streaming"
+        )
+        self.manual_starting_mass_button.setVisible(pending)
+        self.manual_starting_mass_button.setEnabled(pending)
+        self.confirm_starting_mass_button.setVisible(confirming)
+        self.confirm_starting_mass_button.setEnabled(confirming)
+        self.candidate_mass_label.setVisible(confirming)
+        self.measurement_status_label.setVisible(pending)
+        self.measurement_progress_label.setVisible(pending and bool(progress))
+        self._update_controls()
+
     def _update_controls(self, *_args):
         busy = self._state in self._BUSY_STATES
         self.port_combo.setEnabled(not busy and self._state == "disconnected")
@@ -2081,6 +2215,13 @@ class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
         else:
             self.connection_button.setText("Connect")
             self.connection_button.setEnabled(False)
+        opt_in_checked = self.stream_opt_in_checkbox.isChecked()
+        self.stream_opt_in_checkbox.setEnabled(
+            self._stream_capture_status == "idle"
+            and (self._state == "streaming" or opt_in_checked)
+        )
+        if not self.retry_reading_button.isHidden():
+            self.retry_reading_button.setEnabled(self._state == "streaming")
 
 
 class DropletImagingDialog(QtWidgets.QDialog):
@@ -8872,6 +9013,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return
         state = dict(state or self._get_stream_capture_state())
         status = str(state.get("status") or "idle")
+        if hasattr(self, "experimental_balance_group"):
+            self.experimental_balance_group.update_stream_capture_state(state)
         status_message = str(state.get("status_message") or "Ready to begin stream gravimetric capture.")
         error_message = str(state.get("error_message") or "")
         session_id = str(state.get("session_id") or "-")
@@ -8902,7 +9045,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.stream_capture_status_label.setText(status_message)
         if error_message and status in {"error", "stopped", "pending_loading_move", "pending_camera_return", "pending_gripper_restore"}:
             self.stream_capture_status_label.setStyleSheet("color: darkred; font-weight: 600;")
-        elif status in {"awaiting_mass", "awaiting_mass_entry", "pending_camera_return", "returning_to_camera"}:
+        elif status in {
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
+            "awaiting_mass",
+            "awaiting_mass_entry",
+            "pending_camera_return",
+            "returning_to_camera",
+        }:
             self.stream_capture_status_label.setStyleSheet("color: darkgreen; font-weight: 600;")
         elif status in {
             "pending_gripper_refresh",
@@ -8973,6 +9123,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 stream_busy = bool(busy_getter())
             except Exception:
                 stream_busy = status in {
+                    "awaiting_starting_balance_mass",
+                    "awaiting_starting_balance_confirmation",
                     "pending_gripper_refresh",
                     "refreshing_gripper",
                     "suspending_gripper_refresh",
@@ -8987,6 +9139,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 }
         else:
             stream_busy = status in {
+                "awaiting_starting_balance_mass",
+                "awaiting_starting_balance_confirmation",
                 "pending_gripper_refresh",
                 "refreshing_gripper",
                 "suspending_gripper_refresh",
@@ -9001,13 +9155,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
             }
 
         if status == "idle":
-            suggested_rep = int(state.get("suggested_rep") or state.get("rep") or 1)
-            if not self.stream_capture_rep_spin.hasFocus():
-                self.stream_capture_rep_spin.setValue(max(1, suggested_rep))
-            if self._stream_capture_last_status not in (None, "idle"):
-                self.stream_capture_starting_mass_spin.setValue(0.0)
-                self.stream_capture_notes_edit.clear()
+            if not bool(state.get("preserve_start_inputs")):
+                suggested_rep = int(state.get("suggested_rep") or state.get("rep") or 1)
+                if not self.stream_capture_rep_spin.hasFocus():
+                    self.stream_capture_rep_spin.setValue(max(1, suggested_rep))
+                if self._stream_capture_last_status not in (None, "idle"):
+                    self.stream_capture_starting_mass_spin.setValue(0.0)
+                    self.stream_capture_notes_edit.clear()
         elif status in {
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
             "pending_gripper_refresh",
             "refreshing_gripper",
             "suspending_gripper_refresh",
@@ -9027,7 +9184,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 self.stream_capture_rep_spin.setValue(max(1, rep_value))
             if (
                 state.get("starting_mass_mg") is not None
-                and self._stream_capture_last_status in (None, "idle")
+                and self._stream_capture_last_status
+                in (None, "idle", "awaiting_starting_balance_confirmation")
             ):
                 self.stream_capture_starting_mass_spin.setValue(float(state.get("starting_mass_mg") or 0.0))
 
@@ -9038,7 +9196,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
             and (not flash_fault_latched)
             and (not DropletImagingDialog._is_calibration_busy(self))
         )
-        discard_enabled = status in {"pending_loading_move", "awaiting_mass_entry", "error", "stopped"}
+        discard_enabled = status in {
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
+            "pending_loading_move",
+            "awaiting_mass_entry",
+            "error",
+            "stopped",
+        }
 
         self.stream_capture_begin_button.setEnabled(begin_enabled)
         self.stream_capture_discard_button.setEnabled(discard_enabled)
@@ -9087,12 +9252,23 @@ class DropletImagingDialog(QtWidgets.QDialog):
             if bool(getattr(self, "stream_capture_online_mode_checkbox", None) and self.stream_capture_online_mode_checkbox.isChecked())
             else "timecourse"
         )
-        result = self.controller.start_stream_gravimetric_capture(
-            float(self.stream_capture_starting_mass_spin.value()),
-            rep_override=int(self.stream_capture_rep_spin.value()),
-            notes=self.stream_capture_notes_edit.toPlainText().strip(),
-            capture_mode=capture_mode,
-        )
+        common = {
+            "rep_override": int(self.stream_capture_rep_spin.value()),
+            "notes": self.stream_capture_notes_edit.toPlainText().strip(),
+            "capture_mode": capture_mode,
+        }
+        if bool(
+            hasattr(self, "experimental_balance_group")
+            and getattr(self.controller, "experimental_balance_stream_opt_in", False)
+        ):
+            result = self.controller.start_stream_gravimetric_capture_with_balance(
+                **common
+            )
+        else:
+            result = self.controller.start_stream_gravimetric_capture(
+                float(self.stream_capture_starting_mass_spin.value()),
+                **common,
+            )
         if isinstance(result, tuple) and result and (result[0] is False):
             QtWidgets.QMessageBox.warning(self, "Stream Capture", str(result[1] or "Failed to start stream gravimetric capture."))
 
@@ -12321,6 +12497,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._stream_capture_dialog_closing = True
             event.accept()
             return
+
+        try:
+            stream_state = self._get_stream_capture_state()
+        except Exception:
+            stream_state = {}
+        if str(stream_state.get("status") or "") in {
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
+        }:
+            abandon = getattr(
+                self.controller,
+                "abandon_stream_gravimetric_starting_mass",
+                None,
+            )
+            if callable(abandon):
+                abandon(reason="imager_closed_pending_balance_start")
 
         deferred_close_requested = bool(getattr(self, "_imager_close_after_stop_requested", False))
         if self._should_confirm_close_without_applied_calibration():

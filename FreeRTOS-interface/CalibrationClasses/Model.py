@@ -4907,6 +4907,16 @@ class CalibrationManager(QObject):
             "gripper_pulse_duration_snapshot_ms": None,
             "gripper_was_open": None,
             "gripper_refresh_suspended": False,
+            "mass_source": "manual",
+            "balance_request_id": None,
+            "balance_request_phase": None,
+            "balance_request_status": "inactive",
+            "balance_status_message": "",
+            "balance_progress": None,
+            "starting_mass_capture": None,
+            "ending_mass_capture": None,
+            "balance_fallback_reason": None,
+            "preserve_start_inputs": False,
         }
 
     def _copy_stream_capture_state(self):
@@ -4969,6 +4979,8 @@ class CalibrationManager(QObject):
     def has_open_stream_calibration_sequence(self) -> bool:
         status = str((getattr(self, "_stream_calibration_sequence_state", None) or {}).get("status") or "idle")
         return status in {
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
             "pending_gripper_refresh",
             "refreshing_gripper",
             "suspending_gripper_refresh",
@@ -4982,6 +4994,8 @@ class CalibrationManager(QObject):
     def is_stream_calibration_sequence_busy(self) -> bool:
         status = str((getattr(self, "_stream_calibration_sequence_state", None) or {}).get("status") or "idle")
         return status in {
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
             "pending_gripper_refresh",
             "refreshing_gripper",
             "suspending_gripper_refresh",
@@ -6256,32 +6270,42 @@ class CalibrationManager(QObject):
         self._stream_capture_state["metadata_csv_path"] = path
         return path
 
-    def start_stream_gravimetric_capture(self, starting_mass_mg, rep_override=None, notes="", capture_mode="timecourse"):
+    def _prepare_stream_gravimetric_capture_start(
+        self,
+        *,
+        starting_mass_mg=None,
+        require_starting_mass: bool,
+        rep_override=None,
+        notes="",
+        capture_mode="timecourse",
+    ):
         if self.activeCalibration is not None or len(self.calibration_queue) > 0 or self.is_pulsewidth_sweep_active():
-            return False, "Stop the current calibration before starting a stream gravimetric capture."
+            return False, "Stop the current calibration before starting a stream gravimetric capture.", None
         if self.has_open_stream_gravimetric_capture():
-            return False, "Save or discard the existing stream gravimetric capture session first."
+            return False, "Save or discard the existing stream gravimetric capture session first.", None
         if self.has_open_droplet_calibration_sequence():
-            return False, "Stop the current droplet calibration sequence before starting a stream gravimetric capture."
+            return False, "Stop the current droplet calibration sequence before starting a stream gravimetric capture.", None
         if self.has_open_stream_calibration_sequence():
-            return False, "Stop the current stream calibration sequence before starting a stream gravimetric capture."
+            return False, "Stop the current stream calibration sequence before starting a stream gravimetric capture.", None
         if not self.get_record_mode_enabled():
-            return False, "Record Calibration Runs must be enabled before starting a stream gravimetric capture."
+            return False, "Record Calibration Runs must be enabled before starting a stream gravimetric capture.", None
 
         experiment_dir = self._resolve_stream_capture_experiment_dir()
         calibration_file_path = self._resolve_stream_capture_calibration_file_path()
         if not experiment_dir or not calibration_file_path:
-            return False, "An active experiment path is required before starting a stream gravimetric capture."
+            return False, "An active experiment path is required before starting a stream gravimetric capture.", None
         if not os.path.isdir(experiment_dir):
-            return False, f"Experiment directory does not exist: {experiment_dir}"
+            return False, f"Experiment directory does not exist: {experiment_dir}", None
 
-        starting_mass = self._stream_capture_float_or_none(starting_mass_mg)
-        if starting_mass is None:
-            return False, "Starting mass is required."
+        starting_mass = None
+        if require_starting_mass:
+            starting_mass = self._stream_capture_float_or_none(starting_mass_mg)
+            if starting_mass is None:
+                return False, "Starting mass is required.", None
 
         gripper_snapshot, gripper_error = self._get_gripper_refresh_snapshot()
         if not gripper_snapshot:
-            return False, str(gripper_error or "Unable to snapshot current gripper refresh settings.")
+            return False, str(gripper_error or "Unable to snapshot current gripper refresh settings."), None
 
         settings = self.get_current_settings()
         condition_snapshot = self._build_stream_capture_condition_snapshot(settings)
@@ -6292,23 +6316,9 @@ class CalibrationManager(QObject):
         if rep_value is None or rep_value <= 0:
             rep_value = int(suggested_rep)
 
-        try:
-            self.begin_session(calibration_file_path, notes="stream gravimetric capture")
-        except Exception as e:
-            return False, f"Failed to begin calibration session: {e}"
-
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        starting_flash = self._current_flash_count()
-        self._stream_capture_state = {
-            "status": "pending_gripper_refresh",
-            "status_message": "Refreshing gripper vacuum before stream gravimetric capture.",
-            "error_message": "",
-            "session_id": f"stream_capture_{ts}_{uuid.uuid4().hex[:8]}",
-            "starting_mass_mg": float(starting_mass),
-            "ending_mass_mg": None,
-            "starting_flash": starting_flash,
-            "ending_flash": None,
-            "raw_flash_delta": None,
+        return True, "", {
+            "calibration_file_path": str(calibration_file_path),
+            "starting_mass_mg": starting_mass,
             "condition_snapshot": dict(condition_snapshot),
             "suggested_rep": int(suggested_rep),
             "rep": int(rep_value),
@@ -6316,6 +6326,47 @@ class CalibrationManager(QObject):
             "capture_mode": str(normalized_capture_mode),
             "capture_phase_name": str(capture_mode_config.get("phase_name") or ""),
             "capture_process_name": str(capture_mode_config.get("process_name") or ""),
+            "metadata_csv_path": self._resolve_stream_capture_metadata_csv_path(),
+            "stream_capture_log_path": self._resolve_stream_capture_log_path(),
+            "gripper_refresh_period_snapshot_ms": int(gripper_snapshot["refresh_period_ms"]),
+            "gripper_pulse_duration_snapshot_ms": int(gripper_snapshot["pulse_duration_ms"]),
+            "gripper_was_open": bool(gripper_snapshot["gripper_open"]),
+        }
+
+    def _build_stream_gravimetric_capture_start_state(
+        self,
+        prepared,
+        *,
+        session_id,
+        status,
+        status_message,
+        starting_mass_mg,
+        starting_flash,
+        mass_source,
+        balance_request_id=None,
+        balance_request_status="inactive",
+        balance_status_message="",
+        starting_mass_capture=None,
+    ):
+        return {
+            "status": str(status),
+            "status_message": str(status_message),
+            "error_message": "",
+            "session_id": str(session_id),
+            "starting_mass_mg": (
+                None if starting_mass_mg is None else float(starting_mass_mg)
+            ),
+            "ending_mass_mg": None,
+            "starting_flash": starting_flash,
+            "ending_flash": None,
+            "raw_flash_delta": None,
+            "condition_snapshot": dict(prepared["condition_snapshot"]),
+            "suggested_rep": int(prepared["suggested_rep"]),
+            "rep": int(prepared["rep"]),
+            "notes": str(prepared["notes"]),
+            "capture_mode": str(prepared["capture_mode"]),
+            "capture_phase_name": str(prepared["capture_phase_name"]),
+            "capture_process_name": str(prepared["capture_process_name"]),
             "timecourse_run_id": None,
             "dataset_run_id": None,
             "dataset_process_name": None,
@@ -6334,18 +6385,290 @@ class CalibrationManager(QObject):
             "segmented_predicted_volume_nl": None,
             "segmented_predicted_volume_delta_from_runtime_nl": None,
             "analysis_warnings": [],
-            "metadata_csv_path": self._resolve_stream_capture_metadata_csv_path(),
-            "stream_capture_log_path": self._resolve_stream_capture_log_path(),
+            "metadata_csv_path": prepared["metadata_csv_path"],
+            "stream_capture_log_path": prepared["stream_capture_log_path"],
             "sidecar_written": False,
             "sidecar_outcome": None,
             "saved_dataset_name": None,
             "session_outcome": None,
             "post_restore_action": None,
-            "gripper_refresh_period_snapshot_ms": int(gripper_snapshot["refresh_period_ms"]),
-            "gripper_pulse_duration_snapshot_ms": int(gripper_snapshot["pulse_duration_ms"]),
-            "gripper_was_open": bool(gripper_snapshot["gripper_open"]),
+            "gripper_refresh_period_snapshot_ms": int(prepared["gripper_refresh_period_snapshot_ms"]),
+            "gripper_pulse_duration_snapshot_ms": int(prepared["gripper_pulse_duration_snapshot_ms"]),
+            "gripper_was_open": bool(prepared["gripper_was_open"]),
             "gripper_refresh_suspended": False,
+            "mass_source": str(mass_source),
+            "balance_request_id": balance_request_id,
+            "balance_request_phase": "starting" if balance_request_id else None,
+            "balance_request_status": str(balance_request_status),
+            "balance_status_message": str(balance_status_message or ""),
+            "balance_progress": None,
+            "starting_mass_capture": starting_mass_capture,
+            "ending_mass_capture": None,
+            "balance_fallback_reason": None,
+            "preserve_start_inputs": False,
         }
+
+    def _activate_stream_gravimetric_capture_start(
+        self,
+        prepared,
+        *,
+        starting_mass_mg,
+        session_id=None,
+        mass_source="manual",
+        starting_mass_capture=None,
+    ):
+        starting_mass = self._stream_capture_float_or_none(starting_mass_mg)
+        if starting_mass is None:
+            return False, "Starting mass is required."
+
+        try:
+            self.begin_session(
+                prepared["calibration_file_path"],
+                notes="stream gravimetric capture",
+            )
+        except Exception as e:
+            return False, f"Failed to begin calibration session: {e}"
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        starting_flash = self._current_flash_count()
+        self._stream_capture_state = self._build_stream_gravimetric_capture_start_state(
+            prepared,
+            session_id=(session_id or f"stream_capture_{ts}_{uuid.uuid4().hex[:8]}"),
+            status="pending_gripper_refresh",
+            status_message="Refreshing gripper vacuum before stream gravimetric capture.",
+            starting_mass_mg=starting_mass,
+            starting_flash=starting_flash,
+            mass_source=mass_source,
+            balance_request_id=(
+                (starting_mass_capture or {}).get("request_id")
+                if mass_source == "veritas_balance"
+                else None
+            ),
+            balance_request_status=(
+                "stable_candidate" if mass_source == "veritas_balance" else "inactive"
+            ),
+            balance_status_message=(
+                "Confirmed stable starting mass."
+                if mass_source == "veritas_balance"
+                else ""
+            ),
+            starting_mass_capture=starting_mass_capture,
+        )
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def start_stream_gravimetric_capture(self, starting_mass_mg, rep_override=None, notes="", capture_mode="timecourse"):
+        ok, message, prepared = self._prepare_stream_gravimetric_capture_start(
+            starting_mass_mg=starting_mass_mg,
+            require_starting_mass=True,
+            rep_override=rep_override,
+            notes=notes,
+            capture_mode=capture_mode,
+        )
+        if not ok:
+            return False, message
+        return self._activate_stream_gravimetric_capture_start(
+            prepared,
+            starting_mass_mg=prepared["starting_mass_mg"],
+        )
+
+    def stage_stream_gravimetric_balance_start(
+        self,
+        request_id,
+        *,
+        rep_override=None,
+        notes="",
+        capture_mode="timecourse",
+    ):
+        explicit_request_id = str(request_id or "").strip()
+        if not explicit_request_id:
+            return False, "Balance request id is required.", None
+        ok, message, prepared = self._prepare_stream_gravimetric_capture_start(
+            require_starting_mass=False,
+            rep_override=rep_override,
+            notes=notes,
+            capture_mode=capture_mode,
+        )
+        if not ok:
+            return False, message, None
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_id = f"stream_capture_{ts}_{uuid.uuid4().hex[:8]}"
+        self._stream_capture_state = self._build_stream_gravimetric_capture_start_state(
+            prepared,
+            session_id=session_id,
+            status="awaiting_starting_balance_mass",
+            status_message="Waiting for a stable starting mass from the balance.",
+            starting_mass_mg=None,
+            starting_flash=None,
+            mass_source="veritas_balance",
+            balance_request_id=explicit_request_id,
+            balance_request_status="requesting",
+            balance_status_message="Starting stable-mass request.",
+        )
+        self._emit_stream_capture_state_changed()
+        return True, "", session_id
+
+    def _stream_gravimetric_balance_request_matches(self, request_id, session_id):
+        state = self._stream_capture_state or {}
+        return (
+            str(state.get("status") or "")
+            in {
+                "awaiting_starting_balance_mass",
+                "awaiting_starting_balance_confirmation",
+            }
+            and str(state.get("balance_request_id") or "") == str(request_id or "")
+            and str(state.get("session_id") or "") == str(session_id or "")
+            and str(state.get("balance_request_phase") or "") == "starting"
+        )
+
+    def mark_stream_gravimetric_balance_request_started(self, request_id, session_id):
+        if not self._stream_gravimetric_balance_request_matches(request_id, session_id):
+            return False, "Balance request no longer matches the staged stream capture."
+        self._stream_capture_state["status"] = "awaiting_starting_balance_mass"
+        self._stream_capture_state["status_message"] = "Waiting for a stable starting mass from the balance."
+        self._stream_capture_state["balance_request_status"] = "waiting"
+        self._stream_capture_state["balance_status_message"] = "Waiting for stable balance readings."
+        self._stream_capture_state["balance_progress"] = None
+        self._stream_capture_state["starting_mass_capture"] = None
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def prepare_stream_gravimetric_balance_retry(self, request_id):
+        state = self._stream_capture_state or {}
+        if str(state.get("status") or "") not in {
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
+        }:
+            return False, "Stream capture is not waiting for a starting balance mass.", None
+        if str(state.get("balance_request_status") or "") in {"requesting", "waiting", "cancelling"}:
+            return False, "The current balance request has not finished.", None
+        explicit_request_id = str(request_id or "").strip()
+        if not explicit_request_id:
+            return False, "Balance request id is required.", None
+        self._stream_capture_state["status"] = "awaiting_starting_balance_mass"
+        self._stream_capture_state["status_message"] = "Starting another stable starting-mass reading."
+        self._stream_capture_state["balance_request_id"] = explicit_request_id
+        self._stream_capture_state["balance_request_status"] = "requesting"
+        self._stream_capture_state["balance_status_message"] = "Starting stable-mass request."
+        self._stream_capture_state["balance_progress"] = None
+        self._stream_capture_state["starting_mass_capture"] = None
+        session_id = str(self._stream_capture_state.get("session_id") or "")
+        self._emit_stream_capture_state_changed()
+        return True, "", session_id
+
+    def update_stream_gravimetric_balance_progress(self, request_id, session_id, progress):
+        if not self._stream_gravimetric_balance_request_matches(request_id, session_id):
+            return False
+        if str((self._stream_capture_state or {}).get("balance_request_status") or "") != "waiting":
+            return False
+        self._stream_capture_state["balance_progress"] = dict(progress or {})
+        elapsed_ms = int((progress or {}).get("elapsed_ms") or 0)
+        self._stream_capture_state["balance_status_message"] = (
+            f"Waiting for stable balance readings ({elapsed_ms / 1000.0:.1f} s)."
+        )
+        self._emit_stream_capture_state_changed()
+        return True
+
+    def mark_stream_gravimetric_balance_request_cancelling(self, request_id, session_id):
+        if not self._stream_gravimetric_balance_request_matches(request_id, session_id):
+            return False, "Balance request no longer matches the staged stream capture."
+        if str(self._stream_capture_state.get("balance_request_status") or "") not in {"requesting", "waiting"}:
+            return False, "Balance request is not active."
+        self._stream_capture_state["balance_request_status"] = "cancelling"
+        self._stream_capture_state["balance_status_message"] = "Cancelling stable-mass reading."
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def mark_stream_gravimetric_balance_request_failure(
+        self,
+        request_id,
+        session_id,
+        *,
+        request_status,
+        message,
+        capture=None,
+    ):
+        if not self._stream_gravimetric_balance_request_matches(request_id, session_id):
+            return False
+        normalized = str(request_status or "error")
+        if normalized not in {"timeout", "cancelled", "error", "rejected"}:
+            normalized = "error"
+        if str(self._stream_capture_state.get("balance_request_status") or "") == "cancelling":
+            normalized = "cancelled"
+        self._stream_capture_state["status"] = "awaiting_starting_balance_mass"
+        self._stream_capture_state["status_message"] = str(message or "Stable starting-mass request failed.")
+        self._stream_capture_state["balance_request_status"] = normalized
+        self._stream_capture_state["balance_status_message"] = str(message or "")
+        self._stream_capture_state["starting_mass_capture"] = dict(capture or {}) or None
+        self._emit_stream_capture_state_changed()
+        return True
+
+    def record_stream_gravimetric_starting_mass_candidate(self, request_id, session_id, capture):
+        if not self._stream_gravimetric_balance_request_matches(request_id, session_id):
+            return False
+        if str(self._stream_capture_state.get("balance_request_status") or "") == "cancelling":
+            return self.mark_stream_gravimetric_balance_request_failure(
+                request_id,
+                session_id,
+                request_status="cancelled",
+                message="Stable-mass reading was cancelled.",
+                capture=None,
+            )
+        candidate = dict(capture or {})
+        if str(candidate.get("outcome") or "") != "stable" or candidate.get("stable_mass_mg") in (None, ""):
+            return False
+        self._stream_capture_state["status"] = "awaiting_starting_balance_confirmation"
+        self._stream_capture_state["status_message"] = "Stable starting mass is ready for operator confirmation."
+        self._stream_capture_state["balance_request_status"] = "stable_candidate"
+        self._stream_capture_state["balance_status_message"] = "Confirm the stable mass before beginning the stream sequence."
+        self._stream_capture_state["starting_mass_capture"] = candidate
+        self._emit_stream_capture_state_changed()
+        return True
+
+    def confirm_stream_gravimetric_starting_mass(self):
+        state = self._stream_capture_state or {}
+        if str(state.get("status") or "") != "awaiting_starting_balance_confirmation":
+            return False, "No stable starting mass is awaiting confirmation."
+        capture = dict(state.get("starting_mass_capture") or {})
+        mass = self._stream_capture_float_or_none(capture.get("stable_mass_mg"))
+        if mass is None:
+            return False, "Stable starting mass candidate is unavailable."
+        prepared = {
+            "calibration_file_path": self._resolve_stream_capture_calibration_file_path(),
+            "condition_snapshot": dict(state.get("condition_snapshot") or {}),
+            "suggested_rep": int(state.get("suggested_rep") or 1),
+            "rep": int(state.get("rep") or 1),
+            "notes": str(state.get("notes") or ""),
+            "capture_mode": str(state.get("capture_mode") or "timecourse"),
+            "capture_phase_name": str(state.get("capture_phase_name") or ""),
+            "capture_process_name": str(state.get("capture_process_name") or ""),
+            "metadata_csv_path": state.get("metadata_csv_path"),
+            "stream_capture_log_path": state.get("stream_capture_log_path"),
+            "gripper_refresh_period_snapshot_ms": int(state.get("gripper_refresh_period_snapshot_ms") or 0),
+            "gripper_pulse_duration_snapshot_ms": int(state.get("gripper_pulse_duration_snapshot_ms") or 0),
+            "gripper_was_open": bool(state.get("gripper_was_open")),
+        }
+        result = self._activate_stream_gravimetric_capture_start(
+            prepared,
+            starting_mass_mg=mass,
+            session_id=str(state.get("session_id") or ""),
+            mass_source="veritas_balance",
+            starting_mass_capture=capture,
+        )
+        if isinstance(result, tuple) and result and result[0] is False:
+            self._stream_capture_state["error_message"] = str(result[1] or "")
+            self._stream_capture_state["balance_status_message"] = str(result[1] or "")
+            self._emit_stream_capture_state_changed()
+        return result
+
+    def return_stream_gravimetric_start_to_manual(self, reason="operator_manual_fallback", *, preserve_inputs=True):
+        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        if status not in {"awaiting_starting_balance_mass", "awaiting_starting_balance_confirmation"}:
+            return False, "Stream capture is not waiting for a starting balance mass."
+        message = "Returned to manual starting-mass entry."
+        self._stream_capture_state = self._build_default_stream_capture_state(status_message=message)
+        self._stream_capture_state["balance_fallback_reason"] = str(reason or "")
+        self._stream_capture_state["preserve_start_inputs"] = bool(preserve_inputs)
         self._emit_stream_capture_state_changed()
         return True, ""
 
@@ -6402,6 +6725,14 @@ class CalibrationManager(QObject):
         status = str((self._stream_capture_state or {}).get("status") or "idle")
         if status == "idle":
             return False, "No active stream gravimetric capture session to discard."
+        if status in {
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
+        }:
+            return self.return_stream_gravimetric_start_to_manual(
+                reason=reason,
+                preserve_inputs=False,
+            )
         if status == "running" and self.activeCalibration is not None:
             return False, "Stop the stream gravimetric capture before discarding it."
         if status in {"refreshing_gripper", "suspending_gripper_refresh", "moving_to_loading", "restoring_gripper_refresh", "returning_to_camera"}:

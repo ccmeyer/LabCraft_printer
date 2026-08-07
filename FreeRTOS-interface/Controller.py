@@ -826,6 +826,9 @@ class Controller(QObject):
     experimental_balance_connection_changed = Signal(object)
     experimental_balance_reading_received = Signal(object)
     experimental_balance_error_occurred = Signal(object)
+    experimental_balance_stream_opt_in_changed = Signal(bool)
+    experimental_balance_request_progress = Signal(object)
+    experimental_balance_request_finished = Signal(object)
 
     # DFU signals
     dfu_progress = QtCore.Signal(int)
@@ -894,6 +897,8 @@ class Controller(QObject):
         self._experimental_balance_connection_snapshot = None
         self._experimental_balance_last_reading = None
         self._experimental_balance_ports = ()
+        self._experimental_balance_stream_opt_in = False
+        self._experimental_balance_active_stream_request = None
         if self.experimental_features.balance_integration:
             if self._experimental_balance_service is None:
                 raise ValueError(
@@ -907,6 +912,12 @@ class Controller(QObject):
             )
             self._experimental_balance_service.error_occurred.connect(
                 self._on_experimental_balance_error_occurred
+            )
+            self._experimental_balance_service.request_progress.connect(
+                self._on_experimental_balance_request_progress
+            )
+            self._experimental_balance_service.request_finished.connect(
+                self._on_experimental_balance_request_finished
             )
         elif self._experimental_balance_service is not None:
             raise ValueError(
@@ -1407,6 +1418,252 @@ class Controller(QObject):
     def get_experimental_balance_last_reading(self):
         return self._experimental_balance_last_reading
 
+    @property
+    def experimental_balance_stream_opt_in(self) -> bool:
+        return bool(self._experimental_balance_stream_opt_in)
+
+    @staticmethod
+    def _experimental_balance_state_name(snapshot) -> str:
+        state = getattr(snapshot, "state", "")
+        return str(getattr(state, "value", state) or "").strip().casefold()
+
+    def _experimental_balance_is_streaming(self) -> bool:
+        snapshot = self._experimental_balance_connection_snapshot
+        if snapshot is None and self._experimental_balance_service is not None:
+            try:
+                snapshot = self._experimental_balance_service.connection_snapshot
+            except Exception:
+                snapshot = None
+        return self._experimental_balance_state_name(snapshot) == "streaming"
+
+    def set_experimental_balance_stream_opt_in(self, enabled: bool) -> bool:
+        desired = bool(enabled)
+        if not self.experimental_balance_enabled:
+            return False
+        if desired and not self._experimental_balance_is_streaming():
+            self.error_occurred_signal.emit(
+                "Experimental Balance",
+                "Connect the balance and wait for Streaming before enabling it for stream capture.",
+            )
+            return False
+        if desired == self._experimental_balance_stream_opt_in:
+            return True
+        self._experimental_balance_stream_opt_in = desired
+        self.experimental_balance_stream_opt_in_changed.emit(desired)
+        return True
+
+    @staticmethod
+    def _balance_value(value):
+        return str(getattr(value, "value", value) or "")
+
+    @classmethod
+    def _balance_evidence_payload(cls, evidence):
+        if evidence is None:
+            return None
+        return {
+            "sample_count": int(evidence.sample_count),
+            "window_started_ns": int(evidence.window_started_ns),
+            "window_ended_ns": int(evidence.window_ended_ns),
+            "window_duration_ns": int(evidence.window_duration_ns),
+            "mean_mass_mg_unrounded": str(evidence.mean_mass_mg_unrounded),
+            "quantized_mean_mass_mg": str(evidence.quantized_mean_mass_mg),
+            "minimum_mass_mg": str(evidence.minimum_mass_mg),
+            "maximum_mass_mg": str(evidence.maximum_mass_mg),
+            "span_mg": str(evidence.span_mg),
+            "population_standard_deviation_mg": str(
+                evidence.population_standard_deviation_mg
+            ),
+            "fitted_slope_mg_per_second": str(
+                evidence.fitted_slope_mg_per_second
+            ),
+            "device_stable_sample_count": int(evidence.device_stable_sample_count),
+            "device_unstable_sample_count": int(evidence.device_unstable_sample_count),
+            "all_device_stable": bool(evidence.all_device_stable),
+        }
+
+    @classmethod
+    def _balance_progress_payload(cls, progress):
+        reading = progress.latest_reading
+        return {
+            "elapsed_ms": int(progress.elapsed_ns // 1_000_000),
+            "retained_sample_count": int(progress.retained_sample_count),
+            "latest_mass_mg": str(reading.mass_mg),
+            "latest_device_stable": bool(reading.device_stable),
+            "evidence": cls._balance_evidence_payload(progress.evidence),
+        }
+
+    @classmethod
+    def _balance_result_payload(cls, result):
+        stable_mass = getattr(result, "stable_mass_mg", None)
+        return {
+            "request_id": str(result.request_id),
+            "stream_session_id": str(result.stream_session_id),
+            "phase": cls._balance_value(result.phase),
+            "outcome": cls._balance_value(result.outcome),
+            "completed_monotonic_ns": int(result.completed_monotonic_ns),
+            "stable_mass_mg": None if stable_mass is None else str(stable_mass),
+            "evidence": cls._balance_evidence_payload(result.evidence),
+            "failure_reason": cls._balance_value(result.failure_reason),
+            "detail": str(result.detail or ""),
+            "total_readings_seen": int(result.total_readings_seen),
+            "total_stable_readings": int(result.total_stable_readings),
+            "total_unstable_readings": int(result.total_unstable_readings),
+        }
+
+    def _stream_capture_manager(self):
+        return getattr(getattr(self, "model", None), "calibration_manager", None)
+
+    def _submit_stream_gravimetric_starting_mass_request(
+        self, request_id: str, session_id: str
+    ):
+        from BalanceProtocol import StableMassPhase, StableMassRequest
+
+        request = StableMassRequest(
+            request_id=str(request_id),
+            stream_session_id=str(session_id),
+            phase=StableMassPhase.STARTING,
+            started_monotonic_ns=time.monotonic_ns(),
+        )
+        binding = {
+            "request_id": request.request_id,
+            "session_id": request.stream_session_id,
+            "phase": request.phase.value,
+            "cancel_requested": False,
+        }
+        self._experimental_balance_active_stream_request = binding
+        result = self._experimental_balance_service.request_stable_mass(request)
+        manager = self._stream_capture_manager()
+        if not bool(getattr(result, "accepted", False)):
+            self._experimental_balance_active_stream_request = None
+            detail = str(getattr(result, "detail", "") or "Stable-mass request was rejected.")
+            manager.mark_stream_gravimetric_balance_request_failure(
+                request.request_id,
+                request.stream_session_id,
+                request_status="rejected",
+                message=detail,
+            )
+            self.error_occurred_signal.emit("Experimental Balance", detail)
+            return False, detail
+        manager.mark_stream_gravimetric_balance_request_started(
+            request.request_id,
+            request.stream_session_id,
+        )
+        return True, ""
+
+    def start_stream_gravimetric_capture_with_balance(
+        self,
+        rep_override=None,
+        notes="",
+        capture_mode="timecourse",
+    ):
+        if not self.experimental_balance_enabled:
+            return False, "Experimental balance integration is not enabled."
+        if not self.experimental_balance_stream_opt_in:
+            return False, "Use connected balance is not enabled for this application session."
+        if not self._experimental_balance_is_streaming():
+            return False, "Balance must be Streaming before requesting a starting mass."
+        if self._experimental_balance_active_stream_request is not None:
+            return False, "A stream-capture balance request is already active."
+        manager = self._stream_capture_manager()
+        request_id = f"stream_start_{uuid.uuid4().hex}"
+        ok, message, session_id = manager.stage_stream_gravimetric_balance_start(
+            request_id,
+            rep_override=rep_override,
+            notes=notes,
+            capture_mode=capture_mode,
+        )
+        if not ok:
+            return False, message
+        return self._submit_stream_gravimetric_starting_mass_request(
+            request_id,
+            session_id,
+        )
+
+    def retry_stream_gravimetric_starting_mass(self):
+        if not self.experimental_balance_enabled or not self._experimental_balance_is_streaming():
+            return False, "Reconnect the balance before retrying the starting-mass reading."
+        if self._experimental_balance_active_stream_request is not None:
+            return False, "The current balance request has not finished."
+        manager = self._stream_capture_manager()
+        request_id = f"stream_start_{uuid.uuid4().hex}"
+        ok, message, session_id = manager.prepare_stream_gravimetric_balance_retry(
+            request_id
+        )
+        if not ok:
+            return False, message
+        return self._submit_stream_gravimetric_starting_mass_request(
+            request_id,
+            session_id,
+        )
+
+    def cancel_stream_gravimetric_starting_mass(self):
+        binding = self._experimental_balance_active_stream_request
+        if binding is None:
+            return False, "There is no active starting-mass request."
+        manager = self._stream_capture_manager()
+        ok, message = manager.mark_stream_gravimetric_balance_request_cancelling(
+            binding["request_id"],
+            binding["session_id"],
+        )
+        if not ok:
+            return False, message
+        binding["cancel_requested"] = True
+        result = self._experimental_balance_service.cancel_stable_mass(
+            binding["request_id"]
+        )
+        if not bool(getattr(result, "accepted", False)):
+            detail = str(getattr(result, "detail", "") or "Cancellation was rejected.")
+            self.error_occurred_signal.emit("Experimental Balance", detail)
+            return False, detail
+        return True, ""
+
+    def confirm_stream_gravimetric_starting_mass(self):
+        if self._experimental_balance_active_stream_request is not None:
+            return False, "The stable-mass request has not finished."
+        return self._stream_capture_manager().confirm_stream_gravimetric_starting_mass()
+
+    def _retire_stream_gravimetric_starting_mass_request(self):
+        binding = self._experimental_balance_active_stream_request
+        self._experimental_balance_active_stream_request = None
+        if binding is None:
+            return
+        try:
+            self._experimental_balance_service.cancel_stable_mass(
+                binding["request_id"]
+            )
+        except Exception as exc:
+            self.error_occurred_signal.emit(
+                "Experimental Balance",
+                f"Could not cancel retired stable-mass request: {exc}",
+            )
+
+    def use_manual_stream_gravimetric_starting_mass(
+        self, reason="operator_manual_fallback"
+    ):
+        manager = self._stream_capture_manager()
+        result = manager.return_stream_gravimetric_start_to_manual(
+            reason=reason,
+            preserve_inputs=True,
+        )
+        if isinstance(result, tuple) and result and result[0] is False:
+            return result
+        self._retire_stream_gravimetric_starting_mass_request()
+        self.set_experimental_balance_stream_opt_in(False)
+        return True, ""
+
+    def abandon_stream_gravimetric_starting_mass(
+        self, reason="operator_abandoned"
+    ):
+        manager = self._stream_capture_manager()
+        result = manager.return_stream_gravimetric_start_to_manual(
+            reason=reason,
+            preserve_inputs=False,
+        )
+        if isinstance(result, tuple) and result and result[0] is False:
+            return result
+        self._retire_stream_gravimetric_starting_mass_request()
+        return True, ""
+
     def _on_experimental_balance_connection_changed(self, snapshot):
         self._experimental_balance_connection_snapshot = snapshot
         self.experimental_balance_connection_changed.emit(snapshot)
@@ -1414,6 +1671,68 @@ class Controller(QObject):
     def _on_experimental_balance_reading_received(self, reading):
         self._experimental_balance_last_reading = reading
         self.experimental_balance_reading_received.emit(reading)
+
+    def _on_experimental_balance_request_progress(self, progress):
+        binding = self._experimental_balance_active_stream_request
+        request = getattr(progress, "request", None)
+        if binding is None or request is None:
+            return
+        if (
+            str(getattr(request, "request_id", "")) != binding["request_id"]
+            or str(getattr(request, "stream_session_id", "")) != binding["session_id"]
+            or self._balance_value(getattr(request, "phase", "")) != binding["phase"]
+            or bool(binding.get("cancel_requested"))
+        ):
+            return
+        payload = self._balance_progress_payload(progress)
+        if self._stream_capture_manager().update_stream_gravimetric_balance_progress(
+            binding["request_id"],
+            binding["session_id"],
+            payload,
+        ):
+            self.experimental_balance_request_progress.emit(progress)
+
+    def _on_experimental_balance_request_finished(self, result):
+        binding = self._experimental_balance_active_stream_request
+        if binding is None:
+            return
+        if (
+            str(getattr(result, "request_id", "")) != binding["request_id"]
+            or str(getattr(result, "stream_session_id", "")) != binding["session_id"]
+            or self._balance_value(getattr(result, "phase", "")) != binding["phase"]
+        ):
+            return
+        self._experimental_balance_active_stream_request = None
+        payload = self._balance_result_payload(result)
+        outcome = payload["outcome"]
+        manager = self._stream_capture_manager()
+        if outcome == "stable" and not bool(binding.get("cancel_requested")):
+            handled = manager.record_stream_gravimetric_starting_mass_candidate(
+                binding["request_id"],
+                binding["session_id"],
+                payload,
+            )
+        else:
+            status = {
+                "timeout": "timeout",
+                "cancelled": "cancelled",
+            }.get(outcome, "error")
+            if bool(binding.get("cancel_requested")):
+                status = "cancelled"
+            detail = payload.get("detail") or (
+                "Stable-mass reading was cancelled."
+                if status == "cancelled"
+                else "Stable starting-mass request failed."
+            )
+            handled = manager.mark_stream_gravimetric_balance_request_failure(
+                binding["request_id"],
+                binding["session_id"],
+                request_status=status,
+                message=detail,
+                capture=payload,
+            )
+        if handled:
+            self.experimental_balance_request_finished.emit(result)
 
     def _on_experimental_balance_error_occurred(self, error):
         self.experimental_balance_error_occurred.emit(error)
@@ -2306,6 +2625,8 @@ class Controller(QObject):
 
         normalized = str(status or "idle").strip().lower()
         return normalized in {
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
             "pending_gripper_refresh",
             "refreshing_gripper",
             "suspending_gripper_refresh",
@@ -9153,6 +9474,12 @@ class Controller(QObject):
         )
 
     def discard_stream_gravimetric_capture(self, reason="operator_discarded"):
+        state = self.model.calibration_manager.get_stream_gravimetric_capture_state()
+        if str(state.get("status") or "") in {
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
+        }:
+            return self.abandon_stream_gravimetric_starting_mass(reason=reason)
         return self.model.calibration_manager.discard_stream_gravimetric_capture(
             reason=reason,
         )

@@ -774,6 +774,26 @@ def test_controller_app_update_blockers_cover_busy_states(tmp_path):
     assert "Droplet calibration sequence state is pending_gripper_restore." in blockers
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        "awaiting_starting_balance_mass",
+        "awaiting_starting_balance_confirmation",
+    ],
+)
+def test_controller_app_update_blocker_covers_starting_balance_states(
+    tmp_path, status
+):
+    controller = _make_controller(tmp_path)
+    controller.model.calibration_manager = _idle_calibration_manager(
+        get_stream_gravimetric_capture_state=lambda: {"status": status},
+    )
+
+    blockers = controller.get_app_update_blockers()
+
+    assert f"Stream gravimetric capture state is {status}." in blockers
+
+
 def _make_update_mainwindow(controller, *, popup_response=QMessageBox.StandardButton.Yes):
     messages = []
     close_calls = {"count": 0}

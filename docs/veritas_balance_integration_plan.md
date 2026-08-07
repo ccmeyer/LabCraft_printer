@@ -4,7 +4,7 @@
 
 - Date: 2026-08-07
 - Branch: `feature/balance_integration`
-- Status: Slices 0-4 verified; Slice 5 ready
+- Status: Slices 0-5 verified; Slice 6 ready
 - Scope: implementation plan and slice verification record
 - Target hardware: Veritas/BEL HPB balance connected to the Raspberry Pi through a proper RS-232-to-USB adapter
 - Target workflow: stream gravimetric data collection only
@@ -924,7 +924,7 @@ Rollback:
 
 ## Slice 5: Balance-Backed Starting Mass And Manual Fallback
 
-Status: `not_started`
+Status: `verified`
 
 Goal:
 
@@ -951,10 +951,11 @@ Implementation steps:
 2. Split the current start method so validated manual starts preserve exact
    behavior while balance starts pause before session launch.
 3. Issue one identified starting-mass request through the Controller.
-4. Accept only matching successful results and copy their evidence into the
-   stream state.
-5. Continue through the existing gripper preamble and calibration queue with
-   the accepted `starting_mass_mg`.
+4. Accept only matching successful results as candidates and copy their
+   JSON-safe evidence into the stream state.
+5. Require explicit operator confirmation before continuing through the
+   existing gripper preamble and calibration queue with the accepted
+   `starting_mass_mg`.
 6. Add cancel, retry, and explicit `Use Manual Starting Mass` transitions.
 7. Include the new pending state in busy/open/update blockers and duplicate
    start guards.
@@ -963,7 +964,48 @@ Implementation steps:
 
 Validation:
 
-`.\env\Scripts\python.exe -m pytest -q tests\test_stream_gravimetric_balance_integration.py tests\test_stream_gravimetric_capture.py tests\test_app_update_request.py`
+`.\env\Scripts\python.exe -m pytest -q tests\test_stream_gravimetric_balance_integration.py tests\test_stream_gravimetric_capture.py tests\test_app_update_request.py tests\test_balance_service.py`
+
+Implementation findings:
+
+- The application-session opt-in defaults off, is cached only by the
+  Controller, survives closing and reopening the imager, and can be enabled
+  only while the service is streaming.
+- Balance-backed start validation creates a provisional stream session and
+  enters `awaiting_starting_balance_mass` without calling `begin_session()`,
+  reading the starting flash count, changing the calibration queue, or
+  invoking printer hardware.
+- Progress and terminal evidence are copied as bounded JSON-safe primitives;
+  Decimal values are exact strings and raw serial payloads are excluded.
+- Only results matching request id, provisional stream session id, starting
+  phase, and current Manager state are accepted. Late, duplicate, retired,
+  wrong-session, wrong-phase, and cancellation-race results cannot release the
+  stream sequence.
+- A stable result enters `awaiting_starting_balance_confirmation`. Only
+  **Confirm Starting Mass & Begin** copies the mass to the authoritative field
+  and calls the existing start continuation.
+- Retry preserves staged metadata and the provisional session while assigning
+  a new request id. Manual fallback restores editing, preserves widget input,
+  retires the request, disables the opt-in, and requires another Begin click.
+- Both new states are open/busy and block app updates and competing
+  calibration starts.
+- Focused validation passed on 2026-08-07. The full repository suite remains
+  deferred to final all-slices validation as agreed.
+
+Proceed criteria:
+
+- Manual and unchecked paths retain the existing start behavior.
+- Staging and candidate arrival cannot begin a calibration session or queue a
+  hardware action.
+- Confirmation releases the existing continuation exactly once.
+- Timeout, cancellation, rejection, service error, disconnect, retry, manual
+  fallback, close, and stale-event paths remain recoverable without starting
+  hardware.
+
+Operator instructions:
+
+- See `docs/veritas_balance_operator.md` for the session opt-in, confirmed
+  starting-mass workflow, retry/cancel/manual fallback, and safety boundary.
 
 Manual/HIL check:
 

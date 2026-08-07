@@ -1,9 +1,10 @@
 # Experimental HPB Balance Connection
 
 This connection panel is an intentionally hidden data-collection aid for the
-Veritas/BEL HPB-625i. Slice 4 displays the live balance stream only. It does
-not fill either gravimetric mass field, decide that a mass is stable, or alter
-the stream-capture sequence.
+Veritas/BEL HPB-625i. It can display the live balance stream and, after an
+additional session opt-in, stage a stable starting mass for stream gravimetric
+capture. The printer sequence never begins until the operator confirms the
+candidate starting mass.
 
 ## Before Launch
 
@@ -51,6 +52,35 @@ Only the exact value `1` enables the feature. Values such as `true`, `yes`, or
 The existing `BALANCE_PORT` setting is only an optional visual preselection.
 This panel does not modify it.
 
+## Use A Balance Starting Mass
+
+1. Wait until the connection state reads **Streaming**.
+2. Select **Use connected balance for stream capture**. This choice lasts only
+   for the running application; it is not saved in `Settings.json`.
+3. Enter the repetition, notes, and capture mode as usual, then click the
+   normal **Begin Session** control.
+4. Leave the sample undisturbed while the status and sample count update.
+5. Review the candidate mass when it appears. No calibration session, gripper
+   action, flash snapshot, motion, pressure, dispensing, or printer command
+   has started at this point.
+6. Click **Confirm Starting Mass & Begin** only when the candidate is correct.
+   This explicit confirmation releases the existing stream sequence.
+
+Use **Cancel Reading** to stop an active measurement and **Read Again** after a
+timeout, cancellation, service error, or unwanted candidate. A retry keeps the
+staged repetition, notes, capture mode, and provisional stream session, but
+uses a new balance request identity.
+
+Use **Use Manual Starting Mass** to abandon the staged balance measurement.
+This restores the existing manual controls and their pre-request contents,
+turns off the session opt-in, and requires another click of **Begin Session**.
+Closing the imager while a starting reading or candidate is pending abandons
+that provisional measurement but does not disconnect the balance or clear the
+application-session opt-in.
+
+Slice 5 automates only the confirmed starting mass. Ending-mass entry remains
+the existing manual workflow until Slice 6 is implemented.
+
 ## Disable And Restore
 
 Close the application and relaunch it without the environment variable. In
@@ -77,4 +107,3 @@ session if `PC cont` is not its normal configuration.
   the adapter, click **Refresh**, and then explicitly connect again.
 - Never select or work around filtering for the printer MCU. The observed MCU
   adapter is CP2102 VID:PID `10c4:ea60`.
-
