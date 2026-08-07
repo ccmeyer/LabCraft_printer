@@ -6,6 +6,7 @@ import pytest
 
 from tools.virtual_workflows.composition import normalized_steps
 from tools.virtual_workflows.journey_phases import (
+    PostStartLockCopySpec,
     PreparedEditorRevisionSpec,
     SoftStopResumeSpec,
     StockPassSpec,
@@ -229,3 +230,19 @@ def test_prepared_revision_values_vary_without_a_new_runner():
 def test_prepared_revision_rejects_invalid_values(values, message):
     with pytest.raises(ValueError, match=message):
         _prepared_revision(**values)
+
+
+def test_post_start_lock_copy_spec_is_typed_and_bounded(tmp_path):
+    spec = PostStartLockCopySpec(
+        source_dir=tmp_path / "source",
+        source_name="source",
+        copy_name="copy",
+        copy_tolerance_nl=1.0,
+    )
+
+    assert spec.source_dir == (tmp_path / "source").resolve()
+    assert spec.copy_tolerance_nl == 1.0
+    with pytest.raises(ValueError, match="distinct"):
+        PostStartLockCopySpec(tmp_path, "same", "same", 1.0)
+    with pytest.raises(ValueError, match="non-negative"):
+        PostStartLockCopySpec(tmp_path, "source", "copy", -1.0)

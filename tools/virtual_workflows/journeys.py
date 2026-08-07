@@ -15,6 +15,7 @@ from tools.virtual_workflows.assertions import (
     capture_editor_prepared_revision_snapshot,
     editor_artifacts_cleanup_assertion,
     editor_create_finalize_assertion,
+    editor_post_start_lock_copy_assertions,
     editor_prepared_bundle_assertions,
     editor_prepared_revision_assertions,
     editor_prepared_revision_failure_assertion,
@@ -40,9 +41,11 @@ from tools.virtual_workflows.composition import (
 )
 from tools.virtual_workflows.execution_observer import ExecutionObserver
 from tools.virtual_workflows.authoritative_evidence import (
+    capture_authoritative_bundle,
     merge_session_lifecycles,
 )
 from tools.virtual_workflows.editor_reporting import (
+    EditorLifecycleReportSpec,
     build_editor_lifecycle_payload,
     create_finalize_report_spec,
     prepared_revision_report_spec,
@@ -50,12 +53,14 @@ from tools.virtual_workflows.editor_reporting import (
 from tools.virtual_workflows.journey_phases import (
     EditorPreparationSpec,
     PreparedEditorRevisionSpec,
+    PostStartLockCopySpec,
     StockPassSpec,
     SoftStopResumeSpec,
     head_identity_step,
     machine_startup_steps,
     run_editor_preparation,
     run_prepared_editor_revision,
+    run_post_start_lock_copy,
     run_stock_passes,
     run_soft_stop_resume,
     run_authoritative_reload_resume_boundary,
@@ -83,6 +88,7 @@ SOFT_STOP_SCENARIO_VERSION = "1"
 AUTHORITATIVE_RELOAD_WORKLOAD_ID = "authoritative_reload_resume_24_v1"
 AUTHORITATIVE_RELOAD_SCENARIO_NAME = "authoritative_reload_resume"
 AUTHORITATIVE_RELOAD_SCENARIO_VERSION = "1"
+POST_START_LOCK_WORKLOAD_ID = "experiment_editor_post_start_lock_v1"
 
 SMOKE_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -154,6 +160,13 @@ AUTHORITATIVE_RELOAD_REQUIRED_ASSERTIONS = (
     "execution.terminal_bundle_valid",
     "artifacts.required_present",
 )
+POST_START_LOCK_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled", "ui.real_app_constructed",
+    "experiment.active_edit_lock", "experiment.in_place_edit_rejected",
+    "experiment.source_bundle_immutable", "experiment.editable_copy_created",
+    "experiment.editable_copy_fresh_execution",
+    "experiment.editable_copy_editable", "artifacts.required_present",
+)
 
 SMOKE_REQUIRED_UI_ACTIONS = frozenset(
     {
@@ -202,6 +215,15 @@ SOFT_STOP_REQUIRED_UI_ACTIONS = SMOKE_REQUIRED_UI_ACTIONS | frozenset(
 )
 AUTHORITATIVE_RELOAD_REQUIRED_UI_ACTIONS = SOFT_STOP_REQUIRED_UI_ACTIONS | frozenset({
     "experiment.load_authoritative_via_ui", "experiment.activate_authoritative_via_ui"})
+POST_START_LOCK_REQUIRED_UI_ACTIONS = EDITOR_REQUIRED_UI_ACTIONS | frozenset(
+    {
+        "editor.inspect_active_lock_via_ui",
+        "editor.reject_in_place_edit_via_ui",
+        "editor.create_editable_copy_via_ui",
+        "editor.edit_copy_via_ui",
+        "editor.finalize_copy_via_ui",
+    }
+)
 EDITOR_REQUIRED_SCREENSHOTS = frozenset(
     {"editor_opened", "generated", "finalized", "reloaded", "validated"}
 )
@@ -247,6 +269,11 @@ AUTHORITATIVE_RELOAD_REQUIRED_SCREENSHOTS = frozenset({
     "session_1_ready", "session_1_printing", "session_1_stop_requested",
     "session_1_stopped", "session_2_loaded", "session_2_activated",
     "session_2_resumed", "completed",
+})
+POST_START_LOCK_REQUIRED_SCREENSHOTS = frozenset({
+    "editor_opened", "generated", "initial_finalized", "source_locked",
+    "locked_editor_opened", "in_place_edit_rejected", "editable_copy_created",
+    "copy_edited", "copy_finalized", "validated",
 })
 
 _COMMON_ACTIONS = frozenset(
@@ -345,6 +372,17 @@ def _editor_revision_fixture() -> tuple[dict[str, Any], Path]:
         / f"{EDITOR_REVISION_WORKLOAD_ID}.json"
     )
     return load_editor_prestart_rename_refinalize_fixture(path), path
+
+
+def _post_start_lock_fixture() -> tuple[dict[str, Any], Path]:
+    from tools.virtual_workflows.editor_scenarios import (
+        load_editor_post_start_lock_fixture,
+    )
+
+    path = Path(__file__).resolve().parent / "fixtures" / (
+        f"{POST_START_LOCK_WORKLOAD_ID}.json"
+    )
+    return load_editor_post_start_lock_fixture(path), path
 
 
 def _well_ids(fixture: Mapping[str, Any]) -> tuple[str, ...]:
@@ -733,6 +771,88 @@ def _editor_revision_body(runtime: JourneyRuntime) -> None:
                 "eligibility_status"
             ),
             "assertion_count": len(EDITOR_REVISION_REQUIRED_ASSERTIONS),
+        },
+    )
+
+
+def _post_start_lock_body(runtime: JourneyRuntime) -> None:
+    from tools.virtual_workflows.editor_scenarios import _initial_design_fixture
+
+    context = runtime.context
+    fixture = runtime.fixture
+    experiment = fixture["experiment"]
+    expected_wells = tuple(experiment["expected_well_ids"])
+    runtime.add_assertion(simulation_identity_assertion(context))
+    runtime.add_assertion(real_application_assertion(context))
+    run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(
+            _initial_design_fixture(fixture),
+            use_harness_action_runner=True,
+        ),
+    )
+    capture_milestone(
+        context,
+        "initial_finalized",
+        evidence={"experiment_name": experiment["source_name"]},
+    )
+    source_before_lock = capture_authoritative_bundle(context)
+    boundary = run_post_start_lock_copy(
+        runtime,
+        PostStartLockCopySpec(
+            source_dir=Path(source_before_lock.experiment_dir),
+            source_name=experiment["source_name"],
+            copy_name=experiment["copy_name"],
+            copy_tolerance_nl=float(
+                experiment["copy_printed_volume_tolerance_nL"]
+            ),
+        ),
+        source_design=source_before_lock.design,
+        expected_well_ids=expected_wells,
+    )
+    copy_snapshot = boundary["copy_snapshot"]
+    prepared = copy_snapshot.prepared_evidence()
+    loader_evidence = runtime.harness.run_action(
+        "experiment.load_authoritative_via_ui",
+        lambda: ExperimentLoaderDriver(context).load_prepared_design(
+            Path(copy_snapshot.experiment_dir),
+            expected_name=experiment["copy_name"],
+            expected_plan_id=copy_snapshot.plan_id,
+            expected_plan_revision=copy_snapshot.plan_revision,
+        ),
+    )["evidence"]
+    reload_result, _assignments = editor_prepared_reload_assertions(
+        context,
+        prepared_evidence=prepared,
+        loader_evidence=loader_evidence,
+    )
+    if reload_result.decision != "pass":
+        raise RuntimeError(f"prepared copy reload failed: {reload_result.evidence}")
+    boundary["copy_finalized"]["checks"]["prepared_reload_valid"] = True
+    runtime.observations["post_start_edit_boundary"] = {
+        "source_locked": boundary["source_locked"],
+        "locked_editor": boundary["editor"]["lock_matrix"],
+        "editable_copy_before_finalize": boundary["editor"][
+            "copy_before_finalize"
+        ],
+        "editable_copy_after_finalize": boundary["copy_finalized"],
+        "source_after_copy": boundary["source_after_copy"],
+    }
+    runtime.observations["prepared_copy_reload"] = dict(loader_evidence)
+    for assertion in editor_post_start_lock_copy_assertions(
+        source_locked=boundary["source_locked"],
+        editor_boundary=boundary["editor"],
+        copy_finalized=boundary["copy_finalized"],
+        source_after_copy=boundary["source_after_copy"],
+    ):
+        runtime.add_assertion(assertion)
+    capture_milestone(
+        context,
+        "validated",
+        evidence={
+            "source_plan_state": "ACTIVE",
+            "copy_plan_state": copy_snapshot.plan_state.upper(),
+            "assertion_count": len(POST_START_LOCK_REQUIRED_ASSERTIONS),
         },
     )
 
@@ -1142,6 +1262,46 @@ def _editor_revision_payload(
     )
 
 
+def _post_start_lock_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    experiment = runtime.fixture["experiment"]
+    workload = runtime.fixture["workload"]
+    return build_editor_lifecycle_payload(
+        runtime,
+        teardown,
+        EditorLifecycleReportSpec(
+            workload={
+                **_base_workload(runtime),
+                **workload,
+                "operation_count": workload["expected_editor_finalization_operations"],
+                "experiment_name": experiment["source_name"],
+                "copy_experiment_name": experiment["copy_name"],
+                "plate_name": experiment["plate_name"],
+                "expected_reaction_count": experiment["replicates"],
+                "well_ids": list(experiment["expected_well_ids"]),
+                "speed_multiplier": runtime.harness.config.speed_multiplier,
+                "timeout_seconds": runtime.harness.config.timeout_seconds,
+            },
+            required_assertion_ids=POST_START_LOCK_REQUIRED_ASSERTIONS,
+            persistence_values={
+                "post_start_edit_boundary": dict(
+                    runtime.observations.get("post_start_edit_boundary") or {}
+                ),
+                "reload_activation": dict(
+                    runtime.observations.get("prepared_copy_reload") or {}
+                ),
+            },
+            limitations=(
+                "The zero-progress authoritative activation and printing-start lock are direct Model actions, not UI coverage or a print command.",
+                "The scenario validates the editor lifecycle without connecting the simulated machine or printing.",
+                "The simulator does not validate firmware, protocol framing, motion, pressure, cameras, balance behavior, or droplet quality.",
+                "Generated plan IDs, timestamps, durations, paths, and identity-bearing hashes are not expected to be byte-identical across replay.",
+            ),
+        ),
+    )
+
+
 def _multi_payload(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> ComposedReportPayload:
@@ -1370,6 +1530,16 @@ def _editor_revision_artifact(
     )
 
 
+def _post_start_lock_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return editor_artifacts_cleanup_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(POST_START_LOCK_REQUIRED_SCREENSHOTS),
+        teardown=teardown,
+    )
+
+
 def _multi_artifact(runtime: JourneyRuntime, teardown: Mapping[str, Any]) -> Any:
     return multi_stock_artifacts_assertion(
         screenshots=runtime.context.screenshots,
@@ -1430,6 +1600,18 @@ def _editor_revision_summary(
         "Milestone 7 composed prepared editor rename/refinalize/reload\n"
         f"Status: {report['classification']['status']}\n"
         f"Assertions: {passed} / {len(EDITOR_REVISION_REQUIRED_ASSERTIONS)}\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _post_start_lock_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> str:
+    passed = sum(row["decision"] == "pass"
+                 for row in runtime.harness.assertion_results)
+    return (
+        "Milestone 7 composed post-start lock/editable-copy lifecycle\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Assertions: {passed} / {len(POST_START_LOCK_REQUIRED_ASSERTIONS)}\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
     )
@@ -1525,6 +1707,36 @@ EDITOR_REVISION_DEFINITION = JourneyDefinition(
     payload_builder=_editor_revision_payload,
     summary_builder=_editor_revision_summary,
 )
+POST_START_LOCK_DEFINITION = JourneyDefinition(
+    registry_id=POST_START_LOCK_WORKLOAD_ID,
+    scenario_name="experiment_editor_post_start_lock",
+    scenario_version="1",
+    workload_id=POST_START_LOCK_WORKLOAD_ID,
+    required_action_ids=(
+        _COMMON_ACTIONS
+        | _EDITOR_ACTIONS
+        | frozenset(
+            {
+                "experiment.activate_authoritative",
+                "execution.lock_for_printing",
+                "editor.inspect_active_lock_via_ui",
+                "editor.reject_in_place_edit_via_ui",
+                "editor.create_editable_copy_via_ui",
+                "editor.edit_copy_via_ui",
+                "editor.finalize_copy_via_ui",
+                "experiment.load_authoritative_via_ui",
+            }
+        )
+    ),
+    required_ui_action_ids=POST_START_LOCK_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=POST_START_LOCK_REQUIRED_ASSERTIONS,
+    required_screenshots=POST_START_LOCK_REQUIRED_SCREENSHOTS,
+    fixture_loader=_post_start_lock_fixture,
+    body=_post_start_lock_body,
+    artifact_assertion=_post_start_lock_artifact,
+    payload_builder=_post_start_lock_payload,
+    summary_builder=_post_start_lock_summary,
+)
 MULTI_STOCK_DEFINITION = JourneyDefinition(
     registry_id=MULTI_STOCK_WORKLOAD_ID,
     scenario_name=MULTI_STOCK_SCENARIO_NAME,
@@ -1592,6 +1804,7 @@ JOURNEY_DEFINITIONS = {
         SMOKE_DEFINITION,
         EDITOR_DEFINITION,
         EDITOR_REVISION_DEFINITION,
+        POST_START_LOCK_DEFINITION,
         MULTI_STOCK_DEFINITION,
         SOFT_STOP_DEFINITION,
         AUTHORITATIVE_RELOAD_DEFINITION,
@@ -1637,6 +1850,10 @@ __all__ = [
     "MULTI_STOCK_REQUIRED_ASSERTIONS",
     "MULTI_STOCK_REQUIRED_UI_ACTIONS",
     "MULTI_STOCK_WORKLOAD_ID",
+    "POST_START_LOCK_REQUIRED_ASSERTIONS",
+    "POST_START_LOCK_REQUIRED_SCREENSHOTS",
+    "POST_START_LOCK_REQUIRED_UI_ACTIONS",
+    "POST_START_LOCK_WORKLOAD_ID",
     "SMOKE_WORKLOAD_ID",
     "SOFT_STOP_REQUIRED_ASSERTIONS",
     "SOFT_STOP_REQUIRED_UI_ACTIONS",

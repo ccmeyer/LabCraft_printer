@@ -137,7 +137,7 @@ _SCENARIO_DEFINITIONS = {
         ),
         expected_completion_count=2,
         scenario_name="experiment_editor_post_start_lock",
-        runner_family="experiment_editor",
+        runner_family="composed_journey",
         supports_pi_evidence=False,
         supports_injected_stall=False,
         supports_report_sets=False,

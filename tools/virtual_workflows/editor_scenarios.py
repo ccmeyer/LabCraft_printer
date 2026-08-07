@@ -103,12 +103,16 @@ from tools.virtual_workflows.authoritative_evidence import (  # noqa: E402
     capture_authoritative_bundle,
     check_evidence as _check_evidence,
     editor_directory_snapshot as _directory_file_snapshot,
+    post_start_copy_boundary_evidence,
+    post_start_source_lock_evidence,
     read_audit_rows as _audit_rows,
     read_csv_rows as _csv_rows,
     runtime_assignments as _runtime_assignments,
     sha256_file as _file_sha256,
+    snapshot_directory,
 )
 from tools.virtual_workflows.assertions import (  # noqa: E402
+    editor_post_start_lock_copy_assertions,
     editor_prepared_bundle_assertions,
 )
 from tools.virtual_workflows.report import (  # noqa: E402
@@ -656,15 +660,6 @@ def _design_without_name(payload: Mapping[str, Any]) -> dict[str, Any]:
     metadata = normalized.get("metadata")
     if isinstance(metadata, dict):
         metadata.pop("name", None)
-    return normalized
-
-
-def _copy_semantic_design(payload: Mapping[str, Any]) -> dict[str, Any]:
-    normalized = json.loads(json.dumps(payload))
-    metadata = normalized.get("metadata")
-    if isinstance(metadata, dict):
-        metadata.pop("name", None)
-        metadata.pop("printed_volume_tolerance_nL", None)
     return normalized
 
 
@@ -1352,43 +1347,11 @@ def _run_editor_lifecycle_scenario(
 
             locked = lock_execution_for_printing(context, lock_source)
             locked_authoritative = capture_authoritative_bundle(context)
-            locked_design = locked_authoritative.design
-            locked_snapshot = locked_authoritative.directory.editor_projection()
-            locked_checks = {
-                "bundle_valid": locked_authoritative.bundle_valid,
-                "active": locked_authoritative.plan_state == "active",
-                "revision_two": locked_authoritative.plan_revision == 2,
-                "printing_started": locked_authoritative.plan_lock_reason
-                == "printing_started",
-                "history_two": len(locked_authoritative.history_json) == 2
-                and locked_authoritative.history_matches_current,
-                "resume_clean": locked_authoritative.resume_state == "clean",
-                "resume_zero_intents": locked_authoritative.resume_intent_count == 0,
-                "resume_reference_matches": locked_authoritative.resume_plan_id
-                == locked_authoritative.plan_id
-                and locked_authoritative.resume_plan_revision
-                == locked_authoritative.plan_revision,
-                "zero_progress": locked_authoritative.total_added_droplets == 0,
-                "design_unchanged": locked_design == source_design,
-            }
-            post_start_evidence["source_locked"] = _check_evidence(
-                locked_checks,
+            post_start_evidence["source_locked"] = post_start_source_lock_evidence(
+                locked_authoritative,
+                source_design=source_design,
                 activation=activation,
                 lock=locked,
-                experiment_dir=str(source_dir),
-                plan_id=locked_authoritative.plan_id,
-                plan_revision=locked_authoritative.plan_revision,
-                plan_state=locked_authoritative.plan_state,
-                lock_reason=locked_authoritative.plan_lock_reason,
-                history_count=len(locked_authoritative.history_json),
-                total_added_droplets=locked_authoritative.total_added_droplets,
-                resume_state=locked_authoritative.resume_state,
-                resume_intent_count=locked_authoritative.resume_intent_count,
-                runtime_assignments=_runtime_assignments(context.model),
-                directory_snapshot=locked_snapshot,
-                audit_rows=_audit_rows(
-                    Path(experiment_model.experiment_audit_file_path)
-                ),
             )
             if post_start_evidence["source_locked"]["failed_checks"]:
                 raise RuntimeError(
@@ -1399,11 +1362,6 @@ def _run_editor_lifecycle_scenario(
                         ]
                     )
                 )
-            assertion_evidence["experiment.active_edit_lock"] = {
-                "plan_state": locked_authoritative.plan_state,
-                "plan_revision": locked_authoritative.plan_revision,
-                "lock_reason": locked_authoritative.plan_lock_reason,
-            }
             capture_milestone(
                 context,
                 "source_locked",
@@ -1429,23 +1387,6 @@ def _run_editor_lifecycle_scenario(
             post_start_evidence["editable_copy_before_finalize"] = (
                 editor_boundary["copy_before_finalize"]
             )
-            assertion_evidence["experiment.in_place_edit_rejected"] = {
-                "source_name": fixture["experiment"]["source_name"],
-                "control_matrix": editor_boundary["lock_matrix"],
-            }
-            assertion_evidence["experiment.editable_copy_created"] = {
-                "copy_name": fixture["experiment"]["copy_name"],
-                "copy_before_finalize": editor_boundary[
-                    "copy_before_finalize"
-                ],
-            }
-            assertion_evidence["experiment.editable_copy_editable"] = {
-                "copy_tolerance_nL": fixture["experiment"][
-                    "copy_printed_volume_tolerance_nL"
-                ],
-                "controls_editable": True,
-            }
-
             copy_dir = Path(
                 experiment_model.experiment_dir_path
             ).resolve()
@@ -1456,115 +1397,24 @@ def _run_editor_lifecycle_scenario(
                 experiment_model.execution_resume_file_path
             ).resolve()
             copy_authoritative = capture_authoritative_bundle(context)
-            copy_design = copy_authoritative.design
-            copy_key_rows = copy_authoritative.key_rows
-            copy_concentration_rows = copy_authoritative.concentration_rows
-            copy_calibration_absent = not copy_authoritative.calibration_present
-            source_after_snapshot = _directory_file_snapshot(source_dir)
-            copy_checks = {
-                "copy_directory_distinct": copy_dir != source_dir,
-                "copy_directory_name": copy_dir.name
-                == fixture["experiment"]["copy_name"],
-                "copy_metadata_name": copy_design.get(
-                    "metadata", {}
-                ).get("name")
-                == fixture["experiment"]["copy_name"],
-                "copy_semantics_match_source": _copy_semantic_design(
-                    copy_design
-                )
-                == _copy_semantic_design(source_design),
-                "copy_tolerance_changed": math.isclose(
-                    float(
-                        copy_design.get("metadata", {}).get(
-                            "printed_volume_tolerance_nL", -1
-                        )
-                    ),
-                    float(
-                        fixture["experiment"][
-                            "copy_printed_volume_tolerance_nL"
-                        ]
-                    ),
-                    rel_tol=0.0,
-                    abs_tol=1e-9,
-                ),
-                "copy_bundle_valid": copy_authoritative.bundle_valid,
-                "copy_prepared": copy_authoritative.plan_state == "prepared",
-                "copy_revision_one": copy_authoritative.plan_revision == 1,
-                "copy_ready_to_start": copy_authoritative.eligibility_status
-                == "ready_to_start",
-                "copy_plan_distinct": copy_authoritative.plan_id
-                != locked_authoritative.plan_id,
-                "copy_history_fresh": len(copy_authoritative.history_json) == 1
-                and copy_authoritative.history_matches_current,
-                "copy_zero_progress": copy_authoritative.total_added_droplets == 0,
-                "copy_resume_absent": not copy_authoritative.resume_present,
-                "copy_calibration_absent": copy_calibration_absent,
-                "copy_wells_exact": list(copy_authoritative.plan_well_ids)
-                == fixture["experiment"]["expected_well_ids"],
-                "copy_key_wells_exact": list(copy_key_rows)
-                == fixture["experiment"]["expected_well_ids"],
-                "copy_concentration_wells_exact": list(
-                    copy_concentration_rows
-                )
-                == fixture["experiment"]["expected_well_ids"],
-                "source_inventory_unchanged": (
-                    source_after_snapshot["inventory"]
-                    == locked_snapshot["inventory"]
-                ),
-                "source_files_byte_identical": (
-                    source_after_snapshot["sha256"]
-                    == locked_snapshot["sha256"]
-                ),
-            }
-            copy_evidence = _check_evidence(
-                copy_checks,
-                experiment_dir=str(copy_dir),
-                design_path=str(copy_design_path),
-                plan_id=copy_authoritative.plan_id,
-                plan_revision=copy_authoritative.plan_revision,
-                plan_state=copy_authoritative.plan_state,
-                eligibility_status=copy_authoritative.eligibility_status,
-                history_count=len(copy_authoritative.history_json),
-                total_added_droplets=copy_authoritative.total_added_droplets,
-                resume_present=copy_authoritative.resume_present,
-                runtime_assignments=_runtime_assignments(context.model),
-                key_rows=copy_key_rows,
-                concentration_rows=copy_concentration_rows,
-                directory_snapshot=copy_authoritative.directory.editor_projection(),
-            )
-            post_start_evidence["editable_copy_after_finalize"] = (
-                copy_evidence
-            )
-            post_start_evidence["source_after_copy"] = {
-                "directory_snapshot": source_after_snapshot,
-                "inventory_unchanged": copy_checks[
-                    "source_inventory_unchanged"
+            copy_evidence, source_after_copy = post_start_copy_boundary_evidence(
+                locked_authoritative,
+                copy_authoritative,
+                source_after=snapshot_directory(source_dir),
+                copy_name=fixture["experiment"]["copy_name"],
+                copy_tolerance_nl=fixture["experiment"][
+                    "copy_printed_volume_tolerance_nL"
                 ],
-                "files_byte_identical": copy_checks[
-                    "source_files_byte_identical"
-                ],
-            }
+                expected_well_ids=fixture["experiment"]["expected_well_ids"],
+            )
+            post_start_evidence["editable_copy_after_finalize"] = copy_evidence
+            post_start_evidence["source_after_copy"] = source_after_copy
             refinalized_evidence.update(copy_evidence)
             if copy_evidence["failed_checks"]:
                 raise RuntimeError(
                     "editable-copy lifecycle checks failed: "
                     + ", ".join(copy_evidence["failed_checks"])
                 )
-            assertion_evidence["experiment.source_bundle_immutable"] = {
-                "inventory_unchanged": True,
-                "files_byte_identical": True,
-                "file_count": len(locked_snapshot["inventory"]),
-            }
-            assertion_evidence[
-                "experiment.editable_copy_fresh_execution"
-            ] = {
-                "source_plan_id": locked_authoritative.plan_id,
-                "copy_plan_id": copy_authoritative.plan_id,
-                "copy_plan_revision": copy_authoritative.plan_revision,
-                "copy_plan_state": copy_authoritative.plan_state,
-                "copy_resume_absent_before_activation": True,
-                "copy_history_count": len(copy_authoritative.history_json),
-            }
             experiment_dir = copy_dir
             design_path = copy_design_path
             resume_path = copy_resume_path
@@ -1633,6 +1483,20 @@ def _run_editor_lifecycle_scenario(
             return evidence
 
         reload_authoritative_experiment(context, reload)
+        if post_start_lock:
+            copy_boundary = post_start_evidence[
+                "editable_copy_after_finalize"
+            ]
+            copy_boundary["checks"]["prepared_reload_valid"] = not (
+                reload_evidence.get("failed_checks")
+            )
+            for result in editor_post_start_lock_copy_assertions(
+                source_locked=post_start_evidence["source_locked"],
+                editor_boundary=editor_boundary,
+                copy_finalized=copy_boundary,
+                source_after_copy=post_start_evidence["source_after_copy"],
+            ):
+                assertion_evidence[result.assertion_id] = dict(result.evidence)
         capture_milestone(
             context,
             "reloaded" if not post_start_lock else "validated",

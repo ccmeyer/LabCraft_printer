@@ -1046,8 +1046,8 @@ Migration order:
 4. prepared edit/refinalize — complete in Slice 3;
 5. soft stop/resume - complete in Slice 4; code-growth variance explicitly accepted;
 6. authoritative reload/resume - complete in Slice 5;
-7. post-start lock/copy - next candidate, not yet planned;
-8. 96-well regression;
+7. post-start lock/copy - complete in Slice 6;
+8. 96-well regression - next candidate, not yet planned;
 9. 384x10 stress;
 10. disconnect scenario according to the Milestone 0 decision.
 
@@ -1472,15 +1472,17 @@ This effort is complete when:
 
 ## Current Next Action
 
-Milestone 7 Slice 5 is complete; see
-`docs/sil_interactive_simulation_milestone_7_slice_5_completion_record.md`.
-The generic harness now owns same-root application rotation, the page driver
-owns bounded authoritative editor load/activation, and the shared phases and
-assertions prove clean first-session teardown, exact rehydration, no replay,
-and terminal durability. The visible run and exact replay passed with equal
-stable projections. Create a separate plan before migrating post-start
-lock/editable copy. Keep targeted tests per remaining slice and defer the
-complete Python suite until the final Milestone 7 validation. Do not begin
-active parameter matrices, seeded exploration, production fault injection,
-performance remediation, firmware, protocol, Pi operations, or hardware work
-without separate approval.
+Milestone 7 Slice 6 is complete; see
+`docs/sil_interactive_simulation_milestone_7_slice_6_completion_record.md`.
+`experiment_editor_post_start_lock_v1` now uses the generic composed runner.
+The page driver owns the bounded locked-editor/copy QTest mechanics, while
+shared evidence and assertions prove the zero-progress ACTIVE source,
+byte-identical source persistence, fresh PREPARED copy, and inactive prepared
+reload. The deliberate activation and `printing_started` lock report `model`,
+not UI. Focused success, parity, controlled-failure, visible, and exact replay
+gates passed. Create a separate plan before migrating the 96-well regression.
+Keep targeted tests per remaining slice and defer the complete Python suite
+until the final Milestone 7 validation. Do not begin active parameter
+matrices, seeded exploration, production fault injection, performance
+remediation, firmware, protocol, Pi operations, or hardware work without
+separate approval.

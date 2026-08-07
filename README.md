@@ -1016,6 +1016,38 @@ publishes the fresh copy beside the source directory; it does not open a
 source-folder selector or inherit execution, progress, calibration, or
 printing history. The scenario is active in the lifecycle suite.
 
+Milestone 7 Slice 6 routes this scenario through the shared composed journey
+runner. The normal editor controls still own source creation, locked-state
+inspection, in-place rejection, editable-copy creation, tolerance editing,
+finalization, and prepared-copy reload. The deliberate zero-progress
+authoritative activation and `printing_started` lock are recorded as `model`
+actions and are excluded from UI coverage; no machine is connected and no
+print command is issued. Raw QTest/modal handling now has one owner in
+`ExperimentEditorDriver`, and the retained direct runner delegates to the
+same page driver, authoritative evidence, and assertion policy for parity.
+
+Run the focused composed Slice 6 gate and a visible replayable journey with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_virtual_workflow_editor_post_start_composed.py `
+  tests\system\test_virtual_workflow_editor_post_start_lifecycle.py
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario experiment_editor_post_start_lock_v1 `
+  --output-root verification_reports\milestone7-slice6-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 60
+```
+
+Execute the exact `run.replay_command` retained in `report.json`. The stable
+fixture hash, action IDs/multiplicity/surfaces, assertion decisions,
+screenshots, source immutability, copy freshness, classification, and cleanup
+must match; generated identities, paths, timestamps, durations, and
+identity-bearing hashes may differ. If a Qt node materially exceeds its
+normal bounded runtime, rerun that exact node with a fresh `--basetemp` below
+`$env:TEMP\LabCraft`. The complete Python suite remains deferred until the
+final Milestone 7 validation.
+
 Before the first pressure-sweep, stream-volume, droplet `Calibrate All`, or
 stream `Calibrate All` start while the authoritative plan is still
 `PREPARED`, the UI requires `Start Calibration` confirmation. `Cancel` is the

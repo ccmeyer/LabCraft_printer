@@ -24,7 +24,6 @@ from tools.virtual_workflows.actions import (
     drive_editor_prestart_rename_refinalize,
     execute_action,
     install_dialog_handler,
-    inspect_editor_lock_controls,
     observe_stopped_quiescence,
     request_soft_stop_via_ui,
     stage_virtual_head,
@@ -33,6 +32,7 @@ from tools.virtual_workflows.actions import (
     wait_for_completions,
     wait_until,
 )
+from tools.virtual_workflows.page_drivers import inspect_editor_lock_controls
 from tools.virtual_workflows.registry import load_capability_manifest
 
 
@@ -56,6 +56,15 @@ def test_composed_soft_stop_actions_add_one_truthful_resume_contract():
     )
     assert ACTION_INTERACTION_SURFACES["head.return_via_ui"] is (
         InteractionSurface.UI
+    )
+
+
+def test_post_start_synthetic_setup_actions_report_model_surfaces():
+    assert ACTION_INTERACTION_SURFACES["experiment.activate_authoritative"] is (
+        InteractionSurface.MODEL
+    )
+    assert ACTION_INTERACTION_SURFACES["execution.lock_for_printing"] is (
+        InteractionSurface.MODEL
     )
 
 

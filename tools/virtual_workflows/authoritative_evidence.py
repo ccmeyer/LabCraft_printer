@@ -307,6 +307,116 @@ def compare_directories(
     )
 
 
+def post_start_source_lock_evidence(
+    snapshot: AuthoritativeBundleSnapshot,
+    *,
+    source_design: Mapping[str, Any],
+    activation: Mapping[str, Any],
+    lock: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project the immutable zero-progress printing-start lock boundary."""
+
+    checks = {
+        "bundle_valid": snapshot.bundle_valid,
+        "active": snapshot.plan_state == "active",
+        "revision_two": snapshot.plan_revision == 2,
+        "printing_started": snapshot.plan_lock_reason == "printing_started",
+        "history_two": len(snapshot.history_json) == 2
+        and snapshot.history_matches_current,
+        "resume_clean": snapshot.resume_state == "clean",
+        "resume_zero_intents": snapshot.resume_intent_count == 0,
+        "resume_reference_matches": (
+            snapshot.resume_plan_id, snapshot.resume_plan_revision
+        ) == (snapshot.plan_id, snapshot.plan_revision),
+        "zero_progress": snapshot.total_added_droplets == 0,
+        "design_unchanged": snapshot.design == dict(source_design),
+    }
+    values = {
+        "activation": dict(activation), "lock": dict(lock),
+        "experiment_dir": snapshot.experiment_dir, "plan_id": snapshot.plan_id,
+        "plan_revision": snapshot.plan_revision, "plan_state": snapshot.plan_state,
+        "lock_reason": snapshot.plan_lock_reason,
+        "history_count": len(snapshot.history_json),
+        "total_added_droplets": snapshot.total_added_droplets,
+        "resume_state": snapshot.resume_state,
+        "resume_intent_count": snapshot.resume_intent_count,
+        "runtime_assignments": snapshot.assignments,
+        "directory_snapshot": snapshot.directory.editor_projection(),
+        "audit_rows": snapshot.audit_rows,
+    }
+    return check_evidence(checks, **values)
+
+
+def post_start_copy_boundary_evidence(
+    source: AuthoritativeBundleSnapshot,
+    copy: AuthoritativeBundleSnapshot,
+    *,
+    source_after: DirectoryEvidence,
+    copy_name: str,
+    copy_tolerance_nl: float,
+    expected_well_ids: Iterable[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Prove source immutability and a fresh prepared editable copy."""
+
+    def semantic_design(payload: Mapping[str, Any]) -> dict[str, Any]:
+        normalized = json.loads(json.dumps(payload))
+        metadata = normalized.get("metadata")
+        if isinstance(metadata, dict):
+            metadata.pop("name", None)
+            metadata.pop("printed_volume_tolerance_nL", None)
+        return normalized
+
+    expected = list(expected_well_ids)
+    source_unchanged = source.directory.hashes == source_after.hashes
+    inventory_unchanged = source.directory.paths == source_after.paths
+    checks = {
+        "copy_directory_distinct": copy.experiment_dir != source.experiment_dir,
+        "copy_directory_name": Path(copy.experiment_dir).name == copy_name,
+        "copy_metadata_name": copy.metadata.get("name") == copy_name,
+        "copy_semantics_match_source": semantic_design(copy.design)
+        == semantic_design(source.design),
+        "copy_tolerance_changed": abs(
+            float(copy.metadata.get("printed_volume_tolerance_nL", -1.0))
+            - float(copy_tolerance_nl)
+        ) <= 1e-9,
+        "copy_bundle_valid": copy.bundle_valid,
+        "copy_prepared": copy.plan_state == "prepared",
+        "copy_revision_one": copy.plan_revision == 1,
+        "copy_ready_to_start": copy.eligibility_status == "ready_to_start",
+        "copy_plan_distinct": copy.plan_id != source.plan_id,
+        "copy_history_fresh": len(copy.history_json) == 1
+        and copy.history_matches_current,
+        "copy_zero_progress": copy.total_added_droplets == 0,
+        "copy_resume_absent": not copy.resume_present,
+        "copy_calibration_absent": not copy.calibration_present,
+        "copy_runtime_inactive": not copy.runtime_active,
+        "copy_wells_exact": list(copy.plan_well_ids) == expected,
+        "copy_key_wells_exact": list(copy.key_rows) == expected,
+        "copy_concentration_wells_exact": list(copy.concentration_rows) == expected,
+        "source_inventory_unchanged": inventory_unchanged,
+        "source_files_byte_identical": source_unchanged,
+    }
+    values = {
+        "experiment_dir": copy.experiment_dir, "design_path": copy.design_path,
+        "plan_id": copy.plan_id, "plan_revision": copy.plan_revision,
+        "plan_state": copy.plan_state,
+        "eligibility_status": copy.eligibility_status,
+        "history_count": len(copy.history_json),
+        "total_added_droplets": copy.total_added_droplets,
+        "resume_present": copy.resume_present,
+        "runtime_assignments": copy.assignments, "key_rows": copy.key_rows,
+        "concentration_rows": copy.concentration_rows,
+        "directory_snapshot": copy.directory.editor_projection(),
+    }
+    copy_evidence = check_evidence(checks, **values)
+    source_evidence = {
+        "directory_snapshot": source_after.editor_projection(),
+        "inventory_unchanged": inventory_unchanged,
+        "files_byte_identical": source_unchanged,
+    }
+    return copy_evidence, source_evidence
+
+
 def merge_session_lifecycles(
     sessions: Iterable[tuple[str, Mapping[str, Any]]],
 ) -> dict[str, list[Any]]:
@@ -587,6 +697,8 @@ __all__ = [
     "read_model_audit_rows",
     "rich_file_inventory",
     "merge_session_lifecycles",
+    "post_start_copy_boundary_evidence",
+    "post_start_source_lock_evidence",
     "runtime_assignments",
     "sha256_file",
     "snapshot_directory",

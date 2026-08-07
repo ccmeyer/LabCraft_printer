@@ -107,6 +107,23 @@ class PreparedEditorRevisionSpec:
 
 
 @dataclass(frozen=True)
+class PostStartLockCopySpec:
+    source_dir: Path
+    source_name: str
+    copy_name: str
+    copy_tolerance_nl: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_dir", Path(self.source_dir).resolve())
+        if not self.source_name.strip() or not self.copy_name.strip():
+            raise ValueError("post-start source and copy names must be non-empty")
+        if self.source_name == self.copy_name:
+            raise ValueError("post-start editable copy must have a distinct name")
+        if not math.isfinite(self.copy_tolerance_nl) or self.copy_tolerance_nl < 0:
+            raise ValueError("post-start copy tolerance must be finite and non-negative")
+
+
+@dataclass(frozen=True)
 class StockPassSpec:
     stock_id: str
     printer_head_id: str
@@ -286,6 +303,98 @@ def run_prepared_editor_revision(
     )
     runtime.harness.assert_no_unexpected_dialog()
     return dict(result)
+
+
+def run_post_start_lock_copy(
+    runtime: JourneyRuntime,
+    spec: PostStartLockCopySpec,
+    *,
+    source_design: Mapping[str, Any],
+    expected_well_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Cross the Model lock boundary, then drive the normal editor copy UI."""
+
+    def activate(current: JourneyRuntime) -> Mapping[str, Any]:
+        eligibility = current.context.model.load_authoritative_execution_runtime()
+        runtime_active = bool(current.context.experiment_model
+                              .is_authoritative_execution_runtime_active())
+        if eligibility.get("status") != "ready_to_start" or not runtime_active:
+            raise RuntimeError("authoritative source activation was not ready_to_start")
+        return {"eligibility_status": eligibility.get("status"),
+                "runtime_active": runtime_active}
+
+    def lock(current: JourneyRuntime) -> Mapping[str, Any]:
+        plan = current.context.experiment_model.lock_execution_plan("printing_started")
+        if plan is None:
+            raise RuntimeError("printing-start lock returned no execution plan")
+        return {
+            "plan_id": str(plan.plan_id),
+            "plan_revision": int(plan.plan_revision),
+            "plan_state": str(plan.state.value),
+            "lock_reason": plan.lock_reason,
+        }
+
+    activation, locked = runtime.run_steps(
+        (
+            SemanticStep("experiment.activate_authoritative",
+                         InteractionSurface.MODEL, activate),
+            SemanticStep("execution.lock_for_printing",
+                         InteractionSurface.MODEL, lock),
+        )
+    )
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+        post_start_copy_boundary_evidence,
+        post_start_source_lock_evidence,
+        snapshot_directory,
+    )
+
+    source_snapshot = capture_authoritative_bundle(runtime.context)
+    source_locked = post_start_source_lock_evidence(
+        source_snapshot,
+        source_design=source_design,
+        activation=activation["evidence"],
+        lock=locked["evidence"],
+    )
+    if source_locked["failed_checks"]:
+        raise RuntimeError(
+            "post-start source lock checks failed: "
+            + ", ".join(source_locked["failed_checks"])
+        )
+    capture_milestone(
+        runtime.context,
+        "source_locked",
+        evidence={"plan_state": source_snapshot.plan_state,
+                  "plan_revision": source_snapshot.plan_revision,
+                  "lock_reason": source_snapshot.plan_lock_reason},
+    )
+    editor = ExperimentEditorDriver(
+        runtime.context,
+        action_runner=runtime.harness.run_action,
+    ).inspect_lock_and_create_editable_copy(
+        source_dir=spec.source_dir,
+        source_name=spec.source_name,
+        copy_name=spec.copy_name,
+        copy_tolerance_nl=spec.copy_tolerance_nl,
+    )
+    runtime.harness.assert_no_unexpected_dialog()
+    copy_snapshot = capture_authoritative_bundle(runtime.context)
+    copy_finalized, source_after_copy = post_start_copy_boundary_evidence(
+        source_snapshot,
+        copy_snapshot,
+        source_after=snapshot_directory(source_snapshot.experiment_dir),
+        copy_name=spec.copy_name,
+        copy_tolerance_nl=spec.copy_tolerance_nl,
+        expected_well_ids=expected_well_ids,
+    )
+    return {
+        "editor": dict(editor),
+        "source_snapshot": source_snapshot,
+        "copy_snapshot": copy_snapshot,
+        "source_locked": source_locked,
+        "copy_finalized": copy_finalized,
+        "source_after_copy": source_after_copy,
+    }
 
 
 def bind_head_identities(
@@ -1071,6 +1180,8 @@ def validate_stock_pass_boundary(
 __all__ = [
     "EditorPreparationSpec",
     "MachineStartupSpec",
+    "PostStartLockCopySpec",
+    "PreparedEditorRevisionSpec",
     "StockPassSpec",
     "SoftStopResumeSpec",
     "bind_head_identities",
@@ -1079,6 +1190,8 @@ __all__ = [
     "normalized_stock_pass_steps",
     "normalized_soft_stop_resume_steps",
     "run_editor_preparation",
+    "run_post_start_lock_copy",
+    "run_prepared_editor_revision",
     "run_soft_stop_boundary",
     "resume_soft_stopped_array",
     "prepare_persisted_head_for_resume",

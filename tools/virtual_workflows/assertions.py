@@ -1510,6 +1510,66 @@ def editor_prepared_reload_assertions(
     return reload_result, assignments_result
 
 
+def editor_post_start_lock_copy_assertions(
+    *,
+    source_locked: Mapping[str, Any],
+    editor_boundary: Mapping[str, Any],
+    copy_finalized: Mapping[str, Any],
+    source_after_copy: Mapping[str, Any],
+) -> tuple[AssertionResult, ...]:
+    """Project the six post-start lock/copy decisions from immutable evidence."""
+
+    locked = dict(source_locked.get("checks") or {})
+    matrix = dict(editor_boundary.get("lock_matrix") or {})
+    rejection = dict(editor_boundary.get("in_place_rejection") or {})
+    before = dict(editor_boundary.get("copy_before_finalize") or {})
+    copied = dict(copy_finalized.get("checks") or {})
+    policies = (
+        ("experiment.active_edit_lock", "source_locked", ("model", "persistence", "ui"),
+         {**locked, "ui_locked": matrix.get("all_mutating_controls_locked"),
+          "copy_enabled": matrix.get("editable_copy_enabled"),
+          "copy_guidance": matrix.get("actionable_lock_guidance")},
+         {"source_locked": dict(source_locked), "control_matrix": matrix}),
+        ("experiment.in_place_edit_rejected", "in_place_edit_rejected", ("ui",),
+         rejection, {"rejection": rejection, "control_matrix": matrix}),
+        ("experiment.source_bundle_immutable", "copy_finalized", ("persistence",),
+         {key: source_after_copy.get(key) for key in
+          ("inventory_unchanged", "files_byte_identical")}, dict(source_after_copy)),
+        ("experiment.editable_copy_created", "editable_copy_created",
+         ("ui", "persistence"),
+         {"controls_editable": before.get("controls_editable"),
+          **{key: copied.get(key) for key in
+             ("copy_directory_distinct", "copy_directory_name", "copy_metadata_name")}},
+         {"copy_before_finalize": before, "copy_checks": copied}),
+        ("experiment.editable_copy_fresh_execution", "copy_finalized",
+         ("persistence", "model"),
+         {key: copied.get(key) for key in (
+             "copy_bundle_valid", "copy_prepared", "copy_revision_one",
+             "copy_ready_to_start", "copy_plan_distinct", "copy_history_fresh",
+             "copy_zero_progress", "copy_resume_absent", "copy_calibration_absent",
+             "copy_runtime_inactive", "prepared_reload_valid")},
+         dict(copy_finalized)),
+        ("experiment.editable_copy_editable", "copy_finalized",
+         ("ui", "persistence"),
+         {"controls_editable": before.get("controls_editable"),
+          **{key: copied.get(key) for key in (
+              "copy_tolerance_changed", "copy_semantics_match_source",
+              "copy_wells_exact", "copy_key_wells_exact",
+              "copy_concentration_wells_exact")}},
+         {"copy_before_finalize": before, "copy_checks": copied}),
+    )
+    return tuple(
+        AssertionResult(
+            assertion_id, checkpoint,
+            "pass" if checks and all(value is True for value in checks.values()) else "fail",
+            sources, evidence,
+            None if checks and all(value is True for value in checks.values())
+            else "post-start editor boundary policy failed",
+        )
+        for assertion_id, checkpoint, sources, checks, evidence in policies
+    )
+
+
 def editor_artifacts_cleanup_assertion(
     *,
     screenshots: Mapping[str, Path],
@@ -1559,6 +1619,7 @@ __all__ = [
     "editor_artifacts_cleanup_assertion",
     "editor_create_finalize_assertion",
     "editor_prepared_bundle_assertions",
+    "editor_post_start_lock_copy_assertions",
     "editor_prepared_reload_assertions",
     "exact_action_sequence_assertion",
     "execution_lifecycle_assertions",

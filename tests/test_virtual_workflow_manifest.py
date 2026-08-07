@@ -39,7 +39,6 @@ from tools.virtual_workflows.editor_scenarios import (
     POST_START_LOCK_WORKLOAD_ID as EDITOR_POST_START_WORKLOAD_ID,
     RENAME_WORKLOAD_ID as EDITOR_RENAME_WORKLOAD_ID,
     WORKLOAD_ID as EDITOR_WORKLOAD_ID,
-    EditorLifecycleScenarioConfig,
 )
 
 
@@ -347,48 +346,6 @@ def test_registry_dispatch_uses_existing_config_and_runner(
     assert config.output_root == tmp_path.resolve()
     assert config.speed_multiplier == 25
     assert config.timeout_seconds == 90
-
-
-@pytest.mark.parametrize(
-    ("scenario_id", "runner_name"),
-    [
-        (
-            EDITOR_POST_START_WORKLOAD_ID,
-            "run_editor_post_start_lock_scenario",
-        ),
-    ],
-)
-def test_registry_dispatches_editor_family_without_importing_it_for_inspection(
-    scenario_id,
-    runner_name,
-    tmp_path,
-    monkeypatch,
-):
-    from tools.virtual_workflows import editor_scenarios
-
-    captured = []
-
-    def fake_run(config):
-        captured.append(config)
-        return {"scenario_id": config.scenario_id}
-
-    monkeypatch.setattr(
-        editor_scenarios,
-        runner_name,
-        fake_run,
-    )
-    result = run_registered_scenario(
-        scenario_id,
-        output_root=tmp_path,
-        speed_multiplier=25,
-        timeout_seconds=60,
-    )
-
-    assert result == {"scenario_id": scenario_id}
-    assert len(captured) == 1
-    assert isinstance(captured[0], EditorLifecycleScenarioConfig)
-    assert captured[0].output_root == tmp_path.resolve()
-    assert captured[0].timeout_seconds == 60
 
 
 @pytest.mark.parametrize(

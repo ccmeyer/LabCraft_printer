@@ -440,13 +440,13 @@
       "suite_ids": ["lifecycle"],
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
-      "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "experiment.activate_authoritative", "execution.lock_for_printing", "editor.inspect_active_lock_via_ui", "editor.reject_in_place_edit_via_ui", "editor.create_editable_copy_via_ui", "editor.edit_copy_via_ui", "editor.finalize_copy_via_ui", "artifact.capture_milestone", "validation.prepared_bundle", "experiment.reload_authoritative", "scenario.teardown"],
+      "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "experiment.activate_authoritative", "execution.lock_for_printing", "editor.inspect_active_lock_via_ui", "editor.reject_in_place_edit_via_ui", "editor.create_editable_copy_via_ui", "editor.edit_copy_via_ui", "editor.finalize_copy_via_ui", "experiment.load_authoritative_via_ui", "artifact.capture_milestone", "scenario.teardown"],
       "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "experiment.active_edit_lock", "experiment.in_place_edit_rejected", "experiment.source_bundle_immutable", "experiment.editable_copy_created", "experiment.editable_copy_fresh_execution", "experiment.editable_copy_editable", "artifacts.required_present"],
       "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "experiment.prepared_rename_refinalize", "experiment.active_edit_lock", "experiment.editable_copy"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The scenario crosses the ACTIVE lock boundary without connecting a simulated machine or issuing a print command."],
-      "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"],
+      "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report", "tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_and_legacy_editor_post_start_stable_parity"],
       "pi_safety_evidence": []
     },
     {
@@ -783,11 +783,13 @@
       },
       {
         "id": "experiment.activate_authoritative",
+        "interaction_surface": "model",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py"
       },
       {
         "id": "execution.lock_for_printing",
+        "interaction_surface": "model",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py"
       },
@@ -1065,37 +1067,37 @@
         "id": "experiment.active_edit_lock",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.post_start_edit_boundary.source_locked",
-        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report"]
       },
       {
         "id": "experiment.in_place_edit_rejected",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.assertion_results",
-        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report"]
       },
       {
         "id": "experiment.source_bundle_immutable",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.post_start_edit_boundary.source_after_copy",
-        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report"]
       },
       {
         "id": "experiment.editable_copy_created",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.post_start_edit_boundary.editable_copy_before_finalize",
-        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report"]
       },
       {
         "id": "experiment.editable_copy_fresh_execution",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.post_start_edit_boundary.editable_copy_after_finalize",
-        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report"]
       },
       {
         "id": "experiment.editable_copy_editable",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.assertion_results",
-        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report"]
       },
       {
         "id": "execution.soft_stop_requested",
