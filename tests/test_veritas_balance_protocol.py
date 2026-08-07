@@ -401,6 +401,38 @@ def test_cancellation_retains_latest_evidence_and_identity():
     assert detector.cancel(3 * NS) is result
 
 
+@pytest.mark.parametrize(
+    "failure_reason",
+    (
+        StableMassFailureReason.TRANSPORT_ERROR,
+        StableMassFailureReason.SERVICE_ERROR,
+    ),
+)
+def test_external_failure_retains_evidence_counts_and_is_terminal(
+    failure_reason,
+):
+    detector = StabilityDetector(_request())
+    detector.add_reading(_reading("1.00", NS))
+
+    result = detector.fail(2 * NS, failure_reason, "source failed")
+
+    assert result.outcome is StableMassOutcome.ERROR
+    assert result.failure_reason is failure_reason
+    assert result.detail == "source failed"
+    assert result.evidence is not None
+    assert result.total_readings_seen == 1
+    assert detector.fail(3 * NS, StableMassFailureReason.SERVICE_ERROR, "late") is result
+    assert detector.cancel(3 * NS) is result
+
+
+def test_external_failure_validates_reason_and_timestamp():
+    detector = StabilityDetector(_request(started_ns=100))
+    with pytest.raises(ValueError, match="predates"):
+        detector.fail(99, StableMassFailureReason.TRANSPORT_ERROR, "read failed")
+    with pytest.raises(ValueError, match="failure_reason"):
+        detector.fail(100, StableMassFailureReason.TIMEOUT, "wrong reason")
+
+
 def test_sample_limit_returns_typed_error():
     policy = StabilityPolicy(
         ignore_period_ns=0,

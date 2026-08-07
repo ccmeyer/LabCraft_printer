@@ -4,8 +4,8 @@
 
 - Date: 2026-08-07
 - Branch: `feature/balance_integration`
-- Status: Slices 0-2 verified; Slice 3 ready
-- Scope: planning document only
+- Status: Slices 0-3 verified; Slice 4 ready
+- Scope: implementation plan and slice verification record
 - Target hardware: Veritas/BEL HPB balance connected to the Raspberry Pi through a proper RS-232-to-USB adapter
 - Target workflow: stream gravimetric data collection only
 
@@ -746,7 +746,7 @@ Proceed criteria:
 
 ## Slice 3: Nonblocking BalanceService
 
-Status: `ready`
+Status: `verified`
 
 Goal:
 
@@ -757,12 +757,16 @@ Call path:
 
 `test/future Controller -> BalanceService -> worker -> injected serial transport -> BalanceProtocol -> typed signals`
 
-Files to touch:
+Files changed:
 
 - new `FreeRTOS-interface/BalanceService.py`
+- updated `FreeRTOS-interface/BalanceProtocol.py`
 - new `tests/test_balance_service.py`
-- `requirements.txt` only if an additional dependency is proven necessary;
-  `pyserial` is already present and should be sufficient
+- updated `tests/test_veritas_balance_protocol.py`
+- this plan
+
+`requirements.txt` was not changed; the existing PySide6 and pyserial
+dependencies are sufficient.
 
 Implementation steps:
 
@@ -781,13 +785,56 @@ Implementation steps:
 
 Validation:
 
-`.\env\Scripts\python.exe -m pytest -q tests\test_balance_service.py tests\test_veritas_balance_protocol.py`
+```text
+.\env\Scripts\python.exe -m pytest -q tests\test_balance_service.py tests\test_veritas_balance_protocol.py tests\test_probe_veritas_balance.py
+70 passed
+
+.\env\Scripts\python.exe -m pytest -q tests\test_balance_service.py
+17 passed
+
+.\env\Scripts\python.exe -m py_compile FreeRTOS-interface\BalanceService.py FreeRTOS-interface\BalanceProtocol.py tests\test_balance_service.py tests\test_veritas_balance_protocol.py
+passed
+```
+
+Verified findings:
+
+- `BalanceService` is a narrow `QObject` facade with a receive-only worker
+  object running in a dedicated `QThread`; serial open, read, and close calls
+  execute off the caller/GUI thread.
+- The production adapter is fixed at the verified 9600 baud, 8-N-1, 100 ms
+  timeout, 64-byte read, no-flow-control configuration and imports pyserial
+  only when the worker opens an explicitly supplied port.
+- Connection state, command rejection, asynchronous errors, progress,
+  readings, diagnostics, and request results use immutable typed payloads.
+- Open or read failure leaves the service in `ERROR`; an explicit disconnect
+  is required before reconnecting. No automatic reconnect is implemented.
+- One active request is enforced. Cancellation completes before replacement,
+  recently used identifiers are bounded to 64, and connection/request
+  generations reject late worker events.
+- Transport and unexpected service failures now produce terminal
+  `TRANSPORT_ERROR` or `SERVICE_ERROR` results while preserving detector
+  evidence and counts.
+- Framing is bounded at 256 bytes, rejection history at 32 entries, worker
+  commands at 8, request identifiers at 64, and stability samples at the
+  Slice 2 limit of 512.
+- The physical `stable_loaded` fixture was replayed through the worker and
+  produced `1540.57 mg`; fragmented, malformed, empty, overflow, incomplete,
+  disconnect, timeout, and repeated lifecycle cases also passed.
+- QThread shutdown uses the bounded serial timeout and stop event. It never
+  invokes forced thread termination, and a shutdown deadline failure retains
+  the live worker reference and emits a typed error.
+- Static import checks confirm the service is not referenced by application
+  composition, MVC, machine/printer communication, simulation, firmware,
+  camera, or legacy balance code. Slice 3 therefore cannot activate physical
+  balance access from the application.
 
 Proceed criteria:
 
-- No serial read executes on the GUI/test caller thread.
-- Shutdown leaves no live worker or open fake transport.
-- Service errors are typed and do not raise through Qt callbacks.
+- No serial read executes on the GUI/test caller thread: complete.
+- Normal shutdown leaves no live worker or open fake transport: complete.
+- Service errors are typed and do not raise through Qt callbacks: complete.
+- Full repository pytest remains deferred to the final all-slices validation
+  as previously agreed.
 
 Rollback:
 
@@ -795,7 +842,7 @@ Rollback:
 
 ## Slice 4: Explicit Activation, Composition, And Connection UI
 
-Status: `not_started`
+Status: `ready`
 
 Goal:
 

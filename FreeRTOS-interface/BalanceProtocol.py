@@ -293,6 +293,8 @@ class StableMassFailureReason(str, Enum):
     TIMEOUT = "timeout"
     CANCELLED = "cancelled"
     SAMPLE_LIMIT_EXCEEDED = "sample_limit_exceeded"
+    TRANSPORT_ERROR = "transport_error"
+    SERVICE_ERROR = "service_error"
 
 
 def _as_decimal(value: Decimal | int | float | str, label: str) -> Decimal:
@@ -649,6 +651,33 @@ class StabilityDetector:
             failure_reason=StableMassFailureReason.CANCELLED,
             evidence=self._latest_evidence,
             detail="stable mass request cancelled",
+        )
+
+    def fail(
+        self,
+        now_ns: int,
+        failure_reason: StableMassFailureReason,
+        detail: str,
+    ) -> StableMassResult:
+        """Complete the request after a transport or service failure."""
+        if self._terminal_result is not None:
+            return self._terminal_result
+        _validate_timestamp(now_ns, "now_ns")
+        if now_ns < self.request.started_monotonic_ns:
+            raise ValueError("failure timestamp predates the request")
+        if failure_reason not in (
+            StableMassFailureReason.TRANSPORT_ERROR,
+            StableMassFailureReason.SERVICE_ERROR,
+        ):
+            raise ValueError(
+                "failure_reason must be TRANSPORT_ERROR or SERVICE_ERROR"
+            )
+        return self._result(
+            outcome=StableMassOutcome.ERROR,
+            completed_ns=now_ns,
+            failure_reason=failure_reason,
+            evidence=self._latest_evidence,
+            detail=str(detail),
         )
 
 
