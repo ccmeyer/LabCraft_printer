@@ -30,7 +30,9 @@ from tools.virtual_workflows.assertions import (
     simulation_identity_assertion,
     sustained_evidence_assertions,
     SoftStopResumeExpectation,
+    DisconnectFailClosedExpectation,
     authoritative_reload_terminal_assertions,
+    disconnect_fail_closed_assertions,
     soft_stop_paused_assertions,
     soft_stop_terminal_assertions,
     terminal_execution_assertion,
@@ -57,6 +59,7 @@ from tools.virtual_workflows.journey_phases import (
     PostStartLockCopySpec,
     StockPassSpec,
     SoftStopResumeSpec,
+    DisconnectFailClosedSpec,
     capture_completion_midpoint,
     head_identity_step,
     machine_startup_steps,
@@ -65,6 +68,7 @@ from tools.virtual_workflows.journey_phases import (
     run_post_start_lock_copy,
     run_stock_passes,
     run_soft_stop_resume,
+    run_disconnect_fail_closed_boundary,
     run_authoritative_reload_resume_boundary,
 )
 from tools.virtual_workflows.page_drivers import ExperimentLoaderDriver
@@ -94,6 +98,8 @@ AUTHORITATIVE_RELOAD_WORKLOAD_ID = "authoritative_reload_resume_24_v1"
 AUTHORITATIVE_RELOAD_SCENARIO_NAME = "authoritative_reload_resume"
 AUTHORITATIVE_RELOAD_SCENARIO_VERSION = "1"
 POST_START_LOCK_WORKLOAD_ID = "experiment_editor_post_start_lock_v1"
+DISCONNECT_WORKLOAD_ID = "print_array_disconnect_mid_array_24_v1"
+DISCONNECT_SCENARIO_NAME = "print_array_disconnect_fail_closed"
 
 SMOKE_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -194,6 +200,15 @@ POST_START_LOCK_REQUIRED_ASSERTIONS = (
     "experiment.editable_copy_fresh_execution",
     "experiment.editable_copy_editable", "artifacts.required_present",
 )
+DISCONNECT_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "execution.disconnect_requested",
+    "execution.disconnect_fail_closed",
+    "execution.disconnected_boundary_quiescent",
+    "execution.disconnect_recovery_ready",
+    "artifacts.required_present",
+)
 
 SMOKE_REQUIRED_UI_ACTIONS = frozenset(
     {
@@ -242,6 +257,9 @@ SOFT_STOP_REQUIRED_UI_ACTIONS = SMOKE_REQUIRED_UI_ACTIONS | frozenset(
 )
 AUTHORITATIVE_RELOAD_REQUIRED_UI_ACTIONS = SOFT_STOP_REQUIRED_UI_ACTIONS | frozenset({
     "experiment.load_authoritative_via_ui", "experiment.activate_authoritative_via_ui"})
+DISCONNECT_REQUIRED_UI_ACTIONS = SMOKE_REQUIRED_UI_ACTIONS | frozenset(
+    {"machine.disconnect_via_ui"}
+)
 POST_START_LOCK_REQUIRED_UI_ACTIONS = EDITOR_REQUIRED_UI_ACTIONS | frozenset(
     {
         "editor.inspect_active_lock_via_ui",
@@ -305,6 +323,12 @@ POST_START_LOCK_REQUIRED_SCREENSHOTS = frozenset({
     "locked_editor_opened", "in_place_edit_rejected", "editable_copy_created",
     "copy_edited", "copy_finalized", "validated",
 })
+DISCONNECT_REQUIRED_SCREENSHOTS = frozenset(
+    {
+        "editor_opened", "generated", "ready", "printing",
+        "disconnected", "recovery_ready",
+    }
+)
 
 _COMMON_ACTIONS = frozenset(
     {"app.launch_simulated", "artifact.capture_milestone", "scenario.teardown"}
@@ -425,6 +449,10 @@ def _soft_stop_fixture() -> tuple[dict[str, Any], Path]:
 
 def _authoritative_reload_fixture() -> tuple[dict[str, Any], Path]:
     return _print_fixture(AUTHORITATIVE_RELOAD_WORKLOAD_ID)
+
+
+def _disconnect_fixture() -> tuple[dict[str, Any], Path]:
+    return _print_fixture(DISCONNECT_WORKLOAD_ID)
 
 
 def _editor_fixture() -> tuple[dict[str, Any], Path]:
@@ -647,6 +675,20 @@ def _soft_stop_spec(runtime: JourneyRuntime) -> SoftStopResumeSpec:
             lifecycle["request_after_completion_count"]
         ),
         maximum_completion_catchup=int(lifecycle["maximum_completion_catchup"]),
+        quiescence_observation_ms=int(lifecycle["quiescence_observation_ms"]),
+        timeout_seconds=min(20.0, runtime.context.deadline.remaining_seconds()),
+    )
+
+
+def _disconnect_spec(runtime: JourneyRuntime) -> DisconnectFailClosedSpec:
+    lifecycle = runtime.fixture["lifecycle"]
+    return DisconnectFailClosedSpec(
+        disconnect_after_completion_count=int(
+            lifecycle["disconnect_after_completion_count"]
+        ),
+        expected_canceled_intent_count=int(
+            lifecycle["expected_canceled_intent_count"]
+        ),
         quiescence_observation_ms=int(lifecycle["quiescence_observation_ms"]),
         timeout_seconds=min(20.0, runtime.context.deadline.remaining_seconds()),
     )
@@ -1170,6 +1212,67 @@ def _soft_stop_body(runtime: JourneyRuntime) -> None:
         runtime.add_assertion(result)
 
 
+def _disconnect_body(runtime: JourneyRuntime) -> None:
+    context, fixture = runtime.context, runtime.fixture
+    expected_wells = _well_ids(fixture)
+    runtime.observations.update(
+        {
+            "expected_wells": expected_wells,
+            "current_pass": {"index": -1, "starting_count": 0, "stock_id": None},
+        }
+    )
+    _connect_execution_signals(runtime, array_complete=True, machine_errors=True)
+    runtime.add_assertion(simulation_identity_assertion(context))
+    runtime.add_assertion(real_application_assertion(context))
+    runtime.run_steps(machine_startup_steps())
+    run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(_editor_specification(fixture, expected_wells)),
+    )
+    observer = ExecutionObserver(
+        context,
+        experiment_dir=Path(context.experiment_model.experiment_dir_path),
+        completed_count=lambda: len(runtime.observations["completed_wells"]),
+        pass_context=lambda: _current_pass_context(runtime),
+    )
+    runtime.observations["execution_observer"] = observer
+    runtime.register_restorable("execution", observer)
+    observer.install()
+
+    interrupted_pass = replace(
+        _smoke_pass(runtime),
+        expected_plan_state="active",
+        completed_milestone=None,
+        await_terminal_boundary=False,
+    )
+    run_stock_passes(
+        runtime,
+        (interrupted_pass,),
+        active_phase=lambda _runtime, _spec: run_disconnect_fail_closed_boundary(
+            runtime, _disconnect_spec(runtime)
+        ),
+    )
+    runtime.restore_all()
+    snapshot = observer.snapshot()
+    runtime.observations["execution_snapshot"] = snapshot
+    lifecycle = dict(snapshot.get("lifecycle") or {})
+    lifecycle_spec = _disconnect_spec(runtime)
+    for result in disconnect_fail_closed_assertions(
+        context,
+        expectation=DisconnectFailClosedExpectation(
+            completion_count=lifecycle_spec.disconnect_after_completion_count,
+            canceled_intent_count=lifecycle_spec.expected_canceled_intent_count,
+        ),
+        request_evidence=runtime.observations["disconnect_request"],
+        completed_wells=runtime.observations["completed_wells"],
+        array_complete_count=len(runtime.observations.get("array_completions", [])),
+        intent_lifecycle=lifecycle,
+        quiescence=runtime.observations["disconnected_quiescence"],
+        recovery=runtime.observations["disconnect_recovery"],
+    ):
+        runtime.add_assertion(result)
+
+
 def _authoritative_reload_body(runtime: JourneyRuntime) -> None:
     context, fixture = runtime.context, runtime.fixture
     expected_wells = _well_ids(fixture)
@@ -1679,6 +1782,75 @@ def _soft_stop_payload(
     passed = all(
         decisions.get(item) == "pass" for item in SOFT_STOP_REQUIRED_ASSERTIONS
     )
+
+
+def _disconnect_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    observed = runtime.observations
+    expected, completed = observed["expected_wells"], observed["completed_wells"]
+    decisions = _decisions(runtime)
+    snapshot = dict(observed.get("execution_snapshot") or {})
+    lifecycle = dict(snapshot.get("lifecycle") or {})
+    passed = all(
+        decisions.get(item) == "pass" for item in DISCONNECT_REQUIRED_ASSERTIONS
+    )
+    status = "measured" if passed else "partial"
+    return ComposedReportPayload(
+        workload=_single_stock_workload(runtime),
+        workflow_status=status,
+        workflow_values={
+            "expected_well_count": len(expected),
+            "completed_well_count": len(completed),
+            "expected_stock_well_completion_count": len(expected),
+            "completed_stock_well_count": len(completed),
+            "completed_well_ids": list(completed),
+            "well_update_count": len(completed),
+            "array_states": list(runtime.context.array_states),
+            "array_complete_count": len(observed.get("array_completions", [])),
+            "expected_outcome": "disconnect_fail_closed",
+            "cleanup_results": [dict(teardown)],
+        },
+        queue={
+            "status": status,
+            "values": {
+                "queue_drained_at_terminal": bool(
+                    runtime.context.machine.check_if_all_completed()
+                ),
+                "simulator_connected_at_terminal": bool(
+                    runtime.context.machine.state.connected
+                ),
+            },
+        },
+        persistence={
+            "status": status,
+            "values": {
+                "assertion_decisions": decisions,
+                "disconnect_fail_closed": {
+                    "request": dict(observed.get("disconnect_request") or {}),
+                    "quiescence": dict(
+                        observed.get("disconnected_quiescence") or {}
+                    ),
+                    "recovery": dict(observed.get("disconnect_recovery") or {}),
+                    "intent_reconciliation": {
+                        "begin_count": len(lifecycle.get("begins") or []),
+                        "completion_count": len(
+                            lifecycle.get("completions") or []
+                        ),
+                        "discard_batches": list(
+                            lifecycle.get("discard_batches") or []
+                        ),
+                    },
+                },
+                **_observer_persistence(snapshot),
+            },
+        },
+        limitations=(
+            "The disconnect lifecycle validates only the in-process simulated machine boundary and normal Qt controls.",
+            "It does not validate serial framing, ACK/status loss, MCU reset, firmware recovery, physical motion, pressure response, or hardware output.",
+            "Only confirmed simulated queue cancellation permits canceled intent discard; physical or unconfirmed disconnects remain ambiguous.",
+        ),
+    )
     status = "measured" if passed else "partial"
     intent_reconciliation = {
         "completed_count": terminal.get("intent_count"),
@@ -1838,6 +2010,16 @@ def _soft_stop_artifact(
     )
 
 
+def _disconnect_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return multi_stock_artifacts_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(DISCONNECT_REQUIRED_SCREENSHOTS),
+        teardown=teardown,
+    )
+
+
 def _authoritative_reload_artifact(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> Any:
@@ -1923,6 +2105,16 @@ def _soft_stop_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> st
         "Milestone 7 composed 24-well soft-stop/resume lifecycle\n"
         f"Status: {report['classification']['status']}\n"
         f"Completions: {len(runtime.observations['completed_wells'])} / 24\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _disconnect_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> str:
+    return (
+        "Milestone 7 composed mid-array disconnect fail-closed lifecycle\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Durable completions before disconnect: {len(runtime.observations['completed_wells'])} / 24\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
     )
@@ -2127,6 +2319,31 @@ AUTHORITATIVE_RELOAD_DEFINITION = JourneyDefinition(
     payload_builder=_authoritative_reload_payload,
     summary_builder=_authoritative_reload_summary,
 )
+DISCONNECT_DEFINITION = JourneyDefinition(
+    registry_id=DISCONNECT_WORKLOAD_ID,
+    scenario_name=DISCONNECT_SCENARIO_NAME,
+    scenario_version="1",
+    workload_id=DISCONNECT_WORKLOAD_ID,
+    required_action_ids=(
+        _COMMON_ACTIONS
+        | _EDITOR_ACTIONS
+        | (_PRINT_ACTIONS - frozenset({"array.wait_for_completions"}))
+        | frozenset(
+            {
+                "machine.disconnect_via_ui",
+                "array.observe_disconnected_quiescence",
+            }
+        )
+    ),
+    required_ui_action_ids=DISCONNECT_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=DISCONNECT_REQUIRED_ASSERTIONS,
+    required_screenshots=DISCONNECT_REQUIRED_SCREENSHOTS,
+    fixture_loader=_disconnect_fixture,
+    body=_disconnect_body,
+    artifact_assertion=_disconnect_artifact,
+    payload_builder=_disconnect_payload,
+    summary_builder=_disconnect_summary,
+)
 
 JOURNEY_DEFINITIONS = {
     definition.registry_id: definition
@@ -2140,6 +2357,7 @@ JOURNEY_DEFINITIONS = {
         STRESS_DEFINITION,
         SOFT_STOP_DEFINITION,
         AUTHORITATIVE_RELOAD_DEFINITION,
+        DISCONNECT_DEFINITION,
     )
 }
 JOURNEY_DEFINITION_IDS = frozenset(JOURNEY_DEFINITIONS)
@@ -2172,8 +2390,17 @@ def run_soft_stop_resume_24_journey(config: JourneyRunConfig) -> dict[str, Any]:
     return JourneyExecutor().run(SOFT_STOP_DEFINITION, config)
 
 
+def run_disconnect_fail_closed_24_journey(
+    config: JourneyRunConfig,
+) -> dict[str, Any]:
+    return JourneyExecutor().run(DISCONNECT_DEFINITION, config)
+
+
 __all__ = [
     "EDITOR_WORKLOAD_ID",
+    "DISCONNECT_REQUIRED_ASSERTIONS",
+    "DISCONNECT_REQUIRED_UI_ACTIONS",
+    "DISCONNECT_WORKLOAD_ID",
     "AUTHORITATIVE_RELOAD_REQUIRED_ASSERTIONS",
     "AUTHORITATIVE_RELOAD_REQUIRED_UI_ACTIONS",
     "AUTHORITATIVE_RELOAD_WORKLOAD_ID",
@@ -2196,6 +2423,7 @@ __all__ = [
     "get_journey_definition",
     "run_composed_journey",
     "run_editor_create_finalize_journey",
+    "run_disconnect_fail_closed_24_journey",
     "run_multi_stock_24x2_journey",
     "run_soft_stop_resume_24_journey",
     "run_virtual_print_array_24_journey",

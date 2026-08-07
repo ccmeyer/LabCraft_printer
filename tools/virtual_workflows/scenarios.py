@@ -51,6 +51,11 @@ MULTI_STOCK_FIXTURE_PATH = (
     / "fixtures"
     / "print_array_multi_stock_24x2_v1.json"
 )
+DISCONNECT_FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "print_array_disconnect_mid_array_24_v1.json"
+)
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "verification_reports" / "virtual_workflows"
 WORKLOAD_ID = "virtual_print_array_96_v1"
 SMOKE_WORKLOAD_ID = "virtual_print_array_24_v1"
@@ -58,6 +63,7 @@ STRESS_WORKLOAD_ID = "virtual_print_array_384x10_v1"
 SOFT_STOP_RESUME_WORKLOAD_ID = "print_array_soft_stop_resume_24_v1"
 AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID = "authoritative_reload_resume_24_v1"
 MULTI_STOCK_WORKLOAD_ID = "print_array_multi_stock_24x2_v1"
+DISCONNECT_WORKLOAD_ID = "print_array_disconnect_mid_array_24_v1"
 SCENARIO_FIXTURES = {
     WORKLOAD_ID: FIXTURE_PATH,
     STRESS_WORKLOAD_ID: STRESS_FIXTURE_PATH,
@@ -65,6 +71,7 @@ SCENARIO_FIXTURES = {
     SOFT_STOP_RESUME_WORKLOAD_ID: SOFT_STOP_RESUME_FIXTURE_PATH,
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: AUTHORITATIVE_RELOAD_RESUME_FIXTURE_PATH,
     MULTI_STOCK_WORKLOAD_ID: MULTI_STOCK_FIXTURE_PATH,
+    DISCONNECT_WORKLOAD_ID: DISCONNECT_FIXTURE_PATH,
 }
 SCENARIO_COMPLETION_COUNTS = {
     WORKLOAD_ID: 96,
@@ -73,6 +80,7 @@ SCENARIO_COMPLETION_COUNTS = {
     SOFT_STOP_RESUME_WORKLOAD_ID: 24,
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: 24,
     MULTI_STOCK_WORKLOAD_ID: 48,
+    DISCONNECT_WORKLOAD_ID: 24,
 }
 SCENARIO_WORKFLOW_STRATEGIES = {
     WORKLOAD_ID: "uninterrupted",
@@ -554,6 +562,12 @@ def load_virtual_print_array_fixture(
                 "expected_stock_pass_count": 2,
                 "expected_head_stage_count": 2,
                 "expected_between_pass_exchange_count": 1,
+            },
+            DISCONNECT_WORKLOAD_ID: {
+                "kind": "disconnect_fail_closed",
+                "disconnect_after_completion_count": 6,
+                "expected_canceled_intent_count": 2,
+                "quiescence_observation_ms": 250,
             },
         }.get(str(payload.get("fixture_id")))
         if expected_lifecycle is None or lifecycle != expected_lifecycle:

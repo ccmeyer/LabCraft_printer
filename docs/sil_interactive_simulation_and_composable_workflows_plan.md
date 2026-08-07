@@ -1011,7 +1011,7 @@ Rollback:
 
 ### Milestone 7: Journey portfolio and legacy-runner migration
 
-Status: `in progress - Slices 1 through 8 complete`
+Status: `complete - Slices 1 through 9 and final validation complete`
 
 Goal:
 
@@ -1055,7 +1055,11 @@ Migration order:
    identified Qt's post-open mouse-release guard; the reusable mouse driver now
    waits out that bounded guard. Visible and exact-replay runs both complete
    all 3,840 pairs with every required assertion passing and zero starvation;
-10. disconnect scenario according to the Milestone 0 decision.
+10. disconnect scenario according to the Milestone 0 decision - complete in
+    Slice 9. The composed journey disconnects through the normal Qt connection
+    button at six durable completions, retires two look-ahead intents only
+    after canonical simulator cancellation is confirmed, and proves a
+    quiescent `ready_to_resume` boundary.
 
 Gate per migration:
 
@@ -1478,21 +1482,14 @@ This effort is complete when:
 
 ## Current Next Action
 
-Milestone 7 Slice 8 now uses a guarded calibration-specific authoritative
-transaction. During a healthy active session it validates one successor
-against the in-memory validated history and brackets the unchanged atomic
-writes with the existing file-identity guards. Cold activation, recovery, and
-terminal closeout still validate the entire immutable chain.
+Milestone 7 is complete. Slice 9 added the composed mid-array disconnect
+journey and proved exact-trigger UI disconnection, confirmed simulator-only
+intent cancellation, a quiescent `ready_to_resume` boundary, retained failure
+evidence, visible Windows execution, and exact replay. Visible qualification
+also exposed and corrected a generic teardown race in which hiding a focused
+editor could emit a deferred machine command after disconnect.
 
-The final composed node passed all 3,840 operations in 383.65 seconds with
-zero starvation, a 685.460 ms maximum event-loop gap, 81.616 ms
-scheduling-lateness p99, and a 252.072 ms active pressure-render maximum. Nine
-cached calibration commits had a maximum of 181.185 ms, and terminal closeout
-retained one full-chain validation. The direct parity node also passed.
-
-The focused rack-only node isolated Qt's post-open mouse-release guard without
-printing and passed in three fresh visible processes after the shared bounded
-mouse correction. A fresh full visible run and its exact emitted replay then
-completed all 3,840 operations with zero failed actions, failed assertions, or
-starvation and drained terminal queues. Slice 8 is complete; keep the full
-Python suite deferred until final Milestone 7 validation.
+Proceed only through a separately reviewed Milestone 8 plan for suites,
+seeded exploration, scheduling, retention policy, and operational handoff. Do
+not fold new fault injection, Pi operations, firmware/protocol work, or
+hardware work into the completed Milestone 7 migration.

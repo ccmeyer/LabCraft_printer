@@ -211,13 +211,13 @@
       "id": "execution.disconnect_fail_closed",
       "risk": "Execution may continue advancing after simulated disconnection.",
       "owner_role": "execution lifecycle maintainers",
-      "status": "planned",
+      "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": [],
-      "required_assertion_ids": [],
-      "related_source_areas": ["FreeRTOS-interface/Controller.py", "tools/virtual_workflows/scenarios.py"],
+      "active_scenario_ids": ["print_array_disconnect_mid_array_24_v1"],
+      "required_assertion_ids": ["execution.disconnect_requested", "execution.disconnect_fail_closed", "execution.disconnected_boundary_quiescent", "execution.disconnect_recovery_ready"],
+      "related_source_areas": ["FreeRTOS-interface/Controller.py", "tools/virtual_workflows/journeys.py"],
       "limitations": ["Protocol and physical disconnect behavior are outside in-process SIL."],
-      "max_evidence_age_days": null
+      "max_evidence_age_days": 2
     },
     {
       "id": "execution.multi_stock_head_exchange",
@@ -508,6 +508,26 @@
       "limitations": ["The scenario validates virtual rack/head association and durable application behavior, not physical head handling, pressure response, or droplet output."],
       "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_fixture_contract_is_exact", "tests/system/test_virtual_workflow_multi_stock_composed.py::test_composed_multi_stock_lifecycle_report"],
       "pi_safety_evidence": []
+    },
+    {
+      "id": "print_array_disconnect_mid_array_24_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "print_array_disconnect_mid_array_24_v1",
+      "workload_fixture_id": "print_array_disconnect_mid_array_24_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/print_array_disconnect_mid_array_24_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 60,
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "machine.configure_print_settings_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "machine.disconnect_via_ui", "array.observe_disconnected_quiescence", "artifact.capture_milestone", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "execution.disconnect_requested", "execution.disconnect_fail_closed", "execution.disconnected_boundary_quiescent", "execution.disconnect_recovery_ready", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.intent_durability", "execution.disconnect_fail_closed"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The scenario validates expected fail-closed behavior at the in-process simulated machine boundary, not serial framing, MCU reset, firmware recovery, or physical hardware."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_disconnect_composed.py::test_disconnect_fixture_contract_is_exact", "tests/system/test_virtual_workflow_disconnect_composed.py::test_composed_disconnect_fail_closed_report", "tests/system/test_virtual_workflow_disconnect_composed.py::test_disconnect_controlled_assertion_failure_retains_evidence"],
+      "pi_safety_evidence": []
     }
   ],
   "suites": [
@@ -524,7 +544,7 @@
       "status": "active",
       "kind": "lifecycle",
       "platform": "windows_sil",
-      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1"],
+      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1", "print_array_disconnect_mid_array_24_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -854,6 +874,17 @@
         "source_path": "tools/virtual_workflows/actions.py"
       },
       {
+        "id": "machine.disconnect_via_ui",
+        "interaction_surface": "ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "array.observe_disconnected_quiescence",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
         "id": "array.resume_via_ui",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py"
@@ -1164,6 +1195,30 @@
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.authoritative_reload_resume.resume_reconciliation",
         "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes"]
+      },
+      {
+        "id": "execution.disconnect_requested",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.disconnect_fail_closed.request",
+        "test_node_ids": ["tests/system/test_virtual_workflow_disconnect_composed.py::test_composed_disconnect_fail_closed_report"]
+      },
+      {
+        "id": "execution.disconnect_fail_closed",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.disconnect_fail_closed.intent_reconciliation",
+        "test_node_ids": ["tests/system/test_virtual_workflow_disconnect_composed.py::test_composed_disconnect_fail_closed_report"]
+      },
+      {
+        "id": "execution.disconnected_boundary_quiescent",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.disconnect_fail_closed.quiescence",
+        "test_node_ids": ["tests/system/test_virtual_workflow_disconnect_composed.py::test_composed_disconnect_fail_closed_report"]
+      },
+      {
+        "id": "execution.disconnect_recovery_ready",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.disconnect_fail_closed.recovery",
+        "test_node_ids": ["tests/system/test_virtual_workflow_disconnect_composed.py::test_composed_disconnect_fail_closed_report"]
       }
     ]
   }

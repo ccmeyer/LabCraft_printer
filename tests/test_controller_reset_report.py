@@ -539,6 +539,66 @@ def test_handle_transport_fault_interrupts_active_array_without_queueing_motion(
     assert controller.model.record_experiment_audit_event.call_args.kwargs["level"] == "error"
 
 
+def test_machine_disconnect_reconciles_only_confirmed_simulator_intents(tmp_path):
+    controller, _events, popups = _make_reset_controller(
+        tmp_path, array_state="running", has_progress=True, remaining=4
+    )
+    discarded = []
+    controller.runtime_context = SimpleNamespace(is_simulation=True)
+    controller.machine = SimpleNamespace(
+        state=SimpleNamespace(connected=False),
+        check_if_all_completed=lambda: True,
+    )
+    controller._array_context["queued_wells"] = [
+        {"execution_intent_id": "intent-7"},
+        {"execution_intent_id": "intent-8"},
+    ]
+    controller.model.experiment_model.discard_execution_print_intents = (
+        lambda values: discarded.append(tuple(values))
+    )
+    controller.model.experiment_model.set_execution_plan_sync_error = Mock()
+    controller.model.machine_model.mark_evap_plate_dock_check_required = Mock()
+
+    assert Controller._interrupt_array_after_machine_disconnect(controller) == "resume_ready"
+
+    assert discarded == [("intent-7", "intent-8")]
+    assert controller.get_array_run_state() == "resume_ready"
+    assert controller._array_context is None
+    assert popups == []
+    controller.model.machine_model.mark_evap_plate_dock_check_required.assert_called_once_with(
+        "machine_disconnect"
+    )
+    audit = controller.model.record_experiment_audit_event.call_args
+    assert audit.args[:2] == (
+        "print_array_interrupted_by_machine_disconnect",
+        "Print array interrupted by machine disconnect",
+    )
+    assert audit.kwargs["details"]["intent_reconciliation_status"] == "discarded"
+
+
+def test_machine_disconnect_retains_unconfirmed_physical_intents(tmp_path):
+    controller, _events, _popups = _make_reset_controller(
+        tmp_path, array_state="running", has_progress=True, remaining=4
+    )
+    discard = Mock()
+    controller.runtime_context = SimpleNamespace(is_simulation=False)
+    controller.machine = SimpleNamespace(
+        state=SimpleNamespace(connected=False),
+        check_if_all_completed=lambda: True,
+    )
+    controller._array_context["queued_wells"] = [
+        {"execution_intent_id": "ambiguous-intent"}
+    ]
+    controller.model.experiment_model.discard_execution_print_intents = discard
+    controller.model.machine_model.mark_evap_plate_dock_check_required = Mock()
+
+    Controller._interrupt_array_after_machine_disconnect(controller)
+
+    discard.assert_not_called()
+    audit = controller.model.record_experiment_audit_event.call_args
+    assert audit.kwargs["details"]["intent_reconciliation_status"] == "unconfirmed"
+
+
 def test_export_last_connection_loss_debug_bundle_packages_current_context(tmp_path):
     snapshot = tmp_path / "serial_reader_stopped.json"
     snapshot.write_text('{"reason": "serial_reader_stopped"}', encoding="utf-8")

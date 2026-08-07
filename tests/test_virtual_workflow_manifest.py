@@ -25,6 +25,7 @@ from tools.virtual_workflows.registry import (
 )
 from tools.virtual_workflows.scenarios import (
             AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+            DISCONNECT_WORKLOAD_ID,
             MULTI_STOCK_WORKLOAD_ID,
             STRESS_WORKLOAD_ID,
     SCENARIO_COMPLETION_COUNTS,
@@ -70,6 +71,7 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         SOFT_STOP_RESUME_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
+        DISCONNECT_WORKLOAD_ID,
     )
 
     for scenario_id in (WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID):
@@ -113,6 +115,7 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         "print_array_soft_stop_resume_24_v1",
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
+        DISCONNECT_WORKLOAD_ID,
     ]
     rename_scenario = _row(
         payload,
@@ -184,6 +187,12 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         "screenshots",
         "scenario_root",
     ]
+    disconnect = _row(payload, "scenarios", DISCONNECT_WORKLOAD_ID)
+    assert disconnect["status"] == "active"
+    assert disconnect["suite_ids"] == ["lifecycle"]
+    assert "machine.disconnect_via_ui" in disconnect["action_ids"]
+    assert "array.wait_for_completions" not in disconnect["action_ids"]
+    assert "execution.disconnect_fail_closed" in disconnect["assertion_ids"]
     stress = _row(payload, "scenarios", "print_array_stress_384x10_v1")
     assert "fixture.prepare_authoritative" not in stress["action_ids"]
     assert "head.stage_virtual" not in stress["action_ids"]
@@ -252,6 +261,10 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert capabilities["execution.multi_stock_head_exchange"][
         "max_evidence_age_days"
     ] == 2
+    assert capabilities["execution.disconnect_fail_closed"]["status"] == "covered"
+    assert capabilities["execution.disconnect_fail_closed"][
+        "active_scenario_ids"
+    ] == [DISCONNECT_WORKLOAD_ID]
     assert {
         schedule["automation_status"] for schedule in payload["schedules"]
     } == {"not_configured"}

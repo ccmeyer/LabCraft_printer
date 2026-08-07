@@ -167,6 +167,44 @@ def test_pressure_regulation_waits_for_the_simulated_command_queue(qapp):
     window.close()
 
 
+def test_machine_driver_disconnects_through_normal_control(qapp):
+    window = QtWidgets.QWidget()
+    button = QtWidgets.QPushButton("Disconnect", window)
+    machine_model = SimpleNamespace(connected=True)
+    machine_model.is_connected = lambda: machine_model.connected
+    machine = SimpleNamespace(
+        state=SimpleNamespace(connected=True),
+        check_if_all_completed=lambda: True,
+    )
+    connection_widget = SimpleNamespace(
+        machine_connect_button=button,
+        _machine_disconnect_pending=False,
+    )
+
+    def disconnect():
+        connection_widget._machine_disconnect_pending = True
+        machine_model.connected = False
+        machine.state.connected = False
+        connection_widget._machine_disconnect_pending = False
+        button.setText("Connect")
+
+    button.clicked.connect(disconnect)
+    window.show()
+    qapp.processEvents()
+    context = _context(qapp, SimpleNamespace(connection_widget=connection_widget))
+    context.model = SimpleNamespace(machine_model=machine_model)
+    context.machine = machine
+
+    evidence = MachineControlsDriver(context).disconnect()
+
+    assert evidence["before"]["button_text"] == "Disconnect"
+    assert evidence["button_text_after"] == "Connect"
+    assert evidence["model_connected_after"] is False
+    assert evidence["simulator_connected_after"] is False
+    assert evidence["simulator_queue_empty"] is True
+    window.close()
+
+
 def test_prepared_loader_rejects_directory_outside_session_root(qapp, tmp_path):
     context = _context(qapp, QtWidgets.QWidget())
     context.scenario_root = tmp_path / "scenario-root"

@@ -121,6 +121,16 @@ COMPOSED_SOFT_STOP_ACTION_IDS = COMPOSED_SMOKE_ACTION_IDS | frozenset(
         "array.wait_for_state",
     }
 )
+COMPOSED_DISCONNECT_ACTION_IDS = (
+    COMPOSED_SMOKE_ACTION_IDS
+    - frozenset({"array.wait_for_completions"})
+    | frozenset(
+        {
+            "machine.disconnect_via_ui",
+            "array.observe_disconnected_quiescence",
+        }
+    )
+)
 ACTION_IDS = (
     AUTHORITATIVE_RELOAD_ACTION_IDS
     | MULTI_STOCK_LIFECYCLE_ACTION_IDS
@@ -128,6 +138,7 @@ ACTION_IDS = (
     | COMPOSED_SMOKE_ACTION_IDS
     | COMPOSED_MULTI_STOCK_ACTION_IDS
     | COMPOSED_SOFT_STOP_ACTION_IDS
+    | COMPOSED_DISCONNECT_ACTION_IDS
 )
 
 
@@ -153,6 +164,7 @@ ACTION_INTERACTION_SURFACES.update(
         "array.start_via_ui": InteractionSurface.UI,
         "array.request_soft_stop_via_ui": InteractionSurface.UI,
         "array.resume_via_ui": InteractionSurface.UI,
+        "machine.disconnect_via_ui": InteractionSurface.UI,
         "experiment.load_authoritative_via_ui": InteractionSurface.UI,
         "experiment.activate_authoritative_via_ui": InteractionSurface.UI,
         "experiment.activate_authoritative": InteractionSurface.MODEL,
@@ -1282,6 +1294,118 @@ def request_soft_stop_via_ui(
     )
 
 
+def disconnect_machine_via_ui(
+    context: ScenarioContext,
+    *,
+    completed_count: Callable[[], int],
+    trigger_count: int,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """Click the normal disconnect control at one exact completion boundary."""
+
+    def precondition():
+        state = (
+            context.controller.get_array_run_state()
+            if context.controller is not None
+            else None
+        )
+        connected = bool(
+            context.model is not None
+            and context.model.machine_model.is_connected()
+        )
+        return (
+            context.view is not None
+            and context.controller is not None
+            and context.machine is not None
+            and state == "running"
+            and connected,
+            "disconnect requires a connected, running real UI workflow",
+            {"array_state": state, "model_connected": connected},
+        )
+
+    def run() -> Mapping[str, Any]:
+        from tools.virtual_workflows.page_drivers import MachineControlsDriver
+
+        driver = MachineControlsDriver(context)
+        observed: dict[str, Any] = {
+            "trigger_count": int(trigger_count),
+            "click_queued": False,
+            "clicked_count": None,
+        }
+
+        def queue_click(*_args: Any) -> None:
+            count = int(completed_count())
+            if observed["click_queued"] or count < int(trigger_count):
+                return
+            if count != int(trigger_count):
+                observed["overshoot_count"] = count
+                return
+            observed["click_queued"] = True
+
+            def click() -> None:
+                observed["clicked_count"] = int(completed_count())
+                try:
+                    observed.update(driver.disconnect())
+                except RuntimeError as exc:
+                    observed["driver_error"] = str(exc)
+
+            context.qt_core.QTimer.singleShot(0, click)
+
+        signal = context.model.well_plate.well_state_changed_signal
+        signal.connect(queue_click)
+        try:
+            queue_click()
+            wait_until(
+                context,
+                lambda: (
+                    not context.model.machine_model.is_connected()
+                    or bool(context.errors)
+                    or "overshoot_count" in observed
+                    or "driver_error" in observed
+                ),
+                timeout_seconds,
+                f"machine disconnect at completion {int(trigger_count)}",
+                action_id="machine.disconnect_via_ui",
+                evidence=lambda: {
+                    **observed,
+                    "observed_count": int(completed_count()),
+                    "array_state": context.controller.get_array_run_state(),
+                    "simulator_connected": bool(context.machine.state.connected),
+                },
+            )
+        finally:
+            try:
+                signal.disconnect(queue_click)
+            except (RuntimeError, TypeError):
+                pass
+        if context.errors:
+            raise RuntimeError(f"disconnect emitted an error: {context.errors[-1]}")
+        if "overshoot_count" in observed:
+            raise RuntimeError("disconnect trigger was not serviced at the exact completion")
+        if "driver_error" in observed:
+            raise RuntimeError(observed["driver_error"])
+        if (
+            observed["clicked_count"] != int(trigger_count)
+            or int(completed_count()) != int(trigger_count)
+            or context.model.machine_model.is_connected()
+            or context.machine.state.connected
+        ):
+            raise RuntimeError("disconnect did not establish its exact fail-closed boundary")
+        return {
+            **observed,
+            "observed_count": int(completed_count()),
+            "array_state": context.controller.get_array_run_state(),
+            "simulator_connected": bool(context.machine.state.connected),
+        }
+
+    return execute_action(
+        context,
+        "machine.disconnect_via_ui",
+        run,
+        precondition=precondition,
+    )
+
+
 def resume_array_via_ui(context: ScenarioContext) -> dict[str, Any]:
     """Resume a paused array through the normal Qt control."""
 
@@ -1373,6 +1497,77 @@ def observe_stopped_quiescence(
     return execute_action(
         context,
         "array.observe_stopped_quiescence",
+        run,
+        precondition=precondition,
+    )
+
+
+def observe_disconnected_quiescence(
+    context: ScenarioContext,
+    *,
+    completed_count: Callable[[], int],
+    progress_count: Callable[[], int],
+    observation_ms: int,
+) -> dict[str, Any]:
+    """Prove a disconnected resume boundary cannot advance."""
+
+    def precondition():
+        state = context.controller.get_array_run_state()
+        connected = bool(context.model.machine_model.is_connected())
+        return (
+            state == "resume_ready"
+            and not connected
+            and not context.machine.state.connected
+            and context.machine.check_if_all_completed(),
+            "disconnected quiescence requires a drained resume-ready boundary",
+            {
+                "array_state": state,
+                "model_connected": connected,
+                "simulator_connected": bool(context.machine.state.connected),
+                "simulator_queue_empty": bool(context.machine.check_if_all_completed()),
+            },
+        )
+
+    def run() -> Mapping[str, Any]:
+        starting_completions = int(completed_count())
+        starting_progress = int(progress_count())
+        duration_seconds = int(observation_ms) / 1000.0
+        if duration_seconds <= 0:
+            raise RuntimeError("quiescence observation must be positive")
+        if context.deadline.remaining_seconds(duration_seconds + 1.0) < duration_seconds:
+            raise ScenarioActionError(
+                "array.observe_disconnected_quiescence",
+                "scenario deadline cannot contain the quiescence window",
+                stage="timeout",
+            )
+        started = context.clock()
+        while context.clock() - started < duration_seconds:
+            context.pump_events()
+            if (
+                int(completed_count()) != starting_completions
+                or int(progress_count()) != starting_progress
+                or context.controller.get_array_run_state() != "resume_ready"
+                or context.model.machine_model.is_connected()
+                or context.machine.state.connected
+                or not context.machine.check_if_all_completed()
+            ):
+                raise RuntimeError("disconnected workflow advanced during quiescence")
+            context.sleep(0.001)
+        return {
+            "observation_ms": int(observation_ms),
+            "starting_completion_count": starting_completions,
+            "ending_completion_count": int(completed_count()),
+            "starting_progress_count": starting_progress,
+            "ending_progress_count": int(progress_count()),
+            "array_state": context.controller.get_array_run_state(),
+            "model_connected": bool(context.model.machine_model.is_connected()),
+            "simulator_connected": bool(context.machine.state.connected),
+            "simulator_queue_empty": bool(context.machine.check_if_all_completed()),
+        }
+
+    return execute_action(
+        context,
+        "array.observe_disconnected_quiescence",
         run,
         precondition=precondition,
     )
@@ -2849,6 +3044,7 @@ def teardown_scenario(context: ScenarioContext) -> dict[str, Any]:
 
 __all__ = [
     "COMPOSED_MULTI_STOCK_ACTION_IDS",
+    "COMPOSED_DISCONNECT_ACTION_IDS",
     "COMPOSED_SOFT_STOP_ACTION_IDS",
     "ACTION_INTERACTION_SURFACES",
     "ACTION_IDS",
@@ -2878,6 +3074,7 @@ __all__ = [
     "install_dialog_handler",
     "launch_simulated_application",
     "prepare_authoritative_fixture",
+    "disconnect_machine_via_ui",
     "request_soft_stop_via_ui",
     "resume_array_via_ui",
     "reload_authoritative_experiment",
@@ -2885,6 +3082,7 @@ __all__ = [
     "stage_virtual_head",
     "start_array_via_ui",
     "observe_stopped_quiescence",
+    "observe_disconnected_quiescence",
     "teardown_scenario",
     "validate_prepared_bundle",
     "validate_paused_bundle",

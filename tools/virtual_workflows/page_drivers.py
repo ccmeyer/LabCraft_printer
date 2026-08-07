@@ -352,6 +352,49 @@ class MachineControlsDriver(_QTestSurfaceDriver):
             "simulator connection",
         )
 
+    def disconnect(self) -> dict[str, Any]:
+        """Disconnect through the normal connection control and wait for UI truth."""
+
+        widget = self.view.connection_widget
+        button = widget.machine_connect_button
+        if button.text() != "Disconnect" or not button.isEnabled():
+            raise RuntimeError(
+                "expected enabled Disconnect control; observed "
+                f"{button.text()!r} enabled={button.isEnabled()}"
+            )
+        before = {
+            "button_text": button.text(),
+            "model_connected": bool(self.context.model.machine_model.is_connected()),
+            "simulator_connected": bool(self.context.machine.state.connected),
+        }
+        self.click(button)
+        self.wait_until(
+            lambda: (
+                not self.context.model.machine_model.is_connected()
+                and not self.context.machine.state.connected
+                and self.context.machine.check_if_all_completed()
+                and not bool(getattr(widget, "_machine_disconnect_pending", False))
+                and button.text() == "Connect"
+                and button.isEnabled()
+            ),
+            "simulator disconnect and normal connection-control recovery",
+        )
+        return {
+            "before": before,
+            "button_text_after": button.text(),
+            "button_enabled_after": bool(button.isEnabled()),
+            "disconnect_pending_after": bool(
+                getattr(widget, "_machine_disconnect_pending", False)
+            ),
+            "model_connected_after": bool(
+                self.context.model.machine_model.is_connected()
+            ),
+            "simulator_connected_after": bool(self.context.machine.state.connected),
+            "simulator_queue_empty": bool(
+                self.context.machine.check_if_all_completed()
+            ),
+        }
+
     def enable_motors(self) -> None:
         button = self.view.coordinates_box.toggle_motor_button
         if button.text() != "Enable Motors":

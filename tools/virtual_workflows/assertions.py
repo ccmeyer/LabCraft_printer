@@ -83,6 +83,16 @@ class SoftStopResumeExpectation:
 
 
 @dataclass(frozen=True)
+class DisconnectFailClosedExpectation:
+    completion_count: int
+    canceled_intent_count: int
+
+    def __post_init__(self) -> None:
+        if self.completion_count <= 0 or self.canceled_intent_count <= 0:
+            raise ValueError("disconnect expectation counts must be positive")
+
+
+@dataclass(frozen=True)
 class ActionSequenceExpectation:
     action_ids: tuple[str, ...]
     interaction_surfaces: tuple[str, ...]
@@ -223,6 +233,136 @@ def soft_stop_terminal_assertions(
         ("controller", "model", "simulator", "persistence"),
     ))
     return tuple(projected)
+
+
+def disconnect_fail_closed_assertions(
+    context: Any,
+    *,
+    expectation: DisconnectFailClosedExpectation,
+    request_evidence: Mapping[str, Any],
+    completed_wells: list[str],
+    array_complete_count: int,
+    intent_lifecycle: Mapping[str, Any],
+    quiescence: Mapping[str, Any],
+    recovery: Mapping[str, Any],
+) -> tuple[AssertionResult, ...]:
+    """Project the exact request, cancellation, quiescence, and recovery contract."""
+
+    begins = list(intent_lifecycle.get("begins") or [])
+    attachments = list(intent_lifecycle.get("attachments") or [])
+    completions = list(intent_lifecycle.get("completions") or [])
+    discard_batches = list(intent_lifecycle.get("discard_batches") or [])
+    discarded_ids = [
+        intent_id
+        for batch in discard_batches
+        for intent_id in (batch.get("intent_ids") or [])
+    ]
+    eligibility = dict(recovery.get("eligibility") or {})
+
+    request_checks = {
+        "trigger_exact": request_evidence.get("trigger_count")
+        == expectation.completion_count,
+        "clicked_exact": request_evidence.get("clicked_count")
+        == expectation.completion_count,
+        "observed_exact": request_evidence.get("observed_count")
+        == expectation.completion_count,
+        "normal_ui_recovered": request_evidence.get("button_text_after") == "Connect"
+        and request_evidence.get("button_enabled_after") is True,
+    }
+    boundary_checks = {
+        "completion_count_exact": len(completed_wells) == expectation.completion_count,
+        "completed_wells_unique": len(set(completed_wells)) == len(completed_wells),
+        "array_not_completed": int(array_complete_count) == 0,
+        "simulator_queue_empty": bool(context.machine.check_if_all_completed()),
+        "model_disconnected": not context.model.machine_model.is_connected(),
+        "simulator_disconnected": not context.machine.state.connected,
+        "array_resume_ready": context.controller.get_array_run_state()
+        == "resume_ready",
+        "plan_remains_active": str(
+            context.experiment_model.get_execution_plan_snapshot().state.value
+        )
+        == "active",
+        "begins_partition_exact": len(begins)
+        == expectation.completion_count + expectation.canceled_intent_count,
+        "attachments_exact": len(attachments) == len(begins),
+        "completions_exact": len(completions) == expectation.completion_count,
+        "single_discard_batch": len(discard_batches) == 1,
+        "canceled_intents_exact": len(discarded_ids)
+        == expectation.canceled_intent_count,
+        "terminal_intent_partition_exact": set(completions).isdisjoint(discarded_ids)
+        and set(completions) | set(discarded_ids)
+        == {row.get("intent_id") for row in begins},
+        "no_errors": not context.errors,
+        "no_unexpected_dialogs": not context.unexpected_dialogs,
+    }
+    quiescence_checks = {
+        "completion_count_stable": quiescence.get("starting_completion_count")
+        == quiescence.get("ending_completion_count")
+        == expectation.completion_count,
+        "progress_count_stable": quiescence.get("starting_progress_count")
+        == quiescence.get("ending_progress_count")
+        == expectation.completion_count,
+        "queue_remains_empty": quiescence.get("simulator_queue_empty") is True,
+        "array_remains_resume_ready": quiescence.get("array_state")
+        == "resume_ready",
+        "connection_remains_closed": quiescence.get("model_connected") is False
+        and quiescence.get("simulator_connected") is False,
+    }
+    recovery_checks = {
+        "eligibility_ready_to_resume": eligibility.get("status")
+        == "ready_to_resume",
+        "eligibility_can_resume": eligibility.get("can_resume_hardware") is True,
+        "no_ambiguous_intents": eligibility.get("ambiguous_intent_ids") == [],
+        "array_resume_ready": recovery.get("array_state") == "resume_ready",
+        "plan_active": recovery.get("plan_state") == "active",
+        "dock_check_required": "machine_disconnect"
+        in (recovery.get("dock_check_reasons") or []),
+        "motors_unhomed": recovery.get("motors_homed") is False,
+    }
+    groups = (
+        (
+            "execution.disconnect_requested",
+            "disconnect_requested",
+            request_checks,
+            request_evidence,
+            ("ui", "controller", "model", "simulator"),
+        ),
+        (
+            "execution.disconnect_fail_closed",
+            "disconnected",
+            boundary_checks,
+            {
+                "completed_wells": list(completed_wells),
+                "intent_lifecycle": dict(intent_lifecycle),
+            },
+            ("controller", "model", "simulator", "persistence"),
+        ),
+        (
+            "execution.disconnected_boundary_quiescent",
+            "recovery_ready",
+            quiescence_checks,
+            quiescence,
+            ("controller", "model", "simulator", "persistence"),
+        ),
+        (
+            "execution.disconnect_recovery_ready",
+            "recovery_ready",
+            recovery_checks,
+            recovery,
+            ("controller", "model", "persistence"),
+        ),
+    )
+    return tuple(
+        AssertionResult(
+            assertion_id,
+            checkpoint,
+            "pass" if all(checks.values()) else "fail",
+            sources,
+            {"checks": checks, **dict(evidence)},
+            None if all(checks.values()) else "disconnect lifecycle policy failed",
+        )
+        for assertion_id, checkpoint, checks, evidence, sources in groups
+    )
 
 
 def authoritative_first_session_paused_assertion(

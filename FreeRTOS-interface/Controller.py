@@ -1257,6 +1257,7 @@ class Controller(QObject):
             self._restore_print_settings_after_board_reset()
         else:
             print("Controller: Failed to connect to the machine.")
+            self._interrupt_array_after_machine_disconnect()
             self.model.machine_model.disconnect_machine()
 
     def handle_reset_report(self, report: dict):
@@ -3359,6 +3360,90 @@ class Controller(QObject):
             "Print array interrupted by command transport fault",
             details=audit_details,
             level="error",
+        )
+        return next_state
+
+    def _interrupt_array_after_machine_disconnect(self):
+        """Retire active array state, reconciling only proven simulator cancels."""
+
+        previous_state = self.get_array_run_state()
+        if previous_state not in {"running", "stop_requested"}:
+            return None
+
+        context = getattr(self, "_array_context", None)
+        try:
+            audit_details = self._build_print_array_snapshot(context)
+        except Exception:
+            audit_details = {}
+
+        queued_intent_ids = tuple(dict.fromkeys(
+            str(row.get("execution_intent_id"))
+            for row in list((context or {}).get("queued_wells") or [])
+            if row.get("execution_intent_id")
+        ))
+        runtime_context = getattr(
+            self,
+            "runtime_context",
+            PRODUCTION_RUNTIME_CONTEXT,
+        )
+        machine_state = getattr(getattr(self, "machine", None), "state", None)
+        queue_checker = getattr(getattr(self, "machine", None), "check_if_all_completed", None)
+        simulator_cancel_confirmed = bool(
+            getattr(runtime_context, "is_simulation", False)
+            and machine_state is not None
+            and not bool(getattr(machine_state, "connected", True))
+            and callable(queue_checker)
+            and queue_checker()
+        )
+        reconciliation_status = (
+            "not_required" if not queued_intent_ids else "unconfirmed"
+        )
+        if queued_intent_ids and simulator_cancel_confirmed:
+            experiment_model = getattr(getattr(self, "model", None), "experiment_model", None)
+            discard = getattr(experiment_model, "discard_execution_print_intents", None)
+            try:
+                if not callable(discard):
+                    raise RuntimeError("execution-intent discard is unavailable")
+                discard(queued_intent_ids)
+                reconciliation_status = "discarded"
+            except Exception as exc:
+                reconciliation_status = "failed"
+                setter = getattr(experiment_model, "set_execution_plan_sync_error", None)
+                if callable(setter):
+                    setter(exc)
+                self.error_occurred_signal.emit(
+                    "Execution Checkpoint Error",
+                    "The simulator canceled queued work, but its durable print intents "
+                    "could not be reconciled. Resume remains blocked.",
+                )
+
+        progress_status = self._get_experiment_progress_status_for_array()
+        has_progress = bool(progress_status.get("has_printed_progress", False))
+        has_remaining = self._array_has_remaining_wells_for_loaded_stock()
+        next_state = "resume_ready" if has_progress and has_remaining is not False else "idle"
+
+        self._mark_evap_plate_dock_check_required("machine_disconnect")
+        self._array_context = None
+        self._soft_stop_clear_uncertain = False
+        self._set_array_run_state(next_state)
+
+        audit_details.update(
+            {
+                "finalize_reason": "machine_disconnect",
+                "previous_array_state": previous_state,
+                "array_state": self.get_array_run_state(),
+                "progress_status": progress_status,
+                "remaining_wells_for_loaded_stock": has_remaining,
+                "queued_intent_ids": list(queued_intent_ids),
+                "simulator_cancel_confirmed": simulator_cancel_confirmed,
+                "intent_reconciliation_status": reconciliation_status,
+            }
+        )
+        self._record_print_array_audit_event(
+            "print_array_interrupted_by_machine_disconnect",
+            "Print array interrupted by machine disconnect",
+            details=audit_details,
+            level="warning",
         )
         return next_state
 
@@ -6164,6 +6249,10 @@ class Controller(QObject):
         if "transport_fault" in reasons:
             message_parts.append(
                 "A command transport fault interrupted the previous print array before parking was confirmed."
+            )
+        if "machine_disconnect" in reasons:
+            message_parts.append(
+                "The machine disconnected during the previous print array before parking was confirmed."
             )
         if required and not message_parts:
             message_parts.append(

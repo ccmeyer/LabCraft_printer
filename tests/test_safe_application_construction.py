@@ -32,6 +32,10 @@ class _SafeDropletCamera(QtCore.QObject):
     capture_failed_signal = QtCore.Signal()
 
 
+class _DeferredUiSignal(QtCore.QObject):
+    committed = QtCore.Signal()
+
+
 class _ConstructionSafeMachine(QtCore.QObject):
     status_updated = QtCore.Signal(dict)
     error_occurred = QtCore.Signal(str)
@@ -174,6 +178,25 @@ def test_simulation_dependencies_create_contained_roots_and_reject_hardware(tmp_
     ):
         with pytest.raises(composition.HardwareAccessBlocked, match="Simulation mode"):
             getattr(dependencies, name)()
+
+
+def test_application_components_close_blocks_deferred_child_ui_signals(qapp):
+    view = QtCore.QObject()
+    deferred_editor = _DeferredUiSignal(view)
+    commits = []
+    deferred_editor.committed.connect(lambda: commits.append("machine command"))
+    QtCore.QTimer.singleShot(0, deferred_editor.committed.emit)
+    components = composition.ApplicationComponents(
+        model=QtCore.QObject(),
+        machine=QtCore.QObject(),
+        controller=QtCore.QObject(),
+        view=view,
+    )
+
+    components.close()
+
+    assert commits == []
+    assert components._closed is True
 
 
 def test_simulation_requires_an_explicit_machine_factory(tmp_path):

@@ -14,6 +14,7 @@ from tools.virtual_workflows.actions import (
     COMPOSED_SMOKE_ACTION_IDS,
     COMPOSED_MULTI_STOCK_ACTION_IDS,
     COMPOSED_SOFT_STOP_ACTION_IDS,
+    COMPOSED_DISCONNECT_ACTION_IDS,
     InteractionSurface,
     ScenarioActionError,
     ScenarioContext,
@@ -57,6 +58,18 @@ def test_composed_soft_stop_actions_add_one_truthful_resume_contract():
     assert ACTION_INTERACTION_SURFACES["head.return_via_ui"] is (
         InteractionSurface.UI
     )
+
+
+def test_composed_disconnect_actions_replace_terminal_wait_truthfully():
+    assert "array.wait_for_completions" not in COMPOSED_DISCONNECT_ACTION_IDS
+    assert "machine.disconnect_via_ui" in COMPOSED_DISCONNECT_ACTION_IDS
+    assert "array.observe_disconnected_quiescence" in COMPOSED_DISCONNECT_ACTION_IDS
+    assert ACTION_INTERACTION_SURFACES["machine.disconnect_via_ui"] is (
+        InteractionSurface.UI
+    )
+    assert ACTION_INTERACTION_SURFACES[
+        "array.observe_disconnected_quiescence"
+    ] is InteractionSurface.HARNESS
 
 
 def test_post_start_synthetic_setup_actions_report_model_surfaces():

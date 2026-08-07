@@ -11,6 +11,8 @@ from tools.virtual_workflows.actions import (
     InteractionSurface,
     ScenarioActionError,
     capture_milestone,
+    disconnect_machine_via_ui,
+    observe_disconnected_quiescence,
     observe_stopped_quiescence,
     request_soft_stop_via_ui,
     resume_array_via_ui,
@@ -151,6 +153,7 @@ class StockPassSpec:
     detailed_evidence: bool = False
     include_frequency_evidence: bool = True
     no_progress_timeout_seconds: float | None = None
+    await_terminal_boundary: bool = True
 
     def __post_init__(self) -> None:
         if not self.stock_id or not self.printer_head_id:
@@ -171,6 +174,14 @@ class StockPassSpec:
             self.ready_milestone, self.printing_milestone, self.completed_milestone
         )):
             raise ValueError("stock-pass milestone names must be non-empty when present")
+        if not self.await_terminal_boundary and (
+            self.validate_pass_boundary
+            or self.return_head
+            or self.completed_milestone is not None
+        ):
+            raise ValueError(
+                "interrupted stock passes cannot validate, return, or capture a terminal boundary"
+            )
         if (
             self.no_progress_timeout_seconds is not None
             and (
@@ -210,6 +221,26 @@ class SoftStopResumeSpec:
             )
         ):
             raise ValueError("soft-stop milestone names must be non-empty")
+
+
+@dataclass(frozen=True)
+class DisconnectFailClosedSpec:
+    disconnect_after_completion_count: int
+    expected_canceled_intent_count: int
+    quiescence_observation_ms: int
+    timeout_seconds: float = 20.0
+    disconnected_milestone: str = "disconnected"
+    recovery_milestone: str = "recovery_ready"
+
+    def __post_init__(self) -> None:
+        if self.disconnect_after_completion_count <= 0:
+            raise ValueError("disconnect trigger count must be positive")
+        if self.expected_canceled_intent_count <= 0:
+            raise ValueError("disconnect canceled-intent count must be positive")
+        if self.quiescence_observation_ms <= 0 or self.timeout_seconds <= 0:
+            raise ValueError("disconnect quiescence and timeout must be positive")
+        if not self.disconnected_milestone or not self.recovery_milestone:
+            raise ValueError("disconnect milestone names must be non-empty")
 
 
 def machine_startup_steps(
@@ -477,13 +508,20 @@ def normalized_stock_pass_steps(
                 "calibration.select_via_ui",
                 "calibration.apply_via_ui",
                 "array.start_via_ui",
-                "array.wait_for_completions",
             ]
         )
+        if spec.await_terminal_boundary:
+            action_ids.append("array.wait_for_completions")
         if spec.ready_milestone:
             action_ids.insert(action_ids.index("array.start_via_ui"), "artifact.capture_milestone")
         if spec.printing_milestone:
-            action_ids.insert(action_ids.index("array.wait_for_completions"), "artifact.capture_milestone")
+            if "array.wait_for_completions" in action_ids:
+                action_ids.insert(
+                    action_ids.index("array.wait_for_completions"),
+                    "artifact.capture_milestone",
+                )
+            else:
+                action_ids.append("artifact.capture_milestone")
         if spec.validate_pass_boundary:
             action_ids.append("validation.stock_pass_boundary")
         if spec.completed_milestone:
@@ -526,6 +564,31 @@ def normalized_soft_stop_resume_steps(
                 } else "harness"
             ),
             "request_after_completion_count": spec.request_after_completion_count,
+        }
+        for action_id in action_ids
+    ]
+
+
+def normalized_disconnect_fail_closed_steps(
+    spec: DisconnectFailClosedSpec,
+) -> list[dict[str, Any]]:
+    """Return the stable disconnect/recovery action window without Qt."""
+
+    action_ids = (
+        "machine.disconnect_via_ui",
+        "artifact.capture_milestone",
+        "array.observe_disconnected_quiescence",
+        "artifact.capture_milestone",
+    )
+    return [
+        {
+            "action_id": action_id,
+            "interaction_surface": (
+                "ui" if action_id == "machine.disconnect_via_ui" else "harness"
+            ),
+            "disconnect_after_completion_count": (
+                spec.disconnect_after_completion_count
+            ),
         }
         for action_id in action_ids
     ]
@@ -596,6 +659,64 @@ def run_soft_stop_boundary(
     quiescence = dict(quiescence_row.get("evidence") or {})
     observed["stopped_quiescence"] = quiescence
     return {"request": request_evidence, "quiescence": quiescence}
+
+
+def run_disconnect_fail_closed_boundary(
+    runtime: JourneyRuntime,
+    spec: DisconnectFailClosedSpec,
+) -> Mapping[str, Any]:
+    """Disconnect at one exact completion and retain recovery evidence."""
+
+    context, observed = runtime.context, runtime.observations
+    completed = observed["completed_wells"]
+    result = disconnect_machine_via_ui(
+        context,
+        completed_count=lambda: len(completed),
+        trigger_count=spec.disconnect_after_completion_count,
+        timeout_seconds=spec.timeout_seconds,
+    )
+    request = dict(result.get("evidence") or {})
+    request["expected_canceled_intent_count"] = (
+        spec.expected_canceled_intent_count
+    )
+    observed["disconnect_request"] = request
+    capture_milestone(
+        context,
+        spec.disconnected_milestone,
+        evidence={
+            "completed_count": len(completed),
+            "array_state": context.controller.get_array_run_state(),
+            "simulator_connected": bool(context.machine.state.connected),
+        },
+    )
+    quiescence_result = observe_disconnected_quiescence(
+        context,
+        completed_count=lambda: len(completed),
+        progress_count=lambda: sum(
+            int(reagent.get("added_droplets", 0))
+            for well in (context.experiment_model.progress_data or {}).values()
+            for reagent in (well.get("reagents") or {}).values()
+        ),
+        observation_ms=spec.quiescence_observation_ms,
+    )
+    quiescence = dict(quiescence_result.get("evidence") or {})
+    observed["disconnected_quiescence"] = quiescence
+    recovery = {
+        "array_state": context.controller.get_array_run_state(),
+        "plan_state": context.experiment_model.get_execution_plan_snapshot().state.value,
+        "eligibility": context.experiment_model.get_execution_resume_eligibility(),
+        "dock_check_reasons": context.controller._get_evap_plate_dock_check_reasons(),
+        "model_connected": bool(context.model.machine_model.is_connected()),
+        "simulator_connected": bool(context.machine.state.connected),
+        "motors_homed": bool(context.model.machine_model.motors_are_homed()),
+    }
+    observed["disconnect_recovery"] = recovery
+    capture_milestone(
+        context,
+        spec.recovery_milestone,
+        evidence=recovery,
+    )
+    return {"request": request, "quiescence": quiescence, "recovery": recovery}
 
 
 def resume_soft_stopped_array(
@@ -1088,6 +1209,8 @@ def _run_stock_pass(
         )
     if active_phase is not None:
         active_phase(runtime, spec)
+    if not spec.await_terminal_boundary:
+        return
     if spec.return_head and spec.expected_plan_state == "completed":
         from tools.virtual_workflows.execution_observer import (
             capture_execution_liveness_snapshot,
@@ -1311,6 +1434,7 @@ def validate_stock_pass_boundary(
 
 
 __all__ = [
+    "DisconnectFailClosedSpec",
     "EditorPreparationSpec",
     "MachineStartupSpec",
     "PostStartLockCopySpec",
@@ -1323,10 +1447,12 @@ __all__ = [
     "machine_startup_steps",
     "normalized_stock_pass_steps",
     "normalized_soft_stop_resume_steps",
+    "normalized_disconnect_fail_closed_steps",
     "run_editor_preparation",
     "run_post_start_lock_copy",
     "run_prepared_editor_revision",
     "run_soft_stop_boundary",
+    "run_disconnect_fail_closed_boundary",
     "resume_soft_stopped_array",
     "prepare_persisted_head_for_resume",
     "run_authoritative_reload_resume_boundary",

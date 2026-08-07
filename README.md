@@ -1303,7 +1303,48 @@ Three fresh visible rack-only processes passed all six swaps in under nine
 seconds each. The subsequent full visible workflow and its exact emitted
 replay both completed 3,840/3,840 operations with zero failed actions, failed
 assertions, or starvation and drained terminal queues. Slice 8 is complete;
-the full pytest suite remains deferred to final Milestone 7 validation.
+the full pytest suite was deferred to final Milestone 7 validation.
+
+### Mid-array disconnect fail-closed workflow
+
+Milestone 7 Slice 9 adds the composed
+`print_array_disconnect_mid_array_24_v1` lifecycle. It creates the normal
+24-well one-stock experiment, starts through the real array control, and uses
+the normal connection button to disconnect after exactly six durable
+completions. The canonical simulator confirms that its queue is drained before
+the Controller retires the two canceled look-ahead intents. Unconfirmed or
+physical-runtime cancellation is never treated as safe to discard.
+
+The passing boundary retains an ACTIVE plan, Controller `resume_ready`,
+authoritative `ready_to_resume`, six completed stock/well pairs, a disconnected
+and unhomed machine, zero pending intents, and 250 ms of quiescence. It does not
+resume or finish the remaining wells; this focused scenario proves the
+disconnect boundary independently.
+
+Run it offscreen or through a visible Windows window:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_disconnect_mid_array_24_v1 `
+  --seed 19 `
+  --speed-multiplier 20 `
+  --timeout-seconds 60
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_disconnect_mid_array_24_v1 `
+  --seed 19 `
+  --speed-multiplier 20 `
+  --timeout-seconds 60 `
+  --visible
+```
+
+Reports retain the action/assertion ledgers, six named screenshots, state
+trace, hashes, seed, exact replay command, and cleanup evidence beneath
+`verification_reports/virtual_workflows/print_array_disconnect_mid_array_24_v1/`.
+If a visible teardown ever opens a command-error dialog, verify that application
+component cleanup blocks deferred child-widget signals before hiding and
+deleting the window. Slice 9 and the final Milestone 7 Python validation are
+complete; seeded exploration and suite scheduling remain Milestone 8 work.
 
 The report's responsiveness phase timings include `ui.pressure_render`, the
 count and duration distribution for the real pressure-plot update slot. The

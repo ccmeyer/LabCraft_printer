@@ -11,6 +11,7 @@ from tools.virtual_workflows.journey_phases import (
     PostStartLockCopySpec,
     PreparedEditorRevisionSpec,
     SoftStopResumeSpec,
+    DisconnectFailClosedSpec,
     StockPassSpec,
     _run_stock_pass,
     capture_completion_midpoint,
@@ -18,6 +19,7 @@ from tools.virtual_workflows.journey_phases import (
     normalized_prepared_revision_steps,
     normalized_stock_pass_steps,
     normalized_soft_stop_resume_steps,
+    normalized_disconnect_fail_closed_steps,
 )
 
 
@@ -89,6 +91,45 @@ def test_machine_startup_is_one_normalized_reusable_ui_phase():
 def test_completion_midpoint_rejects_an_unbounded_target():
     with pytest.raises(ValueError, match="midpoint"):
         capture_completion_midpoint(object(), 0)
+
+
+def test_interrupted_stock_pass_skips_only_terminal_actions():
+    spec = StockPassSpec(
+        stock_id="stock-a", printer_head_id="head-a", pulse_width_us=1300,
+        pressure_psi=1.2, frequency_hz=20, initial_volume_uL=1000.0,
+        expected_volume_nL=10.0, expected_completion_count=24,
+        expected_plan_state="active", ready_milestone="ready",
+        printing_milestone="printing", completed_milestone=None,
+        staging_slot=0, enable_pressure_regulation=True,
+        await_terminal_boundary=False,
+    )
+    action_ids = [row["action_id"] for row in normalized_stock_pass_steps((spec,))]
+    assert "array.start_via_ui" in action_ids
+    assert "array.wait_for_completions" not in action_ids
+    assert "head.return_via_ui" not in action_ids
+    assert action_ids.count("artifact.capture_milestone") == 2
+
+
+def test_disconnect_phase_is_short_typed_composition():
+    spec = DisconnectFailClosedSpec(6, 2, 250)
+    assert normalized_disconnect_fail_closed_steps(spec) == [
+        {"action_id": "machine.disconnect_via_ui", "interaction_surface": "ui", "disconnect_after_completion_count": 6},
+        {"action_id": "artifact.capture_milestone", "interaction_surface": "harness", "disconnect_after_completion_count": 6},
+        {"action_id": "array.observe_disconnected_quiescence", "interaction_surface": "harness", "disconnect_after_completion_count": 6},
+        {"action_id": "artifact.capture_milestone", "interaction_surface": "harness", "disconnect_after_completion_count": 6},
+    ]
+
+
+def test_interrupted_stock_pass_rejects_terminal_policy_mix():
+    with pytest.raises(ValueError, match="interrupted stock passes"):
+        StockPassSpec(
+            stock_id="stock-a", printer_head_id="head-a", pulse_width_us=1300,
+            pressure_psi=1.2, frequency_hz=20, initial_volume_uL=1000.0,
+            expected_volume_nL=10.0, expected_completion_count=24,
+            expected_plan_state="active", ready_milestone=None,
+            printing_milestone=None, completed_milestone="invalid",
+            await_terminal_boundary=False,
+        )
 
 
 def test_two_stock_plan_has_exact_repeated_groups_and_truthful_surfaces():
