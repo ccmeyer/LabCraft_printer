@@ -1169,7 +1169,7 @@ Status: `complete` (2026-08-07)
 
 #### Milestone 8 Slice 2: Manual suite and capability selection
 
-Status: `planned`
+Status: `complete` (2026-08-07)
 
 - add deterministic `--suite`, `--capability`, listing, and dry-run selection
   over the validated manifest while retaining direct `--scenario` behavior;
@@ -1178,6 +1178,18 @@ Status: `planned`
 - optionally recommend affected scenarios from changed source areas without
   automatically executing them;
 - freeze the standard lane's scenario, seed, order, and timeout.
+
+Completion evidence:
+
+- selection/listing/recommendation modes return before Qt/application imports,
+  emit deterministic JSON with the validated manifest hash, and record
+  `execution_authorized: false`;
+- suite and capability selectors remain dry-run-only until Slice 3, while
+  direct scenario execution retains its existing registry call path;
+- all schedule rows now declare operator-initiated `on_demand` / `manual`
+  ownership, with evidence-age values retained as informational metadata;
+- 117 focused selection/manifest/contract tests and both existing 24-well SIL
+  smoke tests passed on Windows. The full suite remains deferred to Slice 8.
 
 #### Milestone 8 Slice 3: Host suite execution and aggregation
 
@@ -1641,11 +1653,10 @@ This effort is complete when:
 ## Current Next Action
 
 Milestone 7 is complete and the eight-slice Milestone 8 direction is approved.
-Milestone 8 Slice 1 is complete. The registered
-`print_array_mixed_mode_24x2_v1` journey passed its focused tests, offscreen
-qualification, visible Windows qualification, and exact visible replay with
-48/48 completions and 13/13 assertions. Create a concrete implementation plan
-for Milestone 8 Slice 2: manual suite and capability selection. Do not begin
-host suite aggregation, matrices, seeded sequence exploration, remote Pi
-operations, firmware/protocol work, or hardware work until their respective
-later slices are separately planned and approved.
+Milestone 8 Slices 1 and 2 are complete. The operator can now list the tracked
+portfolio, dry-run suite/capability/direct-scenario plans, and request
+changed-source recommendations without launching Qt or writing reports. Create
+a concrete implementation plan for Milestone 8 Slice 3: fresh-process host
+suite execution and aggregate reports. Do not begin matrices, seeded sequence
+exploration, remote Pi operations, firmware/protocol work, or hardware work
+until their respective later slices are separately planned and approved.

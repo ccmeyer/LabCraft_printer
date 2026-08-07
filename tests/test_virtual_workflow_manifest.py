@@ -273,7 +273,14 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     ] == [DISCONNECT_WORKLOAD_ID]
     assert {
         schedule["automation_status"] for schedule in payload["schedules"]
-    } == {"not_configured"}
+    } == {"manual"}
+    assert {schedule["cadence"] for schedule in payload["schedules"]} == {
+        "on_demand"
+    }
+    assert all(
+        schedule["id"] == f"{schedule['suite_id']}_on_demand"
+        for schedule in payload["schedules"]
+    )
     assert payload["policy"]["coverage_join_status"] == "deferred_to_slice_6"
     assert payload["policy"]["generated_evidence_updates_manifest"] is False
 

@@ -1397,6 +1397,73 @@ calibration records, the passed manual-refuel record and ordering, 48 durable
 completion intents, hashes, seed, replay command, and clean teardown. The full
 pytest suite remains deferred to the final Milestone 8 validation.
 
+### Manual SIL selection and changed-source recommendations
+
+Milestone 8 Slice 2 adds a read-only planning surface over the validated
+capability manifest. It does not schedule tests and it does not execute suite
+or capability selections. Operators still decide when to run a journey.
+Listing, recommendations, and dry runs print deterministic JSON to stdout and
+return before importing Qt or constructing the application; they do not create
+anything beneath `verification_reports/`.
+
+Inspect the catalog or produce plans with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --list all
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --suite standard --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --suite lifecycle --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --capability execution.mixed_droplet_stream_lifecycle --dry-run
+```
+
+The standard plan is frozen at `print_array_smoke_24_v1`, order 1, seed 1,
+and a 60-second timeout. A different explicit seed or timeout fails closed.
+Lifecycle plans retain the manifest order and each scenario's declared
+timeout. Suite/capability execution is deliberately unavailable until the
+fresh-process aggregation work in Slice 3; omitting `--dry-run` exits with a
+usage error rather than starting the first scenario.
+
+Request recommendations for all staged, unstaged, and untracked paths, or
+override Git discovery with one or more explicit repository paths:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --recommend-changed
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --recommend-changed `
+  --changed-path tools/virtual_workflows/page_drivers.py
+```
+
+Recommendations report matching capability status, source-area reasons, and
+ordered active scenarios, but never authorize execution. Deferred capability
+matches remain visible as gaps and cannot be selected. Pi plans additionally
+require `--target-pi`, `--pi-preflight`, and `--pi-hardware-proof`; those files
+are validated before a plan is emitted. Direct `--scenario` execution remains
+unchanged, and `--dry-run` alone plans the legacy default scenario.
+
+Run the Slice 2 focused gates with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests/test_virtual_workflow_selection.py `
+  tests/test_virtual_workflow_manifest.py `
+  tests/test_virtual_workflow_contract_freeze.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests/system/test_virtual_workflow_smoke.py
+```
+
+If selection reports manifest drift, validate the tracked manifest before
+running a scenario. If a Pi plan is rejected, regenerate or transfer matching
+preflight/hardware-isolation evidence rather than bypassing validation. No
+unattended scheduler, suite artifact writer, or cleanup command is introduced
+by this slice.
+
 The report's responsiveness phase timings include `ui.pressure_render`, the
 count and duration distribution for the real pressure-plot update slot. The
 text summary shows its count, p95, and maximum. This diagnostic covers the

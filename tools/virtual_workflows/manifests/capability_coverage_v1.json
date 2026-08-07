@@ -614,51 +614,51 @@
   ],
   "schedules": [
     {
-      "id": "standard_every_change",
+      "id": "standard_on_demand",
       "suite_id": "standard",
-      "cadence": "every_change",
+      "cadence": "on_demand",
       "owner_role": "verification maintainers",
-      "automation_status": "not_configured",
+      "automation_status": "manual",
       "max_evidence_age_days": 1
     },
     {
-      "id": "lifecycle_nightly",
+      "id": "lifecycle_on_demand",
       "suite_id": "lifecycle",
-      "cadence": "nightly",
+      "cadence": "on_demand",
       "owner_role": "verification maintainers",
-      "automation_status": "not_configured",
+      "automation_status": "manual",
       "max_evidence_age_days": 2
     },
     {
-      "id": "host_regression_nightly",
+      "id": "host_regression_on_demand",
       "suite_id": "host_regression",
-      "cadence": "nightly",
+      "cadence": "on_demand",
       "owner_role": "verification maintainers",
-      "automation_status": "not_configured",
+      "automation_status": "manual",
       "max_evidence_age_days": 7
     },
     {
-      "id": "host_stress_weekly",
+      "id": "host_stress_on_demand",
       "suite_id": "host_stress",
-      "cadence": "weekly",
+      "cadence": "on_demand",
       "owner_role": "verification maintainers",
-      "automation_status": "not_configured",
+      "automation_status": "manual",
       "max_evidence_age_days": 14
     },
     {
-      "id": "pi_primary_weekly",
+      "id": "pi_primary_on_demand",
       "suite_id": "pi_primary",
-      "cadence": "weekly",
+      "cadence": "on_demand",
       "owner_role": "verification maintainers",
-      "automation_status": "not_configured",
+      "automation_status": "manual",
       "max_evidence_age_days": 14
     },
     {
-      "id": "pi_stress_monthly",
+      "id": "pi_stress_on_demand",
       "suite_id": "pi_stress",
-      "cadence": "monthly",
+      "cadence": "on_demand",
       "owner_role": "verification maintainers",
-      "automation_status": "not_configured",
+      "automation_status": "manual",
       "max_evidence_age_days": 35
     }
   ],

@@ -286,6 +286,12 @@ def test_legacy_cli_surface_remains_additively_compatible():
     assert args.replace_accepted_baseline is False
     assert args.threshold_maturity == "candidate"
     assert args.compare is None
+    assert args.suite is None
+    assert args.capability is None
+    assert args.list_section is None
+    assert args.recommend_changed is False
+    assert args.changed_path == []
+    assert args.dry_run is False
 
     assert parser.parse_args(["--scenario", WORKLOAD_ID]).scenario == WORKLOAD_ID
     assert (
@@ -315,6 +321,12 @@ def test_legacy_cli_surface_remains_additively_compatible():
         "--replace-accepted-baseline",
         "--threshold-maturity",
         "--compare",
+        "--suite",
+        "--capability",
+        "--list",
+        "--recommend-changed",
+        "--changed-path",
+        "--dry-run",
     ):
         assert option in help_text
 

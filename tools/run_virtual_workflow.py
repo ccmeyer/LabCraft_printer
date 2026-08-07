@@ -16,9 +16,19 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.virtual_workflows.registry import (  # noqa: E402
     DEFAULT_SCENARIO_ID,
+    ManifestValidationError,
     get_registered_scenario,
     registered_scenario_ids,
     run_registered_scenario,
+)
+from tools.virtual_workflows.selection import (  # noqa: E402
+    SelectionError,
+    SelectionRequest,
+    build_catalog,
+    deterministic_json,
+    discover_changed_paths,
+    recommend_changed_paths,
+    resolve_selection,
 )
 
 
@@ -29,10 +39,45 @@ def _parser() -> argparse.ArgumentParser:
             "explicit in-process simulator."
         )
     )
-    parser.add_argument(
+    selector = parser.add_mutually_exclusive_group()
+    selector.add_argument(
         "--scenario",
         choices=registered_scenario_ids(),
         default=DEFAULT_SCENARIO_ID,
+    )
+    selector.add_argument(
+        "--suite",
+        help="Select a validated manifest suite (dry-run only in Slice 2).",
+    )
+    selector.add_argument(
+        "--capability",
+        help="Select a covered/partial capability (dry-run only in Slice 2).",
+    )
+    selector.add_argument(
+        "--list",
+        dest="list_section",
+        choices=("all", "suites", "capabilities"),
+        help="Print a read-only manifest catalog and exit.",
+    )
+    selector.add_argument(
+        "--recommend-changed",
+        action="store_true",
+        help="Recommend affected scenarios without executing them.",
+    )
+    parser.add_argument(
+        "--changed-path",
+        action="append",
+        default=[],
+        type=Path,
+        help=(
+            "Explicit changed path for --recommend-changed; repeatable and "
+            "overrides Git discovery."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print a deterministic selection plan without execution.",
     )
     parser.add_argument(
         "--output-root",
@@ -123,6 +168,39 @@ def _parser() -> argparse.ArgumentParser:
         help="Compare an existing baseline summary and candidate report set.",
     )
     return parser
+
+
+def _option_was_supplied(argv: list[str], option: str) -> bool:
+    return any(
+        value == option or value.startswith(option + "=") for value in argv
+    )
+
+
+def _planning_request(
+    args: argparse.Namespace, raw_argv: list[str]
+) -> SelectionRequest:
+    if args.suite is not None:
+        kind, selector_id = "suite", args.suite
+    elif args.capability is not None:
+        kind, selector_id = "capability", args.capability
+    else:
+        kind, selector_id = "scenario", args.scenario
+    timeout_override = (
+        args.timeout_seconds
+        if _option_was_supplied(raw_argv, "--timeout-seconds")
+        else None
+    )
+    pi_evidence = (
+        ("preflight", "hardware_proof") if args.target_pi else ()
+    )
+    return SelectionRequest(
+        kind=kind,
+        selector_id=selector_id,
+        platform="pi_sil" if args.target_pi else "windows_sil",
+        seed=args.seed,
+        timeout_override=timeout_override,
+        pi_evidence=pi_evidence,
+    )
 
 
 def _comparison_exit_code(comparison: dict[str, object]) -> int:
@@ -229,8 +307,41 @@ def _compare_existing(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
-    args = parser.parse_args(argv)
-    scenario_definition = get_registered_scenario(args.scenario)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
+    if args.changed_path and not args.recommend_changed:
+        parser.error("--changed-path requires --recommend-changed")
+    if (args.suite is not None or args.capability is not None) and not args.dry_run:
+        parser.error(
+            "--suite and --capability require --dry-run in Milestone 8 Slice 2; "
+            "multi-scenario execution begins in Slice 3"
+        )
+    if args.dry_run and (args.list_section or args.recommend_changed):
+        parser.error("--dry-run cannot be combined with listing or recommendations")
+    planning_mode = bool(
+        args.dry_run or args.list_section or args.recommend_changed
+    )
+    if planning_mode and args.compare is not None:
+        parser.error("planning modes cannot be combined with --compare")
+
+    try:
+        if args.list_section:
+            print(deterministic_json(build_catalog(args.list_section)), end="")
+            return 0
+        if args.recommend_changed:
+            changed_paths = (
+                tuple(args.changed_path)
+                if args.changed_path
+                else discover_changed_paths(REPO_ROOT)
+            )
+            print(
+                deterministic_json(recommend_changed_paths(changed_paths)),
+                end="",
+            )
+            return 0
+    except (ManifestValidationError, SelectionError) as exc:
+        parser.error(str(exc))
+
     if args.warmup_runs < 0 or args.measured_runs < 1:
         parser.error("--warmup-runs must be >= 0 and --measured-runs must be >= 1")
     if args.replace_accepted_baseline and args.accept_baseline is None:
@@ -248,6 +359,30 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             "--pi-preflight and --pi-hardware-proof require --target-pi"
         )
+    if args.dry_run:
+        try:
+            if args.target_pi:
+                from tools.virtual_workflows.pi_sil import (
+                    load_and_validate_pi_evidence,
+                )
+
+                load_and_validate_pi_evidence(
+                    args.pi_preflight,
+                    args.pi_hardware_proof,
+                    expected_qt_platform=args.qt_platform,
+                )
+            plan = resolve_selection(_planning_request(args, raw_argv))
+            print(deterministic_json(plan), end="")
+            return 0
+        except SelectionError as exc:
+            parser.error(str(exc))
+        except Exception as exc:
+            parser.error(
+                f"selection evidence validation failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    scenario_definition = get_registered_scenario(args.scenario)
     if args.compare is not None:
         if args.accept_baseline is not None:
             parser.error("--compare and --accept-baseline are mutually exclusive")

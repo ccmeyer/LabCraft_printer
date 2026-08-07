@@ -46,7 +46,14 @@ _PLATFORMS = {"windows_sil", "pi_sil"}
 _EXPECTED_OUTCOMES = {"pass", "informational"}
 _SUITE_STATUSES = {"active", "planned"}
 _SUITE_KINDS = {"standard", "lifecycle", "regression", "stress"}
-_CADENCES = {"every_change", "nightly", "weekly", "monthly", "pre_release"}
+_CADENCES = {
+    "on_demand",
+    "every_change",
+    "nightly",
+    "weekly",
+    "monthly",
+    "pre_release",
+}
 _AUTOMATION_STATUSES = {"not_configured", "manual", "automated"}
 _ACTION_IMPLEMENTATION_STATUSES = {"embedded", "reusable"}
 _ASSERTION_EVIDENCE_KINDS = {"report_path", "pytest"}
@@ -1017,6 +1024,19 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
             raise ManifestValidationError(
                 f"scenario {scenario_id} suite membership drifted"
             )
+
+    standard = suite_rows.get("standard")
+    if standard is None or standard["scenario_ids"] != [
+        "print_array_smoke_24_v1"
+    ]:
+        raise ManifestValidationError(
+            "standard suite scenario/order contract drifted"
+        )
+    standard_scenario = scenario_rows["print_array_smoke_24_v1"]
+    if float(standard_scenario["timeout_seconds"]) != 60.0:
+        raise ManifestValidationError(
+            "standard suite timeout contract drifted"
+        )
 
     schedule_rows = _require_unique_ids(
         _require_list(manifest["schedules"], "manifest.schedules"),
