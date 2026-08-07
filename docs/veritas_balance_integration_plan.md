@@ -4,7 +4,7 @@
 
 - Date: 2026-08-07
 - Branch: `feature/balance_integration`
-- Status: Slices 0-1 verified; Slice 2 ready
+- Status: Slices 0-2 verified; Slice 3 ready
 - Scope: planning document only
 - Target hardware: Veritas/BEL HPB balance connected to the Raspberry Pi through a proper RS-232-to-USB adapter
 - Target workflow: stream gravimetric data collection only
@@ -499,7 +499,7 @@ No file under `firmware/` is expected to change.
 | --- | --- | --- |
 | 0 | Plan and freeze boundaries (`verified`) | Plan reviewed |
 | 1 | Hardware/protocol characterization and golden fixtures (`verified`) | Raw HPB behavior recorded |
-| 2 | Pure parser, units, and stability contract | Pure unit tests pass |
+| 2 | Pure parser, units, and stability contract (`verified`) | Pure unit tests pass |
 | 3 | Nonblocking BalanceService | Service/thread tests pass |
 | 4 | Explicit activation, composition, connection UI | Feature-off equivalence and connection tests pass |
 | 5 | Starting-mass workflow and fallback | No printer command before accepted mass |
@@ -657,30 +657,30 @@ Proceed criteria:
 
 ## Slice 2: Pure Protocol, Units, And Stability Contract
 
-Status: `ready`
+Status: `verified`
 
 Goal:
 
-Implement and exhaustively test serial framing, HPB parsing, unit conversion,
+Implement and exhaustively test serial framing, strict mg-only HPB parsing,
 and stability decisions without opening a serial port.
 
 Call path:
 
 `fixture byte chunks -> CR/LF framer -> HPB parser -> BalanceReading -> stability detector -> StableMassResult`
 
-Files to touch:
+Files implemented:
 
-- new `FreeRTOS-interface/BalanceProtocol.py`
-- new `tests/test_veritas_balance_protocol.py`
-- `docs/veritas_balance_integration_plan.md` if characterization changes the
-  contract
+- `FreeRTOS-interface/BalanceProtocol.py`
+- `tests/test_veritas_balance_protocol.py`
+- this plan
 
 Implementation steps:
 
 1. Add immutable request, reading, policy, and result types.
 2. Implement bounded CR/LF framing for partial, combined, empty, and oversized
    input.
-3. Implement strict weighing-record parsing and explicit g/mg conversion.
+3. Implement strict mg-only weighing-record parsing; reject all other units
+   and leading plus signs.
 4. Reject unsupported units, non-finite values, overload/status records, and
    malformed frames with typed reasons.
 5. Implement a monotonic-time stability window with sample-count, duration,
@@ -693,7 +693,9 @@ Implementation steps:
 
 Validation:
 
-`.\env\Scripts\python.exe -m pytest -q tests\test_veritas_balance_protocol.py`
+`.\env\Scripts\python.exe -m pytest -q tests\test_veritas_balance_protocol.py tests\test_probe_veritas_balance.py`
+
+`.\env\Scripts\python.exe -m py_compile FreeRTOS-interface\BalanceProtocol.py tests\test_veritas_balance_protocol.py`
 
 Proceed criteria:
 
@@ -705,9 +707,46 @@ Rollback:
 
 - Remove the pure module and its tests.
 
+Implementation findings (2026-08-07):
+
+- Added a 256-byte bounded CR/LF framer with ordered frame/rejection events,
+  oversized-frame discard/resynchronization, explicit incomplete-tail flush,
+  and no transport dependency.
+- Added an exact 13-byte ASCII parser. Only a leading space or minus sign,
+  right-aligned two-decimal magnitude, `mg`, and verified `S`/space stability
+  fields are accepted. Malformed device data returns typed rejection results
+  rather than raising through a future worker.
+- Mass values and all stability calculations use `Decimal`. A successful
+  window returns its arithmetic mean quantized to 0.01 mg with
+  `ROUND_HALF_EVEN` while retaining the unrounded mean, population standard
+  deviation, span, and ordinary-least-squares slope as evidence.
+- The detector implements the verified combined gate: one-second ignore,
+  three-second window, at least 10 samples, span at most 0.03 mg, absolute
+  slope at most 0.01 mg/s, and every retained sample marked `S`.
+- Timeout is exclusive at 30 seconds. Cancellation, timeout, sample-limit
+  error, and stable completion are typed terminal results; later calls return
+  the same result and cannot change the outcome.
+- All seven physical fixture excerpts replay through the framer/parser,
+  including malformed start, split reads/terminators, negative values,
+  status changes, partial tail, and disconnect boundary.
+- Targeted validation passed: 50 tests. Python compilation passed. The full
+  repository suite remains deferred to the final all-slices validation by
+  operator direction.
+
+Proceed criteria:
+
+- Every retained valid physical record parses to its expected mg value:
+  complete.
+- Device-unstable and numerically drifting samples cannot produce success:
+  complete.
+- Exact threshold, quantized mean, timeout, cancellation, sample bound, and
+  terminal-idempotency contracts: complete.
+- Pure module import audit confirms no Qt, pyserial, MVC, machine, camera,
+  firmware, application composition, or legacy balance dependency: complete.
+
 ## Slice 3: Nonblocking BalanceService
 
-Status: `not_started`
+Status: `ready`
 
 Goal:
 
