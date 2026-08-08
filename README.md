@@ -1559,7 +1559,7 @@ pairing, stock order, calibration profile, and manual-refuel outcome. Generated
 case data stays in memory; the matrix does not create a fixture or workflow
 body for each variation.
 
-Milestone 9 Slices 3-4 add `calibration_requantization_v1`. Its first three
+Milestone 9 Slices 3-5 add `calibration_requantization_v1`. Its first three
 one-stock, 24-well droplet cases freeze exact catalog-owned count oracles for an
 idempotent `10 -> 10` calibration, an 8 nL to 9 nL volume increase producing
 `10 -> 9`, and a 10 nL to 9 nL volume decrease producing `10 -> 11`. Passing
@@ -1573,6 +1573,17 @@ multi-target wells with zero fill omitted from dispatch, an executed stream
 bundle reload in a fresh application session, and fill-stock `4 -> 5`
 requantization while non-fill remains at 6 drops. Their positive intent counts
 are 36, 48, and 48 respectively.
+
+The final two cases complete the eight-case catalog. The missing-fill
+safeguard first records a valid 9 nL calibration, then drives a real
+`droplet_to_stream` 60 nL Apply whose zero-drop reagent preview would require
+an absent fill stock. It passes only when the real `Apply failed` dialog is
+shown, the authoritative bundle remains byte-identical, and no array start,
+durable intent, or simulator dispense occurs. The two-reagent isolation case
+completes reagent 1 at one drop per well before recalibrating reagent 2 from
+one to two drops. It requires 48 unique stock/well intents, exactly 72 total
+commanded droplets, and unchanged reagent-1 identity, assignments, targets,
+calibration linkage, and completed progress.
 
 List the catalog, inspect a deterministic plan, run all cases in isolated
 children, or run one replayable case with:
@@ -1634,6 +1645,14 @@ count (24, 36, or 48). For the stream transition, also require
 `execution.completed_terminal_reload_exact` and the `terminal_reloaded`
 screenshot. Use the retained replay command; do not reconstruct a case from
 remembered values.
+
+For `zero_fill_missing_fill_rejected`, inspect
+`metrics.persistence.values.calibration_rejection_evidence` and require every
+check to pass, zero values for all dispatch counters, and screenshot
+`calibration_apply_blocked`. For `two_reagent_second_1_to_2_isolated`, inspect
+`metrics.persistence.values.two_reagent_isolation`; the support-stock progress
+and linkage checks, primary-only retarget check, exactly-once execution check,
+and 72-droplet total must all pass.
 
 ### Bounded seeded editor exploration
 

@@ -189,6 +189,12 @@ class StockPassSpec:
     refuel_pressure_psi: float | None = None
     manual_refuel_check: ManualRefuelCheckSpec | None = None
     expected_start_outcome: str = "running"
+    rejected_calibration_mode: str | None = None
+    rejected_calibration_pulse_width_us: int | None = None
+    rejected_calibration_profile_id: str | None = None
+    rejected_calibration_title: str | None = None
+    rejected_calibration_message_fragment: str | None = None
+    capture_isolation_boundary: bool = False
 
     def __post_init__(self) -> None:
         if not self.stock_id or not self.printer_head_id:
@@ -251,6 +257,7 @@ class StockPassSpec:
         if self.expected_start_outcome not in {
             "running",
             "manual_refuel_cancelled",
+            "calibration_apply_rejected",
         }:
             raise ValueError("stock-pass start outcome is unsupported")
         if self.expected_start_outcome == "manual_refuel_cancelled" and (
@@ -267,6 +274,34 @@ class StockPassSpec:
         ):
             raise ValueError(
                 "a cancelled pass cannot print, complete, or validate a pass boundary"
+            )
+        rejection_values = (
+            self.rejected_calibration_mode,
+            self.rejected_calibration_pulse_width_us,
+            self.rejected_calibration_profile_id,
+            self.rejected_calibration_title,
+            self.rejected_calibration_message_fragment,
+        )
+        if self.expected_start_outcome == "calibration_apply_rejected":
+            if any(value in (None, "") for value in rejection_values):
+                raise ValueError(
+                    "calibration rejection requires a complete rejected calibration"
+                )
+            if self.rejected_calibration_mode not in {"droplet", "stream"}:
+                raise ValueError("rejected calibration mode is unsupported")
+            if int(self.rejected_calibration_pulse_width_us or 0) <= 0:
+                raise ValueError("rejected calibration pulse width must be positive")
+            if (
+                self.printing_milestone is not None
+                or self.completed_milestone is not None
+                or self.validate_pass_boundary
+            ):
+                raise ValueError(
+                    "a rejected calibration cannot print or validate a pass boundary"
+                )
+        elif any(value is not None for value in rejection_values):
+            raise ValueError(
+                "rejected calibration fields require calibration_apply_rejected"
             )
 
 
@@ -609,9 +644,20 @@ def normalized_stock_pass_steps(
                 "calibration.generate_via_ui",
                 "calibration.select_via_ui",
                 "calibration.apply_via_ui",
-                "array.start_via_ui",
             ]
         )
+        if spec.expected_start_outcome == "calibration_apply_rejected":
+            action_ids.extend(
+                [
+                    "machine.configure_print_settings_via_ui",
+                    "calibration.generate_via_ui",
+                    "calibration.select_via_ui",
+                    "calibration.apply_via_ui",
+                    "artifact.capture_milestone",
+                ]
+            )
+        else:
+            action_ids.append("array.start_via_ui")
         if spec.manual_refuel_check is not None:
             action_ids.insert(
                 action_ids.index("array.start_via_ui"),
@@ -1277,6 +1323,13 @@ def _run_stock_pass(
         )
 
     def apply(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        authoritative_before = None
+        if spec.capture_isolation_boundary:
+            from tools.virtual_workflows.authoritative_evidence import (
+                capture_authoritative_bundle,
+            )
+
+            authoritative_before = capture_authoritative_bundle(context)
         before = capture_count_snapshot(context)
         preview = calibration.inspect_preview()
         handled = calibration.apply_selected(
@@ -1289,9 +1342,15 @@ def _run_stock_pass(
                 "yes" if spec.manual_refuel_check is not None else None
             ),
         )
-        if spec.manual_refuel_check is None:
+        if (
+            spec.manual_refuel_check is None
+            and spec.expected_start_outcome != "calibration_apply_rejected"
+        ):
             calibration.close()
         after = capture_count_snapshot(context)
+        authoritative_after = None
+        if spec.capture_isolation_boundary:
+            authoritative_after = capture_authoritative_bundle(context)
         transition = {
             "stock_id": spec.stock_id,
             "preview": preview,
@@ -1301,6 +1360,13 @@ def _run_stock_pass(
         runtime.observations.setdefault(
             "calibration_count_transitions", []
         ).append(transition)
+        if spec.capture_isolation_boundary:
+            runtime.observations["two_reagent_isolation_boundary"] = {
+                "stock_id": spec.stock_id,
+                "before": authoritative_before,
+                "after": authoritative_after,
+                "count_transition": transition,
+            }
         evidence = {
             "preview": preview,
             "handled_dialogs": handled,
@@ -1329,6 +1395,166 @@ def _run_stock_pass(
             ),
         )
     )
+    if spec.expected_start_outcome == "calibration_apply_rejected":
+        rejected_generated: dict[str, Any] = {}
+        rejected_selected: dict[str, Any] = {}
+        boundary: dict[str, Any] = {}
+
+        def configure_rejected(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+            machine.configure_print_settings(
+                pulse_width_us=int(spec.rejected_calibration_pulse_width_us),
+                pressure_psi=spec.pressure_psi,
+                frequency_hz=spec.frequency_hz,
+            )
+            return {
+                "pulse_width_us": int(spec.rejected_calibration_pulse_width_us),
+                "pressure_psi": spec.pressure_psi,
+                "target_mode": spec.rejected_calibration_mode,
+            }
+
+        def generate_rejected(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+            rejected_generated.update(
+                calibration.generate_from_tab(
+                    str(spec.rejected_calibration_mode),
+                    print_profile_id=spec.calibration_print_profile_id,
+                )
+            )
+            run_id_parts = str(rejected_generated.get("run_id") or "").split(":")
+            if (
+                len(run_id_parts) < 2
+                or run_id_parts[1] != str(spec.rejected_calibration_profile_id)
+            ):
+                raise RuntimeError("rejected calibration profile drifted")
+            return {
+                "stock_id": spec.stock_id,
+                "result_fingerprint": rejected_generated.get(
+                    "synthetic_result_fingerprint"
+                ),
+                "printing_mode": rejected_generated.get("printing_mode"),
+            }
+
+        def select_rejected(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+            rejected_selected.update(
+                calibration.select_result(
+                    str(rejected_generated["synthetic_result_fingerprint"])
+                )
+            )
+            return dict(rejected_selected)
+
+        def machine_boundary() -> dict[str, Any]:
+            plan = context.experiment_model.get_execution_plan_snapshot()
+            active = context.model.rack_model.get_gripper_printer_head()
+            return {
+                "array_state": str(context.controller.get_array_run_state()),
+                "queue_drained": bool(context.machine.check_if_all_completed()),
+                "print_pulse_width_us": int(
+                    context.model.machine_model.get_print_pulse_width()
+                ),
+                "print_pressure_psi": float(
+                    context.model.machine_model.get_target_print_pressure()
+                ),
+                "stock_id": (
+                    str(active.get_stock_id()) if active is not None else None
+                ),
+                "printer_head_id": (
+                    str(active.printer_head_id) if active is not None else None
+                ),
+                "plan_stock_modes": [stock.printing_mode for stock in plan.stocks],
+            }
+
+        def apply_rejected(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+            from tools.virtual_workflows.authoritative_evidence import (
+                capture_authoritative_bundle,
+            )
+
+            preview = calibration.inspect_preview()
+            before_bundle = capture_authoritative_bundle(context)
+            before_counts = capture_count_snapshot(context)
+            before_machine = machine_boundary()
+            handled = calibration.apply_expected_failure(
+                expected_title=str(spec.rejected_calibration_title),
+                expected_message_fragment=str(
+                    spec.rejected_calibration_message_fragment
+                ),
+                mode_switch_choice="yes",
+                capture_modal=lambda evidence: capture_milestone(
+                    context,
+                    "calibration_apply_blocked",
+                    evidence=evidence,
+                ),
+            )
+            after_bundle = capture_authoritative_bundle(context)
+            after_counts = capture_count_snapshot(context)
+            after_machine = machine_boundary()
+            calibration.close(confirm_without_applied=True)
+            boundary.update(
+                {
+                    "terminal": "calibration_apply_rejected",
+                    "stock_id": spec.stock_id,
+                    "printer_head_id": spec.printer_head_id,
+                    "preview": preview,
+                    "handled_dialogs": handled["handled_dialogs"],
+                    "failure": handled["failure"],
+                    "before_bundle": before_bundle,
+                    "after_bundle": after_bundle,
+                    "before_counts": before_counts,
+                    "after_counts": after_counts,
+                    "before_machine": before_machine,
+                    "after_machine": after_machine,
+                }
+            )
+            return {
+                "terminal": boundary["terminal"],
+                "stock_id": spec.stock_id,
+                "preview": preview,
+                "handled_dialogs": handled["handled_dialogs"],
+                "failure": handled["failure"],
+            }
+
+        runtime.run_steps(
+            (
+                SemanticStep(
+                    "machine.configure_print_settings_via_ui",
+                    InteractionSurface.UI,
+                    configure_rejected,
+                ),
+                SemanticStep(
+                    "calibration.generate_via_ui",
+                    InteractionSurface.UI,
+                    generate_rejected,
+                ),
+                SemanticStep(
+                    "calibration.select_via_ui",
+                    InteractionSurface.UI,
+                    select_rejected,
+                ),
+                SemanticStep(
+                    "calibration.apply_via_ui",
+                    InteractionSurface.UI,
+                    apply_rejected,
+                ),
+            )
+        )
+        runtime.observations["calibration_rejection_boundary"] = boundary
+        runtime.observations["matrix_block"] = {
+            "terminal": boundary["terminal"],
+            "stock_id": boundary["stock_id"],
+            "printer_head_id": boundary["printer_head_id"],
+            "preview": boundary["preview"],
+            "handled_dialogs": boundary["handled_dialogs"],
+            "failure": boundary["failure"],
+        }
+        if spec.return_head:
+            runtime.run_steps(
+                (
+                    SemanticStep(
+                        "head.return_via_ui",
+                        InteractionSurface.UI,
+                        return_active_head,
+                    ),
+                )
+            )
+        return dict(runtime.observations["matrix_block"])
     if spec.manual_refuel_check is not None:
         manual_spec = spec.manual_refuel_check
 

@@ -2250,10 +2250,9 @@ Milestones 0-8 are complete. The expanded effort is complete when:
 
 ## Current Next Action
 
-Milestones 7 and 8 and Milestone 9 Slices 9.1-9.4 are complete. Their operator
-capabilities remain the current qualified baseline. Slice 9.5 is the current
-next action; then continue Milestone 9 in the remaining
-independently reviewable slices:
+Milestones 7 and 8 and Milestone 9 Slices 9.1-9.5 are complete. Their operator
+capabilities remain the current qualified baseline. Slice 9.6 milestone
+closeout is the current next action:
 
 1. Slice 9.1: put the existing mixed-mode catalog behind a generic typed
    matrix registry and journey-family dispatch while preserving every current
@@ -2267,9 +2266,10 @@ independently reviewable slices:
    execution, replay, and visible increase/decrease representatives.
 4. Slice 9.4 (complete): add multi-target, 40 nL to 10.8 nL executed
    transition, fill-stock positive cases, and exact completed-terminal reload.
-5. Slice 9.5 (current next): add the missing-fill fail-closed case and two-reagent isolation
-   case with exact no-mutation/no-dispatch evidence where applicable.
-6. Slice 9.6: qualify the complete eight-case matrix, replay, lifecycle and
+5. Slice 9.5 (complete): add the missing-fill fail-closed case and
+   two-reagent isolation case with exact no-mutation/no-dispatch evidence where
+   applicable.
+6. Slice 9.6 (current next): qualify the complete eight-case matrix, replay, lifecycle and
    host regressions, full Python suite, documentation, and representative
    retained evidence.
 

@@ -13,6 +13,7 @@ from tools.virtual_workflows.assertions import (
     calibration_assertion,
     cleanup_assertion,
     completed_terminal_reload_assertion,
+    calibration_apply_fail_closed_assertion,
     capture_editor_prepared_revision_snapshot,
     editor_artifacts_cleanup_assertion,
     editor_create_finalize_assertion,
@@ -41,6 +42,7 @@ from tools.virtual_workflows.assertions import (
     soft_stop_paused_assertions,
     soft_stop_terminal_assertions,
     terminal_execution_assertion,
+    two_reagent_isolation_assertion,
 )
 from tools.virtual_workflows.composition import (
     JourneyDefinition,
@@ -831,6 +833,10 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
     )
     blocked_seen = False
     oracle = dict(fixture.get("lifecycle", {}).get("dispense_count_oracle") or {})
+    matrix_terminal = str(
+        fixture.get("lifecycle", {}).get("case", {}).get("expected_terminal")
+        or ""
+    )
     completion_by_stock: dict[str, int] = {}
     if int(oracle.get("schema_version", 1)) == 2:
         for group in oracle.get("count_groups") or ():
@@ -847,10 +853,13 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
         matrix_blocked = bool(
             matrix_manual and matrix_manual.get("status") != "passed"
         )
+        calibration_rejected = matrix_terminal == "calibration_apply_rejected"
         if blocked_seen:
             break
         is_last_configured = index == stock_count - 1
-        will_complete_case = is_last_configured and not matrix_blocked
+        will_complete_case = (
+            is_last_configured and not matrix_blocked and not calibration_rejected
+        )
         applied_pulse_width_us = int(head["print_pulse_width_us"])
         pulse_width_us = (
             STRESS_FIXED_CALIBRATION_PULSE_WIDTH_US
@@ -883,19 +892,24 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
                 ),
                 expected_plan_state=("completed" if will_complete_case else "active"),
                 ready_milestone=(
+                    None if calibration_rejected else
                     f"pass_{index + 1}_ready" if matrix_case else
                     ("ready" if index == 0 else None) if compact
                     else ("stock_1_ready" if index == 0 else "stock_2_staged")
                 ),
                 printing_milestone=(
-                    (None if matrix_blocked else f"pass_{index + 1}_printing")
+                    (
+                        None
+                        if matrix_blocked or calibration_rejected
+                        else f"pass_{index + 1}_printing"
+                    )
                     if matrix_case else
                     ("printing" if index == 0 else None) if compact
                     else ("stock_1_printing" if index == 0 else "stock_2_printing")
                 ),
                 completed_milestone=(
                     (
-                        None if matrix_blocked else
+                        None if matrix_blocked or calibration_rejected else
                         "completed" if will_complete_case else f"pass_{index + 1}_completed"
                     ) if matrix_case else
                     ("mid_array" if index == stock_count // 2 - 1 else
@@ -977,12 +991,39 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
                     )
                 ),
                 expected_start_outcome=(
-                    "manual_refuel_cancelled" if matrix_blocked else "running"
+                    "calibration_apply_rejected"
+                    if calibration_rejected
+                    else "manual_refuel_cancelled"
+                    if matrix_blocked
+                    else "running"
                 ),
-                validate_pass_boundary=not matrix_blocked,
+                validate_pass_boundary=not matrix_blocked and not calibration_rejected,
+                rejected_calibration_mode=(
+                    str((stock.get("rejected_calibration") or {}).get("target_mode"))
+                    if calibration_rejected else None
+                ),
+                rejected_calibration_pulse_width_us=(
+                    int((stock.get("rejected_calibration") or {}).get("pulse_width_us"))
+                    if calibration_rejected else None
+                ),
+                rejected_calibration_profile_id=(
+                    str((stock.get("rejected_calibration") or {}).get("synthetic_profile_id"))
+                    if calibration_rejected else None
+                ),
+                rejected_calibration_title=(
+                    str((stock.get("rejected_calibration") or {}).get("expected_title"))
+                    if calibration_rejected else None
+                ),
+                rejected_calibration_message_fragment=(
+                    str((stock.get("rejected_calibration") or {}).get("expected_message_fragment"))
+                    if calibration_rejected else None
+                ),
+                capture_isolation_boundary=bool(
+                    stock.get("isolation_calibration")
+                ),
             )
         )
-        blocked_seen = blocked_seen or matrix_blocked
+        blocked_seen = blocked_seen or matrix_blocked or calibration_rejected
     if mixed_mode:
         result[0] = replace(
             result[0],
@@ -1524,6 +1565,45 @@ def _install_multi_observer(runtime: JourneyRuntime) -> None:
     _install_starvation_observer(runtime)
 
 
+def _add_requantization_boundary_assertions(
+    runtime: JourneyRuntime,
+    *,
+    observer: Mapping[str, Any],
+) -> None:
+    fixture = runtime.fixture
+    rejection_oracle = dict(
+        fixture.get("lifecycle", {}).get("calibration_rejection_oracle") or {}
+    )
+    if rejection_oracle:
+        runtime.add_assertion(
+            calibration_apply_fail_closed_assertion(
+                runtime.context,
+                boundary=runtime.observations.get(
+                    "calibration_rejection_boundary", {}
+                ),
+                observer=observer,
+                oracle=rejection_oracle,
+                action_results=runtime.context.action_results,
+                pass_boundaries=runtime.observations["pass_boundaries"],
+                completed_wells=runtime.observations["completed_wells"],
+            )
+        )
+    isolation_oracle = dict(
+        fixture.get("lifecycle", {}).get("two_reagent_isolation_oracle") or {}
+    )
+    if isolation_oracle:
+        runtime.add_assertion(
+            two_reagent_isolation_assertion(
+                runtime.context,
+                boundary=runtime.observations.get(
+                    "two_reagent_isolation_boundary", {}
+                ),
+                observer=observer,
+                oracle=isolation_oracle,
+            )
+        )
+
+
 def _multi_body(runtime: JourneyRuntime) -> None:
     context, fixture = runtime.context, runtime.fixture
     expected_wells = _well_ids(fixture)
@@ -1613,6 +1693,7 @@ def _multi_body(runtime: JourneyRuntime) -> None:
     if bool(count_oracle.get("require_terminal_reload")):
         _run_completed_terminal_reload(runtime)
     _add_dispense_count_assertion(runtime, matrix_case=matrix_case, matrix_terminal=matrix_terminal, observer=snapshot)
+    _add_requantization_boundary_assertions(runtime, observer=snapshot)
     if matrix_case:
         for assertion in matrix_case_assertions(
             context,
@@ -2270,8 +2351,14 @@ def _multi_payload(
             "plate_columns": fixture["plate"]["columns"],
             "well_ids": list(expected),
             "stock_count": stock_count,
-            "array_passes": stock_count,
-            "target_dispenses_per_well": 1,
+            "array_passes": int(
+                fixture["workload"].get("array_passes", stock_count)
+            ),
+            "target_dispenses_per_well": int(
+                fixture["workload"].get(
+                    "target_dispenses_per_stock_per_well", 1
+                )
+            ),
             "expected_completion_count": expected_count,
             "speed_multiplier": runtime.harness.config.speed_multiplier,
             "timeout_seconds": runtime.harness.config.timeout_seconds,
@@ -2298,7 +2385,12 @@ def _multi_payload(
             "values": {
                 "unexpected_starvation_count": len(starvation),
                 "unexpected_starvation_events": list(starvation),
-                "queue_drained_at_terminal": bool(multi.get("terminal", {}).get("queue_drained")),
+                "queue_drained_at_terminal": bool(
+                    multi.get("terminal", {}).get(
+                        "queue_drained",
+                        runtime.context.machine.check_if_all_completed(),
+                    )
+                ),
                 "simulator_cleanup": {
                     "command_timer_active": bool(getattr(runtime.context.machine, "_command_timer", None) and runtime.context.machine._command_timer.isActive()),
                     "connection_timer_active": bool(getattr(runtime.context.machine, "_connection_timer", None) and runtime.context.machine._connection_timer.isActive()),
@@ -2318,6 +2410,24 @@ def _multi_payload(
                         )
                     }
                     if "execution.dispense_counts_reconciled" in evidence
+                    else {}
+                ),
+                **(
+                    {
+                        "calibration_rejection_evidence": evidence.get(
+                            "execution.calibration_apply_fail_closed", {}
+                        )
+                    }
+                    if "execution.calibration_apply_fail_closed" in evidence
+                    else {}
+                ),
+                **(
+                    {
+                        "two_reagent_isolation": evidence.get(
+                            "execution.two_reagent_isolation_exact", {}
+                        )
+                    }
+                    if "execution.two_reagent_isolation_exact" in evidence
                     else {}
                 ),
                 **(
@@ -3143,6 +3253,9 @@ def _run_parameterized_calibration_matrix_case(
     requires_terminal_reload = bool(
         case.normalized().get("require_terminal_reload")
     )
+    case_payload = case.normalized()
+    expected_terminal = str(case_payload.get("expected_terminal") or "")
+    requires_isolation = case_payload.get("case_kind") == "two_reagent_isolation"
     required_actions = (
         _COMMON_ACTIONS
         | _EDITOR_ACTIONS
@@ -3179,17 +3292,28 @@ def _run_parameterized_calibration_matrix_case(
                 required_screenshots.add(name)
     if case.expected_terminal == "manual_refuel_cancelled":
         required_screenshots.add("manual_refuel_blocked")
+    if expected_terminal == "calibration_apply_rejected":
+        required_screenshots.add("calibration_apply_blocked")
     if requires_terminal_reload:
         required_screenshots.add("terminal_reloaded")
-    required_assertions = (
-        (
+    if expected_terminal == "completed":
+        required_assertions = (
             *MULTI_STOCK_REQUIRED_ASSERTIONS[:-1],
             "execution.dispense_counts_reconciled",
+            *(
+                ("execution.two_reagent_isolation_exact",)
+                if requires_isolation else ()
+            ),
             *MATRIX_CASE_REQUIRED_ASSERTIONS[2:],
         )
-        if case.expected_terminal == "completed"
-        else MATRIX_CASE_REQUIRED_ASSERTIONS
-    )
+    elif expected_terminal == "calibration_apply_rejected":
+        required_assertions = (
+            *MATRIX_CASE_REQUIRED_ASSERTIONS[:2],
+            "execution.calibration_apply_fail_closed",
+            *MATRIX_CASE_REQUIRED_ASSERTIONS[2:],
+        )
+    else:
+        required_assertions = MATRIX_CASE_REQUIRED_ASSERTIONS
     if requires_terminal_reload:
         required_assertions = (
             *required_assertions[:-2],

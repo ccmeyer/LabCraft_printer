@@ -208,3 +208,54 @@ def test_grouped_requantization_cases_execute_exact_catalog_counts(
             "decision"
         ] == "pass"
         assert "terminal_reloaded" in report["artifacts"]["screenshots"]
+
+
+@pytest.mark.sil_lifecycle
+def test_missing_fill_requantization_apply_is_fail_closed(tmp_path):
+    report = _run_case(
+        tmp_path,
+        "zero_fill_missing_fill_rejected",
+        CALIBRATION_REQUANTIZATION_MATRIX_ID,
+    )
+    assert report["classification"]["status"] == "pass"
+    values = report["metrics"]["persistence"]["values"]
+    evidence = values["calibration_rejection_evidence"]
+    assert evidence["checks"]["authoritative_bundle_byte_identical"] is True
+    assert evidence["checks"]["zero_execution_dispatch"] is True
+    assert evidence["dispatch_counts"] == {
+        "begins": 0,
+        "attachments": 0,
+        "completions": 0,
+        "simulator_dispenses": 0,
+    }
+    assert evidence["handled_dialogs"] == [
+        "Apply calibration as mode switch?",
+        "Apply failed",
+    ]
+    assert evidence["failure"]["icon"] == "Critical"
+    assert "calibration_apply_blocked" in report["artifacts"]["screenshots"]
+    outcome = values["matrix_case"]["outcome"]
+    assert outcome["expected_terminal"] == "calibration_apply_rejected"
+    assert outcome["observed_completion_count"] == 0
+
+
+@pytest.mark.sil_lifecycle
+def test_two_reagent_requantization_isolates_completed_first_stock(tmp_path):
+    report = _run_case(
+        tmp_path,
+        "two_reagent_second_1_to_2_isolated",
+        CALIBRATION_REQUANTIZATION_MATRIX_ID,
+    )
+    assert report["classification"]["status"] == "pass"
+    values = report["metrics"]["persistence"]["values"]
+    isolation = values["two_reagent_isolation"]
+    assert isolation["checks"]["support_progress_preserved"] is True
+    assert isolation["checks"]["primary_alone_retargeted"] is True
+    assert isolation["checks"]["execution_exact_once"] is True
+    assert isolation["total_commanded_droplets"] == 72
+    counts = values["dispense_count_evidence"]
+    assert counts["reconciliation"]["passed"] is True
+    assert len(counts["command_join"]["joined_commands"]) == 48
+    assert values["matrix_case"]["outcome"][
+        "observed_completion_count"
+    ] == 48

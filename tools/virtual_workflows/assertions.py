@@ -1296,6 +1296,328 @@ def dispense_counts_reconciled_assertion(
         )
 
 
+def calibration_apply_fail_closed_assertion(
+    context: Any,
+    *,
+    boundary: Mapping[str, Any],
+    observer: Mapping[str, Any],
+    oracle: Mapping[str, Any],
+    action_results: list[Mapping[str, Any]],
+    pass_boundaries: list[Mapping[str, Any]],
+    completed_wells: list[str],
+) -> AssertionResult:
+    """Prove a missing-fill Apply rejection is byte-identical and dispatch-free."""
+
+    try:
+        from tools.virtual_workflows.authoritative_evidence import compare_directories
+
+        before = boundary["before_bundle"]
+        after = boundary["after_bundle"]
+        before_counts = dict(boundary.get("before_counts") or {})
+        after_counts = dict(boundary.get("after_counts") or {})
+        before_machine = dict(boundary.get("before_machine") or {})
+        after_machine = dict(boundary.get("after_machine") or {})
+        failure = dict(boundary.get("failure") or {})
+        preview = dict(boundary.get("preview") or {})
+        table = dict(preview.get("visible_table") or {})
+        rows = list(table.get("rows") or ())
+        headers = list(table.get("headers") or ())
+        drops_column = headers.index("Drops")
+        displayed_counts = [row[drops_column] for row in rows]
+        directory = compare_directories(before.directory, after.directory).to_dict()
+        lifecycle = dict(observer.get("lifecycle") or {})
+        action_ids = [str(row.get("action_id") or "") for row in action_results]
+        oracle_payload = dict(oracle)
+        expected_keys = {
+            "schema_version", "source", "stock_id", "well_ids",
+            "accepted_calibration", "rejected_calibration", "count_oracle",
+            "expected_plan_state", "expected_title", "expected_message_fragment",
+            "expected_calibration_record_count", "expected_intent_count",
+            "expected_simulator_dispense_count", "expected_pass_boundary_count",
+            "expected_completion_count",
+        }
+        oracle_valid = (
+            set(oracle_payload) == expected_keys
+            and oracle_payload.get("schema_version") == 1
+            and oracle_payload.get("source")
+            == "calibration_requantization_v1_catalog"
+            and len(oracle_payload.get("well_ids") or ()) == 24
+            and len(set(oracle_payload.get("well_ids") or ())) == 24
+            and dict(oracle_payload.get("count_oracle") or {}).get(
+                "hypothetical_reagent_droplets"
+            ) == 0
+            and dict(oracle_payload.get("count_oracle") or {}).get(
+                "hypothetical_missing_fill_droplets"
+            ) == 1
+        )
+        bundle_checks = {
+            "bundle_objects_equal": before == after,
+            "plan_json_equal": before.plan_json == after.plan_json,
+            "history_equal": before.history_json == after.history_json,
+            "progress_equal": before_counts == after_counts,
+            "eligibility_equal": before.eligibility_json == after.eligibility_json,
+            "calibration_count_equal": before.calibration_record_count
+            == after.calibration_record_count,
+            "audit_equal": before.audit_rows_json == after.audit_rows_json,
+            "key_rows_equal": before.key_rows_json == after.key_rows_json,
+            "concentration_rows_equal": before.concentration_rows_json
+            == after.concentration_rows_json,
+            "files_byte_identical": directory["checks"]["files_byte_identical"],
+        }
+        dispatch_counts = {
+            "begins": len(lifecycle.get("begins") or ()),
+            "attachments": len(lifecycle.get("attachments") or ()),
+            "completions": len(lifecycle.get("completions") or ()),
+            "simulator_dispenses": len(lifecycle.get("simulator_dispenses") or ()),
+        }
+        checks = {
+            "oracle_valid": oracle_valid,
+            "authoritative_bundle_byte_identical": all(bundle_checks.values()),
+            "machine_boundary_unchanged": before_machine == after_machine,
+            "active_zero_progress": (
+                before.plan_state == after.plan_state
+                == oracle_payload.get("expected_plan_state")
+                and before.total_added_droplets == after.total_added_droplets == 0
+            ),
+            "one_accepted_calibration_only": (
+                before.calibration_record_count
+                == after.calibration_record_count
+                == oracle_payload.get("expected_calibration_record_count")
+                and before.manual_refuel_check_count
+                == after.manual_refuel_check_count == 0
+            ),
+            "preview_zero_exact": bool(rows)
+            and all(str(value) == "0" for value in displayed_counts),
+            "failure_dialog_exact": (
+                boundary.get("handled_dialogs")
+                == ["Apply calibration as mode switch?", oracle_payload.get("expected_title")]
+                and failure.get("title") == oracle_payload.get("expected_title")
+                and oracle_payload.get("expected_message_fragment")
+                in str(failure.get("text") or "")
+                and failure.get("icon") == "Critical"
+            ),
+            "zero_execution_dispatch": all(value == 0 for value in dispatch_counts.values())
+            and action_ids.count("array.start_via_ui") == 0,
+            "zero_completion_boundaries": (
+                len(completed_wells)
+                == oracle_payload.get("expected_completion_count")
+                and len(pass_boundaries)
+                == oracle_payload.get("expected_pass_boundary_count")
+            ),
+            "terminal_cleanup_safe": (
+                context.controller.get_array_run_state() == "idle"
+                and context.machine.check_if_all_completed()
+                and context.model.rack_model.get_gripper_printer_head() is None
+                and observer.get("restored") is True
+            ),
+        }
+        evidence = {
+            "schema_version": 1,
+            "oracle": oracle_payload,
+            "checks": checks,
+            "bundle_checks": bundle_checks,
+            "directory_comparison": directory,
+            "plan": {
+                "plan_id": before.plan_id,
+                "plan_revision": before.plan_revision,
+                "plan_state": before.plan_state,
+                "lock_reason": before.plan_lock_reason,
+                "history_count": len(before.history_json),
+                "calibration_record_count": before.calibration_record_count,
+                "total_added_droplets": before.total_added_droplets,
+            },
+            "preview": preview,
+            "failure": failure,
+            "handled_dialogs": list(boundary.get("handled_dialogs") or ()),
+            "machine_boundary": before_machine,
+            "dispatch_counts": dispatch_counts,
+            "action_ids": action_ids,
+        }
+        passed = all(checks.values())
+        return AssertionResult(
+            "execution.calibration_apply_fail_closed",
+            "terminal",
+            "pass" if passed else "fail",
+            ("ui", "controller", "model", "persistence", "simulator"),
+            evidence,
+            None if passed else "calibration rejection mutated state or dispatched work",
+        )
+    except (KeyError, TypeError, ValueError, OSError, RuntimeError) as exc:
+        return AssertionResult(
+            "execution.calibration_apply_fail_closed",
+            "terminal",
+            "fail",
+            ("ui", "controller", "model", "persistence", "simulator"),
+            {"schema_version": 1, "error": f"{type(exc).__name__}: {exc}"},
+            "calibration rejection evidence was incomplete or malformed",
+        )
+
+
+def two_reagent_isolation_assertion(
+    context: Any,
+    *,
+    boundary: Mapping[str, Any],
+    observer: Mapping[str, Any],
+    oracle: Mapping[str, Any],
+) -> AssertionResult:
+    """Prove reagent-two requantization preserves completed reagent-one truth."""
+
+    try:
+        from tools.virtual_workflows.dispense_counts import (
+            intent_and_simulator_counts,
+            normalize_stock_well_counts,
+        )
+
+        before = boundary["before"]
+        after = boundary["after"]
+        transition = dict(boundary.get("count_transition") or {})
+        count_before = dict(transition.get("before") or {})
+        count_after = dict(transition.get("after") or {})
+        oracle_payload = dict(oracle)
+        expected_keys = {
+            "schema_version", "source", "stock_ids", "primary_stock_id",
+            "well_ids", "first_pass_completion_count", "expected_total_droplets",
+        }
+        stock_ids = tuple(oracle_payload.get("stock_ids") or ())
+        primary = str(oracle_payload.get("primary_stock_id") or "")
+        support = stock_ids[0] if len(stock_ids) == 2 else ""
+        well_ids = tuple(oracle_payload.get("well_ids") or ())
+        oracle_valid = (
+            set(oracle_payload) == expected_keys
+            and oracle_payload.get("schema_version") == 1
+            and oracle_payload.get("source")
+            == "calibration_requantization_v1_catalog"
+            and len(stock_ids) == 2
+            and primary == stock_ids[1]
+            and len(well_ids) == len(set(well_ids)) == 24
+            and oracle_payload.get("first_pass_completion_count") == 24
+            and oracle_payload.get("expected_total_droplets") == 72
+        )
+
+        def rows_by_stock(raw: Any) -> dict[str, dict[str, int]]:
+            rows = normalize_stock_well_counts(raw or (), label="isolation counts")
+            output: dict[str, dict[str, int]] = {}
+            for row in rows:
+                output.setdefault(row.stock_id, {})[row.well_id] = row.droplets
+            return output
+
+        plan_before = rows_by_stock(count_before.get("plan_targets"))
+        plan_after = rows_by_stock(count_after.get("plan_targets"))
+        progress_before = rows_by_stock(count_before.get("progress_added"))
+        progress_after = rows_by_stock(count_after.get("progress_added"))
+        runtime_before = rows_by_stock(count_before.get("runtime_targets"))
+        runtime_after = rows_by_stock(count_after.get("runtime_targets"))
+        before_stocks = {
+            str(stock_id): dict(item)
+            for stock_id, item in dict(before.plan.get("stocks") or {}).items()
+        }
+        after_stocks = {
+            str(stock_id): dict(item)
+            for stock_id, item in dict(after.plan.get("stocks") or {}).items()
+        }
+        intent_rows, simulator_rows, command_join = intent_and_simulator_counts(
+            dict(observer.get("lifecycle") or {})
+        )
+        intents = rows_by_stock(intent_rows)
+        simulator = rows_by_stock(simulator_rows)
+        expected_wells = set(well_ids)
+        checks = {
+            "oracle_valid": oracle_valid,
+            "plan_identity_stable": (
+                before.plan_id == after.plan_id
+                and before.design_sha256 == after.design_sha256
+                and before.plan_assignments == after.plan_assignments
+                and before.plan_well_ids == after.plan_well_ids
+            ),
+            "revision_append_exact": (
+                after.plan_revision == before.plan_revision + 1
+                and len(after.history_json) == len(before.history_json) + 1
+                and after.history_json[:-1] == before.history_json
+                and after.history_matches_current
+            ),
+            "support_plan_unchanged": plan_before.get(support)
+            == plan_after.get(support)
+            == {well_id: 1 for well_id in well_ids},
+            "support_progress_preserved": progress_before.get(support)
+            == progress_after.get(support)
+            == {well_id: 1 for well_id in well_ids},
+            "support_runtime_unchanged": runtime_before.get(support)
+            == runtime_after.get(support)
+            == {well_id: 1 for well_id in well_ids},
+            "support_stock_linkage_unchanged": before_stocks.get(support)
+            == after_stocks.get(support),
+            "primary_alone_retargeted": (
+                plan_before.get(primary) == {well_id: 1 for well_id in well_ids}
+                and plan_after.get(primary) == {well_id: 2 for well_id in well_ids}
+                and runtime_before.get(primary) == {well_id: 1 for well_id in well_ids}
+                and runtime_after.get(primary) == {well_id: 2 for well_id in well_ids}
+            ),
+            "primary_progress_zero_at_apply": progress_before.get(primary)
+            == progress_after.get(primary)
+            == {well_id: 0 for well_id in well_ids},
+            "stock_membership_exact": set(before_stocks) == set(after_stocks)
+            == set(stock_ids),
+            "execution_exact_once": (
+                set(intents) == set(simulator) == set(stock_ids)
+                and set(intents.get(support, {})) == expected_wells
+                and set(intents.get(primary, {})) == expected_wells
+                and intents.get(support) == {well_id: 1 for well_id in well_ids}
+                and intents.get(primary) == {well_id: 2 for well_id in well_ids}
+                and simulator == intents
+                and len(command_join.get("joined_commands") or ()) == 48
+                and sum(row.droplets for row in intent_rows)
+                == oracle_payload.get("expected_total_droplets")
+            ),
+            "terminal_completed": (
+                context.experiment_model.get_execution_plan_snapshot().state.value
+                == "completed"
+                and observer.get("restored") is True
+            ),
+        }
+        evidence = {
+            "schema_version": 1,
+            "oracle": oracle_payload,
+            "checks": checks,
+            "before": {
+                "plan_id": before.plan_id,
+                "plan_revision": before.plan_revision,
+                "history_count": len(before.history_json),
+                "total_added_droplets": before.total_added_droplets,
+                "calibration_record_count": before.calibration_record_count,
+            },
+            "after": {
+                "plan_id": after.plan_id,
+                "plan_revision": after.plan_revision,
+                "history_count": len(after.history_json),
+                "total_added_droplets": after.total_added_droplets,
+                "calibration_record_count": after.calibration_record_count,
+            },
+            "support_stock_id": support,
+            "primary_stock_id": primary,
+            "count_transition": transition,
+            "command_join": command_join,
+            "total_commanded_droplets": sum(row.droplets for row in intent_rows),
+        }
+        passed = all(checks.values())
+        return AssertionResult(
+            "execution.two_reagent_isolation_exact",
+            "terminal",
+            "pass" if passed else "fail",
+            ("ui", "model", "persistence", "simulator"),
+            evidence,
+            None if passed else "two-reagent calibration isolation was not exact",
+        )
+    except (IndexError, KeyError, TypeError, ValueError, OSError, RuntimeError) as exc:
+        return AssertionResult(
+            "execution.two_reagent_isolation_exact",
+            "terminal",
+            "fail",
+            ("ui", "model", "persistence", "simulator"),
+            {"schema_version": 1, "error": f"{type(exc).__name__}: {exc}"},
+            "two-reagent isolation evidence was incomplete or malformed",
+        )
+
+
 def multi_stock_terminal_assertions(
     context: Any,
     *,
@@ -1562,6 +1884,9 @@ def matrix_case_assertions(
     )
     plan = context.experiment_model.get_execution_plan_snapshot()
     count_oracle = dict(lifecycle.get("dispense_count_oracle") or {})
+    rejection_oracle = dict(
+        lifecycle.get("calibration_rejection_oracle") or {}
+    )
     oracle_case_linked = True
     if count_oracle:
         if int(count_oracle.get("schema_version", 1)) == 2:
@@ -1573,8 +1898,8 @@ def matrix_case_assertions(
                 and count_oracle.get("count_groups") == case.get("count_groups")
                 and count_oracle.get("calibration_steps")
                 == case.get("calibration_steps")
-                and count_oracle.get("require_terminal_reload")
-                == case.get("require_terminal_reload")
+                and bool(count_oracle.get("require_terminal_reload"))
+                == bool(case.get("require_terminal_reload"))
                 and count_oracle.get("primary_stock_id") in expected_by_id
             )
         else:
@@ -1596,15 +1921,45 @@ def matrix_case_assertions(
                 and count_oracle.get("transition") == case.get("transition")
                 and count_oracle.get("rounding_boundary_margin") == margin
             )
-    profile_ok = (
-        profile.get("calibration_steps") == case.get("calibration_steps")
-        if case.get("case_kind") == "composite_requantization"
-        else profile.get("profile_id") == case.get("profile_id")
-    )
+    rejection_case_linked = True
+    if rejection_oracle:
+        rejection_case_linked = (
+            case.get("case_kind") == "missing_fill_requantization"
+            and rejection_oracle.get("source")
+            == "calibration_requantization_v1_catalog"
+            and rejection_oracle.get("stock_id") in expected_by_id
+            and set(rejection_oracle.get("well_ids") or ())
+            == {well.well_id for well in plan.wells}
+            and rejection_oracle.get("accepted_calibration")
+            == case.get("accepted_calibration")
+            and rejection_oracle.get("rejected_calibration")
+            == case.get("rejected_calibration")
+            and rejection_oracle.get("count_oracle")
+            == case.get("count_oracle")
+            and rejection_oracle.get("expected_completion_count")
+            == case.get("expected_completion_count")
+        )
+    if case.get("case_kind") in {
+        "composite_requantization",
+        "two_reagent_isolation",
+    }:
+        profile_ok = profile.get("calibration_steps") == case.get(
+            "calibration_steps"
+        )
+    elif case.get("case_kind") == "missing_fill_requantization":
+        profile_ok = (
+            profile.get("accepted_calibration")
+            == case.get("accepted_calibration")
+            and profile.get("rejected_calibration")
+            == case.get("rejected_calibration")
+        )
+    else:
+        profile_ok = profile.get("profile_id") == case.get("profile_id")
     parameter_ok = (
         bool(matrix_id)
         and registered_case_valid
         and oracle_case_linked
+        and rejection_case_linked
         and len(expected_stocks) >= 1
         and calibration_ok
         and len(records) == len(staged_ids)
@@ -1624,6 +1979,7 @@ def matrix_case_assertions(
         "registered_case_valid": registered_case_valid,
         "registered_case_error": registered_error,
         "count_oracle_linked_to_case": oracle_case_linked,
+        "calibration_rejection_oracle_linked_to_case": rejection_case_linked,
     }
     parameter_assertion = AssertionResult(
         "execution.matrix_case_parameters_applied",
@@ -1672,7 +2028,7 @@ def matrix_case_assertions(
             and len(pass_boundaries) == len(expected_stocks)
             and all(item.get("status") == "passed" for item in persisted_checks)
         )
-    else:
+    elif expected_terminal == "manual_refuel_cancelled":
         dialog_titles = [str(row.get("title") or "") for row in block.get("dialogs", [])]
         expected_status = next(
             (
@@ -1716,6 +2072,21 @@ def matrix_case_assertions(
             and start_indexes
             and manual_indexes[-1] < start_indexes[-1]
         )
+    elif expected_terminal == "calibration_apply_rejected":
+        outcome_ok = (
+            common_ok
+            and block.get("terminal") == "calibration_apply_rejected"
+            and block.get("handled_dialogs")
+            == ["Apply calibration as mode switch?", "Apply failed"]
+            and block.get("failure", {}).get("title") == "Apply failed"
+            and case.get("expected_warning_fragment")
+            in str(block.get("failure", {}).get("text") or "")
+            and len(pass_boundaries) == 0
+            and action_ids.count("array.start_via_ui") == 0
+            and len(persisted_checks) == 0
+        )
+    else:
+        outcome_ok = False
     outcome_evidence = {
         "expected_terminal": expected_terminal,
         "expected_completion_count": expected_count,
@@ -3201,6 +3572,7 @@ __all__ = [
     "authoritative_session_rotation_assertions",
     "ExecutionLifecycleExpectation",
     "calibration_assertion",
+    "calibration_apply_fail_closed_assertion",
     "cleanup_assertion",
     "evaluate_assertion",
     "editor_artifacts_cleanup_assertion",
@@ -3224,4 +3596,5 @@ __all__ = [
     "simulation_identity_assertion",
     "synthetic_calibration_contract",
     "terminal_execution_assertion",
+    "two_reagent_isolation_assertion",
 ]

@@ -207,3 +207,45 @@ def test_calibration_dialog_driver_handles_mode_switch_and_refuel_prompt(qapp):
         "Manual Refuel Check Required",
     ]
     assert choices == [QtWidgets.QMessageBox.Yes, QtWidgets.QMessageBox.No]
+
+
+def test_calibration_dialog_driver_retains_expected_apply_failure(qapp):
+    row = _row()
+    dialog = _Dialog(row)
+    dialog.bridge_apply_btn.clicked.disconnect()
+
+    def reject_stream():
+        choice = QtWidgets.QMessageBox.question(
+            dialog,
+            "Apply calibration as mode switch?",
+            "Switch mode?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        )
+        if choice == QtWidgets.QMessageBox.Yes:
+            QtWidgets.QMessageBox.critical(
+                dialog,
+                "Apply failed",
+                "Calibration would require a fill stock that is absent.",
+            )
+
+    dialog.bridge_apply_btn.clicked.connect(reject_stream)
+    dialog.show()
+    qapp.processEvents()
+    driver = CalibrationDialogDriver(qapp, dialog)
+    captured = []
+
+    evidence = driver.apply_expected_failure(
+        expected_title="Apply failed",
+        expected_message_fragment="would require a fill stock that is absent",
+        mode_switch_choice="yes",
+        capture_modal=lambda value: captured.append(value),
+    )
+    driver.close()
+
+    assert evidence["handled_dialogs"] == [
+        "Apply calibration as mode switch?",
+        "Apply failed",
+    ]
+    assert evidence["failure"]["icon"] == "Critical"
+    assert evidence["failure"]["selected_button"] == "Ok"
+    assert captured == [evidence["failure"]]

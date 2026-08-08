@@ -94,12 +94,25 @@ Common Windows commands:
 For visible Windows evidence, set `QT_QPA_PLATFORM=windows`, add `--visible`,
 and use a realistic bounded speed such as 20x. Run the exact replay command
 printed by the report or aggregate rather than reconstructing it manually.
-The requantization catalog has six ordered cases. The last three require exact
-grouped stock/well evidence: 36 positive intents for the multi-target case, 48
-for the stream-to-droplet case, and 48 for the fill transition. The stream case
-must additionally retain a passing completed-terminal fresh-session reload;
-the application reports that terminal bundle as `COMPLETED` and
-`analysis_only`, with zero remaining progress and hardware activation blocked.
+The requantization catalog has eight ordered cases. Cases four through six
+require exact grouped stock/well evidence: 36 positive intents for the
+multi-target case, 48 for the stream-to-droplet case, and 48 for the fill
+transition. The stream case must additionally retain a passing
+completed-terminal fresh-session reload; the application reports that terminal
+bundle as `COMPLETED` and `analysis_only`, with zero remaining progress and
+hardware activation blocked.
+
+Case seven, `zero_fill_missing_fill_rejected`, is a safeguard terminal rather
+than an execution terminal. Inspect
+`metrics.persistence.values.calibration_rejection_evidence`: the visible
+preview must show zero reagent drops, the modal sequence must be
+`Apply calibration as mode switch?` then `Apply failed`, the experiment
+directory must remain byte-identical, and all intent/simulator/completion
+counters must remain zero. Case eight,
+`two_reagent_second_1_to_2_isolated`, completes reagent 1 before applying the
+reagent-2 `1 -> 2` change. Inspect `dispense_count_evidence` and
+`two_reagent_isolation`; require 48 unique commands, 72 total droplets, and
+unchanged reagent-1 assignments, targets, calibration linkage, and progress.
 
 ## Evidence layout and authority
 

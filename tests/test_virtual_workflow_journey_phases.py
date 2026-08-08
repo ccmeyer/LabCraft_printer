@@ -204,6 +204,40 @@ def test_manual_refuel_cancelled_requires_a_nonpassing_stream_check():
         StockPassSpec(**values)
 
 
+def test_calibration_rejection_has_no_array_start_or_terminal_actions():
+    spec = StockPassSpec(
+        stock_id="stock-a",
+        printer_head_id="head-a",
+        pulse_width_us=1300,
+        pressure_psi=1.2,
+        frequency_hz=20,
+        initial_volume_uL=1000.0,
+        expected_volume_nL=9.0,
+        expected_completion_count=24,
+        expected_plan_state="active",
+        ready_milestone=None,
+        printing_milestone=None,
+        completed_milestone=None,
+        expected_start_outcome="calibration_apply_rejected",
+        rejected_calibration_mode="stream",
+        rejected_calibration_pulse_width_us=2500,
+        rejected_calibration_profile_id="droplet_to_stream",
+        rejected_calibration_title="Apply failed",
+        rejected_calibration_message_fragment="missing fill",
+        return_head=True,
+    )
+
+    action_ids = [
+        row["action_id"] for row in normalized_stock_pass_steps((spec,))
+    ]
+    assert action_ids.count("calibration.generate_via_ui") == 2
+    assert action_ids.count("calibration.apply_via_ui") == 2
+    assert "array.start_via_ui" not in action_ids
+    assert "array.wait_for_completions" not in action_ids
+    assert "validation.stock_pass_boundary" not in action_ids
+    assert action_ids[-1] == "head.return_via_ui"
+
+
 def test_two_stock_plan_has_exact_repeated_groups_and_truthful_surfaces():
     specs = (
         _stock("stock-a", "head-a", completion_count=24, plan_state="active", first=True),

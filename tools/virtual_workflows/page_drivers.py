@@ -2173,8 +2173,129 @@ class CalibrationDialogDriver:
             raise RuntimeError("expected calibration Apply dialog sequence did not complete")
         return list(state["handled"])
 
-    def close(self) -> None:
-        self.dialog.close()
+    def apply_expected_failure(
+        self,
+        *,
+        expected_title: str,
+        expected_message_fragment: str,
+        mode_switch_choice: str | None = None,
+        capture_modal: Callable[[Mapping[str, Any]], Any] | None = None,
+    ) -> dict[str, Any]:
+        """Apply through the real modal sequence and retain the expected failure."""
+
+        if not str(expected_title).strip() or not str(expected_message_fragment):
+            raise ValueError("expected failure title and message fragment are required")
+        steps: list[tuple[str, Any, bool]] = []
+        if mode_switch_choice is not None:
+            choice = str(mode_switch_choice).strip().lower()
+            if choice not in {"yes", "no"}:
+                raise ValueError("mode_switch_choice must be yes, no, or None")
+            steps.append(
+                (
+                    "Apply calibration as mode switch?",
+                    QtWidgets.QMessageBox.Yes
+                    if choice == "yes"
+                    else QtWidgets.QMessageBox.No,
+                    False,
+                )
+            )
+        steps.append((str(expected_title), QtWidgets.QMessageBox.Ok, True))
+        state: dict[str, Any] = {
+            "handled": [],
+            "failure": None,
+            "error": None,
+        }
+
+        def enum_name(value: Any) -> str:
+            return str(getattr(value, "name", None) or value)
+
+        def handle_modal() -> None:
+            if not steps:
+                return
+            active = self.app.activeModalWidget()
+            if not isinstance(active, QtWidgets.QMessageBox):
+                state["error"] = RuntimeError(
+                    f"unexpected Apply modal: {type(active).__name__ if active else None}"
+                )
+                if isinstance(active, QtWidgets.QDialog):
+                    active.reject()
+                return
+            expected_step_title, standard_button, is_failure = steps.pop(0)
+            if active.windowTitle() != expected_step_title:
+                state["error"] = RuntimeError(
+                    f"unexpected Apply dialog title: {active.windowTitle()!r}"
+                )
+                active.reject()
+                return
+            message = active.text()
+            if is_failure and expected_message_fragment not in message:
+                state["error"] = RuntimeError(
+                    "expected Apply failure message fragment was absent"
+                )
+                active.reject()
+                return
+            button = active.button(standard_button)
+            if button is None:
+                state["error"] = RuntimeError(
+                    f"expected button is missing from {active.windowTitle()!r}"
+                )
+                active.reject()
+                return
+            evidence = {
+                "title": active.windowTitle(),
+                "text": message,
+                "icon": enum_name(active.icon()),
+                "standard_buttons": enum_name(active.standardButtons()),
+                "selected_button": enum_name(standard_button),
+            }
+            state["handled"].append(active.windowTitle())
+            if is_failure:
+                state["failure"] = evidence
+                if capture_modal is not None:
+                    capture_modal(dict(evidence))
+            QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+            if steps:
+                QtCore.QTimer.singleShot(0, handle_modal)
+
+        with _expected_dialogs(
+            self.app,
+            *((title, "QMessageBox") for title, _button, _failure in steps),
+        ):
+            QtCore.QTimer.singleShot(0, handle_modal)
+            QtTest.QTest.mouseClick(
+                self.dialog.bridge_apply_btn,
+                QtCore.Qt.MouseButton.LeftButton,
+            )
+        if state["error"] is not None:
+            raise state["error"]
+        if steps or state["failure"] is None:
+            raise RuntimeError("expected calibration Apply failure did not complete")
+        return {
+            "handled_dialogs": list(state["handled"]),
+            "failure": dict(state["failure"]),
+        }
+
+    def close(self, *, confirm_without_applied: bool = False) -> None:
+        def accept_close_confirmation() -> None:
+            active = self.app.activeModalWidget()
+            if not isinstance(active, QtWidgets.QMessageBox):
+                return
+            if active.windowTitle() != "Exit without applied calibration?":
+                active.reject()
+                return
+            button = active.button(QtWidgets.QMessageBox.Yes)
+            if button is not None:
+                QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+
+        with _expected_dialogs(
+            self.app,
+            *(("Exit without applied calibration?", "QMessageBox"),)
+            if confirm_without_applied
+            else (),
+        ):
+            if confirm_without_applied:
+                QtCore.QTimer.singleShot(0, accept_close_confirmation)
+            self.dialog.close()
         self.wait_until(lambda: not self.dialog.isVisible(), "calibration dialog close")
 
 
