@@ -6,6 +6,7 @@ import pytest
 from PySide6 import QtCore, QtGui, QtTest, QtWidgets
 
 from tools.virtual_workflows.page_drivers import (
+    _click_button_with_bounded_retry,
     ArrayDriver,
     ExperimentEditorDriver,
     ExperimentLoaderDriver,
@@ -48,6 +49,98 @@ def test_qtest_driver_clicks_only_visible_enabled_controls(qapp):
     button.setEnabled(False)
     with pytest.raises(RuntimeError, match="visible and enabled"):
         driver.click(button)
+    view.close()
+
+
+class _SwallowFirstReleaseButton(QtWidgets.QPushButton):
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.release_count = 0
+
+    def mouseReleaseEvent(self, event):
+        self.release_count += 1
+        if self.release_count == 1:
+            self.setDown(False)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class _SwallowEveryReleaseButton(QtWidgets.QPushButton):
+    def mouseReleaseEvent(self, event):
+        self.setDown(False)
+        event.accept()
+
+
+def test_bounded_button_click_retries_only_after_swallowed_activation(qapp):
+    view = QtWidgets.QWidget()
+    button = _SwallowFirstReleaseButton("Create Editable Copy", view)
+    view.show()
+    qapp.processEvents()
+    clicked = []
+    button.clicked.connect(lambda: clicked.append(True))
+
+    evidence = _click_button_with_bounded_retry(
+        SimpleNamespace(app=qapp),
+        button,
+        postcondition=lambda: bool(clicked),
+        description="test button",
+    )
+
+    assert clicked == [True]
+    assert evidence == {
+        "attempt_count": 2,
+        "retried": True,
+        "attempts": [
+            {
+                "attempt": 1,
+                "activated": False,
+                "postcondition_met": False,
+            },
+            {
+                "attempt": 2,
+                "activated": True,
+                "postcondition_met": True,
+            },
+        ],
+    }
+    view.close()
+
+
+def test_bounded_button_click_fails_on_ambiguous_activation(qapp):
+    view = QtWidgets.QWidget()
+    button = QtWidgets.QPushButton("Create Editable Copy", view)
+    view.show()
+    qapp.processEvents()
+
+    with pytest.raises(RuntimeError, match="activated without satisfying"):
+        _click_button_with_bounded_retry(
+            SimpleNamespace(app=qapp),
+            button,
+            postcondition=lambda: False,
+            description="test button",
+        )
+
+    view.close()
+
+
+def test_bounded_button_click_fails_after_one_no_activation_retry(qapp):
+    view = QtWidgets.QWidget()
+    button = _SwallowFirstReleaseButton("Create Editable Copy", view)
+    button.mouseReleaseEvent = lambda event: (
+        button.setDown(False), event.accept()
+    )
+    view.show()
+    qapp.processEvents()
+
+    with pytest.raises(RuntimeError, match="after one bounded retry"):
+        _click_button_with_bounded_retry(
+            SimpleNamespace(app=qapp),
+            button,
+            postcondition=lambda: False,
+            description="test button",
+        )
+
     view.close()
 
 
@@ -98,6 +191,67 @@ def test_dialog_sequence_selects_exact_named_safe_button(qapp):
 
     assert selected == ["Cancel"]
     assert handled[0]["title"] == "Manual Refuel Check Required"
+    view.close()
+
+
+def test_dialog_sequence_retries_after_swallowed_action_click(qapp):
+    view = QtWidgets.QWidget()
+    button = _SwallowFirstReleaseButton("Start", view)
+    selected = []
+
+    def show_guard():
+        selected.append(
+            QtWidgets.QMessageBox.question(
+                view,
+                "Start Print Array",
+                "Proceed?",
+                QtWidgets.QMessageBox.StandardButton.Yes
+                | QtWidgets.QMessageBox.StandardButton.No,
+            )
+        )
+
+    button.clicked.connect(show_guard)
+    view.show()
+    qapp.processEvents()
+    driver = MainWindowDriver(_context(qapp, view))
+
+    handled = driver.click_with_message_boxes(
+        button,
+        [("Start Print Array", QtWidgets.QMessageBox.StandardButton.Yes)],
+    )
+
+    assert selected == [QtWidgets.QMessageBox.StandardButton.Yes]
+    assert handled[0]["title"] == "Start Print Array"
+    assert button.release_count == 2
+    view.close()
+
+
+def test_dialog_sequence_stops_inspector_after_exhausted_clicks(qapp):
+    view = QtWidgets.QWidget()
+    button = _SwallowEveryReleaseButton("Start", view)
+    view.show()
+    qapp.processEvents()
+    driver = MainWindowDriver(_context(qapp, view))
+
+    with pytest.raises(RuntimeError, match="after one bounded retry"):
+        driver.click_with_message_boxes(
+            button,
+            [("Start Print Array", QtWidgets.QMessageBox.StandardButton.Yes)],
+        )
+
+    late = QtWidgets.QMessageBox(
+        QtWidgets.QMessageBox.Icon.Question,
+        "Later unrelated dialog",
+        "Must remain untouched",
+        QtWidgets.QMessageBox.StandardButton.Ok,
+        view,
+    )
+    late.setModal(True)
+    late.show()
+    QtTest.QTest.qWait(30)
+    qapp.processEvents()
+    assert late.isVisible() is True
+    late.reject()
     view.close()
 
 

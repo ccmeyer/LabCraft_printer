@@ -1986,6 +1986,14 @@ performance report set.
 
 ### Manual Pi SIL suites
 
+The complete operator decision table, failure triage, source-freshness rules,
+Pi authorization boundary, and non-destructive retention policy are maintained
+in `docs/sil_virtual_workflow_operator_runbook.md`.
+
+For pytest runs containing SIL session tests, use a unique `--basetemp` beneath
+`$env:LOCALAPPDATA\Temp\LabCraft`; an in-repository basetemp is rejected by the
+intentional session-root safety boundary.
+
 Milestone 8 Slice 7 routes the registered `pi_primary` and `pi_stress` suites
 through the same fresh-process aggregate contract used on Windows. Suite mode
 still performs one preflight and one traced 96-well proof before execution; the

@@ -11,6 +11,75 @@ from typing import Any, Callable, Mapping, Sequence
 from PySide6 import QtCore, QtTest, QtWidgets
 
 
+def _click_button_with_bounded_retry(
+    context: Any,
+    button: Any,
+    *,
+    postcondition: Callable[[], bool],
+    description: str,
+) -> dict[str, Any]:
+    """Use mouse-only activation with one retry after a proven no-op."""
+
+    activations: list[bool] = []
+    attempts: list[dict[str, Any]] = []
+
+    def record_activation(*_args: Any) -> None:
+        activations.append(True)
+
+    button.clicked.connect(record_activation)
+    try:
+        for attempt in (1, 2):
+            if button is None or not button.isVisible() or not button.isEnabled():
+                raise RuntimeError(
+                    f"{description} control is not visible and enabled"
+                )
+            activation_count = len(activations)
+            window = button.window()
+            if window is not None:
+                window.activateWindow()
+            button.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+            context.app.processEvents()
+
+            QtTest.QTest.mouseMove(button, button.rect().center())
+            QtTest.QTest.qWait(5)
+            QtTest.QTest.mousePress(
+                button, QtCore.Qt.MouseButton.LeftButton
+            )
+            QtTest.QTest.qWait(10)
+            QtTest.QTest.mouseRelease(
+                button, QtCore.Qt.MouseButton.LeftButton
+            )
+            QtTest.QTest.qWait(10)
+            context.app.processEvents()
+
+            activated = len(activations) > activation_count
+            satisfied = bool(postcondition())
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "activated": activated,
+                    "postcondition_met": satisfied,
+                }
+            )
+            if satisfied:
+                return {
+                    "attempt_count": attempt,
+                    "retried": attempt > 1,
+                    "attempts": attempts,
+                }
+            if activated:
+                raise RuntimeError(
+                    f"{description} activated without satisfying its "
+                    f"authoritative postcondition: {attempts}"
+                )
+        raise RuntimeError(
+            f"{description} did not activate after one bounded retry: "
+            f"{attempts}"
+        )
+    finally:
+        button.clicked.disconnect(record_activation)
+
+
 @contextmanager
 def _expected_dialogs(app: Any, *specs: tuple[str, str]):
     """Temporarily register dialogs that one driver is actively controlling."""
@@ -266,6 +335,8 @@ class _QTestSurfaceDriver:
         handled: list[dict[str, Any]] = []
         state: dict[str, Any] = {"error": None}
         deadline = time.monotonic() + self.context.deadline.remaining_seconds(10.0)
+        inspection_timer = QtCore.QTimer(self.app)
+        inspection_timer.setInterval(5)
 
         def inspect() -> None:
             if state["error"] is not None or len(handled) >= len(expected):
@@ -276,8 +347,6 @@ class _QTestSurfaceDriver:
                     state["error"] = RuntimeError(
                         "expected dialog sequence did not complete"
                     )
-                    return
-                QtCore.QTimer.singleShot(5, inspect)
                 return
             if not isinstance(active, QtWidgets.QMessageBox):
                 state["error"] = RuntimeError(
@@ -318,16 +387,27 @@ class _QTestSurfaceDriver:
             self.context.dialogs.append(entry)
             self.context.record_event("dialog", **entry)
             QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
-            if len(handled) < len(expected):
-                QtCore.QTimer.singleShot(0, inspect)
 
-        with _expected_dialogs(
-            self.app,
-            *((title, "QMessageBox") for title, _button in expected),
-        ):
-            QtCore.QTimer.singleShot(0, inspect)
-            self.click(widget)
-            self.context.pump_events()
+        inspection_timer.timeout.connect(inspect)
+
+        inspection_timer.start()
+        try:
+            with _expected_dialogs(
+                self.app,
+                *((title, "QMessageBox") for title, _button in expected),
+            ):
+                _click_button_with_bounded_retry(
+                    self.context,
+                    widget,
+                    postcondition=lambda: (
+                        state["error"] is not None
+                        or len(handled) == len(expected)
+                    ),
+                    description="message-box action button",
+                )
+        finally:
+            inspection_timer.stop()
+            inspection_timer.deleteLater()
         if state["error"] is not None:
             raise state["error"]
         if len(handled) != len(expected):
@@ -863,9 +943,31 @@ def _drive_editor_post_start_lock_and_copy(
             copy_modal_timer.timeout.connect(drive_copy_modals)
 
             def create_copy() -> Mapping[str, Any]:
+                expected_dir = (source_dir.parent / copy_name).resolve()
                 copy_modal_timer.start()
                 try:
-                    click(dialog.duplicate_btn)
+                    with _expected_dialogs(
+                        context.app,
+                        (
+                            "Duplicate Experiment Design",
+                            "EditableCopyNameDialog",
+                        ),
+                    ):
+                        interaction = _click_button_with_bounded_retry(
+                            context,
+                            dialog.duplicate_btn,
+                            postcondition=lambda: (
+                                state["error"] is not None
+                                or (
+                                    bool(state["copy_name_dialog"])
+                                    and Path(
+                                        dialog.model.experiment_dir_path
+                                    ).resolve()
+                                    == expected_dir
+                                )
+                            ),
+                            description="editable-copy button",
+                        )
                 finally:
                     copy_modal_timer.stop()
                     copy_modal_timer.deleteLater()
@@ -882,7 +984,6 @@ def _drive_editor_post_start_lock_and_copy(
                     raise RuntimeError(
                         "copy-name dialog did not identify the current source"
                     )
-                expected_dir = (source_dir.parent / copy_name).resolve()
                 current_dir = Path(
                     dialog.model.experiment_dir_path
                 ).resolve()
@@ -916,6 +1017,7 @@ def _drive_editor_post_start_lock_and_copy(
                     "destination": str(expected_dir),
                     "source_auto_selected": str(source_dir.resolve()),
                     "copy_name_dialog": dict(state["copy_name_dialog"]),
+                    "button_interaction": interaction,
                     "action_label": str(dialog.finish_btn.text() or ""),
                     "controls_editable": editable,
                     "control_matrix": matrix,

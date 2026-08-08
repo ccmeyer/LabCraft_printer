@@ -1078,7 +1078,8 @@ Rollback:
 
 ### Milestone 8: Manual suites, exploration, and operational handoff
 
-Status: `in_progress` (Slices 1 through 7 complete; Slice 8 pending)
+Status: `in_progress` (Slices 1 through 7 complete; Slice 8 Windows gates
+complete, final Pi requalification authorization pending)
 
 Goal:
 
@@ -1323,7 +1324,8 @@ Status: `complete` (2026-08-07)
 
 #### Milestone 8 Slice 8: Retention, runbook, and closeout
 
-Status: `planned`
+Status: `in_progress` (Windows gates complete; final Pi requalification
+authorization pending)
 
 - document which manual suite to run for each class of change, artifact
   locations, replay, stale-evidence handling, troubleshooting, and Pi safety;
@@ -1333,6 +1335,26 @@ Status: `planned`
   stress, and authorized Pi evidence;
 - run focused tests per slice and the complete Python suite once at final
   Milestone 8 validation.
+
+Closeout progress (2026-08-07):
+
+- final-source Windows standard 1/1, lifecycle 8/8, matrix 8/8, exploration
+  10/10, and host regression 96/96 passed;
+- host stress completed 3,840/3,840 operations and ten head lifecycles with
+  zero failed actions/assertions, starvation, or unexpected dialogs and clean
+  teardown; its aggregate retains only informational responsiveness/RSS
+  warnings;
+- visible standard and its exact replay passed, and all 21 Windows
+  capabilities are passing with zero failed/stale/missing entries;
+- focused validation passed 189 unit/contract and 18 real-process system
+  tests; the complete default suite passed 4,080 tests with 72 intentional
+  skips and 389 warnings in 218.64 seconds;
+- two fail-closed page-driver timing corrections changed the final Windows
+  source fingerprint to
+  `bd2fb283c348f1bd8585079f2287f180223bfea4b058448899e6c138a2ace5d9`;
+- the retained Slice 7 Pi bundle still validates, but those page-driver changes
+  make it source-stale. A fresh authorized `pi_primary` plus exact replay is the
+  only remaining closeout gate; `pi_stress` remains out of scope.
 
 Gate:
 
