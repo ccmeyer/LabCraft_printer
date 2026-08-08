@@ -1626,10 +1626,10 @@ Rollback:
 
 ### Milestone 11: Randomized design, calibration, reload, and execution interaction
 
-Status: `implementation in progress`; Slices 11.1 through 11.4 complete.
-Current next action: execute Slice 11.5 retained offscreen/replay/visible and
-regression qualification, audit retained evidence, update operator guidance,
-and close Milestone 11.
+Status: `complete` (2026-08-08; five independently reviewed and committed
+slices, including retained qualification).
+Current next action: prepare Milestone 12's editor, execution-preflight, and
+persistence safeguard execution plan before any safeguard implementation.
 
 Execution plan:
 
@@ -2284,7 +2284,7 @@ authoritative reload/resume coverage.
 
 ## Definition Of Done
 
-Milestones 0-10 are complete. The expanded effort is complete when:
+Milestones 0-11 are complete. The expanded effort is complete when:
 
 - a dedicated visible interactive launcher safely constructs the real
   application in simulation mode;
@@ -2334,8 +2334,8 @@ Milestones 0-10 are complete. The expanded effort is complete when:
 
 ## Current Next Action
 
-Milestones 7, 8, 9, and 10 are complete. Their operator capabilities remain
-the current qualified baseline. Milestone 11 is the current next action.
+Milestones 7, 8, 9, 10, and 11 are complete. Their operator capabilities
+remain the current qualified baseline. Milestone 12 is the current next action.
 Milestone 10 closed as follows:
 
 1. Slice 10.1 is complete: the complete typed nine-case catalog, independent
@@ -2365,20 +2365,19 @@ Milestone 10 closed as follows:
    suite pass. Retained evidence was audited and operator documentation was
    updated without changing source behavior or schemas.
 
-Milestone 11 planning is complete in
+Milestone 11 is complete in five independently reviewed slices recorded in
 `docs/sil_interactive_simulation_milestone_11_execution_plan.md`. Slice 11.1
-is complete: the singleton joined-interaction contract, literal seed-4321
-mapping/count/revision/head oracle, tracked fixture and hashes, source
-compatibility audit, and fail-closed mutation coverage are frozen without a
-placeholder runtime registration. Slice 11.2 is the current next action:
-compose real-editor randomized finalization through authoritative revision 1,
-Design A's real boundary-crossing calibration through revision 3, and the
-calibrated zero-progress checkpoint. Execute only one slice at a time, with a
-slice-specific implementation plan, focused validation, completion record,
-clean worktree, and independent commit before advancing. The complete scenario
-is registered only in Slice 11.4; retained offscreen/replay/visible and broader
-regression qualification remain reserved for Slice 11.5. Any production defect
-still requires a separate reviewed correction plan.
+froze the singleton literal joined contract and hashes. Slice 11.2 proved real-
+editor randomization and Design A boundary calibration at zero progress.
+Slice 11.3 proved clean first-session teardown, authoritative fresh load, and
+explicit activation without memory leakage. Slice 11.4 calibrated remaining
+stocks, reconciled all three ID-keyed passes and terminal reload, and
+registered the complete scenario/capability. Slice 11.5 passed retained
+offscreen and visible direct/replay qualification, lifecycle and host-
+regression suite/replays, focused compatibility checks, and the complete
+default Python suite; retained evidence and all eleven visible screenshots
+were audited. Milestone 12 planning is now the current next action. Any future
+production defect still requires a separate reviewed correction plan.
 
 The Milestone 9 count oracle is stable and is reused only to normalize
 observed stock/well plan and runtime counts. Milestone 10 expected values remain

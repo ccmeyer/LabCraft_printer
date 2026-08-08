@@ -161,6 +161,99 @@ for retained paths, hashes, source fingerprint, and limitations. The baseline
 does not make historical artifacts a substitute for source-current
 qualification.
 
+## Randomized calibration/reload lifecycle
+
+Use the singleton `randomized_calibration_reload_execution_v1` scenario when
+a change can affect the join between experiment randomization, stock-specific
+calibration, clean application-session reload, execution, or terminal
+persistence. It creates the qualified seed-4321 multi-reagent design through
+the real Qt editor, calibrates Design A across the 10 nL to 18 nL count
+boundary, rotates into a clean application session, calibrates Water and
+Design B, executes all three stock passes, and performs a third-session
+completed read-only reload.
+
+Inspect selection without executing:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario randomized_calibration_reload_execution_v1 --dry-run
+```
+
+Run retained offscreen evidence:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario randomized_calibration_reload_execution_v1 `
+  --output-root verification_reports\m11-s5\offscreen `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 180 `
+  --qt-platform offscreen
+```
+
+Run visible Windows evidence:
+
+```powershell
+$env:QT_QPA_PLATFORM = "windows"
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario randomized_calibration_reload_execution_v1 `
+  --output-root verification_reports\m11-s5\visible `
+  --seed 1 --speed-multiplier 20 --timeout-seconds 240 --visible
+```
+
+Execute the exact replay list printed in `summary.txt` and stored at
+`run.replay_command`; do not reconstruct it from memory. For visible
+replay, retain `QT_QPA_PLATFORM=windows` in the caller environment. The
+qualified direct replay shapes are:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario randomized_calibration_reload_execution_v1 `
+  --output-root <exact-output-root-from-report> `
+  --seed 1 --speed-multiplier 1000.0 --timeout-seconds 180.0
+
+$env:QT_QPA_PLATFORM = "windows"
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario randomized_calibration_reload_execution_v1 `
+  --output-root <exact-output-root-from-report> `
+  --seed 1 --speed-multiplier 20.0 --timeout-seconds 240.0 --visible
+```
+
+Require the literal reaction mapping `A1:R8`, `A2:R6`, `A3:R3`, `A4:R2`,
+`A5:R7`, `A6:R4`, `A7:R1`, `A8:R5`. Final keyed droplet counts are Design A
+`1,1,1,1,1,1,1,1`, Design B `3,3,1,3,1,3,1,1`, and Water
+`6,6,8,6,8,6,8,8` for wells A1 through A8. Require 24 unique intents and
+completed simulator DISPENSE commands, 80 droplets, pass boundaries 8/16/24,
+revisions 1-6, three distinct application-session IDs, zero dispatch in
+sessions 1 and 3, and terminal `completed`/`analysis_only` state.
+
+For failure triage, inspect the report, action/assertion ledgers, and evidence
+manifest from the exact failed run before changing timeouts:
+
+```powershell
+$run = "<exact-run-directory>"
+Get-Content -LiteralPath "$run\summary.txt"
+Get-Content -LiteralPath "$run\report.json" | ConvertFrom-Json |
+  Select-Object classification, source, workload, metrics
+Get-Content -LiteralPath "$run\evidence_manifest.json" | ConvertFrom-Json
+```
+
+Cleanup is successful only when `scenario.teardown` passes, every application
+recorder closes, `close_succeeded` is true, and `session_lock_present` is
+false. Verify those fields in the retained report:
+
+```powershell
+$report = Get-Content -Raw -LiteralPath "<exact-run-directory>\report.json" |
+  ConvertFrom-Json
+$report.metrics.workflow.values.cleanup_results |
+  Select-Object status, failure_message, evidence
+```
+
+Do not delete the retained run after validation. The Milestone 11 closeout
+baseline at source commit `a385b1b` passed offscreen and visible direct runs
+and exact replays, lifecycle and host-regression suites and exact replays, and
+the default Python suite (`4192 passed, 90 skipped`). See
+`docs/sil_interactive_simulation_milestone_11_slice_5_completion_record.md`
+for retained paths, hashes, exact evidence, and limitations.
+
 ## Evidence layout and authority
 
 Generated data remains beneath the ignored `verification_reports/` tree:

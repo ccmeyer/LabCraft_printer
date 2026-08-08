@@ -1,6 +1,6 @@
 # Milestone 11 Execution Plan: Randomized Design, Calibration, Reload, and Execution
 
-Status: implementation in progress; Slices 11.1 through 11.4 complete
+Status: complete (2026-08-08; all five slices and final qualification complete)
 
 Prepared: 2026-08-08
 
@@ -841,6 +841,9 @@ and host-regression suites/replays, complete Python suite, evidence audit,
 operator documentation, and milestone closeout.
 
 ## Slice 11.5: Qualification, retained evidence, documentation, and closeout
+
+Status: complete (2026-08-08); see
+`docs/sil_interactive_simulation_milestone_11_slice_5_completion_record.md`.
 
 ### Objective and explicit non-goals
 
