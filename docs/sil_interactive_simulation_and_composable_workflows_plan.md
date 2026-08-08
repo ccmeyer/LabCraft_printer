@@ -1628,6 +1628,45 @@ Rollback:
 
 Status: `planned`
 
+Execution plan:
+
+- `docs/sil_interactive_simulation_milestone_11_execution_plan.md`
+- execute five independently reviewed and committed slices;
+- use one typed joined-interaction scenario, not a matrix;
+- defer active scenario/capability registration until Slice 11.4, when the
+  complete journey and its focused system test exist.
+
+Selected design and lifecycle decisions:
+
+- reuse qualified case `multi_reagent_seed_4321`, case SHA-256
+  `5d2e7dff0ea9c2e0bcd1e3b218b39280aca57b745834024226fece850f110f51`,
+  design seed 4321, and its literal assignment;
+- calibrate single-stock `Design A_10.00_x` through the real UI at 1800 us /
+  18 nL, changing its four prepared 2-drop wells to 1 drop while preserving
+  all eight `Design B_10.00_x` counts exactly;
+- rotate at ACTIVE revision 3 with zero added progress, reload in a genuinely
+  fresh application session, and activate explicitly from authoritative
+  files;
+- calibrate Water then Design B, execute explicit ID-keyed Design A, Design B,
+  and Water passes, and reconcile 24 unique stock/well intents and 80 droplets;
+- reload COMPLETED revision 6 in a third fresh application session and prove
+  terminal target, added, intent, simulator, and durable completion truth;
+- add a reusable clean-session rotation phase because the existing reload
+  phase is intrinsically coupled to soft-stop/pause/resume evidence.
+
+Slice sequence:
+
+1. singleton typed contract, literal identity/count/revision oracle, hashes,
+   and compatibility freeze;
+2. real-editor finalization, Design A boundary calibration, and calibrated
+   zero-progress checkpoint;
+3. reusable clean-session rotation, authoritative reload, reconstruction, and
+   explicit activation;
+4. remaining calibrations, all stock passes, terminal reconciliation/reload,
+   and complete scenario/capability registration;
+5. offscreen and visible qualification/replays, lifecycle and host regression,
+   complete Python suite, retained-evidence audit, documentation, and closeout.
+
 Goal:
 
 - prove that a boundary-crossing calibration remains associated with the
@@ -2322,13 +2361,17 @@ Milestone 10 closed as follows:
    suite pass. Retained evidence was audited and operator documentation was
    updated without changing source behavior or schemas.
 
-Milestone 11 should now implement the planned randomized
-design/calibration/reload/execution interaction as independently reviewable
-slices. It must reuse the qualified Milestone 9 count oracle and Milestone 10
-design catalog/driver contracts without weakening either milestone's hashes,
-schemas, replay behavior, authoritative reload, or rejected-boundary
-no-mutation evidence. Any production defect still requires a separate
-reviewed correction plan.
+Milestone 11 planning is complete in
+`docs/sil_interactive_simulation_milestone_11_execution_plan.md`. Slice 11.1
+is the current next action: freeze the singleton joined-interaction contract,
+literal seed-4321 mapping/count/revision/head oracle, new case/fixture hashes,
+and compatibility audit without registering a placeholder scenario. Execute
+only one slice at a time, with a slice-specific implementation plan, focused
+validation, completion record, clean worktree, and independent commit before
+advancing. The complete scenario is registered only in Slice 11.4; retained
+offscreen/replay/visible and broader regression qualification remain reserved
+for Slice 11.5. Any production defect still requires a separate reviewed
+correction plan.
 
 The Milestone 9 count oracle is stable and is reused only to normalize
 observed stock/well plan and runtime counts. Milestone 10 expected values remain
