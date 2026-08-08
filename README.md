@@ -2034,6 +2034,17 @@ linkage before reporting success. Suite mode never invokes cleanup. Retain a
 failed run for diagnosis and use the separately bounded manifest cleanup command
 only after explicit review.
 
+The authorized Milestone 8 Slice 7 qualification on Raspberry Pi 5 passed the
+`pi_primary` suite and its exact replay at seed 1 and 100x simulator speed. Each
+fresh child completed 96/96 wells with all required assertions passing, zero
+unexpected dialogs, zero queue starvation, and clean teardown. The retained
+aggregate SHA-256 values are `25ec6c8389564041...` and `16799d1e19973d6a...`;
+the locally validated two-aggregate bundle SHA-256 is `ecb9fccc83017583...`.
+The remote evidence was intentionally retained and `pi_stress` was not run.
+See
+`docs/sil_interactive_simulation_milestone_8_slice_7_completion_record.md`
+for exact paths, full hashes, safety identity, and the focused bootstrap fixes.
+
 If suite selection fails before Qt starts, verify the suite name, evidence file
 paths, source-tree identity, and Qt platform in preflight/proof. A completed
 failing aggregate returns `2` and is still bundled; orchestration or evidence

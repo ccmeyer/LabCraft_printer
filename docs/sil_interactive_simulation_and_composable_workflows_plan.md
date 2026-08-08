@@ -1078,8 +1078,7 @@ Rollback:
 
 ### Milestone 8: Manual suites, exploration, and operational handoff
 
-Status: `in_progress` (local implementation complete; authorized Pi
-qualification pending)
+Status: `in_progress` (Slices 1 through 7 complete; Slice 8 pending)
 
 Goal:
 
@@ -1287,7 +1286,7 @@ Status: `complete`
 
 #### Milestone 8 Slice 7: Manual Pi suite integration
 
-Status: `planned`
+Status: `complete` (2026-08-07)
 
 - expose `pi_primary` and `pi_stress` through the same manual suite-selection
   and aggregate-report contracts;
@@ -1310,9 +1309,17 @@ Status: `planned`
   including the real Windows standard suite and PowerShell primary/stress dry
   runs. A later combined source-identity selection passed 50 tests from a fresh
   ignored basetemp after the default Windows pytest temp root denied access;
-- no SSH, SCP, Pi, firmware, protocol, or physical-hardware operation has been
-  performed. Slice 7 remains open until separate authorization is granted and
-  the exact-source Pi completes `pi_primary` and its exact replay.
+- the authorized exact-source Raspberry Pi completed `pi_primary` and its exact
+  allowlisted replay with 96/96 completions in each fresh child. Both
+  aggregates, all ten required assertions, Pi proof/trace linkage, clean
+  teardown, zero unexpected dialogs, and zero queue starvation passed;
+- the final aggregate SHA-256 values are `25ec6c8389564041...` and
+  `16799d1e19973d6a...`; the validated two-aggregate bundle SHA-256 is
+  `ecb9fccc83017583...`. Remote evidence remains retained and `pi_stress` was
+  not run;
+- two fail-closed qualification findings were corrected before closeout: the
+  composed proof audit now classifies native Linux ARM as Pi SIL, and isolated
+  children/replay preserve the repository virtual-environment executable.
 
 #### Milestone 8 Slice 8: Retention, runbook, and closeout
 
@@ -1710,9 +1717,7 @@ This effort is complete when:
 ## Current Next Action
 
 Milestone 7 is complete and the eight-slice Milestone 8 direction is approved.
-Milestone 8 Slices 1 through 6 are complete. Slice 7 local implementation and
-focused validation are complete, but the slice remains open at its explicit
-remote-authorization gate. The operator can list the tracked
+Milestone 8 Slices 1 through 7 are complete. The operator can list the tracked
 portfolio, dry-run suite/capability/direct-scenario plans, request
 changed-source recommendations, and explicitly execute Windows suite or
 capability plans as isolated fresh processes with hashed aggregate evidence.
@@ -1722,7 +1727,10 @@ running another workflow. The operator can also list, dry-run, execute, and
 replay the eight-case mixed-mode calibration matrix without adding a journey
 or tracked fixture per variation. The operator can also list, dry-run, execute,
 and exactly replay the ten-sequence bounded prepared-editor exploration without
-adding a fixture or journey body per seed. After the Slice 7 diff is reviewed,
-request separate authorization and exact target/source confirmation for one
-`pi_primary` run plus its exact replay. Do not run `pi_stress`, begin Slice 8,
-or perform firmware, protocol, or physical-hardware work at this gate.
+adding a fixture or journey body per seed. Slice 7 also provides manually
+authorized, exact-source `pi_primary` execution with retained proof, aggregate,
+replay, and bundle evidence. Proceed next to the Slice 8 retention, runbook,
+representative-evidence review, and final full-suite closeout plan. Do not run
+`pi_stress` unless it is explicitly selected and separately justified, and do
+not perform firmware, protocol, or physical-hardware work as part of that
+closeout.

@@ -1,6 +1,6 @@
 # Milestone 8 Slice 7 — Manual Raspberry Pi Suite Integration
 
-Status: local implementation complete; authorized Pi qualification pending
+Status: complete (2026-08-07)
 (2026-08-07)
 
 Baseline: clean commit `63af6cab8414a32e7c1a3dd5b7b7808ad496ef7f`.
@@ -83,7 +83,28 @@ and retrieval commands without contacting a Pi or invoking cleanup. The local
 host has no `bash` executable, so shell syntax is covered by the static Pi-lane
 contract test and must also be checked by the Pi before remote qualification.
 
-No full pytest suite, SSH, SCP, remote Pi operation, stress execution, or
-physical-hardware operation was performed. The completion record remains
-intentionally absent until the separately authorized primary run and exact
-replay both pass.
+No full pytest suite or Pi stress, firmware, protocol, or physical-hardware
+operation was performed during local qualification.
+
+## Authorized Pi qualification
+
+The operator authorized `labcraft@192.168.0.33`. The clean Pi checkout and
+local branch were aligned at `a7fd7b5a844fb88ce1c2fd2fdbe98bfe783beeb8`
+after two bounded orchestration corrections recorded separately: composed
+Linux ARM proof-audit classification and virtual-environment executable
+preservation.
+
+The final `pi_primary` aggregate and its exact allowlisted replay both passed
+96/96 completions. Both used source-tree SHA-256
+`fb2875ac4039fc83e1d7049da3d221c3a6534bb28145a138a1ffb94b343789d1`,
+proof SHA-256
+`04bd01c4a0d7e77f7a36e9709a493ee576eb00983788f95be39a5c3e8d39cfa7`,
+and trace SHA-256
+`ff00486d407e0653dd0b07b353dd7caa91686682885e9146b6a96858c8502059`.
+The aggregate SHA-256 values are
+`25ec6c8389564041531e354892dbbb165db87bf453f189b4b0a70ffc995f5060`
+and `16799d1e19973d6a23e3b30ba4c81f500cb118993e81b663f3204f5dd5cd486b`.
+The locally validated two-aggregate bundle SHA-256 is
+`ecb9fccc83017583eb2660f93db6fb89ffa2794aac864080505e4190d3927e09`.
+Remote evidence remains retained; no cleanup was invoked. See the Slice 7
+completion record for exact paths and inspection results.
