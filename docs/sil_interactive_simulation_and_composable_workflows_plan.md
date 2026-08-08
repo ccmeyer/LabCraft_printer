@@ -1078,8 +1078,7 @@ Rollback:
 
 ### Milestone 8: Manual suites, exploration, and operational handoff
 
-Status: `in_progress` (Slices 1 through 7 complete; Slice 8 Windows gates
-complete, final Pi requalification authorization pending)
+Status: `complete` (2026-08-07; all eight slices and final validation complete)
 
 Goal:
 
@@ -1324,8 +1323,7 @@ Status: `complete` (2026-08-07)
 
 #### Milestone 8 Slice 8: Retention, runbook, and closeout
 
-Status: `in_progress` (Windows gates complete; final Pi requalification
-authorization pending)
+Status: `complete` (2026-08-07)
 
 - document which manual suite to run for each class of change, artifact
   locations, replay, stale-evidence handling, troubleshooting, and Pi safety;
@@ -1352,9 +1350,14 @@ Closeout progress (2026-08-07):
 - two fail-closed page-driver timing corrections changed the final Windows
   source fingerprint to
   `bd2fb283c348f1bd8585079f2287f180223bfea4b058448899e6c138a2ace5d9`;
-- the retained Slice 7 Pi bundle still validates, but those page-driver changes
-  make it source-stale. A fresh authorized `pi_primary` plus exact replay is the
-  only remaining closeout gate; `pi_stress` remains out of scope.
+- fresh authorized `pi_primary` and its exact replay passed 96/96 each from
+  commit `1e7efa86f95461a2865c075c717f06af06ae28cd` in a separate clean Pi
+  worktree. Aggregate hashes are `c884a480054f31fff6d435e5cb0aae7efd9223d6525bff342ca9c2af1baa25f8`
+  and `228fd7aad64d28d03a93511cdd37791825737e70ccfddba11261c7c3293172a6`;
+  the validated bundle hash is
+  `785bcbbc8e6d6e34eff13c11fd7fcc4f20c1afa54b349d53810e89deae7b8ff0`;
+- all remote evidence remains retained, no cleanup ran, and `pi_stress`
+  remained out of scope.
 
 Gate:
 
@@ -1738,8 +1741,7 @@ This effort is complete when:
 
 ## Current Next Action
 
-Milestone 7 is complete and the eight-slice Milestone 8 direction is approved.
-Milestone 8 Slices 1 through 7 are complete. The operator can list the tracked
+Milestones 7 and 8 are complete. The operator can list the tracked
 portfolio, dry-run suite/capability/direct-scenario plans, request
 changed-source recommendations, and explicitly execute Windows suite or
 capability plans as isolated fresh processes with hashed aggregate evidence.
@@ -1751,8 +1753,8 @@ or tracked fixture per variation. The operator can also list, dry-run, execute,
 and exactly replay the ten-sequence bounded prepared-editor exploration without
 adding a fixture or journey body per seed. Slice 7 also provides manually
 authorized, exact-source `pi_primary` execution with retained proof, aggregate,
-replay, and bundle evidence. Proceed next to the Slice 8 retention, runbook,
-representative-evidence review, and final full-suite closeout plan. Do not run
-`pi_stress` unless it is explicitly selected and separately justified, and do
-not perform firmware, protocol, or physical-hardware work as part of that
-closeout.
+replay, and bundle evidence. The operator runbook now records manual lane
+selection, replay, failure triage, freshness, retention, and Pi authorization.
+Do not run `pi_stress` unless it is explicitly selected and separately
+justified, and do not infer firmware, protocol, or physical-hardware coverage
+from application SIL evidence.

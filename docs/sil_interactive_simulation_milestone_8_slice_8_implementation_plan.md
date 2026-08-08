@@ -1,7 +1,6 @@
 # Milestone 8 Slice 8 — Operational Runbook, Evidence Refresh, and Final Closeout
 
-Status: in progress - Windows gates complete; final Pi requalification awaits
-fresh operator authorization
+Status: complete (2026-08-07)
 
 ## Purpose and baseline
 
@@ -103,7 +102,7 @@ automatically.
   prohibited-device accesses;
 - focused validation and the complete default pytest suite have zero failures.
 
-## Current evidence and remaining gate
+## Completion evidence
 
 The final-source Windows evidence is:
 
@@ -147,14 +146,34 @@ Focused validation passed 189 unit/contract tests and 18 real-process system
 tests. The complete default suite passed 4,080 tests with 72 intentional skips
 and 389 existing warnings in 218.64 seconds.
 
-The retained Slice 7 Pi v2 bundle still validates all 52 members and both
-aggregates; its archive SHA-256 remains
-`ecb9fccc83017583eb2660f93db6fb89ffa2794aac864080505e4190d3927e09`.
-However, the page-driver corrections are Pi execution inputs, so that retained
-evidence is now source-stale relative to the final tree. Per the approved
-authorization boundary, Slice 8 and Milestone 8 remain in progress until the
-operator separately authorizes a fresh `pi_primary` run plus exact replay. Do
-not run `pi_stress`.
+The operator authorized deployment of final execution commit
+`1e7efa86f95461a2865c075c717f06af06ae28cd` to the isolated Pi worktree
+`/home/labcraft/LabCraft_printer-m8s8-sil-1e7efa8`. The Pi Linux execution
+tree contains 888 files and has SHA-256
+`8d1dc93d9a9fdd60c1fbba8bfba890d29ee7c5250b36abbc20f48fd8952bb108`.
+The original `feature/balance_integration` checkout was not switched or
+modified.
+
+Fresh `pi_primary` and its exact allowlisted replay each passed 1/1 with
+96/96 completions, distinct parent/child PIDs, zero unexpected dialogs or
+errors, and clean teardown. Their aggregate SHA-256 values are
+`c884a480054f31fff6d435e5cb0aae7efd9223d6525bff342ca9c2af1baa25f8`
+and `228fd7aad64d28d03a93511cdd37791825737e70ccfddba11261c7c3293172a6`.
+Both bind to preflight SHA-256
+`5287ed38afd1e2f0e395897a251876290376144e1414267ba9d94b1a8617e8e0`,
+proof SHA-256
+`1c1ee0533332f29e5bd44b31d7818880970fdea3883c9ae93193e9eaf357e19c`,
+and trace SHA-256
+`fd1f93f95c072769e84326558a8a3b959106f2e33c761f1a1206197a33f88b6a`.
+The locally validated 53-member v2 bundle SHA-256 is
+`785bcbbc8e6d6e34eff13c11fd7fcc4f20c1afa54b349d53810e89deae7b8ff0`.
+Remote evidence and the isolated deployment remain retained; no cleanup ran
+and `pi_stress` was not executed.
+
+All approved Windows, visible/replay, coverage, focused-test, full-suite, and
+fresh Pi gates are therefore complete. Exact paths and the complete audit are
+recorded in
+`sil_interactive_simulation_milestone_8_slice_8_completion_record.md`.
 
 ## Failure policy, exclusions, and rollback
 

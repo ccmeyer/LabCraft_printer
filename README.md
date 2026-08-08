@@ -2053,6 +2053,18 @@ See
 `docs/sil_interactive_simulation_milestone_8_slice_7_completion_record.md`
 for exact paths, full hashes, safety identity, and the focused bootstrap fixes.
 
+Milestone 8 final closeout requalified `pi_primary` after the final reusable
+Qt-driver corrections. The fresh primary and its exact replay each passed
+96/96 from commit `1e7efa86f95461a2865c075c717f06af06ae28cd` in a separate,
+clean Pi worktree. Their aggregate SHA-256 values are
+`c884a480054f31fff6d435e5cb0aae7efd9223d6525bff342ca9c2af1baa25f8`
+and `228fd7aad64d28d03a93511cdd37791825737e70ccfddba11261c7c3293172a6`;
+the validated 53-member bundle SHA-256 is
+`785bcbbc8e6d6e34eff13c11fd7fcc4f20c1afa54b349d53810e89deae7b8ff0`.
+No cleanup or `pi_stress` run occurred. The complete Windows/Pi evidence,
+focused and full-suite results, source identities, and retained paths are in
+`docs/sil_interactive_simulation_milestone_8_slice_8_completion_record.md`.
+
 If suite selection fails before Qt starts, verify the suite name, evidence file
 paths, source-tree identity, and Qt platform in preflight/proof. A completed
 failing aggregate returns `2` and is still bundled; orchestration or evidence
