@@ -108,14 +108,34 @@ def test_milestone_11_partial_checkpoint_cannot_start_or_register_execution():
         "experiment.editor_create_finalize",
         "experiment.randomized_joined_design_exact",
         "execution.calibrated_zero_progress_exact",
+        "ui.fresh_application_session_constructed",
+        "execution.first_session_teardown_clean",
+        "execution.authoritative_reload_valid",
+        "execution.authoritative_runtime_rehydrated",
+        "execution.clean_session_rotation_exact",
     )
     assert "array.start_via_ui" not in JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS
-    assert "experiment.activate_authoritative_via_ui" not in (
+    assert "experiment.activate_authoritative_via_ui" in (
         JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS
     )
     assert "run_stock_passes" not in source
     assert "run_authoritative_reload_resume_boundary" not in source
+    assert "run_clean_authoritative_session_rotation_boundary" in source
     assert JOINED_INTERACTION_CASE_ID not in registered_scenario_ids()
+
+
+def test_clean_session_rotation_phase_is_lifecycle_neutral():
+    from tools.virtual_workflows.journey_phases import (
+        run_clean_authoritative_session_rotation_boundary,
+    )
+
+    source = inspect.getsource(run_clean_authoritative_session_rotation_boundary)
+
+    assert "run_soft_stop_boundary" not in source
+    assert "resume_soft_stopped_array" not in source
+    assert "run_stock_passes" not in source
+    assert 'expected_eligibility_status="ready_to_start"' in source
+    assert 'expected_array_state="idle"' in source
 
 
 def test_authoritative_evidence_readers_are_centralized_and_read_only():

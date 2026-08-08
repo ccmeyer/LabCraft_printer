@@ -3561,6 +3561,187 @@ def calibrated_zero_progress_assertion(
     )
 
 
+def clean_joined_session_rotation_assertion(
+    context: Any,
+    *,
+    case: Any,
+    rotation: Mapping[str, Any],
+    first_session_observer: Mapping[str, Any],
+    second_session_observer: Mapping[str, Any],
+) -> AssertionResult:
+    """Join a fresh clean-start activation to literal persisted case truth."""
+
+    from ExecutionCalibrationStore import load_execution_calibrations
+    from tools.virtual_workflows.joined_interaction_cases import DESIGN_A_STOCK_ID
+
+    source = rotation["source_bundle"]
+    loaded = rotation["loaded_bundle"]
+    activated = rotation["activated_bundle"]
+    sessions = [dict(row) for row in rotation.get("application_sessions", ())]
+    expected = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("calibrated_zero_progress").rows
+        ),
+        label="joined fresh literal",
+    )
+    inspections = dict(rotation.get("inspections") or {})
+    normalized_inspections = {
+        checkpoint: {
+            name: normalize_stock_well_counts(
+                rows,
+                label=f"joined {checkpoint} {name}",
+            )
+            for name, rows in dict(values).items()
+            if name in {
+                "plan_targets",
+                "progress_targets",
+                "runtime_targets",
+                "progress_added",
+            }
+        }
+        for checkpoint, values in inspections.items()
+    }
+    records = load_execution_calibrations(
+        context.experiment_model.execution_calibrations_file_path
+    ).records
+    record_rows = [record.to_dict() for record in records.values()]
+    record = record_rows[0] if len(record_rows) == 1 else {}
+    stocks = {
+        stock.stock_id: stock
+        for stock in context.experiment_model.get_execution_plan_snapshot().stocks
+    }
+    design_a = stocks.get(DESIGN_A_STOCK_ID)
+    lifecycle_keys = (
+        "begins",
+        "attachments",
+        "completions",
+        "discard_batches",
+        "simulator_dispenses",
+        "pass_starts",
+        "terminal_transitions",
+        "soft_stop_events",
+    )
+    lifecycle_1 = dict(first_session_observer.get("lifecycle") or {})
+    lifecycle_2 = dict(second_session_observer.get("lifecycle") or {})
+    loaded_counts = normalized_inspections.get("loaded", {})
+    activated_counts = normalized_inspections.get("activated", {})
+    checks = {
+        "two_distinct_application_sessions": len(sessions) == 2
+        and sessions[0].get("application_session_id")
+        != sessions[1].get("application_session_id"),
+        "same_retained_session_root": len(sessions) == 2
+        and sessions[0].get("session_id") == sessions[1].get("session_id"),
+        "first_recorder_closed": len(sessions) == 2
+        and (sessions[0].get("recorder") or {}).get("status") == "closed",
+        "first_lock_absent": (
+            rotation.get("first_session_cleanup") or {}
+        ).get("session_lock_present")
+        is False,
+        "close_files_byte_identical": bool(
+            (rotation.get("between_sessions") or {}).get("byte_identical")
+        ),
+        "identity_constant_across_boundaries": (
+            source.plan_id,
+            source.plan_revision,
+            source.design_sha256,
+        )
+        == (loaded.plan_id, loaded.plan_revision, loaded.design_sha256)
+        == (activated.plan_id, activated.plan_revision, activated.design_sha256),
+        "revision_three_active_exact": source.plan_revision
+        == loaded.plan_revision
+        == activated.plan_revision
+        == 3
+        and source.plan_state == loaded.plan_state == activated.plan_state == "active",
+        "assignments_exact": source.assignments
+        == activated.assignments
+        == source.expected_assignments
+        == loaded.expected_assignments
+        == activated.expected_assignments
+        == {row.well_id: row.reaction_id for row in case.assignments},
+        "history_exact": [int(row.get("plan_revision", 0)) for row in activated.history]
+        == [1, 2, 3],
+        "loaded_inactive_ready_to_start": not loaded.runtime_active
+        and loaded.eligibility_status == "ready_to_start"
+        and not loaded.resume_present,
+        "activated_runtime_ready_to_start": activated.runtime_active
+        and activated.eligibility_status == "ready_to_start"
+        and context.controller.get_array_run_state() == "idle",
+        "activated_clean_resume_reference_exact": activated.resume_present
+        and activated.resume_state == "clean"
+        and (activated.resume_plan_id, activated.resume_plan_revision)
+        == (activated.plan_id, 3)
+        and activated.resume_intent_count == 0,
+        "progress_reference_exact": (
+            source.progress_plan_id,
+            source.progress_plan_revision,
+        )
+        == (source.plan_id, 3)
+        == (loaded.progress_plan_id, loaded.progress_plan_revision)
+        == (activated.progress_plan_id, activated.progress_plan_revision),
+        "loaded_literal_counts_exact": all(
+            loaded_counts.get(name) == expected
+            for name in ("plan_targets", "progress_targets")
+        ),
+        "activated_literal_counts_exact": all(
+            activated_counts.get(name) == expected
+            for name in ("plan_targets", "progress_targets", "runtime_targets")
+        ),
+        "zero_progress_across_rotation": source.total_added_droplets
+        == loaded.total_added_droplets
+        == activated.total_added_droplets
+        == 0
+        and all(
+            row.droplets == 0
+            for values in (loaded_counts, activated_counts)
+            for row in values.get("progress_added", ())
+        ),
+        "calibration_head_join_exact": len(record_rows) == 1
+        and record.get("stock_id") == DESIGN_A_STOCK_ID
+        and record.get("printer_head_id") == "virtual-head-m11-design-a-v1"
+        and design_a is not None
+        and design_a.calibration_record_key == record.get("record_id")
+        and design_a.printer_head_id == record.get("printer_head_id"),
+        "first_session_zero_execution": all(
+            not lifecycle_1.get(name) for name in lifecycle_keys
+        ),
+        "second_session_zero_execution": all(
+            not lifecycle_2.get(name) for name in lifecycle_keys
+        ),
+        "simulator_drained": context.machine.check_if_all_completed(),
+        "action_cap_not_exceeded": len(context.action_results)
+        <= case.qualification.action_cap,
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "application_sessions": sessions,
+        "first_session_cleanup": dict(rotation.get("first_session_cleanup") or {}),
+        "between_sessions": dict(rotation.get("between_sessions") or {}),
+        "reload_boundaries": dict(rotation.get("reload_boundaries") or {}),
+        "source": source.prepared_evidence(),
+        "loaded": loaded.prepared_evidence(),
+        "activated": activated.prepared_evidence(),
+        "inspections": inspections,
+        "calibration_record": record,
+        "first_session_lifecycle": lifecycle_1,
+        "second_session_lifecycle": lifecycle_2,
+    }
+    return AssertionResult(
+        "execution.clean_session_rotation_exact",
+        "fresh_activated",
+        "pass" if not evidence["failed_checks"] else "fail",
+        ("ui", "session", "model", "persistence", "simulator"),
+        evidence,
+        (
+            None
+            if not evidence["failed_checks"]
+            else "clean joined session rotation failed: "
+            + ", ".join(evidence["failed_checks"])
+        ),
+    )
+
+
 def _prepared_bundle_results(
     snapshot: Any,
     *,
@@ -4358,6 +4539,7 @@ __all__ = [
     "calibration_assertion",
     "calibration_apply_fail_closed_assertion",
     "calibrated_zero_progress_assertion",
+    "clean_joined_session_rotation_assertion",
     "cleanup_assertion",
     "evaluate_assertion",
     "editor_artifacts_cleanup_assertion",

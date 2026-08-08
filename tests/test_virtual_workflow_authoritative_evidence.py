@@ -6,6 +6,8 @@ import pytest
 
 from tools.virtual_workflows.authoritative_evidence import (
     check_evidence,
+    clean_authoritative_activation_boundary,
+    clean_authoritative_loaded_boundary,
     completed_stock_well_pairs,
     compare_directories,
     experiment_design_projection,
@@ -56,6 +58,115 @@ def test_directory_comparison_reports_exact_and_allowlisted_changes(tmp_path):
         "files_byte_identical",
         "only_allowlisted_files_changed",
     ]
+
+
+def _clean_boundary_snapshot(directory, **updates):
+    values = {
+        "directory": directory,
+        "plan_id": "plan-1",
+        "plan_revision": 3,
+        "plan_state": "active",
+        "design_sha256": "design-sha",
+        "history_json": ("revision-1", "revision-2", "revision-3"),
+        "progress_plan_id": "plan-1",
+        "progress_plan_revision": 3,
+        "calibration_record_count": 1,
+        "eligibility_status": "ready_to_start",
+        "runtime_active": False,
+        "resume_present": False,
+        "resume_state": None,
+        "resume_plan_id": None,
+        "resume_plan_revision": None,
+        "resume_intent_count": 0,
+        "total_added_droplets": 0,
+        "completed_well_ids": (),
+        "audit_rows": [],
+        "eligibility": {"status": "ready_to_start"},
+    }
+    values.update(updates)
+    return SimpleNamespace(**values)
+
+
+def test_clean_authoritative_boundaries_accept_read_only_load_and_allowlisted_activation(
+    tmp_path,
+):
+    (tmp_path / "execution_plan.json").write_text("plan", encoding="utf-8")
+    (tmp_path / "experiment_audit.jsonl").write_text("", encoding="utf-8")
+    source_directory = snapshot_directory(tmp_path)
+    source = _clean_boundary_snapshot(source_directory)
+    loaded = _clean_boundary_snapshot(source_directory)
+
+    (tmp_path / "execution_resume.json").write_text("resume", encoding="utf-8")
+    (tmp_path / "experiment_audit.jsonl").write_text("activated", encoding="utf-8")
+    activated = _clean_boundary_snapshot(
+        snapshot_directory(tmp_path),
+        runtime_active=True,
+        resume_present=True,
+        resume_state="clean",
+        resume_plan_id="plan-1",
+        resume_plan_revision=3,
+        audit_rows=[{"event_type": "authoritative_execution_activated"}],
+    )
+
+    loaded_evidence = clean_authoritative_loaded_boundary(source, loaded)
+    activated_evidence = clean_authoritative_activation_boundary(
+        source, loaded, activated
+    )
+
+    assert loaded_evidence["failed_checks"] == []
+    assert activated_evidence["failed_checks"] == []
+    assert set(activated_evidence["changed_paths"]) == {
+        "execution_resume.json",
+        "experiment_audit.jsonl",
+    }
+
+
+@pytest.mark.parametrize(
+    ("mutation", "failed_check"),
+    (
+        ("loaded_runtime", "runtime_inactive"),
+        ("duplicate_audit", "one_activation_audit_event"),
+        ("stale_resume", "one_clean_resume_checkpoint"),
+        ("nonzero_progress", "zero_progress"),
+        ("disallowed_write", "only_allowlisted_files_changed"),
+    ),
+)
+def test_clean_authoritative_boundaries_fail_closed(tmp_path, mutation, failed_check):
+    (tmp_path / "execution_plan.json").write_text("plan", encoding="utf-8")
+    (tmp_path / "experiment_audit.jsonl").write_text("", encoding="utf-8")
+    before = snapshot_directory(tmp_path)
+    source = _clean_boundary_snapshot(before)
+    loaded = _clean_boundary_snapshot(
+        before,
+        runtime_active=mutation == "loaded_runtime",
+    )
+    if mutation == "loaded_runtime":
+        assert failed_check in clean_authoritative_loaded_boundary(
+            source, loaded
+        )["failed_checks"]
+        return
+
+    (tmp_path / "execution_resume.json").write_text("resume", encoding="utf-8")
+    (tmp_path / "experiment_audit.jsonl").write_text("activated", encoding="utf-8")
+    if mutation == "disallowed_write":
+        (tmp_path / "experiment_design.json").write_text("changed", encoding="utf-8")
+    audit_rows = [{"event_type": "authoritative_execution_activated"}]
+    if mutation == "duplicate_audit":
+        audit_rows *= 2
+    activated = _clean_boundary_snapshot(
+        snapshot_directory(tmp_path),
+        runtime_active=True,
+        resume_present=True,
+        resume_state="clean",
+        resume_plan_id="stale" if mutation == "stale_resume" else "plan-1",
+        resume_plan_revision=3,
+        total_added_droplets=1 if mutation == "nonzero_progress" else 0,
+        audit_rows=audit_rows,
+    )
+
+    evidence = clean_authoritative_activation_boundary(source, loaded, activated)
+
+    assert failed_check in evidence["failed_checks"]
 
 
 def test_experiment_design_projection_preserves_exact_positive_counts(tmp_path):

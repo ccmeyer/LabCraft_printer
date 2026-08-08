@@ -15,6 +15,7 @@ from tools.virtual_workflows.assertions import (
     completed_terminal_reload_assertion,
     calibration_apply_fail_closed_assertion,
     calibrated_zero_progress_assertion,
+    clean_joined_session_rotation_assertion,
     capture_editor_prepared_revision_snapshot,
     editor_artifacts_cleanup_assertion,
     editor_create_finalize_assertion,
@@ -91,6 +92,7 @@ from tools.virtual_workflows.journey_phases import (
     run_soft_stop_resume,
     run_disconnect_fail_closed_boundary,
     run_authoritative_reload_resume_boundary,
+    run_clean_authoritative_session_rotation_boundary,
 )
 from tools.virtual_workflows.page_drivers import ExperimentLoaderDriver
 from tools.virtual_workflows.report import ComposedReportPayload
@@ -184,6 +186,11 @@ JOINED_CALIBRATED_CHECKPOINT_REQUIRED_ASSERTIONS = (
     "experiment.editor_create_finalize",
     "experiment.randomized_joined_design_exact",
     "execution.calibrated_zero_progress_exact",
+    "ui.fresh_application_session_constructed",
+    "execution.first_session_teardown_clean",
+    "execution.authoritative_reload_valid",
+    "execution.authoritative_runtime_rehydrated",
+    "execution.clean_session_rotation_exact",
 )
 EXPERIMENT_DESIGN_REJECTED_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -335,6 +342,8 @@ JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS = frozenset(
         "calibration.generate_via_ui",
         "calibration.select_via_ui",
         "calibration.apply_via_ui",
+        "experiment.load_authoritative_via_ui",
+        "experiment.activate_authoritative_via_ui",
     }
 )
 EXPERIMENT_DESIGN_REJECTED_REQUIRED_UI_ACTIONS = frozenset(
@@ -1382,7 +1391,7 @@ def _experiment_design_body(runtime: JourneyRuntime) -> None:
 
 
 def run_joined_calibrated_checkpoint(runtime: JourneyRuntime) -> None:
-    """Drive the unregistered Milestone 11 lifecycle through revision 3."""
+    """Drive the unregistered Milestone 11 lifecycle through fresh activation."""
 
     from tools.virtual_workflows.experiment_design_cases import (
         editor_specification,
@@ -1486,6 +1495,29 @@ def run_joined_calibrated_checkpoint(runtime: JourneyRuntime) -> None:
     runtime.observations["randomized_calibration_lifecycle"][
         "calibrated_zero_progress"
     ] = dict(calibrated_result.evidence)
+
+    rotation = run_clean_authoritative_session_rotation_boundary(
+        runtime,
+        experiment_dir=calibrated.experiment_dir,
+        expected_name=str(calibrated.metadata.get("name") or ""),
+        completed_count=lambda: 0,
+        pass_context=lambda: {"phase": "fresh_zero_progress"},
+        inspect_loaded=lambda: capture_count_snapshot(context),
+        inspect_activated=lambda: capture_count_snapshot(context),
+        observer_key="joined_session_2_execution",
+    )
+    second_observer = runtime.observations["execution_observer"].snapshot()
+    fresh_result = clean_joined_session_rotation_assertion(
+        context,
+        case=case,
+        rotation=rotation,
+        first_session_observer=observer_snapshot,
+        second_session_observer=second_observer,
+    )
+    runtime.add_assertion(fresh_result)
+    runtime.observations["randomized_calibration_lifecycle"][
+        "clean_session_rotation"
+    ] = dict(fresh_result.evidence)
 
 
 def _editor_revision_body(runtime: JourneyRuntime) -> None:

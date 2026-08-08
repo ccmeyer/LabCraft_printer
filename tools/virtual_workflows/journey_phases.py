@@ -1324,6 +1324,134 @@ def run_authoritative_reload_resume_boundary(
     return evidence
 
 
+def run_clean_authoritative_session_rotation_boundary(
+    runtime: JourneyRuntime,
+    *,
+    experiment_dir: str | Path,
+    expected_name: str,
+    completed_count: Callable[[], int],
+    pass_context: Callable[[], Mapping[str, Any] | None],
+    inspect_loaded: Callable[[], Mapping[str, Any]] | None = None,
+    inspect_activated: Callable[[], Mapping[str, Any]] | None = None,
+    observer_key: str = "session_2_execution",
+) -> Mapping[str, Any]:
+    """Rotate and explicitly activate a clean authoritative start boundary."""
+
+    from tools.virtual_workflows.assertions import (
+        authoritative_reload_boundary_assertions,
+        authoritative_session_rotation_assertions,
+    )
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+        clean_authoritative_loaded_boundary,
+        clean_authoritative_rotation_boundaries,
+        compare_directories,
+        snapshot_directory,
+    )
+    from tools.virtual_workflows.execution_observer import ExecutionObserver
+
+    context = runtime.context
+    source = capture_authoritative_bundle(context)
+    runtime.restore_all()
+    first_close = runtime.harness.close_application_session()["evidence"]
+    close_comparison = compare_directories(
+        source.directory,
+        snapshot_directory(source.experiment_dir),
+    ).to_dict()
+    second_launch = runtime.harness.reopen_application_session()["evidence"]
+    fresh, teardown = authoritative_session_rotation_assertions(
+        first_close=first_close,
+        second_launch=second_launch,
+        application_sessions=runtime.harness.application_sessions,
+        files_byte_identical=close_comparison["checks"]["files_byte_identical"],
+    )
+    runtime.add_assertion(fresh)
+    runtime.add_assertion(teardown)
+
+    observer = ExecutionObserver(
+        context,
+        experiment_dir=Path(experiment_dir).resolve(),
+        completed_count=completed_count,
+        pass_context=pass_context,
+    )
+    runtime.observations["execution_observer"] = observer
+    runtime.register_restorable(observer_key, observer)
+    observer.install()
+
+    boundaries: dict[str, Any] = {}
+    snapshots: dict[str, Any] = {}
+    inspections: dict[str, Mapping[str, Any]] = {}
+
+    def validate_loaded() -> Mapping[str, Any]:
+        loaded = capture_authoritative_bundle(context)
+        snapshots["loaded"] = loaded
+        evidence = clean_authoritative_loaded_boundary(source, loaded)
+        if evidence["failed_checks"]:
+            raise RuntimeError(
+                "clean authoritative load boundary is invalid: "
+                + ", ".join(evidence["failed_checks"])
+            )
+        boundaries["loaded"] = evidence
+        if inspect_loaded is not None:
+            inspections["loaded"] = dict(inspect_loaded())
+        return evidence
+
+    def validate_activated() -> Mapping[str, Any]:
+        activated = capture_authoritative_bundle(context)
+        snapshots["activated"] = activated
+        loaded, activation = clean_authoritative_rotation_boundaries(
+            source,
+            snapshots["loaded"],
+            activated,
+        )
+        if loaded["failed_checks"] or activation["failed_checks"]:
+            raise RuntimeError(
+                "clean authoritative activation boundary is invalid: "
+                + ", ".join((*loaded["failed_checks"], *activation["failed_checks"]))
+            )
+        boundaries.update({"loaded": loaded, "activated": activation})
+        if inspect_activated is not None:
+            inspections["activated"] = dict(inspect_activated())
+        return activation
+
+    editor = ExperimentLoaderDriver(context).load_authoritative_execution(
+        Path(experiment_dir).resolve(),
+        expected_name=expected_name,
+        before_activation=validate_loaded,
+        after_activation=validate_activated,
+        expected_eligibility_status="ready_to_start",
+        expected_array_state="idle",
+        loaded_milestone_name="fresh_loaded",
+    )
+    capture_milestone(context, "fresh_activated", evidence=editor["activated"])
+    for result in authoritative_reload_boundary_assertions(
+        loaded=boundaries["loaded"],
+        activated=boundaries["activated"],
+    ):
+        runtime.add_assertion(result)
+
+    evidence = {
+        "source_bundle": source,
+        "loaded_bundle": snapshots["loaded"],
+        "activated_bundle": snapshots["activated"],
+        "first_session_cleanup": first_close,
+        "second_session_launch": second_launch,
+        "application_sessions": [
+            dict(row) for row in runtime.harness.application_sessions
+        ],
+        "between_sessions": {
+            **close_comparison,
+            "byte_identical": close_comparison["checks"]["files_byte_identical"],
+        },
+        "reload_boundaries": boundaries,
+        "inspections": inspections,
+        "editor": editor,
+        "observer_key": observer_key,
+    }
+    runtime.observations["clean_session_rotation"] = evidence
+    return evidence
+
+
 def _active_pass_context(runtime: JourneyRuntime) -> Mapping[str, Any] | None:
     current = runtime.observations.get("current_pass", {})
     if int(current.get("index", -1)) < 0:
@@ -2107,6 +2235,7 @@ __all__ = [
     "resume_soft_stopped_array",
     "prepare_persisted_head_for_resume",
     "run_authoritative_reload_resume_boundary",
+    "run_clean_authoritative_session_rotation_boundary",
     "run_stock_passes",
     "run_stock_calibration_only",
     "run_soft_stop_resume",

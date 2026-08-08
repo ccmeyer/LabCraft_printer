@@ -1626,9 +1626,10 @@ Rollback:
 
 ### Milestone 11: Randomized design, calibration, reload, and execution interaction
 
-Status: `implementation in progress`; Slices 11.1 and 11.2 complete. Current
-next action: execute Slice 11.3, the reusable clean-session rotation,
-authoritative reload/reconstruction, and explicit activation boundary.
+Status: `implementation in progress`; Slices 11.1 through 11.3 complete.
+Current next action: execute Slice 11.4, the remaining count-stable
+calibrations, all ID-keyed stock passes, exact terminal reconciliation/reload,
+and complete scenario/capability registration.
 
 Execution plan:
 

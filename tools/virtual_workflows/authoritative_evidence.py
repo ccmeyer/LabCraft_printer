@@ -621,6 +621,137 @@ def authoritative_reload_boundaries(
     )
 
 
+def clean_authoritative_loaded_boundary(
+    source: AuthoritativeBundleSnapshot,
+    loaded: AuthoritativeBundleSnapshot,
+) -> dict[str, Any]:
+    """Prove a clean-start editor load reconstructed files without mutation."""
+
+    comparison = compare_directories(source.directory, loaded.directory).to_dict()
+    checks = {
+        **dict(comparison["checks"]),
+        "authoritative_files_byte_identical": source.directory.hashes
+        == loaded.directory.hashes,
+        "plan_identity_unchanged": (
+            loaded.plan_id,
+            loaded.plan_revision,
+            loaded.plan_state,
+            loaded.design_sha256,
+        )
+        == (
+            source.plan_id,
+            source.plan_revision,
+            source.plan_state,
+            source.design_sha256,
+        ),
+        "history_unchanged": loaded.history_json == source.history_json,
+        "progress_reference_unchanged": (
+            loaded.progress_plan_id,
+            loaded.progress_plan_revision,
+        )
+        == (source.progress_plan_id, source.progress_plan_revision),
+        "calibration_count_unchanged": loaded.calibration_record_count
+        == source.calibration_record_count,
+        "eligibility_ready_to_start": loaded.eligibility_status
+        == "ready_to_start",
+        "runtime_inactive": not loaded.runtime_active,
+        "resume_absent": not loaded.resume_present,
+        "zero_progress": loaded.total_added_droplets == 0
+        and not loaded.completed_well_ids,
+    }
+    return _boundary_evidence(
+        loaded,
+        checks,
+        changed_paths=comparison["changed_paths"],
+        disallowed_changed_paths=comparison["disallowed_changed_paths"],
+    )
+
+
+def clean_authoritative_activation_boundary(
+    source: AuthoritativeBundleSnapshot,
+    loaded: AuthoritativeBundleSnapshot,
+    activated: AuthoritativeBundleSnapshot,
+) -> dict[str, Any]:
+    """Prove explicit clean-start activation has only established side effects."""
+
+    allowed = {
+        "execution_resume.json",
+        "execution_plan.json",
+        "key.csv",
+        "concentration_key.csv",
+        "experiment_audit.jsonl",
+    }
+    comparison = compare_directories(
+        loaded.directory,
+        activated.directory,
+        allowed_changed_paths=allowed,
+    ).to_dict()
+    activation_rows = [
+        row
+        for row in activated.audit_rows[len(loaded.audit_rows) :]
+        if row.get("event_type") == "authoritative_execution_activated"
+    ]
+    checks = {
+        "only_allowlisted_files_changed": not comparison[
+            "disallowed_changed_paths"
+        ],
+        "plan_identity_unchanged": (
+            activated.plan_id,
+            activated.plan_revision,
+            activated.plan_state,
+            activated.design_sha256,
+        )
+        == (
+            source.plan_id,
+            source.plan_revision,
+            source.plan_state,
+            source.design_sha256,
+        ),
+        "history_unchanged": activated.history_json == source.history_json,
+        "progress_reference_unchanged": (
+            activated.progress_plan_id,
+            activated.progress_plan_revision,
+        )
+        == (source.progress_plan_id, source.progress_plan_revision),
+        "eligibility_ready_to_start": activated.eligibility_status
+        == "ready_to_start",
+        "runtime_active": activated.runtime_active,
+        "one_activation_audit_event": len(activation_rows) == 1,
+        "one_clean_resume_checkpoint": activated.resume_present
+        and activated.resume_state == "clean"
+        and (
+            activated.resume_plan_id,
+            activated.resume_plan_revision,
+        )
+        == (source.plan_id, source.plan_revision)
+        and activated.resume_intent_count == 0,
+        "zero_progress": activated.total_added_droplets == 0
+        and not activated.completed_well_ids,
+        "calibration_count_unchanged": activated.calibration_record_count
+        == source.calibration_record_count,
+    }
+    return _boundary_evidence(
+        activated,
+        checks,
+        changed_paths=comparison["changed_paths"],
+        disallowed_changed_paths=comparison["disallowed_changed_paths"],
+        activation_audit_rows=activation_rows,
+    )
+
+
+def clean_authoritative_rotation_boundaries(
+    source: AuthoritativeBundleSnapshot,
+    loaded: AuthoritativeBundleSnapshot,
+    activated: AuthoritativeBundleSnapshot,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Compare clean read-only load and explicit activation boundaries."""
+
+    return (
+        clean_authoritative_loaded_boundary(source, loaded),
+        clean_authoritative_activation_boundary(source, loaded, activated),
+    )
+
+
 def capture_authoritative_bundle(
     context: Any,
     *,
@@ -769,6 +900,9 @@ __all__ = [
     "authoritative_activation_boundary",
     "authoritative_loaded_boundary",
     "authoritative_reload_boundaries",
+    "clean_authoritative_activation_boundary",
+    "clean_authoritative_loaded_boundary",
+    "clean_authoritative_rotation_boundaries",
     "check_evidence",
     "compare_directories",
     "completed_stock_well_pairs",

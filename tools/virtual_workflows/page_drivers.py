@@ -1289,8 +1289,11 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
         expected_name: str,
         before_activation: Callable[[], Mapping[str, Any]] | None = None,
         after_activation: Callable[[], Mapping[str, Any]] | None = None,
+        expected_eligibility_status: str = "ready_to_resume",
+        expected_array_state: str = "resume_ready",
+        loaded_milestone_name: str = "session_2_loaded",
     ) -> dict[str, Any]:
-        """Load and activate one paused execution through the real editor."""
+        """Load and activate one authoritative execution through the real editor."""
 
         import json
         from pathlib import Path
@@ -1307,12 +1310,12 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             if (
                 isinstance(dialog, QtWidgets.QDialog)
                 and dialog.isVisible()
-                and "session_2_load_failed" not in self.context.screenshots
+                and f"{loaded_milestone_name}_failed" not in self.context.screenshots
             ):
                 try:
                     capture_milestone(
                         self.context,
-                        "session_2_load_failed",
+                        f"{loaded_milestone_name}_failed",
                         evidence={
                             "failure_type": type(exc).__name__,
                             "failure_message": str(exc),
@@ -1332,13 +1335,14 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             )
             status_text = str(dialog.status_lbl.text() or "")
             banner_text = str(dialog.lifecycle_banner.text() or "")
+            eligibility_check = f"eligibility_{expected_eligibility_status}"
             checks = {
                 "name_matches": dialog.exp_name_edit.text() == expected_name,
                 "action_is_load_execution": dialog.finish_btn.text()
                 == "Load Execution",
                 "finish_enabled": bool(dialog.finish_btn.isEnabled()),
-                "eligibility_ready_to_resume": eligibility.get("status")
-                == "ready_to_resume",
+                eligibility_check: eligibility.get("status")
+                == expected_eligibility_status,
                 "runtime_inactive": not runtime_active,
                 "read_only_guidance": "execution plan validated"
                 in status_text.casefold()
@@ -1400,11 +1404,12 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             array_state = self.context.controller.get_array_run_state()
             if (
                 not runtime_active
-                or eligibility.get("status") != "ready_to_resume"
-                or array_state != "resume_ready"
+                or eligibility.get("status") != expected_eligibility_status
+                or array_state != expected_array_state
             ):
                 raise RuntimeError(
-                    "authoritative activation did not restore resume_ready"
+                    "authoritative activation did not reach the expected "
+                    f"{expected_eligibility_status}/{expected_array_state} boundary"
                 )
             return {
                 "eligibility": eligibility,
@@ -1423,7 +1428,7 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             )
             evidence = dict(result["evidence"])
             capture_milestone(
-                self.context, "session_2_loaded", evidence=evidence, widget=dialog
+                self.context, loaded_milestone_name, evidence=evidence, widget=dialog
             )
             return evidence
 

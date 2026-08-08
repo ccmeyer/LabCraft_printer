@@ -65,6 +65,8 @@ def test_real_randomized_editor_and_design_a_calibration_reach_zero_progress_che
             "design_generated",
             "prepared_randomized",
             "calibrated_zero_progress",
+            "fresh_loaded",
+            "fresh_activated",
         }
         assert assertion_rows[0]["evidence"]["machine_type"] == "SimulatedMachine"
         assert "NO HARDWARE" in assertion_rows[0]["evidence"]["banner_text"]
@@ -81,6 +83,16 @@ def test_real_randomized_editor_and_design_a_calibration_reach_zero_progress_che
         )
         assert calibrated["calibrated"]["total_added_droplets"] == 0
         assert all(calibrated["checks"].values())
+        rotation = lifecycle["clean_session_rotation"]
+        assert all(rotation["checks"].values())
+        assert len(rotation["application_sessions"]) == 2
+        assert len({
+            row["application_session_id"]
+            for row in rotation["application_sessions"]
+        }) == 2
+        assert rotation["loaded"]["resume_present"] is False
+        assert rotation["activated"]["resume_present"] is True
+        assert rotation["activated"]["total_added_droplets"] == 0
     finally:
         runtime.restore_all()
         teardown = harness.close()
