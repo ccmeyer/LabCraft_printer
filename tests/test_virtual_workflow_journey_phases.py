@@ -9,6 +9,7 @@ import pytest
 from tools.virtual_workflows.composition import normalized_steps
 from tools.virtual_workflows.journey_phases import (
     CalibrationOnlySpec,
+    PrecalibratedStockPassSpec,
     PostStartLockCopySpec,
     PreparedEditorRevisionSpec,
     SoftStopResumeSpec,
@@ -23,6 +24,7 @@ from tools.virtual_workflows.journey_phases import (
     normalized_soft_stop_resume_steps,
     normalized_disconnect_fail_closed_steps,
     normalized_calibration_only_steps,
+    normalized_precalibrated_stock_pass_steps,
 )
 
 
@@ -117,6 +119,101 @@ def test_calibration_only_phase_has_exact_actions_and_no_execution_control():
         not row["action_id"].startswith(("array.", "manual_refuel."))
         for row in normalized_calibration_only_steps(spec)
     )
+
+
+def test_calibration_only_phase_optionally_returns_the_exact_head():
+    spec = CalibrationOnlySpec(
+        stock_id="Water_1.00_--",
+        printer_head_id="virtual-head-m11-water-v1",
+        pulse_width_us=1300,
+        pressure_psi=2.0,
+        frequency_hz=100,
+        initial_volume_uL=100.0,
+        expected_volume_nL=9.0,
+        return_head=True,
+    )
+
+    action_ids = [
+        row["action_id"] for row in normalized_calibration_only_steps(spec)
+    ]
+    assert action_ids[-1] == "head.return_via_ui"
+    assert action_ids.count("head.return_via_ui") == 1
+    assert "array.start_via_ui" not in action_ids
+
+
+def test_precalibrated_stock_passes_have_no_calibration_or_refill_actions():
+    specs = tuple(
+        PrecalibratedStockPassSpec(
+            stock_id=f"stock-{index}",
+            printer_head_id=f"head-{index}",
+            pulse_width_us=1300 + index * 100,
+            pressure_psi=2.0,
+            frequency_hz=100,
+            initial_volume_uL=100.0,
+            expected_volume_nL=9.0 + index,
+            expected_completion_count=8 * (index + 1),
+            expected_plan_state="completed" if index == 2 else "active",
+            completed_milestone=f"pass-{index + 1}",
+            start_dialog_titles=(
+                ("Start Print Array", "Evaporation Plate Dock Check")
+                if index == 0
+                else ("Start Print Array",)
+            ),
+            bind_identity=index == 0,
+        )
+        for index in range(3)
+    )
+
+    plan = normalized_precalibrated_stock_pass_steps(specs)
+    action_ids = [row["action_id"] for row in plan]
+    assert action_ids.count("head.bind_identity") == 1
+    for action_id in (
+        "machine.configure_print_settings_via_ui",
+        "head.set_volume_via_ui",
+        "head.stage_via_ui",
+        "array.start_via_ui",
+        "array.wait_for_completions",
+        "validation.stock_pass_boundary",
+        "artifact.capture_milestone",
+        "head.return_via_ui",
+    ):
+        assert action_ids.count(action_id) == 3
+    assert not any(
+        action_id.startswith(("calibration.", "manual_refuel."))
+        for action_id in action_ids
+    )
+    assert [
+        row["stock_id"] for row in plan if row["action_id"] == "head.stage_via_ui"
+    ] == ["stock-0", "stock-1", "stock-2"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("stock_id", "", "stock and head"),
+        ("expected_completion_count", 0, "volume/count"),
+        ("expected_plan_state", "paused", "plan state"),
+        ("completed_milestone", "", "milestone"),
+    ),
+)
+def test_precalibrated_stock_pass_rejects_ambiguous_boundaries(
+    field, value, message
+):
+    values = {
+        "stock_id": "stock-a",
+        "printer_head_id": "head-a",
+        "pulse_width_us": 1300,
+        "pressure_psi": 2.0,
+        "frequency_hz": 100,
+        "initial_volume_uL": 100.0,
+        "expected_volume_nL": 9.0,
+        "expected_completion_count": 8,
+        "expected_plan_state": "active",
+        "completed_milestone": "stock-a-complete",
+    }
+    values[field] = value
+    with pytest.raises(ValueError, match=message):
+        PrecalibratedStockPassSpec(**values)
 
 
 @pytest.mark.parametrize(

@@ -134,7 +134,7 @@ def test_every_count_is_stock_well_keyed_and_design_b_is_unchanged():
     assert (case.terminal.expected_intents, case.terminal.expected_droplets) == (24, 80)
 
 
-def test_qualification_contract_is_exact_but_scenario_is_not_registered_yet():
+def test_qualification_contract_is_exact_and_scenario_is_registered_complete():
     qualification = JOINED_INTERACTION_CASE.qualification
 
     assert (qualification.cli_seed, qualification.action_cap) == (1, 96)
@@ -149,7 +149,7 @@ def test_qualification_contract_is_exact_but_scenario_is_not_registered_yet():
         "design_a_pass_complete", "design_b_pass_complete",
         "water_pass_complete", "completed", "terminal_reloaded",
     )
-    assert JOINED_INTERACTION_CASE_ID not in registered_scenario_ids()
+    assert registered_scenario_ids()[-1] == JOINED_INTERACTION_CASE_ID
 
 
 @pytest.mark.parametrize(

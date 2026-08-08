@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,12 +16,18 @@ from tools.virtual_workflows.joined_interaction_cases import (
 from tools.virtual_workflows.journeys import (
     JOINED_CALIBRATED_CHECKPOINT_REQUIRED_ASSERTIONS,
     JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS,
+    RANDOMIZED_CALIBRATION_REQUIRED_ASSERTIONS,
+    RANDOMIZED_CALIBRATION_REQUIRED_SCREENSHOTS,
+    RANDOMIZED_CALIBRATION_REQUIRED_UI_ACTIONS,
+    get_journey_definition,
     run_joined_calibrated_checkpoint,
 )
+from tools.virtual_workflows.registry import run_registered_scenario
+from tools.virtual_workflows.report import validate_report_v1
 
 
 @pytest.mark.sil_lifecycle
-def test_real_randomized_editor_and_design_a_calibration_reach_zero_progress_checkpoint(
+def test_real_randomized_calibration_reload_lifecycle_reconciles_terminal_counts(
     qapp,
     tmp_path,
 ):
@@ -31,7 +39,7 @@ def test_real_randomized_editor_and_design_a_calibration_reach_zero_progress_che
             visible=False,
             seed=1,
             speed_multiplier=1000.0,
-            timeout_seconds=90.0,
+            timeout_seconds=180.0,
             run_id="focused-randomized-calibration-checkpoint",
         )
     )
@@ -58,16 +66,12 @@ def test_real_randomized_editor_and_design_a_calibration_reach_zero_progress_che
         }
         assert ui_actions == JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS
         assert not any(
-            row["action_id"].startswith(("array.", "manual_refuel."))
+            row["action_id"].startswith("manual_refuel.")
             for row in harness.context.action_results
         )
-        assert set(harness.context.screenshots) == {
-            "design_generated",
-            "prepared_randomized",
-            "calibrated_zero_progress",
-            "fresh_loaded",
-            "fresh_activated",
-        }
+        assert set(harness.context.screenshots) == set(
+            JOINED_INTERACTION_CASE.qualification.required_screenshots
+        )
         assert assertion_rows[0]["evidence"]["machine_type"] == "SimulatedMachine"
         assert "NO HARDWARE" in assertion_rows[0]["evidence"]["banner_text"]
 
@@ -93,6 +97,20 @@ def test_real_randomized_editor_and_design_a_calibration_reach_zero_progress_che
         assert rotation["loaded"]["resume_present"] is False
         assert rotation["activated"]["resume_present"] is True
         assert rotation["activated"]["total_added_droplets"] == 0
+        remaining = lifecycle["remaining_calibrations"]
+        assert remaining["history_revisions"] == [1, 2, 3, 4, 5]
+        assert all(remaining["checks"].values())
+        terminal = lifecycle["terminal"]
+        assert terminal["terminal"]["plan_revision"] == 6
+        assert terminal["terminal"]["plan_state"] == "completed"
+        assert terminal["terminal"]["total_added_droplets"] == 80
+        assert terminal["pass_starts"] == [
+            row.stock_id for row in JOINED_INTERACTION_CASE.execution_passes
+        ]
+        assert len(terminal["intent_counts"]) == 24
+        assert len(terminal["simulator_dispenses"]) == 24
+        assert len(terminal["application_sessions"]) == 3
+        assert all(terminal["checks"].values())
     finally:
         runtime.restore_all()
         teardown = harness.close()
@@ -100,3 +118,86 @@ def test_real_randomized_editor_and_design_a_calibration_reach_zero_progress_che
     assert teardown["status"] == "pass"
     assert teardown["evidence"]["close_succeeded"] is True
     assert teardown["evidence"]["session_lock_present"] is False
+
+
+@pytest.mark.sil_lifecycle
+def test_registered_randomized_calibration_reload_execution_report(qapp, tmp_path):
+    report = run_registered_scenario(
+        JOINED_INTERACTION_CASE.case_id,
+        output_root=tmp_path,
+        visible=False,
+        seed=JOINED_INTERACTION_CASE.qualification.cli_seed,
+        speed_multiplier=1000.0,
+        timeout_seconds=180.0,
+        run_id="registered-randomized-calibration-reload",
+    )
+    validate_report_v1(report)
+    workflow = report["metrics"]["workflow"]["values"]
+    assert report["classification"]["status"] == "pass", json.dumps(
+        {
+            "errors": workflow["errors"],
+            "failed_actions": [
+                row for row in workflow["action_results"] if row["status"] == "fail"
+            ],
+            "assertions": workflow["assertion_results"],
+        },
+        indent=2,
+    )
+    assert report["run"]["scenario_name"] == (
+        "randomized_calibration_reload_execution"
+    )
+    assert report["workload"]["case_sha256"] == JOINED_INTERACTION_CASE.sha256()
+    assert report["workload"]["count_oracle_sha256"] == (
+        JOINED_INTERACTION_CASE.count_oracle_sha256()
+    )
+    assert report["workload"]["expected_completion_count"] == 24
+    assert report["workload"]["expected_droplets"] == 80
+    assert workflow["completed_stock_well_count"] == 24
+    assert workflow["array_complete_count"] == 3
+    assert workflow["action_count"] <= workflow["action_cap"] == 96
+    assert {row["action_id"] for row in workflow["action_results"]} == (
+        get_journey_definition(JOINED_INTERACTION_CASE.case_id).required_action_ids
+    )
+    assert {
+        row["action_id"]
+        for row in workflow["action_results"]
+        if row["interaction_surface"] == "ui"
+    } == RANDOMIZED_CALIBRATION_REQUIRED_UI_ACTIONS
+    assert {
+        row["assertion_id"]: row["decision"]
+        for row in workflow["assertion_results"]
+    } == {
+        assertion_id: "pass"
+        for assertion_id in RANDOMIZED_CALIBRATION_REQUIRED_ASSERTIONS
+    }
+    assert set(report["artifacts"]["screenshots"]) == set(
+        RANDOMIZED_CALIBRATION_REQUIRED_SCREENSHOTS
+    )
+
+    persistence = report["metrics"]["persistence"]["values"]
+    lifecycle = persistence["randomized_calibration_lifecycle"]
+    terminal = lifecycle["terminal"]
+    assert terminal["terminal"]["plan_revision"] == 6
+    assert terminal["terminal"]["plan_state"] == "completed"
+    assert terminal["terminal"]["total_added_droplets"] == 80
+    assert len(terminal["intent_counts"]) == 24
+    assert len(terminal["simulator_dispenses"]) == 24
+    assert len(terminal["application_sessions"]) == 3
+    assert all(terminal["checks"].values())
+    assert report["metrics"]["queue"]["values"] == {
+        "unexpected_starvation_count": 0,
+        "queue_drained_at_terminal": True,
+        "simulator_dispense_overflow_count": 0,
+    }
+
+    report_dir = Path(report["safety"]["report_dir"])
+    assert not (Path(report["safety"]["scenario_root"]) / ".sil-session.lock").exists()
+    for name in (
+        "report.json",
+        "summary.txt",
+        "events.jsonl",
+        "action_ledger.json",
+        "assertion_ledger.json",
+        "evidence_manifest.json",
+    ):
+        assert (report_dir / name).is_file()

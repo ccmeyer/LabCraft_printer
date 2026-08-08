@@ -1626,10 +1626,10 @@ Rollback:
 
 ### Milestone 11: Randomized design, calibration, reload, and execution interaction
 
-Status: `implementation in progress`; Slices 11.1 through 11.3 complete.
-Current next action: execute Slice 11.4, the remaining count-stable
-calibrations, all ID-keyed stock passes, exact terminal reconciliation/reload,
-and complete scenario/capability registration.
+Status: `implementation in progress`; Slices 11.1 through 11.4 complete.
+Current next action: execute Slice 11.5 retained offscreen/replay/visible and
+regression qualification, audit retained evidence, update operator guidance,
+and close Milestone 11.
 
 Execution plan:
 

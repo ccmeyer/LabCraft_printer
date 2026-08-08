@@ -16,6 +16,8 @@ from tools.virtual_workflows.assertions import (
     calibration_apply_fail_closed_assertion,
     calibrated_zero_progress_assertion,
     clean_joined_session_rotation_assertion,
+    joined_remaining_calibrations_assertion,
+    joined_terminal_execution_assertion,
     capture_editor_prepared_revision_snapshot,
     editor_artifacts_cleanup_assertion,
     editor_create_finalize_assertion,
@@ -72,6 +74,7 @@ from tools.virtual_workflows.editor_reporting import (
 )
 from tools.virtual_workflows.journey_phases import (
     CalibrationOnlySpec,
+    PrecalibratedStockPassSpec,
     EditorPreparationSpec,
     PreparedEditorRevisionSpec,
     PostStartLockCopySpec,
@@ -93,9 +96,17 @@ from tools.virtual_workflows.journey_phases import (
     run_disconnect_fail_closed_boundary,
     run_authoritative_reload_resume_boundary,
     run_clean_authoritative_session_rotation_boundary,
+    run_precalibrated_stock_passes,
 )
 from tools.virtual_workflows.page_drivers import ExperimentLoaderDriver
 from tools.virtual_workflows.report import ComposedReportPayload
+from tools.virtual_workflows.joined_interaction_cases import (
+    DESIGN_A_STOCK_ID,
+    JOINED_INTERACTION_CASE,
+    JOINED_INTERACTION_CASE_ID,
+    JOINED_INTERACTION_FIXTURE_PATH,
+    joined_fixture_sha256,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -132,6 +143,9 @@ EXPERIMENT_DESIGN_MATRIX_SCENARIO_NAME = (
 )
 EXPLORATION_WORKLOAD_ID = "editor_prepared_guard_v1"
 EXPLORATION_SCENARIO_NAME = "seeded_editor_prepared_guard"
+RANDOMIZED_CALIBRATION_WORKLOAD_ID = JOINED_INTERACTION_CASE_ID
+RANDOMIZED_CALIBRATION_SCENARIO_NAME = "randomized_calibration_reload_execution"
+RANDOMIZED_CALIBRATION_SCENARIO_VERSION = "1"
 
 MATRIX_CASE_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -191,6 +205,13 @@ JOINED_CALIBRATED_CHECKPOINT_REQUIRED_ASSERTIONS = (
     "execution.authoritative_reload_valid",
     "execution.authoritative_runtime_rehydrated",
     "execution.clean_session_rotation_exact",
+    "execution.remaining_calibrations_exact",
+    "execution.completed_terminal_reload_exact",
+    "execution.randomized_calibration_terminal_exact",
+)
+RANDOMIZED_CALIBRATION_REQUIRED_ASSERTIONS = (
+    *JOINED_CALIBRATED_CHECKPOINT_REQUIRED_ASSERTIONS,
+    "artifacts.required_present",
 )
 EXPERIMENT_DESIGN_REJECTED_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -344,7 +365,13 @@ JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS = frozenset(
         "calibration.apply_via_ui",
         "experiment.load_authoritative_via_ui",
         "experiment.activate_authoritative_via_ui",
+        "head.return_via_ui",
+        "array.start_via_ui",
+        "experiment.inspect_completed_via_ui",
     }
+)
+RANDOMIZED_CALIBRATION_REQUIRED_UI_ACTIONS = (
+    JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS
 )
 EXPERIMENT_DESIGN_REJECTED_REQUIRED_UI_ACTIONS = frozenset(
     {
@@ -470,6 +497,9 @@ DISCONNECT_REQUIRED_SCREENSHOTS = frozenset(
         "disconnected", "recovery_ready",
     }
 )
+RANDOMIZED_CALIBRATION_REQUIRED_SCREENSHOTS = frozenset(
+    JOINED_INTERACTION_CASE.qualification.required_screenshots
+)
 
 _COMMON_ACTIONS = frozenset(
     {"app.launch_simulated", "artifact.capture_milestone", "scenario.teardown"}
@@ -505,6 +535,18 @@ _PRINT_ACTIONS = frozenset(
         "array.start_via_ui",
         "array.wait_for_completions",
     }
+)
+_RANDOMIZED_CALIBRATION_ACTIONS = (
+    _COMMON_ACTIONS
+    | RANDOMIZED_CALIBRATION_REQUIRED_UI_ACTIONS
+    | frozenset(
+        {
+            "app.close_simulated_session",
+            "head.bind_identity",
+            "array.wait_for_completions",
+            "validation.stock_pass_boundary",
+        }
+    )
 )
 
 
@@ -604,6 +646,13 @@ def _authoritative_reload_fixture() -> tuple[dict[str, Any], Path]:
 
 def _disconnect_fixture() -> tuple[dict[str, Any], Path]:
     return _print_fixture(DISCONNECT_WORKLOAD_ID)
+
+
+def _randomized_calibration_fixture() -> tuple[dict[str, Any], Path]:
+    return (
+        JOINED_INTERACTION_CASE.normalized(),
+        JOINED_INTERACTION_FIXTURE_PATH,
+    )
 
 
 def _editor_fixture() -> tuple[dict[str, Any], Path]:
@@ -1391,17 +1440,12 @@ def _experiment_design_body(runtime: JourneyRuntime) -> None:
 
 
 def run_joined_calibrated_checkpoint(runtime: JourneyRuntime) -> None:
-    """Drive the unregistered Milestone 11 lifecycle through fresh activation."""
+    """Drive the registered Milestone 11 lifecycle through terminal reload."""
 
     from tools.virtual_workflows.experiment_design_cases import (
         editor_specification,
         get_experiment_design_case,
     )
-    from tools.virtual_workflows.joined_interaction_cases import (
-        DESIGN_A_STOCK_ID,
-        JOINED_INTERACTION_CASE,
-    )
-
     case = JOINED_INTERACTION_CASE
     source = get_experiment_design_case(case.source.case_id)
     context = runtime.context
@@ -1501,7 +1545,7 @@ def run_joined_calibrated_checkpoint(runtime: JourneyRuntime) -> None:
         experiment_dir=calibrated.experiment_dir,
         expected_name=str(calibrated.metadata.get("name") or ""),
         completed_count=lambda: 0,
-        pass_context=lambda: {"phase": "fresh_zero_progress"},
+        pass_context=lambda: _current_pass_context(runtime),
         inspect_loaded=lambda: capture_count_snapshot(context),
         inspect_activated=lambda: capture_count_snapshot(context),
         observer_key="joined_session_2_execution",
@@ -1518,6 +1562,141 @@ def run_joined_calibrated_checkpoint(runtime: JourneyRuntime) -> None:
     runtime.observations["randomized_calibration_lifecycle"][
         "clean_session_rotation"
     ] = dict(fresh_result.evidence)
+
+    runtime.observations.update(
+        {
+            "expected_wells": tuple(case.editor.selected_well_ids),
+            "expected_stock_ids": tuple(
+                row.stock_id for row in case.execution_passes
+            ),
+            "completed_wells": [],
+            "array_completions": [],
+            "pass_boundaries": [],
+            "head_staging": [],
+            "returned_head_ids": [],
+            "starvation_events": [],
+            "current_pass": {"index": -1, "starting_count": 0, "stock_id": None},
+        }
+    )
+    _connect_execution_signals(runtime, array_complete=True, machine_errors=True)
+    _install_starvation_observer(runtime)
+    runtime.run_steps(machine_startup_steps())
+
+    remaining_calibrations: list[Mapping[str, Any]] = []
+    for calibration_row in case.calibrations[1:]:
+        remaining_calibrations.append(
+            run_stock_calibration_only(
+                runtime,
+                CalibrationOnlySpec(
+                    stock_id=calibration_row.stock_id,
+                    printer_head_id=calibration_row.printer_head_id,
+                    pulse_width_us=calibration_row.print_pulse_width_us,
+                    pressure_psi=2.0,
+                    frequency_hz=100,
+                    initial_volume_uL=100.0,
+                    expected_volume_nL=float(calibration_row.droplet_volume_nL),
+                    apply_success_title=(
+                        "Applied (Fill)"
+                        if calibration_row.reagent_name == "Water"
+                        else "Applied"
+                    ),
+                    enable_pressure_regulation=calibration_row.order == 2,
+                    return_head=True,
+                ),
+            )
+        )
+    calibrated_result, fully_calibrated = joined_remaining_calibrations_assertion(
+        context,
+        case=case,
+        calibration_evidence=remaining_calibrations,
+    )
+    runtime.add_assertion(calibrated_result)
+    capture_milestone(
+        context,
+        "remaining_stocks_calibrated",
+        evidence={
+            "plan_id": fully_calibrated.plan_id,
+            "plan_revision": fully_calibrated.plan_revision,
+            "record_count": fully_calibrated.calibration_record_count,
+            "total_added_droplets": fully_calibrated.total_added_droplets,
+        },
+    )
+
+    calibrations_by_stock = {row.stock_id: row for row in case.calibrations}
+    milestones = (
+        "design_a_pass_complete",
+        "design_b_pass_complete",
+        "water_pass_complete",
+    )
+    pass_specs = tuple(
+        PrecalibratedStockPassSpec(
+            stock_id=execution_pass.stock_id,
+            printer_head_id=calibrations_by_stock[
+                execution_pass.stock_id
+            ].printer_head_id,
+            pulse_width_us=calibrations_by_stock[
+                execution_pass.stock_id
+            ].print_pulse_width_us,
+            pressure_psi=2.0,
+            frequency_hz=100,
+            initial_volume_uL=100.0,
+            expected_volume_nL=float(
+                calibrations_by_stock[execution_pass.stock_id].droplet_volume_nL
+            ),
+            expected_completion_count=8 * execution_pass.order,
+            expected_plan_state=(
+                "completed"
+                if execution_pass.order == len(case.execution_passes)
+                else "active"
+            ),
+            completed_milestone=milestones[execution_pass.order - 1],
+            start_dialog_titles=(
+                ("Start Print Array", "Evaporation Plate Dock Check")
+                if execution_pass.order == 1
+                else ("Start Print Array",)
+            ),
+        )
+        for execution_pass in case.execution_passes
+    )
+    run_precalibrated_stock_passes(runtime, pass_specs)
+    terminal_counts = capture_count_snapshot(context)
+    capture_milestone(
+        context,
+        "completed",
+        evidence={
+            "completion_count": len(runtime.observations["completed_wells"]),
+            "plan_revision": context.experiment_model
+            .get_execution_plan_snapshot()
+            .plan_revision,
+        },
+    )
+    runtime.restore_all()
+    session_2_observer = runtime.observations[
+        "joined_session_2_execution_snapshot"
+    ]
+    _run_completed_terminal_reload(
+        runtime,
+        expected_name=case.editor.experiment_name,
+    )
+    terminal_reload = runtime.observations["completed_terminal_reload"]
+    terminal_result = joined_terminal_execution_assertion(
+        context,
+        case=case,
+        terminal_counts=terminal_counts,
+        terminal_reload=terminal_reload,
+        observer=session_2_observer,
+        first_session_observer=observer_snapshot,
+        pass_boundaries=runtime.observations["pass_boundaries"],
+        starvation_events=runtime.observations["starvation_events"],
+        application_sessions=runtime.harness.application_sessions,
+    )
+    runtime.add_assertion(terminal_result)
+    runtime.observations["randomized_calibration_lifecycle"].update(
+        {
+            "remaining_calibrations": dict(calibrated_result.evidence),
+            "terminal": dict(terminal_result.evidence),
+        }
+    )
 
 
 def _editor_revision_body(runtime: JourneyRuntime) -> None:
@@ -1844,7 +2023,11 @@ def _add_dispense_count_assertion(
     )
 
 
-def _run_completed_terminal_reload(runtime: JourneyRuntime) -> None:
+def _run_completed_terminal_reload(
+    runtime: JourneyRuntime,
+    *,
+    expected_name: str | None = None,
+) -> None:
     """Rotate sessions and inspect a completed bundle without activation."""
 
     from tools.virtual_workflows.authoritative_evidence import (
@@ -1862,9 +2045,15 @@ def _run_completed_terminal_reload(runtime: JourneyRuntime) -> None:
     second_launch = runtime.harness.reopen_application_session()["evidence"]
     loader = ExperimentLoaderDriver(context).inspect_completed_execution(
         experiment_dir,
-        expected_name=str(runtime.fixture["fixture_id"]),
+        expected_name=str(
+            expected_name
+            or runtime.fixture.get("fixture_id")
+            or runtime.fixture.get("case_id")
+            or ""
+        ),
     )
     after = capture_authoritative_bundle(context)
+    after_counts = capture_count_snapshot(context)
     after_reload = compare_directories(
         before.directory, snapshot_directory(experiment_dir)
     ).to_dict()
@@ -1888,6 +2077,7 @@ def _run_completed_terminal_reload(runtime: JourneyRuntime) -> None:
     runtime.observations["completed_terminal_reload"] = {
         "before": before,
         "after": after,
+        "after_counts": after_counts,
         "first_close": first_close,
         "second_launch": second_launch,
         "loader": loader,
@@ -2325,12 +2515,12 @@ def _authoritative_reload_body(runtime: JourneyRuntime) -> None:
 
 
 def _current_pass_context(runtime: JourneyRuntime) -> Mapping[str, Any] | None:
-    current = runtime.observations["current_pass"]
-    if int(current["index"]) < 0:
+    current = runtime.observations.get("current_pass", {})
+    if int(current.get("index", -1)) < 0:
         return None
     return {
         "pass_index": int(current["index"]) + 1,
-        "stock_id": current["stock_id"],
+        "stock_id": current.get("stock_id"),
     }
 
 
@@ -3100,6 +3290,101 @@ def _authoritative_reload_persistence(
     }
 
 
+def _randomized_calibration_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    case = JOINED_INTERACTION_CASE
+    decisions = _decisions(runtime)
+    evidence = _assertion_evidence(runtime)
+    required = runtime.definition.required_assertion_ids
+    passed = all(decisions.get(assertion_id) == "pass" for assertion_id in required)
+    status = "measured" if passed else "partial"
+    terminal = evidence.get("execution.randomized_calibration_terminal_exact", {})
+    lifecycle = dict(
+        runtime.observations.get("randomized_calibration_lifecycle") or {}
+    )
+    completed = list(runtime.observations.get("completed_wells") or ())
+    return ComposedReportPayload(
+        workload={
+            **_base_workload(runtime),
+            "case_id": case.case_id,
+            "case_sha256": case.sha256(),
+            "count_oracle_sha256": case.count_oracle_sha256(),
+            "joined_fixture_sha256": joined_fixture_sha256(),
+            "source_case_id": case.source.case_id,
+            "source_case_sha256": case.source.case_sha256,
+            "source_catalog_sha256": case.source.catalog_sha256,
+            "source_assignment_sha256": case.source.assignment_sha256,
+            "source_reaction_multiset_sha256": case.source.reaction_multiset_sha256,
+            "design_randomization_seed": case.editor.random_seed,
+            "plate_name": case.editor.plate_name,
+            "well_ids": list(case.editor.selected_well_ids),
+            "stock_ids": [row.stock_id for row in case.stocks],
+            "stock_count": len(case.stocks),
+            "array_passes": len(case.execution_passes),
+            "expected_completion_count": case.terminal.expected_completed_wells,
+            "expected_intent_count": case.terminal.expected_intents,
+            "expected_droplets": case.terminal.expected_droplets,
+            "action_cap": case.qualification.action_cap,
+            "speed_multiplier": runtime.harness.config.speed_multiplier,
+            "timeout_seconds": runtime.harness.config.timeout_seconds,
+        },
+        workflow_status=status,
+        workflow_values={
+            "expected_stock_well_completion_count": (
+                case.terminal.expected_completed_wells
+            ),
+            "completed_stock_well_count": len(completed),
+            "completed_well_ids": completed,
+            "array_complete_count": len(
+                runtime.observations.get("array_completions") or ()
+            ),
+            "application_sessions": [
+                dict(row) for row in runtime.harness.application_sessions
+            ],
+            "cleanup_results": [dict(teardown)],
+            "action_count": len(runtime.context.action_results),
+            "action_cap": case.qualification.action_cap,
+        },
+        queue={
+            "status": status,
+            "values": {
+                "unexpected_starvation_count": len(
+                    runtime.observations.get("starvation_events") or ()
+                ),
+                "queue_drained_at_terminal": bool(
+                    (terminal.get("checks") or {}).get(
+                        "session_three_zero_dispatch"
+                    )
+                ),
+                "simulator_dispense_overflow_count": int(
+                    terminal.get("simulator_dispense_overflow_count", 0) or 0
+                ),
+            },
+        },
+        persistence={
+            "status": status,
+            "values": {
+                "assertion_decisions": decisions,
+                "randomized_calibration_lifecycle": lifecycle,
+                "terminal": terminal,
+                "case_contract": {
+                    "case_id": case.case_id,
+                    "case_sha256": case.sha256(),
+                    "count_oracle_sha256": case.count_oracle_sha256(),
+                    "fixture_sha256": joined_fixture_sha256(),
+                },
+            },
+        },
+        limitations=(
+            "The three application compositions share one in-process QApplication and retained SIL root; direct CLI and suite runs provide fresh operating-system processes.",
+            "The simulator verifies application-side intent, persistence, and DISPENSE semantics, not firmware or protocol behavior.",
+            "No physical motion, pressure response, calibration quality, camera, balance, collision, or droplet-quality claim is made.",
+            "Generated plan IDs, record IDs, timestamps, paths, and command sequence identities may differ across replay.",
+        ),
+    )
+
+
 def _cleanup_artifact(runtime: JourneyRuntime, teardown: Mapping[str, Any]) -> Any:
     return cleanup_assertion(teardown)
 
@@ -3156,6 +3441,16 @@ def _multi_artifact(runtime: JourneyRuntime, teardown: Mapping[str, Any]) -> Any
     return multi_stock_artifacts_assertion(
         screenshots=runtime.context.screenshots,
         required_screenshots=set(runtime.definition.required_screenshots),
+        teardown=teardown,
+    )
+
+
+def _randomized_calibration_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return multi_stock_artifacts_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(RANDOMIZED_CALIBRATION_REQUIRED_SCREENSHOTS),
         teardown=teardown,
     )
 
@@ -3330,6 +3625,21 @@ def _authoritative_reload_summary(
         "Milestone 7 composed authoritative reload/resume lifecycle\n"
         f"Status: {report['classification']['status']}\n"
         f"Completions: {len(runtime.observations['completed_wells'])} / 24\n"
+        f"Application sessions: {len(runtime.harness.application_sessions)}\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _randomized_calibration_summary(
+    report: Mapping[str, Any], runtime: JourneyRuntime
+) -> str:
+    terminal = runtime.observations["randomized_calibration_lifecycle"]["terminal"]
+    return (
+        "Milestone 11 randomized calibration/reload execution lifecycle\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Intents: {len(terminal['intent_counts'])} / 24\n"
+        f"Droplets: {terminal['terminal']['total_added_droplets']} / 80\n"
         f"Application sessions: {len(runtime.harness.application_sessions)}\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
@@ -3571,6 +3881,21 @@ AUTHORITATIVE_RELOAD_DEFINITION = JourneyDefinition(
     payload_builder=_authoritative_reload_payload,
     summary_builder=_authoritative_reload_summary,
 )
+RANDOMIZED_CALIBRATION_DEFINITION = JourneyDefinition(
+    registry_id=RANDOMIZED_CALIBRATION_WORKLOAD_ID,
+    scenario_name=RANDOMIZED_CALIBRATION_SCENARIO_NAME,
+    scenario_version=RANDOMIZED_CALIBRATION_SCENARIO_VERSION,
+    workload_id=RANDOMIZED_CALIBRATION_WORKLOAD_ID,
+    required_action_ids=_RANDOMIZED_CALIBRATION_ACTIONS,
+    required_ui_action_ids=RANDOMIZED_CALIBRATION_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=RANDOMIZED_CALIBRATION_REQUIRED_ASSERTIONS,
+    required_screenshots=RANDOMIZED_CALIBRATION_REQUIRED_SCREENSHOTS,
+    fixture_loader=_randomized_calibration_fixture,
+    body=run_joined_calibrated_checkpoint,
+    artifact_assertion=_randomized_calibration_artifact,
+    payload_builder=_randomized_calibration_payload,
+    summary_builder=_randomized_calibration_summary,
+)
 DISCONNECT_DEFINITION = JourneyDefinition(
     registry_id=DISCONNECT_WORKLOAD_ID,
     scenario_name=DISCONNECT_SCENARIO_NAME,
@@ -3612,6 +3937,7 @@ JOURNEY_DEFINITIONS = {
         SOFT_STOP_DEFINITION,
         AUTHORITATIVE_RELOAD_DEFINITION,
         DISCONNECT_DEFINITION,
+        RANDOMIZED_CALIBRATION_DEFINITION,
     )
 }
 JOURNEY_DEFINITION_IDS = frozenset(JOURNEY_DEFINITIONS)

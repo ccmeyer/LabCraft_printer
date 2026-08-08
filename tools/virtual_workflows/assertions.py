@@ -3742,6 +3742,427 @@ def clean_joined_session_rotation_assertion(
     )
 
 
+def joined_remaining_calibrations_assertion(
+    context: Any,
+    *,
+    case: Any,
+    calibration_evidence: list[Mapping[str, Any]],
+) -> tuple[AssertionResult, Any]:
+    """Prove all joined calibrations and literal revision-5 counts by ID."""
+
+    from ExecutionCalibrationStore import load_execution_calibrations
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+    )
+
+    snapshot = capture_authoritative_bundle(context)
+    counts = capture_count_snapshot(context)
+    expected = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("all_stocks_calibrated").rows
+        ),
+        label="joined all-calibrated literal",
+    )
+    observed = {
+        name: normalize_stock_well_counts(
+            counts[name], label=f"joined all-calibrated {name}"
+        )
+        for name in ("plan_targets", "progress_targets", "runtime_targets")
+    }
+    added = normalize_stock_well_counts(
+        counts["progress_added"], label="joined all-calibrated added"
+    )
+    document = load_execution_calibrations(
+        context.experiment_model.execution_calibrations_file_path
+    )
+    records = {
+        record.stock_id: record.to_dict() for record in document.records.values()
+    }
+    calibrations = {row.stock_id: row for row in case.calibrations}
+    plan_stocks = {
+        stock.stock_id: stock
+        for stock in context.experiment_model.get_execution_plan_snapshot().stocks
+    }
+    identity_checks = {
+        stock_id: (
+            stock_id in records
+            and stock_id in plan_stocks
+            and records[stock_id].get("printer_head_id")
+            == calibration.printer_head_id
+            and int(records[stock_id].get("pw_us") or 0)
+            == calibration.print_pulse_width_us
+            and math.isclose(
+                float(records[stock_id].get("effective_volume_nL") or 0),
+                float(calibration.droplet_volume_nL),
+            )
+            and plan_stocks[stock_id].printer_head_id
+            == calibration.printer_head_id
+            and plan_stocks[stock_id].calibration_record_key
+            == records[stock_id].get("record_id")
+        )
+        for stock_id, calibration in calibrations.items()
+    }
+    checks = {
+        "revision_history_exact": [
+            int(item.get("plan_revision", 0)) for item in snapshot.history
+        ]
+        == [1, 2, 3, 4, 5],
+        "revision_five_active": snapshot.plan_revision == 5
+        and snapshot.plan_state == "active",
+        "progress_reference_revision_five": (
+            snapshot.progress_plan_id,
+            snapshot.progress_plan_revision,
+        )
+        == (snapshot.plan_id, 5),
+        "resume_reference_revision_five": snapshot.resume_present
+        and snapshot.resume_state == "clean"
+        and (snapshot.resume_plan_id, snapshot.resume_plan_revision)
+        == (snapshot.plan_id, 5)
+        and snapshot.resume_intent_count == 0,
+        "three_calibration_records": len(records) == 3
+        and set(records) == set(calibrations),
+        "calibration_stock_head_record_joins": all(identity_checks.values()),
+        "literal_plan_counts_exact": observed["plan_targets"] == expected,
+        "literal_progress_counts_exact": observed["progress_targets"] == expected,
+        "literal_runtime_counts_exact": observed["runtime_targets"] == expected,
+        "zero_added_progress": all(row.droplets == 0 for row in added)
+        and snapshot.total_added_droplets == 0,
+        "remaining_calibration_order_exact": [
+            str(row.get("stock_id")) for row in calibration_evidence
+        ]
+        == [case.calibrations[1].stock_id, case.calibrations[2].stock_id],
+        "remaining_heads_returned": all(
+            (row.get("return") or {}).get("returned") is True
+            for row in calibration_evidence
+        ),
+        "controller_idle_and_drained": context.controller.get_array_run_state()
+        == "idle"
+        and context.machine.check_if_all_completed(),
+        "action_cap_not_exceeded": len(context.action_results)
+        <= case.qualification.action_cap,
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "identity_checks": identity_checks,
+        "bundle": snapshot.prepared_evidence(),
+        "history_revisions": [
+            int(item.get("plan_revision", 0)) for item in snapshot.history
+        ],
+        "counts": counts,
+        "records": records,
+        "calibrations": [dict(row) for row in calibration_evidence],
+    }
+    return (
+        AssertionResult(
+            "execution.remaining_calibrations_exact",
+            "remaining_stocks_calibrated",
+            "pass" if not evidence["failed_checks"] else "fail",
+            ("ui", "controller", "model", "persistence", "simulator"),
+            evidence,
+            (
+                None
+                if not evidence["failed_checks"]
+                else "remaining joined calibrations failed: "
+                + ", ".join(evidence["failed_checks"])
+            ),
+        ),
+        snapshot,
+    )
+
+
+def joined_terminal_lifecycle_reconciliation(
+    *,
+    case: Any,
+    lifecycle: Mapping[str, Any],
+    pass_boundaries: list[Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """Reconcile literal stock/well intents to simulator commands exactly once."""
+
+    expected = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("all_stocks_calibrated").rows
+        ),
+        label="joined lifecycle literal",
+    )
+    expected_map = {
+        (row.stock_id, row.well_id): row.droplets for row in expected
+    }
+    begins = [dict(row) for row in lifecycle.get("begins", ())]
+    attachments = [dict(row) for row in lifecycle.get("attachments", ())]
+    completions = list(lifecycle.get("completions", ()))
+    simulator = [dict(row) for row in lifecycle.get("simulator_dispenses", ())]
+    begin_ids = [str(row.get("intent_id") or "") for row in begins]
+    begins_by_id = {str(row.get("intent_id") or ""): row for row in begins}
+    attachments_by_id = {
+        str(row.get("intent_id") or ""): row for row in attachments
+    }
+
+    def command_sequence(row: Mapping[str, Any] | None) -> int | None:
+        if row is None or row.get("command_seq32") is None:
+            return None
+        try:
+            return int(row["command_seq32"])
+        except (TypeError, ValueError):
+            return None
+
+    simulator_by_sequence = {
+        sequence: row
+        for row in simulator
+        if (sequence := command_sequence(row)) is not None
+    }
+    observed_map = {
+        (str(row.get("stock_id")), str(row.get("well_id"))): int(
+            row.get("commanded_droplets", 0) or 0
+        )
+        for row in begins
+    }
+    command_join_checks: dict[str, bool] = {}
+    for intent_id in begin_ids:
+        attachment = attachments_by_id.get(intent_id)
+        sequence = command_sequence(attachment)
+        command = simulator_by_sequence.get(sequence)
+        begin = begins_by_id.get(intent_id)
+        command_join_checks[intent_id] = bool(
+            attachment is not None
+            and sequence is not None
+            and command is not None
+            and begin is not None
+            and command.get("command_type") == "DISPENSE"
+            and command.get("status") == "Completed"
+            and not bool(command.get("manual"))
+            and int(command.get("commanded_droplets", 0) or 0)
+            == int(begin.get("commanded_droplets", 0) or 0)
+        )
+    expected_pass_ids = [row.stock_id for row in case.execution_passes]
+    pass_starts = [
+        str(row.get("stock_id") or "")
+        for row in lifecycle.get("pass_starts", ())
+    ]
+    checks = {
+        "intent_pairs_and_counts_exact": len(begins) == 24
+        and len(set(begin_ids)) == 24
+        and observed_map == expected_map,
+        "attachments_exact_once": len(attachments) == 24
+        and len(attachments_by_id) == 24
+        and set(attachments_by_id) == set(begin_ids)
+        and len(
+            {
+                sequence
+                for row in attachments
+                if (sequence := command_sequence(row)) is not None
+            }
+        )
+        == 24,
+        "simulator_commands_exact_once": len(simulator) == 24
+        and len(simulator_by_sequence) == 24
+        and all(command_join_checks.values()),
+        "completion_ids_exact_once": len(completions) == 24
+        and Counter(str(value) for value in completions) == Counter(begin_ids),
+        "droplet_total_exact": sum(observed_map.values())
+        == sum(
+            int(row.get("commanded_droplets", 0) or 0) for row in simulator
+        )
+        == case.terminal.expected_droplets
+        == 80,
+        "no_discard_or_overflow": not lifecycle.get("discard_batches")
+        and int(lifecycle.get("simulator_dispense_overflow_count", 0) or 0) == 0,
+        "pass_order_exact": pass_starts == expected_pass_ids,
+        "pass_boundaries_exact": [
+            (
+                str(row.get("stock_id")),
+                int(row.get("observed_completed_count", 0)),
+                str(row.get("plan_state")),
+            )
+            for row in pass_boundaries
+        ]
+        == [
+            (expected_pass_ids[0], 8, "active"),
+            (expected_pass_ids[1], 16, "active"),
+            (expected_pass_ids[2], 24, "completed"),
+        ],
+    }
+    return {
+        "checks": checks,
+        "expected_counts": [
+            {"stock_id": row.stock_id, "well_id": row.well_id, "droplets": row.droplets}
+            for row in expected
+        ],
+        "intent_counts": begins,
+        "simulator_dispenses": simulator,
+        "command_join_checks": command_join_checks,
+        "pass_starts": pass_starts,
+        "pass_boundaries": [dict(row) for row in pass_boundaries],
+        "simulator_dispense_overflow_count": int(
+            lifecycle.get("simulator_dispense_overflow_count", 0) or 0
+        ),
+    }
+
+
+def joined_terminal_execution_assertion(
+    context: Any,
+    *,
+    case: Any,
+    terminal_counts: Mapping[str, Any],
+    terminal_reload: Mapping[str, Any],
+    observer: Mapping[str, Any],
+    first_session_observer: Mapping[str, Any],
+    pass_boundaries: list[Mapping[str, Any]],
+    starvation_events: list[Mapping[str, Any]],
+    application_sessions: list[Mapping[str, Any]],
+) -> AssertionResult:
+    """Reconcile every joined command and persisted count exactly once."""
+
+    from ExecutionCalibrationStore import load_execution_calibrations
+
+    expected = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("all_stocks_calibrated").rows
+        ),
+        label="joined terminal literal",
+    )
+    normalized_terminal = {
+        name: normalize_stock_well_counts(
+            terminal_counts[name], label=f"joined terminal {name}"
+        )
+        for name in (
+            "plan_targets",
+            "progress_targets",
+            "runtime_targets",
+            "progress_added",
+        )
+    }
+    after_counts_raw = dict(terminal_reload.get("after_counts") or {})
+    normalized_reloaded = {
+        name: normalize_stock_well_counts(
+            after_counts_raw[name], label=f"joined reloaded {name}"
+        )
+        for name in ("plan_targets", "progress_targets", "progress_added")
+    }
+    lifecycle = dict(observer.get("lifecycle") or {})
+    lifecycle_reconciliation = joined_terminal_lifecycle_reconciliation(
+        case=case,
+        lifecycle=lifecycle,
+        pass_boundaries=pass_boundaries,
+    )
+    before = terminal_reload["before"]
+    after = terminal_reload["after"]
+    records = {
+        record.stock_id: record.to_dict()
+        for record in load_execution_calibrations(
+            context.experiment_model.execution_calibrations_file_path
+        ).records.values()
+    }
+    calibration_by_stock = {row.stock_id: row for row in case.calibrations}
+    first_lifecycle = dict(first_session_observer.get("lifecycle") or {})
+    zero_keys = (
+        "begins",
+        "attachments",
+        "completions",
+        "discard_batches",
+        "simulator_dispenses",
+        "pass_starts",
+        "terminal_transitions",
+        "soft_stop_events",
+    )
+    checks = {
+        "terminal_plan_progress_runtime_targets_exact": all(
+            normalized_terminal[name] == expected
+            for name in ("plan_targets", "progress_targets", "runtime_targets")
+        ),
+        "terminal_added_exact": normalized_terminal["progress_added"] == expected,
+        "reloaded_plan_progress_added_exact": all(
+            normalized_reloaded[name] == expected
+            for name in ("plan_targets", "progress_targets", "progress_added")
+        ),
+        **dict(lifecycle_reconciliation["checks"]),
+        "revision_history_one_through_six": [
+            int(row.get("plan_revision", 0)) for row in after.history
+        ]
+        == [1, 2, 3, 4, 5, 6],
+        "terminal_revision_six_analysis_only": before.plan_revision
+        == after.plan_revision
+        == 6
+        and before.plan_state == after.plan_state == "completed"
+        and before.eligibility_status == after.eligibility_status == "analysis_only",
+        "terminal_references_exact": (
+            after.progress_plan_id,
+            after.progress_plan_revision,
+            after.resume_plan_id,
+            after.resume_plan_revision,
+        )
+        == (after.plan_id, 6, after.plan_id, 6),
+        "calibration_records_exact": set(records) == set(calibration_by_stock)
+        and all(
+            records[stock_id].get("printer_head_id") == row.printer_head_id
+            and int(records[stock_id].get("pw_us", 0) or 0)
+            == row.print_pulse_width_us
+            and math.isclose(
+                float(records[stock_id].get("effective_volume_nL", 0) or 0),
+                float(row.droplet_volume_nL),
+            )
+            for stock_id, row in calibration_by_stock.items()
+        ),
+        "three_distinct_application_sessions": len(application_sessions) == 3
+        and len(
+            {
+                str(row.get("application_session_id"))
+                for row in application_sessions
+            }
+        )
+        == 3,
+        "session_one_zero_dispatch": all(
+            not first_lifecycle.get(name) for name in zero_keys
+        ),
+        "session_three_zero_dispatch": not getattr(
+            context.machine, "command_event_history", ()
+        )
+        and context.machine.check_if_all_completed()
+        and not after.runtime_active,
+        "no_starvation_or_errors": not starvation_events
+        and not context.errors
+        and not context.unexpected_dialogs,
+        "action_cap_not_exceeded": len(context.action_results)
+        <= case.qualification.action_cap,
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        **{
+            key: value
+            for key, value in lifecycle_reconciliation.items()
+            if key != "checks"
+        },
+        "application_sessions": [dict(row) for row in application_sessions],
+        "terminal": {
+            "plan_id": after.plan_id,
+            "plan_revision": after.plan_revision,
+            "plan_state": after.plan_state,
+            "eligibility_status": after.eligibility_status,
+            "total_added_droplets": after.total_added_droplets,
+            "calibration_record_count": after.calibration_record_count,
+        },
+        "records": records,
+        "starvation_events": [dict(row) for row in starvation_events],
+    }
+    return AssertionResult(
+        "execution.randomized_calibration_terminal_exact",
+        "terminal_reloaded",
+        "pass" if not evidence["failed_checks"] else "fail",
+        ("ui", "controller", "model", "persistence", "simulator", "session"),
+        evidence,
+        (
+            None
+            if not evidence["failed_checks"]
+            else "joined terminal reconciliation failed: "
+            + ", ".join(evidence["failed_checks"])
+        ),
+    )
+
+
 def _prepared_bundle_results(
     snapshot: Any,
     *,
@@ -4540,6 +4961,9 @@ __all__ = [
     "calibration_apply_fail_closed_assertion",
     "calibrated_zero_progress_assertion",
     "clean_joined_session_rotation_assertion",
+    "joined_remaining_calibrations_assertion",
+    "joined_terminal_lifecycle_reconciliation",
+    "joined_terminal_execution_assertion",
     "cleanup_assertion",
     "evaluate_assertion",
     "editor_artifacts_cleanup_assertion",

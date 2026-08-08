@@ -11,6 +11,9 @@ import pytest
 
 from tools.run_virtual_workflow import _parser, main
 from tools.virtual_workflows.registry import MANIFEST_PATH
+from tools.virtual_workflows.joined_interaction_cases import (
+    JOINED_INTERACTION_CASE_ID,
+)
 from tools.virtual_workflows.selection import (
     SELECTION_CATALOG_SCHEMA_NAME,
     SELECTION_PLAN_SCHEMA_NAME,
@@ -86,8 +89,9 @@ def test_lifecycle_suite_preserves_manifest_order_and_per_scenario_timeouts():
         "print_array_multi_stock_24x2_v1",
         "print_array_mixed_mode_24x2_v1",
         "print_array_disconnect_mid_array_24_v1",
+        JOINED_INTERACTION_CASE_ID,
     ]
-    assert [row["order"] for row in plan["scenarios"]] == list(range(1, 9))
+    assert [row["order"] for row in plan["scenarios"]] == list(range(1, 10))
     assert {row["seed"] for row in plan["scenarios"]} == {7}
     assert [row["timeout_seconds"] for row in plan["scenarios"]] == [
         60.0,
@@ -98,6 +102,7 @@ def test_lifecycle_suite_preserves_manifest_order_and_per_scenario_timeouts():
         60.0,
         90.0,
         60.0,
+        180.0,
     ]
 
 

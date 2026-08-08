@@ -322,6 +322,7 @@ class CalibrationOnlySpec:
     apply_success_title: str = "Applied"
     bind_identity: bool = True
     enable_pressure_regulation: bool = True
+    return_head: bool = False
     detailed_evidence: bool = True
     include_frequency_evidence: bool = True
     refuel_pulse_width_us: int | None = None
@@ -344,6 +345,51 @@ class CalibrationOnlySpec:
             raise ValueError("calibration-only Apply title must be non-empty")
         if self.refuel_pulse_width_us is not None or self.refuel_pressure_psi is not None:
             raise ValueError("calibration-only phase does not support refuel behavior")
+
+
+@dataclass(frozen=True)
+class PrecalibratedStockPassSpec:
+    """One stock pass that must reuse an already-persisted calibration."""
+
+    stock_id: str
+    printer_head_id: str
+    pulse_width_us: int
+    pressure_psi: float
+    frequency_hz: int
+    initial_volume_uL: float
+    expected_volume_nL: float
+    expected_completion_count: int
+    expected_plan_state: str
+    completed_milestone: str
+    staging_slot: int | None = None
+    start_dialog_titles: tuple[str, ...] = ("Start Print Array",)
+    bind_identity: bool = False
+    return_head: bool = True
+    detailed_evidence: bool = True
+    include_frequency_evidence: bool = True
+    calibration_mode: str = "droplet"
+    refuel_pulse_width_us: int | None = None
+    refuel_pressure_psi: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.stock_id or not self.printer_head_id:
+            raise ValueError("precalibrated stock and head IDs must be non-empty")
+        if self.pulse_width_us <= 0 or self.frequency_hz <= 0:
+            raise ValueError("precalibrated pulse and frequency must be positive")
+        if self.pressure_psi <= 0 or self.initial_volume_uL <= 0:
+            raise ValueError("precalibrated pressure and volume must be positive")
+        if self.expected_volume_nL <= 0 or self.expected_completion_count <= 0:
+            raise ValueError("precalibrated expected volume/count must be positive")
+        if self.expected_plan_state not in {"active", "completed"}:
+            raise ValueError("precalibrated plan state must be active or completed")
+        if not self.completed_milestone or not self.start_dialog_titles:
+            raise ValueError("precalibrated milestones/dialogs must be non-empty")
+        if self.staging_slot is not None and self.staging_slot < 0:
+            raise ValueError("precalibrated staging slot must be non-negative")
+        if self.calibration_mode != "droplet":
+            raise ValueError("precalibrated joined passes must remain droplet mode")
+        if self.refuel_pulse_width_us is not None or self.refuel_pressure_psi is not None:
+            raise ValueError("precalibrated joined passes do not support refuel")
 
 
 @dataclass(frozen=True)
@@ -614,7 +660,9 @@ def run_post_start_lock_copy(
 
 def bind_head_identities(
     runtime: JourneyRuntime,
-    pass_specs: Sequence[StockPassSpec | CalibrationOnlySpec],
+    pass_specs: Sequence[
+        StockPassSpec | CalibrationOnlySpec | PrecalibratedStockPassSpec
+    ],
 ) -> Mapping[str, Any]:
     rack = RackDriver(runtime.context)
     bindings: list[dict[str, Any]] = []
@@ -646,7 +694,9 @@ def bind_head_identities(
 
 
 def head_identity_step(
-    pass_specs: Sequence[StockPassSpec | CalibrationOnlySpec],
+    pass_specs: Sequence[
+        StockPassSpec | CalibrationOnlySpec | PrecalibratedStockPassSpec
+    ],
 ) -> SemanticStep:
     frozen = tuple(pass_specs)
     return SemanticStep(
@@ -759,6 +809,8 @@ def normalized_calibration_only_steps(
         "calibration.select_via_ui",
         "calibration.apply_via_ui",
     ])
+    if spec.return_head:
+        action_ids.append("head.return_via_ui")
     return [
         {
             "action_id": action_id,
@@ -766,6 +818,51 @@ def normalized_calibration_only_steps(
         }
         for action_id in action_ids
     ]
+
+
+def normalized_precalibrated_stock_pass_steps(
+    pass_specs: Sequence[PrecalibratedStockPassSpec],
+) -> list[dict[str, Any]]:
+    """Return the exact action ledger for already-calibrated stock passes."""
+
+    specs = tuple(pass_specs)
+    normalized: list[dict[str, Any]] = []
+    if any(spec.bind_identity for spec in specs):
+        normalized.append(
+            {"action_id": "head.bind_identity", "interaction_surface": "model"}
+        )
+    harness_actions = {
+        "array.wait_for_completions",
+        "validation.stock_pass_boundary",
+        "artifact.capture_milestone",
+    }
+    for index, spec in enumerate(specs):
+        action_ids = [
+            "machine.configure_print_settings_via_ui",
+            "head.set_volume_via_ui",
+            "head.stage_via_ui",
+            "array.start_via_ui",
+            "array.wait_for_completions",
+        ]
+        if spec.return_head and spec.expected_plan_state == "completed":
+            action_ids.append("head.return_via_ui")
+        action_ids.extend(
+            ("validation.stock_pass_boundary", "artifact.capture_milestone")
+        )
+        if spec.return_head and spec.expected_plan_state != "completed":
+            action_ids.append("head.return_via_ui")
+        normalized.extend(
+            {
+                "action_id": action_id,
+                "interaction_surface": (
+                    "harness" if action_id in harness_actions else "ui"
+                ),
+                "pass_index": index + 1,
+                "stock_id": spec.stock_id,
+            }
+            for action_id in action_ids
+        )
+    return normalized
 
 
 def normalized_soft_stop_resume_steps(
@@ -964,7 +1061,7 @@ def resume_soft_stopped_array(
 
 def _stage_stock_head(
     runtime: JourneyRuntime,
-    spec: StockPassSpec | CalibrationOnlySpec,
+    spec: StockPassSpec | CalibrationOnlySpec | PrecalibratedStockPassSpec,
     *,
     index: int,
     head_staging: list[dict[str, Any]],
@@ -1065,7 +1162,7 @@ def run_stock_calibration_only(
 
     if spec.bind_identity:
         runtime.run_steps((head_identity_step((spec,)),))
-    machine, _rack, slot, staging_rows = _stage_stock_head(
+    machine, rack, slot, staging_rows = _stage_stock_head(
         runtime,
         spec,
         index=0,
@@ -1155,6 +1252,37 @@ def run_stock_calibration_only(
             SemanticStep("calibration.apply_via_ui", InteractionSurface.UI, apply),
         )
     )
+    returned: Mapping[str, Any] | None = None
+    if spec.return_head:
+        def return_head(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+            rack.wait_until(
+                lambda: runtime.context.controller.get_array_run_state() == "idle"
+                and runtime.context.machine.check_if_all_completed(),
+                "idle drained calibration-only return boundary",
+                timeout_seconds=min(
+                    20.0, runtime.context.deadline.remaining_seconds()
+                ),
+            )
+            active = runtime.context.model.rack_model.get_gripper_printer_head()
+            if active is None or str(active.get_stock_id()) != spec.stock_id:
+                raise RuntimeError("calibration-only return stock identity drifted")
+            rack.unload(slot)
+            return {
+                "slot": slot,
+                "stock_id": spec.stock_id,
+                "printer_head_id": str(active.printer_head_id),
+                "returned": True,
+            }
+
+        returned = runtime.run_steps(
+            (
+                SemanticStep(
+                    "head.return_via_ui",
+                    InteractionSurface.UI,
+                    return_head,
+                ),
+            )
+        )[0]["evidence"]
     runtime.harness.assert_no_unexpected_dialog()
     evidence = {
         "slot": slot,
@@ -1164,12 +1292,150 @@ def run_stock_calibration_only(
         "generated": generated,
         "selected": selected,
         "count_transition": transition,
+        "return": dict(returned or {}),
     }
     runtime.observations.setdefault("calibration_count_transitions", []).append(
         dict(transition)
     )
     runtime.observations["calibration_only"] = evidence
     return evidence
+
+
+def run_precalibrated_stock_passes(
+    runtime: JourneyRuntime,
+    pass_specs: Sequence[PrecalibratedStockPassSpec],
+) -> None:
+    """Execute explicit stock-ID passes without reopening calibration."""
+
+    from PySide6 import QtWidgets
+
+    specs = tuple(pass_specs)
+    if not specs:
+        raise ValueError("at least one precalibrated stock pass is required")
+    if any(spec.bind_identity for spec in specs):
+        runtime.run_steps((head_identity_step(specs),))
+
+    observations = runtime.observations
+    completed_wells = observations.setdefault("completed_wells", [])
+    pass_boundaries = observations.setdefault("pass_boundaries", [])
+    head_staging = observations.setdefault("head_staging", [])
+    returned_head_ids = observations.setdefault("returned_head_ids", [])
+    current_pass = observations.setdefault(
+        "current_pass", {"index": -1, "starting_count": 0, "stock_id": None}
+    )
+
+    for index, spec in enumerate(specs):
+        current_pass.update(
+            {
+                "index": index,
+                "starting_count": len(completed_wells),
+                "stock_id": spec.stock_id,
+            }
+        )
+        _machine, rack, slot, _rows = _stage_stock_head(
+            runtime,
+            spec,
+            index=index,
+            head_staging=head_staging,
+            returned_head_ids=returned_head_ids,
+        )
+        expected_dialogs = [
+            (title, QtWidgets.QMessageBox.StandardButton.Yes)
+            for title in spec.start_dialog_titles
+        ]
+        array = ArrayDriver(runtime.context)
+        runtime.run_steps(
+            (
+                SemanticStep(
+                    "array.start_via_ui",
+                    InteractionSurface.UI,
+                    lambda _runtime, dialogs=expected_dialogs: {
+                        "dialogs": array.start(dialogs)
+                    },
+                ),
+                SemanticStep(
+                    "array.wait_for_completions",
+                    InteractionSurface.HARNESS,
+                    lambda _runtime, current=spec: wait_for_execution_boundary(
+                        runtime,
+                        expected_count=current.expected_completion_count,
+                        expected_plan_state=current.expected_plan_state,
+                        strict=True,
+                    ),
+                ),
+            )
+        )
+
+        def return_active_head(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+            active = runtime.context.model.rack_model.get_gripper_printer_head()
+            if active is None:
+                raise RuntimeError("precalibrated stock-pass head is absent")
+            if (
+                str(active.get_stock_id()) != spec.stock_id
+                or str(active.printer_head_id) != spec.printer_head_id
+            ):
+                raise RuntimeError("precalibrated stock-pass return identity drifted")
+            rack.unload(slot)
+            returned_head_ids.append(spec.printer_head_id)
+            return {
+                "slot": slot,
+                "stock_id": spec.stock_id,
+                "printer_head_id": spec.printer_head_id,
+                "array_state_before": runtime.context.controller.get_array_run_state(),
+                "queue_drained_before": bool(
+                    runtime.context.machine.check_if_all_completed()
+                ),
+                "returned": True,
+            }
+
+        returned_before_validation = (
+            spec.return_head and spec.expected_plan_state == "completed"
+        )
+        if returned_before_validation:
+            runtime.run_steps(
+                (
+                    SemanticStep(
+                        "head.return_via_ui",
+                        InteractionSurface.UI,
+                        return_active_head,
+                    ),
+                )
+            )
+        runtime.run_steps(
+            (
+                SemanticStep(
+                    "validation.stock_pass_boundary",
+                    InteractionSurface.HARNESS,
+                    lambda _runtime, current=spec, current_index=index: (
+                        validate_stock_pass_boundary(
+                            runtime,
+                            current,
+                            index=current_index,
+                            pass_boundaries=pass_boundaries,
+                        )
+                    ),
+                ),
+            )
+        )
+        capture_milestone(
+            runtime.context,
+            spec.completed_milestone,
+            evidence={
+                "stock_id": spec.stock_id,
+                "printer_head_id": spec.printer_head_id,
+                "completion_count": spec.expected_completion_count,
+            },
+        )
+        if spec.return_head and not returned_before_validation:
+            runtime.run_steps(
+                (
+                    SemanticStep(
+                        "head.return_via_ui",
+                        InteractionSurface.UI,
+                        return_active_head,
+                    ),
+                )
+            )
 
 
 def prepare_persisted_head_for_resume(
@@ -2163,7 +2429,7 @@ def wait_for_execution_boundary(
 
 def validate_stock_pass_boundary(
     runtime: JourneyRuntime,
-    spec: StockPassSpec,
+    spec: StockPassSpec | PrecalibratedStockPassSpec,
     *,
     index: int,
     pass_boundaries: list[dict[str, Any]],
@@ -2211,6 +2477,7 @@ def validate_stock_pass_boundary(
 
 __all__ = [
     "CalibrationOnlySpec",
+    "PrecalibratedStockPassSpec",
     "DisconnectFailClosedSpec",
     "EditorPreparationSpec",
     "MachineStartupSpec",
@@ -2224,6 +2491,7 @@ __all__ = [
     "machine_startup_steps",
     "normalized_stock_pass_steps",
     "normalized_calibration_only_steps",
+    "normalized_precalibrated_stock_pass_steps",
     "normalized_soft_stop_resume_steps",
     "normalized_disconnect_fail_closed_steps",
     "run_editor_preparation",
@@ -2238,6 +2506,7 @@ __all__ = [
     "run_clean_authoritative_session_rotation_boundary",
     "run_stock_passes",
     "run_stock_calibration_only",
+    "run_precalibrated_stock_passes",
     "run_soft_stop_resume",
     "validate_stock_pass_boundary",
     "wait_for_execution_boundary",

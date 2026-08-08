@@ -44,6 +44,10 @@ from tools.virtual_workflows.editor_scenarios import (
     WORKLOAD_ID as EDITOR_WORKLOAD_ID,
 )
 from tools.virtual_workflows.actions import ACTION_INTERACTION_SURFACES
+from tools.virtual_workflows.joined_interaction_cases import (
+    JOINED_INTERACTION_CASE_ID,
+    JOINED_INTERACTION_FIXTURE_PATH,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +79,7 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         MULTI_STOCK_WORKLOAD_ID,
         MIXED_MODE_WORKLOAD_ID,
         DISCONNECT_WORKLOAD_ID,
+        JOINED_INTERACTION_CASE_ID,
     )
 
     for scenario_id in (WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID):
@@ -130,6 +135,7 @@ def test_tracked_manifest_validates_and_describes_current_truth():
             MULTI_STOCK_WORKLOAD_ID,
             MIXED_MODE_WORKLOAD_ID,
             DISCONNECT_WORKLOAD_ID,
+            JOINED_INTERACTION_CASE_ID,
     ]
     rename_scenario = _row(
         payload,
@@ -177,6 +183,18 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert authoritative_reload["registry_id"] == (
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID
     )
+    randomized = _row(payload, "scenarios", JOINED_INTERACTION_CASE_ID)
+    assert randomized["status"] == "active"
+    assert randomized["suite_ids"] == ["lifecycle"]
+    assert randomized["timeout_seconds"] == 180
+    assert randomized["workload_fixture_path"] == (
+        JOINED_INTERACTION_FIXTURE_PATH.relative_to(REPO_ROOT).as_posix()
+    )
+    assert randomized["capability_ids"] == [
+        "sil.hardware_isolation.host",
+        "ui.real_app_construction",
+        "execution.randomized_calibration_reload_execution",
+    ]
     multi_stock = _row(payload, "scenarios", MULTI_STOCK_WORKLOAD_ID)
     assert multi_stock["status"] == "active"
     assert multi_stock["suite_ids"] == ["lifecycle"]

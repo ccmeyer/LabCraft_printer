@@ -1670,10 +1670,13 @@ class RackDriver(_QTestSurfaceDriver):
     def confirm_and_load(self, slot_index: int) -> None:
         rack = self.view.rack_box
         button = rack.slot_widgets[int(slot_index)][2]
-        if button.text() != "Confirm":
-            raise RuntimeError(f"expected Confirm control; observed {button.text()!r}")
-        self.click(button)
-        self.wait_until(lambda: button.text() == "Load", "rack slot confirmation")
+        if button.text() == "Confirm":
+            self.click(button)
+            self.wait_until(lambda: button.text() == "Load", "rack slot confirmation")
+        elif button.text() != "Load":
+            raise RuntimeError(
+                f"expected Confirm or Load control; observed {button.text()!r}"
+            )
         self.click(button)
         self.wait_until(
             lambda: self.context.model.rack_model.get_gripper_printer_head()

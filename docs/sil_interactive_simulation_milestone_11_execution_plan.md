@@ -1,6 +1,6 @@
 # Milestone 11 Execution Plan: Randomized Design, Calibration, Reload, and Execution
 
-Status: planned; ready for autonomous Goal-mode execution one reviewed slice at a time
+Status: implementation in progress; Slices 11.1 through 11.4 complete
 
 Prepared: 2026-08-08
 
@@ -720,6 +720,9 @@ Remaining calibration, all execution, terminal reload, retained direct/replay,
 visible qualification, lifecycle/host regression, and complete pytest.
 
 ## Slice 11.4: Remaining calibration, exact execution, terminal reload, and registration
+
+Status: complete (2026-08-08); see
+`docs/sil_interactive_simulation_milestone_11_slice_4_completion_record.md`.
 
 ### Objective and explicit non-goals
 

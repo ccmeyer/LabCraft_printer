@@ -216,6 +216,19 @@ _SCENARIO_DEFINITIONS = {
         supports_injected_stall=False,
         supports_report_sets=False,
     ),
+    "randomized_calibration_reload_execution_v1": ScenarioDefinition(
+        registry_id="randomized_calibration_reload_execution_v1",
+        workload_id="randomized_calibration_reload_execution_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "randomized_calibration_reload_execution_v1.json"
+        ),
+        expected_completion_count=24,
+        scenario_name="randomized_calibration_reload_execution",
+        runner_family="composed_journey",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
 }
 REGISTERED_SCENARIOS: Mapping[str, ScenarioDefinition] = MappingProxyType(
     _SCENARIO_DEFINITIONS
@@ -473,13 +486,21 @@ def _fixture_identity(path: Path, label: str) -> tuple[str, int]:
     except (OSError, json.JSONDecodeError) as exc:
         raise ManifestValidationError(f"{label} is not valid JSON: {exc}") from exc
     fixture = _require_mapping(payload, label)
-    workload = _require_mapping(fixture.get("workload"), f"{label}.workload")
-    completion_count = workload.get("completion_count")
+    fixture_id = str(fixture.get("fixture_id") or fixture.get("case_id") or "")
+    workload = fixture.get("workload")
+    if workload is not None:
+        completion_count = _require_mapping(
+            workload, f"{label}.workload"
+        ).get("completion_count")
+    else:
+        completion_count = _require_mapping(
+            fixture.get("terminal"), f"{label}.terminal"
+        ).get("expected_completed_wells")
     if not isinstance(completion_count, int) or completion_count <= 0:
         raise ManifestValidationError(
-            f"{label}.workload.completion_count must be positive"
+            f"{label} completion count must be positive"
         )
-    return str(fixture.get("fixture_id") or ""), completion_count
+    return fixture_id, completion_count
 
 
 def load_capability_manifest(path: str | Path = MANIFEST_PATH) -> dict[str, Any]:

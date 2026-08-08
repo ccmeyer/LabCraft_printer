@@ -61,6 +61,8 @@ from tools.virtual_workflows.journeys import (
     get_journey_definition,
     JOINED_CALIBRATED_CHECKPOINT_REQUIRED_ASSERTIONS,
     JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS,
+    RANDOMIZED_CALIBRATION_REQUIRED_ASSERTIONS,
+    RANDOMIZED_CALIBRATION_REQUIRED_SCREENSHOTS,
     run_joined_calibrated_checkpoint,
 )
 from tools.virtual_workflows.scenarios import (
@@ -82,7 +84,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_ROOT = REPO_ROOT / "tests" / "performance" / "baselines"
 
 
-def test_milestone_11_joined_contract_is_frozen_without_runtime_registration():
+def test_milestone_11_joined_contract_is_frozen_with_complete_registration():
     from tools.virtual_workflows.registry import registered_scenario_ids
 
     assert JOINED_INTERACTION_CASE.sha256() == (
@@ -94,10 +96,16 @@ def test_milestone_11_joined_contract_is_frozen_without_runtime_registration():
     assert joined_fixture_sha256() == (
         "bf9631efdf2e0ad04e2310b378330a87941d05c157d69a6c47b69b645dbbe118"
     )
-    assert JOINED_INTERACTION_CASE_ID not in registered_scenario_ids()
+    assert registered_scenario_ids()[-1] == JOINED_INTERACTION_CASE_ID
+    registry = get_registered_scenario(JOINED_INTERACTION_CASE_ID)
+    journey = get_journey_definition(JOINED_INTERACTION_CASE_ID)
+    assert registry.runner_family == "composed_journey"
+    assert registry.expected_completion_count == 24
+    assert journey.required_assertion_ids == RANDOMIZED_CALIBRATION_REQUIRED_ASSERTIONS
+    assert journey.required_screenshots == RANDOMIZED_CALIBRATION_REQUIRED_SCREENSHOTS
 
 
-def test_milestone_11_partial_checkpoint_cannot_start_or_register_execution():
+def test_milestone_11_complete_journey_uses_precalibrated_stock_passes():
     from tools.virtual_workflows.registry import registered_scenario_ids
 
     source = inspect.getsource(run_joined_calibrated_checkpoint)
@@ -113,15 +121,20 @@ def test_milestone_11_partial_checkpoint_cannot_start_or_register_execution():
         "execution.authoritative_reload_valid",
         "execution.authoritative_runtime_rehydrated",
         "execution.clean_session_rotation_exact",
+        "execution.remaining_calibrations_exact",
+        "execution.completed_terminal_reload_exact",
+        "execution.randomized_calibration_terminal_exact",
     )
-    assert "array.start_via_ui" not in JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS
+    assert "array.start_via_ui" in JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS
     assert "experiment.activate_authoritative_via_ui" in (
         JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS
     )
     assert "run_stock_passes" not in source
+    assert "run_precalibrated_stock_passes" in source
+    assert "manual_refuel" not in source
     assert "run_authoritative_reload_resume_boundary" not in source
     assert "run_clean_authoritative_session_rotation_boundary" in source
-    assert JOINED_INTERACTION_CASE_ID not in registered_scenario_ids()
+    assert JOINED_INTERACTION_CASE_ID in registered_scenario_ids()
 
 
 def test_clean_session_rotation_phase_is_lifecycle_neutral():
