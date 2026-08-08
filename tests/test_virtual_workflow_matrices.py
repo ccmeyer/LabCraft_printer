@@ -18,7 +18,9 @@ from tools.virtual_workflows.matrices import (
     PROFILES,
     REQUANTIZATION_BASE_FIXTURE_PATH,
     REQUANTIZATION_CASES,
+    REQUANTIZATION_FILL_STOCK_ID,
     REQUANTIZATION_STOCK_ID,
+    RequantizationCountGroup,
     RequantizationCase,
     MatrixDefinition,
     MatrixRegistry,
@@ -39,11 +41,24 @@ EXPECTED_REPRESENTATIVE_PLAN_SHA256 = (
     "543bec9aa811508fcba2bb84e0549054ddbffc6d10bc85ec2ed88353f971ab9f"
 )
 EXPECTED_REQUANTIZATION_CATALOG_SHA256 = (
-    "d36330cddd7f3e168c2802314371837d96c9d4393021c338d487ff27e0c8ada8"
+    "668249dabdf29e7201cb439d349e789d68e12b8513dd24622e756eafb6627eac"
 )
 EXPECTED_REQUANTIZATION_PLAN_SHA256 = (
-    "54bc74e13e9eb82b84105d0cc94cf3472b693b7969fffb4908db5e7d837dec98"
+    "accefd777739e32a2f2ffc70b141d800729a8974fec534540cda0707eed9d073"
 )
+EXPECTED_REQUANTIZATION_CASE_SHA256 = {
+    "droplet_idempotent_10_to_10": "714f1c212bef572de306a7f2b35d47e28c477477467dc36cec4c4acf2ec8d98f",
+    "droplet_volume_increase_10_to_9": "f9bc246789292641551a4606bf6bfcff233bdebf741215c10e1e836e9a18bd99",
+    "droplet_volume_decrease_10_to_11": "028cc1b70dd6023a40596b0fef21704bddfde8fa95c72406ad8a8b3cfbf5c35d",
+    "droplet_multi_target_10_to_9_and_1_to_1": "98912b757f51b31d8246e1c52b78e5b163d4f3ae76ca380b87380318bf485e62",
+    "stream_to_droplet_40_to_10_8": "dd066433aa0888bc24bf70479e9ebf3651a428dbb35dc526c0e8441056a846e1",
+    "fill_volume_decrease_4_to_5": "793b4f28bbb8ea691d8ed3b595d8a0ee4f100e08bf111b5701f16500ec8a0467",
+}
+EXPECTED_GROUPED_PLAN_SHA256 = {
+    "droplet_multi_target_10_to_9_and_1_to_1": "4e29a7892b0a5985f3023b611d2630f42f5015d3d775d0206a9fe6ce4f9ba5e6",
+    "stream_to_droplet_40_to_10_8": "a9e002c603ad9f24cc2a8d953051f635f2c4d47a97c212f76fa19abe906ced3f",
+    "fill_volume_decrease_4_to_5": "dac3a0780fd17442c9ca2c820d972e93493b03080bfd432d3646c3c925f3847c",
+}
 
 
 EXPECTED_CASES = (
@@ -60,6 +75,9 @@ EXPECTED_REQUANTIZATION_CASES = (
     "droplet_idempotent_10_to_10",
     "droplet_volume_increase_10_to_9",
     "droplet_volume_decrease_10_to_11",
+    "droplet_multi_target_10_to_9_and_1_to_1",
+    "stream_to_droplet_40_to_10_8",
+    "fill_volume_decrease_4_to_5",
 )
 
 
@@ -142,15 +160,40 @@ def test_requantization_catalog_freezes_exact_boundary_oracles_and_hashes():
             case.expected_requantized_droplets,
             (case.margin_numerator, case.margin_denominator),
         )
-        for case in REQUANTIZATION_CASES
+        for case in REQUANTIZATION_CASES[:3]
     ] == [
         (9.0, 9.0, 90.0, 10, 10, (1, 2)),
         (8.0, 9.0, 80.0, 10, 9, (7, 18)),
         (10.0, 9.0, 100.0, 10, 11, (7, 18)),
     ]
+    grouped = [case.normalized() for case in REQUANTIZATION_CASES[3:]]
+    assert [case["case_id"] for case in grouped] == list(
+        EXPECTED_REQUANTIZATION_CASES[3:]
+    )
+    assert [case["case_kind"] for case in grouped] == [
+        "composite_requantization"
+    ] * 3
+    assert [
+        build_case_fixture(
+            CALIBRATION_REQUANTIZATION_MATRIX_ID, case["case_id"]
+        )[0]["lifecycle"]["dispense_count_oracle"]["schema_version"]
+        for case in grouped
+    ] == [2, 2, 2]
+    assert [case["expected_completion_count"] for case in grouped] == [36, 48, 48]
+    assert [case["require_terminal_reload"] for case in grouped] == [False, True, False]
     assert catalog_sha256(
         CALIBRATION_REQUANTIZATION_MATRIX_ID
     ) == EXPECTED_REQUANTIZATION_CATALOG_SHA256
+    observed_case_hashes = {
+        row["case"]["case_id"]: row["case_sha256"]
+        for row in resolve_matrix_plan(
+            CALIBRATION_REQUANTIZATION_MATRIX_ID,
+            seed=7,
+            timeout_seconds=12,
+            execution_authorized=False,
+        )["cases"]
+    }
+    assert observed_case_hashes == EXPECTED_REQUANTIZATION_CASE_SHA256
     plan = resolve_matrix_plan(
         CALIBRATION_REQUANTIZATION_MATRIX_ID,
         case_id="droplet_idempotent_10_to_10",
@@ -163,6 +206,22 @@ def test_requantization_catalog_freezes_exact_boundary_oracles_and_hashes():
             plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False
         ).encode("utf-8")
     ).hexdigest() == EXPECTED_REQUANTIZATION_PLAN_SHA256
+    for case_id, expected_hash in EXPECTED_GROUPED_PLAN_SHA256.items():
+        grouped_plan = resolve_matrix_plan(
+            CALIBRATION_REQUANTIZATION_MATRIX_ID,
+            case_id=case_id,
+            seed=7,
+            timeout_seconds=12,
+            execution_authorized=False,
+        )
+        assert hashlib.sha256(
+            json.dumps(
+                grouped_plan,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest() == expected_hash
 
 
 @pytest.mark.parametrize(
@@ -183,6 +242,62 @@ def test_requantization_catalog_freezes_exact_boundary_oracles_and_hashes():
 def test_requantization_case_rejects_drift(changes, message):
     with pytest.raises(MatrixValidationError, match=message):
         replace(REQUANTIZATION_CASES[1], **changes)
+
+
+def test_composite_requantization_rejects_group_and_transition_drift():
+    case = REQUANTIZATION_CASES[3]
+    first = case.count_groups[0]
+    with pytest.raises(MatrixValidationError, match="overlap"):
+        replace(case, count_groups=(*case.count_groups, first))
+    with pytest.raises(MatrixValidationError, match="margin is too small"):
+        replace(first, margin_numerator=1, margin_denominator=4)
+    with pytest.raises(MatrixValidationError, match="count oracle drifted"):
+        replace(
+            case,
+            count_groups=(
+                replace(first, requantized_droplets=2),
+                *case.count_groups[1:],
+            ),
+        )
+    with pytest.raises(MatrixValidationError, match="preview projection"):
+        replace(
+            case,
+            count_groups=(
+                replace(first, preview_row=1),
+                *case.count_groups[1:],
+            ),
+        )
+    with pytest.raises(MatrixValidationError, match="primary transition"):
+        replace(
+            case,
+            calibration_steps=(
+                replace(case.calibration_steps[0], primary=False),
+                replace(case.calibration_steps[1], primary=True),
+            ),
+        )
+
+
+def test_composite_requantization_requires_exact_stock_well_membership():
+    case = REQUANTIZATION_CASES[5]
+    fill = case.count_groups[1]
+    with pytest.raises(MatrixValidationError, match="incomplete"):
+        replace(
+            case,
+            count_groups=(
+                case.count_groups[0],
+                replace(fill, well_ids=fill.well_ids[:-1]),
+            ),
+        )
+    with pytest.raises(MatrixValidationError, match="stock is invalid"):
+        RequantizationCountGroup(
+            stock_id=f"{REQUANTIZATION_FILL_STOCK_ID}-wrong",
+            well_ids=("A1",),
+            prepared_droplets=1,
+            requantized_droplets=1,
+            rounding_rule="nearest_integer",
+            margin_numerator=1,
+            margin_denominator=2,
+        )
 
 
 def test_profiles_freeze_calibration_and_trial_values():

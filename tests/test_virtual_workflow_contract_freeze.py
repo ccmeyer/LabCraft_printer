@@ -275,6 +275,8 @@ def test_authoritative_reload_composed_contract_is_frozen():
     assert "QTest" not in action_function
     assert "load_authoritative_execution" in action_function
     assert "def load_authoritative_execution" in driver_source
+    assert "def inspect_completed_execution" in driver_source
+    assert "experiment.inspect_completed_via_ui" in driver_source
 
 
 def test_legacy_cli_surface_remains_additively_compatible():

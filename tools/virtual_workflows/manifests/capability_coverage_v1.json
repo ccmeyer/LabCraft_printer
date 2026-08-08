@@ -977,6 +977,12 @@
         "interaction_surface": "ui"
       },
       {
+        "id": "experiment.inspect_completed_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
+      },
+      {
         "id": "experiment.activate_authoritative_via_ui",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py",

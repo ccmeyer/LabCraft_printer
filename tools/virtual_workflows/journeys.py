@@ -12,6 +12,7 @@ from tools.virtual_workflows.assertions import (
     ExecutionLifecycleExpectation,
     calibration_assertion,
     cleanup_assertion,
+    completed_terminal_reload_assertion,
     capture_editor_prepared_revision_snapshot,
     editor_artifacts_cleanup_assertion,
     editor_create_finalize_assertion,
@@ -581,12 +582,17 @@ def _editor_specification(
     fixture: Mapping[str, Any], expected_wells: tuple[str, ...]
 ) -> dict[str, Any]:
     stocks = _fixture_stocks(fixture)
+    reagent_stocks = tuple(
+        stock for stock in stocks if stock.get("stock_role") != "fill"
+    )
     volume_field = (
         "prepared_droplet_volume_nL"
         if int(fixture["schema_version"]) >= 2
         else "droplet_volume_nL"
     )
-    default_printed_volume = sum(float(stock[volume_field]) for stock in stocks)
+    default_printed_volume = sum(
+        float(stock[volume_field]) for stock in reagent_stocks
+    )
     design_override = dict(
         fixture.get("lifecycle", {}).get("design") or {}
     )
@@ -602,18 +608,27 @@ def _editor_specification(
             "group": "Additive",
             "printing_mode": stock["printing_mode"],
             "starting_concentration": 0.0,
-            "targets": [float(stock["target_concentration"])],
+            "targets": [
+                float(value) for value in stock.get(
+                    "target_concentrations", [stock["target_concentration"]]
+                )
+            ],
             "units": stock["units"],
             "fixed_stock_concentration": float(stock["concentration"]),
             "droplet_volume_nL": float(stock["prepared_droplet_volume_nL"]),
         }
-        for stock in stocks
+        for stock in reagent_stocks
     ]
     specification = {
         "experiment": {
             "name": fixture["fixture_id"],
             "plate_name": fixture["plate"]["name"],
-            "replicates": len(expected_wells),
+            "replicates": int(
+                design_override.get("replicates", len(expected_wells))
+            ),
+            "expected_reaction_count": int(
+                design_override.get("expected_reaction_count", len(expected_wells))
+            ),
             "expected_well_ids": list(expected_wells),
             "printed_volume_nL": printed_volume,
             "final_volume_nL": final_volume,
@@ -622,6 +637,9 @@ def _editor_specification(
             "allow_two_stock_solutions": False,
         },
     }
+    for key in ("fill_printing_mode", "fill_droplet_volume_nL"):
+        if key in design_override:
+            specification["experiment"][key] = design_override[key]
     specification["reagent" if len(reagents) == 1 else "reagents"] = (
         reagents[0] if len(reagents) == 1 else reagents
     )
@@ -630,12 +648,20 @@ def _editor_specification(
 
 def _prepared_target_dispenses(
     fixture: Mapping[str, Any],
-) -> dict[str, int] | None:
+) -> dict[Any, int] | None:
     oracle = dict(
         fixture.get("lifecycle", {}).get("dispense_count_oracle") or {}
     )
     if not oracle:
         return None
+    if int(oracle.get("schema_version", 1)) == 2:
+        rows: dict[tuple[str, str], int] = {}
+        for group in oracle.get("count_groups") or ():
+            for well_id in group.get("well_ids") or ():
+                rows[(str(group["stock_id"]), str(well_id))] = int(
+                    group["prepared_droplets"]
+                )
+        return rows
     return {
         str(oracle["stock_id"]): int(oracle["prepared_droplets_per_well"])
     }
@@ -804,6 +830,16 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
         fixture.get("lifecycle", {}).get("manual_refuel_checks") or {}
     )
     blocked_seen = False
+    oracle = dict(fixture.get("lifecycle", {}).get("dispense_count_oracle") or {})
+    completion_by_stock: dict[str, int] = {}
+    if int(oracle.get("schema_version", 1)) == 2:
+        for group in oracle.get("count_groups") or ():
+            stock_id = str(group.get("stock_id") or "")
+            if int(group.get("requantized_droplets", 0) or 0) > 0:
+                completion_by_stock[stock_id] = completion_by_stock.get(stock_id, 0) + len(
+                    group.get("well_ids") or ()
+                )
+    cumulative_completion_count = 0
     for index, stock in enumerate(fixture["stocks"]):
         head = stock["printer_head"]
         stock_key = str(stock.get("matrix_stock_key") or "")
@@ -815,13 +851,23 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
             break
         is_last_configured = index == stock_count - 1
         will_complete_case = is_last_configured and not matrix_blocked
+        applied_pulse_width_us = int(head["print_pulse_width_us"])
         pulse_width_us = (
             STRESS_FIXED_CALIBRATION_PULSE_WIDTH_US
-            if compact else int(head["print_pulse_width_us"])
+            if compact else int(
+                stock.get("staging_print_pulse_width_us", applied_pulse_width_us)
+            )
+        )
+        stock_id = _stock_id(stock)
+        cumulative_completion_count += completion_by_stock.get(
+            stock_id, well_count
+        )
+        calibration_mode = str(
+            stock.get("calibration_mode") or stock["printing_mode"]
         )
         result.append(
             StockPassSpec(
-                stock_id=_stock_id(stock),
+                stock_id=stock_id,
                 printer_head_id=str(head["printer_head_id"]),
                 pulse_width_us=pulse_width_us,
                 pressure_psi=float(head["print_pressure_psi"]),
@@ -831,7 +877,10 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
                     response.predict_volume_nl(str(stock["printing_mode"]), pulse_width_us)
                     if compact else float(stock["droplet_volume_nL"])
                 ),
-                expected_completion_count=well_count * (index + 1),
+                expected_completion_count=(
+                    cumulative_completion_count
+                    if completion_by_stock else well_count * (index + 1)
+                ),
                 expected_plan_state=("completed" if will_complete_case else "active"),
                 ready_milestone=(
                     f"pass_{index + 1}_ready" if matrix_case else
@@ -870,7 +919,24 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
                 detailed_evidence=True,
                 include_frequency_evidence=False,
                 no_progress_timeout_seconds=120.0 if compact else None,
-                calibration_mode=str(stock["printing_mode"]),
+                calibration_mode=calibration_mode,
+                mode_switch_choice=(
+                    "yes"
+                    if calibration_mode != str(stock["printing_mode"])
+                    else None
+                ),
+                apply_success_title=(
+                    "Applied (Fill)"
+                    if stock.get("stock_role") == "fill" else "Applied"
+                ),
+                require_refuel_regulation=(
+                    str(stock["printing_mode"]) == "stream"
+                ),
+                expected_applied_pulse_width_us=applied_pulse_width_us,
+                calibration_print_profile_id=(
+                    str((stock.get("calibration_print_profile") or {}).get("id"))
+                    if stock.get("calibration_print_profile") else None
+                ),
                 refuel_pulse_width_us=(
                     int(head["refuel_pulse_width_us"])
                     if "refuel_pulse_width_us" in head else None
@@ -1378,6 +1444,86 @@ def _add_dispense_count_assertion(
     )
 
 
+def _run_completed_terminal_reload(runtime: JourneyRuntime) -> None:
+    """Rotate sessions and inspect a completed bundle without activation."""
+
+    from tools.virtual_workflows.authoritative_evidence import (
+        compare_directories,
+        snapshot_directory,
+    )
+
+    context = runtime.context
+    before = capture_authoritative_bundle(context)
+    experiment_dir = Path(before.experiment_dir)
+    first_close = runtime.harness.close_application_session()["evidence"]
+    after_close = compare_directories(
+        before.directory, snapshot_directory(experiment_dir)
+    ).to_dict()
+    second_launch = runtime.harness.reopen_application_session()["evidence"]
+    loader = ExperimentLoaderDriver(context).inspect_completed_execution(
+        experiment_dir,
+        expected_name=str(runtime.fixture["fixture_id"]),
+    )
+    after = capture_authoritative_bundle(context)
+    after_reload = compare_directories(
+        before.directory, snapshot_directory(experiment_dir)
+    ).to_dict()
+    assertion = completed_terminal_reload_assertion(
+        before=before,
+        after=after,
+        first_close=first_close,
+        second_launch=second_launch,
+        loader=loader,
+        directory_comparisons={
+            "after_close": after_close,
+            "after_reload": after_reload,
+        },
+    )
+    runtime.add_assertion(assertion)
+    if assertion.decision != "pass":
+        raise RuntimeError(
+            "completed terminal reload was not exact: "
+            f"{assertion.evidence.get('failed_checks')}"
+        )
+    runtime.observations["completed_terminal_reload"] = {
+        "before": before,
+        "after": after,
+        "first_close": first_close,
+        "second_launch": second_launch,
+        "loader": loader,
+        "directory_comparisons": {
+            "after_close": after_close,
+            "after_reload": after_reload,
+        },
+    }
+
+
+def _install_fixture_print_profiles(context: Any, fixture: Mapping[str, Any]) -> None:
+    existing = {
+        str(item.get("id") or "")
+        for item in context.model.print_profiles
+        if isinstance(item, Mapping)
+    }
+    for stock in fixture["stocks"]:
+        profile = stock.get("calibration_print_profile")
+        if profile and str(profile["id"]) not in existing:
+            context.model.print_profiles.append(dict(profile))
+            existing.add(str(profile["id"]))
+
+
+def _install_multi_observer(runtime: JourneyRuntime) -> None:
+    context = runtime.context
+    observer = ExecutionObserver(
+        context,
+        experiment_dir=Path(context.experiment_model.experiment_dir_path),
+        completed_count=lambda: len(runtime.observations["completed_wells"]),
+        pass_context=lambda: _current_pass_context(runtime),
+    )
+    runtime.register_restorable("execution", observer)
+    observer.install()
+    _install_starvation_observer(runtime)
+
+
 def _multi_body(runtime: JourneyRuntime) -> None:
     context, fixture = runtime.context, runtime.fixture
     expected_wells = _well_ids(fixture)
@@ -1399,6 +1545,7 @@ def _multi_body(runtime: JourneyRuntime) -> None:
         runtime.observations["evidence_profile"] = profile
         runtime.add_assertion(profile.pi_assertion())
     runtime.run_steps(machine_startup_steps())
+    _install_fixture_print_profiles(context, fixture)
     run_editor_preparation(
         runtime,
         EditorPreparationSpec(_editor_specification(fixture, expected_wells)),
@@ -1415,19 +1562,14 @@ def _multi_body(runtime: JourneyRuntime) -> None:
         raise RuntimeError(f"prepared multi-stock bundle was invalid: {prepared.evidence}")
     runtime.observations["prepared_count_snapshot"] = capture_count_snapshot(context)
     pass_specs = _multi_passes(runtime)
-    runtime.observations["expected_pulse_widths_us"] = tuple(spec.pulse_width_us for spec in pass_specs)
+    runtime.observations["expected_pulse_widths_us"] = tuple(
+        spec.expected_applied_pulse_width_us or spec.pulse_width_us
+        for spec in pass_specs
+    )
     runtime.observations["expected_volumes_nL"] = tuple(spec.expected_volume_nL for spec in pass_specs)
     runtime.run_steps((head_identity_step(pass_specs),))
     if profile is None:
-        observer = ExecutionObserver(
-            context,
-            experiment_dir=Path(context.experiment_model.experiment_dir_path),
-            completed_count=lambda: len(runtime.observations["completed_wells"]),
-            pass_context=lambda: _current_pass_context(runtime),
-        )
-        runtime.register_restorable("execution", observer)
-        observer.install()
-        _install_starvation_observer(runtime)
+        _install_multi_observer(runtime)
     else:
         runtime.register_restorable("sustained_evidence", profile)
         profile.install()
@@ -1467,6 +1609,9 @@ def _multi_body(runtime: JourneyRuntime) -> None:
             observer=snapshot,
         ):
             runtime.add_assertion(assertion)
+    count_oracle = fixture.get("lifecycle", {}).get("dispense_count_oracle") or {}
+    if bool(count_oracle.get("require_terminal_reload")):
+        _run_completed_terminal_reload(runtime)
     _add_dispense_count_assertion(runtime, matrix_case=matrix_case, matrix_terminal=matrix_terminal, observer=snapshot)
     if matrix_case:
         for assertion in matrix_case_assertions(
@@ -2995,6 +3140,9 @@ def _run_parameterized_calibration_matrix_case(
     pass_specs = _multi_passes(dummy)
     steps = normalized_stock_pass_steps(pass_specs)
     observed_actions = {row["action_id"] for row in steps}
+    requires_terminal_reload = bool(
+        case.normalized().get("require_terminal_reload")
+    )
     required_actions = (
         _COMMON_ACTIONS
         | _EDITOR_ACTIONS
@@ -3004,9 +3152,17 @@ def _run_parameterized_calibration_matrix_case(
             "machine.home_via_ui",
         })
         | frozenset(observed_actions)
+        | (
+            frozenset({
+                "app.close_simulated_session",
+                "experiment.inspect_completed_via_ui",
+            })
+            if requires_terminal_reload else frozenset()
+        )
     )
     non_ui = {
-        "app.launch_simulated", "artifact.capture_milestone", "scenario.teardown",
+        "app.launch_simulated", "app.close_simulated_session",
+        "artifact.capture_milestone", "scenario.teardown",
         "head.bind_identity", "array.wait_for_completions",
         "validation.stock_pass_boundary",
     }
@@ -3023,6 +3179,8 @@ def _run_parameterized_calibration_matrix_case(
                 required_screenshots.add(name)
     if case.expected_terminal == "manual_refuel_cancelled":
         required_screenshots.add("manual_refuel_blocked")
+    if requires_terminal_reload:
+        required_screenshots.add("terminal_reloaded")
     required_assertions = (
         (
             *MULTI_STOCK_REQUIRED_ASSERTIONS[:-1],
@@ -3032,6 +3190,12 @@ def _run_parameterized_calibration_matrix_case(
         if case.expected_terminal == "completed"
         else MATRIX_CASE_REQUIRED_ASSERTIONS
     )
+    if requires_terminal_reload:
+        required_assertions = (
+            *required_assertions[:-2],
+            "execution.completed_terminal_reload_exact",
+            *required_assertions[-2:],
+        )
     definition = replace(
         base_definition,
         scenario_name=MATRIX_SCENARIO_NAME,

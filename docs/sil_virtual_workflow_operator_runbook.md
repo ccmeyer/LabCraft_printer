@@ -29,7 +29,7 @@ an explicit non-dry-run selector starts children.
 | Shared Qt driver, application construction, or basic editor/start controls | `standard` | visible standard plus replay |
 | Editor lifecycle, persistence, stop/resume, reload, disconnect, calibration, or manual refuel | `lifecycle` | affected direct scenario |
 | Calibration values, droplet/stream modes, stock order, or manual-refuel safeguards | `mixed_mode_calibration_v1` matrix | visible positive and safe-block cases |
-| Calibration volume or exact prepared/preview/commanded/completed droplet counts | `calibration_requantization_v1` matrix | visible `10 -> 9` and `10 -> 11` cases |
+| Calibration volume or exact prepared/preview/commanded/completed droplet counts | `calibration_requantization_v1` matrix | visible boundary or `stream_to_droplet_40_to_10_8` case |
 | Prepared-editor ordering or activation guards | `editor_prepared_guard_v1` exploration | selected legal/illegal visible sequences |
 | General execution or durability changes | `host_regression` | `host_stress` for sustained effects |
 | Rack, revision history, responsiveness, resource growth, or scalability | `host_stress` | retained visible 384×10 evidence or a separately justified visible run |
@@ -73,6 +73,7 @@ Common Windows commands:
 
 .\env\Scripts\python.exe tools\run_virtual_workflow.py `
   --matrix calibration_requantization_v1 `
+  --case stream_to_droplet_40_to_10_8 `
   --output-root verification_reports\matrices `
   --seed 1 --speed-multiplier 1000 --timeout-seconds 90
 
@@ -93,6 +94,12 @@ Common Windows commands:
 For visible Windows evidence, set `QT_QPA_PLATFORM=windows`, add `--visible`,
 and use a realistic bounded speed such as 20x. Run the exact replay command
 printed by the report or aggregate rather than reconstructing it manually.
+The requantization catalog has six ordered cases. The last three require exact
+grouped stock/well evidence: 36 positive intents for the multi-target case, 48
+for the stream-to-droplet case, and 48 for the fill transition. The stream case
+must additionally retain a passing completed-terminal fresh-session reload;
+the application reports that terminal bundle as `COMPLETED` and
+`analysis_only`, with zero remaining progress and hardware activation blocked.
 
 ## Evidence layout and authority
 

@@ -33,6 +33,7 @@ REQUANTIZATION_BASE_FIXTURE_PATH = (
 REQUANTIZATION_BASE_SCENARIO_ID = "print_array_multi_stock_24x2_v1"
 REQUANTIZATION_PROFILE_ID = "droplet_1300_9nl_v1"
 REQUANTIZATION_STOCK_ID = "Virtual Requantization Stock_10.00_mM"
+REQUANTIZATION_FILL_STOCK_ID = "Water_1.00_--"
 REQUANTIZATION_WELL_IDS = tuple(f"A{column}" for column in range(1, 25))
 
 
@@ -377,7 +378,7 @@ class RequantizationCase:
         }
 
 
-REQUANTIZATION_CASES: tuple[RequantizationCase, ...] = (
+BASE_REQUANTIZATION_CASES: tuple[RequantizationCase, ...] = (
     RequantizationCase(
         "droplet_idempotent_10_to_10",
         "idempotent",
@@ -411,6 +412,458 @@ REQUANTIZATION_CASES: tuple[RequantizationCase, ...] = (
         7,
         18,
     ),
+)
+
+
+@dataclass(frozen=True)
+class RequantizationCountGroup:
+    """One catalog-owned count shared by an explicit stock/well group."""
+
+    stock_id: str
+    well_ids: tuple[str, ...]
+    prepared_droplets: int
+    requantized_droplets: int
+    rounding_rule: str
+    margin_numerator: int | None
+    margin_denominator: int | None
+    preview_row: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.stock_id not in {
+            REQUANTIZATION_STOCK_ID,
+            REQUANTIZATION_FILL_STOCK_ID,
+        }:
+            raise MatrixValidationError("requantization count-group stock is invalid")
+        if (
+            not self.well_ids
+            or len(set(self.well_ids)) != len(self.well_ids)
+            or any(well_id not in REQUANTIZATION_WELL_IDS for well_id in self.well_ids)
+        ):
+            raise MatrixValidationError("requantization count-group wells are invalid")
+        for label, value in (
+            ("prepared", self.prepared_droplets),
+            ("requantized", self.requantized_droplets),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise MatrixValidationError(
+                    f"requantization {label} grouped count is invalid"
+                )
+        if self.rounding_rule == "nearest_integer":
+            if (
+                isinstance(self.margin_numerator, bool)
+                or isinstance(self.margin_denominator, bool)
+                or not isinstance(self.margin_numerator, int)
+                or not isinstance(self.margin_denominator, int)
+                or self.margin_numerator <= 0
+                or self.margin_denominator <= 0
+            ):
+                raise MatrixValidationError("grouped rounding margin is invalid")
+            if Fraction(self.margin_numerator, self.margin_denominator) < Fraction(1, 3):
+                raise MatrixValidationError("grouped rounding margin is too small")
+        elif self.rounding_rule == "nonnegative_clamp":
+            if (
+                self.prepared_droplets != 0
+                or self.requantized_droplets != 0
+                or self.margin_numerator is not None
+                or self.margin_denominator is not None
+            ):
+                raise MatrixValidationError("clamped count groups must remain exact zero")
+        else:
+            raise MatrixValidationError("requantization grouped rounding rule is invalid")
+        if self.preview_row is not None and (
+            isinstance(self.preview_row, bool)
+            or not isinstance(self.preview_row, int)
+            or self.preview_row < 0
+        ):
+            raise MatrixValidationError("requantization preview row is invalid")
+
+    def normalized(self) -> dict[str, Any]:
+        payload = {
+            "stock_id": self.stock_id,
+            "well_ids": list(self.well_ids),
+            "prepared_droplets": self.prepared_droplets,
+            "requantized_droplets": self.requantized_droplets,
+            "rounding_rule": self.rounding_rule,
+            "preview_row": self.preview_row,
+        }
+        if self.rounding_rule == "nearest_integer":
+            payload["rounding_boundary_margin"] = {
+                "numerator": self.margin_numerator,
+                "denominator": self.margin_denominator,
+            }
+        return payload
+
+
+@dataclass(frozen=True)
+class RequantizationCalibrationStep:
+    """One ordered real-UI calibration used by a composite case."""
+
+    stock_id: str
+    target_mode: str
+    pulse_width_us: int
+    applied_volume_nL: float
+    synthetic_profile_id: str
+    preview_kind: str
+    primary: bool
+
+    def __post_init__(self) -> None:
+        if self.stock_id not in {
+            REQUANTIZATION_STOCK_ID,
+            REQUANTIZATION_FILL_STOCK_ID,
+        }:
+            raise MatrixValidationError("requantization calibration stock is invalid")
+        if self.target_mode not in {"droplet", "stream"}:
+            raise MatrixValidationError("requantization calibration mode is invalid")
+        if self.preview_kind not in {"target_rows", "fill_total"}:
+            raise MatrixValidationError("requantization preview kind is invalid")
+        if (self.stock_id == REQUANTIZATION_FILL_STOCK_ID) != (
+            self.preview_kind == "fill_total"
+        ):
+            raise MatrixValidationError("requantization preview kind and stock differ")
+        response = PulseAwareSyntheticEjectionModelV1()
+        if not response.supports(self.target_mode, self.pulse_width_us):
+            raise MatrixValidationError("requantization calibration pulse is unsupported")
+        predicted = Fraction(str(response.predict_volume_nl(
+            self.target_mode, self.pulse_width_us
+        )))
+        if predicted != _fraction(self.applied_volume_nL, "applied volume"):
+            raise MatrixValidationError("requantization applied volume drifted")
+        expected_profile = (
+            "stream_to_droplet"
+            if self.synthetic_profile_id == "stream_to_droplet"
+            else f"nominal_{self.target_mode}"
+        )
+        if self.synthetic_profile_id != expected_profile:
+            raise MatrixValidationError("requantization synthetic profile is invalid")
+
+    def normalized(self) -> dict[str, Any]:
+        return {
+            "stock_id": self.stock_id,
+            "target_mode": self.target_mode,
+            "pulse_width_us": self.pulse_width_us,
+            "applied_volume_nL": self.applied_volume_nL,
+            "synthetic_profile_id": self.synthetic_profile_id,
+            "preview_kind": self.preview_kind,
+            "primary": self.primary,
+        }
+
+
+def _nearest_integer(quotient: Fraction) -> tuple[int, Fraction]:
+    lower = quotient.numerator // quotient.denominator
+    remainder = quotient - lower
+    if remainder == Fraction(1, 2):
+        raise MatrixValidationError("requantization cases may not use half ties")
+    expected = lower + (1 if remainder > Fraction(1, 2) else 0)
+    return expected, Fraction(1, 2) - abs(quotient - expected)
+
+
+@dataclass(frozen=True)
+class CompositeRequantizationCase:
+    """A multi-stock/multi-target requantization case with exact grouped truth."""
+
+    case_id: str
+    design_printed_volume_nL: float
+    final_volume_nL: float
+    replicates: int
+    target_concentrations: tuple[float, ...]
+    nonfill_prepared_mode: str
+    nonfill_prepared_volume_nL: float
+    fill_prepared_volume_nL: float
+    calibration_steps: tuple[RequantizationCalibrationStep, ...]
+    count_groups: tuple[RequantizationCountGroup, ...]
+    require_terminal_reload: bool
+    expected_terminal: str = "completed"
+    expected_completion_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.case_id.strip():
+            raise MatrixValidationError("composite requantization case ID is empty")
+        if self.expected_terminal != "completed":
+            raise MatrixValidationError("composite requantization cases must complete")
+        if self.nonfill_prepared_mode not in {"droplet", "stream"}:
+            raise MatrixValidationError("composite prepared mode is invalid")
+        printed = _fraction(self.design_printed_volume_nL, "printed volume")
+        final = _fraction(self.final_volume_nL, "final volume")
+        nonfill_prepared = _fraction(
+            self.nonfill_prepared_volume_nL, "non-fill prepared volume"
+        )
+        fill_prepared = _fraction(
+            self.fill_prepared_volume_nL, "fill prepared volume"
+        )
+        if min(printed, final, nonfill_prepared, fill_prepared) <= 0:
+            raise MatrixValidationError("composite requantization volumes must be positive")
+        if (
+            isinstance(self.replicates, bool)
+            or not isinstance(self.replicates, int)
+            or self.replicates <= 0
+            or not self.target_concentrations
+            or self.replicates * len(self.target_concentrations)
+            != len(REQUANTIZATION_WELL_IDS)
+        ):
+            raise MatrixValidationError("composite reaction cardinality drifted")
+        if tuple(sorted(self.target_concentrations)) != self.target_concentrations:
+            raise MatrixValidationError("composite targets must be deterministically ordered")
+        if len(self.calibration_steps) != 2:
+            raise MatrixValidationError("composite cases require two calibration steps")
+        if [step.stock_id for step in self.calibration_steps] != [
+            REQUANTIZATION_STOCK_ID,
+            REQUANTIZATION_FILL_STOCK_ID,
+        ]:
+            raise MatrixValidationError("composite calibration order drifted")
+        if sum(step.primary for step in self.calibration_steps) != 1:
+            raise MatrixValidationError("composite cases require one primary calibration")
+
+        grouped: dict[tuple[str, str], RequantizationCountGroup] = {}
+        for group in self.count_groups:
+            for well_id in group.well_ids:
+                key = (group.stock_id, well_id)
+                if key in grouped:
+                    raise MatrixValidationError("composite count groups overlap")
+                grouped[key] = group
+        expected_membership = {
+            (stock_id, well_id)
+            for stock_id in (REQUANTIZATION_STOCK_ID, REQUANTIZATION_FILL_STOCK_ID)
+            for well_id in REQUANTIZATION_WELL_IDS
+        }
+        if set(grouped) != expected_membership:
+            raise MatrixValidationError("composite count groups are incomplete")
+        nonfill_groups = [
+            group for group in self.count_groups
+            if group.stock_id == REQUANTIZATION_STOCK_ID
+        ]
+        fill_groups = [
+            group for group in self.count_groups
+            if group.stock_id == REQUANTIZATION_FILL_STOCK_ID
+        ]
+        preview_rows = [group.preview_row for group in nonfill_groups]
+        if (
+            any(row is None for row in preview_rows)
+            or sorted(int(row) for row in preview_rows if row is not None)
+            != list(range(len(nonfill_groups)))
+            or any(group.preview_row is not None for group in fill_groups)
+        ):
+            raise MatrixValidationError(
+                "composite preview projection is malformed"
+            )
+
+        nonfill_step = self.calibration_steps[0]
+        fill_step = self.calibration_steps[1]
+        nonfill_final = _fraction(nonfill_step.applied_volume_nL, "non-fill final volume")
+        fill_final = _fraction(fill_step.applied_volume_nL, "fill final volume")
+        computed: dict[tuple[str, str], tuple[int, int, str, Fraction | None]] = {}
+        for index, well_id in enumerate(REQUANTIZATION_WELL_IDS):
+            target = _fraction(
+                self.target_concentrations[index % len(self.target_concentrations)],
+                "target concentration",
+            )
+            requested = target * final / Fraction(10)
+            prepared_nonfill, prepared_nonfill_margin = _nearest_integer(
+                requested / nonfill_prepared
+            )
+            final_nonfill, final_nonfill_margin = _nearest_integer(
+                requested / nonfill_final
+            )
+            computed[(REQUANTIZATION_STOCK_ID, well_id)] = (
+                prepared_nonfill,
+                final_nonfill,
+                "nearest_integer",
+                min(prepared_nonfill_margin, final_nonfill_margin),
+            )
+            prepared_remaining = max(
+                Fraction(0), printed - prepared_nonfill * nonfill_prepared
+            )
+            final_remaining = max(
+                Fraction(0), printed - final_nonfill * nonfill_final
+            )
+            if prepared_remaining == 0 and final_remaining == 0:
+                computed[(REQUANTIZATION_FILL_STOCK_ID, well_id)] = (
+                    0, 0, "nonnegative_clamp", None
+                )
+            else:
+                prepared_fill, prepared_fill_margin = _nearest_integer(
+                    prepared_remaining / fill_prepared
+                )
+                final_fill, final_fill_margin = _nearest_integer(
+                    final_remaining / fill_final
+                )
+                computed[(REQUANTIZATION_FILL_STOCK_ID, well_id)] = (
+                    prepared_fill,
+                    final_fill,
+                    "nearest_integer",
+                    min(prepared_fill_margin, final_fill_margin),
+                )
+        for key, group in grouped.items():
+            expected = computed[key]
+            margin = (
+                Fraction(group.margin_numerator, group.margin_denominator)
+                if group.rounding_rule == "nearest_integer" else None
+            )
+            if (
+                group.prepared_droplets,
+                group.requantized_droplets,
+                group.rounding_rule,
+                margin,
+            ) != expected:
+                raise MatrixValidationError(
+                    f"composite count oracle drifted for {key!r}"
+                )
+        changed_by_stock = {
+            stock_id: any(
+                group.prepared_droplets != group.requantized_droplets
+                for group in self.count_groups
+                if group.stock_id == stock_id
+            )
+            for stock_id in (
+                REQUANTIZATION_STOCK_ID,
+                REQUANTIZATION_FILL_STOCK_ID,
+            )
+        }
+        if any(
+            bool(step.primary) != changed_by_stock[step.stock_id]
+            for step in self.calibration_steps
+        ):
+            raise MatrixValidationError(
+                "composite primary transition direction drifted"
+            )
+        positive = sum(
+            1 for value in computed.values() if value[1] > 0
+        )
+        if self.expected_completion_count != positive:
+            raise MatrixValidationError("composite completion count drifted")
+
+    def normalized(self) -> dict[str, Any]:
+        return {
+            "case_id": self.case_id,
+            "case_kind": "composite_requantization",
+            "design": {
+                "printed_volume_nL": self.design_printed_volume_nL,
+                "final_volume_nL": self.final_volume_nL,
+                "replicates": self.replicates,
+                "target_concentrations": list(self.target_concentrations),
+            },
+            "prepared": {
+                "nonfill_mode": self.nonfill_prepared_mode,
+                "nonfill_volume_nL": self.nonfill_prepared_volume_nL,
+                "fill_volume_nL": self.fill_prepared_volume_nL,
+            },
+            "calibration_steps": [step.normalized() for step in self.calibration_steps],
+            "count_groups": [group.normalized() for group in self.count_groups],
+            "require_terminal_reload": self.require_terminal_reload,
+            "expected_terminal": self.expected_terminal,
+            "expected_completion_count": self.expected_completion_count,
+        }
+
+
+def _group(
+    stock_id: str,
+    wells: tuple[str, ...],
+    prepared: int,
+    final: int,
+    margin: tuple[int, int] | None,
+    *,
+    preview_row: int | None = None,
+) -> RequantizationCountGroup:
+    return RequantizationCountGroup(
+        stock_id,
+        wells,
+        prepared,
+        final,
+        "nearest_integer" if margin is not None else "nonnegative_clamp",
+        margin[0] if margin is not None else None,
+        margin[1] if margin is not None else None,
+        preview_row,
+    )
+
+
+ODD_REQUANTIZATION_WELLS = REQUANTIZATION_WELL_IDS[0::2]
+EVEN_REQUANTIZATION_WELLS = REQUANTIZATION_WELL_IDS[1::2]
+
+COMPOSITE_REQUANTIZATION_CASES: tuple[CompositeRequantizationCase, ...] = (
+    CompositeRequantizationCase(
+        "droplet_multi_target_10_to_9_and_1_to_1",
+        80.0,
+        80.0,
+        12,
+        (1.0625, 10.0),
+        "droplet",
+        8.0,
+        9.0,
+        (
+            RequantizationCalibrationStep(
+                REQUANTIZATION_STOCK_ID, "droplet", 1300, 9.0,
+                "nominal_droplet", "target_rows", True,
+            ),
+            RequantizationCalibrationStep(
+                REQUANTIZATION_FILL_STOCK_ID, "droplet", 1300, 9.0,
+                "nominal_droplet", "fill_total", False,
+            ),
+        ),
+        (
+            _group(REQUANTIZATION_STOCK_ID, ODD_REQUANTIZATION_WELLS, 1, 1, (7, 16), preview_row=0),
+            _group(REQUANTIZATION_STOCK_ID, EVEN_REQUANTIZATION_WELLS, 10, 9, (7, 18), preview_row=1),
+            _group(REQUANTIZATION_FILL_STOCK_ID, ODD_REQUANTIZATION_WELLS, 8, 8, (7, 18)),
+            _group(REQUANTIZATION_FILL_STOCK_ID, EVEN_REQUANTIZATION_WELLS, 0, 0, None),
+        ),
+        False,
+        expected_completion_count=36,
+    ),
+    CompositeRequantizationCase(
+        "stream_to_droplet_40_to_10_8",
+        1250.0,
+        1250.0,
+        24,
+        (1.296,),
+        "stream",
+        40.0,
+        9.0,
+        (
+            RequantizationCalibrationStep(
+                REQUANTIZATION_STOCK_ID, "droplet", 1400, 10.8,
+                "stream_to_droplet", "target_rows", True,
+            ),
+            RequantizationCalibrationStep(
+                REQUANTIZATION_FILL_STOCK_ID, "droplet", 1300, 9.0,
+                "nominal_droplet", "fill_total", False,
+            ),
+        ),
+        (
+            _group(REQUANTIZATION_STOCK_ID, REQUANTIZATION_WELL_IDS, 4, 15, (9, 20), preview_row=0),
+            _group(REQUANTIZATION_FILL_STOCK_ID, REQUANTIZATION_WELL_IDS, 121, 121, (7, 18)),
+        ),
+        True,
+        expected_completion_count=48,
+    ),
+    CompositeRequantizationCase(
+        "fill_volume_decrease_4_to_5",
+        100.0,
+        100.0,
+        24,
+        (5.4,),
+        "droplet",
+        9.0,
+        12.0,
+        (
+            RequantizationCalibrationStep(
+                REQUANTIZATION_STOCK_ID, "droplet", 1300, 9.0,
+                "nominal_droplet", "target_rows", False,
+            ),
+            RequantizationCalibrationStep(
+                REQUANTIZATION_FILL_STOCK_ID, "droplet", 1300, 9.0,
+                "nominal_droplet", "fill_total", True,
+            ),
+        ),
+        (
+            _group(REQUANTIZATION_STOCK_ID, REQUANTIZATION_WELL_IDS, 6, 6, (1, 2), preview_row=0),
+            _group(REQUANTIZATION_FILL_STOCK_ID, REQUANTIZATION_WELL_IDS, 4, 5, (1, 3)),
+        ),
+        False,
+        expected_completion_count=48,
+    ),
+)
+
+REQUANTIZATION_CASES: tuple[MatrixCaseContract, ...] = (
+    *BASE_REQUANTIZATION_CASES,
+    *COMPOSITE_REQUANTIZATION_CASES,
 )
 
 
@@ -782,9 +1235,9 @@ def _requantization_profile() -> dict[str, Any]:
 def _build_requantization_case_fixture(
     case: MatrixCaseContract,
 ) -> tuple[dict[str, Any], Path]:
-    """Build a one-stock boundary case from the tracked multi-stock fixture."""
+    """Build one catalog-owned boundary case from the tracked reference."""
 
-    if not isinstance(case, RequantizationCase):
+    if not isinstance(case, (RequantizationCase, CompositeRequantizationCase)):
         raise MatrixValidationError(
             "requantization matrix received an invalid case type"
         )
@@ -792,32 +1245,137 @@ def _build_requantization_case_fixture(
         REQUANTIZATION_BASE_FIXTURE_PATH.read_text(encoding="utf-8")
     )
     fixture = copy.deepcopy(payload)
+    if isinstance(case, RequantizationCase):
+        stock = {
+            "factor_name": "Virtual Requantization Stock",
+            "concentration": 10.0,
+            "target_concentration": 10.0,
+            "units": "mM",
+            "printing_mode": "droplet",
+            "prepared_droplet_volume_nL": case.prepared_volume_nL,
+            "droplet_volume_nL": case.calibrated_volume_nL,
+            "printer_head": {
+                "printer_head_id": "virtual-head-requantization-v1",
+                "initial_volume_uL": 1000.0,
+                "print_pulse_width_us": 1300,
+                "print_pressure_psi": 1.2,
+            },
+        }
+        fixture["fixture_id"] = (
+            f"{CALIBRATION_REQUANTIZATION_MATRIX_ID}__{case.case_id}"
+        )
+        fixture["stocks"] = [stock]
+        fixture["workload"] = {
+            "target_dispenses_per_stock_per_well": (
+                case.expected_requantized_droplets
+            ),
+            "well_count": len(REQUANTIZATION_WELL_IDS),
+            "stock_count": 1,
+            "array_passes": 1,
+            "completion_count": case.expected_completion_count,
+        }
+        fixture["lifecycle"] = {
+            "kind": "parameterized_calibration_matrix_case",
+            "matrix_id": CALIBRATION_REQUANTIZATION_MATRIX_ID,
+            "catalog_sha256": catalog_sha256(
+                CALIBRATION_REQUANTIZATION_MATRIX_ID
+            ),
+            "case": case.normalized(),
+            "case_sha256": _sha256_json(case.normalized()),
+            "profile": _requantization_profile(),
+            "manual_refuel_checks": {},
+            "design": {
+                "printed_volume_nL": case.design_printed_volume_nL,
+                "final_volume_nL": case.design_printed_volume_nL,
+            },
+            "dispense_count_oracle": {
+                "schema_version": 1,
+                "source": "calibration_requantization_v1_catalog",
+                "stock_id": REQUANTIZATION_STOCK_ID,
+                "well_ids": list(REQUANTIZATION_WELL_IDS),
+                "prepared_droplets_per_well": (
+                    case.expected_prepared_droplets
+                ),
+                "requantized_droplets_per_well": (
+                    case.expected_requantized_droplets
+                ),
+                "expected_count_delta": (
+                    case.expected_requantized_droplets
+                    - case.expected_prepared_droplets
+                ),
+                "transition": case.transition,
+                "rounding_boundary_margin": {
+                    "numerator": case.margin_numerator,
+                    "denominator": case.margin_denominator,
+                },
+            },
+        }
+        return fixture, REQUANTIZATION_BASE_FIXTURE_PATH
+
+    nonfill_step, fill_step = case.calibration_steps
     stock = {
         "factor_name": "Virtual Requantization Stock",
         "concentration": 10.0,
-        "target_concentration": 10.0,
+        "target_concentration": case.target_concentrations[0],
+        "target_concentrations": list(case.target_concentrations),
         "units": "mM",
-        "printing_mode": "droplet",
-        "prepared_droplet_volume_nL": case.prepared_volume_nL,
-        "droplet_volume_nL": case.calibrated_volume_nL,
+        "printing_mode": case.nonfill_prepared_mode,
+        "calibration_mode": nonfill_step.target_mode,
+        "synthetic_profile_id": nonfill_step.synthetic_profile_id,
+        "primary_calibration": nonfill_step.primary,
+        "prepared_droplet_volume_nL": case.nonfill_prepared_volume_nL,
+        "droplet_volume_nL": nonfill_step.applied_volume_nL,
         "printer_head": {
             "printer_head_id": "virtual-head-requantization-v1",
             "initial_volume_uL": 1000.0,
-            "print_pulse_width_us": 1300,
+            "print_pulse_width_us": nonfill_step.pulse_width_us,
+            "print_pressure_psi": 1.2,
+        },
+    }
+    if case.nonfill_prepared_mode == "stream":
+        stock["staging_print_pulse_width_us"] = 2500
+        stock["calibration_print_profile"] = {
+            "id": "sil_stream_to_droplet_1400",
+            "name": "SIL stream to droplet 1400",
+            "mode": "droplet",
+            "material": "sil",
+            "print_pressure": 1.2,
+            "refuel_pressure": 0.4,
+            "print_pulse_width": nonfill_step.pulse_width_us,
+            "refuel_pulse_width": 6000,
+        }
+        stock["printer_head"].update(
+            refuel_pulse_width_us=6000,
+            refuel_pressure_psi=0.4,
+        )
+    fill_stock = {
+        "stock_role": "fill",
+        "factor_name": "Water",
+        "concentration": 1.0,
+        "target_concentration": 0.0,
+        "units": "--",
+        "printing_mode": "droplet",
+        "calibration_mode": fill_step.target_mode,
+        "synthetic_profile_id": fill_step.synthetic_profile_id,
+        "primary_calibration": fill_step.primary,
+        "prepared_droplet_volume_nL": case.fill_prepared_volume_nL,
+        "droplet_volume_nL": fill_step.applied_volume_nL,
+        "printer_head": {
+            "printer_head_id": "virtual-head-fill-requantization-v1",
+            "initial_volume_uL": 1000.0,
+            "print_pulse_width_us": fill_step.pulse_width_us,
             "print_pressure_psi": 1.2,
         },
     }
     fixture["fixture_id"] = (
         f"{CALIBRATION_REQUANTIZATION_MATRIX_ID}__{case.case_id}"
     )
-    fixture["stocks"] = [stock]
+    fixture["stocks"] = [stock, fill_stock]
     fixture["workload"] = {
-        "target_dispenses_per_stock_per_well": (
-            case.expected_requantized_droplets
-        ),
+        "target_dispenses_per_stock_per_well": 0,
         "well_count": len(REQUANTIZATION_WELL_IDS),
-        "stock_count": 1,
-        "array_passes": 1,
+        "stock_count": 2,
+        "array_passes": 2,
         "completion_count": case.expected_completion_count,
     }
     fixture["lifecycle"] = {
@@ -828,32 +1386,34 @@ def _build_requantization_case_fixture(
         ),
         "case": case.normalized(),
         "case_sha256": _sha256_json(case.normalized()),
-        "profile": _requantization_profile(),
+        "profile": {
+            "profile_id": "composite_requantization_v1",
+            "calibration_steps": [
+                step.normalized() for step in case.calibration_steps
+            ],
+            "print_pressure_psi": 1.2,
+        },
         "manual_refuel_checks": {},
         "design": {
             "printed_volume_nL": case.design_printed_volume_nL,
-            "final_volume_nL": case.design_printed_volume_nL,
+            "final_volume_nL": case.final_volume_nL,
+            "replicates": case.replicates,
+            "expected_reaction_count": len(REQUANTIZATION_WELL_IDS),
+            "fill_printing_mode": "droplet",
+            "fill_droplet_volume_nL": case.fill_prepared_volume_nL,
         },
         "dispense_count_oracle": {
-            "schema_version": 1,
+            "schema_version": 2,
             "source": "calibration_requantization_v1_catalog",
-            "stock_id": REQUANTIZATION_STOCK_ID,
+            "primary_stock_id": next(
+                step.stock_id for step in case.calibration_steps if step.primary
+            ),
             "well_ids": list(REQUANTIZATION_WELL_IDS),
-            "prepared_droplets_per_well": (
-                case.expected_prepared_droplets
-            ),
-            "requantized_droplets_per_well": (
-                case.expected_requantized_droplets
-            ),
-            "expected_count_delta": (
-                case.expected_requantized_droplets
-                - case.expected_prepared_droplets
-            ),
-            "transition": case.transition,
-            "rounding_boundary_margin": {
-                "numerator": case.margin_numerator,
-                "denominator": case.margin_denominator,
-            },
+            "count_groups": [group.normalized() for group in case.count_groups],
+            "calibration_steps": [
+                step.normalized() for step in case.calibration_steps
+            ],
+            "require_terminal_reload": case.require_terminal_reload,
         },
     }
     built_stock_id = (
@@ -862,8 +1422,13 @@ def _build_requantization_case_fixture(
     )
     if (
         built_stock_id != REQUANTIZATION_STOCK_ID
-        or len(fixture["stocks"]) != 1
-        or fixture["workload"]["completion_count"] != 24
+        or (
+            f"{fill_stock['factor_name']}_"
+            f"{float(fill_stock['concentration']):.2f}_{fill_stock['units']}"
+        ) != REQUANTIZATION_FILL_STOCK_ID
+        or len(fixture["stocks"]) != 2
+        or fixture["workload"]["completion_count"]
+        != case.expected_completion_count
     ):
         raise MatrixValidationError("built requantization fixture cardinality drifted")
     return fixture, REQUANTIZATION_BASE_FIXTURE_PATH

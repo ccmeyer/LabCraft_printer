@@ -6,6 +6,7 @@ from tools.virtual_workflows.assertions import (
     ExecutionLifecycleExpectation,
     SoftStopResumeExpectation,
     cleanup_assertion,
+    completed_terminal_reload_assertion,
     dispense_counts_reconciled_assertion,
     editor_artifacts_cleanup_assertion,
     editor_prepared_revision_failure_assertion,
@@ -35,6 +36,81 @@ def test_assertion_result_rejects_ambiguous_decision():
         assert "pass, fail, or incomplete" in str(exc)
     else:
         raise AssertionError("ambiguous assertion decision was accepted")
+
+
+def test_completed_terminal_reload_requires_exact_read_only_fresh_session():
+    snapshot = SimpleNamespace(
+        plan_id="plan-1",
+        plan_revision=5,
+        plan_state="completed",
+        eligibility_status="analysis_only",
+        design_json="{}",
+        design_sha256="design",
+        plan_design_sha256="design",
+        plan_json="{\"state\":\"completed\"}",
+        plan_well_ids=("A1",),
+        plan_assignments=(("A1", "reaction-1"),),
+        runtime_assignments=(),
+        history_json=("revision",),
+        progress_plan_id="plan-1",
+        progress_plan_revision=5,
+        progress_targets=(("A1", 15),),
+        total_added_droplets=15,
+        completed_well_ids=("A1",),
+        resume_present=True,
+        resume_state="completed",
+        resume_plan_id="plan-1",
+        resume_plan_revision=5,
+        resume_intent_count=0,
+        calibration_present=True,
+        calibration_record_count=2,
+        manual_refuel_check_count=0,
+        runtime_active=False,
+        core_file_hashes={"execution_plan.json": "hash"},
+    )
+    comparison = {
+        "checks": {"files_byte_identical": True},
+        "failed_checks": [],
+    }
+    values = {
+        "before": snapshot,
+        "after": snapshot,
+        "first_close": {
+            "application_session_id": "app-1",
+            "session_id": "session-1",
+            "close_succeeded": True,
+            "recorder": {"status": "closed"},
+            "session_lock_present": False,
+            "root_retained": True,
+        },
+        "second_launch": {
+            "application_session_id": "app-2",
+            "session_id": "session-1",
+            "component_type": "ApplicationComponents",
+            "view_type": "MainWindow",
+            "machine_type": "SimulatedMachine",
+            "hardware_access_allowed": False,
+        },
+        "loader": {
+            "checks": {"completed": True},
+            "activation_performed": False,
+        },
+        "directory_comparisons": {
+            "after_close": comparison,
+            "after_reload": comparison,
+        },
+    }
+
+    passed = completed_terminal_reload_assertion(**values)
+    failed = completed_terminal_reload_assertion(
+        **{**values, "after": SimpleNamespace(**{
+            **vars(snapshot), "plan_revision": 6,
+        })}
+    )
+
+    assert passed.decision == "pass", passed.evidence
+    assert failed.decision == "fail"
+    assert "plan_identity_exact" in failed.evidence["failed_checks"]
 
 
 def test_dispense_count_assertion_reconciles_every_required_layer(monkeypatch):

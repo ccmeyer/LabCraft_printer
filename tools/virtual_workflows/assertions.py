@@ -582,7 +582,7 @@ def multi_stock_prepared_assertion(
     expected_well_ids: tuple[str, ...],
     expected_stock_ids: tuple[str, ...],
     require_stock_order: bool = True,
-    expected_target_dispenses: Mapping[str, int] | None = None,
+    expected_target_dispenses: Mapping[Any, int] | None = None,
 ) -> AssertionResult:
     def inspect() -> tuple[bool, Mapping[str, Any]]:
         plan = context.experiment_model.get_execution_plan_snapshot()
@@ -612,23 +612,37 @@ def multi_stock_prepared_assertion(
             if expected_target_dispenses is None
             else dict(expected_target_dispenses)
         )
+        per_well = any(isinstance(key, tuple) for key in expected_by_stock)
         expected_rows = sorted(
             (
                 stock_id,
                 well_id,
-                expected_by_stock.get(stock_id),
+                expected_by_stock.get((stock_id, well_id))
+                if per_well else expected_by_stock.get(stock_id),
             )
             for well_id in expected_well_ids
             for stock_id in expected_stock_ids
+            if (
+                expected_by_stock.get((stock_id, well_id))
+                if per_well else expected_by_stock.get(stock_id)
+            ) != 0
         )
-        expected_entries = len(expected_well_ids) * len(expected_stock_ids)
+        expected_entries = len(expected_rows)
         evidence.update({
             "target_entry_count": len(target_rows),
             "target_dispense_count": sum(row[2] for row in target_rows),
             "target_dispenses_per_entry": sorted(
                 {row[2] for row in target_rows}
             ),
-            "expected_target_dispenses_by_stock": expected_by_stock,
+            "expected_target_dispenses_by_stock": (
+                None if per_well else expected_by_stock
+            ),
+            "expected_target_dispenses_by_stock_well": (
+                [
+                    {"stock_id": key[0], "well_id": key[1], "droplets": value}
+                    for key, value in sorted(expected_by_stock.items())
+                ] if per_well else None
+            ),
         })
         return (
             len(observed_wells) == len(expected_well_ids)
@@ -688,15 +702,35 @@ def execution_lifecycle_assertions(
     durable = dict(observer.get("durable_io_samples_ms") or {})
     expected_count = int(fixture["workload"]["completion_count"])
     stock_count = len(expected_stock_ids)
-    boundary_counts = [
-        len(expected_well_ids) * (index + 1) for index in range(stock_count)
-    ]
+    oracle = dict(fixture.get("lifecycle", {}).get("dispense_count_oracle") or {})
+    positive_pairs_by_stock: dict[str, set[tuple[str, str]]] = {}
+    if int(oracle.get("schema_version", 1)) == 2:
+        for group in oracle.get("count_groups") or ():
+            if int(group.get("requantized_droplets", 0) or 0) <= 0:
+                continue
+            stock_id = str(group.get("stock_id") or "")
+            positive_pairs_by_stock.setdefault(stock_id, set()).update(
+                (stock_id, str(well_id)) for well_id in group.get("well_ids") or ()
+            )
+    boundary_counts = []
+    cumulative = 0
+    for stock_id in expected_stock_ids:
+        cumulative += len(
+            positive_pairs_by_stock.get(
+                stock_id,
+                {(stock_id, well_id) for well_id in expected_well_ids},
+            )
+        )
+        boundary_counts.append(cumulative)
     boundary_states = ["active"] * max(0, stock_count - 1) + ["completed"]
-    expected_pairs = {
-        (stock_id, well_id)
-        for stock_id in expected_stock_ids
-        for well_id in expected_well_ids
-    }
+    expected_pairs = (
+        set().union(*positive_pairs_by_stock.values())
+        if positive_pairs_by_stock else {
+            (stock_id, well_id)
+            for stock_id in expected_stock_ids
+            for well_id in expected_well_ids
+        }
+    )
 
     def result(
         assertion_id: str,
@@ -751,6 +785,10 @@ def execution_lifecycle_assertions(
         int(stock["printer_head"]["print_pulse_width_us"])
         for stock in fixture["stocks"]
     )
+    staging_pulses = tuple(
+        int(stock.get("staging_print_pulse_width_us", expected_pulses[index]))
+        for index, stock in enumerate(fixture["stocks"])
+    )
     expected_volumes = expectation.expected_volumes_nL or tuple(
         response.predict_volume_nl(str(stock["printing_mode"]), expected_pulses[index])
         for index, stock in enumerate(fixture["stocks"])
@@ -758,6 +796,7 @@ def execution_lifecycle_assertions(
     settings = [
         {
             "print_pulse_width_us": int(expected_pulses[index]),
+            "staging_print_pulse_width_us": int(staging_pulses[index]),
             "fixture_print_pulse_width_us": int(stock["printer_head"]["print_pulse_width_us"]),
             "print_pressure_psi": float(stock["printer_head"]["print_pressure_psi"]),
             "prepared_volume_nL": float(stock["prepared_droplet_volume_nL"]),
@@ -776,7 +815,7 @@ def execution_lifecycle_assertions(
         )
         < 1e-6
         and head_staging[index].get("effective_print_pulse_width_us")
-        == settings[index]["print_pulse_width_us"]
+        == settings[index]["staging_print_pulse_width_us"]
         and abs(
             float(head_staging[index].get("effective_print_pressure_psi", -1))
             - settings[index]["print_pressure_psi"]
@@ -786,10 +825,12 @@ def execution_lifecycle_assertions(
     )
 
     observed = [well for well in completed_wells if well in set(expected_well_ids)]
+    expected_completed_wells = Counter(
+        well_id for _stock_id, well_id in expected_pairs
+    )
     completion_ok = (
         len(observed) == expected_count
-        and Counter(observed)
-        == Counter({well: stock_count for well in expected_well_ids})
+        and Counter(observed) == expected_completed_wells
     )
     begin_ids = [row.get("intent_id") for row in begins]
     attach_ids = [row.get("intent_id") for row in attachments]
@@ -948,97 +989,143 @@ def dispense_counts_reconciled_assertion(
         oracle_evidence: dict[str, Any] | None = None
         prepared_expected = final_counts
         requantized_expected = final_counts
+        oracle_schema = int(oracle_payload.get("schema_version", 0) or 0)
+        preview_contracts: dict[str, dict[str, Any]] = {}
         if oracle_payload:
-            expected_oracle_keys = {
-                "schema_version",
-                "source",
-                "stock_id",
-                "well_ids",
-                "prepared_droplets_per_well",
-                "requantized_droplets_per_well",
-                "expected_count_delta",
-                "transition",
-                "rounding_boundary_margin",
-            }
-            if set(oracle_payload) != expected_oracle_keys:
-                raise ValueError("catalog count oracle has an invalid shape")
-            if oracle_payload.get("schema_version") != 1 or (
-                oracle_payload.get("source")
-                != "calibration_requantization_v1_catalog"
-            ):
+            if oracle_payload.get("source") != "calibration_requantization_v1_catalog":
                 raise ValueError("catalog count oracle identity is invalid")
-            stock_id = str(oracle_payload.get("stock_id") or "").strip()
-            well_ids = tuple(str(item or "").strip() for item in (
-                oracle_payload.get("well_ids") or ()
-            ))
-            prepared_count = oracle_payload.get("prepared_droplets_per_well")
-            requantized_count = oracle_payload.get(
-                "requantized_droplets_per_well"
-            )
-            if (
-                not stock_id
-                or len(well_ids) != 24
-                or any(not well_id for well_id in well_ids)
-                or len(set(well_ids)) != len(well_ids)
-            ):
-                raise ValueError("catalog count oracle identities are invalid")
-            for label, value in (
-                ("prepared", prepared_count),
-                ("requantized", requantized_count),
-            ):
-                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                    raise ValueError(f"catalog {label} count is invalid")
-            expected_delta = requantized_count - prepared_count
-            if oracle_payload.get("expected_count_delta") != expected_delta:
-                raise ValueError("catalog count oracle delta drifted")
-            transition = str(oracle_payload.get("transition") or "")
-            transition_deltas = {
-                "idempotent": 0,
-                "volume_increase": -1,
-                "volume_decrease": 1,
-            }
-            if transition_deltas.get(transition) != expected_delta:
-                raise ValueError("catalog count oracle direction drifted")
-            margin_payload = dict(
-                oracle_payload.get("rounding_boundary_margin") or {}
-            )
-            if set(margin_payload) != {"numerator", "denominator"}:
-                raise ValueError("catalog rounding margin has an invalid shape")
-            numerator = margin_payload.get("numerator")
-            denominator = margin_payload.get("denominator")
-            if (
-                isinstance(numerator, bool)
-                or isinstance(denominator, bool)
-                or not isinstance(numerator, int)
-                or not isinstance(denominator, int)
-                or numerator <= 0
-                or denominator <= 0
-            ):
-                raise ValueError("catalog rounding margin is invalid")
-            margin = Fraction(numerator, denominator)
-            if margin < Fraction(1, 3):
-                raise ValueError("catalog rounding margin is below the minimum")
-            prepared_expected = tuple(
-                StockWellCount(stock_id, well_id, prepared_count)
-                for well_id in well_ids
-            )
-            requantized_expected = tuple(
-                StockWellCount(stock_id, well_id, requantized_count)
-                for well_id in well_ids
-            )
+            if oracle_schema == 1:
+                expected_oracle_keys = {
+                    "schema_version", "source", "stock_id", "well_ids",
+                    "prepared_droplets_per_well",
+                    "requantized_droplets_per_well", "expected_count_delta",
+                    "transition", "rounding_boundary_margin",
+                }
+                if set(oracle_payload) != expected_oracle_keys:
+                    raise ValueError("catalog count oracle has an invalid shape")
+                stock_id = str(oracle_payload.get("stock_id") or "").strip()
+                well_ids = tuple(str(item or "").strip() for item in (
+                    oracle_payload.get("well_ids") or ()
+                ))
+                prepared_count = oracle_payload.get("prepared_droplets_per_well")
+                requantized_count = oracle_payload.get("requantized_droplets_per_well")
+                if (
+                    not stock_id or len(well_ids) != 24
+                    or any(not well_id for well_id in well_ids)
+                    or len(set(well_ids)) != len(well_ids)
+                ):
+                    raise ValueError("catalog count oracle identities are invalid")
+                for label, value in (("prepared", prepared_count), ("requantized", requantized_count)):
+                    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                        raise ValueError(f"catalog {label} count is invalid")
+                expected_delta = requantized_count - prepared_count
+                if oracle_payload.get("expected_count_delta") != expected_delta:
+                    raise ValueError("catalog count oracle delta drifted")
+                transition_deltas = {"idempotent": 0, "volume_increase": -1, "volume_decrease": 1}
+                if transition_deltas.get(str(oracle_payload.get("transition") or "")) != expected_delta:
+                    raise ValueError("catalog count oracle direction drifted")
+                margin_payload = dict(oracle_payload.get("rounding_boundary_margin") or {})
+                if set(margin_payload) != {"numerator", "denominator"}:
+                    raise ValueError("catalog rounding margin has an invalid shape")
+                margin = Fraction(margin_payload["numerator"], margin_payload["denominator"])
+                if margin < Fraction(1, 3):
+                    raise ValueError("catalog rounding margin is below the minimum")
+                prepared_expected = tuple(
+                    StockWellCount(stock_id, well_id, prepared_count) for well_id in well_ids
+                )
+                requantized_expected = tuple(
+                    StockWellCount(stock_id, well_id, requantized_count) for well_id in well_ids
+                )
+                preview_contracts[stock_id] = {
+                    "preview_kind": "target_rows",
+                    "row_groups": (well_ids,),
+                }
+                oracle_evidence = {
+                    **oracle_payload,
+                    "prepared_count": prepared_count,
+                    "requantized_count": requantized_count,
+                    "count_delta": expected_delta,
+                    "minimum_margin_satisfied": True,
+                }
+            elif oracle_schema == 2:
+                expected_oracle_keys = {
+                    "schema_version", "source", "primary_stock_id", "well_ids",
+                    "count_groups", "calibration_steps", "require_terminal_reload",
+                }
+                if set(oracle_payload) != expected_oracle_keys:
+                    raise ValueError("grouped catalog count oracle has an invalid shape")
+                well_ids = tuple(str(item or "").strip() for item in oracle_payload.get("well_ids") or ())
+                if len(well_ids) != 24 or len(set(well_ids)) != 24 or any(not item for item in well_ids):
+                    raise ValueError("grouped catalog well identities are invalid")
+                prepared_rows: list[StockWellCount] = []
+                final_rows: list[StockWellCount] = []
+                grouped_membership: set[tuple[str, str]] = set()
+                row_groups: dict[str, list[tuple[int, tuple[str, ...]]]] = {}
+                for raw_group in oracle_payload.get("count_groups") or ():
+                    group = dict(raw_group)
+                    stock_id = str(group.get("stock_id") or "").strip()
+                    group_wells = tuple(str(item or "").strip() for item in group.get("well_ids") or ())
+                    prepared_count = group.get("prepared_droplets")
+                    final_count = group.get("requantized_droplets")
+                    if not stock_id or not group_wells or len(set(group_wells)) != len(group_wells):
+                        raise ValueError("grouped catalog identities are invalid")
+                    for value in (prepared_count, final_count):
+                        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                            raise ValueError("grouped catalog count is invalid")
+                    rule = str(group.get("rounding_rule") or "")
+                    if rule == "nearest_integer":
+                        margin_payload = dict(group.get("rounding_boundary_margin") or {})
+                        margin = Fraction(margin_payload.get("numerator"), margin_payload.get("denominator"))
+                        if margin < Fraction(1, 3):
+                            raise ValueError("grouped catalog margin is below the minimum")
+                    elif rule == "nonnegative_clamp":
+                        if prepared_count != 0 or final_count != 0 or "rounding_boundary_margin" in group:
+                            raise ValueError("grouped clamped counts are invalid")
+                    else:
+                        raise ValueError("grouped catalog rounding rule is invalid")
+                    for well_id in group_wells:
+                        key = (stock_id, well_id)
+                        if key in grouped_membership:
+                            raise ValueError("grouped catalog membership overlaps")
+                        grouped_membership.add(key)
+                        if rule != "nonnegative_clamp":
+                            prepared_rows.append(StockWellCount(stock_id, well_id, prepared_count))
+                            final_rows.append(StockWellCount(stock_id, well_id, final_count))
+                    preview_row = group.get("preview_row")
+                    if preview_row is not None:
+                        row_groups.setdefault(stock_id, []).append((int(preview_row), group_wells))
+                prepared_expected = normalize_stock_well_counts(prepared_rows, label="grouped prepared oracle")
+                requantized_expected = normalize_stock_well_counts(final_rows, label="grouped final oracle")
+                steps = [dict(item) for item in oracle_payload.get("calibration_steps") or ()]
+                if len(steps) != 2 or sum(bool(item.get("primary")) for item in steps) != 1:
+                    raise ValueError("grouped catalog calibration steps are invalid")
+                for step in steps:
+                    stock_id = str(step.get("stock_id") or "")
+                    kind = str(step.get("preview_kind") or "")
+                    contract = {"preview_kind": kind}
+                    if kind == "target_rows":
+                        ordered = sorted(row_groups.get(stock_id, ()))
+                        if [index for index, _wells in ordered] != list(range(len(ordered))):
+                            raise ValueError("grouped preview rows are not contiguous")
+                        contract["row_groups"] = tuple(wells for _index, wells in ordered)
+                    elif kind != "fill_total":
+                        raise ValueError("grouped preview kind is invalid")
+                    preview_contracts[stock_id] = contract
+                oracle_evidence = {
+                    **oracle_payload,
+                    "prepared_entry_count": len(prepared_expected),
+                    "requantized_entry_count": len(requantized_expected),
+                    "positive_intent_count": sum(row.droplets > 0 for row in requantized_expected),
+                    "minimum_margin_satisfied": True,
+                }
+            else:
+                raise ValueError("catalog count oracle schema is unsupported")
             if {
                 (row.stock_id, row.well_id) for row in final_counts
             } != {
                 (row.stock_id, row.well_id) for row in requantized_expected
             }:
                 raise ValueError("catalog count oracle membership differs from plan")
-            oracle_evidence = {
-                **oracle_payload,
-                "prepared_count": prepared_count,
-                "requantized_count": requantized_count,
-                "count_delta": expected_delta,
-                "minimum_margin_satisfied": margin >= Fraction(1, 3),
-            }
 
         preview_counts: list[StockWellCount] = []
         transition_evidence: list[dict[str, Any]] = []
@@ -1065,17 +1152,27 @@ def dispense_counts_reconciled_assertion(
                 raise ValueError(
                     f"calibration transition {index} preview headers differ"
                 )
-            if table.get("row_count") != 1:
-                raise ValueError(
-                    "Slice 9.2 preview projection requires exactly one row"
-                )
-            projected = project_single_stock_preview_counts(
-                preview,
-                stock_id=stock_id,
-                well_ids_by_row=(
+            contract = preview_contracts.get(stock_id, {})
+            preview_kind = str(contract.get("preview_kind") or "target_rows")
+            if preview_kind == "target_rows":
+                row_groups = contract.get("row_groups") or (
                     tuple(row.well_id for row in after_stock_counts),
-                ),
-            )
+                )
+                projected = project_single_stock_preview_counts(
+                    preview, stock_id=stock_id, well_ids_by_row=row_groups
+                )
+            elif preview_kind == "fill_total":
+                rows = list(table.get("rows") or ())
+                if table.get("row_count") != 1 or len(rows) != 1:
+                    raise ValueError("fill preview requires one aggregate row")
+                drops_column = list(table.get("headers") or ()).index("Drops")
+                displayed = rows[0][drops_column]
+                expected_total = sum(row.droplets for row in after_stock_counts)
+                if str(displayed) != str(expected_total):
+                    raise ValueError("fill preview aggregate count differs from oracle")
+                projected = after_stock_counts
+            else:
+                raise ValueError("preview projection kind is unsupported")
             preview_counts.extend(projected)
             added = normalize_stock_well_counts(
                 after.get("progress_added") or (),
@@ -1131,6 +1228,10 @@ def dispense_counts_reconciled_assertion(
             name: (
                 prepared_expected
                 if name == "prepared_plan"
+                else tuple(
+                    row for row in requantized_expected if row.droplets > 0
+                )
+                if name in {"intent", "simulator"}
                 else requantized_expected
             )
             for name in required_layers
@@ -1438,9 +1539,12 @@ def matrix_case_assertions(
             "effective_volume_nL": record.get("effective_volume_nL"),
         }
         calibration_rows.append(row)
+        expected_mode = str(
+            stock.get("calibration_mode") or stock.get("printing_mode") or ""
+        )
         calibration_ok = calibration_ok and bool(stock) and (
             record.get("printer_head_id") == head.get("printer_head_id")
-            and record.get("printing_mode") == stock.get("printing_mode")
+            and record.get("printing_mode") == expected_mode
             and int(record.get("pw_us") or 0)
             == int(head.get("print_pulse_width_us") or 0)
             and abs(
@@ -1450,31 +1554,53 @@ def matrix_case_assertions(
             < 1e-6
         )
     refuel_expected = sum(
-        expected_by_id[stock_id]["printing_mode"] == "stream"
+        str(
+            expected_by_id[stock_id].get("calibration_mode")
+            or expected_by_id[stock_id]["printing_mode"]
+        ) == "stream"
         for stock_id in staged_ids
     )
     plan = context.experiment_model.get_execution_plan_snapshot()
     count_oracle = dict(lifecycle.get("dispense_count_oracle") or {})
     oracle_case_linked = True
     if count_oracle:
-        margin = dict(case.get("rounding_boundary_margin") or {})
-        oracle_case_linked = (
-            count_oracle.get("source")
-            == "calibration_requantization_v1_catalog"
-            and count_oracle.get("stock_id") in expected_by_id
-            and len(tuple(count_oracle.get("well_ids") or ()))
-            == len(plan.wells)
-            and set(count_oracle.get("well_ids") or ())
-            == {well.well_id for well in plan.wells}
-            and count_oracle.get("prepared_droplets_per_well")
-            == case.get("expected_prepared_droplets")
-            and count_oracle.get("requantized_droplets_per_well")
-            == case.get("expected_requantized_droplets")
-            and count_oracle.get("expected_count_delta")
-            == case.get("expected_count_delta")
-            and count_oracle.get("transition") == case.get("transition")
-            and count_oracle.get("rounding_boundary_margin") == margin
-        )
+        if int(count_oracle.get("schema_version", 1)) == 2:
+            oracle_case_linked = (
+                count_oracle.get("source")
+                == "calibration_requantization_v1_catalog"
+                and set(count_oracle.get("well_ids") or ())
+                == {well.well_id for well in plan.wells}
+                and count_oracle.get("count_groups") == case.get("count_groups")
+                and count_oracle.get("calibration_steps")
+                == case.get("calibration_steps")
+                and count_oracle.get("require_terminal_reload")
+                == case.get("require_terminal_reload")
+                and count_oracle.get("primary_stock_id") in expected_by_id
+            )
+        else:
+            margin = dict(case.get("rounding_boundary_margin") or {})
+            oracle_case_linked = (
+                count_oracle.get("source")
+                == "calibration_requantization_v1_catalog"
+                and count_oracle.get("stock_id") in expected_by_id
+                and len(tuple(count_oracle.get("well_ids") or ()))
+                == len(plan.wells)
+                and set(count_oracle.get("well_ids") or ())
+                == {well.well_id for well in plan.wells}
+                and count_oracle.get("prepared_droplets_per_well")
+                == case.get("expected_prepared_droplets")
+                and count_oracle.get("requantized_droplets_per_well")
+                == case.get("expected_requantized_droplets")
+                and count_oracle.get("expected_count_delta")
+                == case.get("expected_count_delta")
+                and count_oracle.get("transition") == case.get("transition")
+                and count_oracle.get("rounding_boundary_margin") == margin
+            )
+    profile_ok = (
+        profile.get("calibration_steps") == case.get("calibration_steps")
+        if case.get("case_kind") == "composite_requantization"
+        else profile.get("profile_id") == case.get("profile_id")
+    )
     parameter_ok = (
         bool(matrix_id)
         and registered_case_valid
@@ -1483,7 +1609,7 @@ def matrix_case_assertions(
         and calibration_ok
         and len(records) == len(staged_ids)
         and len(manual_refuel_checks) == refuel_expected
-        and profile.get("profile_id") == case.get("profile_id")
+        and profile_ok
     )
     parameter_evidence = {
         "matrix_id": lifecycle.get("matrix_id"),
@@ -2039,6 +2165,127 @@ def cleanup_assertion(teardown: Mapping[str, Any]) -> AssertionResult:
         "artifacts.cleanup_complete",
         "closed",
         ("harness", "session"),
+        inspect,
+    )
+
+
+def completed_terminal_reload_assertion(
+    *,
+    before: Any,
+    after: Any,
+    first_close: Mapping[str, Any],
+    second_launch: Mapping[str, Any],
+    loader: Mapping[str, Any],
+    directory_comparisons: Mapping[str, Mapping[str, Any]],
+) -> AssertionResult:
+    """Prove a completed bundle survives a fresh read-only UI session exactly."""
+
+    def inspect() -> tuple[bool, Mapping[str, Any]]:
+        close = dict(first_close)
+        launch = dict(second_launch)
+        loaded = dict(loader)
+        comparisons = {
+            str(name): dict(value)
+            for name, value in directory_comparisons.items()
+        }
+        checks = {
+            "first_session_closed": bool(close.get("close_succeeded"))
+            and close.get("recorder", {}).get("status") == "closed"
+            and not bool(close.get("session_lock_present"))
+            and bool(close.get("root_retained")),
+            "fresh_application_identity": str(close.get("application_session_id"))
+            != str(launch.get("application_session_id")),
+            "retained_session_identity": str(close.get("session_id"))
+            == str(launch.get("session_id")),
+            "real_components_reconstructed": launch.get("component_type")
+            == "ApplicationComponents"
+            and launch.get("view_type") == "MainWindow",
+            "simulator_reconstructed": launch.get("machine_type")
+            == "SimulatedMachine"
+            and not bool(launch.get("hardware_access_allowed")),
+            "ui_completed_read_only": all(
+                bool(value) for value in dict(loaded.get("checks") or {}).values()
+            )
+            and not bool(loaded.get("activation_performed")),
+            "plan_identity_exact": before.plan_id == after.plan_id
+            and before.plan_revision == after.plan_revision,
+            "completed_state_exact": before.plan_state == after.plan_state
+            == "completed"
+            and before.eligibility_status == after.eligibility_status
+            == "analysis_only",
+            "design_exact": before.design_json == after.design_json
+            and before.design_sha256 == after.design_sha256
+            and before.plan_design_sha256 == after.plan_design_sha256,
+            "plan_exact": before.plan_json == after.plan_json,
+            "well_assignments_exact": before.plan_well_ids == after.plan_well_ids
+            and before.plan_assignments == after.plan_assignments,
+            "runtime_projection_not_activated": not after.runtime_assignments,
+            "revision_history_exact": before.history_json == after.history_json,
+            "progress_exact": before.progress_plan_id == after.progress_plan_id
+            and before.progress_plan_revision == after.progress_plan_revision
+            and before.progress_targets == after.progress_targets
+            and before.total_added_droplets == after.total_added_droplets
+            and before.completed_well_ids == after.completed_well_ids,
+            "resume_terminal_clean": before.resume_present == after.resume_present
+            and before.resume_state == after.resume_state
+            and before.resume_plan_id == after.resume_plan_id
+            and before.resume_plan_revision == after.resume_plan_revision
+            and before.resume_intent_count == after.resume_intent_count == 0,
+            "calibration_linkage_exact": before.calibration_present
+            == after.calibration_present
+            and before.calibration_record_count == after.calibration_record_count
+            and before.manual_refuel_check_count
+            == after.manual_refuel_check_count,
+            "reloaded_runtime_inactive": not after.runtime_active,
+            "authoritative_hashes_exact": before.core_file_hashes
+            == after.core_file_hashes,
+            "files_unchanged_on_close": bool(
+                comparisons.get("after_close", {})
+                .get("checks", {})
+                .get("files_byte_identical")
+            ),
+            "files_unchanged_on_reload": bool(
+                comparisons.get("after_reload", {})
+                .get("checks", {})
+                .get("files_byte_identical")
+            ),
+        }
+        evidence = {
+            "checks": checks,
+            "failed_checks": [name for name, passed in checks.items() if not passed],
+            "before": {
+                "plan_id": before.plan_id,
+                "plan_revision": before.plan_revision,
+                "plan_state": before.plan_state,
+                "design_sha256": before.design_sha256,
+                "core_file_hashes": before.core_file_hashes,
+                "progress_targets": dict(before.progress_targets),
+                "total_added_droplets": before.total_added_droplets,
+                "completed_well_ids": list(before.completed_well_ids),
+                "calibration_record_count": before.calibration_record_count,
+            },
+            "after": {
+                "plan_id": after.plan_id,
+                "plan_revision": after.plan_revision,
+                "plan_state": after.plan_state,
+                "design_sha256": after.design_sha256,
+                "core_file_hashes": after.core_file_hashes,
+                "progress_targets": dict(after.progress_targets),
+                "total_added_droplets": after.total_added_droplets,
+                "completed_well_ids": list(after.completed_well_ids),
+                "calibration_record_count": after.calibration_record_count,
+            },
+            "first_close": close,
+            "second_launch": launch,
+            "loader": loaded,
+            "directory_comparisons": comparisons,
+        }
+        return all(checks.values()), evidence
+
+    return evaluate_assertion(
+        "execution.completed_terminal_reload_exact",
+        "terminal_reloaded",
+        ("ui", "model", "persistence", "session", "simulator"),
         inspect,
     )
 

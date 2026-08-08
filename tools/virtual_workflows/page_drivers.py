@@ -1500,6 +1500,102 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             directory, purpose="prepared", on_loaded=inspect_loaded
         )["loaded"]
 
+    def inspect_completed_execution(
+        self,
+        experiment_dir,
+        *,
+        expected_name: str,
+    ) -> dict[str, Any]:
+        """Load one completed execution read-only without runtime activation."""
+
+        from pathlib import Path
+        from tools.virtual_workflows.actions import capture_milestone, execute_action
+
+        directory = Path(experiment_dir).resolve()
+
+        def inspect_loaded(dialog) -> Mapping[str, Any]:
+            plan = self.context.experiment_model.get_execution_plan_snapshot()
+            eligibility = (
+                self.context.experiment_model.get_execution_resume_eligibility()
+                or {}
+            )
+            runtime_active = bool(
+                self.context.experiment_model
+                .is_authoritative_execution_runtime_active()
+            )
+            status_text = str(dialog.status_lbl.text() or "")
+            banner_text = str(dialog.lifecycle_banner.text() or "")
+            progress_rows = self.context.experiment_model.progress_data.values()
+            progress_complete = all(
+                int(details.get("added_droplets", 0) or 0)
+                == int(details.get("target_droplets", 0) or 0)
+                for well in progress_rows
+                for details in (well.get("reagents") or {}).values()
+            )
+            checks = {
+                "name_matches": dialog.exp_name_edit.text() == expected_name,
+                "path_matches": Path(
+                    self.context.experiment_model.experiment_dir_path
+                ).resolve() == directory,
+                "plan_completed": str(plan.state.value) == "completed",
+                "progress_complete": progress_complete,
+                "eligibility_terminal_analysis_only": eligibility.get("status")
+                == "analysis_only"
+                and not bool(eligibility.get("can_activate_runtime"))
+                and not bool(eligibility.get("can_start_hardware"))
+                and not bool(eligibility.get("can_resume_hardware")),
+                "runtime_inactive": not runtime_active,
+                "action_is_execution_locked": dialog.finish_btn.text()
+                == "Execution Locked",
+                "action_disabled": not bool(dialog.finish_btn.isEnabled()),
+                "read_only_guidance": "read-only" in status_text.casefold()
+                and "hardware activation is blocked" in status_text.casefold(),
+                "visible_lock_banner": not dialog.lifecycle_banner.isHidden()
+                and "locked and read-only" in banner_text.casefold()
+                and "hardware loading is unavailable" in banner_text.casefold(),
+            }
+            evidence = {
+                "checks": checks,
+                "experiment_dir": str(directory),
+                "experiment_name": dialog.exp_name_edit.text(),
+                "plan_id": str(plan.plan_id),
+                "plan_revision": int(plan.plan_revision),
+                "plan_state": str(plan.state.value),
+                "eligibility": eligibility,
+                "runtime_active": runtime_active,
+                "action_label": str(dialog.finish_btn.text() or ""),
+                "action_enabled": bool(dialog.finish_btn.isEnabled()),
+                "status_text": status_text,
+                "banner_text": banner_text,
+                "activation_performed": False,
+                "file_selection_mechanic": "qt_file_dialog_directory_selection",
+            }
+            if not all(checks.values()):
+                raise RuntimeError(
+                    f"completed execution did not reload read-only: {checks}"
+                )
+            capture_milestone(
+                self.context,
+                "terminal_reloaded",
+                evidence=evidence,
+                widget=dialog,
+            )
+            QtTest.QTest.keyClick(dialog, QtCore.Qt.Key.Key_Escape)
+            if dialog.isVisible():
+                raise RuntimeError("completed inspection editor did not close")
+            return evidence
+
+        def record_loaded(dialog) -> Mapping[str, Any]:
+            return execute_action(
+                self.context,
+                "experiment.inspect_completed_via_ui",
+                lambda: inspect_loaded(dialog),
+            )["evidence"]
+
+        return self._drive_directory_load(
+            directory, purpose="completed", on_loaded=record_loaded
+        )["loaded"]
+
 
 class RackDriver(_QTestSurfaceDriver):
     """QTest mechanics for rack volume, confirmation, and head loading."""

@@ -677,6 +677,68 @@ def test_authoritative_loader_rejects_wrong_load_execution_label(
         driver.load_authoritative_execution(tmp_path, expected_name="expected")
 
 
+def test_completed_loader_inspects_terminal_bundle_without_activation(
+    qapp, tmp_path, monkeypatch
+):
+    from tools.virtual_workflows import actions
+
+    dialog = QtWidgets.QDialog()
+    dialog.exp_name_edit = QtWidgets.QLineEdit("expected", dialog)
+    dialog.finish_btn = QtWidgets.QPushButton("Execution Locked", dialog)
+    dialog.finish_btn.setEnabled(False)
+    dialog.status_lbl = QtWidgets.QLabel(
+        "Execution plan loaded read-only for analysis; hardware activation is blocked.",
+        dialog,
+    )
+    dialog.lifecycle_banner = QtWidgets.QLabel(
+        "This saved execution is locked and read-only. Hardware loading is unavailable.",
+        dialog,
+    )
+    dialog.show()
+    qapp.processEvents()
+    plan = SimpleNamespace(
+        plan_id="plan-1", plan_revision=5, state=SimpleNamespace(value="completed")
+    )
+    context = _context(qapp, QtWidgets.QWidget())
+    context.scenario_root = tmp_path
+    context.experiment_model = SimpleNamespace(
+        get_execution_plan_snapshot=lambda: plan,
+        get_execution_resume_eligibility=lambda: {
+            "status": "analysis_only",
+            "can_activate_runtime": False,
+            "can_start_hardware": False,
+            "can_resume_hardware": False,
+        },
+        is_authoritative_execution_runtime_active=lambda: False,
+        experiment_dir_path=str(tmp_path),
+        progress_data={
+            "A1": {"reagents": {
+                "stock": {"target_droplets": 15, "added_droplets": 15}
+            }}
+        },
+    )
+    driver = ExperimentLoaderDriver(context)
+    monkeypatch.setattr(actions, "capture_milestone", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        driver,
+        "_drive_directory_load",
+        lambda _directory, **values: {
+            "loaded": values["on_loaded"](dialog), "activated": None
+        },
+    )
+
+    evidence = driver.inspect_completed_execution(
+        tmp_path, expected_name="expected"
+    )
+
+    assert all(evidence["checks"].values())
+    assert evidence["activation_performed"] is False
+    assert context.action_results[-1]["action_id"] == (
+        "experiment.inspect_completed_via_ui"
+    )
+    assert not dialog.isVisible()
+
+
 def test_rack_driver_requires_one_unambiguous_stock_slot(qapp):
     head = SimpleNamespace(get_stock_id=lambda: "stock-1")
     slots = [

@@ -132,3 +132,79 @@ def test_calibration_requantization_matrix_executes_exact_catalog_counts(tmp_pat
         assert values["matrix_case"]["outcome"][
             "observed_completion_count"
         ] == 24
+
+
+@pytest.mark.sil_lifecycle
+@pytest.mark.parametrize(
+    ("case_id", "completion_count", "preview_counts", "fill_total", "reload"),
+    [
+        pytest.param(
+            "droplet_multi_target_10_to_9_and_1_to_1",
+            36,
+            [1, 9],
+            96,
+            False,
+            id="droplet_multi_target_10_to_9_and_1_to_1",
+        ),
+        pytest.param(
+            "stream_to_droplet_40_to_10_8",
+            48,
+            [15],
+            2904,
+            True,
+            id="stream_to_droplet_40_to_10_8",
+        ),
+        pytest.param(
+            "fill_volume_decrease_4_to_5",
+            48,
+            [6],
+            120,
+            False,
+            id="fill_volume_decrease_4_to_5",
+        ),
+    ],
+)
+def test_grouped_requantization_cases_execute_exact_catalog_counts(
+    tmp_path,
+    case_id,
+    completion_count,
+    preview_counts,
+    fill_total,
+    reload,
+):
+    report = _run_case(
+        tmp_path,
+        case_id,
+        CALIBRATION_REQUANTIZATION_MATRIX_ID,
+    )
+    assert report["classification"]["status"] == "pass"
+    values = report["metrics"]["persistence"]["values"]
+    evidence = values["dispense_count_evidence"]
+    oracle = evidence["count_oracle"]
+    assert oracle["schema_version"] == 2
+    assert oracle["positive_intent_count"] == completion_count
+    assert len(evidence["command_join"]["joined_commands"]) == completion_count
+    assert evidence["reconciliation"]["passed"] is True
+    transitions = evidence["calibration_transitions"]
+    assert [
+        int(row[3])
+        for row in transitions[0]["preview"]["visible_table"]["rows"]
+    ] == preview_counts
+    assert int(
+        transitions[1]["preview"]["visible_table"]["rows"][0][3]
+    ) == fill_total
+    assert values["matrix_case"]["outcome"][
+        "observed_completion_count"
+    ] == completion_count
+    assertions = {
+        item["assertion_id"]: item
+        for item in report["metrics"]["workflow"]["values"]["assertion_results"]
+    }
+    assert (
+        "execution.completed_terminal_reload_exact" in assertions
+    ) is reload
+    if reload:
+        assert assertions["execution.completed_terminal_reload_exact"][
+            "decision"
+        ] == "pass"
+        assert "terminal_reloaded" in report["artifacts"]["screenshots"]

@@ -49,6 +49,7 @@ AUTHORITATIVE_RELOAD_ACTION_IDS = (
         {
             "app.close_simulated_session",
             "experiment.load_authoritative_via_ui",
+            "experiment.inspect_completed_via_ui",
             "experiment.activate_authoritative_via_ui",
             "validation.reload_boundary",
         }
@@ -170,6 +171,7 @@ ACTION_INTERACTION_SURFACES.update(
         "array.resume_via_ui": InteractionSurface.UI,
         "machine.disconnect_via_ui": InteractionSurface.UI,
         "experiment.load_authoritative_via_ui": InteractionSurface.UI,
+        "experiment.inspect_completed_via_ui": InteractionSurface.UI,
         "experiment.activate_authoritative_via_ui": InteractionSurface.UI,
         "experiment.activate_authoritative": InteractionSurface.MODEL,
         "execution.lock_for_printing": InteractionSurface.MODEL,
@@ -2013,6 +2015,20 @@ def drive_editor_create_finalize(
                     dialog.volume_tolerance_spin,
                     experiment["printed_volume_tolerance_nL"],
                 )
+                if "fill_printing_mode" in experiment:
+                    _qt_select_combo_text(
+                        QtCore,
+                        QtTest,
+                        dialog.fill_mode_combo,
+                        experiment["fill_printing_mode"],
+                    )
+                if "fill_droplet_volume_nL" in experiment:
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog.fill_dv_spin,
+                        experiment["fill_droplet_volume_nL"],
+                    )
                 _qt_select_combo_text(
                     QtCore,
                     QtTest,
@@ -2118,9 +2134,12 @@ def drive_editor_create_finalize(
                 if dialog._design_optimization_dirty:
                     raise RuntimeError("generated design remained dirty")
                 reaction_count = int(dialog.model.get_number_of_reactions())
-                if reaction_count != int(experiment["replicates"]):
+                expected_reaction_count = int(
+                    experiment.get("expected_reaction_count", experiment["replicates"])
+                )
+                if reaction_count != expected_reaction_count:
                     raise RuntimeError(
-                        "generated reaction count did not match replicates"
+                        "generated reaction count did not match expected cardinality"
                     )
                 return {
                     "reaction_count": reaction_count,

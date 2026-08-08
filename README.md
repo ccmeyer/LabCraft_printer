@@ -1559,13 +1559,20 @@ pairing, stock order, calibration profile, and manual-refuel outcome. Generated
 case data stays in memory; the matrix does not create a fixture or workflow
 body for each variation.
 
-Milestone 9 Slice 3 adds `calibration_requantization_v1`. Its three one-stock,
-24-well droplet cases freeze exact catalog-owned count oracles for an
+Milestone 9 Slices 3-4 add `calibration_requantization_v1`. Its first three
+one-stock, 24-well droplet cases freeze exact catalog-owned count oracles for an
 idempotent `10 -> 10` calibration, an 8 nL to 9 nL volume increase producing
 `10 -> 9`, and a 10 nL to 9 nL volume decrease producing `10 -> 11`. Passing
 evidence reconciles the prepared plan, visible preview, calibrated plan,
 zero-progress persistence, runtime, durable intents, simulator commands, and
 terminal added counts by exact stock and well identity.
+
+Three appended grouped-oracle cases cover mixed `1 -> 1` and `10 -> 9`
+multi-target wells with zero fill omitted from dispatch, an executed stream
+`40 nL / 4 drops -> 10.8 nL / 15 drops` mode transition with exact completed
+bundle reload in a fresh application session, and fill-stock `4 -> 5`
+requantization while non-fill remains at 6 drops. Their positive intent counts
+are 36, 48, and 48 respectively.
 
 List the catalog, inspect a deterministic plan, run all cases in isolated
 children, or run one replayable case with:
@@ -1608,11 +1615,12 @@ separate evidence and do not satisfy registered capability-manifest coverage.
 Pi, scheduling, repetition, fault injection, baseline, comparison, and
 performance controls remain unavailable in matrix mode.
 
-Run all three requantization cases offscreen with:
+Run a selected requantization case offscreen with:
 
 ```powershell
 .\env\Scripts\python.exe tools\run_virtual_workflow.py `
   --matrix calibration_requantization_v1 `
+  --case stream_to_droplet_40_to_10_8 `
   --output-root verification_reports\matrices `
   --seed 1 --speed-multiplier 1000 --timeout-seconds 90 `
   --qt-platform offscreen
@@ -1621,8 +1629,11 @@ Run all three requantization cases offscreen with:
 Inspect `metrics.persistence.values.dispense_count_evidence` in each retained
 report. `oracle_scope` must be
 `calibration_requantization_v1_catalog_oracle`, all reconciliation checks must
-pass, and the joined command count must be 24. Use the retained replay command;
-do not reconstruct a case from remembered values.
+pass, and the joined command count must match the catalog-owned positive intent
+count (24, 36, or 48). For the stream transition, also require
+`execution.completed_terminal_reload_exact` and the `terminal_reloaded`
+screenshot. Use the retained replay command; do not reconstruct a case from
+remembered values.
 
 ### Bounded seeded editor exploration
 

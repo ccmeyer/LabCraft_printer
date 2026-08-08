@@ -180,6 +180,11 @@ class StockPassSpec:
     no_progress_timeout_seconds: float | None = None
     await_terminal_boundary: bool = True
     calibration_mode: str = "droplet"
+    mode_switch_choice: str | None = None
+    apply_success_title: str = "Applied"
+    require_refuel_regulation: bool = False
+    expected_applied_pulse_width_us: int | None = None
+    calibration_print_profile_id: str | None = None
     refuel_pulse_width_us: int | None = None
     refuel_pressure_psi: float | None = None
     manual_refuel_check: ManualRefuelCheckSpec | None = None
@@ -222,8 +227,17 @@ class StockPassSpec:
             raise ValueError("no-progress timeout must be finite and positive")
         if self.calibration_mode not in {"droplet", "stream"}:
             raise ValueError("calibration mode must be droplet or stream")
+        if self.mode_switch_choice not in {None, "yes", "no"}:
+            raise ValueError("mode-switch choice must be yes, no, or None")
+        if not self.apply_success_title:
+            raise ValueError("Apply success title must be non-empty")
         if self.refuel_pulse_width_us is not None and self.refuel_pulse_width_us <= 0:
             raise ValueError("refuel pulse width must be positive")
+        if (
+            self.expected_applied_pulse_width_us is not None
+            and self.expected_applied_pulse_width_us <= 0
+        ):
+            raise ValueError("expected applied pulse width must be positive")
         if self.refuel_pressure_psi is not None and self.refuel_pressure_psi <= 0:
             raise ValueError("refuel pressure must be positive")
         if self.manual_refuel_check is not None and (
@@ -1189,7 +1203,10 @@ def _run_stock_pass(
                     "pressure.enable_regulation_via_ui",
                     InteractionSurface.UI,
                     lambda _runtime: machine.enable_pressure_regulation(
-                        require_refuel=spec.manual_refuel_check is not None
+                        require_refuel=(
+                            spec.manual_refuel_check is not None
+                            or spec.require_refuel_regulation
+                        )
                     )
                     or {"regulating_print_pressure": True},
                 ),
@@ -1241,7 +1258,10 @@ def _run_stock_pass(
     )
 
     def generate(_runtime: JourneyRuntime) -> Mapping[str, Any]:
-        generated.update(calibration.generate_from_tab(spec.calibration_mode))
+        generated.update(calibration.generate_from_tab(
+            spec.calibration_mode,
+            print_profile_id=spec.calibration_print_profile_id,
+        ))
         evidence = {
             "result_fingerprint": generated.get("synthetic_result_fingerprint")
         }
@@ -1260,7 +1280,11 @@ def _run_stock_pass(
         before = capture_count_snapshot(context)
         preview = calibration.inspect_preview()
         handled = calibration.apply_selected(
-            expected_title=(None if spec.manual_refuel_check is not None else "Applied"),
+            expected_title=(
+                None if spec.manual_refuel_check is not None
+                else spec.apply_success_title
+            ),
+            mode_switch_choice=spec.mode_switch_choice,
             manual_refuel_choice=(
                 "yes" if spec.manual_refuel_check is not None else None
             ),
