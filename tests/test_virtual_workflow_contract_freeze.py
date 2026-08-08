@@ -24,6 +24,11 @@ from tools.virtual_workflows.suite_runner import (
     AGGREGATE_SCHEMA_NAME,
     AGGREGATE_SCHEMA_VERSION,
 )
+from tools.virtual_workflows.pi_sil import (
+    PI_ARTIFACT_MANIFEST_SCHEMA,
+    PI_SIL_SCHEMA_VERSION,
+    PI_SUITE_ARTIFACT_MANIFEST_VERSION,
+)
 from tools.virtual_workflows.coverage import (
     COVERAGE_SCHEMA_NAME,
     COVERAGE_SCHEMA_VERSION,
@@ -399,6 +404,9 @@ def test_legacy_cli_surface_remains_additively_compatible():
 def test_host_selection_aggregate_schema_is_frozen():
     assert AGGREGATE_SCHEMA_NAME == "labcraft.virtual_workflow_aggregate"
     assert AGGREGATE_SCHEMA_VERSION == 1
+    assert PI_ARTIFACT_MANIFEST_SCHEMA == "labcraft.pi_sil_artifact_bundle"
+    assert PI_SIL_SCHEMA_VERSION == 1
+    assert PI_SUITE_ARTIFACT_MANIFEST_VERSION == 2
     assert COVERAGE_SCHEMA_NAME == "labcraft.sil_capability_evaluation"
     assert COVERAGE_SCHEMA_VERSION == 1
     assert EXPLORATION_PLAN_SCHEMA_NAME == (

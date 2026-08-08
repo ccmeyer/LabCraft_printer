@@ -1,4 +1,4 @@
-"""Fresh-process execution and aggregation for manual host SIL selections."""
+"""Fresh-process execution and aggregation for manual SIL selections."""
 
 from __future__ import annotations
 
@@ -41,6 +41,8 @@ CHILD_OUTCOMES = {
     "identity_mismatch",
 }
 AGGREGATE_STATUSES = {"pass", "warning", "fail"}
+AGGREGATE_PLATFORMS = {"windows_sil", "pi_sil"}
+PI_SUITE_IDS = {"pi_primary", "pi_stress"}
 
 
 class AggregateError(ValueError):
@@ -49,7 +51,7 @@ class AggregateError(ValueError):
 
 @dataclass(frozen=True)
 class AggregateRunConfig:
-    """Validated inputs for one explicit host selection execution."""
+    """Validated inputs for one explicit selection execution."""
 
     plan: Mapping[str, Any]
     output_root: Path = DEFAULT_AGGREGATE_ROOT
@@ -61,6 +63,8 @@ class AggregateRunConfig:
     runner_path: Path = REPO_ROOT / "tools" / "run_virtual_workflow.py"
     child_timeout_grace_seconds: float = CHILD_TIMEOUT_GRACE_SECONDS
     termination_grace_seconds: float = TERMINATION_GRACE_SECONDS
+    pi_preflight_path: Path | None = None
+    pi_hardware_proof_path: Path | None = None
 
     def __post_init__(self) -> None:
         _validate_selection_plan(self.plan)
@@ -69,6 +73,18 @@ class AggregateRunConfig:
             self, "python_executable", Path(self.python_executable).resolve()
         )
         object.__setattr__(self, "runner_path", Path(self.runner_path).resolve())
+        if self.pi_preflight_path is not None:
+            object.__setattr__(
+                self,
+                "pi_preflight_path",
+                Path(self.pi_preflight_path).resolve(),
+            )
+        if self.pi_hardware_proof_path is not None:
+            object.__setattr__(
+                self,
+                "pi_hardware_proof_path",
+                Path(self.pi_hardware_proof_path).resolve(),
+            )
         if not self.python_executable.is_file():
             raise AggregateError("suite Python executable does not exist")
         if not self.runner_path.is_file():
@@ -85,6 +101,16 @@ class AggregateRunConfig:
                 raise AggregateError(f"{label} must be positive and finite")
         if any(not isinstance(item, str) or not item for item in self.replay_command):
             raise AggregateError("aggregate replay command is invalid")
+        platform_name = str(self.plan["platform"])
+        pi_paths = (self.pi_preflight_path, self.pi_hardware_proof_path)
+        if platform_name == "pi_sil":
+            if self.visible:
+                raise AggregateError("Pi aggregate execution is headless")
+            if any(path is None for path in pi_paths):
+                raise AggregateError("Pi aggregate execution requires preflight and proof")
+            _pi_safety_identity(self)
+        elif any(path is not None for path in pi_paths):
+            raise AggregateError("Pi evidence is invalid for a Windows aggregate")
 
 
 @dataclass(frozen=True)
@@ -191,8 +217,9 @@ def _validate_selection_plan(plan: Mapping[str, Any]) -> None:
         raise AggregateError("selection plan schema name is unsupported")
     if plan.get("schema_version") != SELECTION_SCHEMA_VERSION:
         raise AggregateError("selection plan schema version is unsupported")
-    if plan.get("platform") != "windows_sil":
-        raise AggregateError("Slice 3 executes Windows SIL selections only")
+    platform_name = plan.get("platform")
+    if platform_name not in AGGREGATE_PLATFORMS:
+        raise AggregateError("selection plan platform is unsupported")
     if plan.get("readiness") != "ready":
         raise AggregateError("selection plan is not ready")
     if plan.get("execution_authorized") is not False:
@@ -203,6 +230,10 @@ def _validate_selection_plan(plan: Mapping[str, Any]) -> None:
         "capability",
     }:
         raise AggregateError("aggregate selection must be a suite or capability")
+    if platform_name == "pi_sil" and (
+        selector.get("kind") != "suite" or selector.get("id") not in PI_SUITE_IDS
+    ):
+        raise AggregateError("Pi execution accepts only pi_primary or pi_stress suites")
     scenarios = plan.get("scenarios")
     if not isinstance(scenarios, list) or not scenarios:
         raise AggregateError("aggregate selection has no scenarios")
@@ -227,6 +258,53 @@ def _validate_selection_plan(plan: Mapping[str, Any]) -> None:
             or timeout <= 0
         ):
             raise AggregateError("selection scenario timeout is invalid")
+        required_pi = scenario.get("required_pi_evidence")
+        if not isinstance(required_pi, list):
+            raise AggregateError("selection scenario Pi evidence is invalid")
+        if platform_name == "pi_sil" and required_pi != [
+            "preflight",
+            "hardware_proof",
+        ]:
+            raise AggregateError("Pi selection scenario evidence contract drifted")
+        if platform_name == "windows_sil" and required_pi:
+            raise AggregateError("Windows selection unexpectedly requires Pi evidence")
+
+
+def _pi_safety_identity(config: AggregateRunConfig) -> dict[str, Any]:
+    """Load the authoritative Pi evidence and return aggregate-safe identity."""
+
+    if config.pi_preflight_path is None or config.pi_hardware_proof_path is None:
+        raise AggregateError("Pi aggregate execution requires preflight and proof")
+    from tools.virtual_workflows.pi_sil import (
+        PiSilError,
+        load_and_validate_pi_evidence,
+    )
+
+    try:
+        preflight, proof = load_and_validate_pi_evidence(
+            config.pi_preflight_path,
+            config.pi_hardware_proof_path,
+            expected_qt_platform=config.qt_platform,
+        )
+    except PiSilError as exc:
+        raise AggregateError(f"Pi aggregate evidence is invalid: {exc}") from exc
+    source_tree_sha256 = preflight.get("source_tree_sha256")
+    if not isinstance(source_tree_sha256, str) or len(source_tree_sha256) != 64:
+        raise AggregateError("Pi aggregate preflight has no source-tree identity")
+    return {
+        "preflight_sha256": _sha256(config.pi_preflight_path),
+        "proof_sha256": _sha256(config.pi_hardware_proof_path),
+        "trace_sha256": str(proof["trace_sha256"]),
+        "source_commit": str(preflight["source_commit"]),
+        "source_tree_sha256": source_tree_sha256,
+        "dirty_worktree": bool(preflight["dirty_worktree"]),
+        "qt_platform": str(preflight["qt_platform"]),
+        "sandbox_method": str(proof["sandbox_method"]),
+        "pi_model": str(preflight["pi_model"]),
+        "private_dev": bool(proof["private_dev"]),
+        "root_read_only": bool(proof["root_read_only"]),
+        "network_unshared": bool(proof["network_unshared"]),
+    }
 
 
 def _selector_label(selector: Mapping[str, Any]) -> str:
@@ -320,6 +398,18 @@ def _child_command(
         command.append("--visible")
     else:
         command.extend(["--qt-platform", config.qt_platform])
+    if config.plan["platform"] == "pi_sil":
+        assert config.pi_preflight_path is not None
+        assert config.pi_hardware_proof_path is not None
+        command.extend(
+            [
+                "--target-pi",
+                "--pi-preflight",
+                str(config.pi_preflight_path),
+                "--pi-hardware-proof",
+                str(config.pi_hardware_proof_path),
+            ]
+        )
     return command
 
 
@@ -375,6 +465,8 @@ def _load_child_report(
     child_root: Path,
     aggregate_root: Path,
     scenario: Mapping[str, Any],
+    platform_name: str,
+    pi_safety: Mapping[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
     try:
         payload = json.loads(report_path.read_text(encoding="utf-8"))
@@ -395,6 +487,38 @@ def _load_child_report(
         mismatches.append("workload ID does not match selected registry ID")
     if payload["run"].get("seed") != scenario["seed"]:
         mismatches.append("report seed does not match selection plan")
+    if platform_name == "pi_sil":
+        assert pi_safety is not None
+        if payload["run"].get("run_mode") != (
+            f"{pi_safety['qt_platform']}_pi_sil"
+        ):
+            mismatches.append("report run mode is not the selected Pi SIL mode")
+        if payload["source"].get("git_commit") != pi_safety["source_commit"]:
+            mismatches.append("report source commit does not match Pi preflight")
+        report_source_tree = payload["source"].get("source_tree") or {}
+        if report_source_tree.get("sha256") != pi_safety["source_tree_sha256"]:
+            mismatches.append("report source tree does not match Pi preflight")
+        environment = payload.get("environment") or {}
+        target_pi = environment.get("target_pi") or {}
+        if target_pi.get("lane") != "raspberry_pi_sil":
+            mismatches.append("report is missing Raspberry Pi lane identity")
+        if target_pi.get("pi_model") != pi_safety["pi_model"]:
+            mismatches.append("report Pi model does not match preflight")
+        report_pi = payload["safety"].get("pi_sil") or {}
+        expected_pi = {
+            "sandbox_method": pi_safety["sandbox_method"],
+            "private_dev": True,
+            "root_read_only": True,
+            "network_unshared": True,
+            "forbidden_access_attempt_count": 0,
+            "proof_sha256": pi_safety["proof_sha256"],
+            "trace_sha256": pi_safety["trace_sha256"],
+        }
+        for key, expected_value in expected_pi.items():
+            if report_pi.get(key) != expected_value:
+                mismatches.append(f"report Pi safety field {key} does not match")
+    elif str(payload["run"].get("run_mode", "")).endswith("_pi_sil"):
+        mismatches.append("Windows aggregate received a Pi SIL report")
     replay = payload["run"].get("replay_command")
     if not isinstance(replay, list) or any(
         not isinstance(item, str) or not item for item in replay
@@ -424,6 +548,7 @@ def _execute_child(
     aggregate_root: Path,
     *,
     popen_factory: Callable[..., subprocess.Popen[str]],
+    pi_safety: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     order = int(scenario["order"])
     slot = _contained(
@@ -479,6 +604,8 @@ def _execute_child(
             child_root=slot,
             aggregate_root=aggregate_root,
             scenario=scenario,
+            platform_name=str(config.plan["platform"]),
+            pi_safety=pi_safety,
         )
     elif not reports:
         report_outcome = "missing_report"
@@ -581,14 +708,16 @@ def aggregate_summary(payload: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def execute_host_selection(
+def execute_selection(
     config: AggregateRunConfig,
     *,
     popen_factory: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
 ) -> AggregateExecutionResult:
-    """Run every planned Windows scenario in a fresh child and aggregate it."""
+    """Run every planned scenario in a fresh child and aggregate it."""
 
     _validate_selection_plan(config.plan)
+    platform_name = str(config.plan["platform"])
+    pi_safety = _pi_safety_identity(config) if platform_name == "pi_sil" else None
     selector = dict(config.plan["selector"])
     run_id = str(uuid.uuid4())
     aggregate_root = (
@@ -611,6 +740,7 @@ def execute_host_selection(
             scenario,
             aggregate_root,
             popen_factory=popen_factory,
+            pi_safety=pi_safety,
         )
         for scenario in config.plan["scenarios"]
     ]
@@ -634,7 +764,7 @@ def execute_host_selection(
         "run": {
             "run_id": run_id,
             "selector": selector,
-            "platform": "windows_sil",
+            "platform": platform_name,
             "started_at_utc": started_at,
             "ended_at_utc": _utc_now(),
             "duration_ms": (time.perf_counter() - started) * 1000.0,
@@ -649,6 +779,7 @@ def execute_host_selection(
             ),
             "execution_requested": True,
             "replay_command": list(config.replay_command),
+            **({"pi_safety": pi_safety} if pi_safety is not None else {}),
         },
         "manifest": dict(config.plan["manifest"]),
         "selection_plan": {
@@ -666,7 +797,12 @@ def execute_host_selection(
             "reasons": reasons,
         },
         "limitations": [
-            "Host SIL children do not prove firmware or physical hardware behavior.",
+            (
+                "Pi SIL children run inside the proved private-device sandbox "
+                "but do not prove firmware or physical hardware behavior."
+                if platform_name == "pi_sil"
+                else "Host SIL children do not prove firmware or physical hardware behavior."
+            ),
             "Aggregate status references child report-v1 evidence; capability freshness is evaluated in Milestone 8 Slice 4.",
         ],
     }
@@ -680,6 +816,16 @@ def execute_host_selection(
         aggregate_path=aggregate_path,
         summary_path=summary_path,
     )
+
+
+def execute_host_selection(
+    config: AggregateRunConfig,
+    *,
+    popen_factory: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
+) -> AggregateExecutionResult:
+    """Backward-compatible alias for the platform-neutral executor."""
+
+    return execute_selection(config, popen_factory=popen_factory)
 
 
 def _artifact_path(value: Any, root: Path, label: str) -> Path:
@@ -742,8 +888,47 @@ def validate_aggregate(
     classification = payload["classification"]
     if not all(isinstance(item, Mapping) for item in (run, manifest, classification)):
         raise AggregateError("aggregate metadata sections must be objects")
-    if run.get("platform") != "windows_sil" or run.get("execution_requested") is not True:
+    platform_name = run.get("platform")
+    if platform_name not in AGGREGATE_PLATFORMS or run.get("execution_requested") is not True:
         raise AggregateError("aggregate execution identity is invalid")
+    pi_safety = run.get("pi_safety")
+    if platform_name == "pi_sil":
+        if not isinstance(pi_safety, Mapping):
+            raise AggregateError("Pi aggregate safety identity is missing")
+        expected_pi_keys = {
+            "preflight_sha256",
+            "proof_sha256",
+            "trace_sha256",
+            "source_commit",
+            "source_tree_sha256",
+            "dirty_worktree",
+            "qt_platform",
+            "sandbox_method",
+            "pi_model",
+            "private_dev",
+            "root_read_only",
+            "network_unshared",
+        }
+        if set(pi_safety) != expected_pi_keys:
+            raise AggregateError("Pi aggregate safety identity is invalid")
+        for hash_key in (
+            "preflight_sha256",
+            "proof_sha256",
+            "trace_sha256",
+            "source_tree_sha256",
+        ):
+            value = pi_safety.get(hash_key)
+            if not isinstance(value, str) or len(value) != 64:
+                raise AggregateError(f"Pi aggregate {hash_key} is invalid")
+        if pi_safety.get("qt_platform") not in {"offscreen", "minimal"}:
+            raise AggregateError("Pi aggregate Qt platform is invalid")
+        if not all(
+            pi_safety.get(key) is True
+            for key in ("private_dev", "root_read_only", "network_unshared")
+        ):
+            raise AggregateError("Pi aggregate sandbox protections are invalid")
+    elif pi_safety is not None:
+        raise AggregateError("Windows aggregate unexpectedly contains Pi safety")
     if not isinstance(run.get("parent_pid"), int) or run["parent_pid"] <= 0:
         raise AggregateError("aggregate parent PID is invalid")
     if not isinstance(run.get("replay_command"), list) or not run["replay_command"]:
@@ -771,6 +956,8 @@ def validate_aggregate(
             _validate_selection_plan(plan)
             if plan.get("manifest") != manifest:
                 raise AggregateError("aggregate manifest differs from selection plan")
+            if plan.get("platform") != platform_name:
+                raise AggregateError("aggregate platform differs from selection plan")
 
     derived_pass = derived_warning = derived_fail = 0
     for expected_order, child in enumerate(children, start=1):
@@ -816,6 +1003,35 @@ def validate_aggregate(
                         report_reference.get("classification_reasons") or []
                     ):
                         raise AggregateError("child report reasons drifted")
+                    if platform_name == "pi_sil":
+                        assert isinstance(pi_safety, Mapping)
+                        if report["run"].get("run_mode") != (
+                            f"{pi_safety['qt_platform']}_pi_sil"
+                        ):
+                            raise AggregateError("child report Pi run mode drifted")
+                        if report["source"].get("git_commit") != pi_safety.get(
+                            "source_commit"
+                        ):
+                            raise AggregateError("child report Pi source drifted")
+                        if (report["source"].get("source_tree") or {}).get(
+                            "sha256"
+                        ) != pi_safety.get("source_tree_sha256"):
+                            raise AggregateError(
+                                "child report Pi source-tree identity drifted"
+                            )
+                        report_pi = report["safety"].get("pi_sil") or {}
+                        for field in (
+                            "proof_sha256",
+                            "trace_sha256",
+                            "sandbox_method",
+                            "private_dev",
+                            "root_read_only",
+                            "network_unshared",
+                        ):
+                            if report_pi.get(field) != pi_safety.get(field):
+                                raise AggregateError(
+                                    f"child report Pi safety {field} drifted"
+                                )
         derived_pass += outcome == "pass"
         derived_warning += outcome == "warning"
         derived_fail += outcome not in {"pass", "warning"}
@@ -890,6 +1106,7 @@ __all__ = [
     "aggregate_exit_code",
     "aggregate_summary",
     "execute_host_selection",
+    "execute_selection",
     "execute_isolated_child_process",
     "load_aggregate",
     "validate_aggregate",

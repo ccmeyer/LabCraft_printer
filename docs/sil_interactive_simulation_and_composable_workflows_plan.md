@@ -1078,7 +1078,8 @@ Rollback:
 
 ### Milestone 8: Manual suites, exploration, and operational handoff
 
-Status: `planned`
+Status: `in_progress` (local implementation complete; authorized Pi
+qualification pending)
 
 Goal:
 
@@ -1296,6 +1297,22 @@ Status: `planned`
   separate operator authorization;
 - run local contract tests before any representative remote evidence is
   requested.
+- aggregate v1 now accepts validated `pi_sil` plans, forwards one proved
+  preflight/proof pair to fresh children, and rejects any report whose source
+  tree, Pi model, Qt platform, proof, trace, or sandbox protections disagree;
+- the remote wrapper exposes only named `pi_primary` and `pi_stress` suites,
+  keeps Pi capabilities planning-only, and retains remote suite evidence by
+  default. Stress remains explicitly selected and was not run locally;
+- suite replay uses a strictly allowlisted argument vector, and artifact bundle
+  v2 transports one original aggregate or an original plus replay without
+  changing the legacy report-set bundle v1 contract;
+- focused local validation passed 81 unit/contract tests and 14 system tests,
+  including the real Windows standard suite and PowerShell primary/stress dry
+  runs. A later combined source-identity selection passed 50 tests from a fresh
+  ignored basetemp after the default Windows pytest temp root denied access;
+- no SSH, SCP, Pi, firmware, protocol, or physical-hardware operation has been
+  performed. Slice 7 remains open until separate authorization is granted and
+  the exact-source Pi completes `pi_primary` and its exact replay.
 
 #### Milestone 8 Slice 8: Retention, runbook, and closeout
 
@@ -1693,7 +1710,9 @@ This effort is complete when:
 ## Current Next Action
 
 Milestone 7 is complete and the eight-slice Milestone 8 direction is approved.
-Milestone 8 Slices 1 through 6 are complete. The operator can list the tracked
+Milestone 8 Slices 1 through 6 are complete. Slice 7 local implementation and
+focused validation are complete, but the slice remains open at its explicit
+remote-authorization gate. The operator can list the tracked
 portfolio, dry-run suite/capability/direct-scenario plans, request
 changed-source recommendations, and explicitly execute Windows suite or
 capability plans as isolated fresh processes with hashed aggregate evidence.
@@ -1703,7 +1722,7 @@ running another workflow. The operator can also list, dry-run, execute, and
 replay the eight-case mixed-mode calibration matrix without adding a journey
 or tracked fixture per variation. The operator can also list, dry-run, execute,
 and exactly replay the ten-sequence bounded prepared-editor exploration without
-adding a fixture or journey body per seed. Create a concrete implementation
-plan for Milestone 8 Slice 7: manual Pi suite integration. Do not begin remote Pi
-operations, firmware/protocol work, or hardware work
-until their respective later slices are separately planned and approved.
+adding a fixture or journey body per seed. After the Slice 7 diff is reviewed,
+request separate authorization and exact target/source confirmation for one
+`pi_primary` run plus its exact replay. Do not run `pi_stress`, begin Slice 8,
+or perform firmware, protocol, or physical-hardware work at this gate.

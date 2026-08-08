@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import subprocess
 import sys
@@ -27,6 +28,12 @@ from tools.virtual_workflows.report import (
 )
 from tools.virtual_workflows.selection import SelectionRequest, resolve_selection
 from tools.virtual_workflows.suite_runner import AggregateRunConfig, execute_host_selection
+from tools.virtual_workflows.pi_sil import (
+    PI_HARDWARE_PROOF_SCHEMA,
+    PI_PREFLIGHT_SCHEMA,
+    PI_SIL_SCHEMA_VERSION,
+    SANDBOX_METHOD,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -108,7 +115,11 @@ class _EvidenceProcess:
                 "run_id": f"coverage-{registry_id}-{self.behavior.get('token', 'a')}",
                 "scenario_name": registry_id,
                 "scenario_version": "1",
-                "run_mode": "offscreen_windows_sil",
+                "run_mode": (
+                    "offscreen_pi_sil"
+                    if "--target-pi" in self.command
+                    else "offscreen_windows_sil"
+                ),
                 "timing_policy": "simulated_command_durations_x1000",
                 "warmup_runs": 0,
                 "measured_runs": 1,
@@ -139,6 +150,33 @@ class _EvidenceProcess:
             },
             "limitations": ["synthetic coverage evidence"],
         }
+        if "--target-pi" in self.command:
+            preflight_path = Path(
+                self.command[self.command.index("--pi-preflight") + 1]
+            )
+            proof_path = Path(
+                self.command[self.command.index("--pi-hardware-proof") + 1]
+            )
+            preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+            proof = json.loads(proof_path.read_text(encoding="utf-8"))
+            payload["source"]["git_commit"] = preflight["source_commit"]
+            payload["environment"] = {
+                "operating_system": "Linux",
+                "target_pi": {
+                    "lane": "raspberry_pi_sil",
+                    "pi_model": preflight["pi_model"],
+                    "filesystem": {},
+                },
+            }
+            payload["safety"]["pi_sil"] = {
+                "sandbox_method": SANDBOX_METHOD,
+                "private_dev": True,
+                "root_read_only": True,
+                "network_unshared": True,
+                "forbidden_access_attempt_count": 0,
+                "proof_sha256": hashlib.sha256(proof_path.read_bytes()).hexdigest(),
+                "trace_sha256": proof["trace_sha256"],
+            }
         (report_dir / "report.json").write_text(json.dumps(payload), encoding="utf-8")
 
     def communicate(self, timeout=None):
@@ -161,6 +199,13 @@ def _aggregate(tmp_path, *, plan=None, behavior=None):
         )
     )
     source = collect_source_identity(REPO_ROOT)
+    pi_paths = (None, None)
+    if selected_plan["platform"] == "pi_sil":
+        pi_paths = _pi_evidence(
+            tmp_path / "safety",
+            source["git_commit"],
+            source["source_tree"]["sha256"],
+        )
 
     def factory(command, **kwargs):
         return _EvidenceProcess(command, source=source, behavior=behavior or {})
@@ -171,10 +216,81 @@ def _aggregate(tmp_path, *, plan=None, behavior=None):
             output_root=tmp_path,
             speed_multiplier=1000,
             replay_command=("python", "runner.py", "--capability", "mixed"),
+            pi_preflight_path=pi_paths[0],
+            pi_hardware_proof_path=pi_paths[1],
         ),
         popen_factory=factory,
     )
     return result.aggregate_path
+
+
+def _pi_evidence(root, source_commit, source_tree_sha256):
+    root.mkdir(parents=True, exist_ok=True)
+    trace = root / "trace.txt"
+    audit = root / "audit.json"
+    trace.write_text("private trace\n", encoding="utf-8")
+    audit.write_text("{}\n", encoding="utf-8")
+    preflight_path = root / "preflight.json"
+    preflight = {
+        "schema_name": PI_PREFLIGHT_SCHEMA,
+        "schema_version": PI_SIL_SCHEMA_VERSION,
+        "created_at_utc": "2026-08-07T00:00:00Z",
+        "status": "pass",
+        "sandbox_method": SANDBOX_METHOD,
+        "repo_root": str(REPO_ROOT),
+        "output_root": str(root.parent),
+        "source_commit": source_commit,
+        "dirty_worktree": True,
+        "source_tree_sha256": source_tree_sha256,
+        "operating_system": "Linux",
+        "architecture": "aarch64",
+        "pi_model": "Raspberry Pi 5 Model B Rev 1.0",
+        "python_version": "3.13.0",
+        "python_executable": "/repo/venv/bin/python",
+        "qt_platform": "offscreen",
+        "pyside_version": "6.7.1",
+        "qt_version": "6.7.1",
+        "filesystem": {
+            "filesystem_type": "ext4",
+            "storage_class": "nvme",
+            "mount_source": "/dev/nvme0n1p2",
+            "free_bytes": 10_000_000_000,
+            "total_bytes": 20_000_000_000,
+        },
+        "thermal": {"temperature_c": 45.0, "throttled_flags": None},
+        "requirements": {
+            "commands": {"bwrap": "/usr/bin/bwrap"},
+            "psutil_version": "7.0.0",
+            "private_dev_present": True,
+            "host_serial_visible": False,
+        },
+    }
+    preflight_path.write_text(json.dumps(preflight), encoding="utf-8")
+    proof_path = root / "proof.json"
+    proof = {
+        "schema_name": PI_HARDWARE_PROOF_SCHEMA,
+        "schema_version": PI_SIL_SCHEMA_VERSION,
+        "created_at_utc": "2026-08-07T00:00:01Z",
+        "status": "pass",
+        "sandbox_method": SANDBOX_METHOD,
+        "preflight_path": str(preflight_path),
+        "preflight_sha256": hashlib.sha256(preflight_path.read_bytes()).hexdigest(),
+        "trace_path": str(trace),
+        "trace_sha256": hashlib.sha256(trace.read_bytes()).hexdigest(),
+        "audit_report_path": str(audit),
+        "audit_report_sha256": hashlib.sha256(audit.read_bytes()).hexdigest(),
+        "source_commit": source_commit,
+        "source_tree_sha256": source_tree_sha256,
+        "qt_platform": "offscreen",
+        "pi_model": preflight["pi_model"],
+        "private_dev": True,
+        "root_read_only": True,
+        "network_unshared": True,
+        "forbidden_patterns": [],
+        "forbidden_matches": [],
+    }
+    proof_path.write_text(json.dumps(proof), encoding="utf-8")
+    return preflight_path, proof_path
 
 
 def _evaluation(tmp_path, paths, *, evaluated_at=None):
@@ -231,6 +347,31 @@ def test_missing_and_narrow_suite_portfolio_are_not_coverage(tmp_path):
     host = next(row for row in narrow["capabilities"] if row["capability_id"] == "sil.hardware_isolation.host")
     assert host["status"] == "incomplete"
     assert "print_array_stress_384x10_v1" in host["required_scenario_ids"]
+
+
+def test_pi_primary_aggregate_is_ingested_without_claiming_stress_coverage(
+    tmp_path,
+):
+    plan = resolve_selection(
+        SelectionRequest(
+            kind="suite",
+            selector_id="pi_primary",
+            platform="pi_sil",
+            pi_evidence=("preflight", "hardware_proof"),
+        )
+    )
+    payload = _evaluation(
+        tmp_path, [_aggregate(tmp_path / "pi-primary", plan=plan)]
+    )
+
+    hardware = next(
+        row
+        for row in payload["capabilities"]
+        if row["capability_id"] == "sil.hardware_isolation.pi"
+    )
+    assert payload["scope"]["platforms"] == ["pi_sil"]
+    assert hardware["status"] == "incomplete"
+    assert "print_array_stress_384x10_v1" in hardware["required_scenario_ids"]
 
 
 def test_conflicting_candidates_are_incomplete_and_identical_evidence_deduplicates(tmp_path):

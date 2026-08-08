@@ -240,8 +240,16 @@ def _aggregate_replay_command(
     selector_option = "--suite" if args.suite is not None else "--capability"
     selector_id = args.suite if args.suite is not None else args.capability
     command = [
-        r".\env\Scripts\python.exe",
-        r"tools\run_virtual_workflow.py",
+        (
+            str(Path(sys.executable).resolve())
+            if args.target_pi
+            else r".\env\Scripts\python.exe"
+        ),
+        (
+            "tools/run_virtual_workflow.py"
+            if args.target_pi
+            else r"tools\run_virtual_workflow.py"
+        ),
         selector_option,
         str(selector_id),
         "--output-root",
@@ -257,6 +265,16 @@ def _aggregate_replay_command(
         command.append("--visible")
     else:
         command.extend(["--qt-platform", args.qt_platform])
+    if args.target_pi:
+        command.extend(
+            [
+                "--target-pi",
+                "--pi-preflight",
+                str(args.pi_preflight.resolve()),
+                "--pi-hardware-proof",
+                str(args.pi_hardware_proof.resolve()),
+            ]
+        )
     return tuple(command)
 
 
@@ -332,13 +350,15 @@ def _reject_aggregate_option_conflicts(
     parser: argparse.ArgumentParser,
     args: argparse.Namespace,
     raw_argv: list[str],
+    *,
+    allow_pi: bool = False,
 ) -> None:
-    if (
+    if not allow_pi and (
         args.target_pi
         or args.pi_preflight is not None
         or args.pi_hardware_proof is not None
     ):
-        parser.error("Pi suite execution is deferred to Milestone 8 Slice 7")
+        parser.error("this aggregate mode is Windows SIL only")
     conflicts = []
     if args.inject_ui_stall_ms != 0 or args.inject_after_completion != 48:
         conflicts.append("fault injection")
@@ -608,7 +628,9 @@ def main(argv: list[str] | None = None) -> int:
     matrix_execution = not args.dry_run and args.matrix is not None
     exploration_execution = not args.dry_run and args.exploration is not None
     if aggregate_execution:
-        _reject_aggregate_option_conflicts(parser, args, raw_argv)
+        _reject_aggregate_option_conflicts(
+            parser, args, raw_argv, allow_pi=True
+        )
     if matrix_execution:
         _reject_aggregate_option_conflicts(parser, args, raw_argv)
     if exploration_execution:
@@ -675,6 +697,13 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     if aggregate_execution:
+        if args.target_pi and (
+            args.suite not in {"pi_primary", "pi_stress"}
+            or args.capability is not None
+        ):
+            parser.error(
+                "Pi execution accepts only --suite pi_primary or --suite pi_stress"
+            )
         aggregate_output_root = (
             args.output_root
             if _option_was_supplied(raw_argv, "--output-root")
@@ -689,10 +718,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             from tools.virtual_workflows.suite_runner import (
                 AggregateRunConfig,
-                execute_host_selection,
+                execute_selection,
             )
 
-            result = execute_host_selection(
+            result = execute_selection(
                 AggregateRunConfig(
                     plan=plan,
                     output_root=aggregate_output_root,
@@ -701,6 +730,12 @@ def main(argv: list[str] | None = None) -> int:
                     qt_platform=args.qt_platform,
                     replay_command=_aggregate_replay_command(
                         args, raw_argv, aggregate_output_root
+                    ),
+                    pi_preflight_path=(
+                        args.pi_preflight if args.target_pi else None
+                    ),
+                    pi_hardware_proof_path=(
+                        args.pi_hardware_proof if args.target_pi else None
                     ),
                 )
             )

@@ -1984,6 +1984,61 @@ private-device process accesses UART/serial, GPIO, camera/video, I2C, or USB/DFU
 paths. Its timings are safety evidence only and are never included in a
 performance report set.
 
+### Manual Pi SIL suites
+
+Milestone 8 Slice 7 routes the registered `pi_primary` and `pi_stress` suites
+through the same fresh-process aggregate contract used on Windows. Suite mode
+still performs one preflight and one traced 96-well proof before execution; the
+aggregate parent and every scenario child then remain inside the same
+Bubblewrap private-device and network namespace. Pi capability selectors are
+planning-only so they cannot launch the stress workload indirectly.
+
+Preview the bounded primary run and exact replay without contacting a Pi:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost pi-test `
+  -Suite pi_primary `
+  -Seed 1 `
+  -SpeedMultiplier 100 `
+  -ReplaySuite `
+  -DryRun
+```
+
+After separately authorizing the target and confirming that its checkout
+contains the exact source under test, remove `-DryRun` and use the approved host
+and user. `-ReplaySuite` validates and executes the first aggregate's exact
+allowlisted command, then retrieves one bundle containing both aggregates and
+their shared proof:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost <approved-host> `
+  -PiUser <approved-user> `
+  -Suite pi_primary `
+  -Seed 1 `
+  -SpeedMultiplier 100 `
+  -ReplaySuite
+```
+
+Suite timeouts default to the manifest: 180 seconds for `pi_primary` and 1,800
+seconds for `pi_stress`. A positive `-TimeoutSeconds` override is recorded in
+the exact replay. The 384x10 lane requires the explicit `-Suite pi_stress`; it
+is never implied by primary or capability execution.
+
+Suite artifacts use `labcraft.pi_sil_artifact_bundle` v2 and remain beneath the
+ignored `verification_reports/virtual_workflows/` tree locally and remotely.
+The wrapper verifies the archive sidecar, every member hash and size, both
+aggregate trees, all child report hashes, source identity, and proof/trace
+linkage before reporting success. Suite mode never invokes cleanup. Retain a
+failed run for diagnosis and use the separately bounded manifest cleanup command
+only after explicit review.
+
+If suite selection fails before Qt starts, verify the suite name, evidence file
+paths, source-tree identity, and Qt platform in preflight/proof. A completed
+failing aggregate returns `2` and is still bundled; orchestration or evidence
+validation failures return `3` and leave remote artifacts in place.
+
 From Windows, the operator-light wrapper performs preflight, proof, one warm-up,
 five measured runs, bundle retrieval, hash/path validation, and optional
 same-Pi comparison:

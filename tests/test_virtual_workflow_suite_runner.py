@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,17 @@ from tools.virtual_workflows.report import (
     METRIC_GROUPS,
     REPORT_SCHEMA_NAME,
     REPORT_SCHEMA_VERSION,
+)
+from tools.virtual_workflows.pi_sil import (
+    PI_HARDWARE_PROOF_SCHEMA,
+    PI_PREFLIGHT_SCHEMA,
+    PI_SIL_SCHEMA_VERSION,
+    SANDBOX_METHOD,
+    PI_SUITE_ARTIFACT_MANIFEST_VERSION,
+    PiSilError,
+    build_pi_suite_artifact_bundle,
+    extract_and_validate_pi_artifact_bundle,
+    validate_pi_suite_replay_command,
 )
 from tools.run_virtual_workflow import main
 from tools.virtual_workflows.selection import SelectionRequest, resolve_selection
@@ -21,6 +34,7 @@ from tools.virtual_workflows.suite_runner import (
     AggregateRunConfig,
     aggregate_summary,
     execute_host_selection,
+    execute_selection,
     load_aggregate,
     validate_aggregate,
     write_aggregate_atomic,
@@ -45,7 +59,10 @@ def _report_payload(
     *,
     classification="pass",
     workload_id=None,
+    pi_evidence=None,
 ):
+    preflight, proof, proof_path = pi_evidence or (None, None, None)
+    is_pi = preflight is not None
     return {
         "schema_name": REPORT_SCHEMA_NAME,
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -53,7 +70,7 @@ def _report_payload(
             "run_id": f"run-{registry_id}",
             "scenario_name": registry_id,
             "scenario_version": "1",
-            "run_mode": "offscreen_windows_sil",
+            "run_mode": "offscreen_pi_sil" if is_pi else "offscreen_windows_sil",
             "timing_policy": "simulated_command_durations_x1000",
             "warmup_runs": 0,
             "measured_runs": 1,
@@ -63,8 +80,31 @@ def _report_payload(
             "seed": seed,
             "replay_command": ["python", "runner.py", "--scenario", registry_id],
         },
-        "source": {"git_commit": "a" * 40, "dirty_worktree": True},
-        "environment": {"operating_system": "Windows"},
+        "source": {
+            "git_commit": preflight["source_commit"] if is_pi else "a" * 40,
+            "dirty_worktree": True,
+            **(
+                {
+                    "source_tree": {
+                        "sha256": preflight["source_tree_sha256"]
+                    }
+                }
+                if is_pi
+                else {}
+            ),
+        },
+        "environment": (
+            {
+                "operating_system": "Linux",
+                "target_pi": {
+                    "lane": "raspberry_pi_sil",
+                    "pi_model": preflight["pi_model"],
+                    "filesystem": {},
+                },
+            }
+            if is_pi
+            else {"operating_system": "Windows"}
+        ),
         "safety": {
             "simulation": True,
             "hardware_access_allowed": False,
@@ -77,6 +117,23 @@ def _report_payload(
             "scenario_root": str(report_dir / "session"),
             "report_dir": str(report_dir),
             "root_containment_valid": True,
+            **(
+                {
+                    "pi_sil": {
+                        "sandbox_method": SANDBOX_METHOD,
+                        "private_dev": True,
+                        "root_read_only": True,
+                        "network_unshared": True,
+                        "forbidden_access_attempt_count": 0,
+                        "proof_sha256": hashlib.sha256(
+                            proof_path.read_bytes()
+                        ).hexdigest(),
+                        "trace_sha256": proof["trace_sha256"],
+                    }
+                }
+                if is_pi
+                else {}
+            ),
         },
         "workload": {"workload_id": workload_id or registry_id},
         "metrics": {
@@ -131,7 +188,34 @@ class _FakeProcess:
                 if self.behavior.get("report") == "mismatch"
                 else None
             ),
+            pi_evidence=(
+                (
+                    json.loads(
+                        Path(
+                            self.command[
+                                self.command.index("--pi-preflight") + 1
+                            ]
+                        ).read_text(encoding="utf-8")
+                    ),
+                    json.loads(
+                        Path(
+                            self.command[
+                                self.command.index("--pi-hardware-proof") + 1
+                            ]
+                        ).read_text(encoding="utf-8")
+                    ),
+                    Path(
+                        self.command[
+                            self.command.index("--pi-hardware-proof") + 1
+                        ]
+                    ),
+                )
+                if "--target-pi" in self.command
+                else None
+            ),
         )
+        if self.behavior.get("pi_mismatch"):
+            payload["safety"]["pi_sil"]["trace_sha256"] = "f" * 64
         report_path.write_text(json.dumps(payload), encoding="utf-8")
         if self.behavior.get("report") == "ambiguous":
             duplicate = output_root / "duplicate" / "report.json"
@@ -192,6 +276,86 @@ def _config(tmp_path, plan=None):
     )
 
 
+def _pi_plan():
+    return resolve_selection(
+        SelectionRequest(
+            kind="suite",
+            selector_id="pi_primary",
+            platform="pi_sil",
+            pi_evidence=("preflight", "hardware_proof"),
+        )
+    )
+
+
+def _pi_evidence(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    trace = tmp_path / "hardware_access_trace.txt"
+    trace.write_text("private device trace\n", encoding="utf-8")
+    audit = tmp_path / "audit_report.json"
+    audit.write_text("{}\n", encoding="utf-8")
+    preflight_path = tmp_path / "preflight.json"
+    preflight = {
+        "schema_name": PI_PREFLIGHT_SCHEMA,
+        "schema_version": PI_SIL_SCHEMA_VERSION,
+        "created_at_utc": "2026-08-07T00:00:00Z",
+        "status": "pass",
+        "sandbox_method": SANDBOX_METHOD,
+        "repo_root": str(tmp_path),
+        "output_root": str(tmp_path),
+        "source_commit": "a" * 40,
+        "dirty_worktree": True,
+        "source_tree_sha256": "d" * 64,
+        "operating_system": "Linux",
+        "architecture": "aarch64",
+        "pi_model": "Raspberry Pi 5 Model B Rev 1.0",
+        "python_version": "3.13.0",
+        "python_executable": "/repo/venv/bin/python",
+        "qt_platform": "offscreen",
+        "pyside_version": "6.7.1",
+        "qt_version": "6.7.1",
+        "filesystem": {
+            "filesystem_type": "ext4",
+            "storage_class": "nvme",
+            "mount_source": "/dev/nvme0n1p2",
+            "free_bytes": 10_000_000_000,
+            "total_bytes": 20_000_000_000,
+        },
+        "thermal": {"temperature_c": 45.0, "throttled_flags": None},
+        "requirements": {
+            "commands": {"bwrap": "/usr/bin/bwrap"},
+            "psutil_version": "7.0.0",
+            "private_dev_present": True,
+            "host_serial_visible": False,
+        },
+    }
+    preflight_path.write_text(json.dumps(preflight), encoding="utf-8")
+    proof_path = tmp_path / "hardware_proof.json"
+    proof = {
+        "schema_name": PI_HARDWARE_PROOF_SCHEMA,
+        "schema_version": PI_SIL_SCHEMA_VERSION,
+        "created_at_utc": "2026-08-07T00:00:01Z",
+        "status": "pass",
+        "sandbox_method": SANDBOX_METHOD,
+        "preflight_path": str(preflight_path),
+        "preflight_sha256": hashlib.sha256(preflight_path.read_bytes()).hexdigest(),
+        "trace_path": str(trace),
+        "trace_sha256": hashlib.sha256(trace.read_bytes()).hexdigest(),
+        "audit_report_path": str(audit),
+        "audit_report_sha256": hashlib.sha256(audit.read_bytes()).hexdigest(),
+        "source_commit": preflight["source_commit"],
+        "source_tree_sha256": preflight["source_tree_sha256"],
+        "qt_platform": "offscreen",
+        "pi_model": preflight["pi_model"],
+        "private_dev": True,
+        "root_read_only": True,
+        "network_unshared": True,
+        "forbidden_patterns": [],
+        "forbidden_matches": [],
+    }
+    proof_path.write_text(json.dumps(proof), encoding="utf-8")
+    return preflight_path, proof_path
+
+
 def test_successful_aggregate_retains_fresh_child_evidence_and_hashes(tmp_path):
     factory, calls, processes = _factory([{}])
     result = execute_host_selection(_config(tmp_path), popen_factory=factory)
@@ -224,6 +388,143 @@ def test_successful_aggregate_retains_fresh_child_evidence_and_hashes(tmp_path):
     assert "Replay: python runner.py --suite standard" in result.summary_path.read_text(
         encoding="utf-8"
     )
+
+
+def test_pi_suite_aggregate_forwards_and_validates_safety_evidence(tmp_path):
+    preflight, proof = _pi_evidence(tmp_path / "safety")
+    factory, calls, processes = _factory([{}])
+    config = AggregateRunConfig(
+        plan=_pi_plan(),
+        output_root=tmp_path / "aggregates",
+        speed_multiplier=100,
+        replay_command=("python", "runner.py", "--suite", "pi_primary"),
+        pi_preflight_path=preflight,
+        pi_hardware_proof_path=proof,
+    )
+
+    result = execute_selection(config, popen_factory=factory)
+
+    assert result.exit_code == 0
+    assert result.aggregate["run"]["platform"] == "pi_sil"
+    assert result.aggregate["run"]["pi_safety"]["private_dev"] is True
+    assert result.aggregate["children"][0]["process"]["pid"] == processes[0].pid
+    command = calls[0][0]
+    assert "--target-pi" in command
+    assert command[command.index("--pi-preflight") + 1] == str(preflight)
+    assert command[command.index("--pi-hardware-proof") + 1] == str(proof)
+    assert load_aggregate(result.aggregate_path) == result.aggregate
+
+
+def test_pi_suite_aggregate_fails_closed_on_report_safety_mismatch(tmp_path):
+    preflight, proof = _pi_evidence(tmp_path / "safety")
+    factory, _, _ = _factory([{"pi_mismatch": True}])
+    result = execute_selection(
+        AggregateRunConfig(
+            plan=_pi_plan(),
+            output_root=tmp_path / "aggregates",
+            pi_preflight_path=preflight,
+            pi_hardware_proof_path=proof,
+            replay_command=("python", "runner.py", "--suite", "pi_primary"),
+        ),
+        popen_factory=factory,
+    )
+    assert result.exit_code == 2
+    assert result.aggregate["children"][0]["outcome"] == "identity_mismatch"
+    assert "trace_sha256" in result.aggregate["children"][0]["reasons"][0]
+
+
+def test_pi_suite_aggregate_requires_both_evidence_files(tmp_path):
+    with pytest.raises(AggregateError, match="requires preflight and proof"):
+        AggregateRunConfig(plan=_pi_plan(), output_root=tmp_path)
+
+
+def test_pi_suite_bundle_v2_round_trip_and_replay_allowlist(tmp_path):
+    repo = tmp_path / "repo"
+    output = repo / "verification_reports" / "virtual_workflows" / "pi-sil"
+    preflight, proof = _pi_evidence(output / "safety")
+    replay = (
+        str(Path(sys.executable).resolve()),
+        "tools/run_virtual_workflow.py",
+        "--suite",
+        "pi_primary",
+        "--output-root",
+        str(output),
+        "--seed",
+        "1",
+        "--speed-multiplier",
+        "100",
+        "--qt-platform",
+        "offscreen",
+        "--target-pi",
+        "--pi-preflight",
+        str(preflight),
+        "--pi-hardware-proof",
+        str(proof),
+    )
+    factory, _, _ = _factory([{}])
+    result = execute_selection(
+        AggregateRunConfig(
+            plan=_pi_plan(),
+            output_root=output,
+            speed_multiplier=100,
+            replay_command=replay,
+            pi_preflight_path=preflight,
+            pi_hardware_proof_path=proof,
+        ),
+        popen_factory=factory,
+    )
+    replay_factory, _, _ = _factory([{}])
+    replay_result = execute_selection(
+        AggregateRunConfig(
+            plan=_pi_plan(),
+            output_root=output,
+            speed_multiplier=100,
+            replay_command=replay,
+            pi_preflight_path=preflight,
+            pi_hardware_proof_path=proof,
+        ),
+        popen_factory=replay_factory,
+    )
+    assert validate_pi_suite_replay_command(
+        result.aggregate_path, repo, output
+    ) == replay
+
+    archive, sidecar = build_pi_suite_artifact_bundle(
+        repo,
+        [result.aggregate_path, replay_result.aggregate_path],
+        proof,
+        output / "safety" / "hardware_access_trace.txt",
+        output / "bundles" / "suite.zip",
+    )
+    extracted = extract_and_validate_pi_artifact_bundle(
+        archive, tmp_path / "extracted", sidecar
+    )
+
+    assert extracted["schema_version"] == PI_SUITE_ARTIFACT_MANIFEST_VERSION
+    assert extracted["aggregate_paths"] == [
+        result.aggregate_path.relative_to(repo).as_posix(),
+        replay_result.aggregate_path.relative_to(repo).as_posix(),
+    ]
+
+    wrong_proof = output / "safety" / "wrong_proof.json"
+    wrong_payload = json.loads(proof.read_text(encoding="utf-8"))
+    wrong_payload["source_tree_sha256"] = "f" * 64
+    wrong_proof.write_text(json.dumps(wrong_payload), encoding="utf-8")
+    with pytest.raises(PiSilError, match="does not match bundle proof"):
+        build_pi_suite_artifact_bundle(
+            repo,
+            [result.aggregate_path],
+            wrong_proof,
+            output / "safety" / "hardware_access_trace.txt",
+            output / "bundles" / "wrong.zip",
+        )
+
+    tampered = copy.deepcopy(result.aggregate)
+    tampered["run"]["replay_command"][0] = "sh"
+    tampered_path = result.aggregate_path.parent / "tampered.json"
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises((PiSilError, AggregateError)):
+        validate_pi_suite_replay_command(tampered_path, repo, output)
 
 
 def test_multi_child_selection_continues_after_failure_and_fails_closed(tmp_path):
@@ -378,7 +679,7 @@ def test_cli_executes_suite_with_default_root_and_resolved_plan(
         )
 
     monkeypatch.setattr(
-        "tools.virtual_workflows.suite_runner.execute_host_selection",
+        "tools.virtual_workflows.suite_runner.execute_selection",
         fake_execute,
     )
 
@@ -406,6 +707,63 @@ def test_cli_executes_suite_with_default_root_and_resolved_plan(
     assert "aggregate summary" in output
     assert f"Aggregate: {aggregate_path}" in output
     assert "Aggregate SHA-256:" in output
+
+
+def test_cli_executes_only_named_pi_suite_with_exact_linux_replay(
+    tmp_path, monkeypatch
+):
+    preflight, proof = _pi_evidence(tmp_path / "safety")
+    aggregate_path = tmp_path / "aggregate.json"
+    aggregate_path.write_text("{}\n", encoding="utf-8")
+    summary_path = tmp_path / "summary.txt"
+    summary_path.write_text("pi aggregate\n", encoding="utf-8")
+    captured = {}
+
+    def fake_execute(config):
+        captured["config"] = config
+        return AggregateExecutionResult(
+            aggregate_path=aggregate_path,
+            summary_path=summary_path,
+            aggregate={"classification": {"status": "pass"}},
+        )
+
+    monkeypatch.setattr(
+        "tools.virtual_workflows.suite_runner.execute_selection", fake_execute
+    )
+    assert main(
+        [
+            "--suite",
+            "pi_primary",
+            "--target-pi",
+            "--pi-preflight",
+            str(preflight),
+            "--pi-hardware-proof",
+            str(proof),
+            "--speed-multiplier",
+            "100",
+        ]
+    ) == 0
+
+    config = captured["config"]
+    assert config.plan["platform"] == "pi_sil"
+    assert config.pi_preflight_path == preflight
+    assert config.pi_hardware_proof_path == proof
+    assert config.replay_command[0] == str(Path(sys.executable).resolve())
+    assert "--target-pi" in config.replay_command
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "--capability",
+                "sil.hardware_isolation.pi",
+                "--target-pi",
+                "--pi-preflight",
+                str(preflight),
+                "--pi-hardware-proof",
+                str(proof),
+            ]
+        )
+    assert exc_info.value.code == 2
 
 
 @pytest.mark.parametrize(
