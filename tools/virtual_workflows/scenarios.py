@@ -858,6 +858,8 @@ def _create_prepared_fixture(
 
 
 class _InstanceInstrumentation:
+    _MAX_SIMULATOR_DISPENSES = 10_000
+
     def __init__(
         self,
         phases: NamedPhaseRecorder,
@@ -879,6 +881,8 @@ class _InstanceInstrumentation:
         self.intent_attachments: list[dict[str, Any]] = []
         self.intent_completions: list[str] = []
         self.intent_discard_batches: list[dict[str, Any]] = []
+        self.simulator_dispenses: list[tuple[Any, bool]] = []
+        self.simulator_dispense_overflow_count = 0
         self.soft_stop_events: list[dict[str, Any]] = []
         self.checkpoint_observations: list[dict[str, Any]] = []
         self.pass_starts: list[dict[str, Any]] = []
@@ -1111,6 +1115,24 @@ class _InstanceInstrumentation:
         self._originals.append((obj, method_name, original))
         setattr(obj, method_name, measured)
 
+    def observe_method(
+        self,
+        obj: Any,
+        method_name: str,
+        observe: Callable[[tuple[Any, ...], dict[str, Any], Any], None],
+    ) -> None:
+        """Observe one instance method without adding a timing phase."""
+
+        original = getattr(obj, method_name)
+
+        def observed(*args, **kwargs):
+            result = original(*args, **kwargs)
+            observe(args, kwargs, result)
+            return result
+
+        self._originals.append((obj, method_name, original))
+        setattr(obj, method_name, observed)
+
     @contextmanager
     def suppress_phases(self, *phase_names: str):
         added = {
@@ -1141,6 +1163,26 @@ class _InstanceInstrumentation:
             "attachments": list(self.intent_attachments),
             "completions": list(self.intent_completions),
             "discard_batches": list(self.intent_discard_batches),
+            "simulator_dispenses": [
+                {
+                    "command_seq32": int(
+                        getattr(command, "command_number", 0) or 0
+                    ),
+                    "command_type": str(
+                        getattr(command, "command_type", "") or ""
+                    ),
+                    "commanded_droplets": int(
+                        getattr(command, "param1", 0) or 0
+                    ),
+                    "manual": bool(manual),
+                    "status": str(getattr(command, "status", "") or ""),
+                }
+                for command, manual in self.simulator_dispenses
+            ],
+            "simulator_dispense_limit": self._MAX_SIMULATOR_DISPENSES,
+            "simulator_dispense_overflow_count": (
+                self.simulator_dispense_overflow_count
+            ),
             "soft_stop_events": list(self.soft_stop_events),
             "checkpoint_observations": list(self.checkpoint_observations),
             "pass_starts": list(self.pass_starts),
@@ -1224,6 +1266,7 @@ def _install_instrumentation(
     *,
     experiment_model: Any,
     controller: Any,
+    machine: Any,
     well_plate_widget: Any,
     pressure_plot_widget: Any,
     experiment_task_list: Any,
@@ -1256,6 +1299,9 @@ def _install_instrumentation(
                 "intent_id": result,
                 "well_id": argument(args, kwargs, "well_id", 0),
                 "stock_id": argument(args, kwargs, "stock_id", 1),
+                "commanded_droplets": int(
+                    argument(args, kwargs, "commanded_droplets", 2)
+                ),
             }
         )
         instrumentation.capture_checkpoint(experiment_model, "after_begin")
@@ -1295,6 +1341,19 @@ def _install_instrumentation(
         )
         instrumentation.capture_checkpoint(experiment_model, "after_discard")
 
+    def observe_dispense(args, kwargs, result) -> None:
+        if not result or str(getattr(result, "command_type", "")) != "DISPENSE":
+            return
+        manual = bool(
+            kwargs.get("manual", args[3] if len(args) > 3 else False)
+        )
+        if len(instrumentation.simulator_dispenses) >= (
+            instrumentation._MAX_SIMULATOR_DISPENSES
+        ):
+            instrumentation.simulator_dispense_overflow_count += 1
+            return
+        instrumentation.simulator_dispenses.append((result, manual))
+
     instrumentation.wrap(
         experiment_model,
         "begin_execution_print_intent",
@@ -1323,6 +1382,11 @@ def _install_instrumentation(
         "discard_execution_print_intents",
         "persistence.discard_intents",
         observe=observe_discard,
+    )
+    instrumentation.observe_method(
+        machine,
+        "print_droplets",
+        observe_dispense,
     )
     for method, phase in (
         ("_save_active_execution_resume", "persistence.save_resume"),
@@ -2895,6 +2959,7 @@ def run_virtual_print_array_scenario(
             phases,
             experiment_model=experiment_model,
             controller=controller,
+            machine=machine,
             well_plate_widget=view.well_plate_widget,
             pressure_plot_widget=view.pressure_box,
             experiment_task_list=view.experiment_task_list,
@@ -3223,6 +3288,7 @@ def run_virtual_print_array_scenario(
                         phases,
                         experiment_model=experiment_model,
                         controller=controller,
+                        machine=machine,
                         well_plate_widget=view.well_plate_widget,
                         pressure_plot_widget=view.pressure_box,
                         experiment_task_list=view.experiment_task_list,

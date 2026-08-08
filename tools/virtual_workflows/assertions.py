@@ -10,6 +10,15 @@ from typing import Any, Callable, Mapping
 
 from collections import Counter
 
+from tools.virtual_workflows.dispense_counts import (
+    StockWellCount,
+    capture_count_snapshot,
+    intent_and_simulator_counts,
+    normalize_stock_well_counts,
+    project_single_stock_preview_counts,
+    reconcile_stock_well_counts,
+)
+
 
 @dataclass(frozen=True)
 class AssertionResult:
@@ -862,6 +871,194 @@ def execution_lifecycle_assertions(
         result("execution.event_history_bounded", "terminal", history_ok, history, ("simulator", "harness")),
         result("execution.terminal_bundle_valid", "terminal", terminal_ok, terminal, ("controller", "model", "persistence")),
     )
+
+
+def dispense_counts_reconciled_assertion(
+    context: Any,
+    *,
+    prepared_snapshot: Mapping[str, Any],
+    calibration_transitions: list[Mapping[str, Any]],
+    observer: Mapping[str, Any],
+) -> AssertionResult:
+    """Prove exact idempotent count consistency through simulated execution."""
+
+    required_layers = (
+        "prepared_plan",
+        "calibration_preview",
+        "calibrated_plan",
+        "zero_progress",
+        "runtime",
+        "intent",
+        "simulator",
+        "terminal_targets",
+        "terminal_added",
+    )
+    expected_headers = [
+        "Target",
+        "Achievable",
+        "Error (%)",
+        "Drops",
+        "Δ/drop",
+        "Printed nL (new)",
+        "Δ printed nL",
+    ]
+
+    try:
+        if not calibration_transitions:
+            raise ValueError("calibration count transitions are missing")
+        transitions = [dict(item) for item in calibration_transitions]
+        final_after = dict(transitions[-1].get("after") or {})
+        final_counts = normalize_stock_well_counts(
+            final_after.get("plan_targets") or (),
+            label="final calibrated plan",
+        )
+        if not final_counts:
+            raise ValueError("final calibrated plan counts are empty")
+
+        preview_counts: list[StockWellCount] = []
+        transition_evidence: list[dict[str, Any]] = []
+        prior_after: Mapping[str, Any] | None = None
+        for index, transition in enumerate(transitions):
+            stock_id = str(transition.get("stock_id") or "")
+            before = dict(transition.get("before") or {})
+            after = dict(transition.get("after") or {})
+            preview = dict(transition.get("preview") or {})
+            table = dict(preview.get("visible_table") or {})
+            after_stock_counts = normalize_stock_well_counts(
+                (
+                    row
+                    for row in after.get("plan_targets") or ()
+                    if str(row.get("stock_id") or "") == stock_id
+                ),
+                label=f"calibration transition {index} stock counts",
+            )
+            if not after_stock_counts:
+                raise ValueError(
+                    f"calibration transition {index} has no stock counts"
+                )
+            if table.get("headers") != expected_headers:
+                raise ValueError(
+                    f"calibration transition {index} preview headers differ"
+                )
+            if table.get("row_count") != 1:
+                raise ValueError(
+                    "Slice 9.2 preview projection requires exactly one row"
+                )
+            projected = project_single_stock_preview_counts(
+                preview,
+                stock_id=stock_id,
+                well_ids_by_row=(
+                    tuple(row.well_id for row in after_stock_counts),
+                ),
+            )
+            preview_counts.extend(projected)
+            added = normalize_stock_well_counts(
+                after.get("progress_added") or (),
+                label=f"calibration transition {index} progress added",
+            )
+            calibrated_stock_added = tuple(
+                row for row in added if row.stock_id == stock_id
+            )
+            if not calibrated_stock_added:
+                raise ValueError(
+                    f"calibration transition {index} has no stock progress"
+                )
+            revision_advanced = int(after.get("plan_revision", -1)) > int(
+                before.get("plan_revision", -1)
+            )
+            chain_contiguous = prior_after is None or (
+                before.get("plan_id") == prior_after.get("plan_id")
+                and before.get("plan_revision") == prior_after.get("plan_revision")
+                and before.get("plan_targets") == prior_after.get("plan_targets")
+            )
+            transition_evidence.append(
+                {
+                    "stock_id": stock_id,
+                    "before_revision": before.get("plan_revision"),
+                    "after_revision": after.get("plan_revision"),
+                    "revision_advanced": revision_advanced,
+                    "chain_contiguous": chain_contiguous,
+                    "zero_progress": all(
+                        row.droplets == 0 for row in calibrated_stock_added
+                    ),
+                    "preview": preview,
+                }
+            )
+            prior_after = after
+
+        lifecycle = dict(observer.get("lifecycle") or {})
+        intent_counts, simulator_counts, command_join = intent_and_simulator_counts(
+            lifecycle
+        )
+        terminal = capture_count_snapshot(context, include_runtime=False)
+        observed = {
+            "prepared_plan": prepared_snapshot.get("plan_targets") or (),
+            "calibration_preview": preview_counts,
+            "calibrated_plan": final_counts,
+            "zero_progress": final_after.get("progress_targets") or (),
+            "runtime": final_after.get("runtime_targets") or (),
+            "intent": intent_counts,
+            "simulator": simulator_counts,
+            "terminal_targets": terminal.get("progress_targets") or (),
+            "terminal_added": terminal.get("progress_added") or (),
+        }
+        expected = {name: final_counts for name in required_layers}
+        reconciliation = reconcile_stock_well_counts(
+            expected=expected,
+            observed=observed,
+            required_layers=required_layers,
+        )
+        checks = {
+            "count_layers_exact": reconciliation.passed,
+            "prepared_plan_id_matches": prepared_snapshot.get("plan_id")
+            == final_after.get("plan_id"),
+            "calibration_revisions_advance": all(
+                row["revision_advanced"] for row in transition_evidence
+            ),
+            "calibration_chain_contiguous": all(
+                row["chain_contiguous"] for row in transition_evidence
+            ),
+            "calibration_progress_zero": all(
+                row["zero_progress"] for row in transition_evidence
+            ),
+            "terminal_plan_id_matches": terminal.get("plan_id")
+            == final_after.get("plan_id"),
+            "terminal_state_completed": terminal.get("plan_state") == "completed",
+            "observer_restored": observer.get("restored") is True,
+        }
+        evidence = {
+            "schema_version": 1,
+            "oracle_scope": "slice_9_2_internal_self_consistency",
+            "checks": checks,
+            "prepared": dict(prepared_snapshot),
+            "calibration_transitions": transition_evidence,
+            "calibrated": final_after,
+            "terminal": terminal,
+            "command_join": command_join,
+            "reconciliation": reconciliation.to_dict(),
+        }
+        passed = all(checks.values())
+        return AssertionResult(
+            "execution.dispense_counts_reconciled",
+            "terminal",
+            "pass" if passed else "fail",
+            ("ui", "model", "persistence", "simulator"),
+            evidence,
+            None if passed else "dispense-count evidence did not reconcile exactly",
+        )
+    except (KeyError, TypeError, ValueError, OSError, RuntimeError) as exc:
+        return AssertionResult(
+            "execution.dispense_counts_reconciled",
+            "terminal",
+            "fail",
+            ("ui", "model", "persistence", "simulator"),
+            {
+                "schema_version": 1,
+                "oracle_scope": "slice_9_2_internal_self_consistency",
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+            "dispense-count evidence was incomplete or malformed",
+        )
 
 
 def multi_stock_terminal_assertions(
@@ -2581,6 +2778,7 @@ __all__ = [
     "editor_create_finalize_assertion",
     "editor_prepared_bundle_assertions",
     "editor_post_start_lock_copy_assertions",
+    "dispense_counts_reconciled_assertion",
     "editor_prepared_reload_assertions",
     "exact_action_sequence_assertion",
     "execution_lifecycle_assertions",

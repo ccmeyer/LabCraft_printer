@@ -42,6 +42,7 @@ def test_execution_observer_installs_and_restores_every_hook(tmp_path, monkeypat
     context = SimpleNamespace(
         experiment_model=SimpleNamespace(),
         controller=SimpleNamespace(),
+        machine=SimpleNamespace(),
         view=SimpleNamespace(
             well_plate_widget=SimpleNamespace(),
             pressure_box=SimpleNamespace(),

@@ -1955,12 +1955,38 @@ class CalibrationDialogDriver:
 
     def inspect_preview(self) -> dict[str, Any]:
         payload = dict(getattr(self.dialog, "_bridge_preview_payload", None) or {})
+        table = self.dialog.bridge_table
+        headers = [
+            (
+                table.horizontalHeaderItem(column).text()
+                if table.horizontalHeaderItem(column) is not None
+                else None
+            )
+            for column in range(table.columnCount())
+        ]
+        rows = [
+            [
+                (
+                    table.item(row, column).text()
+                    if table.item(row, column) is not None
+                    else None
+                )
+                for column in range(table.columnCount())
+            ]
+            for row in range(table.rowCount())
+        ]
         return {
             "payload": payload,
             "status": self.dialog.bridge_status_label.text(),
             "apply_enabled": self.dialog.bridge_apply_btn.isEnabled(),
             "apply_text": self.dialog.bridge_apply_btn.text(),
-            "preview_rows": self.dialog.bridge_table.rowCount(),
+            "preview_rows": table.rowCount(),
+            "visible_table": {
+                "headers": headers,
+                "rows": rows,
+                "row_count": table.rowCount(),
+                "column_count": table.columnCount(),
+            },
         }
 
     def apply_selected(

@@ -20,6 +20,7 @@ from tools.virtual_workflows.actions import (
     wait_for_completions,
 )
 from tools.virtual_workflows.composition import JourneyRuntime, SemanticStep
+from tools.virtual_workflows.dispense_counts import capture_count_snapshot
 from tools.virtual_workflows.page_drivers import (
     ArrayDriver,
     CalibrationDialogDriver,
@@ -1256,6 +1257,7 @@ def _run_stock_pass(
         )
 
     def apply(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        before = capture_count_snapshot(context)
         preview = calibration.inspect_preview()
         handled = calibration.apply_selected(
             expected_title=(None if spec.manual_refuel_check is not None else "Applied"),
@@ -1265,7 +1267,21 @@ def _run_stock_pass(
         )
         if spec.manual_refuel_check is None:
             calibration.close()
-        evidence = {"preview": preview, "handled_dialogs": handled}
+        after = capture_count_snapshot(context)
+        transition = {
+            "stock_id": spec.stock_id,
+            "preview": preview,
+            "before": before,
+            "after": after,
+        }
+        runtime.observations.setdefault(
+            "calibration_count_transitions", []
+        ).append(transition)
+        evidence = {
+            "preview": preview,
+            "handled_dialogs": handled,
+            "count_transition": transition,
+        }
         if spec.detailed_evidence:
             evidence = {"stock_id": spec.stock_id, **evidence}
         return evidence

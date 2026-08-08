@@ -6,6 +6,7 @@ from tools.virtual_workflows.assertions import (
     ExecutionLifecycleExpectation,
     SoftStopResumeExpectation,
     cleanup_assertion,
+    dispense_counts_reconciled_assertion,
     editor_artifacts_cleanup_assertion,
     editor_prepared_revision_failure_assertion,
     editor_sequence_exploration_assertions,
@@ -34,6 +35,80 @@ def test_assertion_result_rejects_ambiguous_decision():
         assert "pass, fail, or incomplete" in str(exc)
     else:
         raise AssertionError("ambiguous assertion decision was accepted")
+
+
+def test_dispense_count_assertion_reconciles_every_required_layer(monkeypatch):
+    count = {"stock_id": "stock-a", "well_id": "A1", "droplets": 3}
+
+    def snapshot(revision, state, added):
+        return {
+            "plan_id": "plan-1",
+            "plan_revision": revision,
+            "plan_state": state,
+            "plan_targets": [count],
+            "progress_targets": [count],
+            "progress_added": [{**count, "droplets": added}],
+            "runtime_targets": [count],
+            "runtime_captured": True,
+        }
+
+    preview = {
+        "visible_table": {
+            "headers": [
+                "Target", "Achievable", "Error (%)", "Drops", "Δ/drop",
+                "Printed nL (new)", "Δ printed nL",
+            ],
+            "rows": [["1", "1", "0.00%", "3", "1", "3 nL", "+0 nL"]],
+            "row_count": 1,
+            "column_count": 7,
+        }
+    }
+    transition = {
+        "stock_id": "stock-a",
+        "preview": preview,
+        "before": snapshot(1, "prepared", 0),
+        "after": snapshot(2, "active", 0),
+    }
+    lifecycle = {
+        "begins": [{
+            "intent_id": "intent-1", "stock_id": "stock-a", "well_id": "A1",
+            "commanded_droplets": 3,
+        }],
+        "attachments": [{"intent_id": "intent-1", "command_seq32": 7}],
+        "simulator_dispenses": [{
+            "command_seq32": 7, "command_type": "DISPENSE",
+            "commanded_droplets": 3, "manual": False, "status": "Completed",
+        }],
+        "simulator_dispense_limit": 10_000,
+        "simulator_dispense_overflow_count": 0,
+    }
+    from tools.virtual_workflows import assertions
+
+    monkeypatch.setattr(
+        assertions,
+        "capture_count_snapshot",
+        lambda _context, include_runtime=False: snapshot(3, "completed", 3),
+    )
+    result = dispense_counts_reconciled_assertion(
+        SimpleNamespace(),
+        prepared_snapshot=snapshot(1, "prepared", 0),
+        calibration_transitions=[transition],
+        observer={"restored": True, "lifecycle": lifecycle},
+    )
+
+    assert result.decision == "pass"
+    assert all(result.evidence["checks"].values())
+    assert all(result.evidence["reconciliation"]["checks"].values())
+
+    transition["after"]["progress_added"][0]["droplets"] = 1
+    rejected = dispense_counts_reconciled_assertion(
+        SimpleNamespace(),
+        prepared_snapshot=snapshot(1, "prepared", 0),
+        calibration_transitions=[transition],
+        observer={"restored": True, "lifecycle": lifecycle},
+    )
+    assert rejected.decision == "fail"
+    assert rejected.evidence["checks"]["calibration_progress_zero"] is False
 
 
 def test_editor_exploration_assertions_project_safe_recovery():

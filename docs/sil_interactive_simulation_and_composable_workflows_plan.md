@@ -2272,6 +2272,11 @@ reviewable slices:
    host regressions, full Python suite, documentation, and representative
    retained evidence.
 
+Validation policy: Slices 9.2-9.5 run only the targeted unit, contract, and
+representative SIL checks needed for their individual changes. Slice 9.6 runs
+the complete Milestone 9 matrix and replay, the broader lifecycle and host
+regressions, and the full Python suite once for milestone closeout.
+
 Milestone 10 must not begin until the Milestone 9 count oracle is stable.
 Milestone 13 must not begin until all deterministic Milestones 9-12 are stable.
 Do not add refill-required/resume cases or operations while volume tracking

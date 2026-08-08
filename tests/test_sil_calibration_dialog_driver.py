@@ -65,7 +65,24 @@ class _Dialog(QtWidgets.QDialog):
         self.calibrate_all_button.clicked.connect(lambda: self._mark_generated(row))
         self.calibrate_all_stream_button.clicked.connect(lambda: self._mark_generated(row))
         self.bridge_status_label = QtWidgets.QLabel("Preview ready")
-        self.bridge_table = QtWidgets.QTableWidget(1, 1)
+        self.bridge_table = QtWidgets.QTableWidget(1, 7)
+        self.bridge_table.setHorizontalHeaderLabels(
+            [
+                "Target",
+                "Achievable",
+                "Error (%)",
+                "Drops",
+                "Δ/drop",
+                "Printed nL (new)",
+                "Δ printed nL",
+            ]
+        )
+        for column, text in enumerate(
+            ("23.00", "23.00", "0.00%", "1", "2.3 mM/drop", "9.00 nL")
+        ):
+            self.bridge_table.setItem(
+                0, column, QtWidgets.QTableWidgetItem(text)
+            )
         self.bridge_apply_btn = QtWidgets.QPushButton("Apply selected calibration to design")
         self.bridge_apply_btn.setEnabled(True)
         self.bridge_apply_btn.clicked.connect(
@@ -136,6 +153,18 @@ def test_calibration_dialog_driver_uses_visible_qt_controls(qapp):
     assert selected["synthetic"] is True
     assert preview["apply_enabled"] is True
     assert preview["payload"]["new_droplet_nL"] == row["mean_nL"]
+    assert preview["visible_table"] == {
+        "headers": [
+            "Target", "Achievable", "Error (%)", "Drops", "Δ/drop",
+            "Printed nL (new)", "Δ printed nL",
+        ],
+        "rows": [[
+            "23.00", "23.00", "0.00%", "1", "2.3 mM/drop",
+            "9.00 nL", None,
+        ]],
+        "row_count": 1,
+        "column_count": 7,
+    }
 
 
 def test_calibration_dialog_driver_handles_mode_switch_and_refuel_prompt(qapp):

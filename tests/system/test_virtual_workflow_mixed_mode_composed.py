@@ -120,6 +120,20 @@ def test_composed_mixed_mode_lifecycle_report(qapp, tmp_path):
     assert record["refuel_pulse_width_us"] == 6000
     assert record["target_refuel_pressure_psi"] == pytest.approx(0.4, abs=0.001)
     assert mixed["manual_refuel"]["action_order"]["valid"] is True
+    counts = persistence["dispense_count_evidence"]
+    assert counts["oracle_scope"] == "slice_9_2_internal_self_consistency"
+    assert all(counts["checks"].values())
+    assert all(counts["reconciliation"]["checks"].values())
+    assert counts["command_join"]["retained_dispense_count"] == 50
+    assert len(counts["command_join"]["joined_commands"]) == 48
+    assert len(counts["command_join"]["unattached_dispenses"]) == 2
+    assert all(
+        transition["preview"]["visible_table"]["headers"] == [
+            "Target", "Achievable", "Error (%)", "Drops", "Δ/drop",
+            "Printed nL (new)", "Δ printed nL",
+        ]
+        for transition in counts["calibration_transitions"]
+    )
     assert report["metrics"]["queue"]["values"]["unexpected_starvation_count"] == 0
     assert set(report["artifacts"]["screenshots"]) == {
         "editor_opened", "generated", "droplet_ready", "droplet_printing",

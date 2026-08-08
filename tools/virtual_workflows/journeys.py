@@ -36,6 +36,7 @@ from tools.virtual_workflows.assertions import (
     DisconnectFailClosedExpectation,
     authoritative_reload_terminal_assertions,
     disconnect_fail_closed_assertions,
+    dispense_counts_reconciled_assertion,
     soft_stop_paused_assertions,
     soft_stop_terminal_assertions,
     terminal_execution_assertion,
@@ -47,6 +48,7 @@ from tools.virtual_workflows.composition import (
     replay_command,
 )
 from tools.virtual_workflows.execution_observer import ExecutionObserver
+from tools.virtual_workflows.dispense_counts import capture_count_snapshot
 from tools.virtual_workflows.authoritative_evidence import (
     capture_authoritative_bundle,
     merge_session_lifecycles,
@@ -188,6 +190,7 @@ MULTI_STOCK_REQUIRED_ASSERTIONS = (
 )
 MIXED_MODE_REQUIRED_ASSERTIONS = (
     *MULTI_STOCK_REQUIRED_ASSERTIONS[:-1],
+    "execution.dispense_counts_reconciled",
     "execution.mixed_mode_calibrations_valid",
     "execution.stream_manual_refuel_passed",
     "artifacts.required_present",
@@ -1321,6 +1324,33 @@ def _post_start_lock_body(runtime: JourneyRuntime) -> None:
     )
 
 
+def _add_dispense_count_assertion(
+    runtime: JourneyRuntime,
+    *,
+    matrix_case: bool,
+    matrix_terminal: str,
+    observer: Mapping[str, Any],
+) -> None:
+    if not (
+        (matrix_case and matrix_terminal == "completed")
+        or (
+            not matrix_case
+            and runtime.definition.registry_id == MIXED_MODE_WORKLOAD_ID
+        )
+    ):
+        return
+    runtime.add_assertion(
+        dispense_counts_reconciled_assertion(
+            runtime.context,
+            prepared_snapshot=runtime.observations["prepared_count_snapshot"],
+            calibration_transitions=runtime.observations.get(
+                "calibration_count_transitions", []
+            ),
+            observer=observer,
+        )
+    )
+
+
 def _multi_body(runtime: JourneyRuntime) -> None:
     context, fixture = runtime.context, runtime.fixture
     expected_wells = _well_ids(fixture)
@@ -1355,6 +1385,7 @@ def _multi_body(runtime: JourneyRuntime) -> None:
     )
     if prepared.decision != "pass":
         raise RuntimeError(f"prepared multi-stock bundle was invalid: {prepared.evidence}")
+    runtime.observations["prepared_count_snapshot"] = capture_count_snapshot(context)
     pass_specs = _multi_passes(runtime)
     runtime.observations["expected_pulse_widths_us"] = tuple(spec.pulse_width_us for spec in pass_specs)
     runtime.observations["expected_volumes_nL"] = tuple(spec.expected_volume_nL for spec in pass_specs)
@@ -1408,6 +1439,7 @@ def _multi_body(runtime: JourneyRuntime) -> None:
             observer=snapshot,
         ):
             runtime.add_assertion(assertion)
+    _add_dispense_count_assertion(runtime, matrix_case=matrix_case, matrix_terminal=matrix_terminal, observer=snapshot)
     if matrix_case:
         for assertion in matrix_case_assertions(
             context,
@@ -2106,6 +2138,15 @@ def _multi_payload(
             "values": {
                 "assertion_decisions": decisions,
                 "multi_stock_head_exchange": multi,
+                **(
+                    {
+                        "dispense_count_evidence": evidence.get(
+                            "execution.dispense_counts_reconciled", {}
+                        )
+                    }
+                    if "execution.dispense_counts_reconciled" in evidence
+                    else {}
+                ),
                 **(
                     {
                         "mixed_mode_lifecycle": {
@@ -2954,7 +2995,11 @@ def _run_mixed_mode_matrix_case(
     if case.expected_terminal == "manual_refuel_cancelled":
         required_screenshots.add("manual_refuel_blocked")
     required_assertions = (
-        (*MULTI_STOCK_REQUIRED_ASSERTIONS[:-1], *MATRIX_CASE_REQUIRED_ASSERTIONS[2:])
+        (
+            *MULTI_STOCK_REQUIRED_ASSERTIONS[:-1],
+            "execution.dispense_counts_reconciled",
+            *MATRIX_CASE_REQUIRED_ASSERTIONS[2:],
+        )
         if case.expected_terminal == "completed"
         else MATRIX_CASE_REQUIRED_ASSERTIONS
     )
