@@ -2363,15 +2363,18 @@ Milestone 10 closed as follows:
 
 Milestone 11 planning is complete in
 `docs/sil_interactive_simulation_milestone_11_execution_plan.md`. Slice 11.1
-is the current next action: freeze the singleton joined-interaction contract,
-literal seed-4321 mapping/count/revision/head oracle, new case/fixture hashes,
-and compatibility audit without registering a placeholder scenario. Execute
-only one slice at a time, with a slice-specific implementation plan, focused
-validation, completion record, clean worktree, and independent commit before
-advancing. The complete scenario is registered only in Slice 11.4; retained
-offscreen/replay/visible and broader regression qualification remain reserved
-for Slice 11.5. Any production defect still requires a separate reviewed
-correction plan.
+is complete: the singleton joined-interaction contract, literal seed-4321
+mapping/count/revision/head oracle, tracked fixture and hashes, source
+compatibility audit, and fail-closed mutation coverage are frozen without a
+placeholder runtime registration. Slice 11.2 is the current next action:
+compose real-editor randomized finalization through authoritative revision 1,
+Design A's real boundary-crossing calibration through revision 3, and the
+calibrated zero-progress checkpoint. Execute only one slice at a time, with a
+slice-specific implementation plan, focused validation, completion record,
+clean worktree, and independent commit before advancing. The complete scenario
+is registered only in Slice 11.4; retained offscreen/replay/visible and broader
+regression qualification remain reserved for Slice 11.5. Any production defect
+still requires a separate reviewed correction plan.
 
 The Milestone 9 count oracle is stable and is reused only to normalize
 observed stock/well plan and runtime counts. Milestone 10 expected values remain

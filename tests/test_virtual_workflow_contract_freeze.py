@@ -42,6 +42,11 @@ from tools.virtual_workflows.exploration_runner import (
     EXPLORATION_AGGREGATE_SCHEMA_VERSION,
 )
 from tools.virtual_workflows.registry import get_registered_scenario
+from tools.virtual_workflows.joined_interaction_cases import (
+    JOINED_INTERACTION_CASE,
+    JOINED_INTERACTION_CASE_ID,
+    joined_fixture_sha256,
+)
 from tools.virtual_workflows.journeys import (
     AUTHORITATIVE_RELOAD_REQUIRED_ASSERTIONS,
     AUTHORITATIVE_RELOAD_REQUIRED_UI_ACTIONS,
@@ -72,6 +77,21 @@ from tools.virtual_workflows.scenarios import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_ROOT = REPO_ROOT / "tests" / "performance" / "baselines"
+
+
+def test_milestone_11_joined_contract_is_frozen_without_runtime_registration():
+    from tools.virtual_workflows.registry import registered_scenario_ids
+
+    assert JOINED_INTERACTION_CASE.sha256() == (
+        "95abfc7be2fcb38744d374be8d7af7060fbe5636d7577b3417a7d6082843d992"
+    )
+    assert JOINED_INTERACTION_CASE.count_oracle_sha256() == (
+        "930a85b245db04e18f4ed9963070baddf18740d39426a33475116ef33b3eb84e"
+    )
+    assert joined_fixture_sha256() == (
+        "f27c0331a367a1a104d11582348f602aa8868c904d8d3d22193bceefd6dc45cc"
+    )
+    assert JOINED_INTERACTION_CASE_ID not in registered_scenario_ids()
 
 
 def test_authoritative_evidence_readers_are_centralized_and_read_only():
