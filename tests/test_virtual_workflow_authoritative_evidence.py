@@ -6,7 +6,9 @@ import pytest
 
 from tools.virtual_workflows.authoritative_evidence import (
     check_evidence,
+    completed_stock_well_pairs,
     compare_directories,
+    merge_session_lifecycles,
     read_audit_rows,
     read_csv_rows,
     snapshot_directory,
@@ -86,3 +88,113 @@ def test_check_evidence_orders_failures_and_copies_values():
         "failed_checks": ["second"],
         "plan_id": "plan-1",
     }
+
+
+def test_merge_session_lifecycles_combines_events_and_bounded_metadata():
+    first_begin = {
+        "intent_id": "intent-1",
+        "stock_id": "stock-1",
+        "well_id": "A1",
+    }
+    second_begin = {
+        "intent_id": "intent-2",
+        "stock_id": "stock-1",
+        "well_id": "A2",
+    }
+
+    merged = merge_session_lifecycles(
+        (
+            (
+                "session-1",
+                {
+                    "begins": [first_begin],
+                    "completions": ["intent-1"],
+                    "simulator_dispense_limit": 10_000,
+                    "simulator_dispense_overflow_count": 1,
+                },
+            ),
+            (
+                "session-2",
+                {
+                    "begins": [second_begin],
+                    "completions": ["intent-2"],
+                    "simulator_dispense_limit": 10_000,
+                    "simulator_dispense_overflow_count": 2,
+                },
+            ),
+        )
+    )
+
+    assert merged["begins"] == [
+        {**first_begin, "application_session_id": "session-1"},
+        {**second_begin, "application_session_id": "session-2"},
+    ]
+    assert merged["completions"] == ["intent-1", "intent-2"]
+    assert merged["simulator_dispense_limit"] == 20_000
+    assert merged["simulator_dispense_overflow_count"] == 3
+    assert "application_session_id" not in first_begin
+    assert completed_stock_well_pairs(merged) == {
+        ("stock-1", "A1"),
+        ("stock-1", "A2"),
+    }
+
+
+def test_merge_session_lifecycles_accepts_legacy_event_only_snapshots():
+    assert merge_session_lifecycles(
+        (
+            ("session-1", {"completions": ["intent-1"]}),
+            ("session-2", {"completions": ("intent-2",)}),
+        )
+    ) == {"completions": ["intent-1", "intent-2"]}
+
+
+@pytest.mark.parametrize(
+    ("sessions", "error", "message"),
+    (
+        (
+            (
+                ("session-1", {
+                    "simulator_dispense_limit": 10_000,
+                    "simulator_dispense_overflow_count": 0,
+                }),
+                ("session-2", {"begins": []}),
+            ),
+            ValueError,
+            "missing bounded metadata",
+        ),
+        (
+            (("session-1", {
+                "simulator_dispense_limit": True,
+                "simulator_dispense_overflow_count": 0,
+            }),),
+            TypeError,
+            "must be an integer",
+        ),
+        (
+            (("session-1", {
+                "simulator_dispense_limit": 0,
+                "simulator_dispense_overflow_count": 0,
+            }),),
+            ValueError,
+            "must be at least 1",
+        ),
+        (
+            (("session-1", {
+                "simulator_dispense_limit": 10_000,
+                "simulator_dispense_overflow_count": -1,
+            }),),
+            ValueError,
+            "must be at least 0",
+        ),
+        (
+            (("session-1", {"unknown_scalar": 1}),),
+            TypeError,
+            "must be a list or tuple",
+        ),
+    ),
+)
+def test_merge_session_lifecycles_rejects_malformed_metadata(
+    sessions, error, message
+):
+    with pytest.raises(error, match=message):
+        merge_session_lifecycles(sessions)

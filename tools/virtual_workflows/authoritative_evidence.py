@@ -419,15 +419,53 @@ def post_start_copy_boundary_evidence(
 
 def merge_session_lifecycles(
     sessions: Iterable[tuple[str, Mapping[str, Any]]],
-) -> dict[str, list[Any]]:
-    """Merge observer lifecycles while attributing dictionary rows to sessions."""
+) -> dict[str, Any]:
+    """Merge ordered lifecycle events and bounded per-session metadata."""
 
     values = tuple((str(name), dict(snapshot)) for name, snapshot in sessions)
-    merged: dict[str, list[Any]] = {}
+    bounded_keys = (
+        "simulator_dispense_limit",
+        "simulator_dispense_overflow_count",
+    )
+    if any(key in snapshot for _name, snapshot in values for key in bounded_keys):
+        for session_id, snapshot in values:
+            missing = [key for key in bounded_keys if key not in snapshot]
+            if missing:
+                raise ValueError(
+                    f"lifecycle session {session_id!r} is missing bounded metadata: "
+                    + ", ".join(missing)
+                )
+
+    merged: dict[str, Any] = {}
     for key in sorted({key for _name, snapshot in values for key in snapshot}):
+        if key in bounded_keys:
+            combined = 0
+            for session_id, snapshot in values:
+                value = snapshot[key]
+                if type(value) is not int:
+                    raise TypeError(
+                        f"lifecycle session {session_id!r} field {key!r} "
+                        "must be an integer"
+                    )
+                minimum = 1 if key == "simulator_dispense_limit" else 0
+                if value < minimum:
+                    raise ValueError(
+                        f"lifecycle session {session_id!r} field {key!r} "
+                        f"must be at least {minimum}"
+                    )
+                combined += value
+            merged[key] = combined
+            continue
+
         rows: list[Any] = []
         for session_id, snapshot in values:
-            for item in snapshot.get(key, ()):
+            collection = snapshot.get(key, ())
+            if not isinstance(collection, (list, tuple)):
+                raise TypeError(
+                    f"lifecycle session {session_id!r} field {key!r} "
+                    "must be a list or tuple"
+                )
+            for item in collection:
                 attributed = dict(item) if isinstance(item, Mapping) else item
                 if isinstance(attributed, dict):
                     attributed.setdefault("application_session_id", session_id)
