@@ -33,6 +33,11 @@ from hardware.serial_ports import (
     resolve_explicit_usb_serial_port,
 )
 from HostBlackBoxLog import HostBlackBoxRecorder
+from GravimetricLedger import (
+    EJECTION_COMMAND_TYPES,
+    EjectionCommandEvent,
+    EjectionCommandLifecycle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -4078,6 +4083,7 @@ class Machine(QObject):
     require_gripper_confirmation = Signal(str)   # "OPEN" or "CLOSE"
     log_message_received = Signal(str)  # Signal to emit when a log message is received
     flash_state_updated = Signal(object)
+    ejection_command_event = Signal(object)
 
     def __init__(
         self,
@@ -4103,6 +4109,7 @@ class Machine(QObject):
         self._machine_log_identity = None
         self._serial_identity_resolver = serial_identity_resolver
         self._last_log_start_error = ""
+        self._transport_epoch = 0
 
         self.balance_droplets = []   # <-- for legacy Balance simulation queue
 
@@ -4771,6 +4778,7 @@ class Machine(QObject):
                 self._send_hello()
                 return
             self.port = port
+            self._transport_epoch += 1
             self.ser = self._serial_factory(self.port, self.baud, timeout=0.1)
             if not self.ser.is_open:
                 raise IOError("Port not open")
@@ -5744,6 +5752,26 @@ class Machine(QObject):
         }
         self.command_event_history.append(event)
         self._record_black_box_event("command_lifecycle", event)
+        command_type = str(getattr(command, "command_type", "") or "").upper()
+        lifecycle = str(event_name or "").lower()
+        if lifecycle == "canceled":
+            lifecycle = EjectionCommandLifecycle.CANCELLED.value
+        if command_type in EJECTION_COMMAND_TYPES and lifecycle in {
+            item.value for item in EjectionCommandLifecycle
+        }:
+            try:
+                self.ejection_command_event.emit(
+                    EjectionCommandEvent(
+                        transport_epoch=int(getattr(self, "_transport_epoch", 0)),
+                        command_number=int(getattr(command, "command_number", 0)),
+                        command_type=command_type,
+                        requested_droplet_count=int(getattr(command, "param1", 0)),
+                        lifecycle=EjectionCommandLifecycle(lifecycle),
+                        monotonic_ns=observed_ns,
+                    )
+                )
+            except (TypeError, ValueError):
+                logger.exception("Failed to emit ejection command lifecycle event")
 
     def register_settings_trace_binding(self, payload):
         payload = dict(payload or {})

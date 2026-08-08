@@ -76,12 +76,33 @@ This panel does not modify it.
    for the running application; it is not saved in `Settings.json`.
 3. Enter the repetition, notes, and capture mode as usual, then click the
    normal **Begin Session** control.
-4. Leave the sample undisturbed while the status and sample count update.
-5. Review the candidate mass when it appears. No calibration session, gripper
-   action, flash snapshot, motion, pressure, dispensing, or printer command
-   has started at this point.
-6. Click **Confirm Starting Mass & Begin** only when the candidate is correct.
-   This explicit confirmation releases the existing stream sequence.
+4. On the first run, or whenever the previous mass is no longer reusable, the
+   printer head moves to the existing loading position. This is the only
+   pre-calibration motion; no calibration session, flash snapshot, gripper
+   action, pressure action, or ejection has begun.
+5. Remove the collection tube, place it on the balance, and click
+   **Sample Placed - Read Starting Mass**. Leave the tube undisturbed while
+   the status and sample count update.
+6. Review the candidate mass. Reinstall that same collection tube on the
+   printer head, then click **Same Tube Reinstalled - Confirm Starting Mass &
+   Return to Camera**.
+7. The head returns to the camera. Only after arrival, and only if no ejection
+   was attempted in the meantime, does the existing calibration session,
+   gripper preamble, and stream sequence begin.
+
+After a successful balance-backed ending save, the next Begin may offer a
+choice instead of moving to loading:
+
+- **Use Previous Ending Mass** carries that verified ending mass forward as
+  the next starting mass. Select it only when the same collection tube remains
+  installed. The run starts from the camera without another weighing.
+- **Measure New Starting Mass** performs the loading-position workflow above.
+
+Carry-forward is available only in the same running application. Any
+`DISPENSE` or `DISPENSE_PRINT` attempt outside or inside the workflow, an MCU
+reset/reconnect, serial transport uncertainty, a discarded run, or manual
+ending-mass fallback invalidates it. `DISPENSE_REFUEL` alone does not invalidate
+it. When invalidated, Begin proceeds to a new loading-position measurement.
 
 Use **Cancel Reading** to stop an active measurement and **Read Again** after a
 timeout, cancellation, service error, or unwanted candidate. A retry keeps the
@@ -89,11 +110,14 @@ staged repetition, notes, capture mode, and provisional stream session, but
 uses a new balance request identity.
 
 Use **Use Manual Starting Mass** to abandon the staged balance measurement.
-This restores the existing manual controls and their pre-request contents,
-turns off the session opt-in, and requires another click of **Begin Session**.
-Closing the imager while a starting reading or candidate is pending abandons
-that provisional measurement but does not disconnect the balance or clear the
-application-session opt-in.
+Because the head and tube may be at loading, first reinstall the tube and click
+**Same Tube Reinstalled - Return to Camera**. After camera arrival the existing
+manual controls and their pre-request contents are restored, the session
+opt-in is turned off, and another click of **Begin Session** is required.
+Closing the imager while a starting reading is active cancels that reading but
+does not move the machine, discard the staged workflow, disconnect the
+balance, or clear the application-session opt-in. Reopening restores the
+appropriate prompt for the current physical position.
 
 ## Use A Balance Ending Mass
 
@@ -109,9 +133,10 @@ Otherwise, loading arrival opens the unchanged manual ending-mass workflow.
 4. Leave the sample undisturbed while the progress display updates.
 5. Review the candidate, mass change, mass per print, sample count, duration,
    span, standard deviation, and slope.
-6. If the candidate is correct, click **Confirm Ending Mass & Save**. This is
-   the only balance path that invokes the existing CSV finalizer, gripper
-   restoration, and camera return.
+6. Reinstall the same collection tube on the printer head. If the candidate is
+   correct, click **Same Tube Reinstalled - Confirm Ending Mass & Save**. This
+   is the only balance path that invokes the existing CSV finalizer, gripper
+   restoration, camera return, and creation of a reusable next-run baseline.
 
 A zero or negative mass gain displays a prominent warning, but it may still be
 saved intentionally for diagnostic data. Use **Cancel Reading** while a read is
@@ -129,20 +154,30 @@ stability evidence, selected adapter, connection generation, and receive-only
 serial settings are written only as additive provenance in
 `stream_capture_log.jsonl`; raw serial frames are not stored there.
 
-## Slice 6 Pi Acceptance
+## Pre-Start Loading And Baseline-Reuse Pi Acceptance
 
-Before treating ending capture as hardware-verified, complete one real
-balance-backed run and check all of the following:
+Before treating the revised workflow as hardware-verified, complete real
+balance-backed runs and check all of the following:
 
-1. Loading arrival does not start a balance request before the sample-ready
-   button is clicked.
-2. The candidate agrees with the HPB display and no CSV row exists before
-   confirmation.
-3. **Confirm Ending Mass & Save** writes exactly one expected CSV row.
-4. The matching `stream_capture_log.jsonl` entry includes both starting and
-   ending capture provenance and contains no raw frame history.
-5. Gripper refresh settings are restored before the head returns to the
-   camera position.
+1. First Begin moves to loading before starting a balance request, calibration
+   session, flash snapshot, pressure action, gripper action, or ejection.
+2. Starting balance reading begins only after the sample-ready button.
+3. Reinstalling the same tube and confirming returns the head to the camera
+   before the calibration sequence begins.
+4. Ending loading arrival does not start a balance request before its
+   sample-ready button is clicked.
+5. The ending candidate agrees with the HPB display and no CSV row exists
+   before confirmation.
+6. **Same Tube Reinstalled - Confirm Ending Mass & Save** writes exactly one
+   expected CSV row; gripper settings are restored before camera return.
+7. A second Begin with no intervening ejection offers the prior ending mass.
+   Explicit reuse starts without another loading move and uses exactly that
+   value as the new starting mass.
+8. After a later ending save, issue a manual droplet ejection. The next Begin
+   must not offer reuse and must require another loading measurement.
+9. Verify CSV `Num Prints` uses the command-derived completed-ejection count.
+   The sidecar contains command and camera-derived counts, carry provenance,
+   and no raw serial frame history.
 
 ## Disable And Restore
 

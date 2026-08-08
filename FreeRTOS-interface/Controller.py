@@ -976,6 +976,9 @@ class Controller(QObject):
             transport_fault_signal.connect(self.handle_transport_fault)
         self.machine.disconnect_complete_signal.connect(self.reset_board)
         self.machine.flash_state_updated.connect(self.model.update_flash_session_state)
+        ejection_signal = getattr(self.machine, "ejection_command_event", None)
+        if ejection_signal is not None:
+            ejection_signal.connect(self._on_machine_ejection_command_event)
         self.model.machine_model.command_numbers_updated.connect(self.update_command_numbers)
         self.machine.command_queue.commands_completed.connect(self.update_expected_with_current)
 
@@ -1598,6 +1601,12 @@ class Controller(QObject):
     def _stream_capture_manager(self):
         return getattr(getattr(self, "model", None), "calibration_manager", None)
 
+    def _on_machine_ejection_command_event(self, event):
+        manager = self._stream_capture_manager()
+        recorder = getattr(manager, "record_stream_gravimetric_ejection_event", None)
+        if callable(recorder):
+            recorder(event)
+
     def _submit_stream_gravimetric_mass_request(
         self,
         request_id: str,
@@ -1686,20 +1695,56 @@ class Controller(QObject):
             return False, "Balance must be Streaming before requesting a starting mass."
         if self._experimental_balance_active_stream_request is not None:
             return False, "A stream-capture balance request is already active."
+        if not self._stream_gravimetric_machine_queue_empty():
+            return False, "Wait for the machine command queue to finish before starting the mass workflow."
         manager = self._stream_capture_manager()
-        request_id = f"stream_start_{uuid.uuid4().hex}"
         ok, message, session_id = manager.stage_stream_gravimetric_balance_start(
-            request_id,
+            None,
             rep_override=rep_override,
             notes=notes,
             capture_mode=capture_mode,
         )
         if not ok:
             return False, message
-        return self._submit_stream_gravimetric_starting_mass_request(
-            request_id,
-            session_id,
+        return True, ""
+
+    def _stream_gravimetric_machine_queue_empty(self):
+        machine = getattr(self, "machine", None)
+        checker = getattr(machine, "check_if_all_completed", None)
+        if not callable(checker):
+            return True
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+
+    def start_stream_gravimetric_starting_mass(self):
+        if not self.experimental_balance_enabled or not self._experimental_balance_is_streaming():
+            return False, "Reconnect the balance before starting the starting-mass reading."
+        if self._experimental_balance_active_stream_request is not None:
+            return False, "A stream-capture balance request is already active."
+        if not self._stream_gravimetric_machine_queue_empty():
+            return False, "Wait for the machine command queue before measuring the starting mass."
+        manager = self._stream_capture_manager()
+        request_id = f"stream_start_{uuid.uuid4().hex}"
+        ok, message, session_id = manager.stage_stream_gravimetric_starting_mass_request(
+            request_id
         )
+        if not ok:
+            return False, message
+        return self._submit_stream_gravimetric_starting_mass_request(request_id, session_id)
+
+    def use_previous_stream_gravimetric_starting_mass(self):
+        if not self.experimental_balance_enabled or not self.experimental_balance_stream_opt_in:
+            return False, "Balance-backed stream capture is not enabled."
+        if not self._experimental_balance_is_streaming():
+            return False, "Balance must remain Streaming before reusing the previous mass."
+        if not self._stream_gravimetric_machine_queue_empty():
+            return False, "Wait for the machine command queue before reusing the previous mass."
+        return self._stream_capture_manager().use_previous_stream_gravimetric_starting_mass()
+
+    def measure_new_stream_gravimetric_starting_mass(self):
+        return self._stream_capture_manager().measure_new_stream_gravimetric_starting_mass()
 
     def retry_stream_gravimetric_starting_mass(self):
         if not self.experimental_balance_enabled or not self._experimental_balance_is_streaming():
@@ -1742,6 +1787,8 @@ class Controller(QObject):
     def confirm_stream_gravimetric_starting_mass(self):
         if self._experimental_balance_active_stream_request is not None:
             return False, "The stable-mass request has not finished."
+        if not self._stream_gravimetric_machine_queue_empty():
+            return False, "Wait for the machine command queue before reinstalling the measured tube."
         return self._stream_capture_manager().confirm_stream_gravimetric_starting_mass()
 
     def _retire_stream_gravimetric_balance_request(self, *, phase=None):
@@ -1823,6 +1870,8 @@ class Controller(QObject):
     ):
         if self._experimental_balance_active_stream_request is not None:
             return False, "The stable-mass request has not finished."
+        if not self._stream_gravimetric_machine_queue_empty():
+            return False, "Wait for the machine command queue before confirming the ending mass."
         return self._stream_capture_manager().confirm_stream_gravimetric_ending_mass(
             rep_override=rep_override,
             notes=notes,
@@ -1846,6 +1895,9 @@ class Controller(QObject):
         self, reason="operator_manual_fallback"
     ):
         manager = self._stream_capture_manager()
+        invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
+        if callable(invalidate):
+            invalidate("Operator selected manual starting-mass fallback.")
         result = manager.return_stream_gravimetric_start_to_manual(
             reason=reason,
             preserve_inputs=True,
@@ -1860,6 +1912,9 @@ class Controller(QObject):
         self, reason="operator_abandoned"
     ):
         manager = self._stream_capture_manager()
+        invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
+        if callable(invalidate):
+            invalidate("A staged starting-mass workflow was abandoned.")
         result = manager.return_stream_gravimetric_start_to_manual(
             reason=reason,
             preserve_inputs=False,
@@ -2067,6 +2122,19 @@ class Controller(QObject):
 
     def update_machine_connection_status(self, status):
         """Update the machine connection status."""
+        manager = self._stream_capture_manager()
+        if manager is not None:
+            if status:
+                begin_epoch = getattr(manager, "begin_stream_gravimetric_transport_epoch", None)
+                if callable(begin_epoch):
+                    begin_epoch("Machine connection established; prior mass baseline is not reusable.")
+            else:
+                invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
+                if callable(invalidate):
+                    invalidate(
+                        "Machine disconnected; prior mass baseline is not reusable.",
+                        transport_uncertain=True,
+                    )
         if status:
             print("Controller: Machine connected successfully.")
             self.model.machine_model.connect_machine()
@@ -2077,6 +2145,13 @@ class Controller(QObject):
 
     def handle_reset_report(self, report: dict):
         report = dict(report or {})
+        manager = self._stream_capture_manager()
+        invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
+        if callable(invalidate):
+            invalidate(
+                "MCU reset invalidated the reusable mass baseline.",
+                transport_uncertain=True,
+            )
         machine_model = self.model.machine_model
         self._pending_reset_print_settings_restore = self._snapshot_print_settings_for_reset_restore(machine_model)
         self._interrupt_array_after_board_reset(report)
@@ -2209,6 +2284,13 @@ class Controller(QObject):
         return export_reset_debug_bundle(context, output_dir=destination)
 
     def handle_serial_connection_lost(self, report: dict):
+        manager = self._stream_capture_manager()
+        invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
+        if callable(invalidate):
+            invalidate(
+                "Serial connection loss invalidated the reusable mass baseline.",
+                transport_uncertain=True,
+            )
         report = dict(report or {})
         machine_model = self.model.machine_model
         self.expected_position = machine_model.get_current_position_dict()
@@ -2234,6 +2316,13 @@ class Controller(QObject):
 
     def handle_transport_fault(self, report: dict):
         report = dict(report or {})
+        manager = self._stream_capture_manager()
+        invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
+        if callable(invalidate):
+            invalidate(
+                "Command transport fault invalidated the reusable mass baseline.",
+                transport_uncertain=True,
+            )
         machine_model = self.model.machine_model
         self.expected_position = machine_model.get_current_position_dict()
         self.expected_location = None
@@ -2863,8 +2952,15 @@ class Controller(QObject):
 
         normalized = str(status or "idle").strip().lower()
         return normalized in {
+            "awaiting_starting_baseline_choice",
+            "pending_starting_loading_move",
+            "moving_to_starting_loading",
+            "awaiting_starting_balance_ready",
             "awaiting_starting_balance_mass",
             "awaiting_starting_balance_confirmation",
+            "awaiting_starting_camera_return_ready",
+            "pending_starting_camera_return",
+            "returning_to_starting_camera",
             "awaiting_ending_balance_ready",
             "awaiting_ending_balance_mass",
             "awaiting_ending_balance_confirmation",
@@ -9731,6 +9827,23 @@ class Controller(QObject):
         return self.model.calibration_manager.discard_stream_gravimetric_capture(
             reason=reason,
         )
+
+    def begin_stream_gravimetric_starting_loading_move(self):
+        return self.model.calibration_manager.begin_stream_gravimetric_starting_loading_move()
+
+    def on_stream_gravimetric_starting_loading_reached(self):
+        return self.model.calibration_manager.mark_stream_gravimetric_starting_loading_reached()
+
+    def begin_stream_gravimetric_starting_camera_return(self):
+        return self.model.calibration_manager.begin_stream_gravimetric_starting_camera_return()
+
+    def on_stream_gravimetric_starting_camera_reached(self):
+        return self.model.calibration_manager.mark_stream_gravimetric_starting_camera_reached()
+
+    def confirm_stream_gravimetric_starting_return_ready(self):
+        if not self._stream_gravimetric_machine_queue_empty():
+            return False, "Wait for the machine command queue before returning to the camera."
+        return self.model.calibration_manager.confirm_stream_gravimetric_starting_return_ready()
 
     def begin_stream_gravimetric_capture_loading_move(self):
         return self.model.calibration_manager.begin_stream_gravimetric_capture_loading_move()

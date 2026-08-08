@@ -150,6 +150,63 @@ def test_machine_dispense_commands_use_configured_frequency(qapp, test_profile):
     assert refuel_only.param2 == 10
 
 
+def test_machine_emits_typed_ejection_lifecycle_without_refuel(qapp, test_profile):
+    model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_dispense_frequency_hz=lambda: 10)
+    )
+    machine = mfr.Machine(model, profile=test_profile)
+    events = []
+    machine.ejection_command_event.connect(events.append)
+
+    dispense = machine.print_droplets(7)
+    refuel = machine.refuel_only(3)
+    machine.command_queue.mark_command_accepted(dispense.command_number)
+    machine.command_queue.update_command_status(
+        current_executing_command=dispense.command_number,
+        last_completed_command=dispense.command_number - 1,
+        last_accepted_command=dispense.command_number,
+        last_retired_command=dispense.command_number - 1,
+    )
+    machine.command_queue.update_command_status(
+        current_executing_command=refuel.command_number,
+        last_completed_command=dispense.command_number,
+        last_accepted_command=refuel.command_number,
+        last_retired_command=dispense.command_number,
+    )
+
+    assert [event.lifecycle.value for event in events] == [
+        "queued",
+        "accepted",
+        "executing",
+        "completed",
+    ]
+    assert all(event.command_type == "DISPENSE" for event in events)
+    assert all(event.requested_droplet_count == 7 for event in events)
+
+
+def test_machine_normalizes_canceled_ejection_lifecycle(qapp, test_profile):
+    model = SimpleNamespace(
+        machine_model=SimpleNamespace(get_dispense_frequency_hz=lambda: 10)
+    )
+    machine = mfr.Machine(model, profile=test_profile)
+    events = []
+    machine.ejection_command_event.connect(events.append)
+    first = machine.print_only(4)
+    second = machine.print_only(6)
+    first.mark_as_sent()
+    second.mark_as_sent()
+
+    machine.command_queue.update_command_status(
+        current_executing_command=second.command_number,
+        last_completed_command=first.command_number,
+        last_accepted_command=second.command_number,
+        last_retired_command=second.command_number,
+    )
+
+    assert events[-1].command_number == second.command_number
+    assert events[-1].lifecycle.value == "cancelled"
+
+
 def _register_settings_trace(machine, *, request_id="req-1", settings=None):
     settings = dict(settings or {"flash_delay": 6000, "num_droplets": 1})
     created_ns = time.monotonic_ns()

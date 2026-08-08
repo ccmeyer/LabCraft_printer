@@ -49,6 +49,12 @@ from tools.stream_analysis import online_fit as online_fit_mod
 from tools.stream_analysis import online_runtime as online_runtime_mod
 from tools.stream_analysis import online_tail as online_tail_mod
 from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
+from GravimetricLedger import (
+    EjectionCommandEvent,
+    EjectionLedgerSnapshot,
+    GravimetricEjectionLedger,
+    ReusableMassBaseline,
+)
 
 
 def _freeze_candidate_value(value):
@@ -1573,6 +1579,8 @@ class CalibrationManager(QObject):
         self._calibration_memory_ui_recommendation = {}
         self._pending_process_verdict = None
         self._stream_capture_state = {}
+        self._stream_gravimetric_ejection_ledger = GravimetricEjectionLedger()
+        self._stream_gravimetric_reusable_baseline = None
         self._stream_calibration_sequence_state = {}
         self._droplet_calibration_sequence_state = {}
         self._capture_performance_process_instance_index = 0
@@ -4909,6 +4917,19 @@ class CalibrationManager(QObject):
             "gripper_refresh_suspended": False,
             "mass_source": "manual",
             "ending_mass_source": "manual",
+            "starting_mass_origin": "manual",
+            "carried_from_session_id": None,
+            "ejection_attempt_generation_start": None,
+            "ejection_completed_total_start": None,
+            "ejection_completed_total_end": None,
+            "ejection_uncertainty_generation_start": None,
+            "ejection_integrity_status": "inactive",
+            "ejection_integrity_message": "",
+            "reusable_baseline_available": False,
+            "reusable_baseline_mass_mg": None,
+            "reusable_baseline_session_id": None,
+            "reusable_baseline_invalid_reason": "",
+            "starting_return_action": None,
             "balance_request_id": None,
             "balance_request_phase": None,
             "balance_request_status": "inactive",
@@ -4926,6 +4947,87 @@ class CalibrationManager(QObject):
         except Exception:
             return dict(self._stream_capture_state or {})
 
+    @staticmethod
+    def _stream_ejection_snapshot_dict(snapshot):
+        if not isinstance(snapshot, EjectionLedgerSnapshot):
+            return None
+        return {
+            "attempt_generation": int(snapshot.attempt_generation),
+            "completed_droplet_total": int(snapshot.completed_droplet_total),
+            "uncertainty_generation": int(snapshot.uncertainty_generation),
+        }
+
+    def _sync_stream_gravimetric_baseline_summary(self):
+        state = self._stream_capture_state or {}
+        baseline = getattr(self, "_stream_gravimetric_reusable_baseline", None)
+        ledger = getattr(self, "_stream_gravimetric_ejection_ledger", None)
+        current = ledger.snapshot() if ledger is not None else None
+        reusable = bool(
+            baseline is not None
+            and baseline.valid
+            and current is not None
+            and ledger.reusable_since(baseline.ledger_snapshot, current)
+        )
+        if baseline is not None and baseline.valid and not reusable:
+            baseline = baseline.invalidated("Droplet ejection or transport uncertainty occurred after the ending mass.")
+            self._stream_gravimetric_reusable_baseline = baseline
+        state["reusable_baseline_available"] = reusable
+        state["reusable_baseline_mass_mg"] = (
+            str(baseline.ending_mass_mg) if reusable else None
+        )
+        state["reusable_baseline_session_id"] = (
+            str(baseline.source_session_id) if reusable else None
+        )
+        state["reusable_baseline_invalid_reason"] = (
+            "" if reusable or baseline is None else str(baseline.invalidation_reason or "")
+        )
+
+    def get_stream_gravimetric_ejection_snapshot(self):
+        return self._stream_ejection_snapshot_dict(
+            self._stream_gravimetric_ejection_ledger.snapshot()
+        )
+
+    def record_stream_gravimetric_ejection_event(self, event):
+        if not isinstance(event, EjectionCommandEvent):
+            return False
+        before = self._stream_gravimetric_ejection_ledger.snapshot()
+        after = self._stream_gravimetric_ejection_ledger.record(event)
+        if after.attempt_generation != before.attempt_generation:
+            baseline = self._stream_gravimetric_reusable_baseline
+            if baseline is not None and baseline.valid:
+                self._stream_gravimetric_reusable_baseline = baseline.invalidated(
+                    "A droplet ejection was attempted after the ending mass."
+                )
+        start_uncertainty = (self._stream_capture_state or {}).get(
+            "ejection_uncertainty_generation_start"
+        )
+        if (
+            start_uncertainty is not None
+            and after.uncertainty_generation > int(start_uncertainty)
+        ):
+            self._stream_capture_state["ejection_integrity_status"] = "uncertain"
+            self._stream_capture_state["ejection_integrity_message"] = (
+                "An accepted ejection command had uncertain completion."
+            )
+        self._sync_stream_gravimetric_baseline_summary()
+        return True
+
+    def invalidate_stream_gravimetric_baseline(self, reason, *, transport_uncertain=False):
+        if transport_uncertain:
+            self._stream_gravimetric_ejection_ledger.mark_uncertain(str(reason or ""))
+        baseline = self._stream_gravimetric_reusable_baseline
+        if baseline is not None and baseline.valid:
+            self._stream_gravimetric_reusable_baseline = baseline.invalidated(str(reason or "Baseline invalidated."))
+        self._sync_stream_gravimetric_baseline_summary()
+        return True
+
+    def begin_stream_gravimetric_transport_epoch(self, reason="machine connected"):
+        self._stream_gravimetric_ejection_ledger.begin_transport_epoch(reason)
+        return self.invalidate_stream_gravimetric_baseline(
+            str(reason or "Machine transport changed."),
+            transport_uncertain=False,
+        )
+
     def _emit_stream_capture_state_changed(self):
         try:
             self.streamCaptureStateChanged.emit(self._copy_stream_capture_state())
@@ -4936,6 +5038,7 @@ class CalibrationManager(QObject):
         self._stream_capture_state = self._build_default_stream_capture_state(
             status_message=status_message,
         )
+        self._sync_stream_gravimetric_baseline_summary()
         self._emit_stream_capture_state_changed()
 
     def _build_default_stream_calibration_sequence_state(self, *, status_message: str | None = None):
@@ -5066,6 +5169,7 @@ class CalibrationManager(QObject):
     def get_stream_gravimetric_capture_state(self):
         if not getattr(self, "_stream_capture_state", None):
             self._reset_stream_gravimetric_capture_state()
+        self._sync_stream_gravimetric_baseline_summary()
         state = self._copy_stream_capture_state()
         if str(state.get("status") or "idle") == "idle":
             settings = {}
@@ -5090,8 +5194,15 @@ class CalibrationManager(QObject):
     def has_open_stream_gravimetric_capture(self) -> bool:
         status = str((getattr(self, "_stream_capture_state", None) or {}).get("status") or "idle")
         return status in {
+            "awaiting_starting_baseline_choice",
+            "pending_starting_loading_move",
+            "moving_to_starting_loading",
+            "awaiting_starting_balance_ready",
             "awaiting_starting_balance_mass",
             "awaiting_starting_balance_confirmation",
+            "awaiting_starting_camera_return_ready",
+            "pending_starting_camera_return",
+            "returning_to_starting_camera",
             "pending_gripper_refresh",
             "refreshing_gripper",
             "suspending_gripper_refresh",
@@ -5113,8 +5224,15 @@ class CalibrationManager(QObject):
     def is_stream_gravimetric_capture_busy(self) -> bool:
         status = str((getattr(self, "_stream_capture_state", None) or {}).get("status") or "idle")
         return status in {
+            "awaiting_starting_baseline_choice",
+            "pending_starting_loading_move",
+            "moving_to_starting_loading",
+            "awaiting_starting_balance_ready",
             "awaiting_starting_balance_mass",
             "awaiting_starting_balance_confirmation",
+            "awaiting_starting_camera_return_ready",
+            "pending_starting_camera_return",
+            "returning_to_starting_camera",
             "pending_gripper_refresh",
             "refreshing_gripper",
             "suspending_gripper_refresh",
@@ -5396,8 +5514,40 @@ class CalibrationManager(QObject):
     def _update_stream_capture_counts(self):
         counts = self._derive_stream_capture_counts()
         self._stream_capture_state["background_capture_count"] = int(counts.get("background_capture_count") or 0)
-        self._stream_capture_state["printed_capture_count"] = int(counts.get("printed_capture_count") or 0)
+        capture_count = int(counts.get("printed_capture_count") or 0)
+        self._stream_capture_state["capture_derived_printed_count"] = capture_count
         self._stream_capture_state["printed_capture_event_count"] = int(counts.get("printed_capture_event_count") or 0)
+        ledger_start = self._stream_capture_state.get("ejection_completed_total_start")
+        if (
+            str(self._stream_capture_state.get("mass_source") or "") == "veritas_balance"
+            and ledger_start is not None
+        ):
+            snapshot = self._stream_gravimetric_ejection_ledger.snapshot()
+            command_count = max(0, int(snapshot.completed_droplet_total) - int(ledger_start))
+            self._stream_capture_state["ejection_completed_total_end"] = int(
+                snapshot.completed_droplet_total
+            )
+            self._stream_capture_state["printed_capture_count"] = command_count
+            if self._stream_capture_state.get("ejection_integrity_status") != "uncertain":
+                if command_count != capture_count:
+                    message = (
+                        "Command-derived ejection count "
+                        f"({command_count}) differs from capture-derived count ({capture_count}); "
+                        "the command-derived count will be saved."
+                    )
+                    self._stream_capture_state["ejection_integrity_status"] = "warning"
+                    self._stream_capture_state["ejection_integrity_message"] = message
+                    warnings = self._stream_capture_warning_list(
+                        self._stream_capture_state.get("analysis_warnings")
+                    )
+                    if message not in warnings:
+                        warnings.append(message)
+                    self._stream_capture_state["analysis_warnings"] = warnings
+                else:
+                    self._stream_capture_state["ejection_integrity_status"] = "clean"
+                    self._stream_capture_state["ejection_integrity_message"] = ""
+        else:
+            self._stream_capture_state["printed_capture_count"] = capture_count
         return counts
 
     def _write_stream_capture_log(self, *, outcome: str, error_message: str = "", csv_row: dict | None = None):
@@ -6084,9 +6234,29 @@ class CalibrationManager(QObject):
         if not message:
             message = (
                 "Failed to move printer head to loading position."
-                if target_name == "loading"
+                if target_name in {"loading", "starting_loading"}
                 else "Failed to move printer head to camera position."
             )
+
+        if target_name == "starting_loading" and status in {
+            "pending_starting_loading_move",
+            "moving_to_starting_loading",
+        }:
+            self._stream_capture_state["status"] = "pending_starting_loading_move"
+            self._stream_capture_state["status_message"] = f"{message} Resolve the issue and retry."
+            self._stream_capture_state["error_message"] = message
+            self._emit_stream_capture_state_changed()
+            return True, ""
+
+        if target_name == "starting_camera" and status in {
+            "pending_starting_camera_return",
+            "returning_to_starting_camera",
+        }:
+            self._stream_capture_state["status"] = "pending_starting_camera_return"
+            self._stream_capture_state["status_message"] = f"{message} Resolve the issue and retry."
+            self._stream_capture_state["error_message"] = message
+            self._emit_stream_capture_state_changed()
+            return True, ""
 
         if target_name == "loading" and status in {"pending_loading_move", "moving_to_loading"}:
             self._stream_capture_state["status"] = "pending_loading_move"
@@ -6109,6 +6279,13 @@ class CalibrationManager(QObject):
         return False, "Stream gravimetric capture is not waiting on that move."
 
     def _build_stream_capture_metadata_row(self, *, ending_mass_mg: float, rep_value: int, notes: str):
+        if str((self._stream_capture_state or {}).get("ejection_integrity_status") or "") == "uncertain":
+            raise ValueError(
+                str(
+                    (self._stream_capture_state or {}).get("ejection_integrity_message")
+                    or "Ejection completion is uncertain; discard this run instead of saving mass-per-print data."
+                )
+            )
         dataset_run_id = str(
             (self._stream_capture_state or {}).get("dataset_run_id")
             or (self._stream_capture_state or {}).get("timecourse_run_id")
@@ -6403,6 +6580,7 @@ class CalibrationManager(QObject):
             "child_processes": [],
             "background_capture_count": None,
             "printed_capture_count": None,
+            "capture_derived_printed_count": None,
             "printed_capture_event_count": None,
             "flow_fit_status": "",
             "tail_phase_status": "",
@@ -6428,6 +6606,21 @@ class CalibrationManager(QObject):
             "gripper_refresh_suspended": False,
             "mass_source": str(mass_source),
             "ending_mass_source": "manual",
+            "starting_mass_origin": (
+                "measured" if str(mass_source) == "veritas_balance" else "manual"
+            ),
+            "carried_from_session_id": None,
+            "ejection_attempt_generation_start": None,
+            "ejection_completed_total_start": None,
+            "ejection_completed_total_end": None,
+            "ejection_uncertainty_generation_start": None,
+            "ejection_integrity_status": "inactive",
+            "ejection_integrity_message": "",
+            "reusable_baseline_available": False,
+            "reusable_baseline_mass_mg": None,
+            "reusable_baseline_session_id": None,
+            "reusable_baseline_invalid_reason": "",
+            "starting_return_action": None,
             "balance_request_id": balance_request_id,
             "balance_request_phase": "starting" if balance_request_id else None,
             "balance_request_status": str(balance_request_status),
@@ -6447,6 +6640,8 @@ class CalibrationManager(QObject):
         session_id=None,
         mass_source="manual",
         starting_mass_capture=None,
+        starting_mass_origin=None,
+        carried_from_session_id=None,
     ):
         starting_mass = self._stream_capture_float_or_none(starting_mass_mg)
         if starting_mass is None:
@@ -6485,6 +6680,27 @@ class CalibrationManager(QObject):
             ),
             starting_mass_capture=starting_mass_capture,
         )
+        ledger_snapshot = self._stream_gravimetric_ejection_ledger.snapshot()
+        self._stream_capture_state["starting_mass_origin"] = str(
+            starting_mass_origin
+            or ("measured" if mass_source == "veritas_balance" else "manual")
+        )
+        self._stream_capture_state["carried_from_session_id"] = (
+            str(carried_from_session_id) if carried_from_session_id else None
+        )
+        self._stream_capture_state["ejection_attempt_generation_start"] = int(
+            ledger_snapshot.attempt_generation
+        )
+        self._stream_capture_state["ejection_completed_total_start"] = int(
+            ledger_snapshot.completed_droplet_total
+        )
+        self._stream_capture_state["ejection_uncertainty_generation_start"] = int(
+            ledger_snapshot.uncertainty_generation
+        )
+        self._stream_capture_state["ejection_integrity_status"] = (
+            "clean" if mass_source == "veritas_balance" else "inactive"
+        )
+        self._sync_stream_gravimetric_baseline_summary()
         self._emit_stream_capture_state_changed()
         return True, ""
 
@@ -6505,15 +6721,12 @@ class CalibrationManager(QObject):
 
     def stage_stream_gravimetric_balance_start(
         self,
-        request_id,
+        request_id=None,
         *,
         rep_override=None,
         notes="",
         capture_mode="timecourse",
     ):
-        explicit_request_id = str(request_id or "").strip()
-        if not explicit_request_id:
-            return False, "Balance request id is required.", None
         ok, message, prepared = self._prepare_stream_gravimetric_capture_start(
             require_starting_mass=False,
             rep_override=rep_override,
@@ -6524,18 +6737,80 @@ class CalibrationManager(QObject):
             return False, message, None
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_id = f"stream_capture_{ts}_{uuid.uuid4().hex[:8]}"
+        self._sync_stream_gravimetric_baseline_summary()
+        baseline_available = bool(
+            (self._stream_capture_state or {}).get("reusable_baseline_available")
+        )
+        status = (
+            "awaiting_starting_baseline_choice"
+            if baseline_available
+            else "pending_starting_loading_move"
+        )
+        status_message = (
+            "A verified previous ending mass is available. Confirm the same collection tube or measure a new starting mass."
+            if baseline_available
+            else "Move to the loading position to measure a starting mass."
+        )
         self._stream_capture_state = self._build_stream_gravimetric_capture_start_state(
             prepared,
             session_id=session_id,
-            status="awaiting_starting_balance_mass",
-            status_message="Waiting for a stable starting mass from the balance.",
+            status=status,
+            status_message=status_message,
             starting_mass_mg=None,
             starting_flash=None,
             mass_source="veritas_balance",
-            balance_request_id=explicit_request_id,
-            balance_request_status="requesting",
-            balance_status_message="Starting stable-mass request.",
+            balance_request_id=None,
+            balance_request_status="inactive",
+            balance_status_message="",
         )
+        self._sync_stream_gravimetric_baseline_summary()
+        self._emit_stream_capture_state_changed()
+        return True, "", session_id
+
+    def begin_stream_gravimetric_starting_loading_move(self):
+        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        if status not in {
+            "pending_starting_loading_move",
+            "awaiting_starting_baseline_choice",
+        }:
+            return False, "Stream capture is not ready for the starting loading move."
+        self._stream_capture_state["status"] = "moving_to_starting_loading"
+        self._stream_capture_state["status_message"] = (
+            "Moving to the loading position for the starting mass measurement."
+        )
+        self._stream_capture_state["error_message"] = ""
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def mark_stream_gravimetric_starting_loading_reached(self):
+        status = str((self._stream_capture_state or {}).get("status") or "idle")
+        if status not in {"pending_starting_loading_move", "moving_to_starting_loading"}:
+            return False, "Stream capture is not waiting for the starting loading position."
+        self._stream_capture_state["status"] = "awaiting_starting_balance_ready"
+        self._stream_capture_state["status_message"] = (
+            "Loading position reached. Place the collection tube on the balance, then start the reading."
+        )
+        self._stream_capture_state["balance_request_status"] = "inactive"
+        self._stream_capture_state["balance_status_message"] = (
+            "Place the sample on the balance before starting the reading."
+        )
+        self._stream_capture_state["error_message"] = ""
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def stage_stream_gravimetric_starting_mass_request(self, request_id):
+        if str((self._stream_capture_state or {}).get("status") or "") != "awaiting_starting_balance_ready":
+            return False, "The starting sample is not ready for a balance reading.", None
+        explicit_request_id = str(request_id or "").strip()
+        if not explicit_request_id:
+            return False, "Balance request id is required.", None
+        self._stream_capture_state["status"] = "awaiting_starting_balance_mass"
+        self._stream_capture_state["balance_request_id"] = explicit_request_id
+        self._stream_capture_state["balance_request_phase"] = "starting"
+        self._stream_capture_state["balance_request_status"] = "requesting"
+        self._stream_capture_state["balance_status_message"] = "Starting stable-mass request."
+        self._stream_capture_state["starting_mass_capture"] = None
+        session_id = str(self._stream_capture_state.get("session_id") or "")
         self._emit_stream_capture_state_changed()
         return True, "", session_id
 
@@ -6649,9 +6924,13 @@ class CalibrationManager(QObject):
         if str(candidate.get("outcome") or "") != "stable" or candidate.get("stable_mass_mg") in (None, ""):
             return False
         self._stream_capture_state["status"] = "awaiting_starting_balance_confirmation"
-        self._stream_capture_state["status_message"] = "Stable starting mass is ready for operator confirmation."
+        self._stream_capture_state["status_message"] = (
+            "Stable starting mass is ready. Reinstall the same collection tube before continuing."
+        )
         self._stream_capture_state["balance_request_status"] = "stable_candidate"
-        self._stream_capture_state["balance_status_message"] = "Confirm the stable mass before beginning the stream sequence."
+        self._stream_capture_state["balance_status_message"] = (
+            "Reinstall the same tube, then confirm the mass and return to the camera."
+        )
         self._stream_capture_state["starting_mass_capture"] = candidate
         self._emit_stream_capture_state_changed()
         return True
@@ -6664,7 +6943,22 @@ class CalibrationManager(QObject):
         mass = self._stream_capture_float_or_none(capture.get("stable_mass_mg"))
         if mass is None:
             return False, "Stable starting mass candidate is unavailable."
-        prepared = {
+        snapshot = self._stream_gravimetric_ejection_ledger.snapshot()
+        state["starting_mass_mg"] = float(mass)
+        state["starting_mass_origin"] = "measured"
+        state["ejection_attempt_generation_start"] = int(snapshot.attempt_generation)
+        state["ejection_uncertainty_generation_start"] = int(snapshot.uncertainty_generation)
+        state["status"] = "pending_starting_camera_return"
+        state["status_message"] = (
+            "Starting mass confirmed. Return the reinstalled collection tube to the camera."
+        )
+        state["balance_status_message"] = "Confirmed stable starting mass."
+        state["error_message"] = ""
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def _prepared_stream_gravimetric_start_from_state(self, state):
+        return {
             "calibration_file_path": self._resolve_stream_capture_calibration_file_path(),
             "condition_snapshot": dict(state.get("condition_snapshot") or {}),
             "suggested_rep": int(state.get("suggested_rep") or 1),
@@ -6679,27 +6973,122 @@ class CalibrationManager(QObject):
             "gripper_pulse_duration_snapshot_ms": int(state.get("gripper_pulse_duration_snapshot_ms") or 0),
             "gripper_was_open": bool(state.get("gripper_was_open")),
         }
-        result = self._activate_stream_gravimetric_capture_start(
-            prepared,
-            starting_mass_mg=mass,
+
+    def use_previous_stream_gravimetric_starting_mass(self):
+        state = self._stream_capture_state or {}
+        if str(state.get("status") or "") != "awaiting_starting_baseline_choice":
+            return False, "No reusable ending mass is awaiting confirmation."
+        self._sync_stream_gravimetric_baseline_summary()
+        baseline = self._stream_gravimetric_reusable_baseline
+        if not bool(state.get("reusable_baseline_available")) or baseline is None:
+            state["status"] = "pending_starting_loading_move"
+            state["status_message"] = "The prior mass is no longer reusable; measure a new starting mass."
+            self._emit_stream_capture_state_changed()
+            return False, "The prior ending mass was invalidated by an ejection or transport change."
+        capture = {
+            "origin": "carried_forward",
+            "stable_mass_mg": str(baseline.ending_mass_mg),
+            "carried_from_session_id": str(baseline.source_session_id),
+            "source_ending_mass_capture": dict(baseline.ending_mass_capture),
+            "baseline_ledger_snapshot": self._stream_ejection_snapshot_dict(baseline.ledger_snapshot),
+        }
+        return self._activate_stream_gravimetric_capture_start(
+            self._prepared_stream_gravimetric_start_from_state(state),
+            starting_mass_mg=baseline.ending_mass_mg,
             session_id=str(state.get("session_id") or ""),
             mass_source="veritas_balance",
             starting_mass_capture=capture,
+            starting_mass_origin="carried_forward",
+            carried_from_session_id=baseline.source_session_id,
         )
-        if isinstance(result, tuple) and result and result[0] is False:
-            self._stream_capture_state["error_message"] = str(result[1] or "")
-            self._stream_capture_state["balance_status_message"] = str(result[1] or "")
+
+    def measure_new_stream_gravimetric_starting_mass(self):
+        if str((self._stream_capture_state or {}).get("status") or "") != "awaiting_starting_baseline_choice":
+            return False, "A reusable starting mass is not awaiting a choice."
+        self._stream_capture_state["status"] = "pending_starting_loading_move"
+        self._stream_capture_state["status_message"] = (
+            "Move to the loading position to measure a new starting mass."
+        )
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def begin_stream_gravimetric_starting_camera_return(self):
+        status = str((self._stream_capture_state or {}).get("status") or "")
+        if status not in {"pending_starting_camera_return", "awaiting_starting_camera_return_ready"}:
+            return False, "Stream capture is not ready to return from the starting measurement."
+        self._stream_capture_state["status"] = "returning_to_starting_camera"
+        self._stream_capture_state["status_message"] = "Returning the printer head to the camera."
+        self._emit_stream_capture_state_changed()
+        return True, ""
+
+    def mark_stream_gravimetric_starting_camera_reached(self):
+        state = self._stream_capture_state or {}
+        if str(state.get("status") or "") not in {
+            "pending_starting_camera_return",
+            "returning_to_starting_camera",
+        }:
+            return False, "Stream capture is not waiting for the starting camera return."
+        if str(state.get("starting_return_action") or "") in {"manual_idle", "discard_idle"}:
+            preserve = str(state.get("starting_return_action")) == "manual_idle"
+            reason = str(state.get("balance_fallback_reason") or "")
+            message = "Returned to camera for manual starting-mass entry." if preserve else "Discarded staged starting-mass measurement."
+            self._reset_stream_gravimetric_capture_state(status_message=message)
+            self._stream_capture_state["preserve_start_inputs"] = preserve
+            self._stream_capture_state["balance_fallback_reason"] = reason
             self._emit_stream_capture_state_changed()
+            return True, ""
+        snapshot = self._stream_gravimetric_ejection_ledger.snapshot()
+        if snapshot.attempt_generation != int(state.get("ejection_attempt_generation_start") or 0):
+            state["status"] = "pending_starting_loading_move"
+            state["starting_mass_mg"] = None
+            state["starting_mass_capture"] = None
+            state["status_message"] = (
+                "An ejection occurred after the starting mass was measured; measure it again."
+            )
+            state["balance_request_status"] = "inactive"
+            self._emit_stream_capture_state_changed()
+            return False, "Starting mass was invalidated by an intervening ejection."
+        capture = dict(state.get("starting_mass_capture") or {})
+        result = self._activate_stream_gravimetric_capture_start(
+            self._prepared_stream_gravimetric_start_from_state(state),
+            starting_mass_mg=state.get("starting_mass_mg"),
+            session_id=str(state.get("session_id") or ""),
+            mass_source="veritas_balance",
+            starting_mass_capture=capture,
+            starting_mass_origin="measured",
+        )
         return result
+
+    def confirm_stream_gravimetric_starting_return_ready(self):
+        if str((self._stream_capture_state or {}).get("status") or "") != "awaiting_starting_camera_return_ready":
+            return False, "The starting workflow is not waiting for tube reinstallation."
+        snapshot = self._stream_gravimetric_ejection_ledger.snapshot()
+        self._stream_capture_state["ejection_attempt_generation_start"] = int(snapshot.attempt_generation)
+        self._stream_capture_state["status"] = "pending_starting_camera_return"
+        self._stream_capture_state["status_message"] = "Return the reinstalled collection tube to the camera."
+        self._emit_stream_capture_state_changed()
+        return True, ""
 
     def return_stream_gravimetric_start_to_manual(self, reason="operator_manual_fallback", *, preserve_inputs=True):
         status = str((self._stream_capture_state or {}).get("status") or "idle")
-        if status not in {"awaiting_starting_balance_mass", "awaiting_starting_balance_confirmation"}:
+        if status not in {
+            "awaiting_starting_balance_ready",
+            "awaiting_starting_balance_mass",
+            "awaiting_starting_balance_confirmation",
+        }:
             return False, "Stream capture is not waiting for a starting balance mass."
-        message = "Returned to manual starting-mass entry."
-        self._stream_capture_state = self._build_default_stream_capture_state(status_message=message)
-        self._stream_capture_state["balance_fallback_reason"] = str(reason or "")
+        self._stream_capture_state["status"] = "awaiting_starting_camera_return_ready"
+        self._stream_capture_state["status_message"] = (
+            "Reinstall the collection tube, then return the printer head to the camera for manual entry."
+        )
+        self._stream_capture_state["starting_return_action"] = (
+            "manual_idle" if preserve_inputs else "discard_idle"
+        )
         self._stream_capture_state["preserve_start_inputs"] = bool(preserve_inputs)
+        self._stream_capture_state["balance_fallback_reason"] = str(reason or "")
+        self._stream_capture_state["balance_request_id"] = None
+        self._stream_capture_state["balance_request_status"] = "inactive"
+        self._stream_capture_state["balance_request_phase"] = None
         self._emit_stream_capture_state_changed()
         return True, ""
 
@@ -6891,6 +7280,9 @@ class CalibrationManager(QObject):
             "awaiting_ending_balance_confirmation",
         }:
             return False, "Stream capture is not waiting for an ending balance mass."
+        self.invalidate_stream_gravimetric_baseline(
+            "Ending mass was entered manually; no reusable balance baseline was established."
+        )
         self._stream_capture_state["status"] = "awaiting_mass_entry"
         self._stream_capture_state["status_message"] = (
             "Enter ending mass manually and inspect the printer head."
@@ -6969,11 +7361,30 @@ class CalibrationManager(QObject):
         )
         if ending_mass is None:
             return False, "Stable ending mass candidate is unavailable."
-        return self._save_stream_gravimetric_capture(
+        snapshot = self._stream_gravimetric_ejection_ledger.snapshot()
+        session_id = str(state.get("session_id") or "")
+        state["reusable_baseline_available"] = True
+        state["reusable_baseline_mass_mg"] = str(capture.get("stable_mass_mg"))
+        state["reusable_baseline_session_id"] = session_id
+        state["reusable_baseline_invalid_reason"] = ""
+        result = self._save_stream_gravimetric_capture(
             ending_mass,
             rep_override=rep_override,
             notes=notes,
         )
+        if isinstance(result, tuple) and result and result[0] is False:
+            self._sync_stream_gravimetric_baseline_summary()
+            return result
+        self._stream_gravimetric_reusable_baseline = ReusableMassBaseline(
+            ending_mass_mg=str(capture.get("stable_mass_mg")),
+            ending_mass_capture=capture,
+            source_session_id=session_id,
+            ledger_snapshot=snapshot,
+            created_monotonic_ns=time.monotonic_ns(),
+        )
+        self._sync_stream_gravimetric_baseline_summary()
+        self._emit_stream_capture_state_changed()
+        return result
 
     def finalize_stream_gravimetric_capture(
         self,
@@ -7003,7 +7414,16 @@ class CalibrationManager(QObject):
         status = str((self._stream_capture_state or {}).get("status") or "idle")
         if status == "idle":
             return False, "No active stream gravimetric capture session to discard."
+        self.invalidate_stream_gravimetric_baseline(
+            "A staged or active gravimetric run was discarded."
+        )
+        if status == "awaiting_starting_baseline_choice":
+            self._reset_stream_gravimetric_capture_state(
+                status_message="Discarded staged starting-mass workflow."
+            )
+            return True, ""
         if status in {
+            "awaiting_starting_balance_ready",
             "awaiting_starting_balance_mass",
             "awaiting_starting_balance_confirmation",
         }:
@@ -7013,8 +7433,23 @@ class CalibrationManager(QObject):
             )
         if status == "running" and self.activeCalibration is not None:
             return False, "Stop the stream gravimetric capture before discarding it."
-        if status in {"refreshing_gripper", "suspending_gripper_refresh", "moving_to_loading", "restoring_gripper_refresh", "returning_to_camera"}:
+        if status in {
+            "pending_starting_loading_move",
+            "moving_to_starting_loading",
+            "pending_starting_camera_return",
+            "returning_to_starting_camera",
+            "refreshing_gripper",
+            "suspending_gripper_refresh",
+            "moving_to_loading",
+            "restoring_gripper_refresh",
+            "returning_to_camera",
+        }:
             return False, "Wait for the current stream gravimetric capture action to finish before discarding it."
+        if status == "awaiting_starting_camera_return_ready":
+            self._stream_capture_state["starting_return_action"] = "discard_idle"
+            self._stream_capture_state["balance_fallback_reason"] = str(reason or "")
+            self._emit_stream_capture_state_changed()
+            return True, ""
         if status == "pending_gripper_restore":
             return False, "Wait for gripper auto-refresh settings to be restored before discarding this session."
         if status in {"pending_camera_return"} and str((self._stream_capture_state or {}).get("sidecar_outcome") or "") == "saved":

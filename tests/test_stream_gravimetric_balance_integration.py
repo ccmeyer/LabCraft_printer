@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ApplicationComposition import ExperimentalFeatures
@@ -21,6 +22,7 @@ from CalibrationClasses.View import (
     StreamCaptureMassEntryDialog,
 )
 from Controller import Controller, ExperimentalBalancePort
+from GravimetricLedger import EjectionCommandEvent, EjectionCommandLifecycle
 from tests.test_stream_gravimetric_capture import (
     SignalStub,
     _make_manager,
@@ -85,6 +87,22 @@ class _UiController(QtCore.QObject):
 
     def confirm_stream_gravimetric_starting_mass(self):
         self.measurement_calls.append("confirm")
+        return True, ""
+
+    def use_previous_stream_gravimetric_starting_mass(self):
+        self.measurement_calls.append("reuse")
+        return True, ""
+
+    def measure_new_stream_gravimetric_starting_mass(self):
+        self.measurement_calls.append("measure_new")
+        return True, ""
+
+    def start_stream_gravimetric_starting_mass(self):
+        self.measurement_calls.append("start_reading")
+        return True, ""
+
+    def confirm_stream_gravimetric_starting_return_ready(self):
+        self.measurement_calls.append("return_ready")
         return True, ""
 
 
@@ -152,6 +170,16 @@ def _controller_with_manager(manager, *, service=None, state="streaming"):
     return controller
 
 
+def _stage_and_start_balance_read(controller, manager, **start_kwargs):
+    assert controller.start_stream_gravimetric_capture_with_balance(**start_kwargs) == (True, "")
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "pending_starting_loading_move"
+    assert controller.begin_stream_gravimetric_starting_loading_move() == (True, "")
+    assert controller.on_stream_gravimetric_starting_loading_reached() == (True, "")
+    assert manager.get_stream_gravimetric_capture_state()["status"] == "awaiting_starting_balance_ready"
+    assert controller.start_stream_gravimetric_starting_mass() == (True, "")
+    return controller._experimental_balance_service.requests[-1]
+
+
 def _prepare_completed_balance_run(manager, *, starting_mass="10.00"):
     state = manager._build_default_stream_capture_state()
     state.update(
@@ -180,6 +208,17 @@ def _prepare_completed_balance_run(manager, *, starting_mass="10.00"):
     )
     manager._stream_capture_state = state
     return state
+
+
+def _complete_balance_ending_and_return(manager, controller, service, mass="12.50"):
+    assert controller.on_stream_gravimetric_capture_loading_reached() == (True, "")
+    assert controller.start_stream_gravimetric_ending_mass() == (True, "")
+    controller._on_experimental_balance_request_finished(
+        _stable_result(service.requests[-1], mass)
+    )
+    assert controller.confirm_stream_gravimetric_ending_mass() == (True, "")
+    assert manager.mark_stream_gravimetric_capture_gripper_restored() == (True, "")
+    assert manager.mark_stream_gravimetric_capture_camera_reached() == (True, "")
 
 
 def _evidence(mass="12.34"):
@@ -406,7 +445,14 @@ def test_controller_stages_candidate_without_starting_session_until_confirmation
     )
 
     assert result == (True, "")
-    assert len(service.requests) == 1
+    assert service.requests == []
+    staged = manager.get_stream_gravimetric_capture_state()
+    assert staged["status"] == "pending_starting_loading_move"
+    assert begin_calls == []
+    assert controller.begin_stream_gravimetric_starting_loading_move() == (True, "")
+    assert controller.on_stream_gravimetric_starting_loading_reached() == (True, "")
+    assert service.requests == []
+    assert controller.start_stream_gravimetric_starting_mass() == (True, "")
     request = service.requests[0]
     assert request.phase is StableMassPhase.STARTING
     waiting = manager.get_stream_gravimetric_capture_state()
@@ -470,10 +516,17 @@ def test_controller_stages_candidate_without_starting_session_until_confirmation
     assert manager.calibration_queue == []
 
     assert controller.confirm_stream_gravimetric_starting_mass() == (True, "")
+    returning = manager.get_stream_gravimetric_capture_state()
+    assert returning["status"] == "pending_starting_camera_return"
+    assert returning["starting_mass_mg"] == 12.34
+    assert begin_calls == []
+    assert controller.begin_stream_gravimetric_starting_camera_return() == (True, "")
+    assert controller.on_stream_gravimetric_starting_camera_reached() == (True, "")
     started = manager.get_stream_gravimetric_capture_state()
     assert started["status"] == "pending_gripper_refresh"
     assert started["starting_mass_mg"] == 12.34
     assert started["mass_source"] == "veritas_balance"
+    assert started["starting_mass_origin"] == "measured"
     assert len(begin_calls) == 1
     assert controller.confirm_stream_gravimetric_starting_mass()[0] is False
     assert len(begin_calls) == 1
@@ -485,7 +538,10 @@ def test_request_rejection_timeout_retry_and_stale_result_are_safe(tmp_path):
     controller = _controller_with_manager(manager, service=service)
     assert controller.set_experimental_balance_stream_opt_in(True)
 
-    ok, message = controller.start_stream_gravimetric_capture_with_balance()
+    assert controller.start_stream_gravimetric_capture_with_balance() == (True, "")
+    assert controller.begin_stream_gravimetric_starting_loading_move() == (True, "")
+    assert controller.on_stream_gravimetric_starting_loading_reached() == (True, "")
+    ok, message = controller.start_stream_gravimetric_starting_mass()
     assert not ok
     assert "rejection" in message
     rejected = manager.get_stream_gravimetric_capture_state()
@@ -537,8 +593,7 @@ def test_cancel_race_cannot_become_candidate(tmp_path):
     service = _StableMassService()
     controller = _controller_with_manager(manager, service=service)
     assert controller.set_experimental_balance_stream_opt_in(True)
-    assert controller.start_stream_gravimetric_capture_with_balance() == (True, "")
-    request = service.requests[-1]
+    request = _stage_and_start_balance_read(controller, manager)
 
     assert controller.cancel_stream_gravimetric_starting_mass() == (True, "")
     assert service.cancel_calls == [request.request_id]
@@ -559,16 +614,16 @@ def test_manual_fallback_invalidates_late_result_and_preserves_manual_marker(
     service = _StableMassService()
     controller = _controller_with_manager(manager, service=service)
     assert controller.set_experimental_balance_stream_opt_in(True)
-    assert controller.start_stream_gravimetric_capture_with_balance(
+    request = _stage_and_start_balance_read(
+        controller,
+        manager,
         rep_override=4,
         notes="keep these inputs",
-    ) == (True, "")
-    request = service.requests[-1]
+    )
 
     assert controller.use_manual_stream_gravimetric_starting_mass() == (True, "")
     fallback = manager.get_stream_gravimetric_capture_state()
-    assert fallback["status"] == "idle"
-    assert fallback["mass_source"] == "manual"
+    assert fallback["status"] == "awaiting_starting_camera_return_ready"
     assert fallback["balance_fallback_reason"] == "operator_manual_fallback"
     assert fallback["preserve_start_inputs"] is True
     assert controller.experimental_balance_stream_opt_in is False
@@ -576,8 +631,13 @@ def test_manual_fallback_invalidates_late_result_and_preserves_manual_marker(
 
     controller._on_experimental_balance_request_finished(_stable_result(request))
     after_late = manager.get_stream_gravimetric_capture_state()
-    assert after_late["status"] == "idle"
-    assert after_late["starting_mass_mg"] == 0.0
+    assert after_late["status"] == "awaiting_starting_camera_return_ready"
+    assert controller.confirm_stream_gravimetric_starting_return_ready() == (True, "")
+    assert controller.begin_stream_gravimetric_starting_camera_return() == (True, "")
+    assert controller.on_stream_gravimetric_starting_camera_reached() == (True, "")
+    after_return = manager.get_stream_gravimetric_capture_state()
+    assert after_return["status"] == "idle"
+    assert after_return["starting_mass_mg"] == 0.0
     assert manager.activeCalibration is None
     assert manager.calibration_queue == []
 
@@ -680,6 +740,131 @@ def test_loading_reached_requires_explicit_ending_read_and_confirmed_save(tmp_pa
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8").splitlines()[0])
     assert sidecar["ending_mass_capture"]["stable_mass_mg"] == "12.50"
     assert sidecar["ending_mass_capture"]["connection"]["port"] == port
+
+
+def test_confirmed_ending_mass_is_offered_and_explicitly_reused(tmp_path):
+    _model, manager = _make_manager(tmp_path)
+    _prepare_completed_balance_run(manager)
+    service = _StableMassService()
+    controller = _controller_with_manager(manager, service=service)
+    controller._experimental_balance_stream_opt_in = True
+
+    _complete_balance_ending_and_return(manager, controller, service, mass="12.50")
+    idle = manager.get_stream_gravimetric_capture_state()
+    assert idle["status"] == "idle"
+    assert idle["reusable_baseline_available"] is True
+    assert idle["reusable_baseline_mass_mg"] == "12.50"
+    source_session_id = idle["reusable_baseline_session_id"]
+
+    request_count = len(service.requests)
+    assert controller.start_stream_gravimetric_capture_with_balance() == (True, "")
+    choice = manager.get_stream_gravimetric_capture_state()
+    assert choice["status"] == "awaiting_starting_baseline_choice"
+    assert choice["reusable_baseline_session_id"] == source_session_id
+
+    assert controller.use_previous_stream_gravimetric_starting_mass() == (True, "")
+    started = manager.get_stream_gravimetric_capture_state()
+    assert started["status"] == "pending_gripper_refresh"
+    assert started["starting_mass_mg"] == 12.5
+    assert started["starting_mass_origin"] == "carried_forward"
+    assert started["carried_from_session_id"] == source_session_id
+    assert started["starting_mass_capture"]["origin"] == "carried_forward"
+    assert len(service.requests) == request_count
+
+
+def test_ejection_attempt_invalidates_reusable_ending_mass(tmp_path):
+    _model, manager = _make_manager(tmp_path)
+    _prepare_completed_balance_run(manager)
+    service = _StableMassService()
+    controller = _controller_with_manager(manager, service=service)
+    controller._experimental_balance_stream_opt_in = True
+    _complete_balance_ending_and_return(manager, controller, service, mass="12.50")
+
+    assert manager.record_stream_gravimetric_ejection_event(
+        EjectionCommandEvent(
+            transport_epoch=1,
+            command_number=72,
+            command_type="DISPENSE",
+            requested_droplet_count=20,
+            lifecycle=EjectionCommandLifecycle.QUEUED,
+            monotonic_ns=10,
+        )
+    )
+    invalidated = manager.get_stream_gravimetric_capture_state()
+    assert invalidated["reusable_baseline_available"] is False
+    assert "ejection" in invalidated["reusable_baseline_invalid_reason"].lower()
+
+    assert controller.start_stream_gravimetric_capture_with_balance() == (True, "")
+    staged = manager.get_stream_gravimetric_capture_state()
+    assert staged["status"] == "pending_starting_loading_move"
+    assert service.requests[-1].phase is StableMassPhase.ENDING
+
+
+def test_command_derived_count_warns_on_camera_mismatch_and_uncertainty_blocks_save(
+    monkeypatch,
+    tmp_path,
+):
+    _model, manager = _make_manager(tmp_path)
+    state = _prepare_completed_balance_run(manager)
+    state["ejection_completed_total_start"] = 0
+    state["ejection_uncertainty_generation_start"] = 0
+    state["ejection_integrity_status"] = "clean"
+    monkeypatch.setattr(
+        manager,
+        "_derive_stream_capture_counts",
+        lambda: {
+            "background_capture_count": 1,
+            "printed_capture_count": 5,
+            "printed_capture_event_count": 5,
+        },
+    )
+    for lifecycle in (
+        EjectionCommandLifecycle.QUEUED,
+        EjectionCommandLifecycle.COMPLETED,
+    ):
+        manager.record_stream_gravimetric_ejection_event(
+            EjectionCommandEvent(
+                transport_epoch=1,
+                command_number=80,
+                command_type="DISPENSE_PRINT",
+                requested_droplet_count=7,
+                lifecycle=lifecycle,
+                monotonic_ns=20 + len(lifecycle.value),
+            )
+        )
+
+    manager._update_stream_capture_counts()
+    counted = manager.get_stream_gravimetric_capture_state()
+    assert counted["capture_derived_printed_count"] == 5
+    assert counted["printed_capture_count"] == 7
+    assert counted["ejection_completed_total_end"] == 7
+    assert counted["ejection_integrity_status"] == "warning"
+    assert "command-derived" in counted["ejection_integrity_message"].lower()
+
+    for lifecycle in (
+        EjectionCommandLifecycle.QUEUED,
+        EjectionCommandLifecycle.ACCEPTED,
+        EjectionCommandLifecycle.CANCELLED,
+    ):
+        manager.record_stream_gravimetric_ejection_event(
+            EjectionCommandEvent(
+                transport_epoch=1,
+                command_number=81,
+                command_type="DISPENSE",
+                requested_droplet_count=3,
+                lifecycle=lifecycle,
+                monotonic_ns=40 + len(lifecycle.value),
+            )
+        )
+
+    uncertain = manager.get_stream_gravimetric_capture_state()
+    assert uncertain["ejection_integrity_status"] == "uncertain"
+    with pytest.raises(ValueError, match="uncertain completion"):
+        manager._build_stream_capture_metadata_row(
+            ending_mass_mg=12.5,
+            rep_value=1,
+            notes="must not save",
+        )
 
 
 def test_manual_and_balance_sources_build_identical_csv_rows(tmp_path):
@@ -875,7 +1060,9 @@ def test_ending_mass_dialog_warns_but_allows_nonpositive_candidate(qapp):
     assert not dialog.ending_mass_spin.isEnabled()
     assert "Mass change: -0.1000 mg" in dialog.balance_preview_label.text()
     assert "Warning" in dialog.balance_warning_label.text()
-    assert dialog.complete_button.text() == "Confirm Ending Mass & Save"
+    assert dialog.complete_button.text() == (
+        "Same Tube Reinstalled - Confirm Ending Mass & Save"
+    )
     assert dialog.complete_button.isEnabled()
 
 
@@ -939,6 +1126,40 @@ def test_group_shows_progress_candidate_and_explicit_controls(qapp):
     assert not group.manual_starting_mass_button.isHidden()
 
 
+def test_group_shows_baseline_choice_and_explicit_starting_sample_action(qapp):
+    controller = _UiController(
+        (_port(),),
+        cached_snapshot=_snapshot("streaming"),
+    )
+    group = ExperimentalBalanceConnectionGroup(controller)
+
+    group.update_stream_capture_state(
+        {
+            "status": "awaiting_starting_baseline_choice",
+            "reusable_baseline_mass_mg": "12.50",
+            "reusable_baseline_session_id": "prior-run",
+        }
+    )
+    assert group.candidate_mass_label.text() == (
+        "Previous verified ending mass: 12.50 mg"
+    )
+    assert not group.use_previous_mass_button.isHidden()
+    assert not group.measure_new_mass_button.isHidden()
+    assert group.start_reading_button.isHidden()
+
+    group.use_previous_mass_button.click()
+    group.measure_new_mass_button.click()
+    assert controller.measurement_calls == ["reuse", "measure_new"]
+
+    group.update_stream_capture_state(
+        {"status": "awaiting_starting_balance_ready"}
+    )
+    assert not group.start_reading_button.isHidden()
+    assert group.use_previous_mass_button.isHidden()
+    group.start_reading_button.click()
+    assert controller.measurement_calls[-1] == "start_reading"
+
+
 def test_manual_fallback_state_preserves_inputs_and_confirmed_state_reflects_mass(
     monkeypatch, qapp
 ):
@@ -975,19 +1196,21 @@ def test_manual_fallback_state_preserves_inputs_and_confirmed_state_reflects_mas
     assert not dialog.stream_capture_starting_mass_spin.isEnabled()
 
 
-def test_closing_imager_abandons_pending_measurement_without_disconnecting_balance(
+def test_closing_imager_cancels_pending_measurement_without_disconnecting_or_abandoning(
     monkeypatch, qapp
 ):
     dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
-    manager.state["status"] = "awaiting_starting_balance_mass"
+    manager.state.update(
+        {
+            "status": "awaiting_starting_balance_mass",
+            "balance_request_status": "waiting",
+        }
+    )
     calls = []
 
-    def abandon(reason=""):
-        calls.append(("abandon", reason))
-        manager.state["status"] = "idle"
-        return True, ""
-
-    controller.abandon_stream_gravimetric_starting_mass = abandon
+    controller.cancel_stream_gravimetric_starting_mass = (
+        lambda: calls.append(("cancel", "")) or (True, "")
+    )
     controller.disconnect_experimental_balance = lambda: calls.append(
         ("disconnect", "")
     )
@@ -997,7 +1220,8 @@ def test_closing_imager_abandons_pending_measurement_without_disconnecting_balan
 
     dialog.closeEvent(event)
 
-    assert calls == [("abandon", "imager_closed_pending_balance_start")]
+    assert calls == [("cancel", "")]
+    assert manager.state["status"] == "awaiting_starting_balance_mass"
     assert event.isAccepted()
 
 

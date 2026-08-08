@@ -4,7 +4,7 @@
 
 - Date: 2026-08-07
 - Branch: `feature/balance_integration`
-- Status: Slices 0-5 verified; MCU log-port hardening and Slice 6 implemented awaiting HIL
+- Status: Slices 0-6 hardware exercised; pre-start loading and ejection-aware baseline reuse implemented awaiting HIL
 - Scope: implementation plan and slice verification record
 - Target hardware: Veritas/BEL HPB balance connected to the Raspberry Pi through a proper RS-232-to-USB adapter
 - Target workflow: stream gravimetric data collection only
@@ -1151,6 +1151,77 @@ Rollback:
 
 - Route loading-reached directly back to `awaiting_mass_entry` and ignore the
   additive balance evidence fields. Existing manual completion remains valid.
+
+## Pre-Start Loading And Ejection-Aware Baseline Reuse
+
+Status: `implemented_awaiting_hil`
+
+Goal:
+
+Move to loading before a new starting measurement, return the reinstalled tube
+to the camera before calibration begins, and carry a verified ending mass into
+the next run only while the central Machine command lifecycle proves that no
+intervening ejection was attempted.
+
+Call path:
+
+`Machine command lifecycle -> GravimetricEjectionLedger -> CalibrationManager baseline validity -> loading/starting-mass choice -> existing calibration -> ending save/new baseline`
+
+Implementation findings:
+
+- The Machine emits immutable lifecycle events for `DISPENSE` and
+  `DISPENSE_PRINT` from its existing command-queue callback. It does not alter
+  command transmission and excludes `DISPENSE_REFUEL`.
+- The application-session ledger deduplicates resends and repeated status
+  notifications, counts completed droplets once, and records uncertainty for
+  accepted/executing commands whose completion cannot be trusted.
+- A first or invalidated balance-backed Begin stages the run and moves to the
+  existing loading coordinates before issuing a starting balance request.
+  Calibration-session creation, starting flash capture, gripper preamble,
+  pressure behavior, and ejections remain gated until the tube is reinstalled
+  and camera return completes.
+- A successful ending CSV save publishes an in-memory reusable baseline.
+  Reuse requires explicit same-tube confirmation, a streaming balance, an
+  empty Machine queue, the same running application, and unchanged ejection
+  attempt/uncertainty generations.
+- Any qualifying ejection attempt, reset, reconnect, disconnect, transport
+  fault, discard, manual starting fallback, or manual ending fallback
+  invalidates reuse. No baseline is loaded after restart.
+- For balance-backed runs, CSV `Num Prints` uses the completed-droplet ledger
+  delta. The camera-derived count remains in sidecar provenance; a mismatch is
+  an operator-visible warning, while uncertain command completion blocks save.
+- Closing the imager cancels an active reading but causes no automatic motion
+  and preserves the staged physical-position workflow for reopening.
+- CSV headers, movement coordinates, pressure behavior, balance stability
+  policy, serial protocol, printer protocol, and firmware remain unchanged.
+
+Focused validation:
+
+`tests/test_gravimetric_ejection_ledger.py`, the stream/balance integration
+tests, command-queue tests, stream-capture tests, app-update tests, and
+BalanceService tests cover deduplication, completion totals, cancellation
+uncertainty, Machine signal routing, loading gates, carry-forward,
+invalidation, manual fallback, and unchanged manual behavior. The full suite
+remains deferred to final all-slices validation as agreed.
+
+Pi acceptance:
+
+1. Verify the first Begin moves to loading and no request/calibration/ejection
+   starts before the explicit sample-ready action.
+2. Measure, reinstall, and confirm the starting tube; verify camera arrival
+   precedes the existing calibration sequence.
+3. Measure and save an ending mass, then begin again without ejecting and
+   explicitly reuse the offered ending mass without a loading move.
+4. Save another ending mass, issue a manual ejection, and verify the next Begin
+   requires a new loading measurement.
+5. Check CSV and sidecar command/camera counts, carry provenance, camera and
+   gripper restoration, MCU logs, and simultaneous balance readings.
+
+Rollback:
+
+- Remove the ledger and new starting states, restore direct starting-balance
+  staging, and disable carry-forward. The prior confirmed starting/ending
+  balance workflow and manual entry remain available.
 
 ## Slice 7: Optional Session Auto-Save
 
