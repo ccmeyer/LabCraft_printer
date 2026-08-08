@@ -41,7 +41,7 @@
   "calibrations": [
     {"order": 1, "stock_id": "Design A_10.00_x", "reagent_name": "Design A", "printer_head_id": "virtual-head-m11-design-a-v1", "print_pulse_width_us": 1800, "droplet_volume_nL": "18", "input_revision": 2, "output_revision": 3},
     {"order": 2, "stock_id": "Water_1.00_--", "reagent_name": "Water", "printer_head_id": "virtual-head-m11-water-v1", "print_pulse_width_us": 1300, "droplet_volume_nL": "9", "input_revision": 3, "output_revision": 4},
-    {"order": 3, "stock_id": "Design B_10.00_x", "reagent_name": "Design B", "printer_head_id": "virtual-head-m11-design-b-v1", "print_pulse_width_us": 1300, "droplet_volume_nL": "9", "input_revision": 4, "output_revision": 5}
+    {"order": 3, "stock_id": "Design B_10.00_x", "reagent_name": "Design B", "printer_head_id": "virtual-head-m11-design-b-v1", "print_pulse_width_us": 1400, "droplet_volume_nL": "10.8", "input_revision": 4, "output_revision": 5}
   ],
   "checkpoints": [
     {"checkpoint_id": "prepared", "session": 1, "phase": "prepared", "plan_revision": 1, "progress_reference_revision": 1, "resume_reference_revision": null, "eligibility": "calibration_required"},
@@ -66,14 +66,14 @@
       ["Design A_10.00_x", "A8", 1], ["Design B_10.00_x", "A8", 1], ["Water_1.00_--", "A8", 9]
     ],
     "calibrated_zero_progress": [
-      ["Design A_10.00_x", "A1", 1], ["Design B_10.00_x", "A1", 3], ["Water_1.00_--", "A1", 5],
-      ["Design A_10.00_x", "A2", 1], ["Design B_10.00_x", "A2", 3], ["Water_1.00_--", "A2", 5],
-      ["Design A_10.00_x", "A3", 1], ["Design B_10.00_x", "A3", 1], ["Water_1.00_--", "A3", 7],
-      ["Design A_10.00_x", "A4", 1], ["Design B_10.00_x", "A4", 3], ["Water_1.00_--", "A4", 5],
-      ["Design A_10.00_x", "A5", 1], ["Design B_10.00_x", "A5", 1], ["Water_1.00_--", "A5", 7],
-      ["Design A_10.00_x", "A6", 1], ["Design B_10.00_x", "A6", 3], ["Water_1.00_--", "A6", 5],
-      ["Design A_10.00_x", "A7", 1], ["Design B_10.00_x", "A7", 1], ["Water_1.00_--", "A7", 7],
-      ["Design A_10.00_x", "A8", 1], ["Design B_10.00_x", "A8", 1], ["Water_1.00_--", "A8", 7]
+      ["Design A_10.00_x", "A1", 1], ["Design B_10.00_x", "A1", 3], ["Water_1.00_--", "A1", 6],
+      ["Design A_10.00_x", "A2", 1], ["Design B_10.00_x", "A2", 3], ["Water_1.00_--", "A2", 6],
+      ["Design A_10.00_x", "A3", 1], ["Design B_10.00_x", "A3", 1], ["Water_1.00_--", "A3", 8],
+      ["Design A_10.00_x", "A4", 1], ["Design B_10.00_x", "A4", 3], ["Water_1.00_--", "A4", 6],
+      ["Design A_10.00_x", "A5", 1], ["Design B_10.00_x", "A5", 1], ["Water_1.00_--", "A5", 8],
+      ["Design A_10.00_x", "A6", 1], ["Design B_10.00_x", "A6", 3], ["Water_1.00_--", "A6", 6],
+      ["Design A_10.00_x", "A7", 1], ["Design B_10.00_x", "A7", 1], ["Water_1.00_--", "A7", 8],
+      ["Design A_10.00_x", "A8", 1], ["Design B_10.00_x", "A8", 1], ["Water_1.00_--", "A8", 8]
     ],
     "all_stocks_calibrated": [
       ["Design A_10.00_x", "A1", 1], ["Design B_10.00_x", "A1", 3], ["Water_1.00_--", "A1", 6],

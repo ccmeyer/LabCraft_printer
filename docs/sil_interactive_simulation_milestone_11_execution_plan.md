@@ -332,14 +332,17 @@ calibration dialog, using printer head
 `virtual-head-m11-design-a-v1`. This is the boundary-crossing step: the four
 2-drop Design A wells become 1-drop wells; the four 1-drop wells remain 1.
 Design B remains byte-for-byte and count-for-count unchanged at this boundary.
-The fill stock is expected to requantize because it preserves printed volume.
+Slice 11.2 real-Qt evidence corrected the provisional dependent-fill oracle:
+Design A Apply requantizes Water to the literal 56-drop vector below while
+preserving every Design B count. This correction changes only case-owned test
+truth; it does not change production behavior.
 
 After clean reload and explicit activation, calibrate the remaining stocks in
 this order to avoid an intermediate half-tie:
 
 1. `Water_1.00_--` at 1300 us / 9 nL with
    `virtual-head-m11-water-v1`;
-2. `Design B_10.00_x` at 1300 us / 9 nL with
+2. `Design B_10.00_x` at 1400 us / 10.8 nL with
    `virtual-head-m11-design-b-v1`.
 
 Then execute the explicit pass order `Design A_10.00_x`,
@@ -378,16 +381,16 @@ Each tuple is `(Design A_10.00_x, Design B_10.00_x, Water_1.00_--)`. These are
 case-owned literals. Implementation tests may validate their shape and hash,
 but may not derive them by calling production requantization code.
 
-| Well / reaction | Prepared revision 1 | Design A 18 nL, revision 3 | Water 9 nL, revision 4 | Final after Design B 9 nL, revision 5 |
+| Well / reaction | Prepared revision 1 | Design A 18 nL, revision 3 | Water 9 nL, revision 4 | Final after Design B 10.8 nL, revision 5 |
 | --- | --- | --- | --- | --- |
-| `A1 / R8` | `(2, 3, 6)` | `(1, 3, 5)` | `(1, 3, 6)` | `(1, 3, 6)` |
-| `A2 / R6` | `(1, 3, 7)` | `(1, 3, 5)` | `(1, 3, 6)` | `(1, 3, 6)` |
-| `A3 / R3` | `(2, 1, 8)` | `(1, 1, 7)` | `(1, 1, 8)` | `(1, 1, 8)` |
-| `A4 / R2` | `(1, 3, 7)` | `(1, 3, 5)` | `(1, 3, 6)` | `(1, 3, 6)` |
-| `A5 / R7` | `(2, 1, 8)` | `(1, 1, 7)` | `(1, 1, 8)` | `(1, 1, 8)` |
-| `A6 / R4` | `(2, 3, 6)` | `(1, 3, 5)` | `(1, 3, 6)` | `(1, 3, 6)` |
-| `A7 / R1` | `(1, 1, 9)` | `(1, 1, 7)` | `(1, 1, 8)` | `(1, 1, 8)` |
-| `A8 / R5` | `(1, 1, 9)` | `(1, 1, 7)` | `(1, 1, 8)` | `(1, 1, 8)` |
+| `A1 / R8` | `(2, 3, 6)` | `(1, 3, 6)` | `(1, 3, 6)` | `(1, 3, 6)` |
+| `A2 / R6` | `(1, 3, 7)` | `(1, 3, 6)` | `(1, 3, 6)` | `(1, 3, 6)` |
+| `A3 / R3` | `(2, 1, 8)` | `(1, 1, 8)` | `(1, 1, 8)` | `(1, 1, 8)` |
+| `A4 / R2` | `(1, 3, 7)` | `(1, 3, 6)` | `(1, 3, 6)` | `(1, 3, 6)` |
+| `A5 / R7` | `(2, 1, 8)` | `(1, 1, 8)` | `(1, 1, 8)` | `(1, 1, 8)` |
+| `A6 / R4` | `(2, 3, 6)` | `(1, 3, 6)` | `(1, 3, 6)` | `(1, 3, 6)` |
+| `A7 / R1` | `(1, 1, 9)` | `(1, 1, 8)` | `(1, 1, 8)` | `(1, 1, 8)` |
+| `A8 / R5` | `(1, 1, 9)` | `(1, 1, 8)` | `(1, 1, 8)` | `(1, 1, 8)` |
 
 The exact unchanged-other-reagent oracle is therefore:
 
@@ -397,7 +400,7 @@ A1=3, A2=3, A3=1, A4=3, A5=1, A6=3, A7=1, A8=1
 ```
 
 Design B must match this map before and after Design A Apply, after reload,
-after its own 9 nL calibration, at runtime, in intent/simulator evidence, and
+after its own 10.8 nL calibration, at runtime, in intent/simulator evidence, and
 at terminal reload. Its calibration changes only its record/head/effective
 volume linkage; it does not change these counts.
 
@@ -498,7 +501,7 @@ Run the new case tests plus experiment-design, matrix, count-normalizer, fixture
 manifest/registry test-local, and contract-freeze tests. Include mutations for
 wrong seed/mapping/hash, wrong stock or well, duplicate pair, changed unchanged-
 Design-B row, revision gap, wrong head join, pass-position lookup, action cap,
-and total 24/80 drift. No offscreen or visible SIL run is authorized.
+ and total 24/80 drift. No offscreen or visible SIL run is authorized.
 
 ### Retained evidence and replay
 

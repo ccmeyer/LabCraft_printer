@@ -1626,7 +1626,9 @@ Rollback:
 
 ### Milestone 11: Randomized design, calibration, reload, and execution interaction
 
-Status: `planned`
+Status: `implementation in progress`; Slices 11.1 and 11.2 complete. Current
+next action: execute Slice 11.3, the reusable clean-session rotation,
+authoritative reload/reconstruction, and explicit activation boundary.
 
 Execution plan:
 
@@ -1647,8 +1649,9 @@ Selected design and lifecycle decisions:
 - rotate at ACTIVE revision 3 with zero added progress, reload in a genuinely
   fresh application session, and activate explicitly from authoritative
   files;
-- calibrate Water then Design B, execute explicit ID-keyed Design A, Design B,
-  and Water passes, and reconcile 24 unique stock/well intents and 80 droplets;
+- calibrate Water at 9 nL and Design B count-stably at 10.8 nL, execute explicit
+  ID-keyed Design A, Design B, and Water passes, and reconcile 24 unique
+  stock/well intents and 80 droplets;
 - reload COMPLETED revision 6 in a third fresh application session and prove
   terminal target, added, intent, simulator, and durable completion truth;
 - add a reusable clean-session rotation phase because the existing reload

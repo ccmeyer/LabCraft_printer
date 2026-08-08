@@ -2747,15 +2747,16 @@ def editor_create_finalize_assertion(
         "editor.optimize_generate_via_ui",
     ),
     pre_configure_action_ids: tuple[str, ...] = (),
+    capture_editor_milestones: bool = True,
 ) -> AssertionResult:
     action_ids = (
         "editor.open_via_ui",
-        "artifact.capture_milestone",
+        *(("artifact.capture_milestone",) if capture_editor_milestones else ()),
         "editor.new_experiment_via_ui",
         *pre_configure_action_ids,
         "editor.configure_design_via_ui",
         *optimization_action_ids,
-        "artifact.capture_milestone",
+        *(("artifact.capture_milestone",) if capture_editor_milestones else ()),
         "editor.finish_via_ui",
     )
     return exact_action_sequence_assertion(
@@ -3338,6 +3339,225 @@ def experiment_prepared_runtime_reconstructed_assertion(
         "reloaded",
         ("ui", "controller", "model", "persistence"),
         lambda: (not evidence["failed_checks"], evidence),
+    )
+
+
+def randomized_joined_design_assertion(
+    context: Any,
+    *,
+    case: Any,
+    driver_evidence: Mapping[str, Any],
+) -> tuple[AssertionResult, Any]:
+    """Join the real randomized editor output to the frozen singleton truth."""
+
+    from tools.virtual_workflows.experiment_design_cases import (
+        get_experiment_design_case,
+    )
+    from tools.virtual_workflows.joined_interaction_cases import (
+        validate_source_compatibility,
+    )
+
+    source = get_experiment_design_case(case.source.case_id)
+    base, snapshot = experiment_design_case_oracle_assertion(
+        context,
+        case=source.normalized(),
+        driver_evidence=driver_evidence,
+    )
+    counts = capture_count_snapshot(context)
+    expected = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("prepared").rows
+        ),
+        label="joined prepared literal",
+    )
+    plan = normalize_stock_well_counts(counts["plan_targets"], label="joined prepared plan")
+    progress = normalize_stock_well_counts(counts["progress_targets"], label="joined prepared progress")
+    runtime = normalize_stock_well_counts(counts["runtime_targets"], label="joined prepared runtime")
+    compatibility = validate_source_compatibility(case)
+    checks = {
+        "source_compatibility_exact": compatibility["complete"] is True,
+        "source_design_assertion_passed": base.decision == "pass",
+        "plan_revision_one": snapshot.plan_revision == 1,
+        "plan_prepared": snapshot.plan_state == "prepared",
+        "plan_progress_reference_exact": (
+            snapshot.progress_plan_id,
+            snapshot.progress_plan_revision,
+        ) == (snapshot.plan_id, 1),
+        "resume_absent": not snapshot.resume_present,
+        "runtime_inactive": not snapshot.runtime_active,
+        "zero_progress": snapshot.total_added_droplets == 0,
+        "literal_plan_counts_exact": plan == expected,
+        "literal_progress_counts_exact": progress == expected,
+        "literal_runtime_counts_exact": runtime == expected,
+        "assignments_exact": snapshot.assignments
+        == {row.well_id: row.reaction_id for row in case.assignments},
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "case_id": case.case_id,
+        "source": compatibility,
+        "prepared": snapshot.prepared_evidence(),
+        "counts": counts,
+        "source_oracle": dict(base.evidence),
+    }
+    return (
+        AssertionResult(
+            "experiment.randomized_joined_design_exact",
+            "prepared_randomized",
+            "pass" if not evidence["failed_checks"] else "fail",
+            ("ui", "model", "persistence"),
+            evidence,
+            None if not evidence["failed_checks"] else "randomized joined design was not exact",
+        ),
+        snapshot,
+    )
+
+
+def calibrated_zero_progress_assertion(
+    context: Any,
+    *,
+    case: Any,
+    prepared_snapshot: Any,
+    calibration_evidence: Mapping[str, Any],
+    observer: Mapping[str, Any],
+) -> tuple[AssertionResult, Any]:
+    """Prove the boundary calibration changed counts but never executed them."""
+
+    from ExecutionCalibrationStore import load_execution_calibrations
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+    )
+    from tools.virtual_workflows.joined_interaction_cases import DESIGN_A_STOCK_ID
+
+    snapshot = capture_authoritative_bundle(context)
+    counts = capture_count_snapshot(context)
+    expected = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("calibrated_zero_progress").rows
+        ),
+        label="joined calibrated literal",
+    )
+    observed = {
+        name: normalize_stock_well_counts(counts[name], label=f"joined calibrated {name}")
+        for name in ("plan_targets", "progress_targets", "runtime_targets")
+    }
+    added = normalize_stock_well_counts(
+        counts["progress_added"], label="joined calibrated added"
+    )
+    history = snapshot.history
+    history_revisions = [int(item.get("plan_revision", 0)) for item in history]
+    history_states = [str(item.get("state") or "") for item in history]
+    document = load_execution_calibrations(
+        context.experiment_model.execution_calibrations_file_path
+    )
+    records = [record.to_dict() for record in document.records.values()]
+    record = records[0] if len(records) == 1 else {}
+    plan_stocks = {stock.stock_id: stock for stock in context.experiment_model.get_execution_plan_snapshot().stocks}
+    design_a = plan_stocks.get(DESIGN_A_STOCK_ID)
+    other_stocks = [stock for stock_id, stock in plan_stocks.items() if stock_id != DESIGN_A_STOCK_ID]
+    lifecycle = dict(observer.get("lifecycle") or {})
+    execution_collections = (
+        "begins", "attachments", "completions", "discard_batches",
+        "simulator_dispenses", "pass_starts", "terminal_transitions",
+        "soft_stop_events",
+    )
+    transition = dict(calibration_evidence.get("count_transition") or {})
+    expected_count_map = {
+        (row.stock_id, row.well_id): row.droplets for row in expected
+    }
+    observed_count_maps = {
+        name: {(row.stock_id, row.well_id): row.droplets for row in rows}
+        for name, rows in observed.items()
+    }
+    count_differences = {
+        name: [
+            {
+                "stock_id": stock_id,
+                "well_id": well_id,
+                "expected": expected_count,
+                "observed": observed_count_maps[name].get((stock_id, well_id)),
+            }
+            for (stock_id, well_id), expected_count in expected_count_map.items()
+            if observed_count_maps[name].get((stock_id, well_id)) != expected_count
+        ]
+        for name in observed
+    }
+    checks = {
+        "plan_identity_unchanged": snapshot.plan_id == prepared_snapshot.plan_id,
+        "design_identity_unchanged": snapshot.design_sha256 == prepared_snapshot.design_sha256,
+        "revision_history_exact": history_revisions == [1, 2, 3],
+        "revision_state_chain_exact": history_states == ["prepared", "active", "active"],
+        "revision_three_active": snapshot.plan_revision == 3 and snapshot.plan_state == "active",
+        "progress_reference_revision_three": (
+            snapshot.progress_plan_id,
+            snapshot.progress_plan_revision,
+        ) == (snapshot.plan_id, 3),
+        "resume_absent": not snapshot.resume_present,
+        "eligibility_ready_to_start": snapshot.eligibility_status == "ready_to_start",
+        "runtime_inactive": not snapshot.runtime_active,
+        "literal_plan_counts_exact": observed["plan_targets"] == expected,
+        "literal_progress_counts_exact": observed["progress_targets"] == expected,
+        "literal_runtime_counts_exact": observed["runtime_targets"] == expected,
+        "zero_added_progress": all(row.droplets == 0 for row in added)
+        and snapshot.total_added_droplets == 0
+        and not snapshot.completed_well_ids,
+        "single_design_a_calibration": len(records) == 1
+        and record.get("stock_id") == DESIGN_A_STOCK_ID,
+        "calibration_head_exact": record.get("printer_head_id")
+        == "virtual-head-m11-design-a-v1",
+        "calibration_pulse_volume_exact": int(record.get("pw_us") or 0) == 1800
+        and math.isclose(float(record.get("effective_volume_nL") or 0), 18.0),
+        "plan_calibration_join_exact": design_a is not None
+        and design_a.printer_head_id == record.get("printer_head_id")
+        and design_a.calibration_record_key == record.get("record_id")
+        and math.isclose(float(design_a.effective_volume_nL), 18.0),
+        "other_stock_calibration_absent": all(
+            stock.printer_head_id is None and stock.calibration_record_key is None
+            for stock in other_stocks
+        ),
+        "transition_revisions_exact": (
+            (transition.get("before") or {}).get("plan_revision"),
+            (transition.get("after") or {}).get("plan_revision"),
+        ) == (1, 3),
+        "zero_execution_lifecycle": all(not lifecycle.get(name) for name in execution_collections)
+        and int(lifecycle.get("simulator_dispense_overflow_count", 0) or 0) == 0,
+        "controller_idle": context.controller.get_array_run_state() == "idle",
+        "simulator_drained": context.machine.check_if_all_completed(),
+        "action_cap_not_exceeded": len(context.action_results)
+        <= case.qualification.action_cap,
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "prepared": prepared_snapshot.prepared_evidence(),
+        "calibrated": snapshot.prepared_evidence(),
+        "history_revisions": history_revisions,
+        "history_states": history_states,
+        "counts": counts,
+        "count_differences": count_differences,
+        "calibration_record": record,
+        "calibration_driver": dict(calibration_evidence),
+        "execution_lifecycle": lifecycle,
+    }
+    return (
+        AssertionResult(
+            "execution.calibrated_zero_progress_exact",
+            "calibrated_zero_progress",
+            "pass" if not evidence["failed_checks"] else "fail",
+            ("ui", "controller", "model", "persistence", "simulator"),
+            evidence,
+            (
+                None
+                if not evidence["failed_checks"]
+                else "calibrated zero-progress boundary failed: "
+                + ", ".join(evidence["failed_checks"])
+                + f"; count_differences={count_differences}"
+            ),
+        ),
+        snapshot,
     )
 
 
@@ -4137,6 +4357,7 @@ __all__ = [
     "ExecutionLifecycleExpectation",
     "calibration_assertion",
     "calibration_apply_fail_closed_assertion",
+    "calibrated_zero_progress_assertion",
     "cleanup_assertion",
     "evaluate_assertion",
     "editor_artifacts_cleanup_assertion",
@@ -4160,6 +4381,7 @@ __all__ = [
     "prepared_execution_assertion",
     "rack_head_assertion",
     "real_application_assertion",
+    "randomized_joined_design_assertion",
     "regression_evidence_assertions",
     "simulation_identity_assertion",
     "synthetic_calibration_contract",

@@ -306,6 +306,47 @@ class StockPassSpec:
 
 
 @dataclass(frozen=True)
+class CalibrationOnlySpec:
+    """One real calibration boundary that cannot start array execution."""
+
+    stock_id: str
+    printer_head_id: str
+    pulse_width_us: int
+    pressure_psi: float
+    frequency_hz: int
+    initial_volume_uL: float
+    expected_volume_nL: float
+    staging_slot: int | None = None
+    calibration_mode: str = "droplet"
+    calibration_print_profile_id: str | None = None
+    apply_success_title: str = "Applied"
+    bind_identity: bool = True
+    enable_pressure_regulation: bool = True
+    detailed_evidence: bool = True
+    include_frequency_evidence: bool = True
+    refuel_pulse_width_us: int | None = None
+    refuel_pressure_psi: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.stock_id or not self.printer_head_id:
+            raise ValueError("calibration-only stock and head IDs must be non-empty")
+        if self.pulse_width_us <= 0 or self.frequency_hz <= 0:
+            raise ValueError("calibration-only pulse and frequency must be positive")
+        if self.pressure_psi <= 0 or self.initial_volume_uL <= 0:
+            raise ValueError("calibration-only pressure and volume must be positive")
+        if self.expected_volume_nL <= 0:
+            raise ValueError("calibration-only expected volume must be positive")
+        if self.staging_slot is not None and self.staging_slot < 0:
+            raise ValueError("calibration-only staging slot must be non-negative")
+        if self.calibration_mode not in {"droplet", "stream"}:
+            raise ValueError("calibration-only mode must be droplet or stream")
+        if not self.apply_success_title:
+            raise ValueError("calibration-only Apply title must be non-empty")
+        if self.refuel_pulse_width_us is not None or self.refuel_pressure_psi is not None:
+            raise ValueError("calibration-only phase does not support refuel behavior")
+
+
+@dataclass(frozen=True)
 class SoftStopResumeSpec:
     request_after_completion_count: int
     maximum_completion_catchup: int
@@ -573,7 +614,7 @@ def run_post_start_lock_copy(
 
 def bind_head_identities(
     runtime: JourneyRuntime,
-    pass_specs: Sequence[StockPassSpec],
+    pass_specs: Sequence[StockPassSpec | CalibrationOnlySpec],
 ) -> Mapping[str, Any]:
     rack = RackDriver(runtime.context)
     bindings: list[dict[str, Any]] = []
@@ -605,7 +646,7 @@ def bind_head_identities(
 
 
 def head_identity_step(
-    pass_specs: Sequence[StockPassSpec],
+    pass_specs: Sequence[StockPassSpec | CalibrationOnlySpec],
 ) -> SemanticStep:
     frozen = tuple(pass_specs)
     return SemanticStep(
@@ -695,6 +736,36 @@ def normalized_stock_pass_steps(
             for action_id in action_ids
         )
     return normalized
+
+
+def normalized_calibration_only_steps(
+    spec: CalibrationOnlySpec,
+) -> list[dict[str, str]]:
+    """Return the bounded calibration-only ledger without constructing Qt."""
+
+    action_ids = []
+    if spec.bind_identity:
+        action_ids.append("head.bind_identity")
+    action_ids.extend([
+        "machine.configure_print_settings_via_ui",
+        "head.set_volume_via_ui",
+        "head.stage_via_ui",
+    ])
+    if spec.enable_pressure_regulation:
+        action_ids.append("pressure.enable_regulation_via_ui")
+    action_ids.extend([
+        "calibration.open_via_ui",
+        "calibration.generate_via_ui",
+        "calibration.select_via_ui",
+        "calibration.apply_via_ui",
+    ])
+    return [
+        {
+            "action_id": action_id,
+            "interaction_surface": "model" if action_id == "head.bind_identity" else "ui",
+        }
+        for action_id in action_ids
+    ]
 
 
 def normalized_soft_stop_resume_steps(
@@ -893,7 +964,7 @@ def resume_soft_stopped_array(
 
 def _stage_stock_head(
     runtime: JourneyRuntime,
-    spec: StockPassSpec,
+    spec: StockPassSpec | CalibrationOnlySpec,
     *,
     index: int,
     head_staging: list[dict[str, Any]],
@@ -984,6 +1055,121 @@ def _stage_stock_head(
         )
     )
     return machine, rack, slot, rows
+
+
+def run_stock_calibration_only(
+    runtime: JourneyRuntime,
+    spec: CalibrationOnlySpec,
+) -> Mapping[str, Any]:
+    """Stage and calibrate one head through real UI without array execution."""
+
+    if spec.bind_identity:
+        runtime.run_steps((head_identity_step((spec,)),))
+    machine, _rack, slot, staging_rows = _stage_stock_head(
+        runtime,
+        spec,
+        index=0,
+        head_staging=[],
+        returned_head_ids=[],
+    )
+    if spec.enable_pressure_regulation:
+        runtime.run_steps(
+            (
+                SemanticStep(
+                    "pressure.enable_regulation_via_ui",
+                    InteractionSurface.UI,
+                    lambda _runtime: machine.enable_pressure_regulation()
+                    or {"regulating_print_pressure": True},
+                ),
+            )
+        )
+    dialog_state: dict[str, Any] = {}
+
+    def open_calibration(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        dialog_state["dialog"] = machine.open_calibration_dialog()
+        return {"window_title": dialog_state["dialog"].windowTitle()}
+
+    runtime.run_steps(
+        (
+            SemanticStep(
+                "calibration.open_via_ui",
+                InteractionSurface.UI,
+                open_calibration,
+            ),
+        )
+    )
+    driver = CalibrationDialogDriver(
+        runtime.context.app,
+        dialog_state["dialog"],
+        timeout_seconds=min(20.0, runtime.context.deadline.remaining_seconds()),
+    )
+    generated: dict[str, Any] = {}
+    selected: dict[str, Any] = {}
+    transition: dict[str, Any] = {}
+
+    def generate(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        generated.update(
+            driver.generate_from_tab(
+                spec.calibration_mode,
+                print_profile_id=spec.calibration_print_profile_id,
+            )
+        )
+        return {
+            "stock_id": spec.stock_id,
+            "result_fingerprint": generated.get("synthetic_result_fingerprint"),
+            "printing_mode": generated.get("printing_mode"),
+        }
+
+    def select(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        selected.update(
+            driver.select_result(str(generated["synthetic_result_fingerprint"]))
+        )
+        return {
+            "stock_id": spec.stock_id,
+            "result_fingerprint": selected.get("synthetic_result_fingerprint"),
+        }
+
+    def apply(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        before = capture_count_snapshot(runtime.context)
+        preview = driver.inspect_preview()
+        handled = driver.apply_selected(expected_title=spec.apply_success_title)
+        driver.close()
+        after = capture_count_snapshot(runtime.context)
+        transition.update(
+            {
+                "stock_id": spec.stock_id,
+                "printer_head_id": spec.printer_head_id,
+                "expected_volume_nL": spec.expected_volume_nL,
+                "preview": preview,
+                "handled_dialogs": handled,
+                "before": before,
+                "after": after,
+            }
+        )
+        return dict(transition)
+
+    runtime.run_steps(
+        (
+            SemanticStep("calibration.generate_via_ui", InteractionSurface.UI, generate),
+            SemanticStep("calibration.select_via_ui", InteractionSurface.UI, select),
+            SemanticStep("calibration.apply_via_ui", InteractionSurface.UI, apply),
+        )
+    )
+    runtime.harness.assert_no_unexpected_dialog()
+    evidence = {
+        "slot": slot,
+        "stock_id": spec.stock_id,
+        "printer_head_id": spec.printer_head_id,
+        "staging_actions": [dict(row) for row in staging_rows],
+        "generated": generated,
+        "selected": selected,
+        "count_transition": transition,
+    }
+    runtime.observations.setdefault("calibration_count_transitions", []).append(
+        dict(transition)
+    )
+    runtime.observations["calibration_only"] = evidence
+    return evidence
 
 
 def prepare_persisted_head_for_resume(
@@ -1896,6 +2082,7 @@ def validate_stock_pass_boundary(
 
 
 __all__ = [
+    "CalibrationOnlySpec",
     "DisconnectFailClosedSpec",
     "EditorPreparationSpec",
     "MachineStartupSpec",
@@ -1908,6 +2095,7 @@ __all__ = [
     "head_identity_step",
     "machine_startup_steps",
     "normalized_stock_pass_steps",
+    "normalized_calibration_only_steps",
     "normalized_soft_stop_resume_steps",
     "normalized_disconnect_fail_closed_steps",
     "run_editor_preparation",
@@ -1920,6 +2108,7 @@ __all__ = [
     "prepare_persisted_head_for_resume",
     "run_authoritative_reload_resume_boundary",
     "run_stock_passes",
+    "run_stock_calibration_only",
     "run_soft_stop_resume",
     "validate_stock_pass_boundary",
     "wait_for_execution_boundary",

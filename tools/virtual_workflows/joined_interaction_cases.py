@@ -418,7 +418,7 @@ def validate_joined_interaction_case(case: JoinedInteractionCase) -> None:
     if calibration_identity != (
         (1, DESIGN_A_STOCK_ID, "Design A", "virtual-head-m11-design-a-v1", 1800, "18", 2, 3),
         (2, WATER_STOCK_ID, "Water", "virtual-head-m11-water-v1", 1300, "9", 3, 4),
-        (3, DESIGN_B_STOCK_ID, "Design B", "virtual-head-m11-design-b-v1", 1300, "9", 4, 5),
+        (3, DESIGN_B_STOCK_ID, "Design B", "virtual-head-m11-design-b-v1", 1400, "10.8", 4, 5),
     ):
         raise JoinedInteractionCaseError("calibration/head/revision joins drifted")
     if sum(row.reagent_name == "Design A" for row in case.calibrations) != 1:

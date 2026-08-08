@@ -59,6 +59,9 @@ from tools.virtual_workflows.journeys import (
     STRESS_REQUIRED_ASSERTIONS,
     STRESS_REQUIRED_SCREENSHOTS,
     get_journey_definition,
+    JOINED_CALIBRATED_CHECKPOINT_REQUIRED_ASSERTIONS,
+    JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS,
+    run_joined_calibrated_checkpoint,
 )
 from tools.virtual_workflows.scenarios import (
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
@@ -83,14 +86,35 @@ def test_milestone_11_joined_contract_is_frozen_without_runtime_registration():
     from tools.virtual_workflows.registry import registered_scenario_ids
 
     assert JOINED_INTERACTION_CASE.sha256() == (
-        "95abfc7be2fcb38744d374be8d7af7060fbe5636d7577b3417a7d6082843d992"
+        "3081ebadd38a9e9de465f67e855ce63a471d7f9092e65e9f7881da1923d509cd"
     )
     assert JOINED_INTERACTION_CASE.count_oracle_sha256() == (
-        "930a85b245db04e18f4ed9963070baddf18740d39426a33475116ef33b3eb84e"
+        "468d78216fd52f326898c5b5625f6ae591995c642118a72ddb1cdf0cb5790814"
     )
     assert joined_fixture_sha256() == (
-        "f27c0331a367a1a104d11582348f602aa8868c904d8d3d22193bceefd6dc45cc"
+        "bf9631efdf2e0ad04e2310b378330a87941d05c157d69a6c47b69b645dbbe118"
     )
+    assert JOINED_INTERACTION_CASE_ID not in registered_scenario_ids()
+
+
+def test_milestone_11_partial_checkpoint_cannot_start_or_register_execution():
+    from tools.virtual_workflows.registry import registered_scenario_ids
+
+    source = inspect.getsource(run_joined_calibrated_checkpoint)
+
+    assert JOINED_CALIBRATED_CHECKPOINT_REQUIRED_ASSERTIONS == (
+        "sil.host_hardware_disabled",
+        "ui.real_app_constructed",
+        "experiment.editor_create_finalize",
+        "experiment.randomized_joined_design_exact",
+        "execution.calibrated_zero_progress_exact",
+    )
+    assert "array.start_via_ui" not in JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS
+    assert "experiment.activate_authoritative_via_ui" not in (
+        JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS
+    )
+    assert "run_stock_passes" not in source
+    assert "run_authoritative_reload_resume_boundary" not in source
     assert JOINED_INTERACTION_CASE_ID not in registered_scenario_ids()
 
 

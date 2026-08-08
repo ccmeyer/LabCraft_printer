@@ -8,6 +8,7 @@ import pytest
 
 from tools.virtual_workflows.composition import normalized_steps
 from tools.virtual_workflows.journey_phases import (
+    CalibrationOnlySpec,
     PostStartLockCopySpec,
     PreparedEditorRevisionSpec,
     SoftStopResumeSpec,
@@ -21,6 +22,7 @@ from tools.virtual_workflows.journey_phases import (
     normalized_stock_pass_steps,
     normalized_soft_stop_resume_steps,
     normalized_disconnect_fail_closed_steps,
+    normalized_calibration_only_steps,
 )
 
 
@@ -87,6 +89,59 @@ def test_machine_startup_is_one_normalized_reusable_ui_phase():
         },
         {"action_id": "machine.home_via_ui", "interaction_surface": "ui"},
     ]
+
+
+def test_calibration_only_phase_has_exact_actions_and_no_execution_control():
+    spec = CalibrationOnlySpec(
+        stock_id="Design A_10.00_x",
+        printer_head_id="virtual-head-m11-design-a-v1",
+        pulse_width_us=1800,
+        pressure_psi=2.0,
+        frequency_hz=100,
+        initial_volume_uL=100.0,
+        expected_volume_nL=18.0,
+    )
+
+    assert normalized_calibration_only_steps(spec) == [
+        {"action_id": "head.bind_identity", "interaction_surface": "model"},
+        {"action_id": "machine.configure_print_settings_via_ui", "interaction_surface": "ui"},
+        {"action_id": "head.set_volume_via_ui", "interaction_surface": "ui"},
+        {"action_id": "head.stage_via_ui", "interaction_surface": "ui"},
+        {"action_id": "pressure.enable_regulation_via_ui", "interaction_surface": "ui"},
+        {"action_id": "calibration.open_via_ui", "interaction_surface": "ui"},
+        {"action_id": "calibration.generate_via_ui", "interaction_surface": "ui"},
+        {"action_id": "calibration.select_via_ui", "interaction_surface": "ui"},
+        {"action_id": "calibration.apply_via_ui", "interaction_surface": "ui"},
+    ]
+    assert all(
+        not row["action_id"].startswith(("array.", "manual_refuel."))
+        for row in normalized_calibration_only_steps(spec)
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("stock_id", "", "stock and head"),
+        ("pulse_width_us", 0, "pulse and frequency"),
+        ("expected_volume_nL", 0, "expected volume"),
+        ("calibration_mode", "unsupported", "mode"),
+        ("refuel_pulse_width_us", 6000, "does not support refuel"),
+    ),
+)
+def test_calibration_only_spec_rejects_scope_and_identity_drift(field, value, message):
+    values = {
+        "stock_id": "stock-a",
+        "printer_head_id": "head-a",
+        "pulse_width_us": 1800,
+        "pressure_psi": 2.0,
+        "frequency_hz": 100,
+        "initial_volume_uL": 100.0,
+        "expected_volume_nL": 18.0,
+    }
+    values[field] = value
+    with pytest.raises(ValueError, match=message):
+        CalibrationOnlySpec(**values)
 
 
 def test_completion_midpoint_rejects_an_unbounded_target():

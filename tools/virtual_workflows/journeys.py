@@ -14,6 +14,7 @@ from tools.virtual_workflows.assertions import (
     cleanup_assertion,
     completed_terminal_reload_assertion,
     calibration_apply_fail_closed_assertion,
+    calibrated_zero_progress_assertion,
     capture_editor_prepared_revision_snapshot,
     editor_artifacts_cleanup_assertion,
     editor_create_finalize_assertion,
@@ -36,6 +37,7 @@ from tools.virtual_workflows.assertions import (
     prepared_execution_assertion,
     rack_head_assertion,
     real_application_assertion,
+    randomized_joined_design_assertion,
     simulation_identity_assertion,
     sustained_evidence_assertions,
     SoftStopResumeExpectation,
@@ -68,6 +70,7 @@ from tools.virtual_workflows.editor_reporting import (
     prepared_revision_report_spec,
 )
 from tools.virtual_workflows.journey_phases import (
+    CalibrationOnlySpec,
     EditorPreparationSpec,
     PreparedEditorRevisionSpec,
     PostStartLockCopySpec,
@@ -83,6 +86,7 @@ from tools.virtual_workflows.journey_phases import (
     run_prepared_editor_sequence,
     run_post_start_lock_copy,
     run_stock_passes,
+    run_stock_calibration_only,
     normalized_stock_pass_steps,
     run_soft_stop_resume,
     run_disconnect_fail_closed_boundary,
@@ -173,6 +177,13 @@ EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS = (
     "experiment.design_case_oracle_exact",
     "experiment.prepared_runtime_reconstructed_exact",
     "artifacts.required_present",
+)
+JOINED_CALIBRATED_CHECKPOINT_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "experiment.editor_create_finalize",
+    "experiment.randomized_joined_design_exact",
+    "execution.calibrated_zero_progress_exact",
 )
 EXPERIMENT_DESIGN_REJECTED_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -306,6 +317,26 @@ EDITOR_REQUIRED_UI_ACTIONS = frozenset(
     }
 )
 EXPERIMENT_DESIGN_REQUIRED_UI_ACTIONS = EDITOR_REQUIRED_UI_ACTIONS
+JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS = frozenset(
+    {
+        "editor.open_via_ui",
+        "editor.new_experiment_via_ui",
+        "editor.configure_design_via_ui",
+        "editor.optimize_generate_via_ui",
+        "editor.finish_via_ui",
+        "machine.connect_via_ui",
+        "machine.enable_motors_via_ui",
+        "machine.home_via_ui",
+        "machine.configure_print_settings_via_ui",
+        "head.set_volume_via_ui",
+        "head.stage_via_ui",
+        "pressure.enable_regulation_via_ui",
+        "calibration.open_via_ui",
+        "calibration.generate_via_ui",
+        "calibration.select_via_ui",
+        "calibration.apply_via_ui",
+    }
+)
 EXPERIMENT_DESIGN_REJECTED_REQUIRED_UI_ACTIONS = frozenset(
     {
         "editor.open_via_ui",
@@ -1348,6 +1379,113 @@ def _experiment_design_body(runtime: JourneyRuntime) -> None:
             ),
         },
     )
+
+
+def run_joined_calibrated_checkpoint(runtime: JourneyRuntime) -> None:
+    """Drive the unregistered Milestone 11 lifecycle through revision 3."""
+
+    from tools.virtual_workflows.experiment_design_cases import (
+        editor_specification,
+        get_experiment_design_case,
+    )
+    from tools.virtual_workflows.joined_interaction_cases import (
+        DESIGN_A_STOCK_ID,
+        JOINED_INTERACTION_CASE,
+    )
+
+    case = JOINED_INTERACTION_CASE
+    source = get_experiment_design_case(case.source.case_id)
+    context = runtime.context
+    runtime.add_assertion(simulation_identity_assertion(context))
+    runtime.add_assertion(real_application_assertion(context))
+    action_start = len(context.action_results)
+    driver = run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(
+            editor_specification(source),
+            use_harness_action_runner=True,
+            capture_editor_milestones=False,
+        ),
+    )
+    runtime.add_assertion(
+        editor_create_finalize_assertion(
+            context,
+            action_start=action_start,
+            action_end=len(context.action_results),
+            optimization_action_ids=("editor.optimize_generate_via_ui",),
+            capture_editor_milestones=False,
+        )
+    )
+    capture_milestone(
+        context,
+        "design_generated",
+        evidence={"case_id": source.case_id, "random_seed": source.experiment.random_seed},
+    )
+    design_result, prepared = randomized_joined_design_assertion(
+        context,
+        case=case,
+        driver_evidence=driver,
+    )
+    runtime.add_assertion(design_result)
+    capture_milestone(
+        context,
+        "prepared_randomized",
+        evidence={
+            "plan_id": prepared.plan_id,
+            "plan_revision": prepared.plan_revision,
+            "assignment_sha256": case.source.assignment_sha256,
+        },
+    )
+    runtime.observations["randomized_calibration_lifecycle"] = {
+        "prepared": dict(design_result.evidence)
+    }
+
+    runtime.run_steps(machine_startup_steps())
+    observer = ExecutionObserver(
+        context,
+        experiment_dir=Path(prepared.experiment_dir),
+        completed_count=lambda: 0,
+        pass_context=lambda: {"stock_id": DESIGN_A_STOCK_ID, "phase": "calibration_only"},
+    )
+    runtime.register_restorable("joined_calibration_execution", observer)
+    observer.install()
+    calibration = case.calibrations[0]
+    boundary = run_stock_calibration_only(
+        runtime,
+        CalibrationOnlySpec(
+            stock_id=calibration.stock_id,
+            printer_head_id=calibration.printer_head_id,
+            pulse_width_us=calibration.print_pulse_width_us,
+            pressure_psi=2.0,
+            frequency_hz=100,
+            initial_volume_uL=100.0,
+            expected_volume_nL=float(calibration.droplet_volume_nL),
+        ),
+    )
+    runtime.restore_all()
+    observer_snapshot = runtime.observations["joined_calibration_execution_snapshot"]
+    calibrated_result, calibrated = calibrated_zero_progress_assertion(
+        context,
+        case=case,
+        prepared_snapshot=prepared,
+        calibration_evidence=boundary,
+        observer=observer_snapshot,
+    )
+    runtime.add_assertion(calibrated_result)
+    capture_milestone(
+        context,
+        "calibrated_zero_progress",
+        evidence={
+            "plan_id": calibrated.plan_id,
+            "plan_revision": calibrated.plan_revision,
+            "stock_id": calibration.stock_id,
+            "printer_head_id": calibration.printer_head_id,
+            "total_added_droplets": calibrated.total_added_droplets,
+        },
+    )
+    runtime.observations["randomized_calibration_lifecycle"][
+        "calibrated_zero_progress"
+    ] = dict(calibrated_result.evidence)
 
 
 def _editor_revision_body(runtime: JourneyRuntime) -> None:
@@ -3770,6 +3908,8 @@ __all__ = [
     "AUTHORITATIVE_RELOAD_REQUIRED_UI_ACTIONS",
     "AUTHORITATIVE_RELOAD_WORKLOAD_ID",
     "JOURNEY_DEFINITIONS",
+    "JOINED_CALIBRATED_CHECKPOINT_REQUIRED_ASSERTIONS",
+    "JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS",
     "JourneyRunConfig",
     "MULTI_STOCK_REQUIRED_ASSERTIONS",
     "MULTI_STOCK_REQUIRED_UI_ACTIONS",
@@ -3791,6 +3931,7 @@ __all__ = [
     "get_journey_definition",
     "run_composed_journey",
     "run_matrix_case",
+    "run_joined_calibrated_checkpoint",
     "run_exploration_sequence",
     "run_editor_create_finalize_journey",
     "run_disconnect_fail_closed_24_journey",

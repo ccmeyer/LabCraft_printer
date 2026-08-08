@@ -13,10 +13,17 @@ execution-pass, timeout, screenshot, and terminal-completion truth.
 
 The literal mapping remains `A1..A8 -> R8,R6,R3,R2,R7,R4,R1,R5`. Design A is
 the sole reagent receiving the Milestone 9 boundary-crossing 1800 us / 18 nL
-calibration. Water and Design B retain their explicit 1300 us / 9 nL
-calibrations after the clean-session boundary. Design B's exact per-well map
+calibration. Water retains 1300 us / 9 nL and Design B uses the count-stable
+1400 us / 10.8 nL calibration after the clean-session boundary. Design B's exact per-well map
 is frozen unchanged at `3,3,1,3,1,3,1,1`. All count validation is keyed by
 `(stock_id, well_id)`; no list-position lookup is used.
+
+Slice 11.2's first real-Qt Apply supplied the earliest authoritative runtime
+evidence for the joined checkpoint and corrected the planning-only literals
+before acceptance: Design A calibration requantizes dependent Water from the
+prepared 60-drop map to the literal 56-drop map while Design B remains exact.
+The later Design B calibration was fixed at count-stable 1400 us / 10.8 nL.
+This is a test-contract correction only; no production behavior changed.
 
 No scenario, matrix, capability, suite, runner, journey phase, report, replay,
 or screenshot was registered. No Qt application or SIL child process ran, and
@@ -38,12 +45,12 @@ pressure, or hardware behavior changed.
 
 New identities:
 
-- normalized joined-case SHA-256:
-  `95abfc7be2fcb38744d374be8d7af7060fbe5636d7577b3417a7d6082843d992`;
+- normalized joined-case SHA-256 (corrected by Slice 11.2 real-Qt evidence):
+  `3081ebadd38a9e9de465f67e855ce63a471d7f9092e65e9f7881da1923d509cd`;
 - tracked fixture byte SHA-256:
-  `f27c0331a367a1a104d11582348f602aa8868c904d8d3d22193bceefd6dc45cc`;
+  `bf9631efdf2e0ad04e2310b378330a87941d05c157d69a6c47b69b645dbbe118`;
 - normalized keyed count-oracle SHA-256:
-  `930a85b245db04e18f4ed9963070baddf18740d39426a33475116ef33b3eb84e`.
+  `468d78216fd52f326898c5b5625f6ae591995c642118a72ddb1cdf0cb5790814`.
 
 The source compatibility audit remains exact:
 
