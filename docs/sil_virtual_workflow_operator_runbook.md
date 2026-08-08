@@ -114,6 +114,15 @@ reagent-2 `1 -> 2` change. Inspect `dispense_count_evidence` and
 `two_reagent_isolation`; require 48 unique commands, 72 total droplets, and
 unchanged reagent-1 assignments, targets, calibration linkage, and progress.
 
+The Milestone 9 closeout baseline at source commit `792a7b0` passed both
+complete matrices and exact replays, visible `10 -> 9` and `10 -> 11` cases
+and replays, lifecycle and host-regression suites and replays, and the default
+Python suite. See
+`docs/sil_interactive_simulation_milestone_9_slice_6_completion_record.md`
+for exact retained paths and hashes. Those artifacts document the accepted
+baseline; new changes still require a source-current selection and its emitted
+replay.
+
 ## Evidence layout and authority
 
 Generated data remains beneath the ignored `verification_reports/` tree:

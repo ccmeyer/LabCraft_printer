@@ -1386,7 +1386,7 @@ Rollback:
 
 ### Milestone 9: Calibration requantization and exact dispense-count evidence
 
-Status: `planned`
+Status: `complete` (2026-08-08; all six slices and final validation complete)
 
 Goal:
 
@@ -2200,7 +2200,7 @@ authoritative reload/resume coverage.
 
 ## Definition Of Done
 
-Milestones 0-8 are complete. The expanded effort is complete when:
+Milestones 0-9 are complete. The expanded effort is complete when:
 
 - a dedicated visible interactive launcher safely constructs the real
   application in simulation mode;
@@ -2250,17 +2250,17 @@ Milestones 0-8 are complete. The expanded effort is complete when:
 
 ## Current Next Action
 
-Milestones 7 and 8 and Milestone 9 Slices 9.1-9.5 are complete. Their operator
-capabilities remain the current qualified baseline. Slice 9.6 milestone
-closeout is the current next action:
+Milestones 7, 8, and 9 are complete. Their operator capabilities remain the
+current qualified baseline. Milestone 10 is the current next action:
 
-1. Slice 9.1: put the existing mixed-mode catalog behind a generic typed
-   matrix registry and journey-family dispatch while preserving every current
-   hash, schema, report, fixture, case, and CLI result. Prove extensibility with
-   test-local definitions; do not publish an empty requantization catalog.
-2. Slice 9.2: retain exact visible calibration-preview cells, commanded intent
-   counts, simulator dispense counts, and reusable stock/well count
-   reconciliation without adding matrix cases.
+1. Slice 9.1 (complete): put the existing mixed-mode catalog behind a generic
+   typed matrix registry and journey-family dispatch while preserving every
+   current hash, schema, report, fixture, case, and CLI result. Prove
+   extensibility with test-local definitions; do not publish an empty
+   requantization catalog.
+2. Slice 9.2 (complete): retain exact visible calibration-preview cells,
+   commanded intent counts, simulator dispense counts, and reusable stock/well
+   count reconciliation without adding matrix cases.
 3. Slice 9.3 (complete): register `calibration_requantization_v1` with the
    idempotent, count-increase, and count-decrease cases, then qualify offscreen
    execution, replay, and visible increase/decrease representatives.
@@ -2269,16 +2269,16 @@ closeout is the current next action:
 5. Slice 9.5 (complete): add the missing-fill fail-closed case and
    two-reagent isolation case with exact no-mutation/no-dispatch evidence where
    applicable.
-6. Slice 9.6 (current next): qualify the complete eight-case matrix, replay, lifecycle and
-   host regressions, full Python suite, documentation, and representative
-   retained evidence.
+6. Slice 9.6 (complete): qualify both complete eight-case matrices and exact
+   replays, visible count boundaries, lifecycle and host regressions, the full
+   Python suite, documentation, and representative retained evidence.
 
 Validation policy: Slices 9.2-9.5 run only the targeted unit, contract, and
 representative SIL checks needed for their individual changes. Slice 9.6 runs
 the complete Milestone 9 matrix and replay, the broader lifecycle and host
 regressions, and the full Python suite once for milestone closeout.
 
-Milestone 10 must not begin until the Milestone 9 count oracle is stable.
+The Milestone 9 count oracle is stable, so Milestone 10 may begin.
 Milestone 13 must not begin until all deterministic Milestones 9-12 are stable.
 Do not add refill-required/resume cases or operations while volume tracking
 remains disabled. Do not run `pi_stress` unless it is explicitly selected and

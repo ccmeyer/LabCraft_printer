@@ -1654,6 +1654,16 @@ check to pass, zero values for all dispatch counters, and screenshot
 and linkage checks, primary-only retarget check, exactly-once execution check,
 and 72-droplet total must all pass.
 
+Milestone 9 qualification completed against source commit `792a7b0`. The
+complete requantization and mixed-mode matrices, their exact aggregate
+replays, the eight-scenario lifecycle suite and replay, the 96-well host
+regression and replay, and visible `10 -> 9` and `10 -> 11` cases and replays
+all passed. The final default Python suite result was `4123 passed, 78 skipped`.
+Exact aggregate/report paths and hashes are retained in
+`docs/sil_interactive_simulation_milestone_9_slice_6_completion_record.md`.
+Use its commands and the current runner-emitted replay rather than treating
+these historical paths as a substitute for source-current qualification.
+
 ### Bounded seeded editor exploration
 
 Milestone 8 Slice 6 adds the manually invoked `editor_prepared_guard_v1`
