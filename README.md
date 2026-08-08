@@ -1559,6 +1559,14 @@ pairing, stock order, calibration profile, and manual-refuel outcome. Generated
 case data stays in memory; the matrix does not create a fixture or workflow
 body for each variation.
 
+Milestone 9 Slice 3 adds `calibration_requantization_v1`. Its three one-stock,
+24-well droplet cases freeze exact catalog-owned count oracles for an
+idempotent `10 -> 10` calibration, an 8 nL to 9 nL volume increase producing
+`10 -> 9`, and a 10 nL to 9 nL volume decrease producing `10 -> 11`. Passing
+evidence reconciles the prepared plan, visible preview, calibrated plan,
+zero-progress persistence, runtime, durable intents, simulator commands, and
+terminal added counts by exact stock and well identity.
+
 List the catalog, inspect a deterministic plan, run all cases in isolated
 children, or run one replayable case with:
 
@@ -1567,6 +1575,9 @@ children, or run one replayable case with:
 
 .\env\Scripts\python.exe tools\run_virtual_workflow.py `
   --matrix mixed_mode_calibration_v1 --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix calibration_requantization_v1 --dry-run
 
 .\env\Scripts\python.exe tools\run_virtual_workflow.py `
   --matrix mixed_mode_calibration_v1 `
@@ -1596,6 +1607,22 @@ execution intents prove that printing was not bypassed. Matrix aggregates are
 separate evidence and do not satisfy registered capability-manifest coverage.
 Pi, scheduling, repetition, fault injection, baseline, comparison, and
 performance controls remain unavailable in matrix mode.
+
+Run all three requantization cases offscreen with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix calibration_requantization_v1 `
+  --output-root verification_reports\matrices `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90 `
+  --qt-platform offscreen
+```
+
+Inspect `metrics.persistence.values.dispense_count_evidence` in each retained
+report. `oracle_scope` must be
+`calibration_requantization_v1_catalog_oracle`, all reconciliation checks must
+pass, and the joined command count must be 24. Use the retained replay command;
+do not reconstruct a case from remembered values.
 
 ### Bounded seeded editor exploration
 

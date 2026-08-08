@@ -29,6 +29,7 @@ an explicit non-dry-run selector starts children.
 | Shared Qt driver, application construction, or basic editor/start controls | `standard` | visible standard plus replay |
 | Editor lifecycle, persistence, stop/resume, reload, disconnect, calibration, or manual refuel | `lifecycle` | affected direct scenario |
 | Calibration values, droplet/stream modes, stock order, or manual-refuel safeguards | `mixed_mode_calibration_v1` matrix | visible positive and safe-block cases |
+| Calibration volume or exact prepared/preview/commanded/completed droplet counts | `calibration_requantization_v1` matrix | visible `10 -> 9` and `10 -> 11` cases |
 | Prepared-editor ordering or activation guards | `editor_prepared_guard_v1` exploration | selected legal/illegal visible sequences |
 | General execution or durability changes | `host_regression` | `host_stress` for sustained effects |
 | Rack, revision history, responsiveness, resource growth, or scalability | `host_stress` | retained visible 384×10 evidence or a separately justified visible run |
@@ -50,6 +51,7 @@ Inspect a selection before executing it:
 .\env\Scripts\python.exe tools\run_virtual_workflow.py --list suites
 .\env\Scripts\python.exe tools\run_virtual_workflow.py --suite lifecycle --dry-run
 .\env\Scripts\python.exe tools\run_virtual_workflow.py --matrix mixed_mode_calibration_v1 --dry-run
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --matrix calibration_requantization_v1 --dry-run
 .\env\Scripts\python.exe tools\run_virtual_workflow.py --exploration editor_prepared_guard_v1 --dry-run
 ```
 
@@ -66,6 +68,11 @@ Common Windows commands:
 
 .\env\Scripts\python.exe tools\run_virtual_workflow.py `
   --matrix mixed_mode_calibration_v1 `
+  --output-root verification_reports\matrices `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix calibration_requantization_v1 `
   --output-root verification_reports\matrices `
   --seed 1 --speed-multiplier 1000 --timeout-seconds 90
 

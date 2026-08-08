@@ -2250,9 +2250,9 @@ Milestones 0-8 are complete. The expanded effort is complete when:
 
 ## Current Next Action
 
-Milestones 7 and 8 are complete and their operator capabilities remain the
-current qualified baseline. Implement Milestone 9 in six independently
-reviewable slices:
+Milestones 7 and 8 and Milestone 9 Slices 9.1-9.3 are complete. Their operator
+capabilities remain the current qualified baseline. Implement Slice 9.4 next,
+then continue Milestone 9 in the remaining independently reviewable slices:
 
 1. Slice 9.1: put the existing mixed-mode catalog behind a generic typed
    matrix registry and journey-family dispatch while preserving every current
@@ -2261,11 +2261,11 @@ reviewable slices:
 2. Slice 9.2: retain exact visible calibration-preview cells, commanded intent
    counts, simulator dispense counts, and reusable stock/well count
    reconciliation without adding matrix cases.
-3. Slice 9.3: register `calibration_requantization_v1` with the idempotent,
-   count-increase, and count-decrease cases, then qualify offscreen execution,
-   replay, and visible increase/decrease representatives.
-4. Slice 9.4: add multi-target, 40 nL to 10.8 nL executed transition, and
-   fill-stock positive cases.
+3. Slice 9.3 (complete): register `calibration_requantization_v1` with the
+   idempotent, count-increase, and count-decrease cases, then qualify offscreen
+   execution, replay, and visible increase/decrease representatives.
+4. Slice 9.4 (current next): add multi-target, 40 nL to 10.8 nL executed
+   transition, and fill-stock positive cases.
 5. Slice 9.5: add the missing-fill fail-closed case and two-reagent isolation
    case with exact no-mutation/no-dispatch evidence where applicable.
 6. Slice 9.6: qualify the complete eight-case matrix, replay, lifecycle and

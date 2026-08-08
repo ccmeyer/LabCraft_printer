@@ -586,7 +586,16 @@ def _editor_specification(
         if int(fixture["schema_version"]) >= 2
         else "droplet_volume_nL"
     )
-    printed_volume = sum(float(stock[volume_field]) for stock in stocks)
+    default_printed_volume = sum(float(stock[volume_field]) for stock in stocks)
+    design_override = dict(
+        fixture.get("lifecycle", {}).get("design") or {}
+    )
+    printed_volume = float(
+        design_override.get("printed_volume_nL", default_printed_volume)
+    )
+    final_volume = float(
+        design_override.get("final_volume_nL", printed_volume)
+    )
     reagents = [
         {
             "stock_label": stock["factor_name"],
@@ -607,7 +616,7 @@ def _editor_specification(
             "replicates": len(expected_wells),
             "expected_well_ids": list(expected_wells),
             "printed_volume_nL": printed_volume,
-            "final_volume_nL": printed_volume,
+            "final_volume_nL": final_volume,
             "printed_volume_tolerance_nL": 0.0,
             "randomize_assignments": False,
             "allow_two_stock_solutions": False,
@@ -617,6 +626,19 @@ def _editor_specification(
         reagents[0] if len(reagents) == 1 else reagents
     )
     return specification
+
+
+def _prepared_target_dispenses(
+    fixture: Mapping[str, Any],
+) -> dict[str, int] | None:
+    oracle = dict(
+        fixture.get("lifecycle", {}).get("dispense_count_oracle") or {}
+    )
+    if not oracle:
+        return None
+    return {
+        str(oracle["stock_id"]): int(oracle["prepared_droplets_per_well"])
+    }
 
 
 def _editor_revision_initial_specification(
@@ -1347,6 +1369,11 @@ def _add_dispense_count_assertion(
                 "calibration_count_transitions", []
             ),
             observer=observer,
+            count_oracle=(
+                runtime.fixture.get("lifecycle", {}).get(
+                    "dispense_count_oracle"
+                )
+            ),
         )
     )
 
@@ -1382,6 +1409,7 @@ def _multi_body(runtime: JourneyRuntime) -> None:
         expected_stock_ids=expected_stock_ids,
         require_stock_order=fixture.get("lifecycle", {}).get("kind")
         != "parameterized_calibration_matrix_case",
+        expected_target_dispenses=_prepared_target_dispenses(fixture),
     )
     if prepared.decision != "pass":
         raise RuntimeError(f"prepared multi-stock bundle was invalid: {prepared.evidence}")
@@ -2944,11 +2972,12 @@ def run_composed_journey(config: JourneyRunConfig) -> dict[str, Any]:
     return JourneyExecutor().run(get_journey_definition(config.scenario_id), config)
 
 
-def _run_mixed_mode_matrix_case(
+def _run_parameterized_calibration_matrix_case(
     config: JourneyRunConfig,
     *,
     matrix_id: str,
     case_id: str,
+    base_definition: JourneyDefinition,
 ) -> dict[str, Any]:
     """Run one typed matrix case through the shared multi-stock journey body."""
 
@@ -2961,7 +2990,7 @@ def _run_mixed_mode_matrix_case(
     # The action and screenshot contracts are derived from the same typed case data.
     dummy = type("MatrixPlanRuntime", (), {})()
     dummy.fixture = fixture
-    dummy.definition = MIXED_MODE_DEFINITION
+    dummy.definition = base_definition
     dummy.harness = type("Harness", (), {"config": config})()
     pass_specs = _multi_passes(dummy)
     steps = normalized_stock_pass_steps(pass_specs)
@@ -3004,7 +3033,7 @@ def _run_mixed_mode_matrix_case(
         else MATRIX_CASE_REQUIRED_ASSERTIONS
     )
     definition = replace(
-        MIXED_MODE_DEFINITION,
+        base_definition,
         scenario_name=MATRIX_SCENARIO_NAME,
         workload_id=matrix_id,
         required_action_ids=frozenset(required_actions),
@@ -3020,7 +3049,36 @@ def _run_mixed_mode_matrix_case(
     )
 
 
+def _run_mixed_mode_matrix_case(
+    config: JourneyRunConfig,
+    *,
+    matrix_id: str,
+    case_id: str,
+) -> dict[str, Any]:
+    return _run_parameterized_calibration_matrix_case(
+        config,
+        matrix_id=matrix_id,
+        case_id=case_id,
+        base_definition=MIXED_MODE_DEFINITION,
+    )
+
+
+def _run_requantization_matrix_case(
+    config: JourneyRunConfig,
+    *,
+    matrix_id: str,
+    case_id: str,
+) -> dict[str, Any]:
+    return _run_parameterized_calibration_matrix_case(
+        config,
+        matrix_id=matrix_id,
+        case_id=case_id,
+        base_definition=MULTI_STOCK_DEFINITION,
+    )
+
+
 _MATRIX_JOURNEY_RUNNERS = {
+    "calibration_requantization": _run_requantization_matrix_case,
     "mixed_mode_calibration": _run_mixed_mode_matrix_case,
 }
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -581,6 +582,7 @@ def multi_stock_prepared_assertion(
     expected_well_ids: tuple[str, ...],
     expected_stock_ids: tuple[str, ...],
     require_stock_order: bool = True,
+    expected_target_dispenses: Mapping[str, int] | None = None,
 ) -> AssertionResult:
     def inspect() -> tuple[bool, Mapping[str, Any]]:
         plan = context.experiment_model.get_execution_plan_snapshot()
@@ -596,16 +598,37 @@ def multi_stock_prepared_assertion(
                 context.experiment_model.is_authoritative_execution_runtime_active()
             ),
         }
-        targets = [
-            int(target.target_dispenses)
+        target_rows = [
+            (
+                str(target.stock_id),
+                str(well.well_id),
+                int(target.target_dispenses),
+            )
             for well in plan.wells
             for target in well.dispenses
         ]
+        expected_by_stock = (
+            {stock_id: 1 for stock_id in expected_stock_ids}
+            if expected_target_dispenses is None
+            else dict(expected_target_dispenses)
+        )
+        expected_rows = sorted(
+            (
+                stock_id,
+                well_id,
+                expected_by_stock.get(stock_id),
+            )
+            for well_id in expected_well_ids
+            for stock_id in expected_stock_ids
+        )
         expected_entries = len(expected_well_ids) * len(expected_stock_ids)
         evidence.update({
-            "target_entry_count": len(targets),
-            "target_dispense_count": sum(targets),
-            "target_dispenses_per_entry": sorted(set(targets)),
+            "target_entry_count": len(target_rows),
+            "target_dispense_count": sum(row[2] for row in target_rows),
+            "target_dispenses_per_entry": sorted(
+                {row[2] for row in target_rows}
+            ),
+            "expected_target_dispenses_by_stock": expected_by_stock,
         })
         return (
             len(observed_wells) == len(expected_well_ids)
@@ -615,9 +638,8 @@ def multi_stock_prepared_assertion(
                 if require_stock_order
                 else set(observed_stock_ids) == set(expected_stock_ids)
             )
-            and len(targets) == expected_entries
-            and sum(targets) == expected_entries
-            and set(targets) == {1}
+            and len(target_rows) == expected_entries
+            and sorted(target_rows) == expected_rows
             and str(plan.state.value) == "prepared"
             and not evidence["runtime_active"],
             evidence,
@@ -879,8 +901,15 @@ def dispense_counts_reconciled_assertion(
     prepared_snapshot: Mapping[str, Any],
     calibration_transitions: list[Mapping[str, Any]],
     observer: Mapping[str, Any],
+    count_oracle: Mapping[str, Any] | None = None,
 ) -> AssertionResult:
-    """Prove exact idempotent count consistency through simulated execution."""
+    """Prove exact catalog-owned or self-consistent simulated dispense counts."""
+
+    oracle_scope = (
+        "calibration_requantization_v1_catalog_oracle"
+        if count_oracle
+        else "slice_9_2_internal_self_consistency"
+    )
 
     required_layers = (
         "prepared_plan",
@@ -914,6 +943,102 @@ def dispense_counts_reconciled_assertion(
         )
         if not final_counts:
             raise ValueError("final calibrated plan counts are empty")
+
+        oracle_payload = dict(count_oracle or {})
+        oracle_evidence: dict[str, Any] | None = None
+        prepared_expected = final_counts
+        requantized_expected = final_counts
+        if oracle_payload:
+            expected_oracle_keys = {
+                "schema_version",
+                "source",
+                "stock_id",
+                "well_ids",
+                "prepared_droplets_per_well",
+                "requantized_droplets_per_well",
+                "expected_count_delta",
+                "transition",
+                "rounding_boundary_margin",
+            }
+            if set(oracle_payload) != expected_oracle_keys:
+                raise ValueError("catalog count oracle has an invalid shape")
+            if oracle_payload.get("schema_version") != 1 or (
+                oracle_payload.get("source")
+                != "calibration_requantization_v1_catalog"
+            ):
+                raise ValueError("catalog count oracle identity is invalid")
+            stock_id = str(oracle_payload.get("stock_id") or "").strip()
+            well_ids = tuple(str(item or "").strip() for item in (
+                oracle_payload.get("well_ids") or ()
+            ))
+            prepared_count = oracle_payload.get("prepared_droplets_per_well")
+            requantized_count = oracle_payload.get(
+                "requantized_droplets_per_well"
+            )
+            if (
+                not stock_id
+                or len(well_ids) != 24
+                or any(not well_id for well_id in well_ids)
+                or len(set(well_ids)) != len(well_ids)
+            ):
+                raise ValueError("catalog count oracle identities are invalid")
+            for label, value in (
+                ("prepared", prepared_count),
+                ("requantized", requantized_count),
+            ):
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise ValueError(f"catalog {label} count is invalid")
+            expected_delta = requantized_count - prepared_count
+            if oracle_payload.get("expected_count_delta") != expected_delta:
+                raise ValueError("catalog count oracle delta drifted")
+            transition = str(oracle_payload.get("transition") or "")
+            transition_deltas = {
+                "idempotent": 0,
+                "volume_increase": -1,
+                "volume_decrease": 1,
+            }
+            if transition_deltas.get(transition) != expected_delta:
+                raise ValueError("catalog count oracle direction drifted")
+            margin_payload = dict(
+                oracle_payload.get("rounding_boundary_margin") or {}
+            )
+            if set(margin_payload) != {"numerator", "denominator"}:
+                raise ValueError("catalog rounding margin has an invalid shape")
+            numerator = margin_payload.get("numerator")
+            denominator = margin_payload.get("denominator")
+            if (
+                isinstance(numerator, bool)
+                or isinstance(denominator, bool)
+                or not isinstance(numerator, int)
+                or not isinstance(denominator, int)
+                or numerator <= 0
+                or denominator <= 0
+            ):
+                raise ValueError("catalog rounding margin is invalid")
+            margin = Fraction(numerator, denominator)
+            if margin < Fraction(1, 3):
+                raise ValueError("catalog rounding margin is below the minimum")
+            prepared_expected = tuple(
+                StockWellCount(stock_id, well_id, prepared_count)
+                for well_id in well_ids
+            )
+            requantized_expected = tuple(
+                StockWellCount(stock_id, well_id, requantized_count)
+                for well_id in well_ids
+            )
+            if {
+                (row.stock_id, row.well_id) for row in final_counts
+            } != {
+                (row.stock_id, row.well_id) for row in requantized_expected
+            }:
+                raise ValueError("catalog count oracle membership differs from plan")
+            oracle_evidence = {
+                **oracle_payload,
+                "prepared_count": prepared_count,
+                "requantized_count": requantized_count,
+                "count_delta": expected_delta,
+                "minimum_margin_satisfied": margin >= Fraction(1, 3),
+            }
 
         preview_counts: list[StockWellCount] = []
         transition_evidence: list[dict[str, Any]] = []
@@ -1002,7 +1127,14 @@ def dispense_counts_reconciled_assertion(
             "terminal_targets": terminal.get("progress_targets") or (),
             "terminal_added": terminal.get("progress_added") or (),
         }
-        expected = {name: final_counts for name in required_layers}
+        expected = {
+            name: (
+                prepared_expected
+                if name == "prepared_plan"
+                else requantized_expected
+            )
+            for name in required_layers
+        }
         reconciliation = reconcile_stock_well_counts(
             expected=expected,
             observed=observed,
@@ -1025,10 +1157,12 @@ def dispense_counts_reconciled_assertion(
             == final_after.get("plan_id"),
             "terminal_state_completed": terminal.get("plan_state") == "completed",
             "observer_restored": observer.get("restored") is True,
+            "catalog_oracle_valid": bool(oracle_evidence) if count_oracle else True,
         }
         evidence = {
             "schema_version": 1,
-            "oracle_scope": "slice_9_2_internal_self_consistency",
+            "oracle_scope": oracle_scope,
+            "count_oracle": oracle_evidence,
             "checks": checks,
             "prepared": dict(prepared_snapshot),
             "calibration_transitions": transition_evidence,
@@ -1054,7 +1188,7 @@ def dispense_counts_reconciled_assertion(
             ("ui", "model", "persistence", "simulator"),
             {
                 "schema_version": 1,
-                "oracle_scope": "slice_9_2_internal_self_consistency",
+                "oracle_scope": oracle_scope,
                 "error": f"{type(exc).__name__}: {exc}",
             },
             "dispense-count evidence was incomplete or malformed",
@@ -1252,6 +1386,30 @@ def matrix_case_assertions(
     lifecycle = dict(fixture["lifecycle"])
     case = dict(lifecycle["case"])
     profile = dict(lifecycle["profile"])
+    matrix_id = str(lifecycle.get("matrix_id") or "")
+    registered_case_valid = False
+    registered_error: str | None = None
+    try:
+        from tools.virtual_workflows.matrices import (
+            catalog_sha256,
+            get_matrix_case,
+            resolve_matrix_plan,
+        )
+
+        registered = get_matrix_case(matrix_id, str(case.get("case_id") or ""))
+        registered_payload = dict(registered.normalized())
+        registered_plan = resolve_matrix_plan(
+            matrix_id,
+            case_id=str(case.get("case_id") or ""),
+        )
+        registered_case_valid = (
+            case == registered_payload
+            and lifecycle.get("catalog_sha256") == catalog_sha256(matrix_id)
+            and lifecycle.get("case_sha256")
+            == registered_plan["cases"][0]["case_sha256"]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        registered_error = f"{type(exc).__name__}: {exc}"
     expected_terminal = str(case["expected_terminal"])
     expected_count = int(case["expected_completion_count"])
     expected_stocks = list(fixture["stocks"])
@@ -1295,11 +1453,33 @@ def matrix_case_assertions(
         expected_by_id[stock_id]["printing_mode"] == "stream"
         for stock_id in staged_ids
     )
+    plan = context.experiment_model.get_execution_plan_snapshot()
+    count_oracle = dict(lifecycle.get("dispense_count_oracle") or {})
+    oracle_case_linked = True
+    if count_oracle:
+        margin = dict(case.get("rounding_boundary_margin") or {})
+        oracle_case_linked = (
+            count_oracle.get("source")
+            == "calibration_requantization_v1_catalog"
+            and count_oracle.get("stock_id") in expected_by_id
+            and len(tuple(count_oracle.get("well_ids") or ()))
+            == len(plan.wells)
+            and set(count_oracle.get("well_ids") or ())
+            == {well.well_id for well in plan.wells}
+            and count_oracle.get("prepared_droplets_per_well")
+            == case.get("expected_prepared_droplets")
+            and count_oracle.get("requantized_droplets_per_well")
+            == case.get("expected_requantized_droplets")
+            and count_oracle.get("expected_count_delta")
+            == case.get("expected_count_delta")
+            and count_oracle.get("transition") == case.get("transition")
+            and count_oracle.get("rounding_boundary_margin") == margin
+        )
     parameter_ok = (
-        lifecycle.get("matrix_id") == "mixed_mode_calibration_v1"
-        and lifecycle.get("catalog_sha256")
-        and lifecycle.get("case_sha256")
-        and len(expected_stocks) == 2
+        bool(matrix_id)
+        and registered_case_valid
+        and oracle_case_linked
+        and len(expected_stocks) >= 1
         and calibration_ok
         and len(records) == len(staged_ids)
         and len(manual_refuel_checks) == refuel_expected
@@ -1315,6 +1495,9 @@ def matrix_case_assertions(
         "staged_stock_order": staged_ids,
         "calibration_records": calibration_rows,
         "manual_refuel_check_count": len(manual_refuel_checks),
+        "registered_case_valid": registered_case_valid,
+        "registered_case_error": registered_error,
+        "count_oracle_linked_to_case": oracle_case_linked,
     }
     parameter_assertion = AssertionResult(
         "execution.matrix_case_parameters_applied",
@@ -1325,7 +1508,6 @@ def matrix_case_assertions(
         None if parameter_ok else "matrix parameters were not applied exactly",
     )
 
-    plan = context.experiment_model.get_execution_plan_snapshot()
     resume_path = Path(context.experiment_model.execution_resume_file_path)
     resume = load_execution_resume(resume_path) if resume_path.is_file() else None
     resume_state = str(resume.state) if resume is not None else "absent_clean"
@@ -1361,7 +1543,7 @@ def matrix_case_assertions(
         outcome_ok = (
             common_ok
             and not block
-            and len(pass_boundaries) == 2
+            and len(pass_boundaries) == len(expected_stocks)
             and all(item.get("status") == "passed" for item in persisted_checks)
         )
     else:

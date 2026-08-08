@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -10,11 +10,16 @@ import pytest
 from tools.run_virtual_workflow import main
 from tools.virtual_workflows.matrices import (
     BASE_FIXTURE_PATH,
+    CALIBRATION_REQUANTIZATION_MATRIX_ID,
     MATRIX_CASES,
     MATRIX_PLAN_SCHEMA_NAME,
     MIXED_MODE_DEFINITION,
     MIXED_MODE_MATRIX_ID,
     PROFILES,
+    REQUANTIZATION_BASE_FIXTURE_PATH,
+    REQUANTIZATION_CASES,
+    REQUANTIZATION_STOCK_ID,
+    RequantizationCase,
     MatrixDefinition,
     MatrixRegistry,
     MatrixValidationError,
@@ -33,6 +38,12 @@ EXPECTED_CATALOG_SHA256 = (
 EXPECTED_REPRESENTATIVE_PLAN_SHA256 = (
     "543bec9aa811508fcba2bb84e0549054ddbffc6d10bc85ec2ed88353f971ab9f"
 )
+EXPECTED_REQUANTIZATION_CATALOG_SHA256 = (
+    "d36330cddd7f3e168c2802314371837d96c9d4393021c338d487ff27e0c8ada8"
+)
+EXPECTED_REQUANTIZATION_PLAN_SHA256 = (
+    "54bc74e13e9eb82b84105d0cc94cf3472b693b7969fffb4908db5e7d837dec98"
+)
 
 
 EXPECTED_CASES = (
@@ -44,6 +55,11 @@ EXPECTED_CASES = (
     "stream_pair_ba_alternate_second_rise",
     "mixed_ab_alternate_fell",
     "mixed_ba_baseline_unclear",
+)
+EXPECTED_REQUANTIZATION_CASES = (
+    "droplet_idempotent_10_to_10",
+    "droplet_volume_increase_10_to_9",
+    "droplet_volume_decrease_10_to_11",
 )
 
 
@@ -93,7 +109,8 @@ def _synthetic_definition(tmp_path: Path) -> MatrixDefinition:
 
 def test_catalog_freezes_eight_cases_profiles_and_pairwise_coverage():
     assert matrix_case_ids() == EXPECTED_CASES
-    assert matrix_catalog()["matrices"][0]["case_count"] == 8
+    entries = {row["id"]: row for row in matrix_catalog()["matrices"]}
+    assert entries[MIXED_MODE_MATRIX_ID]["case_count"] == 8
     assert [row["profile_id"] for row in normalized_catalog()["profiles"]] == [
         "alternate",
         "baseline",
@@ -110,6 +127,62 @@ def test_catalog_freezes_eight_cases_profiles_and_pairwise_coverage():
         for case in MATRIX_CASES
         for item in case.refuel_outcomes
     } == {"stable", "level_rose", "level_fell", "unclear"}
+
+
+def test_requantization_catalog_freezes_exact_boundary_oracles_and_hashes():
+    assert matrix_case_ids(CALIBRATION_REQUANTIZATION_MATRIX_ID) == (
+        EXPECTED_REQUANTIZATION_CASES
+    )
+    assert [
+        (
+            case.prepared_volume_nL,
+            case.calibrated_volume_nL,
+            case.design_printed_volume_nL,
+            case.expected_prepared_droplets,
+            case.expected_requantized_droplets,
+            (case.margin_numerator, case.margin_denominator),
+        )
+        for case in REQUANTIZATION_CASES
+    ] == [
+        (9.0, 9.0, 90.0, 10, 10, (1, 2)),
+        (8.0, 9.0, 80.0, 10, 9, (7, 18)),
+        (10.0, 9.0, 100.0, 10, 11, (7, 18)),
+    ]
+    assert catalog_sha256(
+        CALIBRATION_REQUANTIZATION_MATRIX_ID
+    ) == EXPECTED_REQUANTIZATION_CATALOG_SHA256
+    plan = resolve_matrix_plan(
+        CALIBRATION_REQUANTIZATION_MATRIX_ID,
+        case_id="droplet_idempotent_10_to_10",
+        seed=7,
+        timeout_seconds=12,
+        execution_authorized=False,
+    )
+    assert hashlib.sha256(
+        json.dumps(
+            plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+    ).hexdigest() == EXPECTED_REQUANTIZATION_PLAN_SHA256
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"margin_numerator": 1, "margin_denominator": 4}, "margin drifted"),
+        (
+            {"design_printed_volume_nL": 78.75, "margin_numerator": 1,
+             "margin_denominator": 4},
+            "margin is too small",
+        ),
+        ({"design_printed_volume_nL": 84.0}, "rounding interval"),
+        ({"expected_requantized_droplets": 10}, "count direction drifted"),
+        ({"calibrated_volume_nL": 9.1}, "frozen response"),
+        ({"prepared_volume_nL": 9.0}, "volume direction drifted"),
+    ],
+)
+def test_requantization_case_rejects_drift(changes, message):
+    with pytest.raises(MatrixValidationError, match=message):
+        replace(REQUANTIZATION_CASES[1], **changes)
 
 
 def test_profiles_freeze_calibration_and_trial_values():
@@ -273,6 +346,36 @@ def test_case_fixture_is_in_memory_and_preserves_reference_fixture(tmp_path):
     )["cases"][0]["case_sha256"]
 
 
+def test_requantization_fixture_is_in_memory_one_stock_and_catalog_owned():
+    before = REQUANTIZATION_BASE_FIXTURE_PATH.read_bytes()
+    fixture, source = build_case_fixture(
+        CALIBRATION_REQUANTIZATION_MATRIX_ID,
+        "droplet_volume_increase_10_to_9",
+    )
+
+    assert source == REQUANTIZATION_BASE_FIXTURE_PATH
+    assert REQUANTIZATION_BASE_FIXTURE_PATH.read_bytes() == before
+    assert fixture["workload"] == {
+        "target_dispenses_per_stock_per_well": 9,
+        "well_count": 24,
+        "stock_count": 1,
+        "array_passes": 1,
+        "completion_count": 24,
+    }
+    stock = fixture["stocks"][0]
+    assert (
+        f"{stock['factor_name']}_{stock['concentration']:.2f}_{stock['units']}"
+        == REQUANTIZATION_STOCK_ID
+    )
+    assert fixture["lifecycle"]["design"] == {
+        "printed_volume_nL": 80.0,
+        "final_volume_nL": 80.0,
+    }
+    assert fixture["lifecycle"]["dispense_count_oracle"][
+        "requantized_droplets_per_well"
+    ] == 9
+
+
 def test_unknown_matrix_and_case_fail_closed():
     with pytest.raises(MatrixValidationError, match="unsupported matrix"):
         resolve_matrix_plan("unknown")
@@ -283,7 +386,15 @@ def test_unknown_matrix_and_case_fail_closed():
 def test_cli_lists_and_dry_runs_matrices_without_execution(capsys):
     assert main(["--list", "matrices"]) == 0
     catalog = json.loads(capsys.readouterr().out)
-    assert catalog["matrices"][0]["case_ids"] == list(EXPECTED_CASES)
+    assert [row["id"] for row in catalog["matrices"]] == [
+        CALIBRATION_REQUANTIZATION_MATRIX_ID,
+        MIXED_MODE_MATRIX_ID,
+    ]
+    entries = {row["id"]: row for row in catalog["matrices"]}
+    assert entries[MIXED_MODE_MATRIX_ID]["case_ids"] == list(EXPECTED_CASES)
+    assert entries[CALIBRATION_REQUANTIZATION_MATRIX_ID]["case_ids"] == list(
+        EXPECTED_REQUANTIZATION_CASES
+    )
 
     assert main(
         [

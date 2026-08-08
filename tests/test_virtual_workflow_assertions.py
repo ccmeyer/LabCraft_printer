@@ -96,7 +96,7 @@ def test_dispense_count_assertion_reconciles_every_required_layer(monkeypatch):
         observer={"restored": True, "lifecycle": lifecycle},
     )
 
-    assert result.decision == "pass"
+    assert result.decision == "pass", result.evidence
     assert all(result.evidence["checks"].values())
     assert all(result.evidence["reconciliation"]["checks"].values())
 
@@ -109,6 +109,123 @@ def test_dispense_count_assertion_reconciles_every_required_layer(monkeypatch):
     )
     assert rejected.decision == "fail"
     assert rejected.evidence["checks"]["calibration_progress_zero"] is False
+
+
+def test_dispense_count_assertion_uses_catalog_owned_requantization_oracle(
+    monkeypatch,
+):
+    wells = [f"A{index}" for index in range(1, 25)]
+    stock_id = "Virtual Requantization Stock_10.00_mM"
+
+    def rows(count):
+        return [
+            {"stock_id": stock_id, "well_id": well_id, "droplets": count}
+            for well_id in wells
+        ]
+
+    def snapshot(revision, state, count, added):
+        return {
+            "plan_id": "plan-r",
+            "plan_revision": revision,
+            "plan_state": state,
+            "plan_targets": rows(count),
+            "progress_targets": rows(count),
+            "progress_added": rows(added),
+            "runtime_targets": rows(count),
+            "runtime_captured": True,
+        }
+
+    preview = {
+        "visible_table": {
+            "headers": [
+                "Target", "Achievable", "Error (%)", "Drops", "\u0394/drop",
+                "Printed nL (new)", "\u0394 printed nL",
+            ],
+            "rows": [["10", "10", "0.00%", "9", "1", "81 nL", "+1 nL"]],
+            "row_count": 1,
+            "column_count": 7,
+        }
+    }
+    transition = {
+        "stock_id": stock_id,
+        "preview": preview,
+        "before": snapshot(1, "prepared", 10, 0),
+        "after": snapshot(2, "active", 9, 0),
+    }
+    begins = [
+        {
+            "intent_id": f"intent-{index}",
+            "stock_id": stock_id,
+            "well_id": well_id,
+            "commanded_droplets": 9,
+        }
+        for index, well_id in enumerate(wells, 1)
+    ]
+    lifecycle = {
+        "begins": begins,
+        "attachments": [
+            {"intent_id": row["intent_id"], "command_seq32": index}
+            for index, row in enumerate(begins, 1)
+        ],
+        "simulator_dispenses": [
+            {
+                "command_seq32": index,
+                "command_type": "DISPENSE",
+                "commanded_droplets": 9,
+                "manual": False,
+                "status": "Completed",
+            }
+            for index in range(1, 25)
+        ],
+        "simulator_dispense_limit": 10_000,
+        "simulator_dispense_overflow_count": 0,
+    }
+    oracle = {
+        "schema_version": 1,
+        "source": "calibration_requantization_v1_catalog",
+        "stock_id": stock_id,
+        "well_ids": wells,
+        "prepared_droplets_per_well": 10,
+        "requantized_droplets_per_well": 9,
+        "expected_count_delta": -1,
+        "transition": "volume_increase",
+        "rounding_boundary_margin": {"numerator": 7, "denominator": 18},
+    }
+    from tools.virtual_workflows import assertions
+
+    monkeypatch.setattr(
+        assertions,
+        "capture_count_snapshot",
+        lambda _context, include_runtime=False: snapshot(3, "completed", 9, 9),
+    )
+    result = dispense_counts_reconciled_assertion(
+        SimpleNamespace(),
+        prepared_snapshot=snapshot(1, "prepared", 10, 0),
+        calibration_transitions=[transition],
+        observer={"restored": True, "lifecycle": lifecycle},
+        count_oracle=oracle,
+    )
+
+    assert result.decision == "pass", result.evidence
+    assert result.evidence["oracle_scope"] == (
+        "calibration_requantization_v1_catalog_oracle"
+    )
+    assert result.evidence["count_oracle"]["count_delta"] == -1
+    reconciliation = result.evidence["reconciliation"]
+    assert {row["droplets"] for row in reconciliation["expected"]["prepared_plan"]} == {10}
+    assert {row["droplets"] for row in reconciliation["expected"]["simulator"]} == {9}
+
+    invalid = dict(oracle)
+    invalid["expected_count_delta"] = 0
+    rejected = dispense_counts_reconciled_assertion(
+        SimpleNamespace(),
+        prepared_snapshot=snapshot(1, "prepared", 10, 0),
+        calibration_transitions=[transition],
+        observer={"restored": True, "lifecycle": lifecycle},
+        count_oracle=invalid,
+    )
+    assert rejected.decision == "fail"
+    assert "delta drifted" in rejected.evidence["error"]
 
 
 def test_editor_exploration_assertions_project_safe_recovery():

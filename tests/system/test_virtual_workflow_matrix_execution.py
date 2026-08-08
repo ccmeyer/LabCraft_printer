@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from tools.virtual_workflows.matrices import MIXED_MODE_MATRIX_ID
+from tools.virtual_workflows.matrices import (
+    CALIBRATION_REQUANTIZATION_MATRIX_ID,
+    MIXED_MODE_MATRIX_ID,
+)
 from tools.virtual_workflows.report import validate_report_v1
 
 
@@ -16,7 +19,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / "tools" / "run_virtual_workflow.py"
 
 
-def _run_case(tmp_path: Path, case_id: str) -> dict:
+def _run_case(
+    tmp_path: Path,
+    case_id: str,
+    matrix_id: str = MIXED_MODE_MATRIX_ID,
+) -> dict:
     output_root = tmp_path / case_id
     environment = dict(os.environ)
     environment["QT_QPA_PLATFORM"] = "offscreen"
@@ -25,7 +32,7 @@ def _run_case(tmp_path: Path, case_id: str) -> dict:
             sys.executable,
             str(RUNNER),
             "--matrix",
-            MIXED_MODE_MATRIX_ID,
+            matrix_id,
             "--case",
             case_id,
             "--output-root",
@@ -94,3 +101,34 @@ def test_matrix_cases_reuse_one_journey_for_positive_and_safe_blocks(tmp_path):
         "Start Print Array",
         "Manual Refuel Check Required",
     ]
+
+
+@pytest.mark.sil_lifecycle
+def test_calibration_requantization_matrix_executes_exact_catalog_counts(tmp_path):
+    expected = {
+        "droplet_idempotent_10_to_10": (10, 10),
+        "droplet_volume_increase_10_to_9": (10, 9),
+        "droplet_volume_decrease_10_to_11": (10, 11),
+    }
+    for case_id, (prepared, requantized) in expected.items():
+        report = _run_case(
+            tmp_path,
+            case_id,
+            CALIBRATION_REQUANTIZATION_MATRIX_ID,
+        )
+        assert report["classification"]["status"] == "pass"
+        assert report["workload"]["workload_id"] == (
+            CALIBRATION_REQUANTIZATION_MATRIX_ID
+        )
+        values = report["metrics"]["persistence"]["values"]
+        evidence = values["dispense_count_evidence"]
+        assert evidence["oracle_scope"] == (
+            "calibration_requantization_v1_catalog_oracle"
+        )
+        assert evidence["count_oracle"]["prepared_count"] == prepared
+        assert evidence["count_oracle"]["requantized_count"] == requantized
+        assert evidence["reconciliation"]["passed"] is True
+        assert len(evidence["command_join"]["joined_commands"]) == 24
+        assert values["matrix_case"]["outcome"][
+            "observed_completion_count"
+        ] == 24
