@@ -2282,10 +2282,12 @@ Milestones 0-9 are complete. The expanded effort is complete when:
 Milestones 7, 8, and 9 are complete. Their operator capabilities remain the
 current qualified baseline. Milestone 10 is the current next action:
 
-1. Slice 10.1: define and audit the complete typed nine-case catalog and
-   independent expected-value oracle; exercise hashing/selection only through
-   a test-local definition and keep the production registry unchanged.
-2. Slice 10.2: register the control and multiple-reagent seed-4321 cases after
+1. Slice 10.1 is complete: the complete typed nine-case catalog, independent
+   expected-value oracle, named 14-pair audit, fixed hashes, and test-local
+   selector/runner contracts are recorded while the production registry
+   remains unchanged.
+2. Slice 10.2 is the current next action: register the control and
+   multiple-reagent seed-4321 cases after
    reusable Qt editor inputs and explicit prepared reload/Load Execution
    reconstruction are executable.
 3. Slice 10.3: append the one-stock feasible and two-stock-required cases,

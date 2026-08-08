@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 from tools.run_virtual_workflow import main
+from tools.virtual_workflows.experiment_design_cases import (
+    EXPERIMENT_DESIGN_MATRIX_ID,
+)
 from tools.virtual_workflows.matrices import (
     BASE_FIXTURE_PATH,
     CALIBRATION_REQUANTIZATION_MATRIX_ID,
@@ -569,6 +572,9 @@ def test_cli_lists_and_dry_runs_matrices_without_execution(capsys):
         CALIBRATION_REQUANTIZATION_MATRIX_ID,
         MIXED_MODE_MATRIX_ID,
     ]
+    assert EXPERIMENT_DESIGN_MATRIX_ID not in {
+        row["id"] for row in catalog["matrices"]
+    }
     entries = {row["id"]: row for row in catalog["matrices"]}
     assert entries[MIXED_MODE_MATRIX_ID]["case_ids"] == list(EXPECTED_CASES)
     assert entries[CALIBRATION_REQUANTIZATION_MATRIX_ID]["case_ids"] == list(

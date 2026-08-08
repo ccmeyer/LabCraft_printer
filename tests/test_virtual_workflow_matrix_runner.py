@@ -8,6 +8,14 @@ from pathlib import Path
 import pytest
 
 import tools.virtual_workflows.matrices as matrices
+from tools.virtual_workflows.experiment_design_cases import (
+    EXPERIMENT_DESIGN_BASE_SCENARIO_ID,
+    EXPERIMENT_DESIGN_CASES,
+    EXPERIMENT_DESIGN_JOURNEY_FAMILY,
+    EXPERIMENT_DESIGN_MATRIX_ID,
+    audit_pairwise_coverage,
+    build_experiment_design_fixture,
+)
 from tools.virtual_workflows.matrices import (
     MIXED_MODE_MATRIX_ID,
     MatrixDefinition,
@@ -158,6 +166,19 @@ def _synthetic_definition() -> MatrixDefinition:
     )
 
 
+def _experiment_design_definition() -> MatrixDefinition:
+    return MatrixDefinition(
+        matrix_id=EXPERIMENT_DESIGN_MATRIX_ID,
+        base_scenario_id=EXPERIMENT_DESIGN_BASE_SCENARIO_ID,
+        journey_family=EXPERIMENT_DESIGN_JOURNEY_FAMILY,
+        platform="windows_sil",
+        execution="manual_on_demand",
+        cases=EXPERIMENT_DESIGN_CASES,
+        catalog_metadata={"pairwise_audit": audit_pairwise_coverage()},
+        fixture_builder=build_experiment_design_fixture,
+    )
+
+
 def test_successful_matrix_retains_fresh_process_identity_and_hashes(
     tmp_path, monkeypatch
 ):
@@ -220,6 +241,27 @@ def test_runner_validates_and_aggregates_test_local_second_definition(
     command = calls[0][0]
     assert command[command.index("--matrix") + 1] == definition.matrix_id
     assert command[command.index("--case") + 1] == "control"
+
+
+def test_runner_validates_test_local_experiment_design_plan(monkeypatch):
+    definition = _experiment_design_definition()
+    registry = MatrixRegistry((matrices.MIXED_MODE_DEFINITION, definition))
+    monkeypatch.setattr(matrices, "MATRIX_REGISTRY", registry)
+    plan = registry.resolve_plan(
+        definition.matrix_id,
+        case_id="single_reagent_control",
+        seed=3,
+        timeout_seconds=2,
+        execution_authorized=True,
+    )
+
+    validate_matrix_plan(plan)
+
+    assert plan["matrix"]["id"] == EXPERIMENT_DESIGN_MATRIX_ID
+    assert plan["matrix"]["base_scenario_id"] == (
+        EXPERIMENT_DESIGN_BASE_SCENARIO_ID
+    )
+    assert plan["cases"][0]["case"]["expected"]["terminal"] == "prepared"
 
 
 def test_matrix_continues_after_missing_report_and_fails_closed(
