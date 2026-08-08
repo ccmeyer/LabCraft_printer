@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 from tools.virtual_workflows.assertions import (
     ActionSequenceExpectation,
     AssertionResult,
@@ -10,10 +12,12 @@ from tools.virtual_workflows.assertions import (
     dispense_counts_reconciled_assertion,
     editor_artifacts_cleanup_assertion,
     editor_create_finalize_assertion,
+    editor_create_rejected_assertion,
     editor_prepared_revision_failure_assertion,
     editor_sequence_exploration_assertions,
     exact_action_sequence_assertion,
     evaluate_assertion,
+    experiment_finalization_rejected_no_mutation_assertion,
     multi_stock_artifacts_assertion,
     mixed_mode_lifecycle_assertions,
     regression_evidence_assertions,
@@ -547,6 +551,191 @@ def test_editor_create_finalize_sequence_adds_only_explicit_regeneration():
         for action_id in action_ids
         if action_id != "artifact.capture_milestone"
     ]
+
+
+@pytest.mark.parametrize("generated_before_finalize", (False, True))
+def test_editor_create_rejected_sequence_is_terminal_specific(
+    generated_before_finalize,
+):
+    action_ids = [
+        "editor.open_via_ui",
+        "artifact.capture_milestone",
+        "editor.new_experiment_via_ui",
+        "editor.configure_design_via_ui",
+    ]
+    if generated_before_finalize:
+        action_ids.extend(
+            (
+                "editor.optimize_generate_via_ui",
+                "artifact.capture_milestone",
+            )
+        )
+    action_ids.extend(
+        ("artifact.capture_milestone", "editor.finish_via_ui")
+    )
+    context = SimpleNamespace(
+        action_results=[
+            {
+                "action_id": action_id,
+                "interaction_surface": (
+                    "harness"
+                    if action_id == "artifact.capture_milestone"
+                    else "ui"
+                ),
+                "status": "pass",
+            }
+            for action_id in action_ids
+        ]
+    )
+
+    result = editor_create_rejected_assertion(
+        context,
+        generated_before_finalize=generated_before_finalize,
+    )
+
+    assert result.decision == "pass"
+
+
+def _rejected_finalization_fixture():
+    artifact_names = (
+        "execution_plan.json",
+        "execution_plan_revisions",
+        "progress.json",
+        "key.csv",
+        "concentration_key.csv",
+        "execution_resume.json",
+    )
+    artifacts = {
+        name: {"path": f"draft/{name}", "exists": False}
+        for name in artifact_names
+    }
+    boundary = {
+        "experiment_dir": "draft",
+        "directory_inventory": {
+            "experiment_design.json": {"sha256": "draft", "size_bytes": 1}
+        },
+        "execution_artifacts": artifacts,
+        "runtime_active": False,
+        "runtime_assignments": {},
+        "array_state": "idle",
+        "intent_begin_count": 0,
+        "intent_attachment_count": 0,
+        "intent_completion_count": 0,
+        "simulator_dispense_count": 0,
+        "simulator_command_event_count": 0,
+    }
+    boundary["execution_artifacts"]["progress.json"] = {
+        "path": "Experiments/capacity/progress.json",
+        "exists": True,
+        "sha256": "draft-progress",
+        "size_bytes": 32,
+    }
+    case = {
+        "case_id": "capacity",
+        "experiment": {
+            "selected_well_ids": ["B1", "B2", "B3", "B4"],
+            "excluded_well_ids": [],
+            "random_seed": None,
+        },
+        "reagents": [{"stock_label": "Capacity A"}],
+        "expected": {
+            "terminal": "capacity_rejected",
+            "reaction_count": 5,
+            "dialog_title": "Insufficient Well Capacity",
+            "message_fragments": ["Required reactions: 5", "Available wells", "4"],
+            "capacity_required": 5,
+            "capacity_available": 4,
+        },
+    }
+    driver = {
+        "terminal": "capacity_rejected",
+        "configured": {
+            "declared_well_ids": ["B1", "B2", "B3", "B4"],
+            "selected_well_ids": ["B1", "B2", "B3", "B4"],
+            "excluded_well_ids": [],
+            "random_seed": None,
+            "reagent_count": 1,
+        },
+        "generated": {"reaction_count": 5},
+        "finalization_rejection": {
+            "expected_terminal": "capacity_rejected",
+            "observed_outcome": "rejected",
+            "reaction_count_after": 5,
+            "activation_count": 1,
+            "action_label": "Finalize Design",
+            "warning": {
+                "entered": True,
+                "title": "Insufficient Well Capacity",
+                "text": "Required reactions: 5 Available wells: 4",
+                "dismissed": True,
+                "screenshot_captured": True,
+            },
+            "status": "",
+            "dialog_before": {
+                "visible": True,
+                "result": 0,
+                "apply_requested": False,
+                "dirty": False,
+            },
+            "dialog_after": {
+                "visible": True,
+                "result": 0,
+                "apply_requested": False,
+                "dirty": False,
+            },
+            "before": copy.deepcopy(boundary),
+            "after": copy.deepcopy(boundary),
+            "directory_unchanged": True,
+            "required_execution_artifacts_absent": True,
+            "draft_progress_unchanged": True,
+            "authoritative_execution_artifacts_unchanged": True,
+            "safe": True,
+        },
+    }
+    return case, driver
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "directory",
+        "artifact",
+        "warning",
+        "dispatch",
+        "accepted",
+    ),
+)
+def test_rejected_finalization_assertion_fails_closed_on_evidence_drift(
+    mutation,
+):
+    case, driver = _rejected_finalization_fixture()
+    passing = experiment_finalization_rejected_no_mutation_assertion(
+        SimpleNamespace(), case=case, driver_evidence=driver
+    )
+    assert passing.decision == "pass"
+
+    changed = copy.deepcopy(driver)
+    rejection = changed["finalization_rejection"]
+    if mutation == "directory":
+        rejection["after"]["directory_inventory"]["new.json"] = {
+            "sha256": "new",
+            "size_bytes": 1,
+        }
+    elif mutation == "artifact":
+        rejection["after"]["execution_artifacts"]["progress.json"][
+            "sha256"
+        ] = "mutated-draft-progress"
+    elif mutation == "warning":
+        rejection["warning"]["title"] = "Wrong"
+    elif mutation == "dispatch":
+        rejection["after"]["intent_begin_count"] = 1
+    else:
+        rejection["dialog_after"]["result"] = 1
+
+    result = experiment_finalization_rejected_no_mutation_assertion(
+        SimpleNamespace(), case=case, driver_evidence=changed
+    )
+    assert result.decision == "fail"
 
 
 def test_evaluate_assertion_records_pass_fail_and_incomplete():

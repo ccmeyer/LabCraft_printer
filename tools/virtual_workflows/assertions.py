@@ -2775,6 +2775,193 @@ def editor_create_finalize_assertion(
     )
 
 
+def editor_create_rejected_assertion(
+    context: Any,
+    *,
+    action_start: int = 0,
+    action_end: int | None = None,
+    generated_before_finalize: bool,
+) -> AssertionResult:
+    action_ids = (
+        "editor.open_via_ui",
+        "artifact.capture_milestone",
+        "editor.new_experiment_via_ui",
+        "editor.configure_design_via_ui",
+        *(
+            (
+                "editor.optimize_generate_via_ui",
+                "artifact.capture_milestone",
+            )
+            if generated_before_finalize
+            else ()
+        ),
+        "artifact.capture_milestone",
+        "editor.finish_via_ui",
+    )
+    return exact_action_sequence_assertion(
+        context,
+        expectation=ActionSequenceExpectation(
+            action_ids,
+            tuple(
+                "harness" if action_id == "artifact.capture_milestone" else "ui"
+                for action_id in action_ids
+            ),
+        ),
+        start_index=action_start,
+        end_index=action_end,
+        assertion_id="experiment.editor_create_rejected",
+        checkpoint="finalization_rejected",
+        evidence_surface="ui",
+    )
+
+
+def experiment_finalization_rejected_no_mutation_assertion(
+    context: Any,
+    *,
+    case: Mapping[str, Any],
+    driver_evidence: Mapping[str, Any],
+) -> AssertionResult:
+    """Prove a real Finalize rejection left no authoritative execution state."""
+
+    expected = dict(case["expected"])
+    experiment = dict(case["experiment"])
+    configured = dict(driver_evidence.get("configured") or {})
+    generated = dict(driver_evidence.get("generated") or {})
+    rejection = dict(driver_evidence.get("finalization_rejection") or {})
+    warning = dict(rejection.get("warning") or {})
+    before = dict(rejection.get("before") or {})
+    after = dict(rejection.get("after") or {})
+    before_artifacts = dict(before.get("execution_artifacts") or {})
+    after_artifacts = dict(after.get("execution_artifacts") or {})
+    expected_artifact_names = {
+        "execution_plan.json",
+        "execution_plan_revisions",
+        "progress.json",
+        "key.csv",
+        "concentration_key.csv",
+        "execution_resume.json",
+    }
+    required_absent_names = expected_artifact_names - {"progress.json"}
+    combined_warning = " ".join(
+        (str(warning.get("text") or ""), str(rejection.get("status") or ""))
+    ).casefold()
+    zero_dispatch_keys = (
+        "intent_begin_count",
+        "intent_attachment_count",
+        "intent_completion_count",
+        "simulator_dispense_count",
+        "simulator_command_event_count",
+    )
+    expected_wells = list(experiment["selected_well_ids"])
+    expected_generated = expected["terminal"] == "capacity_rejected"
+    checks = {
+        "terminal_exact": (
+            driver_evidence.get("terminal") == expected["terminal"]
+            and rejection.get("expected_terminal") == expected["terminal"]
+            and rejection.get("observed_outcome") == "rejected"
+        ),
+        "configured_controls_exact": (
+            configured.get("declared_well_ids") == expected_wells
+            and configured.get("selected_well_ids") == expected_wells
+            and configured.get("excluded_well_ids")
+            == list(experiment.get("excluded_well_ids") or [])
+            and configured.get("random_seed") == experiment["random_seed"]
+            and configured.get("reagent_count") == len(case["reagents"])
+        ),
+        "generated_boundary_exact": (
+            bool(generated) == expected_generated
+            and (
+                not expected_generated
+                or generated.get("reaction_count") == expected["reaction_count"]
+            )
+        ),
+        "reaction_count_exact": rejection.get("reaction_count_after")
+        == expected["reaction_count"],
+        "warning_title_exact": warning.get("title") == expected["dialog_title"],
+        "warning_fragments_exact": all(
+            str(fragment).casefold() in combined_warning
+            for fragment in expected.get("message_fragments", ())
+        ),
+        "warning_interaction_exact": (
+            warning.get("entered") is True
+            and warning.get("dismissed") is True
+            and warning.get("screenshot_captured") is True
+            and rejection.get("activation_count") == 1
+            and rejection.get("action_label") == "Finalize Design"
+        ),
+        "dialog_remained_unaccepted": (
+            rejection.get("dialog_before", {}).get("visible") is True
+            and rejection.get("dialog_after", {}).get("visible") is True
+            and rejection.get("dialog_after", {}).get("apply_requested") is False
+            and rejection.get("dialog_after", {}).get("result") != 1
+        ),
+        "dirty_boundary_exact": (
+            rejection.get("dialog_before", {}).get("dirty")
+            == (not expected_generated)
+        ),
+        "directory_byte_identical": (
+            rejection.get("directory_unchanged") is True
+            and before.get("directory_inventory")
+            == after.get("directory_inventory")
+        ),
+        "execution_artifact_names_exact": (
+            set(before_artifacts) == expected_artifact_names
+            and set(after_artifacts) == expected_artifact_names
+        ),
+        "required_execution_artifacts_absent": (
+            rejection.get("required_execution_artifacts_absent") is True
+            and all(
+                not before_artifacts.get(name, {}).get("exists")
+                and not after_artifacts.get(name, {}).get("exists")
+                for name in required_absent_names
+            )
+        ),
+        "draft_progress_unchanged": (
+            rejection.get("draft_progress_unchanged") is True
+            and before_artifacts.get("progress.json")
+            == after_artifacts.get("progress.json")
+        ),
+        "execution_artifacts_unchanged": (
+            rejection.get("authoritative_execution_artifacts_unchanged") is True
+            and before_artifacts == after_artifacts
+        ),
+        "runtime_inactive": (
+            before.get("runtime_active") is False
+            and after.get("runtime_active") is False
+            and before.get("runtime_assignments") == {}
+            and after.get("runtime_assignments") == {}
+        ),
+        "controller_idle": (
+            before.get("array_state") == after.get("array_state") == "idle"
+        ),
+        "zero_dispatch": all(
+            before.get(key) == after.get(key) == 0 for key in zero_dispatch_keys
+        ),
+        "driver_safe": rejection.get("safe") is True,
+    }
+    if expected["terminal"] == "capacity_rejected":
+        checks["capacity_exact"] = (
+            expected.get("capacity_required") == expected["reaction_count"]
+            and expected.get("capacity_available") == len(expected_wells)
+        )
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "case_id": case["case_id"],
+        "terminal": expected["terminal"],
+        "expected": expected,
+        "configured": configured,
+        "generated": generated,
+        "rejection": rejection,
+    }
+    return evaluate_assertion(
+        "experiment.finalization_rejected_no_mutation",
+        "finalization_rejected",
+        ("ui", "controller", "model", "persistence", "simulator"),
+        lambda: (not evidence["failed_checks"], evidence),
+    )
+
+
 def editor_prepared_bundle_assertions(
     context: Any,
     *,
@@ -3954,8 +4141,10 @@ __all__ = [
     "evaluate_assertion",
     "editor_artifacts_cleanup_assertion",
     "editor_create_finalize_assertion",
+    "editor_create_rejected_assertion",
     "editor_prepared_bundle_assertions",
     "experiment_design_case_oracle_assertion",
+    "experiment_finalization_rejected_no_mutation_assertion",
     "experiment_prepared_runtime_reconstructed_assertion",
     "editor_post_start_lock_copy_assertions",
     "dispense_counts_reconciled_assertion",

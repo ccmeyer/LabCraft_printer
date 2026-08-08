@@ -1826,6 +1826,16 @@ def drive_editor_create_finalize(
         "error": None,
         "dialog": None,
     }
+    expected = dict(specification.get("expected") or {})
+    expected_terminal = str(expected.get("terminal") or "prepared")
+    if expected_terminal not in {
+        "prepared",
+        "capacity_rejected",
+        "formulation_rejected",
+    }:
+        raise RuntimeError(
+            f"unsupported editor terminal: {expected_terminal!r}"
+        )
     driver_timer = QtCore.QTimer(context.app)
     driver_timer.setInterval(5)
 
@@ -2322,6 +2332,60 @@ def drive_editor_create_finalize(
                     rows.append(values)
                 return rows
 
+            def rejected_finalization_guard_state() -> dict[str, Any]:
+                from tools.virtual_workflows.authoritative_evidence import (
+                    runtime_assignments,
+                    snapshot_directory,
+                )
+
+                experiment_dir = Path(dialog.model.experiment_dir_path).resolve()
+                directory = snapshot_directory(experiment_dir)
+                artifact_paths: dict[str, dict[str, Any]] = {}
+                for name, attribute in (
+                    ("execution_plan.json", "execution_plan_file_path"),
+                    (
+                        "execution_plan_revisions",
+                        "execution_plan_revisions_dir_path",
+                    ),
+                    ("progress.json", "progress_file_path"),
+                    ("key.csv", "key_file_path"),
+                    ("concentration_key.csv", "concentration_key_file_path"),
+                    ("execution_resume.json", "execution_resume_file_path"),
+                ):
+                    raw_path = getattr(dialog.model, attribute, None)
+                    path = Path(raw_path).resolve() if raw_path else None
+                    artifact_paths[name] = {
+                        "path": str(path) if path is not None else None,
+                        "exists": bool(path is not None and path.exists()),
+                    }
+                instrumentation = context.instrumentation
+                return {
+                    "experiment_dir": str(experiment_dir),
+                    "directory_inventory": directory.rich_inventory(),
+                    "execution_artifacts": artifact_paths,
+                    "runtime_active": bool(
+                        context.experiment_model
+                        .is_authoritative_execution_runtime_active()
+                    ),
+                    "runtime_assignments": runtime_assignments(context.model),
+                    "array_state": context.controller.get_array_run_state(),
+                    "intent_begin_count": len(
+                        getattr(instrumentation, "intent_begins", ())
+                    ),
+                    "intent_attachment_count": len(
+                        getattr(instrumentation, "intent_attachments", ())
+                    ),
+                    "intent_completion_count": len(
+                        getattr(instrumentation, "intent_completions", ())
+                    ),
+                    "simulator_dispense_count": len(
+                        getattr(instrumentation, "simulator_dispenses", ())
+                    ),
+                    "simulator_command_event_count": len(
+                        getattr(context.machine, "command_event_history", ())
+                    ),
+                }
+
             def run_optimization_attempt(
                 attempt: Mapping[str, Any],
                 *,
@@ -2502,7 +2566,12 @@ def drive_editor_create_finalize(
                 return generated
 
             observed_attempts: list[dict[str, Any]] = []
-            for attempt_index, attempt in enumerate(optimization_attempts):
+            attempted_before_finalize = (
+                []
+                if expected_terminal == "formulation_rejected"
+                else optimization_attempts
+            )
+            for attempt_index, attempt in enumerate(attempted_before_finalize):
                 action_id = (
                     "editor.optimize_generate_via_ui"
                     if attempt_index == 0
@@ -2520,11 +2589,13 @@ def drive_editor_create_finalize(
                     dict(action_result.get("evidence") or action_result)
                 )
             state["optimization_attempts"] = observed_attempts
-            if not observed_attempts or observed_attempts[-1].get(
-                "observed_outcome"
-            ) != "generated":
+            if expected_terminal != "formulation_rejected" and (
+                not observed_attempts
+                or observed_attempts[-1].get("observed_outcome")
+                != "generated"
+            ):
                 raise RuntimeError("editor sequence did not end with generation")
-            if capture_editor_milestones:
+            if observed_attempts and capture_editor_milestones:
                 capture_milestone(
                     context,
                     "generated",
@@ -2553,9 +2624,256 @@ def drive_editor_create_finalize(
                     "dialog_result": int(dialog.result()),
                     "apply_requested": bool(dialog._apply_requested),
                     "action_label": action_label,
+                    "observed_outcome": "prepared",
                 }
 
-            run_action("editor.finish_via_ui", finish)
+            def reject_finalization() -> Mapping[str, Any]:
+                expected_title = str(expected.get("dialog_title") or "")
+                expected_fragments = tuple(
+                    str(value)
+                    for value in expected.get("message_fragments", ())
+                )
+                if not expected_title or not expected_fragments:
+                    raise RuntimeError(
+                        "rejected finalization requires warning truth"
+                    )
+                action_label = str(dialog.finish_btn.text() or "")
+                if action_label != "Finalize Design":
+                    raise RuntimeError(
+                        f"editable design exposed {action_label!r}; "
+                        "expected 'Finalize Design'"
+                    )
+                if not dialog.finish_btn.isEnabled():
+                    raise RuntimeError("Finalize Design was not visibly actionable")
+
+                before = rejected_finalization_guard_state()
+                dialog_before = {
+                    "visible": bool(dialog.isVisible()),
+                    "result": int(dialog.result()),
+                    "apply_requested": bool(dialog._apply_requested),
+                    "dirty": bool(dialog._design_optimization_dirty),
+                }
+                activations: list[bool] = []
+                warning: dict[str, Any] = {
+                    "entered": False,
+                    "title": None,
+                    "text": None,
+                    "dismissed": False,
+                    "screenshot_captured": False,
+                    "error": None,
+                }
+
+                def record_activation(checked: bool = False) -> None:
+                    activations.append(bool(checked))
+
+                def dismiss_warning() -> None:
+                    if warning["entered"]:
+                        return
+                    active_warning = context.app.activeModalWidget()
+                    if (
+                        active_warning is None
+                        or active_warning is dialog
+                        or isinstance(active_warning, QtWidgets.QProgressDialog)
+                    ):
+                        return
+                    warning["entered"] = True
+                    warning["title"] = active_warning.windowTitle()
+                    try:
+                        if not isinstance(active_warning, QtWidgets.QMessageBox):
+                            raise RuntimeError(
+                                "expected finalization rejection did not open "
+                                "a QMessageBox"
+                            )
+                        warning["text"] = " ".join(
+                            part
+                            for part in (
+                                active_warning.text(),
+                                active_warning.informativeText(),
+                                active_warning.detailedText(),
+                            )
+                            if part
+                        )
+                        combined = str(warning["text"] or "").casefold()
+                        if warning["title"] != expected_title or any(
+                            fragment.casefold() not in combined
+                            for fragment in expected_fragments
+                        ):
+                            raise RuntimeError(
+                                "finalization rejection warning did not match: "
+                                f"title={warning['title']!r}, "
+                                f"text={warning['text']!r}"
+                            )
+                        if capture_editor_milestones:
+                            capture_milestone(
+                                context,
+                                "finalization_rejected",
+                                evidence={
+                                    "title": warning["title"],
+                                    "text": warning["text"],
+                                    "terminal": expected_terminal,
+                                },
+                                widget=active_warning,
+                            )
+                            warning["screenshot_captured"] = True
+                        ok_button = active_warning.button(
+                            QtWidgets.QMessageBox.StandardButton.Ok
+                        )
+                        if ok_button is None or not ok_button.isEnabled():
+                            raise RuntimeError(
+                                "finalization rejection has no enabled OK button"
+                            )
+                        QtTest.QTest.mouseClick(
+                            ok_button, QtCore.Qt.MouseButton.LeftButton
+                        )
+                        warning["dismissed"] = True
+                    except BaseException as exc:
+                        warning["error"] = exc
+                        if (
+                            isinstance(active_warning, QtWidgets.QDialog)
+                            and active_warning.isVisible()
+                        ):
+                            active_warning.reject()
+
+                warning_timer = QtCore.QTimer(context.app)
+                warning_timer.setInterval(5)
+                warning_timer.timeout.connect(dismiss_warning)
+                dialog.finish_btn.clicked.connect(record_activation)
+                warning_timer.start()
+                try:
+                    with _expected_editor_message_dialog(
+                        context, title=expected_title
+                    ), _expected_editor_progress_dialog(context):
+                        click(dialog.finish_btn)
+                        _wait_for_editor_progress_dialogs(
+                            context,
+                            QtTest,
+                            "editor.finish_via_ui",
+                        )
+                finally:
+                    warning_timer.stop()
+                    warning_timer.deleteLater()
+                    dialog.finish_btn.clicked.disconnect(record_activation)
+                if warning["error"] is not None:
+                    raise warning["error"]
+
+                after = rejected_finalization_guard_state()
+                status = str(dialog.status_lbl.text() or "")
+                dialog_after = {
+                    "visible": bool(dialog.isVisible()),
+                    "result": int(dialog.result()),
+                    "apply_requested": bool(dialog._apply_requested),
+                    "dirty": bool(dialog._design_optimization_dirty),
+                }
+                required_absent_names = {
+                    "execution_plan.json",
+                    "execution_plan_revisions",
+                    "key.csv",
+                    "concentration_key.csv",
+                    "execution_resume.json",
+                }
+                required_artifacts_absent = all(
+                    not bool(before["execution_artifacts"][name]["exists"])
+                    and not bool(after["execution_artifacts"][name]["exists"])
+                    for name in required_absent_names
+                )
+                progress_unchanged = (
+                    before["execution_artifacts"]["progress.json"]
+                    == after["execution_artifacts"]["progress.json"]
+                )
+                zero_dispatch_keys = (
+                    "intent_begin_count",
+                    "intent_attachment_count",
+                    "intent_completion_count",
+                    "simulator_dispense_count",
+                    "simulator_command_event_count",
+                )
+                safety_checks = {
+                    "one_finalize_activation": len(activations) == 1,
+                    "warning_entered": bool(warning["entered"]),
+                    "warning_dismissed": bool(warning["dismissed"]),
+                    "warning_title_exact": warning["title"] == expected_title,
+                    "screenshot_contract": bool(warning["screenshot_captured"])
+                    == bool(capture_editor_milestones),
+                    "guard_state_unchanged": before == after,
+                    "required_execution_artifacts_absent": (
+                        required_artifacts_absent
+                    ),
+                    "draft_progress_unchanged": progress_unchanged,
+                    "dialog_visible": dialog_after["visible"],
+                    "dialog_unaccepted": dialog_after["result"]
+                    != int(QtWidgets.QDialog.DialogCode.Accepted),
+                    "apply_not_requested": not dialog_after["apply_requested"],
+                    "runtime_inactive": not after["runtime_active"],
+                    "runtime_assignments_empty": after["runtime_assignments"]
+                    == {},
+                    "controller_idle": after["array_state"] == "idle",
+                    "zero_dispatch": all(
+                        before[key] == after[key] == 0
+                        for key in zero_dispatch_keys
+                    ),
+                }
+                safe = all(safety_checks.values())
+                evidence = {
+                    "expected_terminal": expected_terminal,
+                    "observed_outcome": "rejected",
+                    "reaction_count_after": int(
+                        dialog.model.get_number_of_reactions()
+                    ),
+                    "activation_count": len(activations),
+                    "action_label": action_label,
+                    "warning": {
+                        key: value
+                        for key, value in warning.items()
+                        if key != "error"
+                    },
+                    "expected_message_fragments": list(expected_fragments),
+                    "status": status,
+                    "dialog_before": dialog_before,
+                    "dialog_after": dialog_after,
+                    "before": before,
+                    "after": after,
+                    "directory_unchanged": (
+                        before["directory_inventory"]
+                        == after["directory_inventory"]
+                    ),
+                    "required_execution_artifacts_absent": (
+                        required_artifacts_absent
+                    ),
+                    "draft_progress_unchanged": progress_unchanged,
+                    "authoritative_execution_artifacts_unchanged": (
+                        before["execution_artifacts"]
+                        == after["execution_artifacts"]
+                    ),
+                    "safe": safe,
+                    "safety_checks": safety_checks,
+                }
+                if not safe:
+                    raise RuntimeError(
+                        "rejected finalization did not preserve the safe boundary: "
+                        + ", ".join(
+                            name
+                            for name, passed in safety_checks.items()
+                            if not passed
+                        )
+                    )
+                return evidence
+
+            if expected_terminal == "prepared":
+                finish_result = run_action("editor.finish_via_ui", finish)
+                state["finalization"] = dict(
+                    finish_result.get("evidence") or finish_result
+                )
+            else:
+                finish_result = run_action(
+                    "editor.finish_via_ui",
+                    reject_finalization,
+                    allowed_dialogs=(dialog,),
+                )
+                state["finalization_rejection"] = dict(
+                    finish_result.get("evidence") or finish_result
+                )
+                dialog.reject()
+                context.app.processEvents()
             state["finished"] = True
         except BaseException as exc:
             state["error"] = exc
@@ -2585,10 +2903,15 @@ def drive_editor_create_finalize(
         )
     return {
         "dialog_type": type(state["dialog"]).__name__,
-        "finalized": True,
+        "terminal": expected_terminal,
+        "finalized": expected_terminal == "prepared",
         "configured": dict(state["configured"]),
-        "generated": dict(state["generated"]),
+        "generated": dict(state.get("generated") or {}),
         "optimization_attempts": list(state["optimization_attempts"]),
+        "finalization": dict(state.get("finalization") or {}),
+        "finalization_rejection": dict(
+            state.get("finalization_rejection") or {}
+        ),
     }
 
 

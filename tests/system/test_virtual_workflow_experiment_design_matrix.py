@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from tools.virtual_workflows.journeys import (
+    EXPERIMENT_DESIGN_REJECTED_REQUIRED_ASSERTIONS,
+    EXPERIMENT_DESIGN_REJECTED_REQUIRED_UI_ACTIONS,
     EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS,
     EXPERIMENT_DESIGN_REQUIRED_SCREENSHOTS,
     EXPERIMENT_DESIGN_REQUIRED_UI_ACTIONS,
@@ -110,6 +112,11 @@ def _run_case(tmp_path: Path, case_id: str) -> dict:
             },
             id="multi_reagent_seed_1234",
         ),
+        pytest.param(
+            "exact_custom_capacity",
+            {"B1": "R1", "B2": "R2", "B3": "R3", "B4": "R4"},
+            id="exact_custom_capacity",
+        ),
     ),
 )
 def test_experiment_design_positive_case_is_exact(
@@ -191,6 +198,100 @@ def test_experiment_design_positive_case_is_exact(
         ]
         assert prepared["observed_excluded_well_ids"] == ["A2", "A5"]
     assert set(report["artifacts"]["screenshots"]) == expected_screenshots
+
+
+@pytest.mark.sil_lifecycle
+@pytest.mark.parametrize(
+    ("case_id", "terminal", "title", "fragments", "generated"),
+    (
+        pytest.param(
+            "capacity_plus_one_rejected",
+            "capacity_rejected",
+            "Insufficient Well Capacity",
+            ("Required reactions: 5", "Available wells", "4"),
+            True,
+            id="capacity_plus_one_rejected",
+        ),
+        pytest.param(
+            "fixed_stock_exceeds_max_rejected",
+            "formulation_rejected",
+            "Optimization failed",
+            ("exceeds max stock",),
+            False,
+            id="fixed_stock_exceeds_max_rejected",
+        ),
+    ),
+)
+def test_experiment_design_rejected_case_has_exact_no_mutation_evidence(
+    tmp_path,
+    case_id,
+    terminal,
+    title,
+    fragments,
+    generated,
+):
+    report = _run_case(tmp_path, case_id)
+
+    assert report["classification"]["status"] == "pass"
+    assert not any(report["safety"]["hardware_interfaces"].values())
+    workflow = report["metrics"]["workflow"]["values"]
+    decisions = {
+        row["assertion_id"]: row["decision"]
+        for row in workflow["assertion_results"]
+    }
+    assert tuple(decisions) == EXPERIMENT_DESIGN_REJECTED_REQUIRED_ASSERTIONS
+    assert set(decisions.values()) == {"pass"}
+    ui_actions = {
+        row["action_id"]
+        for row in workflow["action_results"]
+        if row["interaction_surface"] == "ui"
+    }
+    expected_ui_actions = set(EXPERIMENT_DESIGN_REJECTED_REQUIRED_UI_ACTIONS)
+    if generated:
+        expected_ui_actions.add("editor.optimize_generate_via_ui")
+    assert ui_actions == expected_ui_actions
+
+    values = report["metrics"]["persistence"]["values"]
+    matrix_case = values["matrix_case"]
+    assert matrix_case["case"]["case_id"] == case_id
+    assert matrix_case["outcome"]["terminal"] == terminal
+    assert all(matrix_case["outcome"]["oracle_checks"].values())
+    assert matrix_case["outcome"]["runtime_checks"] == {}
+    rejection = values["experiment_design_evidence"][
+        "finalization_rejection"
+    ]
+    assert rejection["terminal"] == terminal
+    assert all(rejection["checks"].values())
+    boundary = rejection["rejection"]
+    assert boundary["warning"]["title"] == title
+    combined = " ".join(
+        (boundary["warning"]["text"], boundary["status"])
+    ).casefold()
+    assert all(fragment.casefold() in combined for fragment in fragments)
+    assert boundary["before"]["directory_inventory"] == (
+        boundary["after"]["directory_inventory"]
+    )
+    assert boundary["required_execution_artifacts_absent"] is True
+    assert boundary["draft_progress_unchanged"] is True
+    assert boundary["authoritative_execution_artifacts_unchanged"] is True
+    before_artifacts = boundary["before"]["execution_artifacts"]
+    after_artifacts = boundary["after"]["execution_artifacts"]
+    assert before_artifacts["progress.json"]["exists"] is True
+    assert before_artifacts["progress.json"] == after_artifacts["progress.json"]
+    assert all(
+        before_artifacts[name]["exists"] is False
+        and after_artifacts[name]["exists"] is False
+        for name in before_artifacts
+        if name != "progress.json"
+    )
+    assert boundary["before"]["runtime_assignments"] == {}
+    assert boundary["after"]["runtime_assignments"] == {}
+    assert boundary["before"]["array_state"] == "idle"
+    assert boundary["after"]["array_state"] == "idle"
+    assert set(report["artifacts"]["screenshots"]) == (
+        {"editor_opened", "finalization_rejected", "validated"}
+        | ({"generated"} if generated else set())
+    )
 
 
 @pytest.mark.sil_lifecycle

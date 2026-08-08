@@ -28,6 +28,9 @@ EXPERIMENT_DESIGN_EXECUTABLE_CASE_IDS = (
     "two_stock_required",
     "custom_wells_with_exclusions",
     "multi_reagent_seed_1234",
+    "exact_custom_capacity",
+    "capacity_plus_one_rejected",
+    "fixed_stock_exceeds_max_rejected",
 )
 REFERENCE_FIXTURE_PATH = (
     Path(__file__).resolve().parent
@@ -1030,10 +1033,10 @@ EXPERIMENT_DESIGN_CASES: tuple[ExperimentDesignCase, ...] = (
                 )
             ),
             stock_well_counts=(
-                _count(CAPACITY_STOCK_ID, "B1", 1), _count(FILL_STOCK_ID, "B1", 9),
-                _count(CAPACITY_STOCK_ID, "B2", 2), _count(FILL_STOCK_ID, "B2", 8),
-                _count(CAPACITY_STOCK_ID, "B3", 1), _count(FILL_STOCK_ID, "B3", 9),
-                _count(CAPACITY_STOCK_ID, "B4", 2), _count(FILL_STOCK_ID, "B4", 8),
+                _count(CAPACITY_STOCK_ID, "B1", 1), _count(FILL_STOCK_ID, "B1", 10),
+                _count(CAPACITY_STOCK_ID, "B2", 2), _count(FILL_STOCK_ID, "B2", 9),
+                _count(CAPACITY_STOCK_ID, "B3", 1), _count(FILL_STOCK_ID, "B3", 10),
+                _count(CAPACITY_STOCK_ID, "B4", 2), _count(FILL_STOCK_ID, "B4", 9),
             ),
             capacity_required=4,
             capacity_available=4,
@@ -1221,11 +1224,6 @@ def executable_experiment_design_cases() -> tuple[ExperimentDesignCase, ...]:
 
 def editor_specification(case: ExperimentDesignCase) -> dict[str, Any]:
     """Project typed inputs to the normal editor driver's additive contract."""
-
-    if case.expected.terminal != "prepared":
-        raise ExperimentDesignCaseError(
-            "rejected experiment-design cases require the negative driver"
-        )
     experiment = case.experiment.normalized()
     experiment["expected_reaction_count"] = case.expected.reaction_count
     return {
@@ -1234,6 +1232,7 @@ def editor_specification(case: ExperimentDesignCase) -> dict[str, Any]:
         "optimization_attempts": [
             attempt.normalized() for attempt in case.optimization_attempts
         ],
+        "expected": case.expected.normalized(),
     }
 
 

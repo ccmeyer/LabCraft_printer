@@ -177,6 +177,13 @@ def experiment_design_report_spec(
     reconstructed = evidence.get(
         "experiment.prepared_runtime_reconstructed_exact", {}
     )
+    rejected = evidence.get(
+        "experiment.finalization_rejected_no_mutation", {}
+    )
+    observations = getattr(runtime, "observations", {})
+    driver = dict(observations.get("experiment_design_driver") or {})
+    if oracle:
+        driver = dict(oracle.get("driver") or driver)
     return EditorLifecycleReportSpec(
         workload={
             **dict(base_workload),
@@ -186,7 +193,7 @@ def experiment_design_report_spec(
             "expected_reaction_count": case["expected"]["reaction_count"],
             "well_ids": [
                 row["well_id"] for row in case["expected"]["assignments"]
-            ],
+            ] or list(experiment["selected_well_ids"]),
             "expected_editor_finalization_operations": fixture["workload"][
                 "expected_editor_finalization_operations"
             ],
@@ -201,21 +208,22 @@ def experiment_design_report_spec(
                 "case_sha256": lifecycle["case_sha256"],
                 "case": case,
                 "parameters": {
-                    "configured": oracle.get("driver", {}).get(
-                        "configured", {}
-                    ),
-                    "generated": oracle.get("driver", {}).get(
-                        "generated", {}
-                    ),
+                    "configured": driver.get("configured", {}),
+                    "generated": driver.get("generated", {}),
                 },
                 "outcome": {
                     "terminal": case["expected"]["terminal"],
-                    "oracle_checks": oracle.get("checks", {}),
+                    "oracle_checks": (
+                        oracle.get("checks", {})
+                        if oracle
+                        else rejected.get("checks", {})
+                    ),
                     "runtime_checks": reconstructed.get("checks", {}),
                 },
             },
             "experiment_design_evidence": {
                 "prepared_oracle": oracle,
+                "finalization_rejection": rejected,
                 "reload_activation": reconstructed,
             },
         },

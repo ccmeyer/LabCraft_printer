@@ -2299,11 +2299,12 @@ current qualified baseline. Milestone 10 is the current next action:
    real picker proves disabled-cell rejection; authoritative reload proves
    exact selected/assigned wells; and persisted hashes prove equal reaction
    multisets with distinct seed-specific assignments.
-5. Slice 10.5 is the current next action: append exact-capacity and the two
-   rejected-finalization cases;
-   prove exact warning/status behavior and no new or modified authoritative
-   execution artifacts.
-6. Slice 10.6: qualify and replay the complete nine-case matrix, visible
+5. Slice 10.5 is complete: the exact-capacity case finalizes and reconstructs
+   four authoritative assignments, while both rejected Finalize paths retain
+   exact visible warnings and byte-identical draft state with no
+   finalization-owned execution artifacts, runtime activation, or dispatch.
+6. Slice 10.6 is the current next action: qualify and replay the complete
+   nine-case matrix, visible
    positive/negative representatives, lifecycle and host regressions, and the
    complete default Python suite; retain evidence, update operator docs, and
    record Milestone 10 complete.

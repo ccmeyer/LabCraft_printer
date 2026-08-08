@@ -190,3 +190,69 @@ def test_experiment_design_report_spec_adds_case_and_exact_evidence():
     assert spec.persistence_values["experiment_design_evidence"][
         "reload_activation"
     ]["checks"] == {"reloaded": True}
+
+
+def test_experiment_design_report_spec_projects_rejected_terminal_evidence():
+    case = {
+        "case_id": "rejected",
+        "experiment": {
+            "name": "rejected-design",
+            "plate_name": "plate",
+            "selected_well_ids": ["A1"],
+        },
+        "expected": {
+            "terminal": "formulation_rejected",
+            "reaction_count": 1,
+            "assignments": [],
+        },
+    }
+    runtime = SimpleNamespace(
+        fixture={
+            "lifecycle": {
+                "matrix_id": "design-matrix",
+                "catalog_sha256": "catalog",
+                "case_sha256": "case",
+                "case": case,
+            },
+            "workload": {"expected_editor_finalization_operations": 0},
+        },
+        observations={
+            "experiment_design_driver": {
+                "configured": {"selected_well_ids": ["A1"]},
+                "generated": {},
+            }
+        },
+        harness=SimpleNamespace(
+            assertion_results=[
+                {
+                    "assertion_id": (
+                        "experiment.finalization_rejected_no_mutation"
+                    ),
+                    "decision": "pass",
+                    "evidence": {"checks": {"no_mutation": True}},
+                }
+            ],
+            config=SimpleNamespace(
+                speed_multiplier=1000.0,
+                timeout_seconds=90.0,
+            ),
+        ),
+    )
+
+    spec = experiment_design_report_spec(
+        runtime,
+        base_workload={"workload_id": "design-matrix"},
+        required_assertion_ids=(
+            "experiment.finalization_rejected_no_mutation",
+        ),
+    )
+
+    assert spec.workload["well_ids"] == ["A1"]
+    assert spec.persistence_values["matrix_case"]["outcome"] == {
+        "terminal": "formulation_rejected",
+        "oracle_checks": {"no_mutation": True},
+        "runtime_checks": {},
+    }
+    assert spec.persistence_values["experiment_design_evidence"][
+        "finalization_rejection"
+    ]["checks"] == {"no_mutation": True}

@@ -17,6 +17,7 @@ from tools.virtual_workflows.assertions import (
     capture_editor_prepared_revision_snapshot,
     editor_artifacts_cleanup_assertion,
     editor_create_finalize_assertion,
+    editor_create_rejected_assertion,
     editor_post_start_lock_copy_assertions,
     editor_prepared_bundle_assertions,
     editor_prepared_revision_assertions,
@@ -24,6 +25,7 @@ from tools.virtual_workflows.assertions import (
     editor_prepared_reload_assertions,
     editor_sequence_exploration_assertions,
     experiment_design_case_oracle_assertion,
+    experiment_finalization_rejected_no_mutation_assertion,
     experiment_prepared_runtime_reconstructed_assertion,
     machine_ready_assertion,
     matrix_case_assertions,
@@ -172,6 +174,13 @@ EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS = (
     "experiment.prepared_runtime_reconstructed_exact",
     "artifacts.required_present",
 )
+EXPERIMENT_DESIGN_REJECTED_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "experiment.editor_create_rejected",
+    "experiment.finalization_rejected_no_mutation",
+    "artifacts.required_present",
+)
 EDITOR_REVISION_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
     "ui.real_app_constructed",
@@ -297,6 +306,14 @@ EDITOR_REQUIRED_UI_ACTIONS = frozenset(
     }
 )
 EXPERIMENT_DESIGN_REQUIRED_UI_ACTIONS = EDITOR_REQUIRED_UI_ACTIONS
+EXPERIMENT_DESIGN_REJECTED_REQUIRED_UI_ACTIONS = frozenset(
+    {
+        "editor.open_via_ui",
+        "editor.new_experiment_via_ui",
+        "editor.configure_design_via_ui",
+        "editor.finish_via_ui",
+    }
+)
 EDITOR_REVISION_REQUIRED_UI_ACTIONS = EDITOR_REQUIRED_UI_ACTIONS | frozenset(
     {
         "editor.rename_prepared_via_ui",
@@ -1185,6 +1202,43 @@ def _editor_body(runtime: JourneyRuntime) -> None:
     )
 
 
+def _record_experiment_design_rejection(
+    runtime: JourneyRuntime,
+    *,
+    case: Any,
+    case_payload: Mapping[str, Any],
+    driver_evidence: Mapping[str, Any],
+    editor_action_start: int,
+) -> None:
+    expected_terminal = case.expected.terminal
+    runtime.add_assertion(
+        editor_create_rejected_assertion(
+            runtime.context,
+            action_start=editor_action_start,
+            action_end=len(runtime.context.action_results),
+            generated_before_finalize=expected_terminal == "capacity_rejected",
+        )
+    )
+    rejection_result = experiment_finalization_rejected_no_mutation_assertion(
+        runtime.context,
+        case=case_payload,
+        driver_evidence=driver_evidence,
+    )
+    runtime.add_assertion(rejection_result)
+    runtime.observations["experiment_design_rejection"] = dict(
+        rejection_result.evidence
+    )
+    capture_milestone(
+        runtime.context,
+        "validated",
+        evidence={
+            "terminal": expected_terminal,
+            "case_id": case.case_id,
+            "failed_checks": rejection_result.evidence.get("failed_checks", []),
+        },
+    )
+
+
 def _experiment_design_body(runtime: JourneyRuntime) -> None:
     from tools.virtual_workflows.experiment_design_cases import (
         editor_specification,
@@ -1193,6 +1247,7 @@ def _experiment_design_body(runtime: JourneyRuntime) -> None:
 
     case_payload = dict(runtime.fixture["lifecycle"]["case"])
     case = get_experiment_design_case(case_payload["case_id"])
+    expected_terminal = case.expected.terminal
     runtime.add_assertion(simulation_identity_assertion(runtime.context))
     runtime.add_assertion(real_application_assertion(runtime.context))
     well_plate = runtime.context.model.well_plate
@@ -1221,6 +1276,15 @@ def _experiment_design_body(runtime: JourneyRuntime) -> None:
         )
         or {}
     )
+    if expected_terminal != "prepared":
+        _record_experiment_design_rejection(
+            runtime,
+            case=case,
+            case_payload=case_payload,
+            driver_evidence=driver_evidence,
+            editor_action_start=editor_action_start,
+        )
+        return
     runtime.add_assertion(
         editor_create_finalize_assertion(
             runtime.context,
@@ -2334,7 +2398,7 @@ def _experiment_design_payload(
         experiment_design_report_spec(
             runtime,
             base_workload=_base_workload(runtime),
-            required_assertion_ids=EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS,
+            required_assertion_ids=runtime.definition.required_assertion_ids,
         ),
     )
 
@@ -3000,7 +3064,7 @@ def _experiment_design_summary(
         "Milestone 10 experiment-design matrix case\n"
         f"Case: {case_id}\n"
         f"Status: {report['classification']['status']}\n"
-        f"Assertions: {passed} / {len(EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS)}\n"
+        f"Assertions: {passed} / {len(runtime.definition.required_assertion_ids)}\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
     )
@@ -3544,6 +3608,7 @@ def _run_experiment_design_matrix_case(
     from tools.virtual_workflows.matrices import build_case_fixture
 
     case = get_experiment_design_case(case_id)
+    rejected = case.expected.terminal != "prepared"
     transition_actions = (
         frozenset({"editor.regenerate_prepared_design_via_ui"})
         if len(case.optimization_attempts) > 1
@@ -3552,20 +3617,47 @@ def _run_experiment_design_matrix_case(
     required_screenshots = set(EXPERIMENT_DESIGN_REQUIRED_SCREENSHOTS)
     if case.experiment.excluded_well_ids:
         required_screenshots.add("well_picker_configured")
+    if rejected:
+        required_screenshots = {
+            "editor_opened",
+            "finalization_rejected",
+            "validated",
+        }
+        if case.expected.terminal == "capacity_rejected":
+            required_screenshots.add("generated")
+    required_actions = _COMMON_ACTIONS | _EDITOR_ACTIONS | transition_actions
+    required_ui_actions = (
+        EXPERIMENT_DESIGN_REQUIRED_UI_ACTIONS | transition_actions
+    )
+    required_assertions = EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS
+    if rejected:
+        required_actions -= frozenset(
+            {"experiment.load_authoritative_via_ui"}
+        )
+        required_ui_actions = set(
+            EXPERIMENT_DESIGN_REJECTED_REQUIRED_UI_ACTIONS
+        )
+        if case.expected.terminal == "capacity_rejected":
+            required_ui_actions.add("editor.optimize_generate_via_ui")
+        else:
+            required_actions -= frozenset(
+                {"editor.optimize_generate_via_ui"}
+            )
+        required_assertions = EXPERIMENT_DESIGN_REJECTED_REQUIRED_ASSERTIONS
     definition = replace(
         EDITOR_DEFINITION,
         scenario_name=EXPERIMENT_DESIGN_MATRIX_SCENARIO_NAME,
         workload_id=matrix_id,
         required_action_ids=(
-            _COMMON_ACTIONS
-            | _EDITOR_ACTIONS
-            | frozenset({"experiment.load_authoritative_via_ui"})
-            | transition_actions
+            required_actions
+            | (
+                frozenset()
+                if rejected
+                else frozenset({"experiment.load_authoritative_via_ui"})
+            )
         ),
-        required_ui_action_ids=(
-            EXPERIMENT_DESIGN_REQUIRED_UI_ACTIONS | transition_actions
-        ),
-        required_assertion_ids=EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS,
+        required_ui_action_ids=frozenset(required_ui_actions),
+        required_assertion_ids=required_assertions,
         required_screenshots=frozenset(required_screenshots),
         body=_experiment_design_body,
         artifact_assertion=_experiment_design_artifact,
