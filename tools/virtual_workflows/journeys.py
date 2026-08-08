@@ -2903,7 +2903,7 @@ def run_composed_journey(config: JourneyRunConfig) -> dict[str, Any]:
     return JourneyExecutor().run(get_journey_definition(config.scenario_id), config)
 
 
-def run_matrix_case(
+def _run_mixed_mode_matrix_case(
     config: JourneyRunConfig,
     *,
     matrix_id: str,
@@ -2911,8 +2911,6 @@ def run_matrix_case(
 ) -> dict[str, Any]:
     """Run one typed matrix case through the shared multi-stock journey body."""
 
-    if config.scenario_id != MIXED_MODE_WORKLOAD_ID:
-        raise ValueError("matrix cases require the mixed-mode composed base")
     from tools.virtual_workflows.matrices import build_case_fixture, get_matrix_case
 
     fixture_bundle = build_case_fixture(matrix_id, case_id)
@@ -2975,6 +2973,36 @@ def run_matrix_case(
         fixture_bundle=fixture_bundle,
         replay_selector_args=("--matrix", matrix_id, "--case", case_id),
     )
+
+
+_MATRIX_JOURNEY_RUNNERS = {
+    "mixed_mode_calibration": _run_mixed_mode_matrix_case,
+}
+
+
+def run_matrix_case(
+    config: JourneyRunConfig,
+    *,
+    matrix_id: str,
+    case_id: str,
+) -> dict[str, Any]:
+    """Validate and dispatch one registered matrix case by journey family."""
+
+    from tools.virtual_workflows.matrices import get_matrix_definition
+
+    definition = get_matrix_definition(matrix_id)
+    if config.scenario_id != definition.base_scenario_id:
+        raise ValueError(
+            f"matrix {matrix_id!r} requires composed base "
+            f"{definition.base_scenario_id!r}"
+        )
+    try:
+        runner = _MATRIX_JOURNEY_RUNNERS[definition.journey_family]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported matrix journey family: {definition.journey_family!r}"
+        ) from exc
+    return runner(config, matrix_id=matrix_id, case_id=case_id)
 
 
 def run_exploration_sequence(

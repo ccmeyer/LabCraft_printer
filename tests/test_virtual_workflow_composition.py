@@ -288,3 +288,90 @@ def test_named_journeys_meet_concision_and_generic_dispatch_gates():
     assert "definition.workload_id == EDITOR_WORKLOAD_ID" not in dispatch_source
     assert "definition.workload_id == MULTI_STOCK_WORKLOAD_ID" not in dispatch_source
     assert "definition.workload_id == RENAME_WORKLOAD_ID" not in dispatch_source
+
+
+def test_matrix_journey_dispatch_uses_registered_family_and_fails_closed(
+    tmp_path, monkeypatch
+):
+    from tools.virtual_workflows import journeys, matrices
+
+    case = SimpleNamespace(
+        case_id="control",
+        normalized=lambda: {"case_id": "control"},
+    )
+    definition = matrices.MatrixDefinition(
+        matrix_id="synthetic_dispatch_v1",
+        base_scenario_id=journeys.MIXED_MODE_WORKLOAD_ID,
+        journey_family="synthetic_dispatch",
+        platform="windows_sil",
+        execution="manual_on_demand",
+        cases=(case,),
+        catalog_metadata={},
+        fixture_builder=lambda _case: ({}, Path(__file__)),
+    )
+    monkeypatch.setattr(
+        matrices,
+        "MATRIX_REGISTRY",
+        matrices.MatrixRegistry((definition,)),
+    )
+    calls = []
+
+    def run_synthetic(config, *, matrix_id, case_id):
+        calls.append((config.scenario_id, matrix_id, case_id))
+        return {"classification": {"status": "pass"}}
+
+    monkeypatch.setitem(
+        journeys._MATRIX_JOURNEY_RUNNERS,
+        "synthetic_dispatch",
+        run_synthetic,
+    )
+    config = journeys.JourneyRunConfig(
+        scenario_id=journeys.MIXED_MODE_WORKLOAD_ID,
+        output_root=tmp_path,
+    )
+
+    assert journeys.run_matrix_case(
+        config,
+        matrix_id=definition.matrix_id,
+        case_id="control",
+    )["classification"]["status"] == "pass"
+    assert calls == [
+        (
+            journeys.MIXED_MODE_WORKLOAD_ID,
+            definition.matrix_id,
+            "control",
+        )
+    ]
+
+    wrong_base = journeys.JourneyRunConfig(
+        scenario_id=journeys.SMOKE_WORKLOAD_ID,
+        output_root=tmp_path,
+    )
+    with pytest.raises(ValueError, match="requires composed base"):
+        journeys.run_matrix_case(
+            wrong_base,
+            matrix_id=definition.matrix_id,
+            case_id="control",
+        )
+
+    unsupported = matrices.MatrixDefinition(
+        matrix_id="unsupported_dispatch_v1",
+        base_scenario_id=journeys.MIXED_MODE_WORKLOAD_ID,
+        journey_family="not_registered",
+        platform="windows_sil",
+        execution="manual_on_demand",
+        cases=(case,),
+        catalog_metadata={},
+        fixture_builder=lambda _case: ({}, Path(__file__)),
+    )
+    monkeypatch.setattr(
+        matrices,
+        "MATRIX_REGISTRY",
+        matrices.MatrixRegistry((unsupported,)),
+    )
+    with pytest.raises(ValueError, match="unsupported matrix journey family"):
+        journeys.run_matrix_case(
+            config,
+            matrix_id=unsupported.matrix_id,
+            case_id="control",
+        )

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import copy
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+import tools.virtual_workflows.matrices as matrices
 from tools.virtual_workflows.matrices import (
     MIXED_MODE_MATRIX_ID,
+    MatrixDefinition,
+    MatrixRegistry,
     resolve_matrix_plan,
 )
 from tools.virtual_workflows.matrix_runner import (
@@ -129,6 +133,31 @@ def _config(tmp_path, *, plan=None):
     )
 
 
+@dataclass(frozen=True)
+class _SyntheticCase:
+    case_id: str
+    expected_label: str
+
+    def normalized(self):
+        return {
+            "case_id": self.case_id,
+            "expected_label": self.expected_label,
+        }
+
+
+def _synthetic_definition() -> MatrixDefinition:
+    return MatrixDefinition(
+        matrix_id="synthetic_runner_matrix_v1",
+        base_scenario_id="synthetic_runner_base_v1",
+        journey_family="synthetic_runner",
+        platform="windows_sil",
+        execution="manual_on_demand",
+        cases=(_SyntheticCase("control", "runner"),),
+        catalog_metadata={},
+        fixture_builder=lambda _case: ({}, Path(__file__)),
+    )
+
+
 def test_successful_matrix_retains_fresh_process_identity_and_hashes(
     tmp_path, monkeypatch
 ):
@@ -144,6 +173,8 @@ def test_successful_matrix_retains_fresh_process_identity_and_hashes(
     assert result.aggregate["schema_name"] == MATRIX_AGGREGATE_SCHEMA_NAME
     assert result.aggregate["classification"]["status"] == "pass"
     child = result.aggregate["children"][0]
+    assert child["expected_terminal"] == "completed"
+    assert child["expected_completion_count"] == 48
     assert child["process"]["pid"] == processes[0].pid
     assert child["process"]["pid"] != child["process"]["parent_pid"]
     assert child["report"]["sha256"] == file_sha256(
@@ -155,6 +186,40 @@ def test_successful_matrix_retains_fresh_process_identity_and_hashes(
     assert "Replay: python runner.py --matrix" in result.summary_path.read_text(
         encoding="utf-8"
     )
+
+
+def test_runner_validates_and_aggregates_test_local_second_definition(
+    tmp_path, monkeypatch
+):
+    definition = _synthetic_definition()
+    registry = MatrixRegistry((matrices.MIXED_MODE_DEFINITION, definition))
+    monkeypatch.setattr(matrices, "MATRIX_REGISTRY", registry)
+    plan = matrices.resolve_matrix_plan(
+        definition.matrix_id,
+        case_id="control",
+        seed=5,
+        timeout_seconds=1,
+    )
+    validate_matrix_plan(plan)
+    monkeypatch.setattr(
+        "tools.virtual_workflows.matrix_runner._load_report",
+        _fake_report_loader,
+    )
+    factory, calls, _ = _factory([{}])
+
+    result = execute_matrix(
+        _config(tmp_path, plan=plan),
+        popen_factory=factory,
+    )
+
+    assert result.aggregate["catalog"]["id"] == definition.matrix_id
+    child = result.aggregate["children"][0]
+    assert child["expected_label"] == "runner"
+    assert "expected_terminal" not in child
+    assert "expected_completion_count" not in child
+    command = calls[0][0]
+    assert command[command.index("--matrix") + 1] == definition.matrix_id
+    assert command[command.index("--case") + 1] == "control"
 
 
 def test_matrix_continues_after_missing_report_and_fails_closed(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -10,8 +12,11 @@ from tools.virtual_workflows.matrices import (
     BASE_FIXTURE_PATH,
     MATRIX_CASES,
     MATRIX_PLAN_SCHEMA_NAME,
+    MIXED_MODE_DEFINITION,
     MIXED_MODE_MATRIX_ID,
     PROFILES,
+    MatrixDefinition,
+    MatrixRegistry,
     MatrixValidationError,
     build_case_fixture,
     catalog_sha256,
@@ -19,6 +24,14 @@ from tools.virtual_workflows.matrices import (
     matrix_catalog,
     normalized_catalog,
     resolve_matrix_plan,
+)
+
+
+EXPECTED_CATALOG_SHA256 = (
+    "d2439c2e47cb9825ad5a5024e014fd4429ff6b28dcafa54809c92fa674cff884"
+)
+EXPECTED_REPRESENTATIVE_PLAN_SHA256 = (
+    "543bec9aa811508fcba2bb84e0549054ddbffc6d10bc85ec2ed88353f971ab9f"
 )
 
 
@@ -32,6 +45,50 @@ EXPECTED_CASES = (
     "mixed_ab_alternate_fell",
     "mixed_ba_baseline_unclear",
 )
+
+
+@dataclass(frozen=True)
+class _SyntheticCase:
+    case_id: str
+    expected_label: str
+
+    def normalized(self):
+        return {
+            "case_id": self.case_id,
+            "expected_label": self.expected_label,
+        }
+
+
+class _MalformedCase:
+    case_id = "control"
+
+    def normalized(self):
+        return {"case_id": "different"}
+
+
+def _synthetic_definition(tmp_path: Path) -> MatrixDefinition:
+    source = tmp_path / "synthetic_reference.json"
+    source.write_text("{}", encoding="utf-8")
+
+    def build(case):
+        return {
+            "fixture_id": f"synthetic__{case.case_id}",
+            "expected_label": case.expected_label,
+        }, source
+
+    return MatrixDefinition(
+        matrix_id="aaa_contract_matrix_v1",
+        base_scenario_id="synthetic_base_v1",
+        journey_family="synthetic_contract",
+        platform="windows_sil",
+        execution="manual_on_demand",
+        cases=(
+            _SyntheticCase("control", "alpha"),
+            _SyntheticCase("alternate", "beta"),
+        ),
+        catalog_metadata={"profiles": [{"profile_id": "synthetic"}]},
+        fixture_builder=build,
+    )
 
 
 def test_catalog_freezes_eight_cases_profiles_and_pairwise_coverage():
@@ -104,6 +161,95 @@ def test_plan_is_deterministic_hashed_and_supports_one_case():
         timeout_seconds=12,
         execution_authorized=False,
     ) == plan
+    assert catalog_sha256() == EXPECTED_CATALOG_SHA256
+    assert hashlib.sha256(
+        json.dumps(
+            plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+    ).hexdigest() == EXPECTED_REPRESENTATIVE_PLAN_SHA256
+
+
+def test_registry_supports_multiple_sorted_independent_definitions(tmp_path):
+    synthetic = _synthetic_definition(tmp_path)
+    registry = MatrixRegistry((MIXED_MODE_DEFINITION, synthetic))
+
+    assert registry.registered_ids() == (
+        "aaa_contract_matrix_v1",
+        MIXED_MODE_MATRIX_ID,
+    )
+    assert [row["id"] for row in registry.operator_catalog()["matrices"]] == [
+        "aaa_contract_matrix_v1",
+        MIXED_MODE_MATRIX_ID,
+    ]
+    plan = registry.resolve_plan(
+        synthetic.matrix_id,
+        case_id="alternate",
+        seed=13,
+        timeout_seconds=4,
+        execution_authorized=False,
+    )
+    assert plan["matrix"] == {
+        "id": synthetic.matrix_id,
+        "catalog_sha256": synthetic.catalog_sha256(),
+        "base_scenario_id": synthetic.base_scenario_id,
+    }
+    assert plan["cases"][0]["case"] == {
+        "case_id": "alternate",
+        "expected_label": "beta",
+    }
+    assert synthetic.catalog_sha256() != EXPECTED_CATALOG_SHA256
+    fixture, source = registry.build_case_fixture(
+        synthetic.matrix_id, "alternate"
+    )
+    assert fixture == {
+        "fixture_id": "synthetic__alternate",
+        "expected_label": "beta",
+    }
+    assert source == tmp_path / "synthetic_reference.json"
+
+
+def test_registry_rejects_duplicate_and_malformed_definitions(tmp_path):
+    synthetic = _synthetic_definition(tmp_path)
+    with pytest.raises(MatrixValidationError, match="only MatrixDefinition"):
+        MatrixRegistry((object(),))
+    with pytest.raises(MatrixValidationError, match="duplicate matrix IDs"):
+        MatrixRegistry((synthetic, synthetic))
+    with pytest.raises(MatrixValidationError, match="duplicate case IDs"):
+        MatrixDefinition(
+            matrix_id="duplicate_cases_v1",
+            base_scenario_id="synthetic_base_v1",
+            journey_family="synthetic_contract",
+            platform="windows_sil",
+            execution="manual_on_demand",
+            cases=(
+                _SyntheticCase("same", "alpha"),
+                _SyntheticCase("same", "beta"),
+            ),
+            catalog_metadata={},
+            fixture_builder=synthetic.fixture_builder,
+        )
+    with pytest.raises(MatrixValidationError, match="reserved keys"):
+        MatrixDefinition(
+            matrix_id="reserved_metadata_v1",
+            base_scenario_id="synthetic_base_v1",
+            journey_family="synthetic_contract",
+            platform="windows_sil",
+            execution="manual_on_demand",
+            cases=(_SyntheticCase("control", "alpha"),),
+            catalog_metadata={"cases": []},
+            fixture_builder=synthetic.fixture_builder,
+        )
+    with pytest.raises(MatrixValidationError, match="normalized identity drifted"):
+        MatrixDefinition(
+            matrix_id="malformed_case_v1",
+            base_scenario_id="synthetic_base_v1",
+            journey_family="synthetic_contract",
+            platform="windows_sil",
+            execution="manual_on_demand",
+            cases=(_MalformedCase(),),
+            catalog_metadata={},
+            fixture_builder=synthetic.fixture_builder,
+        )
 
 
 def test_case_fixture_is_in_memory_and_preserves_reference_fixture(tmp_path):

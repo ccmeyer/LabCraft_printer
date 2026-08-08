@@ -250,6 +250,9 @@ coverage from Qt Home-button coverage.
 - performance remediation discovered by a stress run;
 - a general-purpose UI macro language;
 - automatically treating random-seed coverage as an acceptance baseline;
+- refill-required/resume SIL qualification while authoritative volume tracking
+  is not enabled; `execution.refill_resume` remains deferred until volume
+  tracking is enabled and observable through the application state;
 - using simulation success to claim physical printer readiness.
 
 ## Non-Negotiable Safety Invariants
@@ -1381,6 +1384,426 @@ Rollback:
 - remove generated aggregate/freshness output without deleting authoritative
   child scenario evidence.
 
+### Milestone 9: Calibration requantization and exact dispense-count evidence
+
+Status: `planned`
+
+Goal:
+
+- make a passing calibration SIL run prove that a changed effective ejection
+  volume produces the intended authoritative, displayed, commanded, and
+  completed droplet counts rather than proving only calibration lifecycle and
+  stock/well completion cardinality.
+
+Current gap:
+
+- `mixed_mode_calibration_v1` varies mode, stock order, calibration profile,
+  and manual-refuel outcome, but each case prepares the same effective volume
+  that its synthetic calibration later applies;
+- the focused 40 nL to 10.8 nL convergence test proves revision persistence
+  and reload but does not execute the recalculated plan;
+- current composed execution evidence counts completed stock/well pairs while
+  omitting the commanded droplet count from retained intent evidence.
+
+Deliverables:
+
+- a small typed matrix registry so additional matrix catalogs reuse the
+  existing fresh-process runner, aggregate, hashing, replay, and report
+  contracts without adding a runner family;
+- calibration page-driver evidence for the exact visible preview rows,
+  including old/new droplet counts, achieved targets, and printed-volume
+  shifts;
+- bounded execution evidence that retains `commanded_droplets` for every
+  durable intent and the corresponding simulator dispense command;
+- reusable assertions joining, by exact stock and well identity:
+  - prepared target counts;
+  - calibration-preview counts;
+  - calibrated execution-plan target counts;
+  - retargeted zero-progress counts and plan revision;
+  - reconstructed runtime targets;
+  - commanded simulator counts;
+  - completed and terminal persisted counts;
+- immutable, hash-identified requantization cases derived in memory from a
+  small tracked reference fixture;
+- exact replay, visible representative evidence, capability/manifest
+  integration, focused tests, and documentation.
+
+Initial curated cases:
+
+1. identical-volume idempotent control with unchanged target counts;
+2. same-mode droplet-volume increase crossing an `N -> N-1` rounding
+   boundary;
+3. same-mode droplet-volume decrease crossing an `N -> N+1` rounding
+   boundary;
+4. multiple targets in one reagent producing both changed and unchanged
+   counts;
+5. the existing stream-to-droplet 40 nL to 10.8 nL transition followed by
+   actual array execution and terminal reload;
+6. fill-stock requantization with non-fill stock targets unchanged;
+7. a zero-fill plan whose requested calibration would require a missing fill
+   stock and must fail without mutation;
+8. a two-reagent plan where one single-stock reagent is recalibrated and the
+   other stock, its assignments, and its counts remain unchanged.
+
+Case policy:
+
+- freeze expected boundary counts in the typed catalog independently of the
+  production requantization method under test;
+- choose values on both sides of a rounding boundary with an explicit margin;
+  do not depend on an exact floating-point half tie;
+- do not infer exact dispensing from stock/well completion cardinality;
+- two-stock reagent auto-application remains outside this milestone because
+  the production calibration UI currently supports automatic Apply only for
+  single-stock reagent plans.
+
+Likely files:
+
+- matrix catalog/selection/runner modules beneath
+  `tools/virtual_workflows/`;
+- shared calibration page driver, execution observer, journey, and assertion
+  modules;
+- focused unit/contract and real-process system tests;
+- capability manifest and operator documentation after executable evidence
+  exists;
+- production MVC files only if the new assertions expose a separately
+  reviewed application defect.
+
+Gate:
+
+- every positive case proves exact equality across preview, plan, progress,
+  runtime, intent, simulator command, and terminal added counts;
+- the expected stock alone changes unless the case explicitly targets fill;
+- plan revision, calibration record, printer-head identity, well assignment,
+  and immutable revision history remain correctly linked across reload;
+- the negative zero-fill case leaves the authoritative bundle byte-identical
+  and emits no print intent or simulator dispense;
+- complete offscreen matrix and exact replay pass in fresh processes;
+- at least one count-increase and one count-decrease case pass visibly and by
+  exact replay;
+- focused validation, the lifecycle suite, host regression, and the complete
+  Python suite pass before milestone closeout.
+
+Rollback:
+
+- remove the requantization catalog and its selector while retaining the
+  generic evidence fields if they are backward-compatible and useful;
+- otherwise revert the bounded observer/driver/assertion additions together;
+- do not modify or delete retained experiment data or historical evidence.
+
+### Milestone 10: Curated experiment-design pairwise matrix
+
+Status: `planned`
+
+Goal:
+
+- promote high-risk formulation, assignment, randomization, and capacity
+  behavior from focused Model/UI tests into real-editor, authoritative-file,
+  reloadable SIL evidence without a Cartesian case explosion.
+
+Deliverables:
+
+- a typed experiment-design case schema and immutable catalog derived in
+  memory from a small reference fixture;
+- reusable editor-driver inputs for multiple reagents, target sets, fixed or
+  optimized stocks, one/two-stock mode, replicate counts, randomization seed,
+  custom printable wells, and preconfigured exclusions;
+- independent expected reaction counts, stock identities, per-well
+  assignments, target counts, and capacity outcomes;
+- positive-case assertions for editor presentation, optimization output,
+  prepared execution plan, progress, key/concentration exports, explicit
+  reload, and reconstructed runtime assignment;
+- negative-case assertions for exact production warning/status behavior and
+  absence of partial authoritative artifacts;
+- fresh-process aggregate, replay, visible representative evidence, focused
+  tests, and documentation.
+
+Initial curated cases:
+
+1. one additive, one target, one stock, and one replicate as a control;
+2. multiple reagents and concentration targets with a nontrivial reaction
+   count;
+3. a formulation feasible with one stock;
+4. a formulation infeasible with one stock but feasible when two-stock mode
+   is enabled;
+5. a sparse custom well subset containing preconfigured excluded wells that
+   must remain unavailable and unassigned;
+6. deterministic randomized assignment with a fixed seed, same-seed replay,
+   and a different-seed comparison while preserving the reaction multiset;
+7. replicate count exactly equal to available plate capacity;
+8. capacity plus one, which must be rejected through the real editor;
+9. a deliberately infeasible target-volume or stock formulation, which must
+   not finalize.
+
+Pairwise policy:
+
+- cover each important value and pair interaction deliberately; do not form a
+  full product of reagents, concentrations, stock modes, wells, seeds, and
+  capacity;
+- manual well assignments and randomized automatic assignments remain
+  separate cases because manual assignment intentionally bypasses
+  randomization;
+- exclusions may be staged as an explicit harness/model precondition when no
+  production UI owns their configuration, but selection, disabled state,
+  capacity, finalization, and reload must be exercised through the real UI and
+  application;
+- same-seed equality and different-seed divergence are asserted only where the
+  reaction set has more than one valid permutation.
+
+Likely files:
+
+- matrix catalog and typed design-case builders;
+- shared experiment-editor page driver, journey phases, assertions, and
+  report evidence;
+- a small reference fixture if the existing editor fixture cannot express the
+  catalog cleanly;
+- focused unit/contract and system tests;
+- capability manifest and documentation after qualification.
+
+Gate:
+
+- every positive case finishes through normal Qt controls and reloads from a
+  valid authoritative bundle;
+- reaction count, stock plan, target counts, well IDs, reaction-to-well
+  mapping, progress reference, and key files match the independent case
+  oracle;
+- same-seed replay reproduces the exact assignment and different-seed cases
+  retain the same reaction multiset;
+- excluded wells are never selectable or assigned;
+- exact-capacity finalization succeeds, while capacity-plus-one and infeasible
+  formulations produce the expected blocking result with no new or changed
+  authoritative execution artifacts;
+- complete matrix, exact replay, visible positive and negative
+  representatives, focused tests, lifecycle suite, and complete Python suite
+  pass before closeout.
+
+Rollback:
+
+- remove the design catalog and dynamic selector while retaining existing
+  editor journeys and focused tests;
+- revert any catalog-only driver generalization that has no remaining caller;
+- no persisted application-data migration is permitted.
+
+### Milestone 11: Randomized design, calibration, reload, and execution interaction
+
+Status: `planned`
+
+Goal:
+
+- prove that a boundary-crossing calibration remains associated with the
+  correct stock, well assignments, counts, printer head, progress, and
+  completion events in a randomized multi-reagent design across an
+  application-session reload.
+
+Required lifecycle:
+
+1. create a bounded multi-reagent design through the real editor;
+2. enable deterministic automatic randomization and retain the seed and exact
+   reaction-to-well mapping;
+3. finalize and validate the prepared authoritative bundle;
+4. stage the intended head and apply a Milestone 9 boundary-crossing
+   calibration to one single-stock reagent through the real calibration UI;
+5. record the changed and unchanged stock/count maps at zero progress;
+6. close the application cleanly;
+7. construct a fresh application session, load the experiment through the
+   editor, and explicitly activate authoritative execution;
+8. validate the same seed, stock identities, printer-head binding,
+   calibration linkage, well mapping, and requantized counts;
+9. calibrate any remaining stock as required and execute every stock pass;
+10. reconcile exact intents, simulator commands, progress, stock-pass
+    boundaries, terminal completion, and terminal reload.
+
+Deliverables:
+
+- a composed journey using the existing session, editor, calibration, rack,
+  reload, execution, and evidence components;
+- a reusable clean-session rotation phase for calibrated zero-progress
+  authoritative execution if the current paused-reload phase cannot express
+  it without scenario-specific branching;
+- assertions keyed by `(stock_id, well_id)` rather than list position;
+- proof that the uncalibrated stock and source design remain unchanged while
+  the calibrated plan revision and progress reference advance correctly;
+- retained screenshots, action/assertion ledgers, authoritative snapshots,
+  exact replay, focused tests, and capability documentation.
+
+Constraints:
+
+- use a multi-reagent design whose calibrated reagent resolves to exactly one
+  execution stock; this milestone does not extend production two-stock
+  calibration Apply behavior;
+- reload must reconstruct from authoritative files and may not reuse success
+  from the first application session;
+- randomization changes well assignment only; stock identity and calibration
+  association must never depend on row or iteration position.
+
+Gate:
+
+- prepared, calibrated, reloaded, active, per-pass, terminal, and terminal
+  reload checkpoints all pass their exact identity/count assertions;
+- the calibrated stock changes by the expected boundary counts and the other
+  stock does not;
+- every commanded and persisted added count matches the reloaded calibrated
+  plan exactly once;
+- no unexpected dialog, error, queue starvation, duplicate intent, missing
+  intent, or ambiguous checkpoint occurs;
+- offscreen execution, exact replay, one visible qualification, focused tests,
+  lifecycle suite, host regression, and complete Python suite pass.
+
+Rollback:
+
+- remove the interaction journey and any journey-specific report fields;
+- retain independently useful Milestone 9 and 10 matrix coverage;
+- revert a generalized reload phase only if it has no other validated caller.
+
+### Milestone 12: Editor, execution-preflight, and persistence safeguards
+
+Status: `planned`
+
+Goal:
+
+- prove through independently runnable real-UI and reload boundaries that the
+  application fails closed before dispensing when design, calibration,
+  identity, lifecycle, or authoritative persistence is invalid.
+
+Safeguard groups:
+
+- editor safeguards:
+  - impossible target or printed/final volume;
+  - infeasible one/two-stock formulation;
+  - plate-capacity overflow;
+  - invalid or excluded well selection;
+  - finalization attempted from a dirty or invalid design;
+- execution-preflight safeguards:
+  - missing or stale applied calibration;
+  - pulse-width or pressure mismatch;
+  - calibration profile/mode mismatch;
+  - loaded printer-head, stock, design, or calibration identity mismatch;
+  - persisted execution inspected but not explicitly activated;
+  - edit, recalibration, start, resume, or head exchange attempted at an
+    invalid lifecycle boundary;
+- persistence safeguards:
+  - an unreflected pending intent producing an ambiguous reload;
+  - conflicting or unavailable plan/progress revision;
+  - missing calibration linkage for progressed execution;
+  - incomplete or conflicting authoritative files.
+
+Deliverables:
+
+- separate typed safeguard catalogs or focused scenarios at meaningful
+  failure boundaries rather than one large negative journey;
+- normal Qt actions for editor Finalize, calibration generation/Apply, load,
+  activation, Start, and other operator-visible attempts;
+- exact expected dialog title, message class, preflight/eligibility code, and
+  UI state evidence;
+- a shared no-mutation/no-dispatch assertion proving unchanged authoritative
+  hashes, plan/progress revision, completion count, queue, array state,
+  command history, and intent set;
+- explicit, instance-local persistence fault fixtures created only beneath an
+  isolated scenario root before application launch, with original and mutated
+  hashes retained;
+- fresh-process execution, exact replay, visible representative failures,
+  focused tests, and capability documentation.
+
+Fault policy:
+
+- a negative persistence case may create a deliberately invalid copy to test
+  application rejection, but it must never modify a user experiment or write
+  authoritative files to manufacture a passing state;
+- each case must stop at its asserted boundary and must not rely on a later
+  cleanup action to erase an unsafe command or intent;
+- bypasses may be tested only as explicitly named safeguard behavior and may
+  not satisfy the normal safe-start capability.
+
+Gate:
+
+- each safeguard attempts the real operator action and observes the expected
+  fail-closed production response;
+- zero new dispense intents, simulator print commands, completions, and added
+  droplets occur after the rejected action;
+- array state remains idle or at the exact pre-existing safe boundary, the
+  queue drains, and no unrelated stock/head state changes;
+- persistence cases are classified with the exact expected eligibility or
+  synchronization result and never activate an ambiguous bundle;
+- all negative-case reports retain failure-boundary evidence while the
+  scenario report itself passes only when the safeguard works;
+- complete safeguard catalogs, exact replay, visible representatives,
+  focused tests, lifecycle suite, and complete Python suite pass.
+
+Rollback:
+
+- remove one safeguard catalog or scenario without weakening existing
+  production guards;
+- remove isolated fault builders and their generated evidence without
+  deleting historical child reports or user experiment data;
+- any production defect fix discovered during qualification receives its own
+  minimal rollback description.
+
+### Milestone 13: Bounded seeded design/calibration exploration
+
+Status: `planned after Milestones 9-12 are stable`
+
+Goal:
+
+- explore bounded legal and illegal operation orderings around reagent edits,
+  randomization, regeneration, calibration application, reload, and lifecycle
+  guards only after deterministic matrices provide exact oracles for every
+  operation used by the generator.
+
+Deliverables:
+
+- a versioned state-machine generator whose states distinguish at least:
+  draft valid/invalid, prepared zero-progress, calibrated zero-progress,
+  reloaded inactive, active zero-progress, progressed/locked, and terminal or
+  safely rejected;
+- a bounded semantic operation catalog covering selected combinations of:
+  - add, remove, or change reagent inputs;
+  - toggle one/two-stock design mode;
+  - change printable wells, randomization, or seed;
+  - optimize, generate, regenerate, finalize, and refinalize;
+  - stage a matching or mismatching head;
+  - generate, select, and apply calibration;
+  - close, reload, activate, start, and attempt invalid lifecycle actions;
+- fixed tracked seeds, a strict action cap, normalized sequence hashes, exact
+  rerun commands, and fresh-process children;
+- legal sequences that reach a valid authoritative terminal boundary and
+  illegal sequences that prove rejection, no mutation/no dispatch, recovery,
+  and a valid final boundary;
+- retained generated plan, reached transitions, action/assertion evidence,
+  screenshots, authoritative hashes, cleanup, aggregate, and exact replay.
+
+Exploration policy:
+
+- reuse the deterministic Milestone 9-12 actions and assertions; the
+  generator must not invent weaker success criteria;
+- use a small fixed seed set and keep each sequence below a reviewed semantic
+  action maximum;
+- generated exploration is diagnostic and may supplement but may not replace
+  deterministic capability evidence;
+- do not add refill-required/resume operations while volume tracking remains
+  disabled and `execution.refill_resume` remains deferred;
+- do not mutate active authoritative files except through an explicitly
+  isolated Milestone 12 fault fixture.
+
+Gate:
+
+- generator output is deterministic, hash-stable, state-continuous, bounded,
+  and exactly replayable;
+- every operation has a deterministic matrix or focused-test oracle before it
+  is admitted to the generator;
+- legal and illegal sequences cover every admitted operation and every
+  declared rejection class across the frozen seed set;
+- unexpected dialogs, assertion omissions, action-cap overruns, state
+  discontinuities, non-replayable failures, or hardware-access attempts fail
+  the campaign;
+- complete campaign and exact replay pass after the deterministic matrices,
+  lifecycle suite, and complete Python suite are green.
+
+Rollback:
+
+- remove the new exploration campaign and selector while retaining all
+  deterministic Milestone 9-12 cases and direct journeys;
+- generated evidence remains historical unless separately reviewed for
+  bounded cleanup.
+
 ## Milestone Dependency Graph
 
 ```text
@@ -1406,12 +1829,35 @@ Milestone 4A --> Milestone 4B
                       |
                       v
                  Milestone 8
+                      |
+                      v
+                 Milestone 9
+                      |
+                      v
+                 Milestone 10
+                      |
+                      v
+                 Milestone 11
+                      |
+                      v
+                 Milestone 12
+                      |
+                      v
+                 Milestone 13
 ```
 
 Milestone 3 can begin after the interfaces in Milestone 0 are frozen and may
 run in parallel with recorder implementation. UI application waits for the
 interactive session and provider. Automation extraction waits for successful
 manual lifecycle characterization.
+
+Milestone 9 establishes the exact dispense-count oracle required by all later
+dosage-sensitive work. Milestone 10 establishes deterministic formulation and
+assignment cases. Milestone 11 joins those two areas across reload and actual
+execution. Milestone 12 freezes the relevant negative lifecycle and
+persistence boundaries before Milestone 13 admits the same operations to
+seeded exploration. Refill-required/resume coverage is not on this dependency
+chain and remains deferred until authoritative volume tracking is enabled.
 
 ## Target Validation Strategy
 
@@ -1424,6 +1870,12 @@ manual lifecycle characterization.
 - action preconditions, timeouts, and evidence;
 - assertion pass/fail/incomplete behavior;
 - report and manifest joins;
+- matrix-registry identity, independent expected-count catalogs, and exact
+  case hashing;
+- exact plan/progress/runtime/intent/simulator count reconciliation;
+- safeguard no-mutation/no-dispatch behavior;
+- state-machine continuity and action-cap enforcement for generated
+  sequences;
 - cleanup idempotence;
 - source/import hardware isolation.
 
@@ -1433,8 +1885,12 @@ manual lifecycle characterization.
 - simulator-control connection;
 - page-driver widget interaction;
 - calibration result display, selection, and Apply;
+- calibration preview old/new count and printed-volume-shift presentation;
 - stream refuel modal/task/preflight behavior;
 - experiment editor to runtime handoff;
+- multiple reagent rows, one/two-stock design selection, custom wells,
+  randomization seed, and capacity/infeasibility presentation;
+- rejected Finalize, calibration Apply, load/activation, and Start actions;
 - failure screenshots and unexpected-dialog rejection.
 
 ### Composed SIL validation
@@ -1442,8 +1898,14 @@ manual lifecycle characterization.
 - complete droplet lifecycle;
 - multi-stock lifecycle;
 - mixed droplet/stream lifecycle;
+- boundary-crossing calibration followed by exact commanded-droplet
+  execution;
+- curated formulation, assignment, randomization, capacity, and infeasibility
+  cases;
+- randomized multi-reagent calibration/reload/execution association;
 - reload/recovery lifecycle;
 - focused fault boundaries;
+- missing/stale/mismatched calibration and ambiguous persistence rejection;
 - exact persistence and intent reconciliation;
 - clean teardown.
 
@@ -1474,9 +1936,14 @@ Every composed journey must retain:
 - cross-layer state trace;
 - dialog and error records;
 - simulator command lifecycle;
+- prepared, previewed, calibrated, runtime, commanded, and completed droplet
+  counts keyed by stock and well where applicable;
 - calibration requests and generated normalized results;
 - manual-refuel outcomes;
 - plan/progress/resume/calibration identities;
+- original and mutated hashes for explicitly isolated negative persistence
+  fixtures;
+- normalized matrix case or exploration sequence identity and exact replay;
 - named screenshots;
 - failure traceback when applicable;
 - cleanup results;
@@ -1645,6 +2112,16 @@ Rollback order:
 - Milestone 7 reverts one scenario migration at a time.
 - Milestone 8 removes suite/schedule selection without deleting direct
   scenario execution.
+- Milestone 9 removes the requantization catalog and, if necessary, its
+  bounded count-evidence extensions without changing production data.
+- Milestone 10 removes the design matrix and catalog-only editor-driver
+  generalization while retaining existing editor journeys.
+- Milestone 11 removes the joined interaction journey while retaining the
+  independently useful Milestone 9 and 10 matrices.
+- Milestone 12 removes one safeguard catalog or isolated fault builder at a
+  time without weakening production guards.
+- Milestone 13 removes the new generated campaign while retaining every
+  deterministic case and direct journey.
 
 Never use rollback to rewrite or delete retained production experiment data,
 accepted baselines, or existing release tags.
@@ -1703,9 +2180,27 @@ Options:
 Do not change report identity until comparison, baseline, Pi, and retained
 report compatibility have been characterized.
 
+### D6: Refill-required/resume sequencing
+
+Status: `accepted` (2026-08-08)
+
+Decision:
+
+- do not include refill-required/resume qualification in Milestones 9-13;
+- keep `execution.refill_resume` deferred while authoritative volume tracking
+  is not enabled;
+- do not add test-owned volume bookkeeping or infer a refill boundary from
+  command counts alone;
+- revisit refill-required/resume only through a separate reviewed plan after
+  production volume tracking is enabled, durable where required, exposed to
+  the SIL state oracle, and covered by focused tests.
+
+This decision does not remove existing non-volume soft-stop/resume or
+authoritative reload/resume coverage.
+
 ## Definition Of Done
 
-This effort is complete when:
+Milestones 0-8 are complete. The expanded effort is complete when:
 
 - a dedicated visible interactive launcher safely constructs the real
   application in simulation mode;
@@ -1731,6 +2226,20 @@ This effort is complete when:
 - capability output distinguishes UI, Controller, Model, simulator, and
   harness interaction surfaces;
 - fixed standard runs and scheduled seed exploration are reproducible;
+- boundary-crossing calibrations reconcile exact displayed, authoritative,
+  runtime, commanded, and terminal droplet counts;
+- curated experiment-design cases cover multiple reagents/concentrations,
+  one/two-stock feasibility, well subsets/exclusions, deterministic
+  randomization, replicate/capacity boundaries, and infeasible formulations;
+- the randomized design/calibration interaction survives a fresh application
+  reload and completes with stock/well/count identity intact;
+- editor, calibration, execution-preflight, lifecycle, and persistence
+  safeguards prove no mutation and no dispense dispatch at rejected
+  boundaries;
+- expanded seeded exploration remains bounded, state-aware, reproducible, and
+  subordinate to deterministic matrix evidence;
+- refill-required/resume remains explicitly deferred and is not required for
+  this expansion while authoritative volume tracking is disabled;
 - hardware isolation remains fail closed;
 - full affected and complete Python regression suites pass;
 - representative success and failure evidence is manually inspected;
@@ -1741,20 +2250,31 @@ This effort is complete when:
 
 ## Current Next Action
 
-Milestones 7 and 8 are complete. The operator can list the tracked
-portfolio, dry-run suite/capability/direct-scenario plans, request
-changed-source recommendations, and explicitly execute Windows suite or
-capability plans as isolated fresh processes with hashed aggregate evidence.
-The operator can also explicitly join retained aggregates to the tracked
-manifest and receive a source-current five-state capability evaluation without
-running another workflow. The operator can also list, dry-run, execute, and
-replay the eight-case mixed-mode calibration matrix without adding a journey
-or tracked fixture per variation. The operator can also list, dry-run, execute,
-and exactly replay the ten-sequence bounded prepared-editor exploration without
-adding a fixture or journey body per seed. Slice 7 also provides manually
-authorized, exact-source `pi_primary` execution with retained proof, aggregate,
-replay, and bundle evidence. The operator runbook now records manual lane
-selection, replay, failure triage, freshness, retention, and Pi authorization.
-Do not run `pi_stress` unless it is explicitly selected and separately
-justified, and do not infer firmware, protocol, or physical-hardware coverage
-from application SIL evidence.
+Milestones 7 and 8 are complete and their operator capabilities remain the
+current qualified baseline. Implement Milestone 9 in six independently
+reviewable slices:
+
+1. Slice 9.1: put the existing mixed-mode catalog behind a generic typed
+   matrix registry and journey-family dispatch while preserving every current
+   hash, schema, report, fixture, case, and CLI result. Prove extensibility with
+   test-local definitions; do not publish an empty requantization catalog.
+2. Slice 9.2: retain exact visible calibration-preview cells, commanded intent
+   counts, simulator dispense counts, and reusable stock/well count
+   reconciliation without adding matrix cases.
+3. Slice 9.3: register `calibration_requantization_v1` with the idempotent,
+   count-increase, and count-decrease cases, then qualify offscreen execution,
+   replay, and visible increase/decrease representatives.
+4. Slice 9.4: add multi-target, 40 nL to 10.8 nL executed transition, and
+   fill-stock positive cases.
+5. Slice 9.5: add the missing-fill fail-closed case and two-reagent isolation
+   case with exact no-mutation/no-dispatch evidence where applicable.
+6. Slice 9.6: qualify the complete eight-case matrix, replay, lifecycle and
+   host regressions, full Python suite, documentation, and representative
+   retained evidence.
+
+Milestone 10 must not begin until the Milestone 9 count oracle is stable.
+Milestone 13 must not begin until all deterministic Milestones 9-12 are stable.
+Do not add refill-required/resume cases or operations while volume tracking
+remains disabled. Do not run `pi_stress` unless it is explicitly selected and
+separately justified, and do not infer firmware, protocol, physical
+calibration, or physical-hardware coverage from application SIL evidence.

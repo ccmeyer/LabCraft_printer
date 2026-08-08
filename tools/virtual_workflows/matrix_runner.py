@@ -16,12 +16,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Sequence
 
 from tools.virtual_workflows.matrices import (
-    BASE_SCENARIO_ID,
     MATRIX_PLAN_SCHEMA_NAME,
     MATRIX_SCHEMA_VERSION,
-    MIXED_MODE_MATRIX_ID,
-    catalog_sha256,
-    get_matrix_case,
+    MatrixValidationError,
+    get_matrix_definition,
 )
 from tools.virtual_workflows.report import validate_report_v1
 from tools.virtual_workflows.suite_runner import (
@@ -106,18 +104,26 @@ def validate_matrix_plan(plan: Mapping[str, Any]) -> None:
         raise MatrixAggregateError("matrix plan schema name is unsupported")
     if plan.get("schema_version") != MATRIX_SCHEMA_VERSION:
         raise MatrixAggregateError("matrix plan schema version is unsupported")
-    if plan.get("platform") != "windows_sil" or plan.get("execution_authorized") is not True:
-        raise MatrixAggregateError("matrix plan is not authorized for Windows SIL")
     matrix = plan.get("matrix")
     cases = plan.get("cases")
     if not isinstance(matrix, Mapping) or not isinstance(cases, list) or not cases:
         raise MatrixAggregateError("matrix plan identity or cases are invalid")
+    try:
+        definition = get_matrix_definition(str(matrix.get("id") or ""))
+    except MatrixValidationError as exc:
+        raise MatrixAggregateError(str(exc)) from exc
+    if (
+        definition.platform != "windows_sil"
+        or plan.get("platform") != definition.platform
+        or plan.get("execution_authorized") is not True
+    ):
+        raise MatrixAggregateError("matrix plan is not authorized for Windows SIL")
     if plan.get("case_count") != len(cases):
         raise MatrixAggregateError("matrix plan case count drifted")
     if (
-        matrix.get("id") != MIXED_MODE_MATRIX_ID
-        or matrix.get("catalog_sha256") != catalog_sha256()
-        or matrix.get("base_scenario_id") != BASE_SCENARIO_ID
+        matrix.get("id") != definition.matrix_id
+        or matrix.get("catalog_sha256") != definition.catalog_sha256()
+        or matrix.get("base_scenario_id") != definition.base_scenario_id
     ):
         raise MatrixAggregateError("matrix catalog identity drifted")
     if not isinstance(plan.get("seed"), int) or isinstance(plan.get("seed"), bool):
@@ -137,7 +143,11 @@ def validate_matrix_plan(plan: Mapping[str, Any]) -> None:
         digest = row.get("case_sha256")
         if not isinstance(digest, str) or len(digest) != 64:
             raise MatrixAggregateError("matrix case hash is invalid")
-        if case != get_matrix_case(MIXED_MODE_MATRIX_ID, case_id).normalized():
+        try:
+            expected_case = definition.get_case(case_id)
+        except MatrixValidationError as exc:
+            raise MatrixAggregateError(str(exc)) from exc
+        if case != expected_case.normalized():
             raise MatrixAggregateError("matrix case parameters drifted")
         expected_digest = hashlib.sha256(
             json.dumps(
@@ -298,13 +308,11 @@ def _execute_child(
         else:
             outcome = classification
             reasons.extend(reference["classification_reasons"])
-    return {
+    evidence = {
         "order": order,
         "case_id": case_id,
         "case_sha256": row["case_sha256"],
         "normalized_parameters": dict(row["case"]),
-        "expected_terminal": row["case"]["expected_terminal"],
-        "expected_completion_count": row["case"]["expected_completion_count"],
         "command": command,
         "watchdog_seconds": watchdog,
         "outcome": outcome,
@@ -314,6 +322,14 @@ def _execute_child(
         },
         "report": reference,
     }
+    evidence.update(
+        {
+            key: value
+            for key, value in row["case"].items()
+            if str(key).startswith("expected_")
+        }
+    )
+    return evidence
 
 
 def _status(children: Sequence[Mapping[str, Any]]) -> str:

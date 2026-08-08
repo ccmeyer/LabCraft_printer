@@ -802,12 +802,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             from tools.virtual_workflows.journeys import (
                 JourneyRunConfig,
-                MIXED_MODE_WORKLOAD_ID,
                 run_matrix_case,
             )
+            from tools.virtual_workflows.matrices import get_matrix_definition
+
+            matrix_definition = get_matrix_definition(args.matrix)
             report = run_matrix_case(
                 JourneyRunConfig(
-                    scenario_id=MIXED_MODE_WORKLOAD_ID,
+                    scenario_id=matrix_definition.base_scenario_id,
                     output_root=matrix_output_root,
                     visible=args.visible,
                     seed=args.seed,

@@ -7,7 +7,8 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from types import MappingProxyType
+from typing import Any, Callable, Mapping, Protocol
 
 from tools.sil.ejection_response import PulseAwareSyntheticEjectionModelV1
 
@@ -26,6 +27,14 @@ BASE_SCENARIO_ID = "print_array_mixed_mode_24x2_v1"
 
 class MatrixValidationError(ValueError):
     """Raised when a matrix definition or requested case is invalid."""
+
+
+class MatrixCaseContract(Protocol):
+    """Minimum immutable case surface required by the generic registry."""
+
+    case_id: str
+
+    def normalized(self) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -240,6 +249,245 @@ def _sha256_json(value: Mapping[str, Any] | list[Any]) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True)
+class MatrixDefinition:
+    """One typed matrix catalog and its fixture/journey dispatch contract."""
+
+    matrix_id: str
+    base_scenario_id: str
+    journey_family: str
+    platform: str
+    execution: str
+    cases: tuple[MatrixCaseContract, ...]
+    catalog_metadata: Mapping[str, Any]
+    fixture_builder: Callable[[MatrixCaseContract], tuple[dict[str, Any], Path]]
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("matrix ID", self.matrix_id),
+            ("base scenario ID", self.base_scenario_id),
+            ("journey family", self.journey_family),
+            ("platform", self.platform),
+            ("execution policy", self.execution),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise MatrixValidationError(f"{label} must be non-empty")
+        if not callable(self.fixture_builder):
+            raise MatrixValidationError("matrix fixture builder must be callable")
+        if not isinstance(self.catalog_metadata, Mapping):
+            raise MatrixValidationError("matrix catalog metadata must be an object")
+        reserved = {"matrix_id", "base_scenario_id", "cases"}
+        overlap = reserved.intersection(self.catalog_metadata)
+        if overlap:
+            raise MatrixValidationError(
+                "matrix catalog metadata uses reserved keys: "
+                + ", ".join(sorted(overlap))
+            )
+        try:
+            normalized_metadata = json.loads(
+                _canonical_json(dict(self.catalog_metadata))
+            )
+        except (TypeError, ValueError) as exc:
+            raise MatrixValidationError(
+                "matrix catalog metadata must be deterministic JSON"
+            ) from exc
+        object.__setattr__(
+            self, "catalog_metadata", MappingProxyType(normalized_metadata)
+        )
+        try:
+            normalized_cases = tuple(self.cases)
+        except TypeError as exc:
+            raise MatrixValidationError("matrix cases must be an iterable") from exc
+        object.__setattr__(self, "cases", normalized_cases)
+        if not self.cases:
+            raise MatrixValidationError("matrix definition must contain at least one case")
+        case_ids: list[str] = []
+        for case in self.cases:
+            case_id = getattr(case, "case_id", None)
+            normalizer = getattr(case, "normalized", None)
+            if not isinstance(case_id, str) or not case_id.strip():
+                raise MatrixValidationError("matrix case ID must be non-empty")
+            if not callable(normalizer):
+                raise MatrixValidationError(
+                    f"matrix case {case_id!r} has no normalized contract"
+                )
+            normalized = normalizer()
+            if not isinstance(normalized, Mapping):
+                raise MatrixValidationError(
+                    f"matrix case {case_id!r} normalized payload must be an object"
+                )
+            if normalized.get("case_id") != case_id:
+                raise MatrixValidationError(
+                    f"matrix case {case_id!r} normalized identity drifted"
+                )
+            try:
+                canonical = _canonical_json(dict(normalized))
+                repeated = normalizer()
+                repeated_canonical = _canonical_json(dict(repeated))
+            except (TypeError, ValueError) as exc:
+                raise MatrixValidationError(
+                    f"matrix case {case_id!r} must be deterministic JSON"
+                ) from exc
+            if canonical != repeated_canonical:
+                raise MatrixValidationError(
+                    f"matrix case {case_id!r} normalized payload is not deterministic"
+                )
+            case_ids.append(case_id)
+        if len(set(case_ids)) != len(case_ids):
+            raise MatrixValidationError("matrix definition contains duplicate case IDs")
+
+    def case_ids(self) -> tuple[str, ...]:
+        return tuple(case.case_id for case in self.cases)
+
+    def get_case(self, case_id: str) -> MatrixCaseContract:
+        matches = [case for case in self.cases if case.case_id == str(case_id)]
+        if len(matches) != 1:
+            raise MatrixValidationError(f"unsupported matrix case: {case_id!r}")
+        return matches[0]
+
+    def normalized_catalog(self) -> dict[str, Any]:
+        return {
+            "matrix_id": self.matrix_id,
+            "base_scenario_id": self.base_scenario_id,
+            **copy.deepcopy(dict(self.catalog_metadata)),
+            "cases": [dict(case.normalized()) for case in self.cases],
+        }
+
+    def catalog_sha256(self) -> str:
+        return _sha256_json(self.normalized_catalog())
+
+    def build_case_fixture(
+        self, case_id: str
+    ) -> tuple[dict[str, Any], Path]:
+        result = self.fixture_builder(self.get_case(case_id))
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise MatrixValidationError("matrix fixture builder returned an invalid bundle")
+        fixture, source = result
+        if not isinstance(fixture, dict):
+            raise MatrixValidationError("matrix fixture payload must be an object")
+        try:
+            source_path = Path(source)
+        except TypeError as exc:
+            raise MatrixValidationError(
+                "matrix reference fixture path is invalid"
+            ) from exc
+        if not source_path.is_file():
+            raise MatrixValidationError("matrix reference fixture does not exist")
+        return fixture, source_path
+
+    def catalog_entry(self) -> dict[str, Any]:
+        return {
+            "id": self.matrix_id,
+            "case_ids": list(self.case_ids()),
+            "case_count": len(self.cases),
+            "catalog_sha256": self.catalog_sha256(),
+            "platform": self.platform,
+            "execution": self.execution,
+        }
+
+
+class MatrixRegistry:
+    """Immutable, deterministic registry for typed matrix definitions."""
+
+    def __init__(self, definitions: tuple[MatrixDefinition, ...]) -> None:
+        definitions = tuple(definitions)
+        if not definitions:
+            raise MatrixValidationError("matrix registry must not be empty")
+        if any(
+            not isinstance(definition, MatrixDefinition)
+            for definition in definitions
+        ):
+            raise MatrixValidationError(
+                "matrix registry accepts only MatrixDefinition entries"
+            )
+        ids = [definition.matrix_id for definition in definitions]
+        if len(set(ids)) != len(ids):
+            raise MatrixValidationError("matrix registry contains duplicate matrix IDs")
+        ordered = sorted(definitions, key=lambda definition: definition.matrix_id)
+        self._definitions = MappingProxyType(
+            {definition.matrix_id: definition for definition in ordered}
+        )
+
+    def registered_ids(self) -> tuple[str, ...]:
+        return tuple(self._definitions)
+
+    def get_definition(self, matrix_id: str) -> MatrixDefinition:
+        try:
+            return self._definitions[str(matrix_id)]
+        except KeyError as exc:
+            raise MatrixValidationError(f"unsupported matrix: {matrix_id!r}") from exc
+
+    def matrix_case_ids(self, matrix_id: str) -> tuple[str, ...]:
+        return self.get_definition(matrix_id).case_ids()
+
+    def get_case(self, matrix_id: str, case_id: str) -> MatrixCaseContract:
+        return self.get_definition(matrix_id).get_case(case_id)
+
+    def normalized_catalog(self, matrix_id: str) -> dict[str, Any]:
+        return self.get_definition(matrix_id).normalized_catalog()
+
+    def catalog_sha256(self, matrix_id: str) -> str:
+        return self.get_definition(matrix_id).catalog_sha256()
+
+    def build_case_fixture(
+        self, matrix_id: str, case_id: str
+    ) -> tuple[dict[str, Any], Path]:
+        return self.get_definition(matrix_id).build_case_fixture(case_id)
+
+    def resolve_plan(
+        self,
+        matrix_id: str,
+        *,
+        case_id: str | None = None,
+        seed: int = 1,
+        timeout_seconds: float = 90.0,
+        execution_authorized: bool = True,
+    ) -> dict[str, Any]:
+        definition = self.get_definition(matrix_id)
+        selected = (
+            (definition.get_case(case_id),)
+            if case_id is not None
+            else definition.cases
+        )
+        return {
+            "schema_name": MATRIX_PLAN_SCHEMA_NAME,
+            "schema_version": MATRIX_SCHEMA_VERSION,
+            "matrix": {
+                "id": definition.matrix_id,
+                "catalog_sha256": definition.catalog_sha256(),
+                "base_scenario_id": definition.base_scenario_id,
+            },
+            "platform": definition.platform,
+            "seed": int(seed),
+            "timeout_seconds": float(timeout_seconds),
+            "case_count": len(selected),
+            "cases": [
+                self._plan_case(index, case)
+                for index, case in enumerate(selected, 1)
+            ],
+            "execution_authorized": bool(execution_authorized),
+        }
+
+    @staticmethod
+    def _plan_case(index: int, case: MatrixCaseContract) -> dict[str, Any]:
+        normalized = dict(case.normalized())
+        return {
+            "order": index,
+            "case": normalized,
+            "case_sha256": _sha256_json(normalized),
+        }
+
+    def operator_catalog(self) -> dict[str, Any]:
+        return {
+            "schema_name": "labcraft.virtual_workflow_matrix_catalog",
+            "schema_version": MATRIX_SCHEMA_VERSION,
+            "matrices": [
+                definition.catalog_entry()
+                for definition in self._definitions.values()
+            ],
+        }
+
+
 def _validate_catalog() -> None:
     ids = [case.case_id for case in MATRIX_CASES]
     if len(ids) != 8 or len(set(ids)) != len(ids):
@@ -275,77 +523,13 @@ def _validate_catalog() -> None:
 _validate_catalog()
 
 
-def matrix_case_ids(matrix_id: str = MIXED_MODE_MATRIX_ID) -> tuple[str, ...]:
-    if matrix_id != MIXED_MODE_MATRIX_ID:
-        raise MatrixValidationError(f"unsupported matrix: {matrix_id!r}")
-    return tuple(case.case_id for case in MATRIX_CASES)
-
-
-def get_matrix_case(matrix_id: str, case_id: str) -> MatrixCase:
-    if matrix_id != MIXED_MODE_MATRIX_ID:
-        raise MatrixValidationError(f"unsupported matrix: {matrix_id!r}")
-    matches = [case for case in MATRIX_CASES if case.case_id == str(case_id)]
-    if len(matches) != 1:
-        raise MatrixValidationError(f"unsupported matrix case: {case_id!r}")
-    return matches[0]
-
-
-def normalized_catalog() -> dict[str, Any]:
-    return {
-        "matrix_id": MIXED_MODE_MATRIX_ID,
-        "base_scenario_id": BASE_SCENARIO_ID,
-        "profiles": [PROFILES[key].normalized() for key in sorted(PROFILES)],
-        "cases": [case.normalized() for case in MATRIX_CASES],
-    }
-
-
-def catalog_sha256() -> str:
-    return _sha256_json(normalized_catalog())
-
-
-def resolve_matrix_plan(
-    matrix_id: str,
-    *,
-    case_id: str | None = None,
-    seed: int = 1,
-    timeout_seconds: float = 90.0,
-    execution_authorized: bool = True,
-) -> dict[str, Any]:
-    if matrix_id != MIXED_MODE_MATRIX_ID:
-        raise MatrixValidationError(f"unsupported matrix: {matrix_id!r}")
-    selected = (
-        (get_matrix_case(matrix_id, case_id),)
-        if case_id is not None
-        else MATRIX_CASES
-    )
-    return {
-        "schema_name": MATRIX_PLAN_SCHEMA_NAME,
-        "schema_version": MATRIX_SCHEMA_VERSION,
-        "matrix": {
-            "id": matrix_id,
-            "catalog_sha256": catalog_sha256(),
-            "base_scenario_id": BASE_SCENARIO_ID,
-        },
-        "platform": "windows_sil",
-        "seed": int(seed),
-        "timeout_seconds": float(timeout_seconds),
-        "case_count": len(selected),
-        "cases": [
-            {
-                "order": index,
-                "case": case.normalized(),
-                "case_sha256": _sha256_json(case.normalized()),
-            }
-            for index, case in enumerate(selected, 1)
-        ],
-        "execution_authorized": bool(execution_authorized),
-    }
-
-
-def build_case_fixture(matrix_id: str, case_id: str) -> tuple[dict[str, Any], Path]:
+def _build_mixed_mode_case_fixture(
+    case: MatrixCaseContract,
+) -> tuple[dict[str, Any], Path]:
     """Build one validated in-memory case from the single tracked reference fixture."""
 
-    case = get_matrix_case(matrix_id, case_id)
+    if not isinstance(case, MatrixCase):
+        raise MatrixValidationError("mixed-mode matrix received an invalid case type")
     profile = PROFILES[case.profile_id]
     payload = json.loads(BASE_FIXTURE_PATH.read_text(encoding="utf-8"))
     fixture = copy.deepcopy(payload)
@@ -392,8 +576,8 @@ def build_case_fixture(matrix_id: str, case_id: str) -> tuple[dict[str, Any], Pa
     fixture["fixture_id"] = f"{MIXED_MODE_MATRIX_ID}__{case.case_id}"
     fixture["lifecycle"] = {
         "kind": "parameterized_calibration_matrix_case",
-        "matrix_id": matrix_id,
-        "catalog_sha256": catalog_sha256(),
+        "matrix_id": MIXED_MODE_MATRIX_ID,
+        "catalog_sha256": catalog_sha256(MIXED_MODE_MATRIX_ID),
         "case": case.normalized(),
         "case_sha256": _sha256_json(case.normalized()),
         "profile": profile.normalized(),
@@ -411,21 +595,73 @@ def build_case_fixture(matrix_id: str, case_id: str) -> tuple[dict[str, Any], Pa
     return fixture, BASE_FIXTURE_PATH
 
 
+MIXED_MODE_DEFINITION = MatrixDefinition(
+    matrix_id=MIXED_MODE_MATRIX_ID,
+    base_scenario_id=BASE_SCENARIO_ID,
+    journey_family="mixed_mode_calibration",
+    platform="windows_sil",
+    execution="manual_on_demand",
+    cases=MATRIX_CASES,
+    catalog_metadata={
+        "profiles": [PROFILES[key].normalized() for key in sorted(PROFILES)]
+    },
+    fixture_builder=_build_mixed_mode_case_fixture,
+)
+
+MATRIX_REGISTRY = MatrixRegistry((MIXED_MODE_DEFINITION,))
+
+
+def registered_matrix_ids() -> tuple[str, ...]:
+    return MATRIX_REGISTRY.registered_ids()
+
+
+def get_matrix_definition(matrix_id: str) -> MatrixDefinition:
+    return MATRIX_REGISTRY.get_definition(matrix_id)
+
+
+def matrix_case_ids(matrix_id: str = MIXED_MODE_MATRIX_ID) -> tuple[str, ...]:
+    return MATRIX_REGISTRY.matrix_case_ids(matrix_id)
+
+
+def get_matrix_case(matrix_id: str, case_id: str) -> MatrixCaseContract:
+    return MATRIX_REGISTRY.get_case(matrix_id, case_id)
+
+
+def normalized_catalog(
+    matrix_id: str = MIXED_MODE_MATRIX_ID,
+) -> dict[str, Any]:
+    return MATRIX_REGISTRY.normalized_catalog(matrix_id)
+
+
+def catalog_sha256(matrix_id: str = MIXED_MODE_MATRIX_ID) -> str:
+    return MATRIX_REGISTRY.catalog_sha256(matrix_id)
+
+
+def resolve_matrix_plan(
+    matrix_id: str,
+    *,
+    case_id: str | None = None,
+    seed: int = 1,
+    timeout_seconds: float = 90.0,
+    execution_authorized: bool = True,
+) -> dict[str, Any]:
+    return MATRIX_REGISTRY.resolve_plan(
+        matrix_id,
+        case_id=case_id,
+        seed=seed,
+        timeout_seconds=timeout_seconds,
+        execution_authorized=execution_authorized,
+    )
+
+
+def build_case_fixture(
+    matrix_id: str, case_id: str
+) -> tuple[dict[str, Any], Path]:
+    return MATRIX_REGISTRY.build_case_fixture(matrix_id, case_id)
+
+
 def matrix_catalog() -> dict[str, Any]:
-    return {
-        "schema_name": "labcraft.virtual_workflow_matrix_catalog",
-        "schema_version": MATRIX_SCHEMA_VERSION,
-        "matrices": [
-            {
-                "id": MIXED_MODE_MATRIX_ID,
-                "case_ids": list(matrix_case_ids()),
-                "case_count": len(MATRIX_CASES),
-                "catalog_sha256": catalog_sha256(),
-                "platform": "windows_sil",
-                "execution": "manual_on_demand",
-            }
-        ],
-    }
+    return MATRIX_REGISTRY.operator_catalog()
 
 
 __all__ = [
@@ -433,15 +669,22 @@ __all__ = [
     "BASE_SCENARIO_ID",
     "MATRIX_CASES",
     "MATRIX_PLAN_SCHEMA_NAME",
+    "MATRIX_REGISTRY",
     "MATRIX_SCHEMA_VERSION",
     "MIXED_MODE_MATRIX_ID",
+    "MIXED_MODE_DEFINITION",
     "MatrixCase",
+    "MatrixCaseContract",
+    "MatrixDefinition",
+    "MatrixRegistry",
     "MatrixValidationError",
     "build_case_fixture",
     "catalog_sha256",
+    "get_matrix_definition",
     "get_matrix_case",
     "matrix_case_ids",
     "matrix_catalog",
     "normalized_catalog",
+    "registered_matrix_ids",
     "resolve_matrix_plan",
 ]
