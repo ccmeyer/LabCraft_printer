@@ -29,6 +29,7 @@ from tools.virtual_workflows.suite_runner import (
     TERMINATION_GRACE_SECONDS,
     communicate_bounded,
     contained_artifact_path,
+    execute_isolated_child_process,
     file_sha256,
     log_reference,
     relative_artifact_path,
@@ -241,38 +242,22 @@ def _execute_child(
         aggregate_root,
         "matrix child root",
     )
-    slot.mkdir(parents=True, exist_ok=False)
     command = _child_command(config, row, slot)
     watchdog = float(config.plan["timeout_seconds"]) + config.child_timeout_grace_seconds
     environment = os.environ.copy()
     if not config.visible:
         environment["QT_QPA_PLATFORM"] = config.qt_platform
-    process: subprocess.Popen[str] | None = None
-    launch_error: str | None = None
-    stdout = stderr = ""
-    timed_out = terminated = killed = False
-    started = time.perf_counter()
-    try:
-        process = popen_factory(
-            command,
-            cwd=REPO_ROOT,
-            env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        stdout, stderr, timed_out, terminated, killed = communicate_bounded(
-            process,
-            timeout_seconds=watchdog,
-            termination_grace_seconds=config.termination_grace_seconds,
-        )
-    except OSError as exc:
-        launch_error = f"{type(exc).__name__}: {exc}"
-        stderr = launch_error + "\n"
-    duration_ms = (time.perf_counter() - started) * 1000.0
-    stdout_path = write_text_atomic(slot / "process_stdout.txt", stdout)
-    stderr_path = write_text_atomic(slot / "process_stderr.txt", stderr)
-    reports = sorted(slot.rglob("report.json"), key=lambda item: item.as_posix())
+    isolated = execute_isolated_child_process(
+        command=command,
+        child_root=slot,
+        aggregate_root=aggregate_root,
+        watchdog_seconds=watchdog,
+        termination_grace_seconds=config.termination_grace_seconds,
+        environment=environment,
+        popen_factory=popen_factory,
+    )
+    process_evidence = dict(isolated.process)
+    reports = list(isolated.report_paths)
     reference: dict[str, Any] | None = None
     report_error: str | None = None
     if len(reports) == 1:
@@ -287,7 +272,9 @@ def _execute_child(
         report_error = "child produced no report.json"
     else:
         report_error = f"child produced {len(reports)} report.json files"
-    return_code = process.returncode if process is not None else None
+    return_code = process_evidence["return_code"]
+    timed_out = bool(process_evidence["timed_out"])
+    launch_error = process_evidence["launch_error"]
     reasons: list[str] = []
     if timed_out:
         outcome = "timeout"
@@ -323,16 +310,7 @@ def _execute_child(
         "outcome": outcome,
         "reasons": reasons,
         "process": {
-            "parent_pid": os.getpid(),
-            "pid": process.pid if process is not None else None,
-            "return_code": return_code,
-            "duration_ms": duration_ms,
-            "timed_out": timed_out,
-            "terminated": terminated,
-            "killed": killed,
-            "launch_error": launch_error,
-            "stdout": log_reference(stdout_path, aggregate_root),
-            "stderr": log_reference(stderr_path, aggregate_root),
+            **process_evidence,
         },
         "report": reference,
     }

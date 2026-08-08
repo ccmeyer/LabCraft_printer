@@ -1263,17 +1263,26 @@ Status: `complete`
 
 #### Milestone 8 Slice 6: Seeded sequence exploration
 
-Status: `planned`
+Status: `complete`
 
-- add a bounded state-aware generator over the existing semantic-action
-  vocabulary for legal and intentionally illegal action orders;
-- start with the fixed five-seed set, at most 25 actions per sequence, and at
-  most ten sequences per campaign;
-- record the generated action sequence, expected acceptance/rejection at each
-  step, reached transitions, seed, and exact replay command;
-- begin on a narrow editor/activation safeguard surface and prohibit physical
-  hardware actions, direct Model mutation for UI claims, and unbounded random
-  walks.
+- `editor_prepared_guard_v1` generates legal and intentionally invalid
+  prepared-editor sequences for the frozen seeds `1, 7, 19, 42, 101` using one
+  private seeded generator, one in-memory fixture derivation, and one dynamic
+  journey;
+- legal sequences vary rename and edit/regenerate ordering. Illegal sequences
+  temporarily make printed volume exceed final reaction volume, attempt
+  Finalize through the real Qt control, dismiss the real `Invalid volumes`
+  warning, prove authoritative persistence/runtime state is unchanged, and
+  recover through normal Qt edits, regeneration, refinalization, and reload;
+- reports retain the normalized plan, catalog/sequence hashes, reached
+  transitions, rejection and recovery evidence, action cap, seed, screenshots,
+  snapshots, ledgers, and exact replay. Legal runs use 18 actions and the
+  longest illegal run uses 23 of the 25-action maximum;
+- ten fresh children run sequentially beneath a hashed exploration aggregate.
+  The complete offscreen campaign and its exact replay passed 10/10; visible
+  `seed_7_legal` and `seed_101_illegal` runs and both exact replays passed;
+- focused validation passed 148 unit/contract tests and seven real-process
+  system tests. The complete Python suite remains deferred to Slice 8.
 
 #### Milestone 8 Slice 7: Manual Pi suite integration
 
@@ -1684,7 +1693,7 @@ This effort is complete when:
 ## Current Next Action
 
 Milestone 7 is complete and the eight-slice Milestone 8 direction is approved.
-Milestone 8 Slices 1 through 5 are complete. The operator can list the tracked
+Milestone 8 Slices 1 through 6 are complete. The operator can list the tracked
 portfolio, dry-run suite/capability/direct-scenario plans, request
 changed-source recommendations, and explicitly execute Windows suite or
 capability plans as isolated fresh processes with hashed aggregate evidence.
@@ -1692,7 +1701,9 @@ The operator can also explicitly join retained aggregates to the tracked
 manifest and receive a source-current five-state capability evaluation without
 running another workflow. The operator can also list, dry-run, execute, and
 replay the eight-case mixed-mode calibration matrix without adding a journey
-or tracked fixture per variation. Create a concrete implementation plan for
-Milestone 8 Slice 6: seeded sequence exploration. Do not begin remote Pi
+or tracked fixture per variation. The operator can also list, dry-run, execute,
+and exactly replay the ten-sequence bounded prepared-editor exploration without
+adding a fixture or journey body per seed. Create a concrete implementation
+plan for Milestone 8 Slice 7: manual Pi suite integration. Do not begin remote Pi
 operations, firmware/protocol work, or hardware work
 until their respective later slices are separately planned and approved.

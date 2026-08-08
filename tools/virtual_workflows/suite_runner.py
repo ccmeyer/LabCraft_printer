@@ -100,6 +100,74 @@ class AggregateExecutionResult:
         return aggregate_exit_code(self.aggregate)
 
 
+@dataclass(frozen=True)
+class IsolatedChildProcessResult:
+    """Process/log/report-discovery facts shared by aggregate runners."""
+
+    command: tuple[str, ...]
+    process: Mapping[str, Any]
+    report_paths: tuple[Path, ...]
+
+
+def execute_isolated_child_process(
+    *,
+    command: Sequence[str],
+    child_root: Path,
+    aggregate_root: Path,
+    watchdog_seconds: float,
+    termination_grace_seconds: float,
+    environment: Mapping[str, str],
+    popen_factory: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
+    cwd: Path = REPO_ROOT,
+) -> IsolatedChildProcessResult:
+    """Run one fresh child, retain logs, and discover report-v1 candidates."""
+
+    root = contained_artifact_path(child_root, aggregate_root, "child root")
+    root.mkdir(parents=True, exist_ok=False)
+    process: subprocess.Popen[str] | None = None
+    launch_error: str | None = None
+    stdout = stderr = ""
+    timed_out = terminated = killed = False
+    started = time.perf_counter()
+    try:
+        process = popen_factory(
+            list(command),
+            cwd=Path(cwd).resolve(),
+            env=dict(environment),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, stderr, timed_out, terminated, killed = communicate_bounded(
+            process,
+            timeout_seconds=float(watchdog_seconds),
+            termination_grace_seconds=float(termination_grace_seconds),
+        )
+    except OSError as exc:
+        launch_error = f"{type(exc).__name__}: {exc}"
+        stderr = launch_error + "\n"
+    duration_ms = (time.perf_counter() - started) * 1000.0
+    stdout_path = write_text_atomic(root / "process_stdout.txt", stdout)
+    stderr_path = write_text_atomic(root / "process_stderr.txt", stderr)
+    reports = tuple(sorted(root.rglob("report.json"), key=lambda item: item.as_posix()))
+    return IsolatedChildProcessResult(
+        command=tuple(str(value) for value in command),
+        process={
+            "parent_pid": os.getpid(),
+            "pid": process.pid if process is not None else None,
+            "return_code": process.returncode if process is not None else None,
+            "duration_ms": duration_ms,
+            "timed_out": timed_out,
+            "terminated": terminated,
+            "killed": killed,
+            "launch_error": launch_error,
+            "stdout": log_reference(stdout_path, aggregate_root),
+            "stderr": log_reference(stderr_path, aggregate_root),
+        },
+        report_paths=reports,
+    )
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -818,9 +886,11 @@ __all__ = [
     "AggregateError",
     "AggregateExecutionResult",
     "AggregateRunConfig",
+    "IsolatedChildProcessResult",
     "aggregate_exit_code",
     "aggregate_summary",
     "execute_host_selection",
+    "execute_isolated_child_process",
     "load_aggregate",
     "validate_aggregate",
     "write_aggregate_atomic",

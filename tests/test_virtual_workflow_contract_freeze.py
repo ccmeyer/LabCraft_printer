@@ -28,6 +28,14 @@ from tools.virtual_workflows.coverage import (
     COVERAGE_SCHEMA_NAME,
     COVERAGE_SCHEMA_VERSION,
 )
+from tools.virtual_workflows.exploration import (
+    EXPLORATION_PLAN_SCHEMA_NAME,
+    EXPLORATION_SCHEMA_VERSION,
+)
+from tools.virtual_workflows.exploration_runner import (
+    EXPLORATION_AGGREGATE_SCHEMA_NAME,
+    EXPLORATION_AGGREGATE_SCHEMA_VERSION,
+)
 from tools.virtual_workflows.registry import get_registered_scenario
 from tools.virtual_workflows.journeys import (
     AUTHORITATIVE_RELOAD_REQUIRED_ASSERTIONS,
@@ -296,6 +304,10 @@ def test_legacy_cli_surface_remains_additively_compatible():
     assert args.compare is None
     assert args.suite is None
     assert args.capability is None
+    assert args.matrix is None
+    assert args.case is None
+    assert args.exploration is None
+    assert args.sequence is None
     assert args.list_section is None
     assert args.recommend_changed is False
     assert args.changed_path == []
@@ -331,6 +343,10 @@ def test_legacy_cli_surface_remains_additively_compatible():
         "--compare",
         "--suite",
         "--capability",
+        "--matrix",
+        "--case",
+        "--exploration",
+        "--sequence",
         "--list",
         "--recommend-changed",
         "--changed-path",
@@ -385,6 +401,14 @@ def test_host_selection_aggregate_schema_is_frozen():
     assert AGGREGATE_SCHEMA_VERSION == 1
     assert COVERAGE_SCHEMA_NAME == "labcraft.sil_capability_evaluation"
     assert COVERAGE_SCHEMA_VERSION == 1
+    assert EXPLORATION_PLAN_SCHEMA_NAME == (
+        "labcraft.virtual_workflow_exploration_plan"
+    )
+    assert EXPLORATION_SCHEMA_VERSION == 1
+    assert EXPLORATION_AGGREGATE_SCHEMA_NAME == (
+        "labcraft.virtual_workflow_exploration_aggregate"
+    )
+    assert EXPLORATION_AGGREGATE_SCHEMA_VERSION == 1
 
 
 def test_legacy_scenario_api_remains_additively_compatible():

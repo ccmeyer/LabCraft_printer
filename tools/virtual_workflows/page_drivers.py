@@ -6,7 +6,7 @@ from contextlib import contextmanager
 import math
 import time
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from PySide6 import QtCore, QtTest, QtWidgets
 
@@ -529,6 +529,31 @@ class ExperimentEditorDriver(_QTestSurfaceDriver):
             renamed_name=renamed_name,
             experiment=experiment,
             reagent=reagent,
+            action_runner=self.action_runner,
+        )
+
+    def run_prepared_sequence(
+        self,
+        *,
+        initial_name: str,
+        renamed_name: str,
+        experiment: Mapping[str, Any],
+        reagent: Mapping[str, Any],
+        sequence_steps: Sequence[Mapping[str, Any]],
+        intermediate_tolerance_nl: float,
+    ) -> dict[str, Any]:
+        """Run a validated ordered prepared-editor sequence."""
+
+        from tools.virtual_workflows.actions import drive_editor_prepared_sequence
+
+        return drive_editor_prepared_sequence(
+            self.context,
+            initial_name=initial_name,
+            renamed_name=renamed_name,
+            experiment=experiment,
+            reagent=reagent,
+            sequence_steps=sequence_steps,
+            intermediate_tolerance_nl=intermediate_tolerance_nl,
             action_runner=self.action_runner,
         )
 

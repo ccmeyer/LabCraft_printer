@@ -2306,6 +2306,171 @@ def editor_prepared_reload_assertions(
     return reload_result, assignments_result
 
 
+def editor_sequence_exploration_assertions(
+    context: Any,
+    *,
+    exploration: Mapping[str, Any],
+    driver_evidence: Mapping[str, Any],
+    refinalized_evidence: Mapping[str, Any],
+    loader_evidence: Mapping[str, Any],
+    action_start: int,
+    action_end: int | None = None,
+) -> tuple[AssertionResult, AssertionResult, AssertionResult]:
+    """Validate a generated editor plan, rejection, and terminal recovery."""
+
+    sequence = dict(exploration["sequence"])
+    planned_steps = [dict(step) for step in sequence["steps"]]
+    observed_transitions = [
+        dict(step) for step in driver_evidence.get("observed_transitions", [])
+    ]
+    observed_transitions.append(
+        {
+            "ordinal": int(planned_steps[-1]["ordinal"]),
+            "action_id": "experiment.load_authoritative_via_ui",
+            "from_state": str(planned_steps[-1]["from_state"]),
+            "to_state": str(planned_steps[-1]["to_state"]),
+            "expected_outcome": "accepted",
+            "observed_outcome": "accepted",
+            "edit_variant": None,
+        }
+    )
+    relevant_ids = {str(step["action_id"]) for step in planned_steps}
+    end = len(context.action_results) if action_end is None else action_end
+    ledger = [
+        dict(result)
+        for result in context.action_results[action_start:end]
+        if result.get("action_id") in relevant_ids
+    ]
+    planned_action_ids = [str(step["action_id"]) for step in planned_steps]
+    observed_action_ids = [str(result.get("action_id")) for result in ledger]
+    transition_checks = {
+        "action_ids_exact": observed_action_ids == planned_action_ids,
+        "actions_passed": all(result.get("status") == "pass" for result in ledger),
+        "actions_use_ui": all(
+            result.get("interaction_surface") == "ui" for result in ledger
+        ),
+        "transition_count_exact": len(observed_transitions) == len(planned_steps),
+        "transition_actions_exact": [
+            step.get("action_id") for step in observed_transitions
+        ] == planned_action_ids,
+        "transition_states_exact": all(
+            observed.get("from_state") == planned.get("from_state")
+            and observed.get("to_state") == planned.get("to_state")
+            for observed, planned in zip(observed_transitions, planned_steps)
+        ),
+        "transition_outcomes_exact": all(
+            observed.get("observed_outcome") == planned.get("expected_outcome")
+            for observed, planned in zip(observed_transitions, planned_steps)
+        ),
+        "transition_variants_exact": all(
+            observed.get("edit_variant") == planned.get("edit_variant")
+            for observed, planned in zip(observed_transitions, planned_steps)
+        ),
+        # The body adds one final evidence capture and teardown adds one action.
+        "action_cap_respected": len(context.action_results) + 2
+        <= int(exploration["maximum_actions"]),
+    }
+    plan_evidence = {
+        "checks": transition_checks,
+        "failed_checks": sorted(
+            key for key, passed in transition_checks.items() if not passed
+        ),
+        "campaign_id": exploration["campaign_id"],
+        "generator_version": exploration["generator_version"],
+        "catalog_sha256": exploration["catalog_sha256"],
+        "sequence_sha256": exploration["sequence_sha256"],
+        "sequence": sequence,
+        "observed_transitions": observed_transitions,
+        "observed_action_ids": observed_action_ids,
+        "action_count_at_assertion": len(context.action_results),
+        "projected_terminal_action_count": len(context.action_results) + 2,
+    }
+    plan_result = evaluate_assertion(
+        "exploration.sequence_plan_applied",
+        "sequence_complete",
+        ("ui", "action_ledger"),
+        lambda: (not plan_evidence["failed_checks"], plan_evidence),
+    )
+
+    rejections = [dict(value) for value in driver_evidence.get("rejections", [])]
+    expected_rejections = 1 if sequence["sequence_class"] == "illegal" else 0
+    rejection_checks = {
+        "rejection_count_exact": len(rejections) == expected_rejections,
+        "safe_evidence_exact": all(value.get("safe") is True for value in rejections),
+        "single_finalize_activation": all(
+            int(value.get("activation_count", -1)) == 1 for value in rejections
+        ),
+        "invalid_volume_dialog_handled": all(
+            (value.get("warning") or {}).get("entered") is True
+            and (value.get("warning") or {}).get("title") == "Invalid volumes"
+            and (value.get("warning") or {}).get("type") == "QMessageBox"
+            and (value.get("warning") or {}).get("dismissed") is True
+            for value in rejections
+        ),
+        "authoritative_unchanged": all(
+            value.get("authoritative_state_unchanged") is True
+            and value.get("before") == value.get("after")
+            for value in rejections
+        ),
+        "dialog_retained": all(
+            value.get("dialog_after") == value.get("dialog_before")
+            and bool((value.get("dialog_after") or {}).get("visible"))
+            for value in rejections
+        ),
+    }
+    rejection_evidence = {
+        "checks": rejection_checks,
+        "failed_checks": sorted(
+            key for key, passed in rejection_checks.items() if not passed
+        ),
+        "sequence_class": sequence["sequence_class"],
+        "expected_rejection_count": expected_rejections,
+        "rejections": rejections,
+    }
+    rejection_result = evaluate_assertion(
+        "exploration.expected_rejection_safe",
+        "rejection_observed" if expected_rejections else "legal_sequence",
+        ("ui", "model", "persistence"),
+        lambda: (not rejection_evidence["failed_checks"], rejection_evidence),
+    )
+
+    final_checks = {
+        key: value
+        for key, value in dict(refinalized_evidence.get("checks") or {}).items()
+        if not key.startswith("revision_actions_")
+    }
+    recovery_checks = {
+        "refinalized_checks_pass": bool(final_checks)
+        and all(final_checks.values()),
+        "prepared": loader_evidence.get("plan_state") == "prepared",
+        "ready_to_start": loader_evidence.get("eligibility_status")
+        == "ready_to_start",
+        "activation_absent": loader_evidence.get("activation_performed") is False,
+        "runtime_inactive": not context.experiment_model.is_authoritative_execution_runtime_active(),
+        "array_idle": context.controller.get_array_run_state() == "idle",
+        "queue_drained": context.machine.check_if_all_completed(),
+        "no_unexpected_dialogs": not context.unexpected_dialogs,
+        "no_errors": not context.errors,
+    }
+    recovery_evidence = {
+        "checks": recovery_checks,
+        "failed_checks": sorted(
+            key for key, passed in recovery_checks.items() if not passed
+        ),
+        "plan_id": refinalized_evidence.get("plan_id"),
+        "plan_revision": refinalized_evidence.get("plan_revision"),
+        "well_ids": refinalized_evidence.get("well_ids"),
+        "loader": dict(loader_evidence),
+    }
+    recovery_result = evaluate_assertion(
+        "exploration.recovery_terminal_valid",
+        "reloaded",
+        ("ui", "model", "persistence", "simulator"),
+        lambda: (not recovery_evidence["failed_checks"], recovery_evidence),
+    )
+    return plan_result, rejection_result, recovery_result
+
+
 def editor_post_start_lock_copy_assertions(
     *,
     source_locked: Mapping[str, Any],

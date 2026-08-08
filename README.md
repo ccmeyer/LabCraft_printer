@@ -1597,6 +1597,51 @@ separate evidence and do not satisfy registered capability-manifest coverage.
 Pi, scheduling, repetition, fault injection, baseline, comparison, and
 performance controls remain unavailable in matrix mode.
 
+### Bounded seeded editor exploration
+
+Milestone 8 Slice 6 adds the manually invoked `editor_prepared_guard_v1`
+campaign. It generates one legal and one intentionally invalid prepared-editor
+sequence for each frozen seed `1, 7, 19, 42, 101`. All ten sequences reuse the
+tracked prepared-editor fixture and one dynamic journey; no per-seed fixture or
+journey body is written.
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --list explorations
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration editor_prepared_guard_v1 --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration editor_prepared_guard_v1 `
+  --output-root verification_reports\exploration `
+  --speed-multiplier 1000 --timeout-seconds 60
+
+$env:QT_QPA_PLATFORM = "windows"
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration editor_prepared_guard_v1 `
+  --sequence seed_101_illegal `
+  --output-root verification_reports\exploration `
+  --speed-multiplier 20 --timeout-seconds 120 --visible
+```
+
+A full campaign runs ten fresh child processes and writes a hashed
+`exploration_plan.json`, `aggregate.json`, summary, child logs, and references
+to each authoritative report-v1 evidence tree beneath
+`verification_reports/exploration/editor_prepared_guard_v1/<run>/`. The full
+campaign uses its frozen seed set and rejects an explicit `--seed`; a selected
+sequence derives its seed from the sequence ID and rejects a mismatch.
+
+Illegal sequences temporarily set printed volume above final reaction volume,
+attempt Finalize through the real Qt control, dismiss the real `Invalid
+volumes` warning through QTest, and pass only when plan revision, files, audit
+history, directory identity, runtime activation, and modal state remain
+unchanged. They then restore valid values, regenerate, refinalize, and reload a
+prepared, `ready_to_start`, runtime-inactive design. Legal runs use 18 actions;
+the longest illegal run uses 23 of the 25-action limit. Exploration aggregates
+remain separate from registered capability coverage and do not schedule tests.
+Pi, hardware, protocol, firmware, unbounded random walks, fault injection,
+repetition, baselines, and comparisons remain unavailable in exploration mode.
+
 The report's responsiveness phase timings include `ui.pressure_render`, the
 count and duration distribution for the real pressure-plot update slot. The
 text summary shows its count, p95, and maximum. This diagnostic covers the

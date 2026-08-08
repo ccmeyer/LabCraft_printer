@@ -8,6 +8,7 @@ from tools.virtual_workflows.assertions import (
     cleanup_assertion,
     editor_artifacts_cleanup_assertion,
     editor_prepared_revision_failure_assertion,
+    editor_sequence_exploration_assertions,
     exact_action_sequence_assertion,
     evaluate_assertion,
     multi_stock_artifacts_assertion,
@@ -20,6 +21,11 @@ from tools.virtual_workflows.assertions import (
 import pytest
 from types import SimpleNamespace
 
+from tools.virtual_workflows.exploration import (
+    CAMPAIGN_ID,
+    build_sequence_fixture,
+)
+
 
 def test_assertion_result_rejects_ambiguous_decision():
     try:
@@ -28,6 +34,82 @@ def test_assertion_result_rejects_ambiguous_decision():
         assert "pass, fail, or incomplete" in str(exc)
     else:
         raise AssertionError("ambiguous assertion decision was accepted")
+
+
+def test_editor_exploration_assertions_project_safe_recovery():
+    fixture, _ = build_sequence_fixture(CAMPAIGN_ID, "seed_1_illegal")
+    exploration = fixture["exploration"]
+    steps = exploration["sequence"]["steps"]
+    context = SimpleNamespace(
+        action_results=[
+            {
+                "action_id": step["action_id"],
+                "status": "pass",
+                "interaction_surface": "ui",
+            }
+            for step in steps
+        ],
+        experiment_model=SimpleNamespace(
+            is_authoritative_execution_runtime_active=lambda: False
+        ),
+        controller=SimpleNamespace(get_array_run_state=lambda: "idle"),
+        machine=SimpleNamespace(check_if_all_completed=lambda: True),
+        unexpected_dialogs=[],
+        errors=[],
+    )
+    unchanged = {"plan_revision": 1, "runtime_active": False}
+    modal = {
+        "visible": True,
+        "result": 0,
+        "apply_requested": False,
+        "finish_enabled": True,
+    }
+    driver = {
+        "observed_transitions": [
+            {
+                **{key: step[key] for key in (
+                    "ordinal", "action_id", "from_state", "to_state",
+                    "expected_outcome", "edit_variant",
+                )},
+                "observed_outcome": step["expected_outcome"],
+            }
+            for step in steps[:-1]
+        ],
+        "rejections": [{
+            "safe": True,
+            "activation_count": 1,
+            "warning": {
+                "entered": True,
+                "title": "Invalid volumes",
+                "type": "QMessageBox",
+                "dismissed": True,
+            },
+            "authoritative_state_unchanged": True,
+            "before": unchanged,
+            "after": unchanged,
+            "dialog_before": modal,
+            "dialog_after": modal,
+        }],
+    }
+    results = editor_sequence_exploration_assertions(
+        context,
+        exploration=exploration,
+        driver_evidence=driver,
+        refinalized_evidence={"checks": {"plan_prepared": True}},
+        loader_evidence={
+            "plan_state": "prepared",
+            "eligibility_status": "ready_to_start",
+            "activation_performed": False,
+        },
+        action_start=0,
+    )
+
+    assert [result.assertion_id for result in results] == [
+        "exploration.sequence_plan_applied",
+        "exploration.expected_rejection_safe",
+        "exploration.recovery_terminal_valid",
+    ]
+    assert {result.decision for result in results} == {"pass"}
 
 
 def test_execution_lifecycle_expectation_rejects_ambiguous_identity_sets():

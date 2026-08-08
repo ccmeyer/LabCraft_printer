@@ -20,6 +20,7 @@ from tools.virtual_workflows.assertions import (
     editor_prepared_revision_assertions,
     editor_prepared_revision_failure_assertion,
     editor_prepared_reload_assertions,
+    editor_sequence_exploration_assertions,
     machine_ready_assertion,
     matrix_case_assertions,
     mixed_mode_lifecycle_assertions,
@@ -43,6 +44,7 @@ from tools.virtual_workflows.composition import (
     JourneyDefinition,
     JourneyExecutor,
     JourneyRuntime,
+    replay_command,
 )
 from tools.virtual_workflows.execution_observer import ExecutionObserver
 from tools.virtual_workflows.authoritative_evidence import (
@@ -68,6 +70,7 @@ from tools.virtual_workflows.journey_phases import (
     machine_startup_steps,
     run_editor_preparation,
     run_prepared_editor_revision,
+    run_prepared_editor_sequence,
     run_post_start_lock_copy,
     run_stock_passes,
     normalized_stock_pass_steps,
@@ -108,6 +111,8 @@ POST_START_LOCK_WORKLOAD_ID = "experiment_editor_post_start_lock_v1"
 DISCONNECT_WORKLOAD_ID = "print_array_disconnect_mid_array_24_v1"
 DISCONNECT_SCENARIO_NAME = "print_array_disconnect_fail_closed"
 MATRIX_SCENARIO_NAME = "parameterized_calibration_matrix_case"
+EXPLORATION_WORKLOAD_ID = "editor_prepared_guard_v1"
+EXPLORATION_SCENARIO_NAME = "seeded_editor_prepared_guard"
 
 MATRIX_CASE_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -158,6 +163,14 @@ EDITOR_REVISION_REQUIRED_ASSERTIONS = (
     "experiment.prepared_reload_ready",
     "experiment.runtime_assignments_match",
     "experiment.key_files_consistent",
+    "artifacts.required_present",
+)
+EXPLORATION_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "exploration.sequence_plan_applied",
+    "exploration.expected_rejection_safe",
+    "exploration.recovery_terminal_valid",
     "artifacts.required_present",
 )
 MULTI_STOCK_REQUIRED_ASSERTIONS = (
@@ -311,6 +324,9 @@ EDITOR_REVISION_REQUIRED_SCREENSHOTS = frozenset(
         "validated",
     }
 )
+EXPLORATION_REQUIRED_SCREENSHOTS = frozenset(
+    {"editor_opened", "generated", "initial_finalized", "reloaded", "validated"}
+)
 MULTI_STOCK_REQUIRED_SCREENSHOTS = frozenset(
     {
         "editor_opened",
@@ -457,6 +473,12 @@ def _print_fixture(workload_id: str) -> tuple[dict[str, Any], Path]:
 
     path = Path(__file__).resolve().parent / "fixtures" / f"{workload_id}.json"
     return load_virtual_print_array_fixture(path, scenario_id=workload_id), path
+
+
+def _exploration_fixture() -> tuple[dict[str, Any], Path]:
+    from tools.virtual_workflows.exploration import build_sequence_fixture
+
+    return build_sequence_fixture(EXPLORATION_WORKLOAD_ID, "seed_1_legal")
 
 
 def _smoke_fixture() -> tuple[dict[str, Any], Path]:
@@ -1088,6 +1110,135 @@ def _editor_revision_body(runtime: JourneyRuntime) -> None:
     )
 
 
+def _exploration_body(runtime: JourneyRuntime) -> None:
+    fixture = runtime.fixture
+    experiment = fixture["experiment"]
+    exploration = dict(fixture["exploration"])
+    sequence = dict(exploration["sequence"])
+    steps = [dict(step) for step in sequence["steps"]]
+    modal_steps = [
+        step
+        for step in steps
+        if step["action_id"] != "experiment.load_authoritative_via_ui"
+    ]
+    initial_wells = tuple(experiment["initial_expected_well_ids"])
+    runtime.add_assertion(simulation_identity_assertion(runtime.context))
+    runtime.add_assertion(real_application_assertion(runtime.context))
+    run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(
+            _editor_revision_initial_specification(fixture),
+            use_harness_action_runner=True,
+        ),
+    )
+    capture_milestone(
+        runtime.context,
+        "initial_finalized",
+        evidence={"experiment_name": experiment["initial_name"]},
+    )
+    initial = capture_editor_prepared_revision_snapshot(
+        runtime.context,
+        expected_well_ids=initial_wells,
+    )
+    runtime.observations["prepared_revision_initial"] = initial
+    action_start = len(runtime.context.action_results)
+    driver_evidence = run_prepared_editor_sequence(
+        runtime,
+        _editor_revision_spec(fixture),
+        sequence_steps=modal_steps,
+        intermediate_tolerance_nl=float(
+            exploration["intermediate_printed_volume_tolerance_nL"]
+        ),
+    )
+    _revision_results, refinalized = editor_prepared_revision_assertions(
+        runtime.context,
+        fixture=fixture,
+        initial_snapshot=initial,
+        action_start=action_start,
+        action_end=len(runtime.context.action_results),
+    )
+    runtime.observations["refinalized_bundle"] = refinalized
+    loader_evidence = runtime.harness.run_action(
+        "experiment.load_authoritative_via_ui",
+        lambda: ExperimentLoaderDriver(runtime.context).load_prepared_design(
+            Path(refinalized["experiment_dir"]),
+            expected_name=experiment["renamed_name"],
+            expected_plan_id=str(refinalized["plan_id"]),
+            expected_plan_revision=int(refinalized["plan_revision"]),
+        ),
+    )["evidence"]
+    loader_evidence = {**dict(loader_evidence), "activation_performed": False}
+    capture_milestone(
+        runtime.context,
+        "reloaded",
+        evidence={
+            key: loader_evidence[key]
+            for key in ("plan_state", "eligibility_status")
+        },
+    )
+    plan_result, rejection_result, recovery_result = (
+        editor_sequence_exploration_assertions(
+            runtime.context,
+            exploration=exploration,
+            driver_evidence=driver_evidence,
+            refinalized_evidence=refinalized,
+            loader_evidence=loader_evidence,
+            action_start=action_start,
+            action_end=len(runtime.context.action_results),
+        )
+    )
+    for result in (plan_result, rejection_result, recovery_result):
+        runtime.add_assertion(result)
+    runtime.observations["sequence_exploration"] = {
+        "campaign_id": exploration["campaign_id"],
+        "generator_version": exploration["generator_version"],
+        "catalog_sha256": exploration["catalog_sha256"],
+        "sequence_sha256": exploration["sequence_sha256"],
+        "sequence": sequence,
+        "expected_outcomes": [step["expected_outcome"] for step in steps],
+        "observed_transitions": list(driver_evidence["observed_transitions"])
+        + [dict(plan_result.evidence["observed_transitions"][-1])],
+        "rejection_evidence": list(driver_evidence["rejections"]),
+        "before": dict(initial["before"]),
+        "after": {
+            key: refinalized.get(key)
+            for key in (
+                "experiment_dir",
+                "plan_id",
+                "plan_revision",
+                "plan_state",
+                "eligibility_status",
+                "well_ids",
+                "file_sha256",
+                "audit_rows",
+            )
+        },
+        "terminal_recovery": dict(recovery_result.evidence),
+        "action_cap": int(exploration["maximum_actions"]),
+        "projected_terminal_action_count": plan_result.evidence[
+            "projected_terminal_action_count"
+        ],
+        "exact_replay": replay_command(
+            runtime.harness,
+            EXPLORATION_WORKLOAD_ID,
+            selector_args=(
+                "--exploration",
+                EXPLORATION_WORKLOAD_ID,
+                "--sequence",
+                sequence["sequence_id"],
+            ),
+        ),
+    }
+    capture_milestone(
+        runtime.context,
+        "validated",
+        evidence={
+            "sequence_id": sequence["sequence_id"],
+            "sequence_class": sequence["sequence_class"],
+            "plan_state": loader_evidence["plan_state"],
+            "eligibility_status": loader_evidence["eligibility_status"],
+        },
+    )
 def _post_start_lock_body(runtime: JourneyRuntime) -> None:
     from tools.virtual_workflows.editor_scenarios import _initial_design_fixture
 
@@ -1777,6 +1928,60 @@ def _editor_revision_payload(
     )
 
 
+def _exploration_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    exploration = dict(runtime.fixture["exploration"])
+    sequence = dict(exploration["sequence"])
+    evidence = _assertion_evidence(runtime)
+    payload = build_editor_lifecycle_payload(
+        runtime,
+        teardown,
+        EditorLifecycleReportSpec(
+            workload={
+                **_base_workload(runtime),
+                "campaign_id": exploration["campaign_id"],
+                "generator_version": exploration["generator_version"],
+                "catalog_sha256": exploration["catalog_sha256"],
+                "sequence_id": sequence["sequence_id"],
+                "sequence_sha256": exploration["sequence_sha256"],
+                "sequence_class": sequence["sequence_class"],
+                "operation_count": len(sequence["steps"]),
+                "maximum_action_count": exploration["maximum_actions"],
+                "speed_multiplier": runtime.harness.config.speed_multiplier,
+                "timeout_seconds": runtime.harness.config.timeout_seconds,
+            },
+            required_assertion_ids=EXPLORATION_REQUIRED_ASSERTIONS,
+            persistence_values={
+                "prepared_bundle": dict(
+                    runtime.observations.get("prepared_revision_initial", {})
+                    .get("prepared_bundle", {})
+                ),
+                "refinalized_bundle": dict(
+                    runtime.observations.get("refinalized_bundle") or {}
+                ),
+                "rejection_safety": evidence.get(
+                    "exploration.expected_rejection_safe", {}
+                ),
+            },
+            limitations=(
+                "This bounded campaign explores only the prepared-design editor activation guard.",
+                "It does not connect the simulated machine, activate execution, print, or claim hardware coverage.",
+                "Generated plan IDs, timestamps, paths, and identity-bearing artifact hashes may differ across replay.",
+            ),
+        ),
+    )
+    return replace(
+        payload,
+        workflow_values={
+            **dict(payload.workflow_values),
+            "sequence_exploration": dict(
+                runtime.observations.get("sequence_exploration") or {}
+            ),
+        },
+    )
+
+
 def _post_start_lock_payload(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> ComposedReportPayload:
@@ -2220,6 +2425,16 @@ def _editor_revision_artifact(
     )
 
 
+def _exploration_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return editor_artifacts_cleanup_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(runtime.definition.required_screenshots),
+        teardown=teardown,
+    )
+
+
 def _post_start_lock_artifact(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> Any:
@@ -2310,6 +2525,21 @@ def _editor_revision_summary(
         "Milestone 7 composed prepared editor rename/refinalize/reload\n"
         f"Status: {report['classification']['status']}\n"
         f"Assertions: {passed} / {len(EDITOR_REVISION_REQUIRED_ASSERTIONS)}\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _exploration_summary(
+    report: Mapping[str, Any], runtime: JourneyRuntime
+) -> str:
+    sequence = runtime.fixture["exploration"]["sequence"]
+    return (
+        "Milestone 8 bounded prepared-editor sequence exploration\n"
+        f"Sequence: {sequence['sequence_id']} ({sequence['sequence_class']})\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Actions: {len(runtime.context.action_results)} / "
+        f"{runtime.fixture['exploration']['maximum_actions']}\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
     )
@@ -2456,6 +2686,33 @@ EDITOR_REVISION_DEFINITION = JourneyDefinition(
     artifact_assertion=_editor_revision_artifact,
     payload_builder=_editor_revision_payload,
     summary_builder=_editor_revision_summary,
+)
+EXPLORATION_DEFINITION = JourneyDefinition(
+    registry_id=EXPLORATION_WORKLOAD_ID,
+    scenario_name=EXPLORATION_SCENARIO_NAME,
+    scenario_version="1",
+    workload_id=EXPLORATION_WORKLOAD_ID,
+    required_action_ids=(
+        _COMMON_ACTIONS
+        | _EDITOR_ACTIONS
+        | frozenset(
+            {
+                "editor.rename_prepared_via_ui",
+                "editor.edit_prepared_design_via_ui",
+                "editor.regenerate_prepared_design_via_ui",
+                "editor.refinalize_prepared_via_ui",
+                "experiment.load_authoritative_via_ui",
+            }
+        )
+    ),
+    required_ui_action_ids=EDITOR_REVISION_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=EXPLORATION_REQUIRED_ASSERTIONS,
+    required_screenshots=EXPLORATION_REQUIRED_SCREENSHOTS,
+    fixture_loader=_exploration_fixture,
+    body=_exploration_body,
+    artifact_assertion=_exploration_artifact,
+    payload_builder=_exploration_payload,
+    summary_builder=_exploration_summary,
 )
 POST_START_LOCK_DEFINITION = JourneyDefinition(
     registry_id=POST_START_LOCK_WORKLOAD_ID,
@@ -2622,6 +2879,7 @@ JOURNEY_DEFINITIONS = {
         REGRESSION_DEFINITION,
         EDITOR_DEFINITION,
         EDITOR_REVISION_DEFINITION,
+        EXPLORATION_DEFINITION,
         POST_START_LOCK_DEFINITION,
         MULTI_STOCK_DEFINITION,
         MIXED_MODE_DEFINITION,
@@ -2719,6 +2977,39 @@ def run_matrix_case(
     )
 
 
+def run_exploration_sequence(
+    config: JourneyRunConfig,
+    *,
+    campaign_id: str,
+    sequence_id: str,
+) -> dict[str, Any]:
+    """Run one generated editor sequence through the shared journey body."""
+
+    if config.scenario_id != EXPLORATION_WORKLOAD_ID:
+        raise ValueError("exploration requires the prepared-guard composed base")
+    from tools.virtual_workflows.exploration import build_sequence_fixture
+
+    fixture_bundle = build_sequence_fixture(campaign_id, sequence_id)
+    required_screenshots = set(EXPLORATION_REQUIRED_SCREENSHOTS)
+    if fixture_bundle[0]["exploration"]["sequence"]["sequence_class"] == "illegal":
+        required_screenshots.add("premature_refinalize_rejected")
+    definition = replace(
+        EXPLORATION_DEFINITION,
+        required_screenshots=frozenset(required_screenshots),
+    )
+    return JourneyExecutor().run(
+        definition,
+        config,
+        fixture_bundle=fixture_bundle,
+        replay_selector_args=(
+            "--exploration",
+            campaign_id,
+            "--sequence",
+            sequence_id,
+        ),
+    )
+
+
 def run_virtual_print_array_24_journey(config: JourneyRunConfig) -> dict[str, Any]:
     return JourneyExecutor().run(SMOKE_DEFINITION, config)
 
@@ -2743,6 +3034,8 @@ def run_disconnect_fail_closed_24_journey(
 
 __all__ = [
     "EDITOR_WORKLOAD_ID",
+    "EXPLORATION_WORKLOAD_ID",
+    "EXPLORATION_REQUIRED_ASSERTIONS",
     "DISCONNECT_REQUIRED_ASSERTIONS",
     "DISCONNECT_REQUIRED_UI_ACTIONS",
     "DISCONNECT_WORKLOAD_ID",
@@ -2771,6 +3064,7 @@ __all__ = [
     "get_journey_definition",
     "run_composed_journey",
     "run_matrix_case",
+    "run_exploration_sequence",
     "run_editor_create_finalize_journey",
     "run_disconnect_fail_closed_24_journey",
     "run_multi_stock_24x2_journey",

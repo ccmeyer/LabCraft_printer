@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 
 PRINT_ARRAY_ACTION_IDS = frozenset(
@@ -1693,6 +1693,32 @@ def _expected_editor_progress_dialog(context: ScenarioContext):
             registry.remove(entry)
 
 
+@contextmanager
+def _expected_editor_well_selection_dialog(context: ScenarioContext):
+    registry = getattr(context.app, "_sil_expected_dialog_specs", [])
+    setattr(context.app, "_sil_expected_dialog_specs", registry)
+    entry = {"title": "Printable Wells", "type": "WellSelectionDialog"}
+    registry.append(entry)
+    try:
+        yield
+    finally:
+        if entry in registry:
+            registry.remove(entry)
+
+
+@contextmanager
+def _expected_editor_invalid_volume_dialog(context: ScenarioContext):
+    registry = getattr(context.app, "_sil_expected_dialog_specs", [])
+    setattr(context.app, "_sil_expected_dialog_specs", registry)
+    entry = {"title": "Invalid volumes", "type": "QMessageBox"}
+    registry.append(entry)
+    try:
+        yield
+    finally:
+        if entry in registry:
+            registry.remove(entry)
+
+
 def _qt_replace_text(QtCore: Any, QtTest: Any, widget: Any, value: Any) -> None:
     widget.setFocus()
     QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
@@ -1871,10 +1897,11 @@ def drive_editor_create_finalize(
                     active.reject()
 
         QtCore.QTimer.singleShot(0, drive_selection)
-        QtTest.QTest.mouseClick(
-            dialog.well_selection_btn,
-            QtCore.Qt.MouseButton.LeftButton,
-        )
+        with _expected_editor_well_selection_dialog(context):
+            QtTest.QTest.mouseClick(
+                dialog.well_selection_btn,
+                QtCore.Qt.MouseButton.LeftButton,
+            )
         if selection_state["error"] is not None:
             raise selection_state["error"]
         if not selection_state["entered"]:
@@ -2329,10 +2356,11 @@ def drive_editor_prestart_rename_refinalize(
                     active.reject()
 
         QtCore.QTimer.singleShot(0, drive_selection)
-        QtTest.QTest.mouseClick(
-            dialog.well_selection_btn,
-            QtCore.Qt.MouseButton.LeftButton,
-        )
+        with _expected_editor_well_selection_dialog(context):
+            QtTest.QTest.mouseClick(
+                dialog.well_selection_btn,
+                QtCore.Qt.MouseButton.LeftButton,
+            )
         if selection_state["error"] is not None:
             raise selection_state["error"]
         if not selection_state["entered"]:
@@ -2679,6 +2707,542 @@ def drive_editor_prestart_rename_refinalize(
         "renamed_name": renamed_name,
         "non_name_controls_unchanged": state["before"] == state["after"],
         "prepared_design_changed": state.get("after_edit") != state["after"],
+        "refinalized": True,
+    }
+
+
+def drive_editor_prepared_sequence(
+    context: ScenarioContext,
+    *,
+    initial_name: str,
+    renamed_name: str,
+    experiment: Mapping[str, Any],
+    reagent: Mapping[str, Any],
+    sequence_steps: Sequence[Mapping[str, Any]],
+    intermediate_tolerance_nl: float,
+    action_runner: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Drive one validated ordered prepared-editor sequence through Qt."""
+
+    if context.app is None or context.qt_core is None or context.view is None:
+        raise RuntimeError("editor automation requires a launched Qt application")
+    normalized_steps = tuple(dict(step) for step in sequence_steps)
+    if not normalized_steps or normalized_steps[0].get("action_id") != "editor.open_via_ui":
+        raise ValueError("prepared-editor sequence must start with editor.open_via_ui")
+    if any(
+        step.get("action_id") == "experiment.load_authoritative_via_ui"
+        for step in normalized_steps
+    ):
+        raise ValueError("authoritative reload is outside the modal editor sequence")
+
+    from PySide6 import QtTest, QtWidgets
+    from View import ExperimentDesignDialog, WellSelectionDialog
+
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+    )
+
+    QtCore = context.qt_core
+    button = context.view.well_plate_widget.design_experiment_button
+    if not button.isEnabled():
+        raise ScenarioActionError(
+            "editor.open_via_ui",
+            "Experiment Editor button is disabled",
+            stage="precondition",
+        )
+
+    state: dict[str, Any] = {
+        "entered": False,
+        "finished": False,
+        "error": None,
+        "dialog": None,
+        "observed_transitions": [],
+        "rejections": [],
+        "edit_count": 0,
+        "regeneration_count": 0,
+    }
+    driver_timer = QtCore.QTimer(context.app)
+    driver_timer.setInterval(5)
+
+    def run_action(
+        action_id: str,
+        operation: Callable[[], Mapping[str, Any] | None],
+        *,
+        allowed_dialogs: tuple[Any, ...] = (),
+    ) -> dict[str, Any]:
+        if action_runner is not None:
+            return action_runner(
+                action_id,
+                operation,
+                allowed_dialogs=allowed_dialogs,
+            )
+        return execute_action(context, action_id, operation)
+
+    def click(widget: Any) -> None:
+        QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
+        context.app.processEvents()
+
+    def toggle_checkbox(widget: Any) -> None:
+        widget.setFocus()
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key.Key_Space)
+        context.app.processEvents()
+
+    def select_printable_wells(dialog: Any, well_ids: list[str]) -> None:
+        selection_state: dict[str, Any] = {"entered": False, "error": None}
+
+        def drive_selection() -> None:
+            selection_state["entered"] = True
+            active = context.app.activeModalWidget()
+            try:
+                if not isinstance(active, WellSelectionDialog):
+                    title = active.windowTitle() if active is not None else None
+                    if isinstance(active, QtWidgets.QDialog):
+                        active.reject()
+                    raise RuntimeError(
+                        "unexpected printable-wells modal in prepared sequence: "
+                        f"{type(active).__name__ if active is not None else None} "
+                        f"{title!r}"
+                    )
+                click(active.clear_btn)
+                for well_id in well_ids:
+                    row_label = "".join(c for c in well_id if c.isalpha()).upper()
+                    column_text = "".join(c for c in well_id if c.isdigit())
+                    row = 0
+                    for character in row_label:
+                        row = row * 26 + (ord(character) - ord("A") + 1)
+                    QtTest.QTest.mouseClick(
+                        active.grid,
+                        QtCore.Qt.MouseButton.LeftButton,
+                        pos=active.grid._cell_rect(row - 1, int(column_text) - 1).center(),
+                    )
+                if active.selected_well_ids() != well_ids:
+                    raise RuntimeError("printable-well selection did not match the plan")
+                click(active.ok_btn)
+            except BaseException as exc:
+                selection_state["error"] = exc
+                if isinstance(active, QtWidgets.QDialog) and active.isVisible():
+                    active.reject()
+
+        QtCore.QTimer.singleShot(0, drive_selection)
+        with _expected_editor_well_selection_dialog(context):
+            QtTest.QTest.mouseClick(
+                dialog.well_selection_btn,
+                QtCore.Qt.MouseButton.LeftButton,
+            )
+        if selection_state["error"] is not None:
+            raise selection_state["error"]
+        if not selection_state["entered"]:
+            raise RuntimeError("Printable Wells dialog did not open")
+        if list(dialog.model.get_auto_assignment_included_wells() or []) != well_ids:
+            raise RuntimeError("prepared editor retained the wrong printable wells")
+
+    def persisted_guard_state() -> dict[str, Any]:
+        snapshot = capture_authoritative_bundle(context)
+        return {
+            "experiment_dir": snapshot.experiment_dir,
+            "design_sha256": snapshot.design_sha256,
+            "plan_json": snapshot.plan_json,
+            "plan_revision": snapshot.plan_revision,
+            "plan_state": snapshot.plan_state,
+            "progress_plan_revision": snapshot.progress_plan_revision,
+            "audit_rows_json": snapshot.audit_rows_json,
+            "directory_hashes": dict(snapshot.directory.hashes),
+            "experiment_directories": list(snapshot.experiment_directories),
+            "staging_directories": list(snapshot.staging_directories),
+            "current_plan_paths": list(snapshot.current_plan_paths),
+            "runtime_active": snapshot.runtime_active,
+            "runtime_assignments": dict(snapshot.runtime_assignments),
+            "array_state": context.controller.get_array_run_state(),
+        }
+
+    def run_driver() -> None:
+        if state["entered"]:
+            return
+        state["entered"] = True
+        driver_timer.stop()
+        active = context.app.activeModalWidget()
+        try:
+            if not isinstance(active, ExperimentDesignDialog):
+                title = active.windowTitle() if active is not None else None
+                if isinstance(active, QtWidgets.QDialog):
+                    active.reject()
+                raise RuntimeError(
+                    "unexpected active modal while opening prepared sequence: "
+                    f"{type(active).__name__ if active is not None else None} {title!r}"
+                )
+            dialog = active
+            state["dialog"] = dialog
+            state["initial_final_volume_nL"] = float(dialog.final_v_spin.value())
+
+            def record(step: Mapping[str, Any], evidence: Mapping[str, Any]) -> None:
+                state["observed_transitions"].append(
+                    {
+                        "ordinal": int(step.get("ordinal", 0)),
+                        "action_id": str(step["action_id"]),
+                        "from_state": str(step["from_state"]),
+                        "to_state": str(step["to_state"]),
+                        "expected_outcome": str(step.get("expected_outcome", "accepted")),
+                        "observed_outcome": str(
+                            evidence.get("observed_outcome", "accepted")
+                        ),
+                        "edit_variant": step.get("edit_variant"),
+                    }
+                )
+
+            def rename() -> Mapping[str, Any]:
+                if not dialog.exp_name_edit.isEnabled() or dialog.exp_name_edit.isReadOnly():
+                    raise RuntimeError("prepared experiment name is not editable")
+                if dialog.auto_update_chk.isChecked():
+                    toggle_checkbox(dialog.auto_update_chk)
+                before_name = dialog.exp_name_edit.text()
+                _qt_replace_text(QtCore, QtTest, dialog.exp_name_edit, renamed_name)
+                QtTest.QTest.keyClick(dialog.exp_name_edit, QtCore.Qt.Key.Key_Tab)
+                context.app.processEvents()
+                if dialog.exp_name_edit.text() != renamed_name:
+                    raise RuntimeError("prepared experiment rename was not retained")
+                return {
+                    "before_name": before_name,
+                    "renamed_name": renamed_name,
+                    "dirty_after": bool(dialog._design_optimization_dirty),
+                    "observed_outcome": "accepted",
+                }
+
+            def edit(variant: str) -> Mapping[str, Any]:
+                def apply_final_values() -> None:
+                    _qt_set_spin_value(
+                        QtCore, QtTest, dialog.rep_spin,
+                        experiment["refinalized_replicates"],
+                    )
+                    _qt_set_spin_value(
+                        QtCore, QtTest, dialog.v_spin,
+                        experiment["refinalized_printed_volume_nL"],
+                    )
+                    _qt_set_spin_value(
+                        QtCore, QtTest, dialog.final_v_spin,
+                        experiment["refinalized_final_volume_nL"],
+                    )
+                    _qt_set_spin_value(
+                        QtCore, QtTest, dialog.volume_tolerance_spin, 0.0
+                    )
+                    select_printable_wells(
+                        dialog,
+                        list(experiment["refinalized_expected_well_ids"]),
+                    )
+                    _qt_select_combo_text(
+                        QtCore, QtTest, dialog.fill_mode_combo,
+                        experiment["refinalized_fill_printing_mode"],
+                    )
+                    _qt_set_spin_value(
+                        QtCore, QtTest, dialog.fill_dv_spin,
+                        experiment["refinalized_fill_droplet_volume_nL"],
+                    )
+                    if dialog._reagent_row_count() != 1:
+                        raise RuntimeError("prepared editor did not retain one reagent")
+                    row = 0
+                    _qt_select_combo_text(
+                        QtCore, QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_MODE),
+                        reagent["refinalized_printing_mode"],
+                    )
+                    _qt_replace_text(
+                        QtCore, QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_TARGETS),
+                        ", ".join(str(value) for value in reagent["refinalized_targets"]),
+                    )
+                    _qt_set_spin_value(
+                        QtCore, QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_DROPLET),
+                        reagent["refinalized_droplet_volume_nL"],
+                    )
+
+                if variant in {"intermediate", "intermediate_invalid"}:
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog.volume_tolerance_spin,
+                        intermediate_tolerance_nl,
+                    )
+                    if variant == "intermediate_invalid":
+                        _qt_set_spin_value(
+                            QtCore,
+                            QtTest,
+                            dialog.final_v_spin,
+                            float(dialog.v_spin.value()) - 1.0,
+                        )
+                elif variant == "intermediate_recovery":
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog.final_v_spin,
+                        state["initial_final_volume_nL"],
+                    )
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog.volume_tolerance_spin,
+                        intermediate_tolerance_nl,
+                    )
+                elif variant in {"final", "final_invalid"}:
+                    apply_final_values()
+                    if variant == "final_invalid":
+                        _qt_set_spin_value(
+                            QtCore,
+                            QtTest,
+                            dialog.final_v_spin,
+                            float(dialog.v_spin.value()) - 1.0,
+                        )
+                else:
+                    raise RuntimeError(f"unsupported exploration edit variant: {variant!r}")
+                context.app.processEvents()
+                if not dialog._design_optimization_dirty:
+                    raise RuntimeError("prepared exploration edit did not mark the design dirty")
+                state["edit_count"] += 1
+                return {
+                    "edit_variant": variant,
+                    "tolerance_nL": dialog.volume_tolerance_spin.value(),
+                    "printed_volume_nL": dialog.v_spin.value(),
+                    "final_volume_nL": dialog.final_v_spin.value(),
+                    "volume_relationship_invalid": (
+                        dialog.v_spin.value() > dialog.final_v_spin.value()
+                    ),
+                    "dirty_after": True,
+                    "observed_outcome": "accepted",
+                }
+
+            def regenerate() -> Mapping[str, Any]:
+                with _expected_editor_progress_dialog(context):
+                    click(dialog.run_btn)
+                    _wait_for_editor_progress_dialogs(
+                        context, QtTest, "editor.regenerate_prepared_design_via_ui"
+                    )
+                if dialog._design_optimization_dirty:
+                    raise RuntimeError("regenerated prepared design remained dirty")
+                state["regeneration_count"] += 1
+                return {
+                    "reaction_count": int(dialog.model.get_number_of_reactions()),
+                    "dirty_after": False,
+                    "observed_outcome": "accepted",
+                }
+
+            def reject_invalid_refinalize() -> Mapping[str, Any]:
+                if not dialog._design_optimization_dirty:
+                    raise RuntimeError("premature Refinalize was not attempted while dirty")
+                if dialog.v_spin.value() <= dialog.final_v_spin.value():
+                    raise RuntimeError("premature Refinalize did not have invalid volumes")
+                if not dialog.finish_btn.isEnabled():
+                    raise RuntimeError("invalid-volume safeguard was not visibly actionable")
+                before = persisted_guard_state()
+                dialog_before = {
+                    "visible": bool(dialog.isVisible()),
+                    "result": int(dialog.result()),
+                    "apply_requested": bool(dialog._apply_requested),
+                    "finish_enabled": bool(dialog.finish_btn.isEnabled()),
+                }
+                activations: list[bool] = []
+                def record_activation(checked: bool = False) -> None:
+                    activations.append(bool(checked))
+
+                warning = {
+                    "entered": False,
+                    "title": None,
+                    "type": None,
+                    "dismissed": False,
+                    "error": None,
+                }
+
+                def dismiss_warning() -> None:
+                    active_warning = context.app.activeModalWidget()
+                    warning["entered"] = True
+                    warning["title"] = (
+                        active_warning.windowTitle()
+                        if active_warning is not None
+                        else None
+                    )
+                    warning["type"] = (
+                        type(active_warning).__name__
+                        if active_warning is not None
+                        else None
+                    )
+                    try:
+                        if (
+                            not isinstance(active_warning, QtWidgets.QMessageBox)
+                            or active_warning.windowTitle() != "Invalid volumes"
+                        ):
+                            raise RuntimeError(
+                                "unexpected safeguard dialog during invalid Refinalize"
+                            )
+                        ok_button = active_warning.button(
+                            QtWidgets.QMessageBox.StandardButton.Ok
+                        )
+                        if ok_button is None or not ok_button.isEnabled():
+                            raise RuntimeError("invalid-volume dialog has no enabled OK")
+                        QtTest.QTest.mouseClick(
+                            ok_button, QtCore.Qt.MouseButton.LeftButton
+                        )
+                        warning["dismissed"] = True
+                    except BaseException as exc:
+                        warning["error"] = exc
+                        if (
+                            isinstance(active_warning, QtWidgets.QDialog)
+                            and active_warning.isVisible()
+                        ):
+                            active_warning.reject()
+
+                dialog.finish_btn.clicked.connect(record_activation)
+                try:
+                    QtCore.QTimer.singleShot(0, dismiss_warning)
+                    with _expected_editor_invalid_volume_dialog(context):
+                        QtTest.QTest.mouseClick(
+                            dialog.finish_btn, QtCore.Qt.MouseButton.LeftButton
+                        )
+                    QtTest.QTest.qWait(25)
+                    context.app.processEvents()
+                finally:
+                    dialog.finish_btn.clicked.disconnect(record_activation)
+                if warning["error"] is not None:
+                    raise warning["error"]
+                after = persisted_guard_state()
+                dialog_after = {
+                    "visible": bool(dialog.isVisible()),
+                    "result": int(dialog.result()),
+                    "apply_requested": bool(dialog._apply_requested),
+                    "finish_enabled": bool(dialog.finish_btn.isEnabled()),
+                }
+                safe = (
+                    len(activations) == 1
+                    and warning["entered"]
+                    and warning["title"] == "Invalid volumes"
+                    and warning["type"] == "QMessageBox"
+                    and warning["dismissed"]
+                    and before == after
+                    and dialog_after == dialog_before
+                    and dialog_after["visible"]
+                    and not after["runtime_active"]
+                    and after["array_state"] == "idle"
+                )
+                evidence = {
+                    "observed_outcome": "rejected_invalid",
+                    "activation_count": len(activations),
+                    "warning": {
+                        key: value
+                        for key, value in warning.items()
+                        if key != "error"
+                    },
+                    "invalid_volumes": {
+                        "printed_volume_nL": dialog.v_spin.value(),
+                        "final_volume_nL": dialog.final_v_spin.value(),
+                    },
+                    "authoritative_state_unchanged": before == after,
+                    "dialog_before": dialog_before,
+                    "dialog_after": dialog_after,
+                    "before": before,
+                    "after": after,
+                    "safe": safe,
+                }
+                if not safe:
+                    raise RuntimeError(
+                        "invalid-volume Refinalize rejection was not safe"
+                    )
+                state["rejections"].append(evidence)
+                return evidence
+
+            def refinalize() -> Mapping[str, Any]:
+                if dialog._design_optimization_dirty or not dialog.finish_btn.isEnabled():
+                    raise RuntimeError("terminal Refinalize was not eligible")
+                action_label = str(dialog.finish_btn.text() or "")
+                if action_label != "Finalize Design":
+                    raise RuntimeError("prepared design did not expose Finalize Design")
+                click(dialog.finish_btn)
+                if dialog.result() != QtWidgets.QDialog.DialogCode.Accepted:
+                    raise RuntimeError("prepared editor did not accept terminal Refinalize")
+                return {
+                    "dialog_result": int(dialog.result()),
+                    "apply_requested": bool(dialog._apply_requested),
+                    "action_label": action_label,
+                    "observed_outcome": "accepted",
+                }
+
+            for step in normalized_steps:
+                action_id = str(step["action_id"])
+                expected = str(step.get("expected_outcome", "accepted"))
+                if action_id == "editor.open_via_ui":
+                    operation = lambda: {
+                        "dialog_type": type(dialog).__name__,
+                        "prepared_reopen": True,
+                        "action_label": str(dialog.finish_btn.text() or ""),
+                        "observed_outcome": "accepted",
+                    }
+                elif action_id == "editor.rename_prepared_via_ui":
+                    operation = rename
+                elif action_id == "editor.edit_prepared_design_via_ui":
+                    variant = str(step.get("edit_variant") or "")
+                    operation = lambda variant=variant: edit(variant)
+                elif action_id == "editor.regenerate_prepared_design_via_ui":
+                    operation = regenerate
+                elif action_id == "editor.refinalize_prepared_via_ui" and expected == "rejected_invalid":
+                    operation = reject_invalid_refinalize
+                elif action_id == "editor.refinalize_prepared_via_ui":
+                    operation = refinalize
+                else:
+                    raise RuntimeError(f"unsupported modal exploration action: {action_id!r}")
+                action_result = run_action(
+                    action_id,
+                    operation,
+                    allowed_dialogs=(dialog,) if dialog.isVisible() else (),
+                )
+                evidence = dict(action_result.get("evidence") or action_result)
+                record(step, evidence)
+                if expected == "rejected_invalid":
+                    capture_milestone(
+                        context,
+                        "premature_refinalize_rejected",
+                        evidence={
+                            "activation_count": evidence["activation_count"],
+                            "warning_title": evidence["warning"]["title"],
+                            "authoritative_state_unchanged": evidence[
+                                "authoritative_state_unchanged"
+                            ],
+                        },
+                        widget=dialog,
+                    )
+            state["finished"] = True
+        except BaseException as exc:
+            state["error"] = exc
+            try:
+                if "failure" not in context.screenshots:
+                    capture_failure_screenshot(context, widget=active)
+            except Exception:
+                pass
+            if isinstance(active, QtWidgets.QDialog) and active.isVisible():
+                active.reject()
+
+    driver_timer.timeout.connect(run_driver)
+    driver_timer.start()
+    try:
+        QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+    finally:
+        driver_timer.stop()
+        driver_timer.deleteLater()
+    if state["error"] is not None:
+        raise state["error"]
+    if not state["entered"]:
+        raise ScenarioActionError(
+            "editor.open_via_ui", "the prepared editor did not open", stage="timeout"
+        )
+    if not state["finished"]:
+        raise ScenarioActionError(
+            "editor.refinalize_prepared_via_ui",
+            "the prepared editor sequence did not finish",
+            stage="operation",
+        )
+    return {
+        "dialog_type": type(state["dialog"]).__name__,
+        "initial_name": initial_name,
+        "renamed_name": renamed_name,
+        "observed_transitions": state["observed_transitions"],
+        "rejections": state["rejections"],
+        "edit_count": state["edit_count"],
+        "regeneration_count": state["regeneration_count"],
         "refinalized": True,
     }
 

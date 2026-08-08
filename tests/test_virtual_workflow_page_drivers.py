@@ -784,3 +784,41 @@ def test_editor_revision_driver_delegates_to_existing_bounded_mechanics(
         "reagent": {"refinalized_targets": [0.5, 1.0]},
         "action_runner": runner,
     }
+
+
+def test_editor_sequence_driver_delegates_ordered_plan(qapp, monkeypatch):
+    import tools.virtual_workflows.actions as actions
+
+    context = _context(qapp, QtWidgets.QWidget())
+    runner = object()
+    observed = {}
+    steps = ({"action_id": "editor.open_via_ui"},)
+
+    def drive(received_context, **values):
+        observed.update(values)
+        assert received_context is context
+        return {"refinalized": True, "observed_transitions": []}
+
+    monkeypatch.setattr(actions, "drive_editor_prepared_sequence", drive)
+    result = ExperimentEditorDriver(
+        context,
+        action_runner=runner,
+    ).run_prepared_sequence(
+        initial_name="initial",
+        renamed_name="renamed",
+        experiment={"refinalized_replicates": 3},
+        reagent={"refinalized_targets": [0.5, 1.0]},
+        sequence_steps=steps,
+        intermediate_tolerance_nl=1.0,
+    )
+
+    assert result["refinalized"] is True
+    assert observed == {
+        "initial_name": "initial",
+        "renamed_name": "renamed",
+        "experiment": {"refinalized_replicates": 3},
+        "reagent": {"refinalized_targets": [0.5, 1.0]},
+        "sequence_steps": steps,
+        "intermediate_tolerance_nl": 1.0,
+        "action_runner": runner,
+    }

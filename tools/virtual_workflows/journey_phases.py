@@ -405,6 +405,30 @@ def run_prepared_editor_revision(
     return dict(result)
 
 
+def run_prepared_editor_sequence(
+    runtime: JourneyRuntime,
+    spec: PreparedEditorRevisionSpec,
+    *,
+    sequence_steps: Sequence[Mapping[str, Any]],
+    intermediate_tolerance_nl: float,
+) -> dict[str, Any]:
+    """Run one generated sequence through the reusable prepared editor."""
+
+    result = ExperimentEditorDriver(
+        runtime.context,
+        action_runner=runtime.harness.run_action,
+    ).run_prepared_sequence(
+        initial_name=spec.initial_name,
+        renamed_name=spec.renamed_name,
+        experiment=spec.experiment_values(),
+        reagent=spec.reagent_values(),
+        sequence_steps=sequence_steps,
+        intermediate_tolerance_nl=intermediate_tolerance_nl,
+    )
+    runtime.harness.assert_no_unexpected_dialog()
+    return dict(result)
+
+
 def run_post_start_lock_copy(
     runtime: JourneyRuntime,
     spec: PostStartLockCopySpec,
@@ -1623,6 +1647,7 @@ __all__ = [
     "run_editor_preparation",
     "run_post_start_lock_copy",
     "run_prepared_editor_revision",
+    "run_prepared_editor_sequence",
     "run_soft_stop_boundary",
     "run_disconnect_fail_closed_boundary",
     "resume_soft_stopped_array",

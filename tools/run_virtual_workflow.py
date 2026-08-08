@@ -60,9 +60,13 @@ def _parser() -> argparse.ArgumentParser:
         help="Plan or execute a validated typed parameter matrix.",
     )
     selector.add_argument(
+        "--exploration",
+        help="Plan or execute a bounded seeded sequence campaign.",
+    )
+    selector.add_argument(
         "--list",
         dest="list_section",
-        choices=("all", "suites", "capabilities", "matrices"),
+        choices=("all", "suites", "capabilities", "matrices", "explorations"),
         help="Print a read-only manifest catalog and exit.",
     )
     selector.add_argument(
@@ -94,6 +98,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--case",
         help="Run exactly one case from the selected --matrix.",
+    )
+    parser.add_argument(
+        "--sequence",
+        help="Run exactly one sequence from the selected --exploration.",
     )
     parser.add_argument(
         "--dry-run",
@@ -283,6 +291,35 @@ def _matrix_replay_command(
     return tuple(command)
 
 
+def _exploration_replay_command(
+    args: argparse.Namespace,
+    output_root: Path,
+) -> tuple[str, ...]:
+    command = [
+        r".\env\Scripts\python.exe",
+        r"tools\run_virtual_workflow.py",
+        "--exploration",
+        str(args.exploration),
+    ]
+    if args.sequence is not None:
+        command.extend(["--sequence", str(args.sequence)])
+    command.extend(
+        [
+            "--output-root",
+            str(output_root),
+            "--speed-multiplier",
+            f"{args.speed_multiplier:g}",
+            "--timeout-seconds",
+            str(float(args.timeout_seconds)),
+        ]
+    )
+    if args.visible:
+        command.append("--visible")
+    else:
+        command.extend(["--qt-platform", args.qt_platform])
+    return tuple(command)
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -319,7 +356,7 @@ def _reject_aggregate_option_conflicts(
         conflicts.append("--compare")
     if conflicts:
         parser.error(
-            "suite/capability/matrix execution does not support: "
+            "suite/capability/matrix/exploration execution does not support: "
             + ", ".join(conflicts)
         )
 
@@ -463,6 +500,26 @@ def main(argv: list[str] | None = None) -> int:
     coverage_mode = bool(args.coverage_from)
     if args.case is not None and args.matrix is None:
         parser.error("--case requires --matrix")
+    if args.sequence is not None and args.exploration is None:
+        parser.error("--sequence requires --exploration")
+    if args.exploration is not None:
+        from tools.virtual_workflows.exploration import get_sequence
+
+        if args.sequence is None and _option_was_supplied(raw_argv, "--seed"):
+            parser.error("a full exploration campaign uses its frozen seed set")
+        if args.sequence is not None:
+            try:
+                sequence_seed = get_sequence(
+                    args.exploration, args.sequence
+                ).seed
+            except Exception as exc:
+                parser.error(str(exc))
+            if (
+                _option_was_supplied(raw_argv, "--seed")
+                and args.seed != sequence_seed
+            ):
+                parser.error("--seed must match the selected sequence ID")
+            args.seed = sequence_seed
     if coverage_mode:
         _reject_coverage_option_conflicts(parser, raw_argv)
     if args.changed_path and not args.recommend_changed:
@@ -481,6 +538,11 @@ def main(argv: list[str] | None = None) -> int:
                 from tools.virtual_workflows.matrices import matrix_catalog
 
                 print(deterministic_json(matrix_catalog()), end="")
+                return 0
+            if args.list_section == "explorations":
+                from tools.virtual_workflows.exploration import exploration_catalog
+
+                print(deterministic_json(exploration_catalog()), end="")
                 return 0
             print(deterministic_json(build_catalog(args.list_section)), end="")
             return 0
@@ -544,9 +606,12 @@ def main(argv: list[str] | None = None) -> int:
         and (args.suite is not None or args.capability is not None)
     )
     matrix_execution = not args.dry_run and args.matrix is not None
+    exploration_execution = not args.dry_run and args.exploration is not None
     if aggregate_execution:
         _reject_aggregate_option_conflicts(parser, args, raw_argv)
     if matrix_execution:
+        _reject_aggregate_option_conflicts(parser, args, raw_argv)
+    if exploration_execution:
         _reject_aggregate_option_conflicts(parser, args, raw_argv)
     pi_evidence = (args.pi_preflight, args.pi_hardware_proof)
     if args.target_pi and any(value is None for value in pi_evidence):
@@ -568,6 +633,21 @@ def main(argv: list[str] | None = None) -> int:
                     args.matrix,
                     case_id=args.case,
                     seed=args.seed,
+                    timeout_seconds=args.timeout_seconds,
+                    execution_authorized=False,
+                )
+                print(deterministic_json(plan), end="")
+                return 0
+            if args.exploration is not None:
+                if args.target_pi:
+                    parser.error("sequence exploration is Windows SIL only")
+                from tools.virtual_workflows.exploration import (
+                    resolve_exploration_plan,
+                )
+
+                plan = resolve_exploration_plan(
+                    args.exploration,
+                    sequence_id=args.sequence,
                     timeout_seconds=args.timeout_seconds,
                     execution_authorized=False,
                 )
@@ -709,6 +789,87 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             print(
                 "Virtual workflow matrix failed: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return 3
+
+    if exploration_execution:
+        if args.target_pi:
+            parser.error("sequence exploration is Windows SIL only")
+        if not math.isfinite(args.speed_multiplier) or args.speed_multiplier <= 0:
+            parser.error("--speed-multiplier must be finite and greater than zero")
+        exploration_output_root = (
+            args.output_root
+            if _option_was_supplied(raw_argv, "--output-root")
+            else REPO_ROOT / "verification_reports" / "exploration"
+        )
+        try:
+            from tools.virtual_workflows.exploration import resolve_exploration_plan
+
+            if args.sequence is None:
+                from tools.virtual_workflows.exploration_runner import (
+                    ExplorationRunConfig,
+                    execute_exploration,
+                )
+
+                plan = resolve_exploration_plan(
+                    args.exploration,
+                    timeout_seconds=args.timeout_seconds,
+                )
+                result = execute_exploration(
+                    ExplorationRunConfig(
+                        plan=plan,
+                        output_root=exploration_output_root,
+                        speed_multiplier=args.speed_multiplier,
+                        visible=args.visible,
+                        qt_platform=args.qt_platform,
+                        replay_command=_exploration_replay_command(
+                            args, exploration_output_root
+                        ),
+                    )
+                )
+                print(result.summary_path.read_text(encoding="utf-8"), end="")
+                print(f"Exploration aggregate: {result.aggregate_path}")
+                print(
+                    "Exploration aggregate SHA-256: "
+                    f"{_file_sha256(result.aggregate_path)}"
+                )
+                return result.exit_code
+
+            if not args.visible:
+                os.environ["QT_QPA_PLATFORM"] = args.qt_platform
+            from tools.virtual_workflows.qt_font_environment import (
+                configure_sil_qt_font_environment,
+            )
+            configure_sil_qt_font_environment(
+                qt_platform=(None if args.visible else args.qt_platform)
+            )
+            from tools.virtual_workflows.journeys import (
+                EXPLORATION_WORKLOAD_ID,
+                JourneyRunConfig,
+                run_exploration_sequence,
+            )
+
+            report = run_exploration_sequence(
+                JourneyRunConfig(
+                    scenario_id=EXPLORATION_WORKLOAD_ID,
+                    output_root=exploration_output_root,
+                    visible=args.visible,
+                    seed=args.seed,
+                    speed_multiplier=args.speed_multiplier,
+                    timeout_seconds=args.timeout_seconds,
+                ),
+                campaign_id=args.exploration,
+                sequence_id=args.sequence,
+            )
+            report_path = _report_path(report)
+            print(report_path.with_name("summary.txt").read_text(encoding="utf-8"), end="")
+            print(f"Report: {report_path}")
+            return 0 if report["classification"]["status"] != "fail" else 2
+        except Exception as exc:
+            print(
+                "Virtual workflow exploration failed: "
                 f"{type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
