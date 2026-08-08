@@ -2294,11 +2294,13 @@ current qualified baseline. Milestone 10 is the current next action:
    correction. The one-stock and two-stock cases pass selected fresh-process,
    replay, and visible checks with exact stocks/counts, authoritative reload,
    and no-mutation evidence for the rejected first attempt.
-4. Slice 10.4 is the current next action: append sparse custom-well/exclusion
-   and seed-1234 cases; prove
-   exact excluded-well behavior, same-seed replay, equal reaction multisets,
-   and different-seed assignment divergence.
-5. Slice 10.5: append exact-capacity and the two rejected-finalization cases;
+4. Slice 10.4 is complete: the sparse custom-well/exclusion and seed-1234
+   cases pass fresh-process, exact replay, and visible exclusion checks. The
+   real picker proves disabled-cell rejection; authoritative reload proves
+   exact selected/assigned wells; and persisted hashes prove equal reaction
+   multisets with distinct seed-specific assignments.
+5. Slice 10.5 is the current next action: append exact-capacity and the two
+   rejected-finalization cases;
    prove exact warning/status behavior and no new or modified authoritative
    execution artifacts.
 6. Slice 10.6: qualify and replay the complete nine-case matrix, visible

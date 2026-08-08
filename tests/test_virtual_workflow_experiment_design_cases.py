@@ -52,10 +52,10 @@ EXPECTED_CASE_SHA256 = {
         "b9bd401c9f223c1576bc98938c75b2a7401958dad2048a2d048f95d4fbda2fff"
     ),
     "custom_wells_with_exclusions": (
-        "ace89896cfdfdf63ecb9c5ae567ef29c7926b6e5211ed15c168fdeee0b5eef6e"
+        "d7226b2e801489066516b46206274706a85749c4a73cfdfa4cc3df289f4391cf"
     ),
     "multi_reagent_seed_1234": (
-        "a30c30ed1f5b9c40a64ebeed9eec4ed062532a1e9627e69e60d1711860ce9df4"
+        "795a80c456f8af02e1b759a95de96994cd8dc6fbb4a8ed640fe0ee2f7b385f29"
     ),
     "exact_custom_capacity": (
         "f8f29163ef968a7a0ba0e6ba2483d96104dab1eac87db53e6f932ef10e9368bf"
@@ -68,13 +68,13 @@ EXPECTED_CASE_SHA256 = {
     ),
 }
 EXPECTED_PLANNED_CATALOG_SHA256 = (
-    "cb283c2b8519dfe9dc806a8a0205fe9eb99bda976da728d4de6d6ef9c0ad35dc"
+    "3bab3f49d6cb40786ca1d8a251d923c2392271cd4b513a626318d8f98c6ce590"
 )
 EXPECTED_TEST_LOCAL_DEFINITION_SHA256 = (
-    "47c5b7962f1788fdd2095ea96a1de9120bb1c17305b1a526244068c23a47629b"
+    "fe45b2cefcf701e7977f7b968ba5420db6b9aab4f4ab8d731769ef1a27c66a74"
 )
 EXPECTED_TEST_LOCAL_PLAN_SHA256 = (
-    "ea3fe6b3d508ca05fd4d95eab4f004a6679de331690ed621e8352a35858dae72"
+    "935b11e042dc208cee7ed1cd5c7caf3f17a4f559d2c110344e2eef7d8a639e41"
 )
 
 
@@ -186,12 +186,14 @@ def test_reference_fixture_is_sha_verified_and_transformed_only_in_memory():
 
 def test_executable_prefix_and_editor_projection_are_additive_and_exact():
     cases = executable_experiment_design_cases()
-    assert tuple(case.case_id for case in cases) == EXPECTED_CASE_IDS[:4]
+    assert tuple(case.case_id for case in cases) == EXPECTED_CASE_IDS[:6]
 
     control = editor_specification(cases[0])
     randomized = editor_specification(cases[1])
     one_stock = editor_specification(cases[2])
     two_stock = editor_specification(cases[3])
+    custom_wells = editor_specification(cases[4])
+    seed_1234 = editor_specification(cases[5])
 
     assert control["experiment"]["selected_well_ids"] == ["A1"]
     assert control["experiment"]["expected_reaction_count"] == 1
@@ -217,6 +219,22 @@ def test_executable_prefix_and_editor_projection_are_additive_and_exact():
         (attempt["allow_two_stock_solutions"], attempt["expected_outcome"])
         for attempt in two_stock["optimization_attempts"]
     ] == [(False, "rejected"), (True, "generated")]
+    assert custom_wells["experiment"]["selected_well_ids"] == [
+        "A1", "A2", "A3", "A4", "A5", "A6"
+    ]
+    assert custom_wells["experiment"]["excluded_well_ids"] == ["A2", "A5"]
+    assert [
+        row.target_droplets
+        for row in cases[4].expected.stock_well_counts
+        if row.stock_id == "Water_1.00_--"
+    ] == [10, 9, 8]
+    assert seed_1234["experiment"]["random_seed"] == 1234
+    assert seed_1234["experiment"]["randomize_assignments"] is True
+    assert [
+        row.target_droplets
+        for row in cases[5].expected.stock_well_counts
+        if row.stock_id == "Water_1.00_--"
+    ] == [7, 6, 8, 9, 7, 8, 9, 6]
 
     with pytest.raises(ExperimentDesignCaseError, match="negative driver"):
         editor_specification(

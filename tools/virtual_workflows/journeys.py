@@ -1195,6 +1195,17 @@ def _experiment_design_body(runtime: JourneyRuntime) -> None:
     case = get_experiment_design_case(case_payload["case_id"])
     runtime.add_assertion(simulation_identity_assertion(runtime.context))
     runtime.add_assertion(real_application_assertion(runtime.context))
+    well_plate = runtime.context.model.well_plate
+    exclusions_before = sorted(
+        str(getattr(value, "well_id", value))
+        for value in set(getattr(well_plate, "excluded_wells", set()) or set())
+    )
+    if exclusions_before:
+        raise RuntimeError(
+            "experiment-design scenario did not start with empty exclusions: "
+            f"{exclusions_before!r}"
+        )
+    expected_exclusions = sorted(case.experiment.excluded_well_ids)
     editor_action_start = len(runtime.context.action_results)
     driver_evidence = run_editor_preparation(
         runtime,
@@ -1204,6 +1215,12 @@ def _experiment_design_body(runtime: JourneyRuntime) -> None:
         ),
     )
     runtime.observations["experiment_design_driver"] = driver_evidence
+    runtime.observations["experiment_design_exclusions"] = dict(
+        (driver_evidence.get("configured") or {}).get(
+            "exclusion_precondition"
+        )
+        or {}
+    )
     runtime.add_assertion(
         editor_create_finalize_assertion(
             runtime.context,
@@ -1214,6 +1231,11 @@ def _experiment_design_body(runtime: JourneyRuntime) -> None:
                 if index == 0
                 else "editor.regenerate_prepared_design_via_ui"
                 for index, _attempt in enumerate(case.optimization_attempts)
+            ),
+            pre_configure_action_ids=(
+                ("artifact.capture_milestone",)
+                if expected_exclusions
+                else ()
             ),
         )
     )
@@ -2861,7 +2883,7 @@ def _experiment_design_artifact(
 ) -> Any:
     return editor_artifacts_cleanup_assertion(
         screenshots=runtime.context.screenshots,
-        required_screenshots=set(EXPERIMENT_DESIGN_REQUIRED_SCREENSHOTS),
+        required_screenshots=set(runtime.definition.required_screenshots),
         teardown=teardown,
     )
 
@@ -3527,6 +3549,9 @@ def _run_experiment_design_matrix_case(
         if len(case.optimization_attempts) > 1
         else frozenset()
     )
+    required_screenshots = set(EXPERIMENT_DESIGN_REQUIRED_SCREENSHOTS)
+    if case.experiment.excluded_well_ids:
+        required_screenshots.add("well_picker_configured")
     definition = replace(
         EDITOR_DEFINITION,
         scenario_name=EXPERIMENT_DESIGN_MATRIX_SCENARIO_NAME,
@@ -3541,7 +3566,7 @@ def _run_experiment_design_matrix_case(
             EXPERIMENT_DESIGN_REQUIRED_UI_ACTIONS | transition_actions
         ),
         required_assertion_ids=EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS,
-        required_screenshots=EXPERIMENT_DESIGN_REQUIRED_SCREENSHOTS,
+        required_screenshots=frozenset(required_screenshots),
         body=_experiment_design_body,
         artifact_assertion=_experiment_design_artifact,
         payload_builder=_experiment_design_payload,

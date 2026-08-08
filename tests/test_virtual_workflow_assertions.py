@@ -511,9 +511,37 @@ def test_editor_create_finalize_sequence_adds_only_explicit_regeneration():
             "editor.regenerate_prepared_design_via_ui",
         ),
     )
+    picker_action_ids = (
+        *action_ids[:3],
+        "artifact.capture_milestone",
+        *action_ids[3:],
+    )
+    picker_context = SimpleNamespace(
+        action_results=[
+            {
+                "action_id": action_id,
+                "interaction_surface": (
+                    "harness"
+                    if action_id == "artifact.capture_milestone"
+                    else "ui"
+                ),
+                "status": "pass",
+            }
+            for action_id in picker_action_ids
+        ]
+    )
+    picker = editor_create_finalize_assertion(
+        picker_context,
+        optimization_action_ids=(
+            "editor.optimize_generate_via_ui",
+            "editor.regenerate_prepared_design_via_ui",
+        ),
+        pre_configure_action_ids=("artifact.capture_milestone",),
+    )
 
     assert legacy.decision == "fail"
     assert transitioned.decision == "pass"
+    assert picker.decision == "pass"
     assert transitioned.evidence["observed_action_ids"] == [
         action_id
         for action_id in action_ids

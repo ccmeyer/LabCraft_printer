@@ -1865,8 +1865,29 @@ def drive_editor_create_finalize(
     def select_printable_wells(
         dialog: Any,
         well_ids: list[str],
-    ) -> None:
-        selection_state: dict[str, Any] = {"entered": False, "error": None}
+        *,
+        excluded_well_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        expected_excluded = sorted(
+            str(value) for value in (excluded_well_ids or ())
+        )
+        selection_state: dict[str, Any] = {
+            "entered": False,
+            "error": None,
+            "evidence": None,
+        }
+
+        def well_position(well_id: str) -> tuple[int, int]:
+            row_label = "".join(
+                character for character in well_id if character.isalpha()
+            ).upper()
+            column_text = "".join(
+                character for character in well_id if character.isdigit()
+            )
+            row = 0
+            for character in row_label:
+                row = row * 26 + (ord(character) - ord("A") + 1)
+            return row - 1, int(column_text) - 1
 
         def drive_selection() -> None:
             selection_state["entered"] = True
@@ -1882,22 +1903,27 @@ def drive_editor_create_finalize(
                         f"{title!r}"
                     )
                 click(active.clear_btn)
-                for well_id in well_ids:
-                    row_label = "".join(
-                        character
-                        for character in well_id
-                        if character.isalpha()
-                    ).upper()
-                    column_text = "".join(
-                        character
-                        for character in well_id
-                        if character.isdigit()
+                disabled = sorted(str(value) for value in active.grid._disabled)
+                if disabled != expected_excluded:
+                    raise RuntimeError(
+                        f"printable-wells modal disabled {disabled!r}; "
+                        f"expected {expected_excluded!r}"
                     )
-                    row = 0
-                    for character in row_label:
-                        row = row * 26 + (ord(character) - ord("A") + 1)
-                    row -= 1
-                    column = int(column_text) - 1
+                rejected_excluded: list[str] = []
+                for well_id in expected_excluded:
+                    row, column = well_position(well_id)
+                    QtTest.QTest.mouseClick(
+                        active.grid,
+                        QtCore.Qt.MouseButton.LeftButton,
+                        pos=active.grid._cell_rect(row, column).center(),
+                    )
+                    if well_id in active.selected_well_ids():
+                        raise RuntimeError(
+                            f"disabled printable well became selected: {well_id}"
+                        )
+                    rejected_excluded.append(well_id)
+                for well_id in well_ids:
+                    row, column = well_position(well_id)
                     QtTest.QTest.mouseClick(
                         active.grid,
                         QtCore.Qt.MouseButton.LeftButton,
@@ -1908,6 +1934,20 @@ def drive_editor_create_finalize(
                     raise RuntimeError(
                         f"printable wells retained {observed!r}; "
                         f"expected {well_ids!r}"
+                    )
+                selection_evidence = {
+                    "disabled_well_ids": disabled,
+                    "rejected_disabled_well_ids": rejected_excluded,
+                    "selected_well_ids": list(observed),
+                    "selection_summary": active.summary_lbl.text(),
+                }
+                selection_state["evidence"] = selection_evidence
+                if expected_excluded and capture_editor_milestones:
+                    capture_milestone(
+                        context,
+                        "well_picker_configured",
+                        evidence=selection_evidence,
+                        widget=active,
                     )
                 click(active.ok_btn)
             except BaseException as exc:
@@ -1932,6 +1972,7 @@ def drive_editor_create_finalize(
                 f"editor retained printable wells {selected!r}; "
                 f"expected {well_ids!r}"
             )
+        return dict(selection_state["evidence"] or {})
 
     def run_driver() -> None:
         if state["entered"]:
@@ -2061,20 +2102,60 @@ def drive_editor_create_finalize(
                         dialog.fill_dv_spin,
                         experiment["fill_droplet_volume_nL"],
                     )
+                excluded_wells = list(experiment.get("excluded_well_ids") or [])
+                well_plate = context.model.well_plate
+                exclusions_before = sorted(
+                    str(getattr(value, "well_id", value))
+                    for value in set(
+                        getattr(well_plate, "excluded_wells", set()) or set()
+                    )
+                )
+                if exclusions_before:
+                    raise RuntimeError(
+                        "fresh editor session retained exclusions before its "
+                        f"scenario precondition: {exclusions_before!r}"
+                    )
+                well_plate.excluded_wells = set(excluded_wells)
+                well_plate.normalize_excluded_wells()
+                exclusions_after = sorted(well_plate.excluded_wells)
+                if exclusions_after != sorted(excluded_wells):
+                    raise RuntimeError(
+                        f"scenario retained exclusions {exclusions_after!r}; "
+                        f"expected {sorted(excluded_wells)!r}"
+                    )
+                exclusion_precondition = {
+                    "before": exclusions_before,
+                    "applied": exclusions_after,
+                    "scenario_local": True,
+                }
+                context.record_event(
+                    "experiment_design_exclusions_applied",
+                    **exclusion_precondition,
+                )
                 _qt_select_combo_text(
                     QtCore,
                     QtTest,
                     dialog.plate_format_combo,
                     experiment["plate_name"],
                 )
-                selected_wells = list(
+                declared_wells = list(
                     experiment[
                         "selected_well_ids"
                         if "selected_well_ids" in experiment
                         else "expected_well_ids"
                     ]
                 )
-                select_printable_wells(dialog, selected_wells)
+                excluded_set = set(excluded_wells)
+                selected_wells = [
+                    well_id
+                    for well_id in declared_wells
+                    if well_id not in excluded_set
+                ]
+                picker_evidence = select_printable_wells(
+                    dialog,
+                    selected_wells,
+                    excluded_well_ids=excluded_wells,
+                )
                 for checkbox, expected in (
                     (
                         dialog.allow_two_chk,
@@ -2177,7 +2258,11 @@ def drive_editor_create_finalize(
                     "plate_name": dialog.plate_format_combo.currentText(),
                     "reagent_count": dialog._reagent_row_count(),
                     "auto_update": dialog.auto_update_chk.isChecked(),
+                    "declared_well_ids": declared_wells,
                     "selected_well_ids": selected_wells,
+                    "excluded_well_ids": excluded_wells,
+                    "exclusion_precondition": exclusion_precondition,
+                    "well_picker": picker_evidence,
                     "randomize_assignments": dialog.randomize_chk.isChecked(),
                     "random_seed": (
                         int(dialog.random_seed_spin.value())

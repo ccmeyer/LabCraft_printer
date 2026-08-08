@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass
@@ -2745,11 +2746,13 @@ def editor_create_finalize_assertion(
     optimization_action_ids: tuple[str, ...] = (
         "editor.optimize_generate_via_ui",
     ),
+    pre_configure_action_ids: tuple[str, ...] = (),
 ) -> AssertionResult:
     action_ids = (
         "editor.open_via_ui",
         "artifact.capture_milestone",
         "editor.new_experiment_via_ui",
+        *pre_configure_action_ids,
         "editor.configure_design_via_ui",
         *optimization_action_ids,
         "artifact.capture_milestone",
@@ -2864,7 +2867,61 @@ def experiment_design_case_oracle_assertion(
                 if stock_id.startswith(f"{reagent}_")
             )
             concentration_checks[f"{well_id}:{reagent}"] = total == target
+    expected_reaction_rows = {
+        str(row["reaction_id"]): dict(row) for row in expected["reactions"]
+    }
+
+    def canonical_decimal(value: Decimal) -> str:
+        if value == 0:
+            return "0"
+        return format(value.normalize(), "f")
+
+    observed_reaction_multiset: list[dict[str, Any]] = []
+    for well_id, reaction_id in sorted(observed_assignments.items()):
+        expected_reaction = expected_reaction_rows.get(reaction_id)
+        if expected_reaction is None:
+            continue
+        concentration_row = dict(observed_concentrations.get(well_id) or {})
+        observed_reaction_multiset.append(
+            {
+                "replicate": int(expected_reaction["replicate"]),
+                "targets": [
+                    {
+                        "reagent": str(target["reagent"]),
+                        "target": canonical_decimal(
+                            sum(
+                                Decimal(str(value or "0"))
+                                for stock_id, value in concentration_row.items()
+                                if stock_id.startswith(
+                                    f"{target['reagent']}_"
+                                )
+                            )
+                        ),
+                    }
+                    for target in expected_reaction["targets"]
+                ],
+            }
+        )
+    def canonical_json(value: Any) -> str:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+    observed_reaction_multiset.sort(key=canonical_json)
+    observed_reaction_multiset_sha256 = hashlib.sha256(
+        canonical_json(observed_reaction_multiset).encode("utf-8")
+    ).hexdigest()
+    observed_assignment_rows = [
+        {"well_id": well_id, "reaction_id": reaction_id}
+        for well_id, reaction_id in sorted(observed_assignments.items())
+    ]
+    observed_assignment_sha256 = hashlib.sha256(
+        canonical_json(observed_assignment_rows).encode("utf-8")
+    ).hexdigest()
     configured = dict(driver_evidence.get("configured") or {})
+    picker_evidence = dict(configured.get("well_picker") or {})
+    exclusion_precondition = dict(
+        configured.get("exclusion_precondition") or {}
+    )
     generated = dict(driver_evidence.get("generated") or {})
     expected_attempts = list(case.get("optimization_attempts") or [])
     observed_attempts = list(driver_evidence.get("optimization_attempts") or [])
@@ -2919,6 +2976,19 @@ def experiment_design_case_oracle_assertion(
     expected_editor_stock_rows = len(expected_stocks) + int(
         not any(stock.get("role") == "fill" for stock in expected_stocks.values())
     )
+    expected_excluded_wells = sorted(experiment.get("excluded_well_ids") or [])
+    expected_declared_wells = list(experiment["selected_well_ids"])
+    expected_printable_wells = [
+        well_id
+        for well_id in expected_declared_wells
+        if well_id not in set(expected_excluded_wells)
+    ]
+    observed_excluded_wells = sorted(
+        str(getattr(value, "well_id", value))
+        for value in set(
+            getattr(context.model.well_plate, "excluded_wells", set()) or set()
+        )
+    )
     metadata = snapshot.metadata
     checks = {
         "bundle_valid": snapshot.bundle_valid,
@@ -2933,6 +3003,18 @@ def experiment_design_case_oracle_assertion(
         "stock_ids_exact": set(observed_stocks) == set(expected_stocks),
         "stock_fields_exact": all(stock_checks.values()),
         "assignments_exact": observed_assignments == expected_assignments,
+        "reaction_multiset_hash_exact": observed_reaction_multiset_sha256
+        == expected["reaction_multiset_sha256"],
+        "assignment_hash_exact": observed_assignment_sha256
+        == expected["assignment_sha256"],
+        "excluded_state_exact": observed_excluded_wells
+        == expected_excluded_wells,
+        "excluded_wells_unassigned": not (
+            set(observed_assignments) & set(expected_excluded_wells)
+        ),
+        "assigned_wells_printable": set(observed_assignments).issubset(
+            set(expected_printable_wells)
+        ),
         "stock_well_counts_exact": observed_counts == expected_counts,
         "concentrations_exact": all(concentration_checks.values()),
         "key_wells_exact": list(projection["key_rows"])
@@ -2949,8 +3031,19 @@ def experiment_design_case_oracle_assertion(
         "metadata_seed_exact": metadata.get("random_seed")
         == experiment["random_seed"],
         "configured_controls_exact": (
-            configured.get("selected_well_ids")
-            == list(experiment["selected_well_ids"])
+            configured.get("declared_well_ids") == expected_declared_wells
+            and configured.get("selected_well_ids") == expected_printable_wells
+            and configured.get("excluded_well_ids") == expected_excluded_wells
+            and picker_evidence.get("disabled_well_ids")
+            == expected_excluded_wells
+            and picker_evidence.get("rejected_disabled_well_ids")
+            == expected_excluded_wells
+            and picker_evidence.get("selected_well_ids")
+            == expected_printable_wells
+            and exclusion_precondition.get("before") == []
+            and exclusion_precondition.get("applied")
+            == expected_excluded_wells
+            and exclusion_precondition.get("scenario_local") is True
             and configured.get("random_seed") == experiment["random_seed"]
             and configured.get("reagent_count") == len(case["reagents"])
             and bool(configured.get("allow_two_stock_solutions"))
@@ -2976,6 +3069,11 @@ def experiment_design_case_oracle_assertion(
         "observed": projection,
         "stock_checks": stock_checks,
         "concentration_checks": concentration_checks,
+        "observed_reaction_multiset": observed_reaction_multiset,
+        "observed_reaction_multiset_sha256": observed_reaction_multiset_sha256,
+        "observed_assignment_sha256": observed_assignment_sha256,
+        "observed_excluded_well_ids": observed_excluded_wells,
+        "expected_printable_well_ids": expected_printable_wells,
         "optimization_attempt_checks": optimization_attempt_checks,
         "driver": dict(driver_evidence),
         "expected_editor_stock_row_count": expected_editor_stock_rows,

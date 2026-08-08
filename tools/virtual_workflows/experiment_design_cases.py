@@ -26,6 +26,8 @@ EXPERIMENT_DESIGN_EXECUTABLE_CASE_IDS = (
     "multi_reagent_seed_4321",
     "one_stock_feasible",
     "two_stock_required",
+    "custom_wells_with_exclusions",
+    "multi_reagent_seed_1234",
 )
 REFERENCE_FIXTURE_PATH = (
     Path(__file__).resolve().parent
@@ -931,9 +933,9 @@ EXPERIMENT_DESIGN_CASES: tuple[ExperimentDesignCase, ...] = (
                 _assignment("A4", "R3"),
             ),
             stock_well_counts=(
-                _count(WELL_STOCK_ID, "A1", 1), _count(FILL_STOCK_ID, "A1", 9),
-                _count(WELL_STOCK_ID, "A3", 2), _count(FILL_STOCK_ID, "A3", 8),
-                _count(WELL_STOCK_ID, "A4", 3), _count(FILL_STOCK_ID, "A4", 7),
+                _count(WELL_STOCK_ID, "A1", 1), _count(FILL_STOCK_ID, "A1", 10),
+                _count(WELL_STOCK_ID, "A3", 2), _count(FILL_STOCK_ID, "A3", 9),
+                _count(WELL_STOCK_ID, "A4", 3), _count(FILL_STOCK_ID, "A4", 8),
             ),
         ),
         coverage_tags=frozenset(
@@ -976,10 +978,10 @@ EXPERIMENT_DESIGN_CASES: tuple[ExperimentDesignCase, ...] = (
             ),
             stock_well_counts=_multi_counts(
                 (
-                    ("A1", 1, 3, 6), ("A2", 2, 3, 5),
-                    ("A3", 2, 1, 7), ("A4", 1, 1, 8),
-                    ("A5", 1, 3, 6), ("A6", 2, 1, 7),
-                    ("A7", 1, 1, 8), ("A8", 2, 3, 5),
+                    ("A1", 1, 3, 7), ("A2", 2, 3, 6),
+                    ("A3", 2, 1, 8), ("A4", 1, 1, 9),
+                    ("A5", 1, 3, 7), ("A6", 2, 1, 8),
+                    ("A7", 1, 1, 9), ("A8", 2, 3, 6),
                 )
             ),
         ),

@@ -91,6 +91,25 @@ def _run_case(tmp_path: Path, case_id: str) -> dict:
             {"A1": "R1", "A2": "R2"},
             id="two_stock_required",
         ),
+        pytest.param(
+            "custom_wells_with_exclusions",
+            {"A1": "R1", "A3": "R2", "A4": "R3"},
+            id="custom_wells_with_exclusions",
+        ),
+        pytest.param(
+            "multi_reagent_seed_1234",
+            {
+                "A1": "R2",
+                "A2": "R4",
+                "A3": "R3",
+                "A4": "R5",
+                "A5": "R6",
+                "A6": "R7",
+                "A7": "R1",
+                "A8": "R8",
+            },
+            id="multi_reagent_seed_1234",
+        ),
     ),
 )
 def test_experiment_design_positive_case_is_exact(
@@ -131,6 +150,13 @@ def test_experiment_design_positive_case_is_exact(
     prepared = values["experiment_design_evidence"]["prepared_oracle"]
     reconstructed = values["experiment_design_evidence"]["reload_activation"]
     assert prepared["observed"]["runtime_assignments"] == expected_assignments
+    expected_case = case_evidence["case"]["expected"]
+    assert prepared["observed_reaction_multiset_sha256"] == (
+        expected_case["reaction_multiset_sha256"]
+    )
+    assert prepared["observed_assignment_sha256"] == (
+        expected_case["assignment_sha256"]
+    )
     assert reconstructed["reconstructed"]["runtime_assignments"] == (
         expected_assignments
     )
@@ -150,6 +176,42 @@ def test_experiment_design_positive_case_is_exact(
         assert attempts[0]["dialog_open_after"] is True
     else:
         assert [row["observed_outcome"] for row in attempts] == ["generated"]
-    assert set(report["artifacts"]["screenshots"]) == set(
-        EXPERIMENT_DESIGN_REQUIRED_SCREENSHOTS
+    expected_screenshots = set(EXPERIMENT_DESIGN_REQUIRED_SCREENSHOTS)
+    if case_id == "custom_wells_with_exclusions":
+        expected_screenshots.add("well_picker_configured")
+        configured = prepared["driver"]["configured"]
+        assert configured["declared_well_ids"] == [
+            "A1", "A2", "A3", "A4", "A5", "A6"
+        ]
+        assert configured["selected_well_ids"] == ["A1", "A3", "A4", "A6"]
+        assert configured["excluded_well_ids"] == ["A2", "A5"]
+        assert configured["well_picker"]["disabled_well_ids"] == ["A2", "A5"]
+        assert configured["well_picker"]["rejected_disabled_well_ids"] == [
+            "A2", "A5"
+        ]
+        assert prepared["observed_excluded_well_ids"] == ["A2", "A5"]
+    assert set(report["artifacts"]["screenshots"]) == expected_screenshots
+
+
+@pytest.mark.sil_lifecycle
+def test_randomized_design_cases_have_same_multiset_and_distinct_assignments(
+    tmp_path,
+):
+    seed_4321 = _run_case(tmp_path, "multi_reagent_seed_4321")
+    seed_1234 = _run_case(tmp_path, "multi_reagent_seed_1234")
+
+    prepared_4321 = seed_4321["metrics"]["persistence"]["values"][
+        "experiment_design_evidence"
+    ]["prepared_oracle"]
+    prepared_1234 = seed_1234["metrics"]["persistence"]["values"][
+        "experiment_design_evidence"
+    ]["prepared_oracle"]
+    assert prepared_4321["observed_reaction_multiset_sha256"] == (
+        prepared_1234["observed_reaction_multiset_sha256"]
+    ) == "b189fe1ed4b975953600c7d299fd320be366eda827ceb39f28cf3a3bbc22b696"
+    assert prepared_4321["observed_assignment_sha256"] == (
+        "e264b345bddb83c2aeb12bf6421d83a81d21c8b9f31ff6698780164a1bee82ef"
+    )
+    assert prepared_1234["observed_assignment_sha256"] == (
+        "1ecbf5c4967d71a45fe33b6ac8cb858e3334b02bb1933f37ebbeddeae36450e9"
     )
