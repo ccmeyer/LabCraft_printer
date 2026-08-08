@@ -1492,7 +1492,36 @@ Rollback:
 
 ### Milestone 10: Curated experiment-design pairwise matrix
 
-Status: `planned`
+Status: `execution planned` (2026-08-08; six independently reviewable slices)
+
+Execution plan:
+
+- `docs/sil_interactive_simulation_milestone_10_execution_plan.md`
+- execute one slice at a time, with a slice-specific implementation plan,
+  targeted validation, retained evidence, completion record, and independent
+  commit before advancing;
+- register no placeholder matrix in Slice 10.1. Publish the first executable
+  two-case prefix in Slice 10.2, append cases without changing earlier case
+  hashes, and freeze the final nine-case catalog in Slice 10.5;
+- derive every case in memory from the unchanged
+  `experiment_editor_create_finalize_v1.json` reference fixture;
+- keep catalog expectations independent of production optimization,
+  generation, assignment, finalization, and runtime-reconstruction code.
+
+Slice sequence:
+
+1. typed catalog, independent oracle, named pairwise audit, hashing, and
+   test-local selector contracts;
+2. reusable editor inputs, authoritative reload/activation, control case, and
+   multiple-reagent seed-4321 case;
+3. one-stock feasible and one-stock-rejected/two-stock-success formulation
+   cases;
+4. custom wells with exclusions and the paired seed-1234 randomization case;
+5. exact capacity, capacity-plus-one rejection, and infeasible fixed/max-stock
+   rejection with exact no-authoritative-mutation evidence;
+6. complete matrix/replay, visible representatives, lifecycle and host
+   regressions/replays, full Python suite, retained evidence, documentation,
+   and milestone closeout.
 
 Goal:
 
@@ -2253,32 +2282,35 @@ Milestones 0-9 are complete. The expanded effort is complete when:
 Milestones 7, 8, and 9 are complete. Their operator capabilities remain the
 current qualified baseline. Milestone 10 is the current next action:
 
-1. Slice 9.1 (complete): put the existing mixed-mode catalog behind a generic
-   typed matrix registry and journey-family dispatch while preserving every
-   current hash, schema, report, fixture, case, and CLI result. Prove
-   extensibility with test-local definitions; do not publish an empty
-   requantization catalog.
-2. Slice 9.2 (complete): retain exact visible calibration-preview cells,
-   commanded intent counts, simulator dispense counts, and reusable stock/well
-   count reconciliation without adding matrix cases.
-3. Slice 9.3 (complete): register `calibration_requantization_v1` with the
-   idempotent, count-increase, and count-decrease cases, then qualify offscreen
-   execution, replay, and visible increase/decrease representatives.
-4. Slice 9.4 (complete): add multi-target, 40 nL to 10.8 nL executed
-   transition, fill-stock positive cases, and exact completed-terminal reload.
-5. Slice 9.5 (complete): add the missing-fill fail-closed case and
-   two-reagent isolation case with exact no-mutation/no-dispatch evidence where
-   applicable.
-6. Slice 9.6 (complete): qualify both complete eight-case matrices and exact
-   replays, visible count boundaries, lifecycle and host regressions, the full
-   Python suite, documentation, and representative retained evidence.
+1. Slice 10.1: define and audit the complete typed nine-case catalog and
+   independent expected-value oracle; exercise hashing/selection only through
+   a test-local definition and keep the production registry unchanged.
+2. Slice 10.2: register the control and multiple-reagent seed-4321 cases after
+   reusable Qt editor inputs and explicit prepared reload/Load Execution
+   reconstruction are executable.
+3. Slice 10.3: append the one-stock feasible and two-stock-required cases,
+   including the normal-UI one-stock rejection followed by two-stock success.
+4. Slice 10.4: append sparse custom-well/exclusion and seed-1234 cases; prove
+   exact excluded-well behavior, same-seed replay, equal reaction multisets,
+   and different-seed assignment divergence.
+5. Slice 10.5: append exact-capacity and the two rejected-finalization cases;
+   prove exact warning/status behavior and no new or modified authoritative
+   execution artifacts.
+6. Slice 10.6: qualify and replay the complete nine-case matrix, visible
+   positive/negative representatives, lifecycle and host regressions, and the
+   complete default Python suite; retain evidence, update operator docs, and
+   record Milestone 10 complete.
 
-Validation policy: Slices 9.2-9.5 run only the targeted unit, contract, and
-representative SIL checks needed for their individual changes. Slice 9.6 runs
-the complete Milestone 9 matrix and replay, the broader lifecycle and host
-regressions, and the full Python suite once for milestone closeout.
+Validation policy: Slices 10.1-10.5 run only their targeted unit, contract,
+selected fresh-process, and bounded visible checks. Slice 10.6 alone runs the
+complete Milestone 10 matrix and exact aggregate replay, broader regression
+suites/replays, and the full Python suite. Existing Milestone 7-9 hashes,
+schemas, runners, reports, replay behavior, fixtures, and direct journeys
+remain compatibility gates throughout.
 
-The Milestone 9 count oracle is stable, so Milestone 10 may begin.
+The Milestone 9 count oracle is stable and is reused only to normalize
+observed stock/well plan and runtime counts. Milestone 10 expected values remain
+literal catalog-owned data and are not computed by production algorithms.
 Milestone 13 must not begin until all deterministic Milestones 9-12 are stable.
 Do not add refill-required/resume cases or operations while volume tracking
 remains disabled. Do not run `pi_stress` unless it is explicitly selected and
