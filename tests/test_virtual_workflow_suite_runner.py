@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -354,6 +355,31 @@ def _pi_evidence(tmp_path):
     }
     proof_path.write_text(json.dumps(proof), encoding="utf-8")
     return preflight_path, proof_path
+
+
+def test_aggregate_config_preserves_virtualenv_executable_path(
+    tmp_path, monkeypatch
+):
+    executable = tmp_path / "env" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"python")
+    resolved_target = tmp_path / "usr" / "bin" / "python3"
+    original_resolve = Path.resolve
+
+    def fake_resolve(path, *args, **kwargs):
+        if path == executable:
+            return resolved_target
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+    config = AggregateRunConfig(
+        plan=_plan(),
+        output_root=tmp_path / "aggregates",
+        python_executable=executable,
+    )
+
+    assert config.python_executable == Path(os.path.abspath(executable))
+    assert config.python_executable != resolved_target
 
 
 def test_successful_aggregate_retains_fresh_child_evidence_and_hashes(tmp_path):
@@ -730,6 +756,10 @@ def test_cli_executes_only_named_pi_suite_with_exact_linux_replay(
     monkeypatch.setattr(
         "tools.virtual_workflows.suite_runner.execute_selection", fake_execute
     )
+    venv_python = tmp_path / "env" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_bytes(b"python")
+    monkeypatch.setattr(sys, "executable", str(venv_python))
     assert main(
         [
             "--suite",
@@ -748,7 +778,7 @@ def test_cli_executes_only_named_pi_suite_with_exact_linux_replay(
     assert config.plan["platform"] == "pi_sil"
     assert config.pi_preflight_path == preflight
     assert config.pi_hardware_proof_path == proof
-    assert config.replay_command[0] == str(Path(sys.executable).resolve())
+    assert config.replay_command[0] == os.path.abspath(str(venv_python))
     assert "--target-pi" in config.replay_command
 
     with pytest.raises(SystemExit) as exc_info:

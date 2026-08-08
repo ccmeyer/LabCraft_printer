@@ -70,7 +70,9 @@ class AggregateRunConfig:
         _validate_selection_plan(self.plan)
         object.__setattr__(self, "output_root", Path(self.output_root).resolve())
         object.__setattr__(
-            self, "python_executable", Path(self.python_executable).resolve()
+            self,
+            "python_executable",
+            Path(os.path.abspath(os.fspath(self.python_executable))),
         )
         object.__setattr__(self, "runner_path", Path(self.runner_path).resolve())
         if self.pi_preflight_path is not None:

@@ -241,7 +241,7 @@ def _aggregate_replay_command(
     selector_id = args.suite if args.suite is not None else args.capability
     command = [
         (
-            str(Path(sys.executable).resolve())
+            os.path.abspath(sys.executable)
             if args.target_pi
             else r".\env\Scripts\python.exe"
         ),
