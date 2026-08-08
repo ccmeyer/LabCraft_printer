@@ -30,6 +30,7 @@ an explicit non-dry-run selector starts children.
 | Editor lifecycle, persistence, stop/resume, reload, disconnect, calibration, or manual refuel | `lifecycle` | affected direct scenario |
 | Calibration values, droplet/stream modes, stock order, or manual-refuel safeguards | `mixed_mode_calibration_v1` matrix | visible positive and safe-block cases |
 | Calibration volume or exact prepared/preview/commanded/completed droplet counts | `calibration_requantization_v1` matrix | visible boundary or `stream_to_droplet_40_to_10_8` case |
+| Experiment formulation, stock feasibility, well selection/randomization, capacity, or Finalize safeguards | `experiment_design_pairwise_v1` matrix | visible positive and rejected-boundary cases |
 | Prepared-editor ordering or activation guards | `editor_prepared_guard_v1` exploration | selected legal/illegal visible sequences |
 | General execution or durability changes | `host_regression` | `host_stress` for sustained effects |
 | Rack, revision history, responsiveness, resource growth, or scalability | `host_stress` | retained visible 384×10 evidence or a separately justified visible run |
@@ -52,6 +53,7 @@ Inspect a selection before executing it:
 .\env\Scripts\python.exe tools\run_virtual_workflow.py --suite lifecycle --dry-run
 .\env\Scripts\python.exe tools\run_virtual_workflow.py --matrix mixed_mode_calibration_v1 --dry-run
 .\env\Scripts\python.exe tools\run_virtual_workflow.py --matrix calibration_requantization_v1 --dry-run
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --matrix experiment_design_pairwise_v1 --dry-run
 .\env\Scripts\python.exe tools\run_virtual_workflow.py --exploration editor_prepared_guard_v1 --dry-run
 ```
 
@@ -78,6 +80,12 @@ Common Windows commands:
   --seed 1 --speed-multiplier 1000 --timeout-seconds 90
 
 .\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix experiment_design_pairwise_v1 `
+  --output-root verification_reports\matrices `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90 `
+  --qt-platform offscreen
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
   --exploration editor_prepared_guard_v1 `
   --output-root verification_reports\exploration `
   --speed-multiplier 1000 --timeout-seconds 60
@@ -102,6 +110,26 @@ completed-terminal fresh-session reload; the application reports that terminal
 bundle as `COMPLETED` and `analysis_only`, with zero remaining progress and
 hardware activation blocked.
 
+The experiment-design catalog has nine ordered cases. Positive cases must
+reach prepared state through normal editor controls, reload the authoritative
+design and execution plan, and reproduce catalog-owned stock, reaction, and
+well assignments. For `two_stock_required`, require the rejected one-stock
+attempt to leave authoritative execution artifacts unchanged before the
+two-stock attempt succeeds. For `custom_wells_with_exclusions`, inspect
+`well_picker_configured`: selected wells are `A1`, `A3`, `A4`, and `A6`, while
+excluded `A2` and `A5` remain disabled and unassigned. The seed-4321 and
+seed-1234 cases must retain the same reaction multiset and distinct catalog
+assignments.
+
+`capacity_plus_one_rejected` must show `Insufficient Well Capacity` with five
+required reactions and four available wells.
+`fixed_stock_exceeds_max_rejected` must show `Optimization failed` with fixed
+35 mM exceeding max 20 mM for `Infeasible A`. For both, require byte-identical
+draft state, no new or modified finalization-owned authoritative artifact, no
+runtime activation, and zero durable-intent or simulator dispatch. Retain and
+exactly replay visible representatives rather than reconstructing their
+inputs manually.
+
 Case seven, `zero_fill_missing_fill_rejected`, is a safeguard terminal rather
 than an execution terminal. Inspect
 `metrics.persistence.values.calibration_rejection_evidence`: the visible
@@ -122,6 +150,16 @@ Python suite. See
 for exact retained paths and hashes. Those artifacts document the accepted
 baseline; new changes still require a source-current selection and its emitted
 replay.
+
+The Milestone 10 closeout baseline at source commit `a373433` passed the
+complete nine-case experiment-design matrix and exact replay, five visible
+positive/negative representatives and replays, lifecycle and host-regression
+suites and replays, and the default Python suite (`4146 passed, 88 skipped`).
+See
+`docs/sil_interactive_simulation_milestone_10_slice_6_completion_record.md`
+for retained paths, hashes, source fingerprint, and limitations. The baseline
+does not make historical artifacts a substitute for source-current
+qualification.
 
 ## Evidence layout and authority
 

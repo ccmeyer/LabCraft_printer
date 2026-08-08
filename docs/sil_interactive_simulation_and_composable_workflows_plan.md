@@ -1492,7 +1492,8 @@ Rollback:
 
 ### Milestone 10: Curated experiment-design pairwise matrix
 
-Status: `execution planned` (2026-08-08; six independently reviewable slices)
+Status: `complete` (2026-08-08; six independently reviewed and committed
+slices)
 
 Execution plan:
 
@@ -1507,6 +1508,17 @@ Execution plan:
   `experiment_editor_create_finalize_v1.json` reference fixture;
 - keep catalog expectations independent of production optimization,
   generation, assignment, finalization, and runtime-reconstruction code.
+
+Completion result:
+
+- all nine curated cases pass the complete fresh-process matrix and exact
+  aggregate replay;
+- the five required visible positive/negative representatives and exact
+  replays pass with authoritative reload or exact no-mutation evidence;
+- lifecycle and host-regression suites and exact replays pass;
+- the default Python suite passes with `4146 passed, 88 skipped`;
+- exact retained paths and hashes are recorded in
+  `docs/sil_interactive_simulation_milestone_10_slice_6_completion_record.md`.
 
 Slice sequence:
 
@@ -2229,7 +2241,7 @@ authoritative reload/resume coverage.
 
 ## Definition Of Done
 
-Milestones 0-9 are complete. The expanded effort is complete when:
+Milestones 0-10 are complete. The expanded effort is complete when:
 
 - a dedicated visible interactive launcher safely constructs the real
   application in simulation mode;
@@ -2279,8 +2291,9 @@ Milestones 0-9 are complete. The expanded effort is complete when:
 
 ## Current Next Action
 
-Milestones 7, 8, and 9 are complete. Their operator capabilities remain the
-current qualified baseline. Milestone 10 is the current next action:
+Milestones 7, 8, 9, and 10 are complete. Their operator capabilities remain
+the current qualified baseline. Milestone 11 is the current next action.
+Milestone 10 closed as follows:
 
 1. Slice 10.1 is complete: the complete typed nine-case catalog, independent
    expected-value oracle, named 14-pair audit, fixed hashes, and test-local
@@ -2303,18 +2316,19 @@ current qualified baseline. Milestone 10 is the current next action:
    four authoritative assignments, while both rejected Finalize paths retain
    exact visible warnings and byte-identical draft state with no
    finalization-owned execution artifacts, runtime activation, or dispatch.
-6. Slice 10.6 is the current next action: qualify and replay the complete
-   nine-case matrix, visible
-   positive/negative representatives, lifecycle and host regressions, and the
-   complete default Python suite; retain evidence, update operator docs, and
-   record Milestone 10 complete.
+6. Slice 10.6 is complete: the complete nine-case matrix and exact replay,
+   all five visible representatives and exact replays, lifecycle and
+   host-regression suites and replays, and the one authorized default Python
+   suite pass. Retained evidence was audited and operator documentation was
+   updated without changing source behavior or schemas.
 
-Validation policy: Slices 10.1-10.5 run only their targeted unit, contract,
-selected fresh-process, and bounded visible checks. Slice 10.6 alone runs the
-complete Milestone 10 matrix and exact aggregate replay, broader regression
-suites/replays, and the full Python suite. Existing Milestone 7-9 hashes,
-schemas, runners, reports, replay behavior, fixtures, and direct journeys
-remain compatibility gates throughout.
+Milestone 11 should now implement the planned randomized
+design/calibration/reload/execution interaction as independently reviewable
+slices. It must reuse the qualified Milestone 9 count oracle and Milestone 10
+design catalog/driver contracts without weakening either milestone's hashes,
+schemas, replay behavior, authoritative reload, or rejected-boundary
+no-mutation evidence. Any production defect still requires a separate
+reviewed correction plan.
 
 The Milestone 9 count oracle is stable and is reused only to normalize
 observed stock/well plan and runtime counts. Milestone 10 expected values remain

@@ -1664,6 +1664,57 @@ Exact aggregate/report paths and hashes are retained in
 Use its commands and the current runner-emitted replay rather than treating
 these historical paths as a substitute for source-current qualification.
 
+### Experiment-design SIL matrix
+
+Milestone 10 adds the manually invoked `experiment_design_pairwise_v1`
+matrix. Its nine literal, independently derived cases cover a single-reagent
+control, multiple reagents and seeds, one- and two-stock feasibility, sparse
+custom wells and exclusions, exact capacity, capacity rejection, and fixed
+stock infeasibility without forming a Cartesian product.
+
+List or inspect the ordered catalog, run every case in a fresh Qt process, or
+run one visible representative with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --list matrices
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix experiment_design_pairwise_v1 --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix experiment_design_pairwise_v1 `
+  --output-root verification_reports\matrices `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90 `
+  --qt-platform offscreen
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix experiment_design_pairwise_v1 `
+  --case custom_wells_with_exclusions `
+  --output-root verification_reports\matrices `
+  --seed 1 --speed-multiplier 20 --timeout-seconds 120 --visible
+```
+
+Positive cases manipulate normal experiment-editor controls, finalize the
+design, reload the authoritative bundle, and compare the reconstructed stock,
+reaction, and well assignment to the catalog oracle. The two-stock case also
+proves the rejected one-stock attempt did not mutate authoritative execution
+artifacts. Negative cases stop at the real Finalize warning and require the
+experiment directory to remain byte-identical with no execution plan,
+runtime activation, durable intent, or simulator dispatch.
+
+For visible review, inspect `generated`, `well_picker_configured`,
+`finalization_rejected`, and `prepared_reloaded` screenshots when emitted.
+Run the exact replay printed by the aggregate or report. Matrix evidence is
+outside registered capability-manifest aggregation and does not replace
+source-current lifecycle or regression selection.
+
+Milestone 10 qualification completed against source commit `a373433`. The
+nine-case matrix and exact replay, five visible case/replay pairs, lifecycle
+and host-regression suites/replays, and default Python suite all passed. The
+suite result was `4146 passed, 88 skipped`. Exact retained paths, hashes, and
+limitations are in
+`docs/sil_interactive_simulation_milestone_10_slice_6_completion_record.md`.
+
 ### Bounded seeded editor exploration
 
 Milestone 8 Slice 6 adds the manually invoked `editor_prepared_guard_v1`
