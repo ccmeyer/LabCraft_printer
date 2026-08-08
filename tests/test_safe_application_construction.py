@@ -10,6 +10,7 @@ from PySide6 import QtCore
 import ApplicationComposition as composition
 import LocalConfig
 from hardware.profile import CURRENT_PROFILE, LEGACY_PROFILE
+from hardware.serial_ports import DEFAULT_CURRENT_MCU_LOG_PORT
 from simulation import (
     SIMULATED_PORT,
     SimulationConfig,
@@ -129,6 +130,7 @@ def _safe_machine_factory(
     refuel_camera_factory,
     droplet_camera_factory,
     log_reader_factory,
+    machine_log_port=None,
 ):
     return _ConstructionSafeMachine(
         {
@@ -138,6 +140,7 @@ def _safe_machine_factory(
             "refuel_camera_factory": refuel_camera_factory,
             "droplet_camera_factory": droplet_camera_factory,
             "log_reader_factory": log_reader_factory,
+            "machine_log_port": machine_log_port,
         }
     )
 
@@ -236,6 +239,14 @@ def test_default_and_simulation_construction_never_invoke_experimental_factory(
     assert calls == []
     assert default_components.balance_service is None
     assert simulated_components.balance_service is None
+    assert (
+        default_components.machine.dependency_factories["machine_log_port"]
+        == DEFAULT_CURRENT_MCU_LOG_PORT
+    )
+    assert (
+        simulated_components.machine.dependency_factories["machine_log_port"]
+        is None
+    )
     assert default_components.controller.experimental_balance_enabled is False
     assert simulated_components.controller.experimental_balance_enabled is False
     default_components.close()

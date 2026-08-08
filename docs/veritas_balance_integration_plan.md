@@ -4,7 +4,7 @@
 
 - Date: 2026-08-07
 - Branch: `feature/balance_integration`
-- Status: Slices 0-5 verified; Slice 6 implemented awaiting HIL
+- Status: Slices 0-5 verified; MCU log-port hardening and Slice 6 implemented awaiting HIL
 - Scope: implementation plan and slice verification record
 - Target hardware: Veritas/BEL HPB balance connected to the Raspberry Pi through a proper RS-232-to-USB adapter
 - Target workflow: stream gravimetric data collection only
@@ -1018,6 +1018,47 @@ Rollback:
 
 - Remove the balance-start branch and state fields. Manual start continues to
   call the existing method with the spin-box value.
+
+## Prerequisite: MCU Log-Port Identity Hardening
+
+Status: `implemented_awaiting_hil`
+
+The separate MCU firmware log channel previously relied on the literal device
+`/dev/ttyUSB0`. Attaching the Prolific balance adapter could change Linux USB
+enumeration and route the log reader to the balance, preventing `FLASH_ARMED`
+and normal firmware logs from reaching the imager on both `main` and the
+balance branch.
+
+The production/current call path now passes an explicit `MACHINE_LOG_PORT`
+from settings into `Machine`. Immediately after `HELLO_ACK`, a read-only
+identity resolver maps the persistent by-id alias to its system device and
+requires CP2102 `10c4:ea60` before `LogReader` opens it at 115200 baud. There is
+no `ttyUSB` fallback. Missing configuration, metadata, device, identity, or an
+open failure leaves flash disarmed, prevents transport readiness and command
+execution, closes the command connection, and reports an actionable error
+without resetting the MCU.
+
+The balance Controller now reserves the configured and resolved MCU log path
+and all matching aliases in addition to its existing CP2102 classification.
+The Prolific adapter remains the only verified HPB adapter. Import and object
+construction do not enumerate or open ports; legacy and simulation do not
+resolve the log path. Existing ignored local settings without the new key use
+the verified persistent default in memory and are not rewritten.
+
+Focused automated validation passed on 2026-08-07 with 113 tests across serial
+identity, flash parsing, reader teardown, balance classification, safe
+construction, BalanceService, and stream balance integration. An additional
+41 command-transport, connection-retry, and reset-report tests passed. The full
+suite remains deferred to final all-slices validation.
+
+Pi acceptance requires booting with both adapters attached, confirming normal
+MCU logs and `FLASH_ARMED`, connecting the Prolific balance, and verifying that
+both streams continue simultaneously regardless of their `ttyUSB` numbering.
+Slice 6 HIL remains paused until this prerequisite passes.
+
+Rollback removes the identity resolver/configuration seam and restores the old
+log construction. Operationally, the balance must remain unplugged after such
+a rollback because the old `ttyUSB0` behavior is enumeration-dependent.
 
 ## Slice 6: Ending Mass, Provenance, And Confirmed Save
 

@@ -26,6 +26,12 @@ import select
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
+from hardware.serial_ports import (
+    MCU_LOG_EXPECTED_VID_PID,
+    SerialPortValidationError,
+    SerialPortValidationReason,
+    resolve_explicit_usb_serial_port,
+)
 from HostBlackBoxLog import HostBlackBoxRecorder
 
 logger = logging.getLogger(__name__)
@@ -3621,9 +3627,23 @@ class LogReader(QThread):
     flashStateChanged = Signal(object)
     
 
-    def __init__(self, baud=115200, parent=None, log_port="/dev/ttyUSB0", serial_factory=serial.Serial):
+    def __init__(
+        self,
+        baud=115200,
+        parent=None,
+        *,
+        log_port,
+        serial_factory=serial.Serial,
+    ):
         super().__init__(parent)
-        self.ser = serial_factory(log_port, baud, timeout=LOG_READER_SERIAL_TIMEOUT_S)
+        if not isinstance(log_port, str) or not log_port.strip():
+            raise ValueError("an explicit MCU log serial port is required")
+        self.log_port = log_port.strip()
+        self.ser = serial_factory(
+            self.log_port,
+            baud,
+            timeout=LOG_READER_SERIAL_TIMEOUT_S,
+        )
         self._running = True
         self._stop_requested = False
         self._discarding_legacy_stats = False
@@ -3632,7 +3652,7 @@ class LogReader(QThread):
         self._level_re = re.compile(r'^\s*\[(DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL)\]\s*(.*)$', re.I)
         self._flash_state = default_flash_safety_state()
 
-        print(f"LogReader initialized on {log_port} at {baud} baud")
+        print(f"LogReader initialized on {self.log_port} at {baud} baud")
 
     # ---------- public helpers for UI/controllers ----------
     def get_recent_messages(self):
@@ -4069,6 +4089,8 @@ class Machine(QObject):
         refuel_camera_factory=None,
         droplet_camera_factory=None,
         log_reader_factory=None,
+        machine_log_port=None,
+        serial_identity_resolver=resolve_explicit_usb_serial_port,
     ):
         super().__init__()
         self.model = model
@@ -4077,6 +4099,10 @@ class Machine(QObject):
         self._refuel_camera_factory = refuel_camera_factory or RefuelCamera
         self._droplet_camera_factory = droplet_camera_factory or DropletCamera
         self._log_reader_factory = log_reader_factory
+        self._machine_log_port = machine_log_port
+        self._machine_log_identity = None
+        self._serial_identity_resolver = serial_identity_resolver
+        self._last_log_start_error = ""
 
         self.balance_droplets = []   # <-- for legacy Balance simulation queue
 
@@ -4790,8 +4816,9 @@ class Machine(QObject):
             self.error_occurred.emit(msg)
             self.machine_connected_signal.emit(False)
             return
-        if self.profile.has_log_channel:
-            self.begin_log_thread()
+        if self.profile.has_log_channel and not self.begin_log_thread():
+            self._fail_connection_for_log_channel()
+            return
         self._clear_transport_fault_latch("clean_hello")
         self._session_recovery_in_progress = False
         self._transport_capabilities = capabilities
@@ -5277,21 +5304,118 @@ class Machine(QObject):
             fallback_timeout_ms=None,
         )
 
+    def get_machine_log_port(self):
+        return self._machine_log_port
+
+    def get_resolved_machine_log_port(self):
+        identity = self._machine_log_identity
+        return None if identity is None else identity.system_device
+
+    def get_machine_log_port_identity(self):
+        return self._machine_log_identity
+
+    def _record_log_channel_start_failure(self, error):
+        configured = self._machine_log_port
+        observed = getattr(error, "observed_vid_pid", None)
+        reason = getattr(error, "reason", None)
+        reason_value = getattr(reason, "value", reason) or "open_failure"
+        detail = str(getattr(error, "detail", "") or error)
+        message = (
+            f"MCU log adapter {configured!r} is unavailable or invalid. "
+            f"Expected USB identity {MCU_LOG_EXPECTED_VID_PID}"
+            + (f", observed {observed}" if observed else "")
+            + f". {detail} Verify MACHINE_LOG_PORT and the CP2102 connection, then reconnect."
+        )
+        self._last_log_start_error = message
+        self._machine_log_identity = None
+        self._flash_state = default_flash_safety_state()
+        self.flash_state_updated.emit(dict(self._flash_state))
+        self._record_black_box_event(
+            "mcu_log_channel_start_failed",
+            {
+                "reason": str(reason_value),
+                "configured_port": (
+                    configured if isinstance(configured, str) else None
+                ),
+                "expected_vid_pid": MCU_LOG_EXPECTED_VID_PID,
+                "observed_vid_pid": observed,
+                "exception_type": type(error).__name__,
+                "detail": detail,
+            },
+        )
+        print(message)
+        self.error_occurred.emit(message)
+
+    def _fail_connection_for_log_channel(self):
+        self._transport_ready = False
+        self._transport_capabilities = 0
+        self._command_queue_blocked_reason = "mcu_log_unavailable"
+        self._tx_paused = True
+        self._sequence_pause = False
+        self._session_recovery_in_progress = False
+        self._waiting_for_post_clear_status = False
+        self._stop_mcu_response_watchdog()
+        try:
+            if self.execution_timer is not None:
+                self.execution_timer.stop()
+        except Exception:
+            pass
+        self._expect_serial_reader_stop("mcu_log_unavailable")
+        try:
+            self.stop_reader_thread()
+        except Exception:
+            pass
+        try:
+            if self.ser is not None and getattr(self.ser, "is_open", False):
+                self.ser.close()
+        except Exception:
+            pass
+        self.ser = None
+        self.port = None
+        self.reader = None
+        self.machine_connected_signal.emit(False)
+
     def begin_log_thread(self):
         """
         Start the log reader thread to read logs from the machine.
         """
         if not self.profile.has_log_channel:
             self.log_reader = None
-            return
+            return True
+
+        configured_port = self._machine_log_port
+        if not isinstance(configured_port, str) or not configured_port.strip():
+            error = SerialPortValidationError(
+                SerialPortValidationReason.INVALID_PATH,
+                "MACHINE_LOG_PORT must be a nonempty string.",
+                requested_path=(
+                    configured_port if isinstance(configured_port, str) else None
+                ),
+                expected_vid_pid=MCU_LOG_EXPECTED_VID_PID,
+            )
+            self._record_log_channel_start_failure(error)
+            return False
+
+        try:
+            identity = self._serial_identity_resolver(
+                configured_port.strip(),
+                expected_vid_pid=MCU_LOG_EXPECTED_VID_PID,
+            )
+        except Exception as error:
+            self._record_log_channel_start_failure(error)
+            return False
 
         reader = self.log_reader
         if reader is not None:
             try:
                 if reader.isRunning():
-                    return
+                    active_port = str(getattr(reader, "log_port", "") or "")
+                    if active_port == identity.requested_path:
+                        self._machine_log_identity = identity
+                        self._last_log_start_error = ""
+                        return True
             except Exception:
-                return
+                pass
             try:
                 reader.stop()
             except Exception:
@@ -5302,15 +5426,45 @@ class Machine(QObject):
             log_reader_factory = self._log_reader_factory or LogReader
             self.log_reader = log_reader_factory(
                 self.baud,
+                log_port=identity.requested_path,
                 serial_factory=self._serial_factory,
             )
             self.log_reader.lineReceived.connect(self.on_log_line_received)
             self.log_reader.messageReceived.connect(self.on_log_message_received)
             self.log_reader.flashStateChanged.connect(self.on_flash_state_changed)
             self.log_reader.start()
-        except Exception as e:
-            print(f"Could not start log thread: {e}")
+            self._machine_log_identity = identity
+            self._last_log_start_error = ""
+            self._record_black_box_event(
+                "mcu_log_channel_started",
+                {
+                    "configured_port": identity.requested_path,
+                    "system_device": identity.system_device,
+                    "by_id_paths": list(getattr(identity, "by_id_paths", ())),
+                    "vid_pid": getattr(identity, "vid_pid", None),
+                    "product": getattr(identity, "product", None),
+                    "manufacturer": getattr(identity, "manufacturer", None),
+                },
+            )
+            return True
+        except Exception as error:
+            reader = self.log_reader
+            if reader is not None:
+                self._disconnect_log_reader_signals(reader)
+                try:
+                    reader.request_stop()
+                except Exception:
+                    pass
+                try:
+                    reader.wait_for_stop(READER_STOP_FALLBACK_WAIT_MS)
+                except Exception:
+                    try:
+                        reader.stop()
+                    except Exception:
+                        pass
             self.log_reader = None
+            self._record_log_channel_start_failure(error)
+            return False
 
     def on_log_message_received(self, message: str):
         self.log_message_received.emit(message)

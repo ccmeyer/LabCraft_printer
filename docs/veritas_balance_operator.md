@@ -16,6 +16,22 @@ the operator confirms the candidate ending mass.
 3. Leave the printer MCU connected to its normal adapter. The application
    excludes CP2102, STM, and the active MCU device from the balance list.
 
+The current printer profile requires the MCU log adapter to identify as the
+Silicon Labs CP2102 `10c4:ea60`. Its configured persistent path is:
+
+```text
+/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0
+```
+
+The application validates this identity before opening the log reader and no
+longer falls back to `/dev/ttyUSB0`. Verify both adapters before launch:
+
+```bash
+ls -l /dev/serial/by-id
+readlink -f /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0
+readlink -f /dev/serial/by-id/usb-Prolific_Technology_Inc._USB-Serial_Controller_CKAXb132J02-if00-port0
+```
+
 ## Intentional Activation
 
 On Raspberry Pi/Linux:
@@ -152,5 +168,11 @@ session if `PC cont` is not its normal configuration.
   re-login after any serial-group membership change.
 - Error after unplugging: click **Disconnect** to reset the service, reconnect
   the adapter, click **Refresh**, and then explicitly connect again.
+- MCU connection rejected with an MCU log-adapter error: confirm the CP2102
+  by-id path exists and resolves to a device whose VID:PID is `10c4:ea60`.
+  Never substitute `/dev/ttyUSB0` or `/dev/ttyUSB1`; those names can swap when
+  the Prolific adapter is attached. If the CP2102 hardware is replaced, update
+  `MACHINE_LOG_PORT` in `local/Settings.json` only after verifying the new
+  persistent alias and USB identity.
 - Never select or work around filtering for the printer MCU. The observed MCU
   adapter is CP2102 VID:PID `10c4:ea60`.

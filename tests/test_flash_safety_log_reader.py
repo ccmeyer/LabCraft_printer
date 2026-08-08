@@ -75,7 +75,7 @@ def test_log_reader_emits_flash_state_updates_from_log_lines(qapp):
         def close(self):
             self.is_open = False
 
-    reader = mfr.LogReader(serial_factory=lambda *_args, **_kwargs: _LineSerial([
+    reader = mfr.LogReader(log_port="COM_LOG", serial_factory=lambda *_args, **_kwargs: _LineSerial([
         "FLASH_ARMED",
         "FLASH_FAULT reason=line_stuck_high",
         "FLASH_DISARMED reason=fault",
@@ -131,7 +131,10 @@ def test_log_reader_suppresses_legacy_stats_block_and_resumes_messages(qapp):
                 return b""
             return self._lines.pop(0)
 
-    reader = mfr.LogReader(serial_factory=lambda *_args, **_kwargs: _LineSerial())
+    reader = mfr.LogReader(
+        log_port="COM_LOG",
+        serial_factory=lambda *_args, **_kwargs: _LineSerial(),
+    )
     raw_lines = []
     messages = []
     reader.lineReceived.connect(raw_lines.append)
@@ -154,7 +157,10 @@ def test_log_reader_uses_short_serial_timeout(qapp):
         def read_until(self, expected=b"\n", size=1024):
             return b""
 
-    mfr.LogReader(serial_factory=lambda _port, _baud, timeout=0.0: (timeouts.append(timeout), _Serial())[1])
+    mfr.LogReader(
+        log_port="COM_LOG",
+        serial_factory=lambda _port, _baud, timeout=0.0: (timeouts.append(timeout), _Serial())[1],
+    )
 
     assert timeouts == [mfr.LOG_READER_SERIAL_TIMEOUT_S]
 
@@ -177,7 +183,10 @@ def test_log_reader_request_stop_and_wait_for_stop_close_port_on_clean_exit(qapp
         def __init__(self, ser):
             self.wait_calls = []
             self.interrupt_calls = 0
-            super().__init__(serial_factory=lambda *_args, **_kwargs: ser)
+            super().__init__(
+                log_port="COM_LOG",
+                serial_factory=lambda *_args, **_kwargs: ser,
+            )
 
         def isRunning(self):
             return True
@@ -222,7 +231,10 @@ def test_log_reader_wait_for_stop_tolerates_cancel_and_close_errors(qapp):
         def __init__(self, ser):
             self.wait_calls = []
             self.interrupt_calls = 0
-            super().__init__(serial_factory=lambda *_args, **_kwargs: ser)
+            super().__init__(
+                log_port="COM_LOG",
+                serial_factory=lambda *_args, **_kwargs: ser,
+            )
 
         def isRunning(self):
             return True

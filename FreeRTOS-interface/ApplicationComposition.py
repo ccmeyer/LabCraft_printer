@@ -410,14 +410,21 @@ def build_application_components(
         )
         if model_setup is not None:
             model_setup(model)
-        machine = dependencies.machine_factory(
-            model,
-            profile=profile,
-            serial_factory=dependencies.serial_factory,
-            refuel_camera_factory=dependencies.refuel_camera_factory,
-            droplet_camera_factory=dependencies.droplet_camera_factory,
-            log_reader_factory=dependencies.log_reader_factory,
-        )
+        machine_kwargs = {
+            "profile": profile,
+            "serial_factory": dependencies.serial_factory,
+            "refuel_camera_factory": dependencies.refuel_camera_factory,
+            "droplet_camera_factory": dependencies.droplet_camera_factory,
+            "log_reader_factory": dependencies.log_reader_factory,
+        }
+        if (
+            dependencies.runtime_context.mode is RuntimeMode.PRODUCTION
+            and profile.has_log_channel
+        ):
+            machine_kwargs["machine_log_port"] = (
+                model.get_default_machine_log_port()
+            )
+        machine = dependencies.machine_factory(model, **machine_kwargs)
         if effective_features.balance_integration:
             balance_service = dependencies.experimental_balance_factory()
         controller = Controller(

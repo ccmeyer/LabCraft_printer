@@ -25,6 +25,11 @@ import inspect
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
+from hardware.serial_ports import (
+    normalized_usb_id as _normalized_usb_id,
+    resolved_serial_path as _resolved_serial_path,
+    serial_by_id_aliases as _serial_by_id_aliases,
+)
 from simulation import SIMULATED_PORT
 from CaptureCoordinator import CaptureCoordinator
 from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
@@ -84,38 +89,6 @@ class ExperimentalBalancePort:
             raise ValueError("balance port paths must not be empty")
         if not isinstance(self.by_id_paths, tuple):
             raise TypeError("by_id_paths must be a tuple")
-
-
-def _normalized_usb_id(value) -> str | None:
-    if value is None:
-        return None
-    try:
-        if isinstance(value, str):
-            return f"{int(value, 16):04x}"
-        return f"{int(value):04x}"
-    except (TypeError, ValueError):
-        return None
-
-
-def _resolved_serial_path(path: str) -> str:
-    return os.path.normcase(os.path.realpath(os.path.abspath(str(path))))
-
-
-def _serial_by_id_aliases(
-    root: Path = Path("/dev/serial/by-id"),
-) -> dict[str, tuple[str, ...]]:
-    aliases: dict[str, list[str]] = {}
-    try:
-        entries = sorted(root.iterdir(), key=lambda item: item.name.casefold())
-    except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
-        return {}
-    for entry in entries:
-        try:
-            resolved = _resolved_serial_path(str(entry))
-        except OSError:
-            continue
-        aliases.setdefault(resolved, []).append(str(entry))
-    return {key: tuple(values) for key, values in aliases.items()}
 
 
 class DropletCapturePerformanceDiagnostics:
@@ -1303,11 +1276,27 @@ class Controller(QObject):
             return ()
 
         active_machine_port = str(self.get_machine_port() or "").strip()
-        active_machine_device = (
-            _resolved_serial_path(active_machine_port)
-            if active_machine_port
-            else None
+        reserved_devices = set()
+        if active_machine_port:
+            reserved_devices.add(_resolved_serial_path(active_machine_port))
+        log_port_getter = getattr(self.machine, "get_machine_log_port", None)
+        configured_log_port = (
+            log_port_getter() if callable(log_port_getter) else None
         )
+        if isinstance(configured_log_port, str) and configured_log_port.strip():
+            reserved_devices.add(
+                _resolved_serial_path(configured_log_port.strip())
+            )
+        resolved_log_getter = getattr(
+            self.machine,
+            "get_resolved_machine_log_port",
+            None,
+        )
+        resolved_log_port = (
+            resolved_log_getter() if callable(resolved_log_getter) else None
+        )
+        if isinstance(resolved_log_port, str) and resolved_log_port.strip():
+            reserved_devices.add(_resolved_serial_path(resolved_log_port.strip()))
         aliases_by_device = _serial_by_id_aliases()
         descriptors = []
         seen_system_devices = set()
@@ -1316,7 +1305,7 @@ class Controller(QObject):
             if not system_device or "ttyAMA" in system_device:
                 continue
             resolved_device = _resolved_serial_path(system_device)
-            if resolved_device == active_machine_device:
+            if resolved_device in reserved_devices:
                 continue
             if self._is_mcu_port_info(info) or not self._is_balance_port_info(info):
                 continue
@@ -1388,13 +1377,33 @@ class Controller(QObject):
             )
             return False
         active_machine_port = str(self.get_machine_port() or "").strip()
-        if active_machine_port and (
+        reserved_paths = []
+        if active_machine_port:
+            reserved_paths.append(active_machine_port)
+        log_port_getter = getattr(self.machine, "get_machine_log_port", None)
+        configured_log_port = (
+            log_port_getter() if callable(log_port_getter) else None
+        )
+        if isinstance(configured_log_port, str) and configured_log_port.strip():
+            reserved_paths.append(configured_log_port.strip())
+        resolved_log_getter = getattr(
+            self.machine,
+            "get_resolved_machine_log_port",
+            None,
+        )
+        resolved_log_port = (
+            resolved_log_getter() if callable(resolved_log_getter) else None
+        )
+        if isinstance(resolved_log_port, str) and resolved_log_port.strip():
+            reserved_paths.append(resolved_log_port.strip())
+        if any(
             _resolved_serial_path(descriptor.device_path)
-            == _resolved_serial_path(active_machine_port)
+            == _resolved_serial_path(reserved_path)
+            for reserved_path in reserved_paths
         ):
             self.error_occurred_signal.emit(
                 "Experimental Balance",
-                "The selected port is the active printer-controller port.",
+                "The selected port is reserved by the printer controller or MCU log channel.",
             )
             return False
         result = self._experimental_balance_service.connect_balance(

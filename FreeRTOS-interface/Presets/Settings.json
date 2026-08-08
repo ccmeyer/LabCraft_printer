@@ -2,6 +2,7 @@
     "BASE_PATH":"./",
     "HARDWARE_PROFILE":"current",
     "MACHINE_PORT":"/dev/ttyAMA0",
+    "MACHINE_LOG_PORT":"/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0",
     "BALANCE_PORT":"",
     "DEFAULT_PLATE": "shallow-384_well_plate",
     "DEFAULT_DISPENSER":"droplet",

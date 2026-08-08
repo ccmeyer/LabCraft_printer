@@ -208,7 +208,16 @@ def test_begin_log_thread_replaces_stopped_reader_reference(qapp, monkeypatch):
         has_droplet_camera=False,
         has_log_channel=True,
     )
-    machine = Machine(SimpleNamespace(), profile=profile)
+    identity = SimpleNamespace(
+        requested_path="COM_LOG",
+        system_device="COM_LOG",
+    )
+    machine = Machine(
+        SimpleNamespace(),
+        profile=profile,
+        machine_log_port="COM_LOG",
+        serial_identity_resolver=lambda *_args, **_kwargs: identity,
+    )
 
     class _SignalTracker:
         def __init__(self):
@@ -230,8 +239,9 @@ def test_begin_log_thread_replaces_stopped_reader_reference(qapp, monkeypatch):
     created = []
 
     class _NewReader:
-        def __init__(self, baud, serial_factory=None):
+        def __init__(self, baud, *, log_port, serial_factory=None):
             self.baud = baud
+            self.log_port = log_port
             self.serial_factory = serial_factory
             self.lineReceived = _SignalTracker()
             self.messageReceived = _SignalTracker()
