@@ -8,11 +8,13 @@ from tools.virtual_workflows.authoritative_evidence import (
     check_evidence,
     completed_stock_well_pairs,
     compare_directories,
+    experiment_design_projection,
     merge_session_lifecycles,
     read_audit_rows,
     read_csv_rows,
     snapshot_directory,
 )
+from types import SimpleNamespace
 
 
 def test_directory_snapshot_is_deterministic_and_read_only(tmp_path):
@@ -54,6 +56,45 @@ def test_directory_comparison_reports_exact_and_allowlisted_changes(tmp_path):
         "files_byte_identical",
         "only_allowlisted_files_changed",
     ]
+
+
+def test_experiment_design_projection_preserves_exact_positive_counts(tmp_path):
+    (tmp_path / "execution_plan.json").write_text("{}", encoding="utf-8")
+    snapshot = SimpleNamespace(
+        plan={
+            "stocks": {
+                "A_10.00_x": {
+                    "reagent_name": "A",
+                    "concentration": 10,
+                    "units": "x",
+                    "printing_mode": "droplet",
+                }
+            },
+            "wells": {
+                "A1": {
+                    "reaction_id": "R1",
+                    "reagents": {
+                        "A_10.00_x": {"target_dispenses": 2},
+                        "unused": {"target_dispenses": 0},
+                    },
+                }
+            },
+        },
+        assignments={"A1": "R1"},
+        key_rows={"A1": {"A_10.00_x_10.0nL": "2"}},
+        concentration_rows={"A1": {"A_x": "2.0"}},
+        directory=snapshot_directory(tmp_path),
+    )
+
+    projection = experiment_design_projection(snapshot)
+
+    assert projection["assignments"] == [
+        {"well_id": "A1", "reaction_id": "R1"}
+    ]
+    assert projection["stock_well_counts"] == [
+        {"stock_id": "A_10.00_x", "well_id": "A1", "target_droplets": 2}
+    ]
+    assert projection["runtime_assignments"] == {"A1": "R1"}
 
 
 def test_shared_csv_and_audit_readers_fail_closed(tmp_path):

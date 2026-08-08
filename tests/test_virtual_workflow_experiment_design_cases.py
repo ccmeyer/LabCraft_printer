@@ -18,6 +18,8 @@ from tools.virtual_workflows.experiment_design_cases import (
     ExperimentDesignCaseError,
     audit_pairwise_coverage,
     build_experiment_design_fixture,
+    editor_specification,
+    executable_experiment_design_cases,
     get_experiment_design_case,
     planned_catalog_sha256,
     validate_experiment_design_catalog,
@@ -41,7 +43,7 @@ EXPECTED_CASE_SHA256 = {
         "b0deaaf5af7b4391d3cc92de2b03b7729ba3ea6abf7b22d122f78b9ef347c033"
     ),
     "multi_reagent_seed_4321": (
-        "94c63041bb70d5a739f252d824d666fd973aa69e7749976ca8f07f38c2b1ac0e"
+        "5d2e7dff0ea9c2e0bcd1e3b218b39280aca57b745834024226fece850f110f51"
     ),
     "one_stock_feasible": (
         "30ee17fcd869f6c3989d39b50d7e484ed8de233e5af6fc1f2c47cfac40230e17"
@@ -66,13 +68,13 @@ EXPECTED_CASE_SHA256 = {
     ),
 }
 EXPECTED_PLANNED_CATALOG_SHA256 = (
-    "81c68119944c125f796f59d4f9604f4a450c90709f25ba9199abd1efe08901e1"
+    "9f2745b22e8c7a1a8601a498a46471ae94fd0c81eadeb884a4c0063f42216fa7"
 )
 EXPECTED_TEST_LOCAL_DEFINITION_SHA256 = (
-    "cfe4f895bfd4550a121d9076df4962a24f60a786768d534587177e2900607aae"
+    "558ad29a314dce6fad729f75bed298afe45486f43db79d1b318497ec0d8c0c8e"
 )
 EXPECTED_TEST_LOCAL_PLAN_SHA256 = (
-    "71a3dc1e7ff9d8c9f87a503e3a309646a8fb4269bfc09f877aa11054fbeef21b"
+    "dae78071835ea968cf5752d5dab5e1ceba5daafab90b5de6eb827786ef72d41e"
 )
 
 
@@ -180,6 +182,32 @@ def test_reference_fixture_is_sha_verified_and_transformed_only_in_memory():
     assert "reagent" not in fixture
     assert len(fixture["reagents"]) == 1
     assert REFERENCE_FIXTURE_PATH.read_bytes() == source_before
+
+
+def test_executable_prefix_and_editor_projection_are_additive_and_exact():
+    cases = executable_experiment_design_cases()
+    assert tuple(case.case_id for case in cases) == EXPECTED_CASE_IDS[:2]
+
+    control = editor_specification(cases[0])
+    randomized = editor_specification(cases[1])
+
+    assert control["experiment"]["selected_well_ids"] == ["A1"]
+    assert control["experiment"]["expected_reaction_count"] == 1
+    assert control["experiment"]["random_seed"] is None
+    assert len(control["reagents"]) == 1
+    assert randomized["experiment"]["random_seed"] == 4321
+    assert randomized["experiment"]["randomize_assignments"] is True
+    assert randomized["experiment"]["expected_reaction_count"] == 8
+    assert len(randomized["reagents"]) == 2
+    assert [row["fixed_stock_concentration"] for row in randomized["reagents"]] == [
+        "10",
+        "10",
+    ]
+
+    with pytest.raises(ExperimentDesignCaseError, match="negative driver"):
+        editor_specification(
+            get_experiment_design_case("capacity_plus_one_rejected")
+        )
 
 
 def test_test_local_definition_resolves_generic_selector_contracts():

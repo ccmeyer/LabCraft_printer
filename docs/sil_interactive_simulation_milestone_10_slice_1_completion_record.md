@@ -43,11 +43,11 @@ Reference editor fixture:
 Planned experiment-design identities:
 
 - planned catalog SHA-256:
-  `81c68119944c125f796f59d4f9604f4a450c90709f25ba9199abd1efe08901e1`
+  `9f2745b22e8c7a1a8601a498a46471ae94fd0c81eadeb884a4c0063f42216fa7`
 - test-local `MatrixDefinition` catalog SHA-256:
-  `cfe4f895bfd4550a121d9076df4962a24f60a786768d534587177e2900607aae`
+  `558ad29a314dce6fad729f75bed298afe45486f43db79d1b318497ec0d8c0c8e`
 - full test-local plan SHA-256 at seed 9, timeout 12, execution unauthorized:
-  `71a3dc1e7ff9d8c9f87a503e3a309646a8fb4269bfc09f877aa11054fbeef21b`
+  `dae78071835ea968cf5752d5dab5e1ceba5daafab90b5de6eb827786ef72d41e`
 - pairwise audit: 9 cases, 14 required pairs, 0 uncovered
 
 Case SHA-256 values:
@@ -55,7 +55,7 @@ Case SHA-256 values:
 | Case | SHA-256 |
 |---|---|
 | `single_reagent_control` | `b0deaaf5af7b4391d3cc92de2b03b7729ba3ea6abf7b22d122f78b9ef347c033` |
-| `multi_reagent_seed_4321` | `94c63041bb70d5a739f252d824d666fd973aa69e7749976ca8f07f38c2b1ac0e` |
+| `multi_reagent_seed_4321` | `5d2e7dff0ea9c2e0bcd1e3b218b39280aca57b745834024226fece850f110f51` |
 | `one_stock_feasible` | `30ee17fcd869f6c3989d39b50d7e484ed8de233e5af6fc1f2c47cfac40230e17` |
 | `two_stock_required` | `aa4d85a9f29df49d8c99f1b6f50fd80b59e79101c053f8d93a8ec332a4557350` |
 | `custom_wells_with_exclusions` | `ace89896cfdfdf63ecb9c5ae567ef29c7926b6e5211ed15c168fdeee0b5eef6e` |
@@ -63,6 +63,15 @@ Case SHA-256 values:
 | `exact_custom_capacity` | `f8f29163ef968a7a0ba0e6ba2483d96104dab1eac87db53e6f932ef10e9368bf` |
 | `capacity_plus_one_rejected` | `16af7c74a8e4d5840e24317b20996a1bc511a1d26641e5e4a5dce10b31fca21a` |
 | `fixed_stock_exceeds_max_rejected` | `c386c67a6d5da03ff4a376f5631189881fb16b9d49f758a5a94a42bca10bcca9` |
+
+Slice 10.2 execution corrected the `multi_reagent_seed_4321` literal Water
+counts before that case was accepted: the editor input specifies a 9 nL fill
+droplet, so the eight expected counts are the independently calculated
+ceilings of each remaining printed volume divided by 9 nL. The prior literals
+had inadvertently used 10 nL. The case, planned-catalog, test-local definition,
+and test-local plan hashes above are the corrected frozen identities; no
+production optimizer or generated output was used as the expected-value
+source.
 
 Existing production matrix identities remain:
 
@@ -117,4 +126,5 @@ Slice 10.1 exit criteria are satisfied when final focused tests and
 `git diff --check` pass and the slice commit is clean. Slice 10.2 is next:
 make only `single_reagent_control` and `multi_reagent_seed_4321` executable
 through reusable normal Qt inputs, finalization, authoritative folder reload,
-Load Execution reconstruction, and the generic fresh-process matrix path.
+exact saved-plan assignment reconstruction, and the generic fresh-process
+matrix path.

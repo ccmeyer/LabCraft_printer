@@ -23,6 +23,8 @@ from tools.virtual_workflows.assertions import (
     editor_prepared_revision_failure_assertion,
     editor_prepared_reload_assertions,
     editor_sequence_exploration_assertions,
+    experiment_design_case_oracle_assertion,
+    experiment_prepared_runtime_reconstructed_assertion,
     machine_ready_assertion,
     matrix_case_assertions,
     mixed_mode_lifecycle_assertions,
@@ -60,6 +62,7 @@ from tools.virtual_workflows.editor_reporting import (
     EditorLifecycleReportSpec,
     build_editor_lifecycle_payload,
     create_finalize_report_spec,
+    experiment_design_report_spec,
     prepared_revision_report_spec,
 )
 from tools.virtual_workflows.journey_phases import (
@@ -116,6 +119,9 @@ POST_START_LOCK_WORKLOAD_ID = "experiment_editor_post_start_lock_v1"
 DISCONNECT_WORKLOAD_ID = "print_array_disconnect_mid_array_24_v1"
 DISCONNECT_SCENARIO_NAME = "print_array_disconnect_fail_closed"
 MATRIX_SCENARIO_NAME = "parameterized_calibration_matrix_case"
+EXPERIMENT_DESIGN_MATRIX_SCENARIO_NAME = (
+    "parameterized_experiment_design_matrix_case"
+)
 EXPLORATION_WORKLOAD_ID = "editor_prepared_guard_v1"
 EXPLORATION_SCENARIO_NAME = "seeded_editor_prepared_guard"
 
@@ -156,6 +162,14 @@ EDITOR_REQUIRED_ASSERTIONS = (
     "experiment.prepared_reload_ready",
     "experiment.runtime_assignments_match",
     "experiment.key_files_consistent",
+    "artifacts.required_present",
+)
+EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "experiment.editor_create_finalize",
+    "experiment.design_case_oracle_exact",
+    "experiment.prepared_runtime_reconstructed_exact",
     "artifacts.required_present",
 )
 EDITOR_REVISION_REQUIRED_ASSERTIONS = (
@@ -282,6 +296,7 @@ EDITOR_REQUIRED_UI_ACTIONS = frozenset(
         "experiment.load_authoritative_via_ui",
     }
 )
+EXPERIMENT_DESIGN_REQUIRED_UI_ACTIONS = EDITOR_REQUIRED_UI_ACTIONS
 EDITOR_REVISION_REQUIRED_UI_ACTIONS = EDITOR_REQUIRED_UI_ACTIONS | frozenset(
     {
         "editor.rename_prepared_via_ui",
@@ -315,6 +330,15 @@ POST_START_LOCK_REQUIRED_UI_ACTIONS = EDITOR_REQUIRED_UI_ACTIONS | frozenset(
 )
 EDITOR_REQUIRED_SCREENSHOTS = frozenset(
     {"editor_opened", "generated", "finalized", "reloaded", "validated"}
+)
+EXPERIMENT_DESIGN_REQUIRED_SCREENSHOTS = frozenset(
+    {
+        "editor_opened",
+        "generated",
+        "finalized",
+        "prepared_reloaded",
+        "validated",
+    }
 )
 EDITOR_REVISION_REQUIRED_SCREENSHOTS = frozenset(
     {
@@ -1157,6 +1181,79 @@ def _editor_body(runtime: JourneyRuntime) -> None:
             "plan_state": reload_result.evidence.get("plan_state"),
             "eligibility_status": reload_result.evidence.get("eligibility_status"),
             "assertion_count": len(EDITOR_REQUIRED_ASSERTIONS),
+        },
+    )
+
+
+def _experiment_design_body(runtime: JourneyRuntime) -> None:
+    from tools.virtual_workflows.experiment_design_cases import (
+        editor_specification,
+        get_experiment_design_case,
+    )
+
+    case_payload = dict(runtime.fixture["lifecycle"]["case"])
+    case = get_experiment_design_case(case_payload["case_id"])
+    runtime.add_assertion(simulation_identity_assertion(runtime.context))
+    runtime.add_assertion(real_application_assertion(runtime.context))
+    editor_action_start = len(runtime.context.action_results)
+    driver_evidence = run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(
+            editor_specification(case),
+            use_harness_action_runner=True,
+        ),
+    )
+    runtime.observations["experiment_design_driver"] = driver_evidence
+    runtime.add_assertion(
+        editor_create_finalize_assertion(
+            runtime.context,
+            action_start=editor_action_start,
+            action_end=len(runtime.context.action_results),
+        )
+    )
+    capture_milestone(
+        runtime.context,
+        "finalized",
+        evidence={"experiment_name": case.experiment.name},
+    )
+    oracle_result, prepared_snapshot = experiment_design_case_oracle_assertion(
+        runtime.context,
+        case=case_payload,
+        driver_evidence=driver_evidence,
+    )
+    runtime.add_assertion(oracle_result)
+    runtime.observations["experiment_design_prepared"] = dict(
+        oracle_result.evidence
+    )
+    loader_evidence = runtime.harness.run_action(
+        "experiment.load_authoritative_via_ui",
+        lambda: ExperimentLoaderDriver(runtime.context).load_prepared_design(
+            Path(prepared_snapshot.experiment_dir),
+            expected_name=case.experiment.name,
+            expected_plan_id=prepared_snapshot.plan_id,
+            expected_plan_revision=prepared_snapshot.plan_revision,
+            capture_milestone_name="prepared_reloaded",
+        ),
+    )["evidence"]
+    runtime.observations["experiment_design_reload"] = loader_evidence
+    runtime.add_assertion(
+        experiment_prepared_runtime_reconstructed_assertion(
+            runtime.context,
+            case=case_payload,
+            prepared_snapshot=prepared_snapshot,
+            loader_evidence=loader_evidence,
+        )
+    )
+    capture_milestone(
+        runtime.context,
+        "validated",
+        evidence={
+            "case_id": case.case_id,
+            "array_state": runtime.context.controller.get_array_run_state(),
+            "runtime_active": bool(
+                runtime.context.experiment_model
+                .is_authoritative_execution_runtime_active()
+            ),
         },
     )
 
@@ -2200,6 +2297,20 @@ def _editor_payload(
     )
 
 
+def _experiment_design_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    return build_editor_lifecycle_payload(
+        runtime,
+        teardown,
+        experiment_design_report_spec(
+            runtime,
+            base_workload=_base_workload(runtime),
+            required_assertion_ids=EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS,
+        ),
+    )
+
+
 def _editor_revision_payload(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> ComposedReportPayload:
@@ -2739,6 +2850,16 @@ def _editor_artifact(runtime: JourneyRuntime, teardown: Mapping[str, Any]) -> An
     )
 
 
+def _experiment_design_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return editor_artifacts_cleanup_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(EXPERIMENT_DESIGN_REQUIRED_SCREENSHOTS),
+        teardown=teardown,
+    )
+
+
 def _editor_revision_artifact(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> Any:
@@ -2834,6 +2955,24 @@ def _editor_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> str:
         "Milestone 7 composed editor create/finalize/reload\n"
         f"Status: {report['classification']['status']}\n"
         f"Assertions: {passed} / {len(EDITOR_REQUIRED_ASSERTIONS)}\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _experiment_design_summary(
+    report: Mapping[str, Any], runtime: JourneyRuntime
+) -> str:
+    passed = sum(
+        row["decision"] == "pass"
+        for row in runtime.harness.assertion_results
+    )
+    case_id = runtime.fixture["lifecycle"]["case"]["case_id"]
+    return (
+        "Milestone 10 experiment-design matrix case\n"
+        f"Case: {case_id}\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Assertions: {passed} / {len(EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS)}\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
     )
@@ -3365,8 +3504,42 @@ def _run_requantization_matrix_case(
     )
 
 
+def _run_experiment_design_matrix_case(
+    config: JourneyRunConfig,
+    *,
+    matrix_id: str,
+    case_id: str,
+) -> dict[str, Any]:
+    from tools.virtual_workflows.matrices import build_case_fixture
+
+    definition = replace(
+        EDITOR_DEFINITION,
+        scenario_name=EXPERIMENT_DESIGN_MATRIX_SCENARIO_NAME,
+        workload_id=matrix_id,
+        required_action_ids=(
+            _COMMON_ACTIONS
+            | _EDITOR_ACTIONS
+            | frozenset({"experiment.load_authoritative_via_ui"})
+        ),
+        required_ui_action_ids=EXPERIMENT_DESIGN_REQUIRED_UI_ACTIONS,
+        required_assertion_ids=EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS,
+        required_screenshots=EXPERIMENT_DESIGN_REQUIRED_SCREENSHOTS,
+        body=_experiment_design_body,
+        artifact_assertion=_experiment_design_artifact,
+        payload_builder=_experiment_design_payload,
+        summary_builder=_experiment_design_summary,
+    )
+    return JourneyExecutor().run(
+        definition,
+        config,
+        fixture_bundle=build_case_fixture(matrix_id, case_id),
+        replay_selector_args=("--matrix", matrix_id, "--case", case_id),
+    )
+
+
 _MATRIX_JOURNEY_RUNNERS = {
     "calibration_requantization": _run_requantization_matrix_case,
+    "experiment_design": _run_experiment_design_matrix_case,
     "mixed_mode_calibration": _run_mixed_mode_matrix_case,
 }
 

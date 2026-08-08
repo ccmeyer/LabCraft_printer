@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -2777,6 +2778,217 @@ def editor_prepared_bundle_assertions(
     return _prepared_bundle_results(snapshot, expected_well_ids=expected_well_ids)
 
 
+def experiment_design_case_oracle_assertion(
+    context: Any,
+    *,
+    case: Mapping[str, Any],
+    driver_evidence: Mapping[str, Any],
+) -> tuple[AssertionResult, Any]:
+    """Compare a PREPARED authoritative bundle with independent literal truth."""
+
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+        experiment_design_projection,
+    )
+
+    snapshot = capture_authoritative_bundle(context)
+    projection = experiment_design_projection(snapshot)
+    expected = dict(case["expected"])
+    experiment = dict(case["experiment"])
+    expected_stocks = {
+        str(row["stock_id"]): dict(row) for row in expected["stocks"]
+    }
+    observed_stocks = {
+        str(row["stock_id"]): dict(row) for row in projection["stocks"]
+    }
+    stock_checks = {
+        stock_id: (
+            observed_stocks.get(stock_id, {}).get("reagent_name")
+            == row["reagent_name"]
+            and observed_stocks.get(stock_id, {}).get("units") == row["units"]
+            and observed_stocks.get(stock_id, {}).get("printing_mode")
+            == row["printing_mode"]
+            and Decimal(
+                observed_stocks.get(stock_id, {}).get("concentration", "NaN")
+            )
+            == Decimal(row["concentration"])
+        )
+        for stock_id, row in expected_stocks.items()
+    }
+    expected_assignments = {
+        str(row["well_id"]): str(row["reaction_id"])
+        for row in expected["assignments"]
+    }
+    observed_assignments = {
+        str(row["well_id"]): str(row["reaction_id"])
+        for row in projection["assignments"]
+    }
+    expected_counts = sorted(
+        (
+            str(row["stock_id"]),
+            str(row["well_id"]),
+            int(row["target_droplets"]),
+        )
+        for row in expected["stock_well_counts"]
+    )
+    observed_counts = sorted(
+        (
+            str(row["stock_id"]),
+            str(row["well_id"]),
+            int(row["target_droplets"]),
+        )
+        for row in projection["stock_well_counts"]
+    )
+    reaction_targets = {
+        str(row["reaction_id"]): {
+            str(item["reagent"]): Decimal(str(item["target"]))
+            for item in row["targets"]
+        }
+        for row in expected["reactions"]
+    }
+    observed_concentrations = projection["concentration_rows"]
+    concentration_checks: dict[str, bool] = {}
+    for well_id, reaction_id in expected_assignments.items():
+        row = dict(observed_concentrations.get(well_id) or {})
+        for reagent, target in reaction_targets[reaction_id].items():
+            total = sum(
+                Decimal(str(value or "0"))
+                for stock_id, value in row.items()
+                if stock_id.startswith(f"{reagent}_")
+            )
+            concentration_checks[f"{well_id}:{reagent}"] = total == target
+    configured = dict(driver_evidence.get("configured") or {})
+    generated = dict(driver_evidence.get("generated") or {})
+    expected_editor_stock_rows = len(expected_stocks) + int(
+        not any(stock.get("role") == "fill" for stock in expected_stocks.values())
+    )
+    metadata = snapshot.metadata
+    checks = {
+        "bundle_valid": snapshot.bundle_valid,
+        "plan_prepared": snapshot.plan_state == "prepared",
+        "ready_to_start": snapshot.eligibility_status == "ready_to_start",
+        "runtime_inactive": not snapshot.runtime_active,
+        "zero_progress": snapshot.total_added_droplets == 0,
+        "resume_absent": not snapshot.resume_present,
+        "case_terminal_prepared": expected["terminal"] == "prepared",
+        "reaction_count_exact": len(observed_assignments)
+        == int(expected["reaction_count"]),
+        "stock_ids_exact": set(observed_stocks) == set(expected_stocks),
+        "stock_fields_exact": all(stock_checks.values()),
+        "assignments_exact": observed_assignments == expected_assignments,
+        "stock_well_counts_exact": observed_counts == expected_counts,
+        "concentrations_exact": all(concentration_checks.values()),
+        "key_wells_exact": list(projection["key_rows"])
+        == list(expected_assignments),
+        "metadata_name_exact": metadata.get("name") == experiment["name"],
+        "metadata_plate_exact": metadata.get("plate_name")
+        == experiment["plate_name"],
+        "metadata_replicates_exact": int(metadata.get("replicates", -1))
+        == int(experiment["replicates"]),
+        "metadata_randomize_exact": bool(
+            metadata.get("randomize_assignments")
+        )
+        == bool(experiment["randomize_assignments"]),
+        "metadata_seed_exact": metadata.get("random_seed")
+        == experiment["random_seed"],
+        "configured_controls_exact": (
+            configured.get("selected_well_ids")
+            == list(experiment["selected_well_ids"])
+            and configured.get("random_seed") == experiment["random_seed"]
+            and configured.get("reagent_count") == len(case["reagents"])
+        ),
+        "generated_evidence_exact": (
+            generated.get("reaction_count") == expected["reaction_count"]
+            and generated.get("stock_row_count") == expected_editor_stock_rows
+        ),
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "case_id": case["case_id"],
+        "expected": expected,
+        "observed": projection,
+        "stock_checks": stock_checks,
+        "concentration_checks": concentration_checks,
+        "driver": dict(driver_evidence),
+        "expected_editor_stock_row_count": expected_editor_stock_rows,
+        "plan_id": snapshot.plan_id,
+        "plan_revision": snapshot.plan_revision,
+        "experiment_dir": snapshot.experiment_dir,
+    }
+    return (
+        evaluate_assertion(
+            "experiment.design_case_oracle_exact",
+            "prepared",
+            ("ui", "model", "persistence"),
+            lambda: (not evidence["failed_checks"], evidence),
+        ),
+        snapshot,
+    )
+
+
+def experiment_prepared_runtime_reconstructed_assertion(
+    context: Any,
+    *,
+    case: Mapping[str, Any],
+    prepared_snapshot: Any,
+    loader_evidence: Mapping[str, Any],
+) -> AssertionResult:
+    """Prove Qt reload reconstructs the exact saved assignments in memory."""
+
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+        compare_directories,
+    )
+
+    reloaded = capture_authoritative_bundle(context)
+    expected_assignments = {
+        str(row["well_id"]): str(row["reaction_id"])
+        for row in case["expected"]["assignments"]
+    }
+    directory_comparison = compare_directories(
+        prepared_snapshot.directory,
+        reloaded.directory,
+    ).to_dict()
+    loaded = dict(loader_evidence)
+    checks = {
+        "reload_checks_pass": all(dict(loaded.get("checks") or {}).values()),
+        "directory_byte_identical": not directory_comparison["changed_paths"],
+        "plan_identity_unchanged": (
+            reloaded.plan_id,
+            reloaded.plan_revision,
+        )
+        == (prepared_snapshot.plan_id, prepared_snapshot.plan_revision),
+        "plan_remains_prepared": reloaded.plan_state == "prepared",
+        "eligibility_ready_to_start": reloaded.eligibility_status
+        == "ready_to_start",
+        "runtime_inactive": not reloaded.runtime_active,
+        "resume_absent": not reloaded.resume_present,
+        "zero_progress": reloaded.total_added_droplets == 0,
+        "reconstructed_assignments_exact": reloaded.assignments
+        == expected_assignments,
+        "reconstructed_assignments_match_plan": reloaded.assignments
+        == reloaded.expected_assignments,
+        "prepared_assignments_unchanged": reloaded.assignments
+        == prepared_snapshot.assignments,
+        "controller_idle": context.controller.get_array_run_state() == "idle",
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "loaded": loaded,
+        "reconstructed": reloaded.prepared_evidence(),
+        "changed_paths": directory_comparison["changed_paths"],
+        "case_id": case["case_id"],
+    }
+    return evaluate_assertion(
+        "experiment.prepared_runtime_reconstructed_exact",
+        "reloaded",
+        ("ui", "controller", "model", "persistence"),
+        lambda: (not evidence["failed_checks"], evidence),
+    )
+
+
 def _prepared_bundle_results(
     snapshot: Any,
     *,
@@ -3578,6 +3790,8 @@ __all__ = [
     "editor_artifacts_cleanup_assertion",
     "editor_create_finalize_assertion",
     "editor_prepared_bundle_assertions",
+    "experiment_design_case_oracle_assertion",
+    "experiment_prepared_runtime_reconstructed_assertion",
     "editor_post_start_lock_copy_assertions",
     "dispense_counts_reconciled_assertion",
     "editor_prepared_reload_assertions",

@@ -160,9 +160,77 @@ def prepared_revision_report_spec(
     )
 
 
+def experiment_design_report_spec(
+    runtime: Any,
+    *,
+    base_workload: Mapping[str, Any],
+    required_assertion_ids: tuple[str, ...],
+) -> EditorLifecycleReportSpec:
+    """Build additive report-v1 values for one design-matrix case."""
+
+    fixture = runtime.fixture
+    lifecycle = dict(fixture["lifecycle"])
+    case = dict(lifecycle["case"])
+    experiment = dict(case["experiment"])
+    evidence = _assertion_evidence(runtime)
+    oracle = evidence.get("experiment.design_case_oracle_exact", {})
+    reconstructed = evidence.get(
+        "experiment.prepared_runtime_reconstructed_exact", {}
+    )
+    return EditorLifecycleReportSpec(
+        workload={
+            **dict(base_workload),
+            "case_id": case["case_id"],
+            "experiment_name": experiment["name"],
+            "plate_name": experiment["plate_name"],
+            "expected_reaction_count": case["expected"]["reaction_count"],
+            "well_ids": [
+                row["well_id"] for row in case["expected"]["assignments"]
+            ],
+            "expected_editor_finalization_operations": fixture["workload"][
+                "expected_editor_finalization_operations"
+            ],
+            "speed_multiplier": runtime.harness.config.speed_multiplier,
+            "timeout_seconds": runtime.harness.config.timeout_seconds,
+        },
+        required_assertion_ids=required_assertion_ids,
+        persistence_values={
+            "matrix_case": {
+                "matrix_id": lifecycle["matrix_id"],
+                "catalog_sha256": lifecycle["catalog_sha256"],
+                "case_sha256": lifecycle["case_sha256"],
+                "case": case,
+                "parameters": {
+                    "configured": oracle.get("driver", {}).get(
+                        "configured", {}
+                    ),
+                    "generated": oracle.get("driver", {}).get(
+                        "generated", {}
+                    ),
+                },
+                "outcome": {
+                    "terminal": case["expected"]["terminal"],
+                    "oracle_checks": oracle.get("checks", {}),
+                    "runtime_checks": reconstructed.get("checks", {}),
+                },
+            },
+            "experiment_design_evidence": {
+                "prepared_oracle": oracle,
+                "reload_activation": reconstructed,
+            },
+        },
+        limitations=(
+            "The scenario validates design creation, persistence, reload, and runtime reconstruction without connecting or printing.",
+            "The simulator does not validate firmware, protocol framing, motion, pressure, cameras, balance behavior, physical calibration, or droplet quality.",
+            "Generated plan IDs, timestamps, paths, and identity-bearing artifact hashes may differ across replay.",
+        ),
+    )
+
+
 __all__ = [
     "EditorLifecycleReportSpec",
     "build_editor_lifecycle_payload",
     "create_finalize_report_spec",
+    "experiment_design_report_spec",
     "prepared_revision_report_spec",
 ]

@@ -48,8 +48,8 @@ per case is planned.
 
 Milestone 10 adds a Windows-host SIL matrix named
 `experiment_design_pairwise_v1`. It exercises the real experiment editor,
-authoritative finalization, read-only reload, explicit `Load Execution`, and
-runtime reconstruction. It does not print, calibrate, connect to a machine,
+authoritative finalization, Qt directory reload, and exact in-memory
+reconstruction from the saved plan. It does not print, calibrate, connect to a machine,
 or dispatch simulator commands.
 
 The following are non-goals for every slice:
@@ -121,28 +121,26 @@ and timeout continue to fail closed before an aggregate can pass.
 
 ### Reload and reconstructed runtime assignment
 
-Positive cases must extend the current editor inspection boundary through the
-existing operator-visible activation step:
+Positive cases extend the current editor inspection boundary through the
+existing untouched-PREPARED reload path:
 
 ```text
 finalized PREPARED bundle
 -> ExperimentLoaderDriver opens Experiment Editor
 -> Qt folder dialog selects the isolated authoritative experiment directory
 -> ExperimentDesignDialog._on_load_design()
--> ExperimentModel.load_experiment() inspects the saved execution read-only
--> UI exposes Load Execution for ready_to_start
--> QTest clicks Load Execution
--> MainWindow.activate_authoritative_execution()
--> Model.load_authoritative_execution_runtime()
--> build_execution_runtime_spec() from saved plan/progress
--> reconstructed stocks, reactions, printer-head identities, and well map
--> Controller array-run state normalized to idle for ready_to_start
--> exact catalog-to-plan-to-runtime comparison
+-> ExperimentModel.load_experiment() validates the saved execution
+-> untouched PREPARED remains editable and ready_to_start, with runtime inactive
+-> _project_reconstructed_execution_plan() reconstructs stocks, reactions,
+   printer-head identities, and well map from the saved plan
+-> Controller array-run state remains idle
+-> exact catalog-to-plan-to-reconstructed-assignment comparison
 ```
 
-The activation may create only the already-defined activation checkpoint and
-exports allowed by the authoritative loader. Evidence must distinguish the
-read-only load boundary from the explicit activation boundary.
+The reload must create or modify no authoritative file. Evidence must
+distinguish reconstructed in-memory assignments from an active authoritative
+runtime. `Load Execution` remains the existing contract for locked saved
+executions and is not expected for an untouched PREPARED design.
 
 ### Rejected finalization and no mutation
 
@@ -242,7 +240,7 @@ The independent oracle contains, as applicable:
   rows;
 - exact custom, excluded, available, and assigned well sets;
 - exact reaction-to-well mapping for non-random and seeded cases;
-- expected plan state/revision, zero progress, and activation eligibility;
+- expected plan state/revision, zero progress, and start eligibility;
 - exact key and concentration-key rows after finalization;
 - capacity required/available values;
 - expected terminal kind: `prepared`, `capacity_rejected`, or
@@ -368,8 +366,7 @@ lifecycle and host regressions, and the full Python suite.
 
 Generalize the existing editor driver and composed editor journey only enough
 to execute cases 1 and 2, then register the two-case prefix. Add explicit
-prepared reload plus `Load Execution` activation and exact reconstructed
-assignment evidence. Do not add feasibility, exclusion, alternate-seed,
+prepared reload plus exact reconstructed-assignment evidence. Do not add feasibility, exclusion, alternate-seed,
 capacity, or negative-finalization behavior.
 
 ### Exact call path
@@ -379,9 +376,9 @@ matrix selector -> fresh child -> experiment_design journey family
 -> in-memory case fixture -> EditorPreparationSpec
 -> ExperimentEditorDriver -> normal Qt New/configure/Optimize/Finalize
 -> MainWindow -> Model authoritative finalization
--> Qt directory reload -> read-only PREPARED inspection
--> Qt Load Execution -> Model authoritative runtime reconstruction
--> Controller idle-state normalization
+-> Qt directory reload -> editable untouched-PREPARED inspection
+-> Model saved-plan projection -> reconstructed assignments with runtime inactive
+-> Controller idle-state observation
 -> catalog/plan/progress/key/runtime assertion -> report-v1
 ```
 
@@ -390,13 +387,13 @@ matrix selector -> fresh child -> experiment_design journey family
 - reusable tuple-of-reagent inputs and explicit random-seed control;
 - generated editor evidence for controls, stock-table rows, reaction count,
   and status;
-- a prepared activation driver accepting `ready_to_start` without weakening
-  the existing `ready_to_resume` path;
+- reuse of the prepared reload driver with exact `ready_to_start`, inactive
+  runtime, and byte-identical-file checks;
 - assertions `experiment.design_case_oracle_exact` and
   `experiment.prepared_runtime_reconstructed_exact`;
 - additive `matrix_case` identity and `experiment_design_evidence` in
   report-v1;
-- required action IDs for prepared load and explicit activation.
+- required action ID for prepared Qt directory load.
 
 ### Initial files expected to change
 
@@ -433,8 +430,8 @@ order. Freeze both case hashes and the two-case catalog hash.
 
 Run the listed focused unit/contract tests and only the two selected
 fresh-process system cases with `--run-sil-lifecycle`. Assert exact actions,
-screenshots, plan/progress/key/concentration data, activation side effects,
-runtime mapping, hardware isolation, and cleanup.
+screenshots, plan/progress/key/concentration data, reload immutability,
+reconstructed mapping, hardware isolation, and cleanup.
 
 ```powershell
 .\env\Scripts\python.exe -m pytest -q `
@@ -459,7 +456,7 @@ runtime mapping, hardware isolation, and cleanup.
 
 Run `multi_reagent_seed_4321` visibly on Windows and execute its retained
 replay. Inspect the two reagent rows, random-seed control, generated stock
-table, finalization, Load Execution state, and reconstructed well mapping.
+table, finalization, untouched-PREPARED reload state, and reconstructed well mapping.
 
 ### Retained evidence
 
@@ -470,9 +467,8 @@ authoritative inventories, and exact replay commands.
 ### Compatibility contracts
 
 The existing editor scenario remains unchanged and directly runnable. The
-existing prepared-inspection method remains nonactivating; the new prepared
-activation behavior is additive. Existing matrix hashes and schemas remain
-frozen.
+existing prepared-inspection method remains nonactivating and editable for an
+untouched PREPARED bundle. Existing matrix hashes and schemas remain frozen.
 
 ### Commit boundary
 
@@ -481,7 +477,7 @@ One commit: `test: add control and multi-reagent design SIL cases`.
 ### Risks and rollback
 
 Primary risks are accidental changes to the legacy editor action sequence and
-confusing read-only reload with explicit activation. Rollback removes the new
+confusing reconstructed assignments with active runtime. Rollback removes the new
 journey family/two-case registration and catalog-only driver extensions while
 leaving the existing editor journey intact.
 
@@ -513,8 +509,8 @@ typed formulation case -> editor stock inputs
 -> Optimize & Generate
 -> case 3 one-stock stock-table/target preview
 or case 4 expected one-stock warning -> Qt toggle -> regenerate two-stock
--> normal Finalize -> authoritative files -> Qt reload/Load Execution
--> exact stock identity/count/runtime oracle
+-> normal Finalize -> authoritative files -> Qt reload/reconstruction
+-> exact stock identity/count/reconstructed-assignment oracle
 ```
 
 ### Contracts and evidence introduced
@@ -613,7 +609,7 @@ branch while cases 1-2 remain independently runnable.
 
 Entrance: Slice 10.2 committed and clean; the independent arithmetic for both
 solutions is reviewed. Exit: both cases and the visible replay pass, exact
-stock/count identities survive reload and activation, earlier hashes remain
+stock/count identities survive reload and reconstruction, earlier hashes remain
 fixed, focused tests pass, and evidence is recorded.
 
 ### Validation deferred to Slice 10.6
@@ -637,7 +633,7 @@ case precondition -> isolated WellPlate.excluded_wells
 -> Qt editor/well picker with disabled excluded cells
 -> normal custom selection or random-seed control
 -> Optimize/Finalize -> authoritative plan mapping
--> Qt reload/Load Execution -> reconstructed mapping
+-> Qt reload -> reconstructed mapping
 -> literal assignment and reaction-multiset oracle
 ```
 
@@ -763,7 +759,7 @@ Positive case:
 
 ```text
 four-reaction/four-well Qt design -> Finalize
--> authoritative PREPARED bundle -> Qt reload/Load Execution
+-> authoritative PREPARED bundle -> Qt reload/reconstruction
 -> exact reconstructed mapping
 ```
 
@@ -783,7 +779,7 @@ normal Qt New/configuration -> pre-attempt directory/runtime snapshot
 - reusable expected-modal Finalize driver with bounded title/message matching;
 - shared `experiment.finalization_rejected_no_mutation` assertion;
 - byte-level directory comparison plus explicit absence of execution plan,
-  revision, key, concentration key, resume, activation, intent, simulator,
+  revision, key, concentration key, resume, runtime, intent, simulator,
   completion, and array-start evidence;
 - final nine-case order, pairwise audit, case hashes, and catalog hash.
 

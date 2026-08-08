@@ -21,6 +21,10 @@ from typing import Any, Iterable, Mapping, Sequence
 EXPERIMENT_DESIGN_MATRIX_ID = "experiment_design_pairwise_v1"
 EXPERIMENT_DESIGN_BASE_SCENARIO_ID = "experiment_editor_create_finalize_v1"
 EXPERIMENT_DESIGN_JOURNEY_FAMILY = "experiment_design"
+EXPERIMENT_DESIGN_EXECUTABLE_CASE_IDS = (
+    "single_reagent_control",
+    "multi_reagent_seed_4321",
+)
 REFERENCE_FIXTURE_PATH = (
     Path(__file__).resolve().parent
     / "fixtures"
@@ -782,10 +786,10 @@ EXPERIMENT_DESIGN_CASES: tuple[ExperimentDesignCase, ...] = (
             ),
             stock_well_counts=_multi_counts(
                 (
-                    ("A1", 2, 3, 5), ("A2", 1, 3, 6),
-                    ("A3", 2, 1, 7), ("A4", 1, 3, 6),
-                    ("A5", 2, 1, 7), ("A6", 2, 3, 5),
-                    ("A7", 1, 1, 8), ("A8", 1, 1, 8),
+                    ("A1", 2, 3, 6), ("A2", 1, 3, 7),
+                    ("A3", 2, 1, 8), ("A4", 1, 3, 7),
+                    ("A5", 2, 1, 8), ("A6", 2, 3, 6),
+                    ("A7", 1, 1, 9), ("A8", 1, 1, 9),
                 )
             ),
         ),
@@ -1199,6 +1203,30 @@ def planned_catalog_sha256() -> str:
     return _sha256_json(normalized_planned_catalog())
 
 
+def executable_experiment_design_cases() -> tuple[ExperimentDesignCase, ...]:
+    """Return the reviewed executable prefix without changing case truth."""
+
+    return tuple(
+        get_experiment_design_case(case_id)
+        for case_id in EXPERIMENT_DESIGN_EXECUTABLE_CASE_IDS
+    )
+
+
+def editor_specification(case: ExperimentDesignCase) -> dict[str, Any]:
+    """Project typed inputs to the normal editor driver's additive contract."""
+
+    if case.expected.terminal != "prepared":
+        raise ExperimentDesignCaseError(
+            "rejected experiment-design cases require the negative driver"
+        )
+    experiment = case.experiment.normalized()
+    experiment["expected_reaction_count"] = case.expected.reaction_count
+    return {
+        "experiment": experiment,
+        "reagents": [reagent.normalized() for reagent in case.reagents],
+    }
+
+
 def build_experiment_design_fixture(
     case: ExperimentDesignCase,
 ) -> tuple[dict[str, Any], Path]:
@@ -1244,6 +1272,7 @@ __all__ = [
     "DesignReagentInput",
     "EXPERIMENT_DESIGN_BASE_SCENARIO_ID",
     "EXPERIMENT_DESIGN_CASES",
+    "EXPERIMENT_DESIGN_EXECUTABLE_CASE_IDS",
     "EXPERIMENT_DESIGN_JOURNEY_FAMILY",
     "EXPERIMENT_DESIGN_MATRIX_ID",
     "ExpectedDesignOutcome",
@@ -1259,6 +1288,8 @@ __all__ = [
     "REQUIRED_PAIRWISE_INTERACTIONS",
     "audit_pairwise_coverage",
     "build_experiment_design_fixture",
+    "editor_specification",
+    "executable_experiment_design_cases",
     "get_experiment_design_case",
     "normalized_planned_catalog",
     "planned_catalog_sha256",

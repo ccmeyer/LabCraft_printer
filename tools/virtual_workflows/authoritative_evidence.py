@@ -561,6 +561,49 @@ def authoritative_activation_boundary(
     )
 
 
+def experiment_design_projection(
+    snapshot: AuthoritativeBundleSnapshot,
+) -> dict[str, Any]:
+    """Project authoritative plan truth for an independent design oracle."""
+
+    plan = snapshot.plan
+    stocks = dict(plan.get("stocks") or {})
+    wells = dict(plan.get("wells") or {})
+    return {
+        "stocks": [
+            {
+                "stock_id": stock_id,
+                "reagent_name": str(stock.get("reagent_name") or ""),
+                "concentration": str(stock.get("concentration")),
+                "units": str(stock.get("units") or ""),
+                "printing_mode": str(stock.get("printing_mode") or ""),
+            }
+            for stock_id, stock in stocks.items()
+        ],
+        "assignments": [
+            {
+                "well_id": well_id,
+                "reaction_id": str(well.get("reaction_id") or ""),
+            }
+            for well_id, well in wells.items()
+        ],
+        "stock_well_counts": [
+            {
+                "stock_id": stock_id,
+                "well_id": well_id,
+                "target_droplets": int(dispense.get("target_dispenses", 0)),
+            }
+            for well_id, well in wells.items()
+            for stock_id, dispense in dict(well.get("reagents") or {}).items()
+            if int(dispense.get("target_dispenses", 0)) > 0
+        ],
+        "runtime_assignments": snapshot.assignments,
+        "key_rows": snapshot.key_rows,
+        "concentration_rows": snapshot.concentration_rows,
+        "directory_snapshot": snapshot.directory.editor_projection(),
+    }
+
+
 def authoritative_reload_boundaries(
     paused: AuthoritativeBundleSnapshot,
     loaded: AuthoritativeBundleSnapshot,
@@ -730,6 +773,7 @@ __all__ = [
     "compare_directories",
     "completed_stock_well_pairs",
     "editor_directory_snapshot",
+    "experiment_design_projection",
     "read_audit_rows",
     "read_csv_rows",
     "read_model_audit_rows",

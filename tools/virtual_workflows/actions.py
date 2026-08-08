@@ -2035,10 +2035,14 @@ def drive_editor_create_finalize(
                     dialog.plate_format_combo,
                     experiment["plate_name"],
                 )
-                select_printable_wells(
-                    dialog,
-                    list(experiment["expected_well_ids"]),
+                selected_wells = list(
+                    experiment[
+                        "selected_well_ids"
+                        if "selected_well_ids" in experiment
+                        else "expected_well_ids"
+                    ]
                 )
+                select_printable_wells(dialog, selected_wells)
                 for checkbox, expected in (
                     (
                         dialog.allow_two_chk,
@@ -2050,6 +2054,18 @@ def drive_editor_create_finalize(
                         toggle_checkbox(checkbox)
                     if bool(checkbox.isChecked()) != bool(expected):
                         raise RuntimeError("checkbox did not retain requested state")
+                requested_seed = experiment.get("random_seed")
+                if experiment["randomize_assignments"]:
+                    if requested_seed is None:
+                        raise RuntimeError(
+                            "randomized editor input requires an explicit seed"
+                        )
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog.random_seed_spin,
+                        requested_seed,
+                    )
                 for row, reagent in enumerate(reagents):
                     click(dialog.add_reagent_btn)
                     if dialog._reagent_row_count() != row + 1:
@@ -2096,8 +2112,25 @@ def drive_editor_create_finalize(
                         QtCore,
                         QtTest,
                         dialog._reagent_cell_widget(row, dialog.COL_SET_STOCK),
-                        reagent["fixed_stock_concentration"],
+                        (
+                            ""
+                            if reagent.get("fixed_stock_concentration") is None
+                            else reagent["fixed_stock_concentration"]
+                        ),
                     )
+                    if "max_stock_concentration" in reagent:
+                        _qt_replace_text(
+                            QtCore,
+                            QtTest,
+                            dialog._reagent_cell_widget(
+                                row, dialog.COL_MAX_STOCK
+                            ),
+                            (
+                                ""
+                                if reagent.get("max_stock_concentration") is None
+                                else reagent["max_stock_concentration"]
+                            ),
+                        )
                     _qt_set_spin_value(
                         QtCore,
                         QtTest,
@@ -2107,12 +2140,22 @@ def drive_editor_create_finalize(
                 _ensure_editor_deadline(
                     context, "editor.configure_design_via_ui", "configured"
                 )
-                return {
+                configured = {
                     "experiment_name": dialog.exp_name_edit.text(),
                     "plate_name": dialog.plate_format_combo.currentText(),
                     "reagent_count": dialog._reagent_row_count(),
                     "auto_update": dialog.auto_update_chk.isChecked(),
+                    "selected_well_ids": selected_wells,
+                    "randomize_assignments": dialog.randomize_chk.isChecked(),
+                    "random_seed": (
+                        int(dialog.random_seed_spin.value())
+                        if dialog.randomize_chk.isChecked()
+                        else None
+                    ),
+                    "allow_two_stock_solutions": dialog.allow_two_chk.isChecked(),
                 }
+                state["configured"] = configured
+                return configured
 
             run_action(
                 "editor.configure_design_via_ui",
@@ -2141,11 +2184,29 @@ def drive_editor_create_finalize(
                     raise RuntimeError(
                         "generated reaction count did not match expected cardinality"
                     )
-                return {
+                stock_rows: list[list[str]] = []
+                for row in range(dialog.stock_table.rowCount()):
+                    values: list[str] = []
+                    for column in range(dialog.stock_table.columnCount()):
+                        item = dialog.stock_table.item(row, column)
+                        widget = dialog.stock_table.cellWidget(row, column)
+                        if item is not None:
+                            values.append(str(item.text()))
+                        elif hasattr(widget, "currentText"):
+                            values.append(str(widget.currentText()))
+                        elif hasattr(widget, "text"):
+                            values.append(str(widget.text()))
+                        else:
+                            values.append("")
+                    stock_rows.append(values)
+                generated = {
                     "reaction_count": reaction_count,
                     "stock_row_count": dialog.stock_table.rowCount(),
+                    "stock_table_rows": stock_rows,
                     "status": dialog.status_lbl.text(),
                 }
+                state["generated"] = generated
+                return generated
 
             run_action(
                 "editor.optimize_generate_via_ui",
@@ -2214,6 +2275,8 @@ def drive_editor_create_finalize(
     return {
         "dialog_type": type(state["dialog"]).__name__,
         "finalized": True,
+        "configured": dict(state["configured"]),
+        "generated": dict(state["generated"]),
     }
 
 
@@ -2775,6 +2838,8 @@ def drive_editor_prepared_sequence(
         "finished": False,
         "error": None,
         "dialog": None,
+        "configured": {},
+        "generated": {},
         "observed_transitions": [],
         "rejections": [],
         "edit_count": 0,

@@ -52,6 +52,12 @@ EXPECTED_REQUANTIZATION_CATALOG_SHA256 = (
 EXPECTED_REQUANTIZATION_PLAN_SHA256 = (
     "4f86d140b330646182aed7dcda285ec5d636d6ad875131f33ae2c4b1754410e7"
 )
+EXPECTED_EXPERIMENT_DESIGN_PREFIX_CATALOG_SHA256 = (
+    "1af94890988d17829e34d4e63fa08d679c13a9aae9090941656fb91b168b012e"
+)
+EXPECTED_EXPERIMENT_DESIGN_CONTROL_PLAN_SHA256 = (
+    "1c6fee0dc79b4f375b555f4183566eed3cc081850d97f37b0621cf8c450e352f"
+)
 EXPECTED_REQUANTIZATION_CASE_SHA256 = {
     "droplet_idempotent_10_to_10": "714f1c212bef572de306a7f2b35d47e28c477477467dc36cec4c4acf2ec8d98f",
     "droplet_volume_increase_10_to_9": "f9bc246789292641551a4606bf6bfcff233bdebf741215c10e1e836e9a18bd99",
@@ -570,16 +576,37 @@ def test_cli_lists_and_dry_runs_matrices_without_execution(capsys):
     catalog = json.loads(capsys.readouterr().out)
     assert [row["id"] for row in catalog["matrices"]] == [
         CALIBRATION_REQUANTIZATION_MATRIX_ID,
+        EXPERIMENT_DESIGN_MATRIX_ID,
         MIXED_MODE_MATRIX_ID,
     ]
-    assert EXPERIMENT_DESIGN_MATRIX_ID not in {
-        row["id"] for row in catalog["matrices"]
-    }
     entries = {row["id"]: row for row in catalog["matrices"]}
     assert entries[MIXED_MODE_MATRIX_ID]["case_ids"] == list(EXPECTED_CASES)
     assert entries[CALIBRATION_REQUANTIZATION_MATRIX_ID]["case_ids"] == list(
         EXPECTED_REQUANTIZATION_CASES
     )
+    assert entries[EXPERIMENT_DESIGN_MATRIX_ID]["case_ids"] == [
+        "single_reagent_control",
+        "multi_reagent_seed_4321",
+    ]
+    assert entries[EXPERIMENT_DESIGN_MATRIX_ID]["catalog_sha256"] == (
+        EXPECTED_EXPERIMENT_DESIGN_PREFIX_CATALOG_SHA256
+    )
+
+    design_plan = resolve_matrix_plan(
+        EXPERIMENT_DESIGN_MATRIX_ID,
+        case_id="single_reagent_control",
+        seed=7,
+        timeout_seconds=12,
+        execution_authorized=False,
+    )
+    assert hashlib.sha256(
+        json.dumps(
+            design_plan,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest() == EXPECTED_EXPERIMENT_DESIGN_CONTROL_PLAN_SHA256
 
     assert main(
         [

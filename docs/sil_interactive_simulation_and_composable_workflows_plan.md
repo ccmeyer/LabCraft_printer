@@ -2286,11 +2286,11 @@ current qualified baseline. Milestone 10 is the current next action:
    expected-value oracle, named 14-pair audit, fixed hashes, and test-local
    selector/runner contracts are recorded while the production registry
    remains unchanged.
-2. Slice 10.2 is the current next action: register the control and
-   multiple-reagent seed-4321 cases after
-   reusable Qt editor inputs and explicit prepared reload/Load Execution
-   reconstruction are executable.
-3. Slice 10.3: append the one-stock feasible and two-stock-required cases,
+2. Slice 10.2 is complete: the control and multiple-reagent seed-4321 cases
+   execute through reusable Qt editor inputs, authoritative finalization,
+   byte-identical prepared reload, and exact saved-plan assignment
+   reconstruction.
+3. Slice 10.3 is the current next action: append the one-stock feasible and two-stock-required cases,
    including the normal-UI one-stock rejection followed by two-stock success.
 4. Slice 10.4: append sparse custom-well/exclusion and seed-1234 cases; prove
    exact excluded-well behavior, same-seed replay, equal reaction multisets,

@@ -1448,7 +1448,10 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
         expected_name: str,
         expected_plan_id: str,
         expected_plan_revision: int,
+        capture_milestone_name: str | None = None,
     ) -> dict[str, Any]:
+        from tools.virtual_workflows.actions import capture_milestone
+
         from pathlib import Path
         directory = Path(experiment_dir).resolve()
         def inspect_loaded(dialog) -> Mapping[str, Any]:
@@ -1491,6 +1494,13 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                     "activation_performed": False,
                     "file_selection_mechanic": "qt_file_dialog_directory_selection",
                 }
+                if capture_milestone_name is not None:
+                    capture_milestone(
+                        self.context,
+                        capture_milestone_name,
+                        evidence=result,
+                        widget=dialog,
+                    )
                 QtTest.QTest.keyClick(dialog, QtCore.Qt.Key.Key_Escape)
                 if dialog.isVisible():
                     raise RuntimeError("prepared inspection editor did not close")

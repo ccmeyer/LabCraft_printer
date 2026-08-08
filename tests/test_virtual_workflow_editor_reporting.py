@@ -6,6 +6,7 @@ from tools.virtual_workflows.editor_reporting import (
     EditorLifecycleReportSpec,
     build_editor_lifecycle_payload,
     create_finalize_report_spec,
+    experiment_design_report_spec,
     prepared_revision_report_spec,
 )
 
@@ -128,3 +129,64 @@ def test_editor_report_specs_preserve_lifecycle_specific_values():
             "audit_rows": [],
         },
     }
+
+
+def test_experiment_design_report_spec_adds_case_and_exact_evidence():
+    case = {
+        "case_id": "control",
+        "experiment": {"name": "designed", "plate_name": "plate"},
+        "expected": {
+            "terminal": "prepared",
+            "reaction_count": 1,
+            "assignments": [{"well_id": "A1", "reaction_id": "R1"}],
+        },
+    }
+    runtime = SimpleNamespace(
+        fixture={
+            "lifecycle": {
+                "matrix_id": "design-matrix",
+                "catalog_sha256": "catalog",
+                "case_sha256": "case",
+                "case": case,
+            },
+            "workload": {"expected_editor_finalization_operations": 1},
+        },
+        harness=SimpleNamespace(
+            assertion_results=[
+                {
+                    "assertion_id": "experiment.design_case_oracle_exact",
+                    "decision": "pass",
+                    "evidence": {
+                        "checks": {"exact": True},
+                        "driver": {"configured": {"seed": 1}},
+                    },
+                },
+                {
+                    "assertion_id": (
+                        "experiment.prepared_runtime_reconstructed_exact"
+                    ),
+                    "decision": "pass",
+                    "evidence": {"checks": {"reloaded": True}},
+                },
+            ],
+            config=SimpleNamespace(speed_multiplier=1000.0, timeout_seconds=90.0),
+        ),
+    )
+
+    spec = experiment_design_report_spec(
+        runtime,
+        base_workload={"workload_id": "design-matrix"},
+        required_assertion_ids=(
+            "experiment.design_case_oracle_exact",
+            "experiment.prepared_runtime_reconstructed_exact",
+        ),
+    )
+
+    assert spec.persistence_values["matrix_case"]["case"] == case
+    assert spec.persistence_values["matrix_case"]["parameters"] == {
+        "configured": {"seed": 1},
+        "generated": {},
+    }
+    assert spec.persistence_values["experiment_design_evidence"][
+        "reload_activation"
+    ]["checks"] == {"reloaded": True}

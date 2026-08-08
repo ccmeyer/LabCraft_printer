@@ -278,6 +278,7 @@ def test_named_journeys_meet_concision_and_generic_dispatch_gates():
     }
     assert lengths["_smoke_body"] <= 120
     assert lengths["_editor_body"] <= 120
+    assert lengths["_experiment_design_body"] <= 120
     assert lengths["_editor_revision_body"] <= 120
     assert lengths["_multi_body"] <= 120
     assert lengths["_soft_stop_body"] <= 120

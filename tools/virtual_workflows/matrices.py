@@ -12,6 +12,15 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol
 
 from tools.sil.ejection_response import PulseAwareSyntheticEjectionModelV1
+from tools.virtual_workflows.experiment_design_cases import (
+    EXPERIMENT_DESIGN_BASE_SCENARIO_ID,
+    EXPERIMENT_DESIGN_JOURNEY_FAMILY,
+    EXPERIMENT_DESIGN_MATRIX_ID,
+    audit_pairwise_coverage,
+    build_experiment_design_fixture,
+    executable_experiment_design_cases,
+    planned_catalog_sha256,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1896,8 +1905,36 @@ CALIBRATION_REQUANTIZATION_DEFINITION = MatrixDefinition(
     fixture_builder=_build_requantization_case_fixture,
 )
 
+
+def _build_experiment_design_case_fixture(
+    case: MatrixCaseContract,
+) -> tuple[dict[str, Any], Path]:
+    fixture, source = build_experiment_design_fixture(case)
+    fixture["lifecycle"]["catalog_sha256"] = (
+        EXPERIMENT_DESIGN_DEFINITION.catalog_sha256()
+    )
+    return fixture, source
+
+EXPERIMENT_DESIGN_DEFINITION = MatrixDefinition(
+    matrix_id=EXPERIMENT_DESIGN_MATRIX_ID,
+    base_scenario_id=EXPERIMENT_DESIGN_BASE_SCENARIO_ID,
+    journey_family=EXPERIMENT_DESIGN_JOURNEY_FAMILY,
+    platform="windows_sil",
+    execution="manual_on_demand",
+    cases=executable_experiment_design_cases(),
+    catalog_metadata={
+        "planned_catalog_sha256": planned_catalog_sha256(),
+        "planned_pairwise_audit": audit_pairwise_coverage(),
+    },
+    fixture_builder=_build_experiment_design_case_fixture,
+)
+
 MATRIX_REGISTRY = MatrixRegistry(
-    (MIXED_MODE_DEFINITION, CALIBRATION_REQUANTIZATION_DEFINITION)
+    (
+        MIXED_MODE_DEFINITION,
+        CALIBRATION_REQUANTIZATION_DEFINITION,
+        EXPERIMENT_DESIGN_DEFINITION,
+    )
 )
 
 
@@ -1959,6 +1996,8 @@ __all__ = [
     "BASE_SCENARIO_ID",
     "CALIBRATION_REQUANTIZATION_DEFINITION",
     "CALIBRATION_REQUANTIZATION_MATRIX_ID",
+    "EXPERIMENT_DESIGN_DEFINITION",
+    "EXPERIMENT_DESIGN_MATRIX_ID",
     "MATRIX_CASES",
     "MATRIX_PLAN_SCHEMA_NAME",
     "MATRIX_REGISTRY",
