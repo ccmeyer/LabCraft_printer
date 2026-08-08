@@ -2290,11 +2290,10 @@ current qualified baseline. Milestone 10 is the current next action:
    execute through reusable Qt editor inputs, authoritative finalization,
    byte-identical prepared reload, and exact saved-plan assignment
    reconstruction.
-3. Slice 10.3 is blocked before implementation acceptance. The one-stock case
-   passes, but the two-stock production optimizer prunes the independently
-   exact 5/10 mM pair and selects an inexact 3.33/10 mM pair. Review and
-   complete `docs/sil_experiment_design_two_stock_accuracy_correction_plan.md`
-   before restarting this slice from clean commit `fa6ed5c`.
+3. The separately authorized two-stock accuracy correction is complete. It
+   retains the best accuracy candidate per bounded printed-volume tier, passes
+   the full Python suite, and leaves schemas and hardware paths unchanged.
+   Slice 10.3 is again the current next action from the correction commit.
 4. Slice 10.4: append sparse custom-well/exclusion and seed-1234 cases; prove
    exact excluded-well behavior, same-seed replay, equal reaction multisets,
    and different-seed assignment divergence.

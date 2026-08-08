@@ -1180,6 +1180,35 @@ class ExperimentModel(QObject):
             max_volume_nL=float(plan.max_volume_nL),
         )
 
+    def _score_two_stock_targets(
+        self,
+        plan: TwoStockPlan,
+        *,
+        target_values: List[float],
+        starting_conc: float,
+        final_volume_nL: float,
+        units: str,
+    ) -> _PlanAccuracyScore:
+        rows = [
+            self._evaluate_two_stock_target(
+                t_final=float(t_final),
+                starting_conc=float(starting_conc),
+                stock_concentrations=(
+                    float(plan.stock_concs[0]),
+                    float(plan.stock_concs[1]),
+                ),
+                droplet_nL=float(plan.droplet_nL),
+                final_volume_nL=float(final_volume_nL),
+                units=str(units),
+            )
+            for t_final in target_values
+        ]
+        return self._summarize_plan_accuracy_rows(
+            rows,
+            concentration_burden=float(plan.conc_sum),
+            max_volume_nL=float(plan.max_volume_nL),
+        )
+
     def _score_two_stock_plan(
         self,
         opt: OptionSpec,
@@ -1189,24 +1218,12 @@ class ExperimentModel(QObject):
         targets_final: Optional[List[float]] = None,
     ) -> _PlanAccuracyScore:
         target_values = targets_final if targets_final is not None else getattr(opt, "targets", []) or []
-        rows = [
-            self._evaluate_two_stock_target(
-                t_final=float(t_final),
-                starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
-                stock_concentrations=(
-                    float(plan.stock_concs[0]),
-                    float(plan.stock_concs[1]),
-                ),
-                droplet_nL=float(plan.droplet_nL),
-                final_volume_nL=float(final_volume_nL),
-                units=str(plan.units or getattr(opt, "units", "")),
-            )
-            for t_final in target_values
-        ]
-        return self._summarize_plan_accuracy_rows(
-            rows,
-            concentration_burden=float(plan.conc_sum),
-            max_volume_nL=float(plan.max_volume_nL),
+        return self._score_two_stock_targets(
+            plan,
+            target_values=[float(value) for value in target_values],
+            starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
+            final_volume_nL=float(final_volume_nL),
+            units=str(plan.units or getattr(opt, "units", "")),
         )
 
     def _candidate_single_stock_deltas(
@@ -1759,7 +1776,10 @@ class ExperimentModel(QObject):
         if not pairs:
             return [], pair_limit_hit
 
-        # Pareto-prune by (conc_sum, max_volume_nL)
+        # Preserve the historical concentration/volume frontier, plus the
+        # most accurate candidate at every feasible printed-volume tier. The
+        # latter is required because the final selection refines accuracy only
+        # after this bounded enumeration step.
         pairs.sort(key=lambda p: (p.conc_sum, p.max_volume_nL))
         pruned: List[TwoStockPlan] = []
         best_vol = float("inf")
@@ -1767,6 +1787,26 @@ class ExperimentModel(QObject):
             if p.max_volume_nL + 1e-12 < best_vol:
                 pruned.append(p)
                 best_vol = p.max_volume_nL
+
+        accuracy_by_volume: Dict[float, Tuple[TwoStockPlan, _PlanAccuracyScore]] = {}
+        for p in pairs:
+            volume_key = round(float(p.max_volume_nL), 12)
+            score = self._score_two_stock_targets(
+                p,
+                target_values=xs,
+                starting_conc=0.0,
+                final_volume_nL=float(final_volume_nL),
+                units=str(units),
+            )
+            incumbent = accuracy_by_volume.get(volume_key)
+            if incumbent is None or self._plan_accuracy_score_is_better(score, incumbent[1]):
+                accuracy_by_volume[volume_key] = (p, score)
+
+        for p, _score in accuracy_by_volume.values():
+            if p not in pruned:
+                pruned.append(p)
+
+        pruned.sort(key=lambda p: (p.conc_sum, p.max_volume_nL))
 
         return pruned[:max_pairs], pair_limit_hit
 

@@ -1,11 +1,11 @@
 # Experiment-Design Two-Stock Accuracy Correction Plan
 
-Status: review required; planning only (2026-08-08)
+Status: complete after explicit authorization (2026-08-08)
 
 This is the separate production-correction plan required by the Milestone 10
-guardrail. It does not authorize implementation. No firmware, protocol,
-hardware, motion, pressure, printing, or physical-calibration work is in
-scope.
+guardrail. The user explicitly authorized its implementation after reviewing
+the blocked Slice 10.3 evidence. No firmware, protocol, hardware, motion,
+pressure, printing, or physical-calibration work is in scope.
 
 ## Defect statement
 
