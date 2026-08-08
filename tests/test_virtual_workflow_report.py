@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
 
+import tools.virtual_workflows.report as report_module
 from tools.virtual_workflows.report import (
     ComposedReportAdapter,
     ComposedReportPayload,
@@ -47,7 +49,9 @@ def test_source_tree_identity_changes_for_code_but_not_documentation(tmp_path):
     assert untracked_changed["sha256"] != code_changed["sha256"]
 
 
-def test_composed_report_adapter_builds_common_truthful_envelope(tmp_path):
+def test_composed_report_adapter_builds_common_truthful_envelope(
+    tmp_path, monkeypatch
+):
     report_dir = tmp_path / "reports" / "run"
     report_dir.mkdir(parents=True)
     scenario_root = tmp_path / "session"
@@ -108,6 +112,28 @@ def test_composed_report_adapter_builds_common_truthful_envelope(tmp_path):
     assert sections["artifacts"]["screenshots"] == {
         "ready": "screenshots/ready.png"
     }
+
+    pi_identity = report_module.collect_environment_identity(
+        Path(__file__).resolve().parents[1]
+    )
+    pi_identity["environment"]["operating_system"] = "Linux"
+    pi_identity["environment"]["architecture"] = "aarch64"
+    pi_identity["environment"]["qt"]["platform"] = "offscreen"
+    monkeypatch.setattr(
+        report_module,
+        "collect_environment_identity",
+        lambda _repo_root: copy.deepcopy(pi_identity),
+    )
+    pi_sections = ComposedReportAdapter(
+        harness, repo_root=Path(__file__).resolve().parents[1]
+    ).sections(
+        workload_id="workload",
+        scenario_name="scenario",
+        scenario_version="1",
+        replay_command=["python", "runner.py"],
+        passed=True,
+    )
+    assert pi_sections["run"]["run_mode"] == "offscreen_pi_sil"
 
     report = ComposedReportAdapter(
         harness, repo_root=Path(__file__).resolve().parents[1]

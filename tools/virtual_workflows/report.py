@@ -115,6 +115,23 @@ class ComposedReportAdapter:
         report_identity = dict(getattr(harness, "report_identity", {}) or {})
         if report_identity.get("target_pi") is not None:
             identity["environment"]["target_pi"] = report_identity["target_pi"]
+        environment = identity["environment"]
+        operating_system = str(environment.get("operating_system") or "")
+        architecture = str(environment.get("architecture") or "").lower()
+        qt_platform = str(
+            (environment.get("qt") or {}).get("platform") or "unknown"
+        )
+        native_pi = (
+            operating_system == "Linux"
+            and architecture in {"aarch64", "arm64"}
+        )
+        default_run_mode = (
+            f"{qt_platform}_pi_sil"
+            if native_pi
+            else "visible_windows_sil"
+            if harness.config.visible
+            else "offscreen_windows_sil"
+        )
         failure_text = str(harness.failure) if harness.failure is not None else None
         classification = "pass" if passed and failure_text is None else "fail"
         roots = getattr(harness.session, "application_roots", None)
@@ -136,9 +153,7 @@ class ComposedReportAdapter:
                 "run_id": harness.run_id,
                 "scenario_name": str(scenario_name),
                 "scenario_version": str(scenario_version),
-                "run_mode": report_identity.get("run_mode") or (
-                    "visible_windows_sil" if harness.config.visible else "offscreen_windows_sil"
-                ),
+                "run_mode": report_identity.get("run_mode") or default_run_mode,
                 "timing_policy": (
                     "simulated_command_durations_x"
                     f"{harness.config.speed_multiplier:g}"

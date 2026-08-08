@@ -280,6 +280,16 @@ def test_hardware_trace_accepts_private_dev_and_rejects_physical_devices(tmp_pat
     assert proof.status == "pass"
     assert proof.forbidden_matches == []
 
+    mislabeled_report = _report("audit-mislabeled", scenario_root)
+    mislabeled_report["run"]["run_mode"] = "offscreen_windows_sil"
+    mislabeled_path = _write_json(
+        tmp_path / "audit" / "mislabeled-report.json", mislabeled_report
+    )
+    with pytest.raises(PiSilError, match="not a Pi SIL run"):
+        validate_pi_hardware_trace(
+            preflight_path, trace_path, mislabeled_path
+        )
+
     trace_path.write_text(
         'openat(AT_FDCWD, "/dev/ttyAMA0", O_RDWR) = 7</dev/ttyAMA0>\n',
         encoding="utf-8",
