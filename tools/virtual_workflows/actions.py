@@ -1721,6 +1721,23 @@ def _expected_editor_invalid_volume_dialog(context: ScenarioContext):
             registry.remove(entry)
 
 
+@contextmanager
+def _expected_editor_message_dialog(
+    context: ScenarioContext,
+    *,
+    title: str,
+):
+    registry = getattr(context.app, "_sil_expected_dialog_specs", [])
+    setattr(context.app, "_sil_expected_dialog_specs", registry)
+    entry = {"title": str(title), "type": "QMessageBox"}
+    registry.append(entry)
+    try:
+        yield
+    finally:
+        if entry in registry:
+            registry.remove(entry)
+
+
 def _qt_replace_text(QtCore: Any, QtTest: Any, widget: Any, value: Any) -> None:
     widget.setFocus()
     QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
@@ -1982,6 +1999,21 @@ def drive_editor_create_finalize(
             reagents = list(reagents)
             if not reagents:
                 raise RuntimeError("editor specification requires a reagent")
+            optimization_attempts = list(
+                specification.get("optimization_attempts")
+                or (
+                    {
+                        "allow_two_stock_solutions": experiment[
+                            "allow_two_stock_solutions"
+                        ],
+                        "expected_outcome": "generated",
+                        "expected_dialog_title": None,
+                        "expected_message_fragments": [],
+                    },
+                )
+            )
+            if not optimization_attempts:
+                raise RuntimeError("editor specification requires an optimization attempt")
 
             def configure() -> Mapping[str, Any]:
                 if dialog.auto_update_chk.isChecked():
@@ -2046,7 +2078,7 @@ def drive_editor_create_finalize(
                 for checkbox, expected in (
                     (
                         dialog.allow_two_chk,
-                        experiment["allow_two_stock_solutions"],
+                        optimization_attempts[0]["allow_two_stock_solutions"],
                     ),
                     (dialog.randomize_chk, experiment["randomize_assignments"]),
                 ):
@@ -2163,28 +2195,32 @@ def drive_editor_create_finalize(
                 allowed_dialogs=(dialog,),
             )
 
-            def generate() -> Mapping[str, Any]:
-                with _expected_editor_progress_dialog(context):
-                    click(dialog.run_btn)
-                    _wait_for_editor_progress_dialogs(
-                        context,
-                        QtTest,
-                        "editor.optimize_generate_via_ui",
-                    )
-                _ensure_editor_deadline(
-                    context, "editor.optimize_generate_via_ui", "generated"
-                )
-                if dialog._design_optimization_dirty:
-                    raise RuntimeError("generated design remained dirty")
-                reaction_count = int(dialog.model.get_number_of_reactions())
-                expected_reaction_count = int(
-                    experiment.get("expected_reaction_count", experiment["replicates"])
-                )
-                if reaction_count != expected_reaction_count:
-                    raise RuntimeError(
-                        "generated reaction count did not match expected cardinality"
-                    )
-                stock_rows: list[list[str]] = []
+            def execution_artifact_state() -> dict[str, Any]:
+                import hashlib
+
+                state_by_name: dict[str, Any] = {}
+                for name, attribute in (
+                    ("execution_plan.json", "execution_plan_file_path"),
+                    ("progress.json", "progress_file_path"),
+                    ("key.csv", "key_file_path"),
+                    ("concentration_key.csv", "concentration_key_file_path"),
+                ):
+                    raw_path = getattr(dialog.model, attribute, None)
+                    path = Path(raw_path).resolve() if raw_path else None
+                    exists = bool(path is not None and path.is_file())
+                    state_by_name[name] = {
+                        "path": str(path) if path is not None else None,
+                        "exists": exists,
+                        "sha256": (
+                            hashlib.sha256(path.read_bytes()).hexdigest()
+                            if exists
+                            else None
+                        ),
+                    }
+                return state_by_name
+
+            def stock_table_rows() -> list[list[str]]:
+                rows: list[list[str]] = []
                 for row in range(dialog.stock_table.rowCount()):
                     values: list[str] = []
                     for column in range(dialog.stock_table.columnCount()):
@@ -2198,21 +2234,211 @@ def drive_editor_create_finalize(
                             values.append(str(widget.text()))
                         else:
                             values.append("")
-                    stock_rows.append(values)
+                    rows.append(values)
+                return rows
+
+            def run_optimization_attempt(
+                attempt: Mapping[str, Any],
+                *,
+                action_id: str,
+            ) -> Mapping[str, Any]:
+                expected_allow_two = bool(attempt["allow_two_stock_solutions"])
+                if bool(dialog.allow_two_chk.isChecked()) != expected_allow_two:
+                    toggle_checkbox(dialog.allow_two_chk)
+                if bool(dialog.allow_two_chk.isChecked()) != expected_allow_two:
+                    raise RuntimeError("two-stock checkbox did not retain attempt state")
+
+                expected_outcome = str(attempt["expected_outcome"])
+                if expected_outcome == "rejected":
+                    expected_title = str(attempt["expected_dialog_title"])
+                    expected_fragments = tuple(
+                        str(value)
+                        for value in attempt.get("expected_message_fragments", ())
+                    )
+                    before = execution_artifact_state()
+                    warning: dict[str, Any] = {
+                        "entered": False,
+                        "title": None,
+                        "text": None,
+                        "dismissed": False,
+                        "error": None,
+                    }
+
+                    def dismiss_warning() -> None:
+                        active_warning = context.app.activeModalWidget()
+                        if active_warning is None or isinstance(
+                            active_warning, QtWidgets.QProgressDialog
+                        ):
+                            return
+                        if active_warning is dialog:
+                            return
+                        warning["entered"] = True
+                        warning["title"] = (
+                            active_warning.windowTitle()
+                            if active_warning is not None
+                            else None
+                        )
+                        try:
+                            if not isinstance(active_warning, QtWidgets.QMessageBox):
+                                raise RuntimeError(
+                                    "expected optimization rejection did not open a QMessageBox"
+                                )
+                            text_parts = (
+                                active_warning.text(),
+                                active_warning.informativeText(),
+                                active_warning.detailedText(),
+                            )
+                            warning["text"] = " ".join(
+                                part for part in text_parts if part
+                            )
+                            if warning["title"] != expected_title:
+                                raise RuntimeError(
+                                    "optimization rejection title did not match"
+                                )
+                            combined = str(warning["text"] or "").casefold()
+                            if any(
+                                fragment.casefold() not in combined
+                                for fragment in expected_fragments
+                            ):
+                                raise RuntimeError(
+                                    "optimization rejection message did not match: "
+                                    f"expected={expected_fragments!r}, "
+                                    f"observed={warning['text']!r}"
+                                )
+                            ok_button = active_warning.button(
+                                QtWidgets.QMessageBox.StandardButton.Ok
+                            )
+                            if ok_button is None or not ok_button.isEnabled():
+                                raise RuntimeError(
+                                    "optimization rejection has no enabled OK button"
+                                )
+                            QtTest.QTest.mouseClick(
+                                ok_button, QtCore.Qt.MouseButton.LeftButton
+                            )
+                            warning["dismissed"] = True
+                        except BaseException as exc:
+                            warning["error"] = exc
+                            if (
+                                isinstance(active_warning, QtWidgets.QDialog)
+                                and active_warning.isVisible()
+                            ):
+                                active_warning.reject()
+
+                    warning_timer = QtCore.QTimer(context.app)
+                    warning_timer.setInterval(5)
+                    warning_timer.timeout.connect(dismiss_warning)
+                    warning_timer.start()
+                    try:
+                        with _expected_editor_message_dialog(
+                            context, title=expected_title
+                        ), _expected_editor_progress_dialog(context):
+                            click(dialog.run_btn)
+                            _wait_for_editor_progress_dialogs(
+                                context,
+                                QtTest,
+                                action_id,
+                            )
+                    finally:
+                        warning_timer.stop()
+                        warning_timer.deleteLater()
+                    if warning["error"] is not None:
+                        raise warning["error"]
+                    after = execution_artifact_state()
+                    status = str(dialog.status_lbl.text() or "")
+                    combined_evidence = " ".join(
+                        (str(warning["text"] or ""), status)
+                    ).casefold()
+                    artifacts_unchanged = before == after
+                    safe = (
+                        warning["entered"]
+                        and warning["dismissed"]
+                        and warning["title"] == expected_title
+                        and all(
+                            fragment.casefold() in combined_evidence
+                            for fragment in expected_fragments
+                        )
+                        and bool(dialog._design_optimization_dirty)
+                        and dialog.isVisible()
+                        and dialog.result()
+                        != QtWidgets.QDialog.DialogCode.Accepted
+                        and artifacts_unchanged
+                    )
+                    if not safe:
+                        raise RuntimeError(
+                            "optimization rejection did not preserve the editor boundary"
+                        )
+                    return {
+                        "allow_two_stock_solutions": expected_allow_two,
+                        "expected_outcome": expected_outcome,
+                        "observed_outcome": "rejected",
+                        "warning": {
+                            key: value
+                            for key, value in warning.items()
+                            if key != "error"
+                        },
+                        "expected_message_fragments": list(expected_fragments),
+                        "status": status,
+                        "dirty_after": True,
+                        "dialog_open_after": True,
+                        "authoritative_execution_artifacts_unchanged": artifacts_unchanged,
+                        "execution_artifacts_before": before,
+                        "execution_artifacts_after": after,
+                    }
+
+                if expected_outcome != "generated":
+                    raise RuntimeError(
+                        f"unsupported optimization outcome: {expected_outcome!r}"
+                    )
+                with _expected_editor_progress_dialog(context):
+                    click(dialog.run_btn)
+                    _wait_for_editor_progress_dialogs(context, QtTest, action_id)
+                _ensure_editor_deadline(context, action_id, "generated")
+                if dialog._design_optimization_dirty:
+                    raise RuntimeError("generated design remained dirty")
+                reaction_count = int(dialog.model.get_number_of_reactions())
+                expected_reaction_count = int(
+                    experiment.get("expected_reaction_count", experiment["replicates"])
+                )
+                if reaction_count != expected_reaction_count:
+                    raise RuntimeError(
+                        "generated reaction count did not match expected cardinality"
+                    )
                 generated = {
+                    "allow_two_stock_solutions": expected_allow_two,
+                    "expected_outcome": expected_outcome,
+                    "observed_outcome": "generated",
                     "reaction_count": reaction_count,
                     "stock_row_count": dialog.stock_table.rowCount(),
-                    "stock_table_rows": stock_rows,
+                    "stock_table_rows": stock_table_rows(),
                     "status": dialog.status_lbl.text(),
+                    "dirty_after": False,
                 }
                 state["generated"] = generated
                 return generated
 
-            run_action(
-                "editor.optimize_generate_via_ui",
-                generate,
-                allowed_dialogs=(dialog,),
-            )
+            observed_attempts: list[dict[str, Any]] = []
+            for attempt_index, attempt in enumerate(optimization_attempts):
+                action_id = (
+                    "editor.optimize_generate_via_ui"
+                    if attempt_index == 0
+                    else "editor.regenerate_prepared_design_via_ui"
+                )
+                action_result = run_action(
+                    action_id,
+                    lambda attempt=attempt, action_id=action_id: run_optimization_attempt(
+                        attempt,
+                        action_id=action_id,
+                    ),
+                    allowed_dialogs=(dialog,),
+                )
+                observed_attempts.append(
+                    dict(action_result.get("evidence") or action_result)
+                )
+            state["optimization_attempts"] = observed_attempts
+            if not observed_attempts or observed_attempts[-1].get(
+                "observed_outcome"
+            ) != "generated":
+                raise RuntimeError("editor sequence did not end with generation")
             if capture_editor_milestones:
                 capture_milestone(
                     context,
@@ -2277,6 +2503,7 @@ def drive_editor_create_finalize(
         "finalized": True,
         "configured": dict(state["configured"]),
         "generated": dict(state["generated"]),
+        "optimization_attempts": list(state["optimization_attempts"]),
     }
 
 

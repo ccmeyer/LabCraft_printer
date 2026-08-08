@@ -61,7 +61,7 @@ the manifest/registry join contract.
 ## Frozen identities
 
 - full planned nine-case catalog:
-  `9f2745b22e8c7a1a8601a498a46471ae94fd0c81eadeb884a4c0063f42216fa7`
+  `cb283c2b8519dfe9dc806a8a0205fe9eb99bda976da728d4de6d6ef9c0ad35dc`
 - `multi_reagent_seed_4321` case:
   `5d2e7dff0ea9c2e0bcd1e3b218b39280aca57b745834024226fece850f110f51`
 - registered two-case prefix catalog:

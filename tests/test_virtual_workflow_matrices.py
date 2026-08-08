@@ -53,10 +53,10 @@ EXPECTED_REQUANTIZATION_PLAN_SHA256 = (
     "4f86d140b330646182aed7dcda285ec5d636d6ad875131f33ae2c4b1754410e7"
 )
 EXPECTED_EXPERIMENT_DESIGN_PREFIX_CATALOG_SHA256 = (
-    "1af94890988d17829e34d4e63fa08d679c13a9aae9090941656fb91b168b012e"
+    "1d4c866eebfff7803d39b7390cff053f8b741aec22f7b30f2bc0801712727ea1"
 )
 EXPECTED_EXPERIMENT_DESIGN_CONTROL_PLAN_SHA256 = (
-    "1c6fee0dc79b4f375b555f4183566eed3cc081850d97f37b0621cf8c450e352f"
+    "6ec75e4f04d495bf7fdf78245a936f3e71462f61a2fe59e9e1c4c5a63c694288"
 )
 EXPECTED_REQUANTIZATION_CASE_SHA256 = {
     "droplet_idempotent_10_to_10": "714f1c212bef572de306a7f2b35d47e28c477477467dc36cec4c4acf2ec8d98f",
@@ -587,6 +587,8 @@ def test_cli_lists_and_dry_runs_matrices_without_execution(capsys):
     assert entries[EXPERIMENT_DESIGN_MATRIX_ID]["case_ids"] == [
         "single_reagent_control",
         "multi_reagent_seed_4321",
+        "one_stock_feasible",
+        "two_stock_required",
     ]
     assert entries[EXPERIMENT_DESIGN_MATRIX_ID]["catalog_sha256"] == (
         EXPECTED_EXPERIMENT_DESIGN_PREFIX_CATALOG_SHA256

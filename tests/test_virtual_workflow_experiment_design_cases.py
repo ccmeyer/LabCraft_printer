@@ -49,7 +49,7 @@ EXPECTED_CASE_SHA256 = {
         "30ee17fcd869f6c3989d39b50d7e484ed8de233e5af6fc1f2c47cfac40230e17"
     ),
     "two_stock_required": (
-        "aa4d85a9f29df49d8c99f1b6f50fd80b59e79101c053f8d93a8ec332a4557350"
+        "b9bd401c9f223c1576bc98938c75b2a7401958dad2048a2d048f95d4fbda2fff"
     ),
     "custom_wells_with_exclusions": (
         "ace89896cfdfdf63ecb9c5ae567ef29c7926b6e5211ed15c168fdeee0b5eef6e"
@@ -68,13 +68,13 @@ EXPECTED_CASE_SHA256 = {
     ),
 }
 EXPECTED_PLANNED_CATALOG_SHA256 = (
-    "9f2745b22e8c7a1a8601a498a46471ae94fd0c81eadeb884a4c0063f42216fa7"
+    "cb283c2b8519dfe9dc806a8a0205fe9eb99bda976da728d4de6d6ef9c0ad35dc"
 )
 EXPECTED_TEST_LOCAL_DEFINITION_SHA256 = (
-    "558ad29a314dce6fad729f75bed298afe45486f43db79d1b318497ec0d8c0c8e"
+    "47c5b7962f1788fdd2095ea96a1de9120bb1c17305b1a526244068c23a47629b"
 )
 EXPECTED_TEST_LOCAL_PLAN_SHA256 = (
-    "dae78071835ea968cf5752d5dab5e1ceba5daafab90b5de6eb827786ef72d41e"
+    "ea3fe6b3d508ca05fd4d95eab4f004a6679de331690ed621e8352a35858dae72"
 )
 
 
@@ -186,10 +186,12 @@ def test_reference_fixture_is_sha_verified_and_transformed_only_in_memory():
 
 def test_executable_prefix_and_editor_projection_are_additive_and_exact():
     cases = executable_experiment_design_cases()
-    assert tuple(case.case_id for case in cases) == EXPECTED_CASE_IDS[:2]
+    assert tuple(case.case_id for case in cases) == EXPECTED_CASE_IDS[:4]
 
     control = editor_specification(cases[0])
     randomized = editor_specification(cases[1])
+    one_stock = editor_specification(cases[2])
+    two_stock = editor_specification(cases[3])
 
     assert control["experiment"]["selected_well_ids"] == ["A1"]
     assert control["experiment"]["expected_reaction_count"] == 1
@@ -203,6 +205,18 @@ def test_executable_prefix_and_editor_projection_are_additive_and_exact():
         "10",
         "10",
     ]
+    assert one_stock["optimization_attempts"] == [
+        {
+            "allow_two_stock_solutions": False,
+            "expected_outcome": "generated",
+            "expected_dialog_title": None,
+            "expected_message_fragments": [],
+        }
+    ]
+    assert [
+        (attempt["allow_two_stock_solutions"], attempt["expected_outcome"])
+        for attempt in two_stock["optimization_attempts"]
+    ] == [(False, "rejected"), (True, "generated")]
 
     with pytest.raises(ExperimentDesignCaseError, match="negative driver"):
         editor_specification(

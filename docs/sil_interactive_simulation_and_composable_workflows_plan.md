@@ -2290,11 +2290,12 @@ current qualified baseline. Milestone 10 is the current next action:
    execute through reusable Qt editor inputs, authoritative finalization,
    byte-identical prepared reload, and exact saved-plan assignment
    reconstruction.
-3. The separately authorized two-stock accuracy correction is complete. It
-   retains the best accuracy candidate per bounded printed-volume tier, passes
-   the full Python suite, and leaves schemas and hardware paths unchanged.
-   Slice 10.3 is again the current next action from the correction commit.
-4. Slice 10.4: append sparse custom-well/exclusion and seed-1234 cases; prove
+3. Slice 10.3 is complete after the separately authorized two-stock accuracy
+   correction. The one-stock and two-stock cases pass selected fresh-process,
+   replay, and visible checks with exact stocks/counts, authoritative reload,
+   and no-mutation evidence for the rejected first attempt.
+4. Slice 10.4 is the current next action: append sparse custom-well/exclusion
+   and seed-1234 cases; prove
    exact excluded-well behavior, same-seed replay, equal reaction multisets,
    and different-seed assignment divergence.
 5. Slice 10.5: append exact-capacity and the two rejected-finalization cases;

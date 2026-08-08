@@ -81,6 +81,16 @@ def _run_case(tmp_path: Path, case_id: str) -> dict:
             },
             id="multi_reagent_seed_4321",
         ),
+        pytest.param(
+            "one_stock_feasible",
+            {"A1": "R1", "A2": "R2"},
+            id="one_stock_feasible",
+        ),
+        pytest.param(
+            "two_stock_required",
+            {"A1": "R1", "A2": "R2"},
+            id="two_stock_required",
+        ),
     ),
 )
 def test_experiment_design_positive_case_is_exact(
@@ -108,7 +118,10 @@ def test_experiment_design_positive_case_is_exact(
         for row in workflow["action_results"]
         if row["interaction_surface"] == "ui"
     }
-    assert ui_actions == set(EXPERIMENT_DESIGN_REQUIRED_UI_ACTIONS)
+    expected_ui_actions = set(EXPERIMENT_DESIGN_REQUIRED_UI_ACTIONS)
+    if case_id == "two_stock_required":
+        expected_ui_actions.add("editor.regenerate_prepared_design_via_ui")
+    assert ui_actions == expected_ui_actions
 
     values = report["metrics"]["persistence"]["values"]
     case_evidence = values["matrix_case"]
@@ -123,6 +136,20 @@ def test_experiment_design_positive_case_is_exact(
     )
     assert reconstructed["checks"]["runtime_inactive"] is True
     assert reconstructed["changed_paths"] == []
+    attempts = prepared["driver"]["optimization_attempts"]
+    if case_id == "two_stock_required":
+        assert [row["observed_outcome"] for row in attempts] == [
+            "rejected",
+            "generated",
+        ]
+        assert attempts[0][
+            "authoritative_execution_artifacts_unchanged"
+        ] is True
+        assert attempts[0]["warning"]["title"] == "Optimization failed"
+        assert attempts[0]["dirty_after"] is True
+        assert attempts[0]["dialog_open_after"] is True
+    else:
+        assert [row["observed_outcome"] for row in attempts] == ["generated"]
     assert set(report["artifacts"]["screenshots"]) == set(
         EXPERIMENT_DESIGN_REQUIRED_SCREENSHOTS
     )

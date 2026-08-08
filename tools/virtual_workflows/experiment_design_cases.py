@@ -24,6 +24,8 @@ EXPERIMENT_DESIGN_JOURNEY_FAMILY = "experiment_design"
 EXPERIMENT_DESIGN_EXECUTABLE_CASE_IDS = (
     "single_reagent_control",
     "multi_reagent_seed_4321",
+    "one_stock_feasible",
+    "two_stock_required",
 )
 REFERENCE_FIXTURE_PATH = (
     Path(__file__).resolve().parent
@@ -863,7 +865,10 @@ EXPERIMENT_DESIGN_CASES: tuple[ExperimentDesignCase, ...] = (
                 False,
                 "rejected",
                 "Optimization failed",
-                ("Enable two-stock mode",),
+                (
+                    "requires up to 20 nL per reaction",
+                    "printed-volume budget is 10 nL",
+                ),
             ),
             DesignOptimizationAttempt(True, "generated"),
         ),
@@ -1224,6 +1229,9 @@ def editor_specification(case: ExperimentDesignCase) -> dict[str, Any]:
     return {
         "experiment": experiment,
         "reagents": [reagent.normalized() for reagent in case.reagents],
+        "optimization_attempts": [
+            attempt.normalized() for attempt in case.optimization_attempts
+        ],
     }
 
 

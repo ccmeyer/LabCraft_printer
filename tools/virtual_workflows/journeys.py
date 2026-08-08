@@ -1209,6 +1209,12 @@ def _experiment_design_body(runtime: JourneyRuntime) -> None:
             runtime.context,
             action_start=editor_action_start,
             action_end=len(runtime.context.action_results),
+            optimization_action_ids=tuple(
+                "editor.optimize_generate_via_ui"
+                if index == 0
+                else "editor.regenerate_prepared_design_via_ui"
+                for index, _attempt in enumerate(case.optimization_attempts)
+            ),
         )
     )
     capture_milestone(
@@ -3510,8 +3516,17 @@ def _run_experiment_design_matrix_case(
     matrix_id: str,
     case_id: str,
 ) -> dict[str, Any]:
+    from tools.virtual_workflows.experiment_design_cases import (
+        get_experiment_design_case,
+    )
     from tools.virtual_workflows.matrices import build_case_fixture
 
+    case = get_experiment_design_case(case_id)
+    transition_actions = (
+        frozenset({"editor.regenerate_prepared_design_via_ui"})
+        if len(case.optimization_attempts) > 1
+        else frozenset()
+    )
     definition = replace(
         EDITOR_DEFINITION,
         scenario_name=EXPERIMENT_DESIGN_MATRIX_SCENARIO_NAME,
@@ -3520,8 +3535,11 @@ def _run_experiment_design_matrix_case(
             _COMMON_ACTIONS
             | _EDITOR_ACTIONS
             | frozenset({"experiment.load_authoritative_via_ui"})
+            | transition_actions
         ),
-        required_ui_action_ids=EXPERIMENT_DESIGN_REQUIRED_UI_ACTIONS,
+        required_ui_action_ids=(
+            EXPERIMENT_DESIGN_REQUIRED_UI_ACTIONS | transition_actions
+        ),
         required_assertion_ids=EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS,
         required_screenshots=EXPERIMENT_DESIGN_REQUIRED_SCREENSHOTS,
         body=_experiment_design_body,

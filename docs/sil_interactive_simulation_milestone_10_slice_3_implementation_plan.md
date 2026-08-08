@@ -1,8 +1,8 @@
 # Milestone 10 Slice 10.3 Implementation Plan
 
-Status: blocked before implementation acceptance (2026-08-08)
+Status: complete after authorized correction (2026-08-08)
 
-## Blocking evidence
+## Historical blocking evidence and resolution
 
 The clean Slice 10.2 baseline can execute `one_stock_feasible`, but the first
 selected `two_stock_required` diagnostic exposed a production optimizer
@@ -22,8 +22,10 @@ Retained failure report:
 
 The harness changes used to expose this boundary were discarded. No
 production change, executable catalog expansion, oracle change, or Slice 10.3
-commit was accepted. Work may resume only after the separate optimizer
-correction plan is reviewed and completed.
+commit was accepted at that boundary. The user subsequently authorized the
+separate optimizer correction plan. Commit `6c05b80` retained the exact
+accuracy candidate, passed the complete Python suite, and restored the clean
+entrance for this slice.
 
 ## Objective and non-goals
 
@@ -91,8 +93,8 @@ No production file or tracked fixture is expected to change.
 
 Case 3 must contain exactly `Feasibility A_5.00_mM` plus the independently
 expected fill stock/count rows. Case 4 must first show `Optimization failed`
-with `Enable two-stock mode`, remain unfinalized with no authoritative
-execution artifact mutation, then expose exactly
+with the independently exact 20 nL requirement and 10 nL budget, remain
+unfinalized with no authoritative execution artifact mutation, then expose exactly
 `Feasibility A_5.00_mM` and `Feasibility A_10.00_mM` after the normal checkbox
 transition. Both cases must preserve plan revision 1, zero progress,
 `ready_to_start`, inactive runtime, byte-identical reload, exact key and
@@ -117,7 +119,8 @@ title/text/order, dirty state, finalization absence, any execution-artifact
 mutation, or extra/missing stock/count evidence. A production defect stops
 the slice for a separate reviewed correction plan.
 
-Entrance is clean Slice 10.2 commit `fa6ed5c`. Exit requires both new cases,
+Entrance is clean Slice 10.2 commit `fa6ed5c` plus authorized correction
+commit `6c05b80`. Exit requires both new cases,
 their replays, the visible representative/replay, focused tests, evidence
 inspection, completion record, `git diff --check`, and an independent clean
 commit. Rollback reverts only that commit and restores the two-case prefix.

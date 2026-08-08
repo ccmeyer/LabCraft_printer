@@ -9,6 +9,7 @@ from tools.virtual_workflows.assertions import (
     completed_terminal_reload_assertion,
     dispense_counts_reconciled_assertion,
     editor_artifacts_cleanup_assertion,
+    editor_create_finalize_assertion,
     editor_prepared_revision_failure_assertion,
     editor_sequence_exploration_assertions,
     exact_action_sequence_assertion,
@@ -473,6 +474,50 @@ def test_exact_action_sequence_uses_only_the_explicit_ledger_window():
         "outside",
         "first",
         "second",
+    ]
+
+
+def test_editor_create_finalize_sequence_adds_only_explicit_regeneration():
+    action_ids = (
+        "editor.open_via_ui",
+        "artifact.capture_milestone",
+        "editor.new_experiment_via_ui",
+        "editor.configure_design_via_ui",
+        "editor.optimize_generate_via_ui",
+        "editor.regenerate_prepared_design_via_ui",
+        "artifact.capture_milestone",
+        "editor.finish_via_ui",
+    )
+    context = SimpleNamespace(
+        action_results=[
+            {
+                "action_id": action_id,
+                "interaction_surface": (
+                    "harness"
+                    if action_id == "artifact.capture_milestone"
+                    else "ui"
+                ),
+                "status": "pass",
+            }
+            for action_id in action_ids
+        ]
+    )
+
+    legacy = editor_create_finalize_assertion(context)
+    transitioned = editor_create_finalize_assertion(
+        context,
+        optimization_action_ids=(
+            "editor.optimize_generate_via_ui",
+            "editor.regenerate_prepared_design_via_ui",
+        ),
+    )
+
+    assert legacy.decision == "fail"
+    assert transitioned.decision == "pass"
+    assert transitioned.evidence["observed_action_ids"] == [
+        action_id
+        for action_id in action_ids
+        if action_id != "artifact.capture_milestone"
     ]
 
 

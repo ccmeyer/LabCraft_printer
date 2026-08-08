@@ -43,11 +43,11 @@ Reference editor fixture:
 Planned experiment-design identities:
 
 - planned catalog SHA-256:
-  `9f2745b22e8c7a1a8601a498a46471ae94fd0c81eadeb884a4c0063f42216fa7`
+  `cb283c2b8519dfe9dc806a8a0205fe9eb99bda976da728d4de6d6ef9c0ad35dc`
 - test-local `MatrixDefinition` catalog SHA-256:
-  `558ad29a314dce6fad729f75bed298afe45486f43db79d1b318497ec0d8c0c8e`
+  `47c5b7962f1788fdd2095ea96a1de9120bb1c17305b1a526244068c23a47629b`
 - full test-local plan SHA-256 at seed 9, timeout 12, execution unauthorized:
-  `dae78071835ea968cf5752d5dab5e1ceba5daafab90b5de6eb827786ef72d41e`
+  `ea3fe6b3d508ca05fd4d95eab4f004a6679de331690ed621e8352a35858dae72`
 - pairwise audit: 9 cases, 14 required pairs, 0 uncovered
 
 Case SHA-256 values:
@@ -57,7 +57,7 @@ Case SHA-256 values:
 | `single_reagent_control` | `b0deaaf5af7b4391d3cc92de2b03b7729ba3ea6abf7b22d122f78b9ef347c033` |
 | `multi_reagent_seed_4321` | `5d2e7dff0ea9c2e0bcd1e3b218b39280aca57b745834024226fece850f110f51` |
 | `one_stock_feasible` | `30ee17fcd869f6c3989d39b50d7e484ed8de233e5af6fc1f2c47cfac40230e17` |
-| `two_stock_required` | `aa4d85a9f29df49d8c99f1b6f50fd80b59e79101c053f8d93a8ec332a4557350` |
+| `two_stock_required` | `b9bd401c9f223c1576bc98938c75b2a7401958dad2048a2d048f95d4fbda2fff` |
 | `custom_wells_with_exclusions` | `ace89896cfdfdf63ecb9c5ae567ef29c7926b6e5211ed15c168fdeee0b5eef6e` |
 | `multi_reagent_seed_1234` | `a30c30ed1f5b9c40a64ebeed9eec4ed062532a1e9627e69e60d1711860ce9df4` |
 | `exact_custom_capacity` | `f8f29163ef968a7a0ba0e6ba2483d96104dab1eac87db53e6f932ef10e9368bf` |
@@ -72,6 +72,13 @@ had inadvertently used 10 nL. The case, planned-catalog, test-local definition,
 and test-local plan hashes above are the corrected frozen identities; no
 production optimizer or generated output was used as the expected-value
 source.
+
+Slice 10.3 corrected a second planning-only oracle mismatch before accepting
+the case. The Model's raw reason mentions enabling two-stock mode, but the
+real Qt warning/status surface instead reports the independently exact 20 nL
+requirement and 10 nL budget. The `two_stock_required`, planned-catalog,
+test-local definition, and test-local plan hashes above freeze those stronger
+visible fragments. No production message or behavior was changed.
 
 Existing production matrix identities remain:
 

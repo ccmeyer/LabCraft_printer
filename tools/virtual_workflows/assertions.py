@@ -2742,20 +2742,27 @@ def editor_create_finalize_assertion(
     *,
     action_start: int = 0,
     action_end: int | None = None,
+    optimization_action_ids: tuple[str, ...] = (
+        "editor.optimize_generate_via_ui",
+    ),
 ) -> AssertionResult:
+    action_ids = (
+        "editor.open_via_ui",
+        "artifact.capture_milestone",
+        "editor.new_experiment_via_ui",
+        "editor.configure_design_via_ui",
+        *optimization_action_ids,
+        "artifact.capture_milestone",
+        "editor.finish_via_ui",
+    )
     return exact_action_sequence_assertion(
         context,
         expectation=ActionSequenceExpectation(
-            (
-                "editor.open_via_ui",
-                "artifact.capture_milestone",
-                "editor.new_experiment_via_ui",
-                "editor.configure_design_via_ui",
-                "editor.optimize_generate_via_ui",
-                "artifact.capture_milestone",
-                "editor.finish_via_ui",
+            action_ids,
+            tuple(
+                "harness" if action_id == "artifact.capture_milestone" else "ui"
+                for action_id in action_ids
             ),
-            ("ui", "harness", "ui", "ui", "ui", "harness", "ui"),
         ),
         start_index=action_start,
         end_index=action_end,
@@ -2859,6 +2866,56 @@ def experiment_design_case_oracle_assertion(
             concentration_checks[f"{well_id}:{reagent}"] = total == target
     configured = dict(driver_evidence.get("configured") or {})
     generated = dict(driver_evidence.get("generated") or {})
+    expected_attempts = list(case.get("optimization_attempts") or [])
+    observed_attempts = list(driver_evidence.get("optimization_attempts") or [])
+
+    def optimization_attempt_matches(
+        expected_attempt: Mapping[str, Any],
+        observed_attempt: Mapping[str, Any],
+    ) -> bool:
+        expected_outcome = str(expected_attempt.get("expected_outcome") or "")
+        if (
+            bool(observed_attempt.get("allow_two_stock_solutions"))
+            != bool(expected_attempt.get("allow_two_stock_solutions"))
+            or str(observed_attempt.get("observed_outcome") or "")
+            != expected_outcome
+        ):
+            return False
+        if expected_outcome == "generated":
+            return observed_attempt.get("dirty_after") is False
+        warning = dict(observed_attempt.get("warning") or {})
+        combined = " ".join(
+            (
+                str(warning.get("text") or ""),
+                str(observed_attempt.get("status") or ""),
+            )
+        ).casefold()
+        return (
+            warning.get("title") == expected_attempt.get("expected_dialog_title")
+            and bool(warning.get("entered"))
+            and bool(warning.get("dismissed"))
+            and all(
+                str(fragment).casefold() in combined
+                for fragment in expected_attempt.get(
+                    "expected_message_fragments", ()
+                )
+            )
+            and observed_attempt.get("dirty_after") is True
+            and observed_attempt.get("dialog_open_after") is True
+            and observed_attempt.get(
+                "authoritative_execution_artifacts_unchanged"
+            )
+            is True
+            and observed_attempt.get("execution_artifacts_before")
+            == observed_attempt.get("execution_artifacts_after")
+        )
+
+    optimization_attempt_checks = [
+        optimization_attempt_matches(expected_attempt, observed_attempt)
+        for expected_attempt, observed_attempt in zip(
+            expected_attempts, observed_attempts
+        )
+    ]
     expected_editor_stock_rows = len(expected_stocks) + int(
         not any(stock.get("role") == "fill" for stock in expected_stocks.values())
     )
@@ -2896,10 +2953,19 @@ def experiment_design_case_oracle_assertion(
             == list(experiment["selected_well_ids"])
             and configured.get("random_seed") == experiment["random_seed"]
             and configured.get("reagent_count") == len(case["reagents"])
+            and bool(configured.get("allow_two_stock_solutions"))
+            == bool(expected_attempts[0]["allow_two_stock_solutions"])
+        ),
+        "optimization_attempts_exact": (
+            len(observed_attempts) == len(expected_attempts)
+            and len(optimization_attempt_checks) == len(expected_attempts)
+            and all(optimization_attempt_checks)
         ),
         "generated_evidence_exact": (
             generated.get("reaction_count") == expected["reaction_count"]
             and generated.get("stock_row_count") == expected_editor_stock_rows
+            and bool(generated.get("allow_two_stock_solutions"))
+            == bool(expected_attempts[-1]["allow_two_stock_solutions"])
         ),
     }
     evidence = {
@@ -2910,6 +2976,7 @@ def experiment_design_case_oracle_assertion(
         "observed": projection,
         "stock_checks": stock_checks,
         "concentration_checks": concentration_checks,
+        "optimization_attempt_checks": optimization_attempt_checks,
         "driver": dict(driver_evidence),
         "expected_editor_stock_row_count": expected_editor_stock_rows,
         "plan_id": snapshot.plan_id,
