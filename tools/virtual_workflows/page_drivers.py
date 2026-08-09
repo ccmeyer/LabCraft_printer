@@ -1446,6 +1446,150 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             on_failure=capture_failure,
         )
 
+    def load_rejected_authoritative_execution(
+        self,
+        experiment_dir,
+        *,
+        case,
+    ) -> dict[str, Any]:
+        """Inspect one prelaunch-faulted bundle and attempt its locked action."""
+
+        from pathlib import Path
+
+        from tools.virtual_workflows.actions import (
+            capture_execution_preflight_boundary,
+            capture_milestone,
+            execute_action,
+        )
+
+        directory = Path(experiment_dir).resolve()
+
+        def loaded(dialog) -> Mapping[str, Any]:
+            model = self.context.experiment_model
+            bundle = model.get_authoritative_execution_bundle()
+            if bundle is None:
+                raise RuntimeError("authoritative inspection produced no bundle")
+            eligibility = model.get_execution_resume_eligibility() or {}
+            issues = [
+                {
+                    "severity": issue.severity,
+                    "code": issue.code,
+                    "message": issue.message,
+                    "context": dict(issue.context),
+                }
+                for issue in bundle.issues
+            ]
+            raw_code = issues[0]["code"] if issues else str(eligibility.get("status") or "")
+            raw_message = issues[0]["message"] if issues else str(eligibility.get("reason") or "")
+            normalized_message = raw_message
+            if case.case_id == "incomplete_authoritative_bundle_invalid":
+                expected_suffix = str(directory / "progress.json")
+                portable_raw = raw_message.replace("\\\\", "\\")
+                if "No such file or directory" not in raw_message or expected_suffix not in portable_raw:
+                    raise RuntimeError("missing progress classification did not identify the exact copied path")
+                normalized_message = case.expected.message
+            if (
+                raw_code != case.expected.code
+                or normalized_message != case.expected.message
+            ):
+                raise RuntimeError(
+                    "authoritative classification drifted: "
+                    f"code={raw_code!r}, message={raw_message!r}"
+                )
+            status_text = str(dialog.status_lbl.text() or "")
+            banner_text = str(dialog.lifecycle_banner.text() or "")
+            action_label = str(dialog.finish_btn.text() or "")
+            if (
+                action_label != "Execution Locked"
+                or dialog.finish_btn.isEnabled()
+                or model.is_authoritative_execution_runtime_active()
+                or self.context.controller.get_array_run_state() != "idle"
+                or raw_message not in status_text
+                or raw_message not in banner_text
+            ):
+                raise RuntimeError("rejected authoritative editor state is not exact")
+            evidence = {
+                "classification": case.expected.classification,
+                "code": raw_code,
+                "message": normalized_message,
+                "raw_message": raw_message,
+                "issues": issues,
+                "eligibility": dict(eligibility),
+                "status_text": status_text,
+                "banner_text": banner_text,
+                "action_label": action_label,
+                "action_enabled": bool(dialog.finish_btn.isEnabled()),
+                "runtime_active": bool(model.is_authoritative_execution_runtime_active()),
+                "experiment_dir": str(directory),
+            }
+            execute_action(
+                self.context,
+                case.operator_action_id,
+                lambda: evidence,
+            )
+            before = capture_execution_preflight_boundary(
+                self.context,
+                identity_keys=case.identity_keys,
+                workflow_state=case.expected.workflow_state,
+            )
+
+            def attempt_locked_action() -> Mapping[str, Any]:
+                QtTest.QTest.mouseClick(
+                    dialog.finish_btn,
+                    QtCore.Qt.MouseButton.LeftButton,
+                )
+                self.context.app.processEvents()
+                if not dialog.isVisible() or dialog.finish_btn.isEnabled():
+                    raise RuntimeError("locked activation action changed state")
+                return {
+                    "selected_control": str(dialog.finish_btn.text() or ""),
+                    "enabled": bool(dialog.finish_btn.isEnabled()),
+                }
+
+            attempt = execute_action(
+                self.context,
+                "experiment.attempt_locked_activation_via_ui",
+                attempt_locked_action,
+            )
+            after = capture_execution_preflight_boundary(
+                self.context,
+                identity_keys=case.identity_keys,
+                workflow_state=case.expected.workflow_state,
+            )
+            capture_milestone(
+                self.context,
+                "rejection_observed",
+                evidence={
+                    "case_id": case.case_id,
+                    "code": raw_code,
+                    "message": raw_message,
+                    "action_label": action_label,
+                    "action_enabled": False,
+                },
+                widget=dialog,
+            )
+            dialog.reject()
+            return {
+                "classification": evidence,
+                "attempt": dict(attempt),
+                "before": before,
+                "after": after,
+                "ui": {
+                    "title": None,
+                    "message": normalized_message,
+                    "raw_message": raw_message,
+                    "selected_control": action_label,
+                    "status_text": status_text,
+                    "banner_text": banner_text,
+                },
+            }
+
+        return self._drive_directory_load(
+            directory,
+            purpose="authoritative persistence safeguard",
+            on_loaded=loaded,
+        )["loaded"]
+
     def load_prepared_design(
         self,
         experiment_dir,

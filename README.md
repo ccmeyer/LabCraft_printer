@@ -1715,6 +1715,74 @@ suite result was `4146 passed, 88 skipped`. Exact retained paths, hashes, and
 limitations are in
 `docs/sil_interactive_simulation_milestone_10_slice_6_completion_record.md`.
 
+### Milestone 12 safeguard matrices
+
+Milestone 12 adds three Windows host-SIL matrices. They exercise real Qt
+operator actions and pass only when the exact typed/UI outcome and the shared
+no-mutation/no-dispatch oracle agree:
+
+- `editor_safeguards_v1` (8 compact Finalize/Upload Design boundaries);
+- `execution_preflight_safeguards_v1` (17 calibration, durable-identity, and
+  lifecycle boundaries, including one reordered-row positive identity case);
+- `authoritative_persistence_safeguards_v1` (9 isolated one-fault reload
+  classifications).
+
+Use the repository virtual environment on Windows. List or dry-run first, then
+run a complete catalog or one visible case:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --list matrices
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix editor_safeguards_v1 --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix execution_preflight_safeguards_v1 `
+  --output-root verification_reports\milestone_12 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 180
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix authoritative_persistence_safeguards_v1 `
+  --case unreflected_pending_intent_blocked `
+  --output-root verification_reports\milestone_12_visible `
+  --seed 1 --speed-multiplier 20 --timeout-seconds 240 --visible
+```
+
+Run the exact replay command printed by each report or matrix aggregate; do
+not reconstruct a negative fixture from memory. A complete matrix writes a
+plan, aggregate, child logs, report-v1 trees, catalog/manifest hashes, and the
+tracked matrix-registration row. Persistence faults are created before launch
+only in test-owned copies beneath the current SIL scenario root. Never point a
+fault case at a user experiment.
+
+For a rejection report, inspect
+`metrics.persistence.values.safeguard_boundary`: `failed_checks` must be empty,
+all checks must be true, the observed typed/UI record must equal the literal
+expected record, and dispatch counters must remain unchanged. Persistence
+reports additionally retain `prelaunch_fault`, source/faulted inventories, and
+the one-path fault manifest. Visible reports retain the rejection dialog or
+locked-state screenshot; a missing-file screenshot naturally differs across
+replay because it shows the new isolated absolute path.
+
+The immutable Milestone 11A
+`optimizer_360_calibration_reload_execution_v1` scenario remains the complex
+positive control and is not a negative-case fixture. The preexisting
+`print_array_stress_384x10_v1` pulse-width fixture/staging mismatch is also not
+a Milestone 12 product failure. Use direct Milestone 12 matrices, the selected
+optimizer-360 compatibility run, `lifecycle`, and `host_regression` as the
+Milestone 12 gates; do not require or weaken evidence to make the entire
+`host_stress` aggregate green.
+
+If pytest cannot access its shared `%TEMP%\pytest-of-<user>` root in a sandbox,
+give focused runs a unique repository-contained `--basetemp` beneath
+`verification_reports`. The required final suite remains:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q
+```
+
+Allow at least 900000 ms when an external runner supplies a timeout.
+
 ### Bounded seeded editor exploration
 
 Milestone 8 Slice 6 adds the manually invoked `editor_prepared_guard_v1`

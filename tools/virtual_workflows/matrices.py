@@ -21,6 +21,30 @@ from tools.virtual_workflows.experiment_design_cases import (
     executable_experiment_design_cases,
     planned_catalog_sha256,
 )
+from tools.virtual_workflows.editor_safeguards import (
+    EDITOR_SAFEGUARD_BASE_SCENARIO_ID,
+    EDITOR_SAFEGUARD_JOURNEY_FAMILY,
+    EDITOR_SAFEGUARD_MATRIX_ID,
+    build_editor_safeguard_fixture,
+    editor_safeguard_cases,
+    editor_safeguard_catalog,
+)
+from tools.virtual_workflows.execution_preflight_safeguards import (
+    EXECUTION_PREFLIGHT_BASE_SCENARIO_ID,
+    EXECUTION_PREFLIGHT_JOURNEY_FAMILY,
+    EXECUTION_PREFLIGHT_MATRIX_ID,
+    build_execution_preflight_fixture,
+    execution_preflight_cases,
+    execution_preflight_catalog,
+)
+from tools.virtual_workflows.persistence_safeguards import (
+    PERSISTENCE_SAFEGUARD_BASE_SCENARIO_ID,
+    PERSISTENCE_SAFEGUARD_JOURNEY_FAMILY,
+    PERSISTENCE_SAFEGUARD_MATRIX_ID,
+    build_persistence_safeguard_fixture,
+    persistence_safeguard_cases,
+    persistence_safeguard_catalog,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1929,11 +1953,92 @@ EXPERIMENT_DESIGN_DEFINITION = MatrixDefinition(
     fixture_builder=_build_experiment_design_case_fixture,
 )
 
+
+def _build_editor_safeguard_case_fixture(
+    case: MatrixCaseContract,
+) -> tuple[dict[str, Any], Path]:
+    fixture, source = build_editor_safeguard_fixture(case)
+    fixture["lifecycle"]["catalog_sha256"] = (
+        EDITOR_SAFEGUARD_DEFINITION.catalog_sha256()
+    )
+    return fixture, source
+
+
+EDITOR_SAFEGUARD_DEFINITION = MatrixDefinition(
+    matrix_id=EDITOR_SAFEGUARD_MATRIX_ID,
+    base_scenario_id=EDITOR_SAFEGUARD_BASE_SCENARIO_ID,
+    journey_family=EDITOR_SAFEGUARD_JOURNEY_FAMILY,
+    platform="windows_sil",
+    execution="manual_on_demand",
+    cases=editor_safeguard_cases(),
+    catalog_metadata={
+        "safeguard_schema_version": 1,
+        "source_catalog_sha256": editor_safeguard_catalog().contract_sha256,
+    },
+    fixture_builder=_build_editor_safeguard_case_fixture,
+)
+
+
+def _build_execution_preflight_case_fixture(
+    case: MatrixCaseContract,
+) -> tuple[dict[str, Any], Path]:
+    fixture, source = build_execution_preflight_fixture(case)
+    fixture["lifecycle"]["catalog_sha256"] = (
+        EXECUTION_PREFLIGHT_DEFINITION.catalog_sha256()
+    )
+    return fixture, source
+
+
+EXECUTION_PREFLIGHT_DEFINITION = MatrixDefinition(
+    matrix_id=EXECUTION_PREFLIGHT_MATRIX_ID,
+    base_scenario_id=EXECUTION_PREFLIGHT_BASE_SCENARIO_ID,
+    journey_family=EXECUTION_PREFLIGHT_JOURNEY_FAMILY,
+    platform="windows_sil",
+    execution="manual_on_demand",
+    cases=execution_preflight_cases(),
+    catalog_metadata={
+        "safeguard_schema_version": 1,
+        "source_catalog_sha256": execution_preflight_catalog().contract_sha256,
+        "identity_join": "durable_ids_not_serialized_row_position",
+    },
+    fixture_builder=_build_execution_preflight_case_fixture,
+)
+
+
+def _build_persistence_safeguard_case_fixture(
+    case: MatrixCaseContract,
+) -> tuple[dict[str, Any], Path]:
+    fixture, source = build_persistence_safeguard_fixture(case)
+    fixture["lifecycle"]["catalog_sha256"] = (
+        PERSISTENCE_SAFEGUARD_DEFINITION.catalog_sha256()
+    )
+    return fixture, source
+
+
+PERSISTENCE_SAFEGUARD_DEFINITION = MatrixDefinition(
+    matrix_id=PERSISTENCE_SAFEGUARD_MATRIX_ID,
+    base_scenario_id=PERSISTENCE_SAFEGUARD_BASE_SCENARIO_ID,
+    journey_family=PERSISTENCE_SAFEGUARD_JOURNEY_FAMILY,
+    platform="windows_sil",
+    execution="manual_on_demand",
+    cases=persistence_safeguard_cases(),
+    catalog_metadata={
+        "safeguard_schema_version": 1,
+        "source_catalog_sha256": persistence_safeguard_catalog().contract_sha256,
+        "fault_phase": "prelaunch",
+        "fixture_root_kind": "scenario_case_copy",
+    },
+    fixture_builder=_build_persistence_safeguard_case_fixture,
+)
+
 MATRIX_REGISTRY = MatrixRegistry(
     (
         MIXED_MODE_DEFINITION,
         CALIBRATION_REQUANTIZATION_DEFINITION,
         EXPERIMENT_DESIGN_DEFINITION,
+        EDITOR_SAFEGUARD_DEFINITION,
+        EXECUTION_PREFLIGHT_DEFINITION,
+        PERSISTENCE_SAFEGUARD_DEFINITION,
     )
 )
 
@@ -1998,6 +2103,12 @@ __all__ = [
     "CALIBRATION_REQUANTIZATION_MATRIX_ID",
     "EXPERIMENT_DESIGN_DEFINITION",
     "EXPERIMENT_DESIGN_MATRIX_ID",
+    "EDITOR_SAFEGUARD_DEFINITION",
+    "EDITOR_SAFEGUARD_MATRIX_ID",
+    "EXECUTION_PREFLIGHT_DEFINITION",
+    "EXECUTION_PREFLIGHT_MATRIX_ID",
+    "PERSISTENCE_SAFEGUARD_DEFINITION",
+    "PERSISTENCE_SAFEGUARD_MATRIX_ID",
     "MATRIX_CASES",
     "MATRIX_PLAN_SCHEMA_NAME",
     "MATRIX_REGISTRY",

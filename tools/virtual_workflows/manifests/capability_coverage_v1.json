@@ -733,6 +733,33 @@
     "path_policy": "repository_relative_posix",
     "generated_evidence_updates_manifest": false,
     "coverage_join_status": "implemented_milestone_8_slice_4",
+    "safeguard_matrix_coverage_join_status": "implemented_milestone_12_slice_5",
+    "safeguard_matrix_catalog": [
+      {
+        "id": "editor_safeguards_v1",
+        "case_count": 8,
+        "case_ids": ["impossible_fixed_target_finalize_rejected", "printed_exceeds_final_finalize_rejected", "one_stock_infeasible_finalize_rejected", "two_stock_infeasible_finalize_rejected", "capacity_plus_one_finalize_rejected", "invalid_uploaded_well_rejected", "excluded_uploaded_well_rejected", "dirty_invalid_finalize_rejected"],
+        "catalog_sha256": "7b75e9776402641a1b8b00527b394de8296f5ed29875af52c05970de328d7da5",
+        "required_assertion_ids": ["safeguard_rejection_no_mutation_no_dispatch"],
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_safeguards.py::test_editor_safeguard_real_operator_action_is_exact_and_quiescent"]
+      },
+      {
+        "id": "execution_preflight_safeguards_v1",
+        "case_count": 17,
+        "case_ids": ["calibration_head_mode_cancelled", "calibration_pulse_profile_cancelled", "start_missing_applied_calibration_cancelled", "start_stale_design_volume_cancelled", "start_pulse_width_mismatch_cancelled", "start_pressure_mismatch_cancelled", "wrong_stock_calibration_binding_rejected", "wrong_printer_head_calibration_binding_rejected", "reordered_stock_rows_keyed_valid", "regenerated_design_stale_calibration_rejected", "inspected_not_activated_start_rejected", "invalid_activation_rejected", "active_execution_edit_rejected", "progressed_stock_recalibration_rejected", "start_while_active_rejected", "resume_at_invalid_boundary_rejected", "head_exchange_at_invalid_boundary_rejected"],
+        "catalog_sha256": "0a4169cfc5f844e25cc02c1af74ab9b26b01d82a9703470b85adfc0b0ed763c2",
+        "required_assertion_ids": ["safeguard_rejection_no_mutation_no_dispatch"],
+        "test_node_ids": ["tests/system/test_virtual_workflow_execution_preflight_safeguards.py::test_execution_preflight_real_operator_surface_is_exact_and_quiescent"]
+      },
+      {
+        "id": "authoritative_persistence_safeguards_v1",
+        "case_count": 9,
+        "case_ids": ["unreflected_pending_intent_blocked", "positive_progress_without_checkpoint_blocked", "checkpoint_plan_revision_conflict_blocked", "checkpoint_progress_fingerprint_conflict_blocked", "progress_plan_revision_conflict_invalid", "latest_plan_history_conflict_invalid", "progressed_calibration_link_missing_invalid", "design_plan_hash_conflict_invalid", "incomplete_authoritative_bundle_invalid"],
+        "catalog_sha256": "64fffe3723489cb812358be06f146c22fd72cf36c4fc61292d5820154a06656c",
+        "required_assertion_ids": ["safeguard_rejection_no_mutation_no_dispatch"],
+        "test_node_ids": ["tests/system/test_virtual_workflow_persistence_safeguards.py::test_persistence_fault_real_load_is_exact_inactive_and_nonmutating"]
+      }
+    ],
     "action_catalog": [
       {
         "id": "fixture.prepare_authoritative",
@@ -882,6 +909,90 @@
         "id": "editor.configure_design_via_ui",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "editor.upload_design_apply_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "calibration.preflight_cancel_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "array.start_preflight_cancel_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "array.start_identity_preflight_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "experiment.inspect_reordered_execution_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "array.start_inactive_execution_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "experiment.activate_invalid_execution_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "editor.finalize_active_execution_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "calibration.apply_progressed_stock_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "array.start_while_active_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "array.resume_invalid_boundary_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "head.exchange_invalid_boundary_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "experiment.load_rejected_authoritative_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "experiment.attempt_locked_activation_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
         "interaction_surface": "ui"
       },
       {

@@ -231,6 +231,7 @@ class JourneyExecutor:
         fixture_bundle: tuple[dict[str, Any], Path] | None = None,
         replay_selector_args: Sequence[str] | None = None,
         initial_observations: Mapping[str, Any] | None = None,
+        prelaunch_prepare: Callable[[JourneyRuntime], None] | None = None,
     ) -> dict[str, Any]:
         if str(config.scenario_id) != definition.registry_id:
             raise ValueError(
@@ -266,7 +267,11 @@ class JourneyExecutor:
             runtime.observations.update(dict(initial_observations))
         teardown: Mapping[str, Any] = {}
         try:
-            harness.start()
+            harness.start(
+                (lambda _root: prelaunch_prepare(runtime))
+                if prelaunch_prepare is not None
+                else None
+            )
             definition.body(runtime)
             self._validate_success_contract(runtime)
         except BaseException as exc:

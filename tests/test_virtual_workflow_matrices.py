@@ -11,6 +11,18 @@ from tools.run_virtual_workflow import main
 from tools.virtual_workflows.experiment_design_cases import (
     EXPERIMENT_DESIGN_MATRIX_ID,
 )
+from tools.virtual_workflows.editor_safeguards import (
+    EDITOR_SAFEGUARD_MATRIX_ID,
+    EXPECTED_CASE_IDS as EXPECTED_EDITOR_SAFEGUARD_CASES,
+)
+from tools.virtual_workflows.execution_preflight_safeguards import (
+    EXECUTION_PREFLIGHT_MATRIX_ID,
+    EXPECTED_CASE_IDS as EXPECTED_EXECUTION_PREFLIGHT_CASES,
+)
+from tools.virtual_workflows.persistence_safeguards import (
+    PERSISTENCE_SAFEGUARD_MATRIX_ID,
+    EXPECTED_CASE_IDS as EXPECTED_PERSISTENCE_SAFEGUARD_CASES,
+)
 from tools.virtual_workflows.matrices import (
     BASE_FIXTURE_PATH,
     CALIBRATION_REQUANTIZATION_MATRIX_ID,
@@ -57,6 +69,15 @@ EXPECTED_EXPERIMENT_DESIGN_PREFIX_CATALOG_SHA256 = (
 )
 EXPECTED_EXPERIMENT_DESIGN_CONTROL_PLAN_SHA256 = (
     "68fe98feec0fe13883eeac6024644f105a26783b44b33b23ecc8f0c92470157e"
+)
+EXPECTED_EDITOR_SAFEGUARD_CATALOG_SHA256 = (
+    "7b75e9776402641a1b8b00527b394de8296f5ed29875af52c05970de328d7da5"
+)
+EXPECTED_EXECUTION_PREFLIGHT_CATALOG_SHA256 = (
+    "0a4169cfc5f844e25cc02c1af74ab9b26b01d82a9703470b85adfc0b0ed763c2"
+)
+EXPECTED_PERSISTENCE_SAFEGUARD_CATALOG_SHA256 = (
+    "64fffe3723489cb812358be06f146c22fd72cf36c4fc61292d5820154a06656c"
 )
 EXPECTED_REQUANTIZATION_CASE_SHA256 = {
     "droplet_idempotent_10_to_10": "714f1c212bef572de306a7f2b35d47e28c477477467dc36cec4c4acf2ec8d98f",
@@ -575,7 +596,10 @@ def test_cli_lists_and_dry_runs_matrices_without_execution(capsys):
     assert main(["--list", "matrices"]) == 0
     catalog = json.loads(capsys.readouterr().out)
     assert [row["id"] for row in catalog["matrices"]] == [
+        PERSISTENCE_SAFEGUARD_MATRIX_ID,
         CALIBRATION_REQUANTIZATION_MATRIX_ID,
+        EDITOR_SAFEGUARD_MATRIX_ID,
+        EXECUTION_PREFLIGHT_MATRIX_ID,
         EXPERIMENT_DESIGN_MATRIX_ID,
         MIXED_MODE_MATRIX_ID,
     ]
@@ -597,6 +621,24 @@ def test_cli_lists_and_dry_runs_matrices_without_execution(capsys):
     ]
     assert entries[EXPERIMENT_DESIGN_MATRIX_ID]["catalog_sha256"] == (
         EXPECTED_EXPERIMENT_DESIGN_PREFIX_CATALOG_SHA256
+    )
+    assert entries[EDITOR_SAFEGUARD_MATRIX_ID]["case_ids"] == list(
+        EXPECTED_EDITOR_SAFEGUARD_CASES
+    )
+    assert entries[EDITOR_SAFEGUARD_MATRIX_ID]["catalog_sha256"] == (
+        EXPECTED_EDITOR_SAFEGUARD_CATALOG_SHA256
+    )
+    assert entries[EXECUTION_PREFLIGHT_MATRIX_ID]["case_ids"] == list(
+        EXPECTED_EXECUTION_PREFLIGHT_CASES
+    )
+    assert entries[EXECUTION_PREFLIGHT_MATRIX_ID]["catalog_sha256"] == (
+        EXPECTED_EXECUTION_PREFLIGHT_CATALOG_SHA256
+    )
+    assert entries[PERSISTENCE_SAFEGUARD_MATRIX_ID]["case_ids"] == list(
+        EXPECTED_PERSISTENCE_SAFEGUARD_CASES
+    )
+    assert entries[PERSISTENCE_SAFEGUARD_MATRIX_ID]["catalog_sha256"] == (
+        EXPECTED_PERSISTENCE_SAFEGUARD_CATALOG_SHA256
     )
 
     design_plan = resolve_matrix_plan(

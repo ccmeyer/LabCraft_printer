@@ -300,6 +300,59 @@ per-stock 1300-1390 us fixture values with the existing fixed 1355 us stress
 staging value. Retain that report as a separate finding; do not change the new
 oracle, production behavior, or timeout to conceal it.
 
+## Milestone 12 safeguard qualification
+
+Select the smallest catalog matching the changed boundary:
+
+| Boundary | Matrix |
+| --- | --- |
+| Finalize, formulation, capacity, uploaded/excluded wells | `editor_safeguards_v1` |
+| Calibration settings, durable stock/head binding, activate/start/resume/edit/recalibrate/head exchange | `execution_preflight_safeguards_v1` |
+| Authoritative plan/progress/resume/revision/calibration conflicts | `authoritative_persistence_safeguards_v1` |
+
+List and dry-run before executing. A complete matrix uses fresh child
+processes and embeds its tracked capability-manifest registration in the
+aggregate:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --list matrices
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix authoritative_persistence_safeguards_v1 --dry-run
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix authoritative_persistence_safeguards_v1 `
+  --output-root verification_reports\milestone_12 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 180
+```
+
+For every negative child, require a passing report, the exact typed
+classification/code/message and UI title/control, and an empty
+`metrics.persistence.values.safeguard_boundary.failed_checks`. Every shared
+oracle check must be true, especially persistence/model/lifecycle/queue/
+dispatch unchanged and no activation. The reordered-stock-row case is a
+positive identity control: it must validate by durable IDs and still dispatch
+nothing.
+
+Persistence cases must additionally retain one `prelaunch_fault` manifest,
+one changed relative path, distinct original/mutated hashes, equal source and
+faulted inventories everywhere else, `application_launched: false` at fault
+creation, and a locked inactive load. Fault roots must be descendants of the
+current scenario root. Never edit, copy over, or delete user experiment data.
+
+Run visible representatives with `--visible`, inspect the actual modal or
+locked banner, then execute the emitted replay exactly. The required set is
+three editor, four preflight, and three persistence cases documented in the
+Milestone 12 execution plan. Missing-file screenshots include the unique
+case-owned absolute root and therefore need not be byte-identical across
+replay; the literal portable classification and all other oracle fields must
+remain exact.
+
+Closeout also requires optimizer-360 direct/replay as the immutable complex
+positive control, lifecycle direct/replay, host-regression direct/replay, the
+focused safeguard tests, and the default Python suite. Do not use the full
+360-reaction journey for individual negative guards. Do not treat the known
+384x10 pulse-width mismatch in `host_stress` as a Milestone 12 failure or
+weaken any expected rejection because of it.
+
 ## Evidence layout and authority
 
 Generated data remains beneath the ignored `verification_reports/` tree:

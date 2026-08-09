@@ -1773,13 +1773,35 @@ Rollback:
 
 ### Milestone 12: Editor, execution-preflight, and persistence safeguards
 
-Status: `planned`
+Status: `complete` (2026-08-09; all five slices and final qualification passed)
 
 Goal:
 
 - prove through independently runnable real-UI and reload boundaries that the
   application fails closed before dispensing when design, calibration,
   identity, lifecycle, or authoritative persistence is invalid.
+
+Positive baseline and scope:
+
+- preserve Milestone 11A's qualified
+  `optimizer_360_calibration_reload_execution_v1` case as the immutable complex
+  positive control for optimizer, randomized-assignment, five-calibration,
+  clean-session, exact-execution, and terminal-persistence behavior;
+- use compact deterministic fixtures for most rejected boundaries so that each
+  safeguard isolates one invalid invariant and stops immediately after the
+  expected rejection rather than replaying the complete 360-reaction journey;
+- use a reduced, case-owned derivative of the Milestone 11A contract only for
+  high-value multi-stock identity safeguards: correct calibration values joined
+  to the wrong stock or printer-head identity, stock rows presented in a
+  different order, and calibration made stale by optimizer regeneration or
+  refinalization;
+- keep all assertions keyed by durable identities rather than row, iteration,
+  or list position, and retain literal expected values independently of
+  production design, optimizer, or calibration algorithms;
+- do not absorb the pre-existing `print_array_stress_384x10_v1` pulse-width
+  fixture/staging mismatch into this milestone. It requires a separate reviewed
+  correction plan before a future qualification treats the complete
+  `host_stress` suite as a required green gate.
 
 Safeguard groups:
 
@@ -1818,7 +1840,15 @@ Deliverables:
   isolated scenario root before application launch, with original and mutated
   hashes retained;
 - fresh-process execution, exact replay, visible representative failures,
-  focused tests, and capability documentation.
+  focused tests, and capability documentation;
+- an execution plan that prefers approximately five independently reviewable
+  boundaries:
+  1. typed safeguard contracts plus the shared no-mutation/no-dispatch oracle;
+  2. editor safeguards;
+  3. calibration, identity, and lifecycle preflight safeguards;
+  4. isolated persistence and authoritative-reload safeguards;
+  5. exact replay, visible representatives, regression, documentation, and
+     closeout.
 
 Fault policy:
 
@@ -1828,7 +1858,10 @@ Fault policy:
 - each case must stop at its asserted boundary and must not rely on a later
   cleanup action to erase an unsafe command or intent;
 - bypasses may be tested only as explicitly named safeguard behavior and may
-  not satisfy the normal safe-start capability.
+  not satisfy the normal safe-start capability;
+- any observed production guard that does not fail closed is a defect signal
+  requiring a separate reviewed correction plan; do not weaken the typed
+  expected rejection or literal oracle to accommodate it.
 
 Gate:
 
@@ -1885,16 +1918,37 @@ Deliverables:
   illegal sequences that prove rejection, no mutation/no dispatch, recovery,
   and a valid final boundary;
 - retained generated plan, reached transitions, action/assertion evidence,
-  screenshots, authoritative hashes, cleanup, aggregate, and exact replay.
+  screenshots, authoritative hashes, cleanup, aggregate, and exact replay;
+- a versioned coverage report for admitted states, state transitions,
+  operations, and rejection classes rather than relying on seed or action
+  counts as a proxy for semantic coverage;
+- retention of every original failing generated sequence, plus an optional
+  deterministic reduction that produces a smaller diagnostic reproducer
+  without replacing or changing the authoritative original sequence;
+- an execution plan that prefers independently reviewable state-model,
+  legal-sequence, illegal/recovery-sequence, replay/reduction, and final
+  qualification boundaries.
 
 Exploration policy:
 
 - reuse the deterministic Milestone 9-12 actions and assertions; the
   generator must not invent weaker success criteria;
-- use a small fixed seed set and keep each sequence below a reviewed semantic
-  action maximum;
-- generated exploration is diagnostic and may supplement but may not replace
-  deterministic capability evidence;
+- use compact deterministic experiment cases for the normal generated corpus;
+  keep the 360-reaction Milestone 11A case as a separately selected targeted
+  stress oracle rather than paying its lifecycle cost for every generated
+  sequence;
+- distinguish two seed tiers:
+  - a small, versioned frozen seed set whose reviewed sequences and exact
+    replays are release-blocking;
+  - newly sampled or ad hoc seeds that remain diagnostic until reviewed and
+    deliberately promoted into the frozen set;
+- keep each sequence and the complete frozen campaign below reviewed semantic
+  action, session-rotation, screenshot, retained-evidence, and runtime budgets;
+- generated exploration may supplement but may not replace deterministic
+  capability evidence;
+- if deterministic reduction is enabled, retain and replay the original
+  failure as authoritative evidence and label the reduced sequence as a
+  diagnostic derivative;
 - do not add refill-required/resume operations while volume tracking remains
   disabled and `execution.refill_resume` remains deferred;
 - do not mutate active authoritative files except through an explicitly
@@ -1906,13 +1960,15 @@ Gate:
   and exactly replayable;
 - every operation has a deterministic matrix or focused-test oracle before it
   is admitted to the generator;
-- legal and illegal sequences cover every admitted operation and every
-  declared rejection class across the frozen seed set;
+- legal and illegal sequences cover every declared state, required transition,
+  admitted operation, and rejection class across the frozen seed set;
 - unexpected dialogs, assertion omissions, action-cap overruns, state
   discontinuities, non-replayable failures, or hardware-access attempts fail
-  the campaign;
-- complete campaign and exact replay pass after the deterministic matrices,
-  lifecycle suite, and complete Python suite are green.
+  the frozen campaign;
+- the complete frozen campaign and exact replay pass after the deterministic
+  matrices, lifecycle suite, and complete Python suite are green; failures from
+  diagnostic seeds are retained and triaged but do not silently change the
+  frozen release gate.
 
 Rollback:
 
@@ -1957,6 +2013,9 @@ Milestone 4A --> Milestone 4B
                  Milestone 11
                       |
                       v
+                 Milestone 11A
+                      |
+                      v
                  Milestone 12
                       |
                       v
@@ -1971,10 +2030,13 @@ manual lifecycle characterization.
 Milestone 9 establishes the exact dispense-count oracle required by all later
 dosage-sensitive work. Milestone 10 establishes deterministic formulation and
 assignment cases. Milestone 11 joins those two areas across reload and actual
-execution. Milestone 12 freezes the relevant negative lifecycle and
-persistence boundaries before Milestone 13 admits the same operations to
-seeded exploration. Refill-required/resume coverage is not on this dependency
-chain and remains deferred until authoritative volume tracking is enabled.
+execution. Milestone 11A extends that positive baseline through a complex
+optimizer-driven, randomized, five-calibration lifecycle without becoming the
+default fixture for later negative or generated cases. Milestone 12 freezes the
+relevant negative lifecycle and persistence boundaries before Milestone 13
+admits the same operations to bounded seeded exploration. Refill-required/resume
+coverage is not on this dependency chain and remains deferred until
+authoritative volume tracking is enabled.
 
 ## Target Validation Strategy
 
@@ -2370,8 +2432,16 @@ Milestones 0-11 and 11A are complete. The expanded effort is complete when:
 
 ## Current Next Action
 
-Milestones 7, 8, 9, 10, 11, and 11A are complete. Their operator capabilities
-remain the current qualified baseline. Milestone 12 is the current next action.
+Milestones 7, 8, 9, 10, 11, 11A, and 12 are complete. Their operator
+capabilities remain the current qualified deterministic baseline. Milestone 12
+closed in five slices with 34 compact safeguards, complete manifest-registered
+direct/replay matrices, ten visible direct/replay representatives, the
+immutable optimizer-360 direct/replay positive control, lifecycle and
+host-regression direct/replay, 611 focused tests, 34 safeguard system tests,
+and the exact default Python suite (`4269 passed, 127 skipped`). Milestone 13
+remains out of scope and cannot begin until this Milestones 9-12 baseline,
+including the Milestone 11A positive control, is confirmed stable at its own
+start boundary.
 Milestone 10 closed as follows:
 
 1. Slice 10.1 is complete: the complete typed nine-case catalog, independent
@@ -2412,8 +2482,8 @@ registered the complete scenario/capability. Slice 11.5 passed retained
 offscreen and visible direct/replay qualification, lifecycle and host-
 regression suite/replays, focused compatibility checks, and the complete
 default Python suite; retained evidence and all eleven visible screenshots
-were audited. Milestone 12 planning is now the current next action. Any future
-production defect still requires a separate reviewed correction plan.
+were audited. Milestone 12 implementation is now active. Any future production
+defect still requires a separate reviewed correction plan.
 
 Milestone 11A is complete in five independently reviewed slices recorded in
 `docs/sil_interactive_simulation_milestone_11a_execution_plan.md`. It adds the
@@ -2427,13 +2497,18 @@ and the complete default Python suite passed. The complete host-stress
 aggregate was also run: the new child passed, while the pre-existing 384x10
 child retained its independently scoped pulse-width fixture/staging mismatch.
 That finding is recorded without changing its fixture or production behavior;
-any correction requires a separate reviewed plan. Milestone 12 remains the
-current next action.
+any correction requires a separate reviewed plan. Milestone 12 preserved
+Milestone 11A as its immutable complex positive control and used compact
+fixtures for rejected boundaries. The pre-existing 384x10 finding is not a
+Milestone 12 product failure and did not weaken or broaden its gate.
 
 The Milestone 9 count oracle is stable and is reused only to normalize
 observed stock/well plan and runtime counts. Milestone 10 expected values remain
 literal catalog-owned data and are not computed by production algorithms.
-Milestone 13 must not begin until all deterministic Milestones 9-12 are stable.
+Milestone 13 must not begin until all deterministic Milestones 9-12 and the
+Milestone 11A positive baseline are stable. Its frozen seeds are blocking and
+exactly replayed; newly sampled seeds remain diagnostic until reviewed and
+promoted.
 Do not add refill-required/resume cases or operations while volume tracking
 remains disabled. Do not run `pi_stress` unless it is explicitly selected and
 separately justified, and do not infer firmware, protocol, physical

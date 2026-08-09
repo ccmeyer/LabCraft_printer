@@ -52,6 +52,7 @@ from tools.virtual_workflows.optimizer_360_cases import (
     OPTIMIZER_360_CASE_ID,
     OPTIMIZER_360_FIXTURE_PATH,
 )
+from tools.virtual_workflows.matrices import get_matrix_definition
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +119,25 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert payload["policy"]["coverage_join_status"] == (
         "implemented_milestone_8_slice_4"
     )
+    assert payload["policy"]["safeguard_matrix_coverage_join_status"] == (
+        "implemented_milestone_12_slice_5"
+    )
+    safeguard_matrices = {
+        row["id"]: row
+        for row in payload["policy"]["safeguard_matrix_catalog"]
+    }
+    assert set(safeguard_matrices) == {
+        "editor_safeguards_v1",
+        "execution_preflight_safeguards_v1",
+        "authoritative_persistence_safeguards_v1",
+    }
+    for matrix_id, row in safeguard_matrices.items():
+        definition = get_matrix_definition(matrix_id)
+        assert row["case_ids"] == list(definition.case_ids())
+        assert row["case_count"] == len(definition.case_ids())
+        assert row["required_assertion_ids"] == [
+            "safeguard_rejection_no_mutation_no_dispatch"
+        ]
     assert {
         row["id"]: row["interaction_surface"]
         for row in payload["policy"]["action_catalog"]

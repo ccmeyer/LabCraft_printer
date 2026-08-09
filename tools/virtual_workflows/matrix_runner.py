@@ -22,6 +22,12 @@ from tools.virtual_workflows.matrices import (
     get_matrix_definition,
 )
 from tools.virtual_workflows.report import validate_report_v1
+from tools.virtual_workflows.registry import (
+    MANIFEST_ID,
+    MANIFEST_PATH,
+    MANIFEST_SCHEMA_NAME,
+    MANIFEST_SCHEMA_VERSION,
+)
 from tools.virtual_workflows.suite_runner import (
     CHILD_TIMEOUT_GRACE_SECONDS,
     TERMINATION_GRACE_SECONDS,
@@ -44,6 +50,43 @@ MATRIX_STATUSES = {"pass", "warning", "fail"}
 
 class MatrixAggregateError(ValueError):
     """Raised when matrix execution or retained evidence violates its contract."""
+
+
+def _manifest_registration(
+    matrix_id: str,
+    *,
+    catalog_sha256: str,
+    case_count: int,
+) -> dict[str, Any]:
+    try:
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MatrixAggregateError(f"could not load capability manifest: {exc}") from exc
+    rows = manifest.get("policy", {}).get("safeguard_matrix_catalog") or []
+    matches = [row for row in rows if row.get("id") == matrix_id]
+    if not matches:
+        return {
+            "status": "not_registered",
+            "manifest_id": MANIFEST_ID,
+            "manifest_sha256": file_sha256(MANIFEST_PATH),
+        }
+    if len(matches) != 1:
+        raise MatrixAggregateError("matrix has ambiguous manifest registration")
+    row = matches[0]
+    if (
+        row.get("catalog_sha256") != catalog_sha256
+        or row.get("case_count") != case_count
+    ):
+        raise MatrixAggregateError("matrix manifest registration drifted")
+    return {
+        "status": "registered",
+        "schema_name": MANIFEST_SCHEMA_NAME,
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "manifest_id": MANIFEST_ID,
+        "manifest_path": MANIFEST_PATH.relative_to(REPO_ROOT).as_posix(),
+        "manifest_sha256": file_sha256(MANIFEST_PATH),
+        "matrix": dict(row),
+    }
 
 
 @dataclass(frozen=True)
@@ -382,6 +425,11 @@ def execute_matrix(
         for row in config.plan["cases"]
     ]
     status = _status(children)
+    manifest_registration = _manifest_registration(
+        matrix_id,
+        catalog_sha256=str(config.plan["matrix"]["catalog_sha256"]),
+        case_count=len(children),
+    )
     aggregate = {
         "schema_name": MATRIX_AGGREGATE_SCHEMA_NAME,
         "schema_version": MATRIX_AGGREGATE_SCHEMA_VERSION,
@@ -400,6 +448,7 @@ def execute_matrix(
             "replay_command": list(config.replay_command),
         },
         "catalog": dict(config.plan["matrix"]),
+        "manifest_registration": manifest_registration,
         "matrix_plan": {
             "path": relative_artifact_path(plan_path, root),
             "sha256": file_sha256(plan_path),
@@ -419,7 +468,11 @@ def execute_matrix(
         },
         "limitations": [
             "Matrix evidence is host SIL evidence and does not validate firmware or physical output.",
-            "Matrix aggregates remain separate from registered capability coverage.",
+            (
+                "This safeguard matrix is joined to the tracked capability manifest."
+                if manifest_registration["status"] == "registered"
+                else "This non-safeguard matrix is not registered in the safeguard matrix catalog."
+            ),
         ],
     }
     validate_matrix_aggregate(aggregate, aggregate_root=root, verify_hashes=True)
@@ -449,6 +502,18 @@ def validate_matrix_aggregate(
         raise MatrixAggregateError("matrix aggregate schema version is unsupported")
     if payload.get("classification", {}).get("status") not in MATRIX_STATUSES:
         raise MatrixAggregateError("matrix aggregate classification is invalid")
+    registration = payload.get("manifest_registration")
+    if not isinstance(registration, Mapping) or registration.get("status") not in {
+        "registered", "not_registered"
+    }:
+        raise MatrixAggregateError("matrix manifest registration is invalid")
+    expected_registration = _manifest_registration(
+        str(payload.get("catalog", {}).get("id") or ""),
+        catalog_sha256=str(payload.get("catalog", {}).get("catalog_sha256") or ""),
+        case_count=len(payload.get("children") or []),
+    )
+    if dict(registration) != expected_registration:
+        raise MatrixAggregateError("matrix aggregate manifest registration drifted")
     children = payload.get("children")
     if not isinstance(children, list) or not children:
         raise MatrixAggregateError("matrix aggregate children are invalid")

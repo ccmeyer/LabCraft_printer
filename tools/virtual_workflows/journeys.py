@@ -7,7 +7,16 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
-from tools.virtual_workflows.actions import capture_milestone
+from tools.virtual_workflows.actions import (
+    capture_milestone,
+    drive_execution_preflight_safeguard,
+)
+from tools.virtual_workflows.persistence_safeguards import (
+    PERSISTENCE_SAFEGUARD_MATRIX_ID,
+    get_persistence_safeguard_case,
+    persistence_fixture_inventory,
+    prepare_persistence_fault,
+)
 from tools.virtual_workflows.assertions import (
     ExecutionLifecycleExpectation,
     calibration_assertion,
@@ -119,6 +128,11 @@ from tools.virtual_workflows.optimizer_360_cases import (
     OPTIMIZER_360_FIXTURE_PATH,
     RANGE_A_STOCK_ID,
 )
+from tools.virtual_workflows.safeguards import (
+    ExpectedSafeguardOutcome,
+    capture_safeguard_boundary,
+    safeguard_rejection_no_mutation_no_dispatch_assertion,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -152,6 +166,13 @@ DISCONNECT_SCENARIO_NAME = "print_array_disconnect_fail_closed"
 MATRIX_SCENARIO_NAME = "parameterized_calibration_matrix_case"
 EXPERIMENT_DESIGN_MATRIX_SCENARIO_NAME = (
     "parameterized_experiment_design_matrix_case"
+)
+EDITOR_SAFEGUARD_MATRIX_SCENARIO_NAME = "parameterized_editor_safeguard_case"
+EXECUTION_PREFLIGHT_MATRIX_SCENARIO_NAME = (
+    "parameterized_execution_preflight_safeguard_case"
+)
+PERSISTENCE_SAFEGUARD_MATRIX_SCENARIO_NAME = (
+    "parameterized_persistence_safeguard_case"
 )
 EXPLORATION_WORKLOAD_ID = "editor_prepared_guard_v1"
 EXPLORATION_SCENARIO_NAME = "seeded_editor_prepared_guard"
@@ -260,6 +281,24 @@ EXPERIMENT_DESIGN_REJECTED_REQUIRED_ASSERTIONS = (
     "ui.real_app_constructed",
     "experiment.editor_create_rejected",
     "experiment.finalization_rejected_no_mutation",
+    "artifacts.required_present",
+)
+EDITOR_SAFEGUARD_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "safeguard_rejection_no_mutation_no_dispatch",
+    "artifacts.required_present",
+)
+EXECUTION_PREFLIGHT_SAFEGUARD_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "safeguard_rejection_no_mutation_no_dispatch",
+    "artifacts.required_present",
+)
+PERSISTENCE_SAFEGUARD_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "safeguard_rejection_no_mutation_no_dispatch",
     "artifacts.required_present",
 )
 EDITOR_REVISION_REQUIRED_ASSERTIONS = (
@@ -1484,6 +1523,243 @@ def _experiment_design_body(runtime: JourneyRuntime) -> None:
                 runtime.context.experiment_model
                 .is_authoritative_execution_runtime_active()
             ),
+        },
+    )
+
+
+def _editor_safeguard_body(runtime: JourneyRuntime) -> None:
+    from tools.virtual_workflows.editor_safeguards import (
+        get_editor_safeguard_case,
+    )
+
+    lifecycle = dict(runtime.fixture["lifecycle"])
+    case = get_editor_safeguard_case(lifecycle["case"]["case_id"])
+    specification = dict(lifecycle["editor_safeguard_specification"])
+    runtime.add_assertion(simulation_identity_assertion(runtime.context))
+    runtime.add_assertion(real_application_assertion(runtime.context))
+    driver = run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(
+            specification,
+            use_harness_action_runner=True,
+        ),
+    )
+    rejection = dict(driver.get("finalization_rejection") or {})
+    before_values = rejection.get("before") or rejection.get(
+        "execution_artifacts_before"
+    )
+    after_values = rejection.get("after") or rejection.get(
+        "execution_artifacts_after"
+    )
+    if not isinstance(before_values, Mapping) or not isinstance(
+        after_values, Mapping
+    ):
+        raise RuntimeError("editor safeguard omitted its exact action boundary")
+
+    def boundary(values: Mapping[str, Any]):
+        return capture_safeguard_boundary(
+            persistence={
+                "experiment_dir": values.get("experiment_dir"),
+                "directory_inventory": values.get("directory_inventory", {}),
+                "execution_artifacts": values.get("execution_artifacts", {}),
+            },
+            model=dict(values.get("model") or {}),
+            lifecycle=dict(values.get("lifecycle") or {}),
+            queue=dict(values.get("queue") or {}),
+            dispatch=dict(values.get("dispatch") or {}),
+        )
+
+    before = boundary(before_values)
+    after = boundary(after_values)
+    warning = dict(rejection.get("warning") or {})
+    issue_codes = tuple(str(value) for value in rejection.get("issue_codes", ()))
+    observed_code = str(rejection.get("observed_code") or "")
+    if not observed_code and case.expected.code in issue_codes:
+        observed_code = case.expected.code
+    elif not observed_code and len(issue_codes) == 1:
+        observed_code = issue_codes[0]
+    observed_workflow = (
+        "draft_dirty"
+        if bool(after_values.get("lifecycle", {}).get("dirty"))
+        else "draft_generated"
+    )
+    observed = ExpectedSafeguardOutcome(
+        outcome_kind=case.expected.outcome_kind,
+        classification=case.expected.classification,
+        code=observed_code,
+        message=str(warning.get("text") or ""),
+        ui_surface="dialog",
+        ui_title=str(warning.get("title") or ""),
+        selected_control="OK" if warning.get("dismissed") else None,
+        workflow_state=observed_workflow,
+        queue_state=str(after_values.get("queue", {}).get("array_state") or ""),
+        runtime_active=bool(
+            after_values.get("lifecycle", {}).get("runtime_active")
+        ),
+        activation_count=0,
+    )
+    result = safeguard_rejection_no_mutation_no_dispatch_assertion(
+        case=case,
+        before=before,
+        after=after,
+        observed=observed,
+        checkpoint="after_editor_safeguard_rejection",
+    )
+    runtime.add_assertion(result)
+    runtime.observations["editor_safeguard"] = {
+        "case_id": case.case_id,
+        "case_sha256": case.contract_sha256,
+        "catalog_sha256": lifecycle["catalog_sha256"],
+        "driver": driver,
+        "oracle": dict(result.evidence),
+    }
+    capture_milestone(
+        runtime.context,
+        "validated",
+        evidence={
+            "case_id": case.case_id,
+            "decision": result.decision,
+            "failed_checks": result.evidence.get("failed_checks", []),
+        },
+    )
+
+
+def _execution_preflight_safeguard_body(runtime: JourneyRuntime) -> None:
+    from tools.virtual_workflows.execution_preflight_safeguards import (
+        get_execution_preflight_case,
+    )
+
+    lifecycle = dict(runtime.fixture["lifecycle"])
+    case = get_execution_preflight_case(lifecycle["case"]["case_id"])
+    runtime.add_assertion(simulation_identity_assertion(runtime.context))
+    runtime.add_assertion(real_application_assertion(runtime.context))
+    driven = drive_execution_preflight_safeguard(runtime.context, case)
+
+    def boundary(values: Mapping[str, Any]):
+        return capture_safeguard_boundary(
+            persistence=dict(values["persistence"]),
+            model=dict(values["model"]),
+            lifecycle=dict(values["lifecycle"]),
+            queue=dict(values["queue"]),
+            dispatch=dict(values["dispatch"]),
+        )
+
+    before = boundary(driven["before"])
+    after = boundary(driven["after"])
+    ui = dict(driven["ui"])
+    observed = ExpectedSafeguardOutcome(
+        outcome_kind=case.expected.outcome_kind,
+        classification=case.expected.classification,
+        code=case.expected.code,
+        message=str(ui["message"]),
+        ui_surface=case.expected.ui_surface,
+        ui_title=ui.get("title"),
+        selected_control=ui.get("selected_control"),
+        workflow_state=case.expected.workflow_state,
+        queue_state=str(driven["after"]["queue"]["array_state"]),
+        runtime_active=bool(driven["after"]["lifecycle"]["runtime_active"]),
+        activation_count=0,
+    )
+    result = safeguard_rejection_no_mutation_no_dispatch_assertion(
+        case=case,
+        before=before,
+        after=after,
+        observed=observed,
+        checkpoint="after_execution_preflight_safeguard",
+    )
+    runtime.add_assertion(result)
+    runtime.observations["execution_preflight_safeguard"] = {
+        "case_id": case.case_id,
+        "case_sha256": case.contract_sha256,
+        "catalog_sha256": lifecycle["catalog_sha256"],
+        "driver": driven,
+        "oracle": dict(result.evidence),
+    }
+    capture_milestone(
+        runtime.context,
+        "validated",
+        evidence={
+            "case_id": case.case_id,
+            "decision": result.decision,
+            "failed_checks": result.evidence.get("failed_checks", []),
+        },
+    )
+
+
+def _persistence_safeguard_body(runtime: JourneyRuntime) -> None:
+    lifecycle = dict(runtime.fixture["lifecycle"])
+    case = get_persistence_safeguard_case(lifecycle["case"]["case_id"])
+    prepared = dict(runtime.observations["persistence_fault_prelaunch"])
+    runtime.add_assertion(simulation_identity_assertion(runtime.context))
+    runtime.add_assertion(real_application_assertion(runtime.context))
+    driven = ExperimentLoaderDriver(runtime.context).load_rejected_authoritative_execution(
+        prepared["faulted_root"],
+        case=case,
+    )
+
+    source_current = persistence_fixture_inventory(Path(prepared["source_root"]))
+    faulted_current = persistence_fixture_inventory(Path(prepared["faulted_root"]))
+    if source_current != dict(prepared["source_inventory"]):
+        raise RuntimeError("pristine persistence source changed after application launch")
+    if faulted_current != dict(prepared["faulted_inventory"]):
+        raise RuntimeError("faulted persistence copy changed after application launch")
+
+    def boundary(values: Mapping[str, Any]):
+        persistence = dict(values["persistence"])
+        persistence.update(
+            source_inventory=source_current,
+            faulted_inventory=faulted_current,
+            fault_manifest=dict(prepared["fault_manifest"]),
+        )
+        return capture_safeguard_boundary(
+            persistence=persistence,
+            model=dict(values["model"]),
+            lifecycle=dict(values["lifecycle"]),
+            queue=dict(values["queue"]),
+            dispatch=dict(values["dispatch"]),
+        )
+
+    before = boundary(driven["before"])
+    after = boundary(driven["after"])
+    ui = dict(driven["ui"])
+    observed = ExpectedSafeguardOutcome(
+        outcome_kind=case.expected.outcome_kind,
+        classification=str(driven["classification"]["classification"]),
+        code=str(driven["classification"]["code"]),
+        message=str(ui["message"]),
+        ui_surface=case.expected.ui_surface,
+        ui_title=None,
+        selected_control=str(ui["selected_control"]),
+        workflow_state=case.expected.workflow_state,
+        queue_state=str(driven["after"]["queue"]["array_state"]),
+        runtime_active=bool(driven["after"]["lifecycle"]["runtime_active"]),
+        activation_count=0,
+    )
+    result = safeguard_rejection_no_mutation_no_dispatch_assertion(
+        case=case,
+        before=before,
+        after=after,
+        observed=observed,
+        checkpoint="after_rejected_authoritative_activation",
+    )
+    runtime.add_assertion(result)
+    runtime.observations["persistence_safeguard"] = {
+        "case_id": case.case_id,
+        "case_sha256": case.contract_sha256,
+        "catalog_sha256": lifecycle["catalog_sha256"],
+        "prelaunch": prepared,
+        "driver": driven,
+        "oracle": dict(result.evidence),
+    }
+    capture_milestone(
+        runtime.context,
+        "validated",
+        evidence={
+            "case_id": case.case_id,
+            "decision": result.decision,
+            "failed_checks": result.evidence.get("failed_checks", []),
+            "source_preserved": True,
+            "faulted_copy_preserved": True,
         },
     )
 
@@ -3117,6 +3393,141 @@ def _experiment_design_payload(
     )
 
 
+def _editor_safeguard_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    lifecycle = dict(runtime.fixture["lifecycle"])
+    case = dict(lifecycle["case"])
+    observed = dict(runtime.observations.get("editor_safeguard") or {})
+    return build_editor_lifecycle_payload(
+        runtime,
+        teardown,
+        EditorLifecycleReportSpec(
+            workload={
+                **_base_workload(runtime),
+                "case_id": case["case_id"],
+                "experiment_name": runtime.fixture["experiment"]["name"],
+                "plate_name": runtime.fixture["experiment"]["plate_name"],
+                "expected_reaction_count": 0,
+                "well_ids": [],
+                "expected_editor_finalization_operations": 1,
+                "speed_multiplier": runtime.harness.config.speed_multiplier,
+                "timeout_seconds": runtime.harness.config.timeout_seconds,
+            },
+            required_assertion_ids=EDITOR_SAFEGUARD_REQUIRED_ASSERTIONS,
+            persistence_values={
+                "matrix_case": {
+                    "matrix_id": lifecycle["matrix_id"],
+                    "catalog_sha256": lifecycle["catalog_sha256"],
+                    "case_sha256": lifecycle["case_sha256"],
+                    "case": case,
+                    "parameters": {
+                        "configured": dict(
+                            observed.get("driver", {}).get("configured") or {}
+                        )
+                    },
+                    "outcome": dict(observed.get("oracle") or {}),
+                },
+                "safeguard_boundary": dict(observed.get("oracle") or {}),
+            },
+            limitations=(
+                "This compact negative case stops immediately after its declared editor rejection.",
+                "The simulator validates application-side UI, state, persistence, and dispatch boundaries; it does not validate firmware or physical hardware.",
+                "All setup data belongs to the isolated scenario session; no user experiment directory is modified.",
+            ),
+        ),
+    )
+
+
+def _execution_preflight_safeguard_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    lifecycle = dict(runtime.fixture["lifecycle"])
+    case = dict(lifecycle["case"])
+    observed = dict(
+        runtime.observations.get("execution_preflight_safeguard") or {}
+    )
+    return build_editor_lifecycle_payload(
+        runtime,
+        teardown,
+        EditorLifecycleReportSpec(
+            workload={
+                **_base_workload(runtime),
+                "case_id": case["case_id"],
+                "experiment_name": runtime.fixture["experiment"]["name"],
+                "plate_name": runtime.fixture["experiment"]["plate_name"],
+                "expected_reaction_count": 0,
+                "well_ids": [],
+                "expected_editor_finalization_operations": 0,
+                "speed_multiplier": runtime.harness.config.speed_multiplier,
+                "timeout_seconds": runtime.harness.config.timeout_seconds,
+            },
+            required_assertion_ids=(
+                EXECUTION_PREFLIGHT_SAFEGUARD_REQUIRED_ASSERTIONS
+            ),
+            persistence_values={
+                "matrix_case": {
+                    "matrix_id": lifecycle["matrix_id"],
+                    "catalog_sha256": lifecycle["catalog_sha256"],
+                    "case_sha256": lifecycle["case_sha256"],
+                    "case": case,
+                    "outcome": dict(observed.get("oracle") or {}),
+                },
+                "safeguard_boundary": dict(observed.get("oracle") or {}),
+                "operator_ui": dict(observed.get("driver", {}).get("ui") or {}),
+            },
+            limitations=(
+                "Each compact preflight case stops immediately after its declared operator-visible boundary.",
+                "The cases validate application-side UI, typed state, persistence, and dispatch boundaries in host SIL; they do not validate firmware or physical hardware.",
+                "All setup state belongs to the isolated scenario session; no user experiment directory is modified.",
+            ),
+        ),
+    )
+
+
+def _persistence_safeguard_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    lifecycle = dict(runtime.fixture["lifecycle"])
+    case = dict(lifecycle["case"])
+    observed = dict(runtime.observations.get("persistence_safeguard") or {})
+    driver = dict(observed.get("driver") or {})
+    return build_editor_lifecycle_payload(
+        runtime,
+        teardown,
+        EditorLifecycleReportSpec(
+            workload={
+                **_base_workload(runtime),
+                "case_id": case["case_id"],
+                "experiment_name": runtime.fixture["experiment"]["name"],
+                "plate_name": runtime.fixture["experiment"]["plate_name"],
+                "expected_reaction_count": 0,
+                "well_ids": [],
+                "expected_editor_finalization_operations": 0,
+                "speed_multiplier": runtime.harness.config.speed_multiplier,
+                "timeout_seconds": runtime.harness.config.timeout_seconds,
+            },
+            required_assertion_ids=PERSISTENCE_SAFEGUARD_REQUIRED_ASSERTIONS,
+            persistence_values={
+                "matrix_case": {
+                    "matrix_id": lifecycle["matrix_id"],
+                    "catalog_sha256": lifecycle["catalog_sha256"],
+                    "case_sha256": lifecycle["case_sha256"],
+                    "case": case,
+                    "outcome": dict(observed.get("oracle") or {}),
+                },
+                "safeguard_boundary": dict(observed.get("oracle") or {}),
+                "prelaunch_fault": dict(observed.get("prelaunch") or {}),
+                "persistence_classification": dict(driver.get("classification") or {}),
+                "operator_ui": dict(driver.get("ui") or {}),
+            },
+            limitations=(
+                "Each fault changes one file in a retained test-owned copy before application launch and stops after locked activation evidence.",
+                "Missing-file errors retain the exact OS path in raw UI evidence and use a literal portable classification message in the shared typed oracle.",
+                "The host SIL validates application persistence and UI boundaries; it does not validate firmware or physical hardware.",
+            ),
+        ),
+    )
 def _editor_revision_payload(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> ComposedReportPayload:
@@ -3848,6 +4259,36 @@ def _experiment_design_artifact(
     )
 
 
+def _editor_safeguard_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return editor_artifacts_cleanup_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(runtime.definition.required_screenshots),
+        teardown=teardown,
+    )
+
+
+def _execution_preflight_safeguard_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return editor_artifacts_cleanup_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(runtime.definition.required_screenshots),
+        teardown=teardown,
+    )
+
+
+def _persistence_safeguard_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return editor_artifacts_cleanup_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(runtime.definition.required_screenshots),
+        teardown=teardown,
+    )
+
+
 def _editor_revision_artifact(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> Any:
@@ -3981,6 +4422,61 @@ def _experiment_design_summary(
         f"Case: {case_id}\n"
         f"Status: {report['classification']['status']}\n"
         f"Assertions: {passed} / {len(runtime.definition.required_assertion_ids)}\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _editor_safeguard_summary(
+    report: Mapping[str, Any], runtime: JourneyRuntime
+) -> str:
+    passed = sum(
+        row["decision"] == "pass"
+        for row in runtime.harness.assertion_results
+    )
+    case_id = runtime.fixture["lifecycle"]["case"]["case_id"]
+    return (
+        "Milestone 12 editor safeguard matrix case\n"
+        f"Case: {case_id}\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Assertions: {passed} / {len(EDITOR_SAFEGUARD_REQUIRED_ASSERTIONS)}\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _execution_preflight_safeguard_summary(
+    report: Mapping[str, Any], runtime: JourneyRuntime
+) -> str:
+    passed = sum(
+        row["decision"] == "pass"
+        for row in runtime.harness.assertion_results
+    )
+    case_id = runtime.fixture["lifecycle"]["case"]["case_id"]
+    return (
+        "Milestone 12 execution-preflight safeguard matrix case\n"
+        f"Case: {case_id}\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Assertions: {passed} / "
+        f"{len(EXECUTION_PREFLIGHT_SAFEGUARD_REQUIRED_ASSERTIONS)}\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _persistence_safeguard_summary(
+    report: Mapping[str, Any], runtime: JourneyRuntime
+) -> str:
+    passed = sum(
+        row["decision"] == "pass"
+        for row in runtime.harness.assertion_results
+    )
+    case_id = runtime.fixture["lifecycle"]["case"]["case_id"]
+    return (
+        "Milestone 12 authoritative-persistence safeguard matrix case\n"
+        f"Case: {case_id}\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Assertions: {passed} / {len(PERSISTENCE_SAFEGUARD_REQUIRED_ASSERTIONS)}\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
     )
@@ -4653,8 +5149,150 @@ def _run_experiment_design_matrix_case(
     )
 
 
+def _run_editor_safeguard_matrix_case(
+    config: JourneyRunConfig,
+    *,
+    matrix_id: str,
+    case_id: str,
+) -> dict[str, Any]:
+    from tools.virtual_workflows.editor_safeguards import (
+        get_editor_safeguard_case,
+    )
+    from tools.virtual_workflows.matrices import build_case_fixture
+
+    case = get_editor_safeguard_case(case_id)
+    specification = dict(case.setup)["specification"]
+    terminal = str(specification["expected"]["terminal"])
+    ui_actions = {
+        "editor.open_via_ui",
+        "editor.new_experiment_via_ui",
+        "editor.configure_design_via_ui",
+        case.operator_action_id,
+    }
+    screenshots = {"editor_opened", "finalization_rejected", "validated"}
+    if specification["experiment"].get("excluded_well_ids"):
+        screenshots.add("well_picker_configured")
+    if terminal in {"capacity_rejected", "dirty_invalid_rejected"}:
+        ui_actions.add("editor.optimize_generate_via_ui")
+        screenshots.add("generated")
+    definition = replace(
+        EDITOR_DEFINITION,
+        scenario_name=EDITOR_SAFEGUARD_MATRIX_SCENARIO_NAME,
+        workload_id=matrix_id,
+        required_action_ids=_COMMON_ACTIONS | frozenset(ui_actions),
+        required_ui_action_ids=frozenset(ui_actions),
+        required_assertion_ids=EDITOR_SAFEGUARD_REQUIRED_ASSERTIONS,
+        required_screenshots=frozenset(screenshots),
+        body=_editor_safeguard_body,
+        artifact_assertion=_editor_safeguard_artifact,
+        payload_builder=_editor_safeguard_payload,
+        summary_builder=_editor_safeguard_summary,
+    )
+    return JourneyExecutor().run(
+        definition,
+        config,
+        fixture_bundle=build_case_fixture(matrix_id, case_id),
+        replay_selector_args=("--matrix", matrix_id, "--case", case_id),
+    )
+
+
+def _run_execution_preflight_safeguard_matrix_case(
+    config: JourneyRunConfig,
+    *,
+    matrix_id: str,
+    case_id: str,
+) -> dict[str, Any]:
+    from tools.virtual_workflows.execution_preflight_safeguards import (
+        get_execution_preflight_case,
+    )
+    from tools.virtual_workflows.matrices import build_case_fixture
+
+    case = get_execution_preflight_case(case_id)
+    definition = replace(
+        EDITOR_DEFINITION,
+        scenario_name=EXECUTION_PREFLIGHT_MATRIX_SCENARIO_NAME,
+        workload_id=matrix_id,
+        required_action_ids=(
+            _COMMON_ACTIONS
+            | frozenset({case.operator_action_id, "artifact.capture_milestone"})
+        ),
+        required_ui_action_ids=frozenset({case.operator_action_id}),
+        required_assertion_ids=(
+            EXECUTION_PREFLIGHT_SAFEGUARD_REQUIRED_ASSERTIONS
+        ),
+        required_screenshots=frozenset(
+            {"rejection_observed", "validated"}
+        ),
+        body=_execution_preflight_safeguard_body,
+        artifact_assertion=_execution_preflight_safeguard_artifact,
+        payload_builder=_execution_preflight_safeguard_payload,
+        summary_builder=_execution_preflight_safeguard_summary,
+    )
+    return JourneyExecutor().run(
+        definition,
+        config,
+        fixture_bundle=build_case_fixture(matrix_id, case_id),
+        replay_selector_args=("--matrix", matrix_id, "--case", case_id),
+    )
+
+
+def _run_persistence_safeguard_matrix_case(
+    config: JourneyRunConfig,
+    *,
+    matrix_id: str,
+    case_id: str,
+) -> dict[str, Any]:
+    from tools.virtual_workflows.matrices import build_case_fixture
+
+    case = get_persistence_safeguard_case(case_id)
+    definition = replace(
+        EDITOR_DEFINITION,
+        scenario_name=PERSISTENCE_SAFEGUARD_MATRIX_SCENARIO_NAME,
+        workload_id=matrix_id,
+        required_action_ids=(
+            _COMMON_ACTIONS
+            | frozenset(
+                {
+                    case.operator_action_id,
+                    "experiment.attempt_locked_activation_via_ui",
+                    "artifact.capture_milestone",
+                }
+            )
+        ),
+        required_ui_action_ids=frozenset(
+            {
+                case.operator_action_id,
+                "experiment.attempt_locked_activation_via_ui",
+            }
+        ),
+        required_assertion_ids=PERSISTENCE_SAFEGUARD_REQUIRED_ASSERTIONS,
+        required_screenshots=frozenset({"rejection_observed", "validated"}),
+        body=_persistence_safeguard_body,
+        artifact_assertion=_persistence_safeguard_artifact,
+        payload_builder=_persistence_safeguard_payload,
+        summary_builder=_persistence_safeguard_summary,
+    )
+
+    def prepare(runtime: JourneyRuntime) -> None:
+        prepared = prepare_persistence_fault(case, runtime.harness.scenario_root)
+        runtime.observations["persistence_fault_prelaunch"] = prepared.to_dict()
+
+    return JourneyExecutor().run(
+        definition,
+        config,
+        fixture_bundle=build_case_fixture(matrix_id, case_id),
+        replay_selector_args=("--matrix", matrix_id, "--case", case_id),
+        prelaunch_prepare=prepare,
+    )
+
+
 _MATRIX_JOURNEY_RUNNERS = {
     "calibration_requantization": _run_requantization_matrix_case,
+    "editor_safeguards": _run_editor_safeguard_matrix_case,
+    "execution_preflight_safeguards": (
+        _run_execution_preflight_safeguard_matrix_case
+    ),
+    "persistence_safeguards": _run_persistence_safeguard_matrix_case,
     "experiment_design": _run_experiment_design_matrix_case,
     "mixed_mode_calibration": _run_mixed_mode_matrix_case,
 }

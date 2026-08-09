@@ -567,6 +567,8 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
             "path_policy",
             "generated_evidence_updates_manifest",
             "coverage_join_status",
+            "safeguard_matrix_coverage_join_status",
+            "safeguard_matrix_catalog",
             "action_catalog",
             "assertion_catalog",
         },
@@ -582,6 +584,13 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
     if policy["coverage_join_status"] != "implemented_milestone_8_slice_4":
         raise ManifestValidationError(
             "manifest.policy.coverage_join_status is unsupported"
+        )
+    if (
+        policy["safeguard_matrix_coverage_join_status"]
+        != "implemented_milestone_12_slice_5"
+    ):
+        raise ManifestValidationError(
+            "manifest.policy.safeguard_matrix_coverage_join_status is unsupported"
         )
     forbidden_tiers = set(
         _require_string_list(
@@ -599,6 +608,70 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
     )
     if pi_required != _PI_REQUIRED_EVIDENCE:
         raise ManifestValidationError("Pi suites require preflight and hardware proof")
+
+    matrix_rows = _require_unique_ids(
+        _require_list(
+            policy["safeguard_matrix_catalog"],
+            "manifest.policy.safeguard_matrix_catalog",
+        ),
+        "manifest.policy.safeguard_matrix_catalog",
+    )
+    from tools.virtual_workflows.matrices import get_matrix_definition
+
+    for matrix_id, row in matrix_rows.items():
+        _require_keys(
+            row,
+            label=f"safeguard matrix {matrix_id}",
+            expected={
+                "id",
+                "case_count",
+                "case_ids",
+                "catalog_sha256",
+                "required_assertion_ids",
+                "test_node_ids",
+            },
+        )
+        try:
+            definition = get_matrix_definition(matrix_id)
+        except Exception as exc:
+            raise ManifestValidationError(
+                f"safeguard matrix {matrix_id!r} is not registered"
+            ) from exc
+        case_ids = _require_string_list(
+            row["case_ids"], f"safeguard matrix {matrix_id}.case_ids"
+        )
+        if case_ids != list(definition.case_ids()):
+            raise ManifestValidationError(
+                f"safeguard matrix {matrix_id}.case_ids drifted"
+            )
+        if row["case_count"] != len(case_ids):
+            raise ManifestValidationError(
+                f"safeguard matrix {matrix_id}.case_count drifted"
+            )
+        if row["catalog_sha256"] != definition.catalog_sha256():
+            raise ManifestValidationError(
+                f"safeguard matrix {matrix_id}.catalog_sha256 drifted"
+            )
+        assertion_ids = _require_string_list(
+            row["required_assertion_ids"],
+            f"safeguard matrix {matrix_id}.required_assertion_ids",
+        )
+        if assertion_ids != ["safeguard_rejection_no_mutation_no_dispatch"]:
+            raise ManifestValidationError(
+                f"safeguard matrix {matrix_id} has unsupported assertions"
+            )
+        test_nodes = _require_string_list(
+            row["test_node_ids"], f"safeguard matrix {matrix_id}.test_node_ids"
+        )
+        if not test_nodes:
+            raise ManifestValidationError(
+                f"safeguard matrix {matrix_id} requires a current system test"
+            )
+        for index, node in enumerate(test_nodes):
+            _validate_test_node(
+                node,
+                f"safeguard matrix {matrix_id}.test_node_ids[{index}]",
+            )
 
     action_rows = _require_unique_ids(
         _require_list(policy["action_catalog"], "manifest.policy.action_catalog"),

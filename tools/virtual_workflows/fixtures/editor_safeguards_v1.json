@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "impossible_fixed_target_finalize_rejected",
+      "family": "editor",
+      "fixture_id": "compact_editor_impossible_fixed_v1",
+      "operator_action_id": "editor.finish_via_ui",
+      "operator_action_label": "Finalize Design",
+      "invalid_invariant": "fixed stock concentration exceeds its declared maximum",
+      "expected": {
+        "outcome_kind": "typed_rejection",
+        "classification": "editor_input_invalid",
+        "code": "fixed_exceeds_max",
+        "message": "Showing last valid stock plan; current stock inputs are not feasible. Fixed stock 35 mM exceeds max stock 20 mM for additive 'Infeasible A'.",
+        "ui_surface": "dialog",
+        "ui_title": "Optimization failed",
+        "selected_control": "OK",
+        "workflow_state": "draft_dirty",
+        "queue_state": "idle",
+        "runtime_active": false,
+        "activation_count": 0
+      },
+      "identity_keys": {
+        "design_id": "m12-editor-impossible-fixed-v1",
+        "stock_ids": {"Infeasible A_35.00_mM": "Infeasible A_35.00_mM"},
+        "printer_head_ids": {"none": "unassigned"},
+        "calibration_ids": {"none": "unapplied"},
+        "plan_id": "absent-before-finalization",
+        "progress_id": "draft-progress"
+      },
+      "setup": {
+        "driver": "editor_safeguard",
+        "specification": {
+          "experiment": {"name": "m12-editor-impossible-fixed-v1", "plate_name": "shallow-384_well_plate", "replicates": 1, "selected_well_ids": ["C1"], "excluded_well_ids": [], "printed_volume_nL": 100, "final_volume_nL": 500, "printed_volume_tolerance_nL": 0, "randomize_assignments": false, "random_seed": null, "allow_two_stock_solutions": false},
+          "reagents": [{"stock_label": "Infeasible A", "group": "Additive", "printing_mode": "droplet", "starting_concentration": 0, "targets": [1], "units": "mM", "fixed_stock_concentration": 35, "max_stock_concentration": 20, "droplet_volume_nL": 10}],
+          "optimization_attempts": [{"allow_two_stock_solutions": false, "expected_outcome": "rejected", "expected_dialog_title": "Optimization failed", "expected_message": "Showing last valid stock plan; current stock inputs are not feasible. Fixed stock 35 mM exceeds max stock 20 mM for additive 'Infeasible A'."}],
+          "expected": {"terminal": "formulation_rejected", "dialog_title": "Optimization failed", "message": "Showing last valid stock plan; current stock inputs are not feasible. Fixed stock 35 mM exceeds max stock 20 mM for additive 'Infeasible A'.", "code": "fixed_exceeds_max"}
+        }
+      },
+      "fault": null,
+      "direct_required": true, "manifest_required": true, "fresh_process_required": true, "replay_required": false, "visible_required": false
+    },
+    {
+      "case_id": "printed_exceeds_final_finalize_rejected",
+      "family": "editor", "fixture_id": "compact_editor_invalid_volume_v1",
+      "operator_action_id": "editor.finish_via_ui", "operator_action_label": "Finalize Design",
+      "invalid_invariant": "printed volume exceeds final reaction volume",
+      "expected": {"outcome_kind": "typed_rejection", "classification": "editor_input_invalid", "code": "printed_exceeds_final_volume", "message": "Showing last valid stock plan; current volume settings are invalid. Printed Volume (20 nL) cannot exceed Final Reaction Volume (10 nL). Lower Printed Volume or increase Final Reaction Volume.", "ui_surface": "dialog", "ui_title": "Invalid volumes", "selected_control": "OK", "workflow_state": "draft_dirty", "queue_state": "idle", "runtime_active": false, "activation_count": 0},
+      "identity_keys": {"design_id": "m12-editor-invalid-volume-v1", "stock_ids": {"Volume A_1.00_x": "Volume A_1.00_x"}, "printer_head_ids": {"none": "unassigned"}, "calibration_ids": {"none": "unapplied"}, "plan_id": "absent-before-finalization", "progress_id": "draft-progress"},
+      "setup": {"driver": "editor_safeguard", "specification": {"experiment": {"name": "m12-editor-invalid-volume-v1", "plate_name": "shallow-384_well_plate", "replicates": 1, "selected_well_ids": ["A1"], "excluded_well_ids": [], "printed_volume_nL": 20, "final_volume_nL": 10, "printed_volume_tolerance_nL": 0, "randomize_assignments": false, "random_seed": null, "allow_two_stock_solutions": false}, "reagents": [{"stock_label": "Volume A", "group": "Additive", "printing_mode": "droplet", "starting_concentration": 0, "targets": [1], "units": "x", "fixed_stock_concentration": 1, "droplet_volume_nL": 10}], "optimization_attempts": [{"allow_two_stock_solutions": false, "expected_outcome": "rejected", "expected_dialog_title": "Invalid volumes", "expected_message": "Showing last valid stock plan; current volume settings are invalid. Printed Volume (20 nL) cannot exceed Final Reaction Volume (10 nL). Lower Printed Volume or increase Final Reaction Volume."}], "expected": {"terminal": "formulation_rejected", "dialog_title": "Invalid volumes", "message": "Showing last valid stock plan; current volume settings are invalid. Printed Volume (20 nL) cannot exceed Final Reaction Volume (10 nL). Lower Printed Volume or increase Final Reaction Volume.", "code": "printed_exceeds_final_volume"}}},
+      "fault": null, "direct_required": true, "manifest_required": true, "fresh_process_required": true, "replay_required": false, "visible_required": false
+    },
+    {
+      "case_id": "one_stock_infeasible_finalize_rejected",
+      "family": "editor", "fixture_id": "compact_editor_one_stock_infeasible_v1",
+      "operator_action_id": "editor.optimize_generate_via_ui", "operator_action_label": "Optimize & Generate",
+      "invalid_invariant": "one-stock plan exceeds the printed-volume budget",
+      "expected": {"outcome_kind": "typed_rejection", "classification": "optimizer_infeasible", "code": "single_stock_volume_budget_exceeded", "message": "Showing last valid stock plan; current stock inputs are not feasible. Feasibility A requires up to 20 nL per reaction, but the printed-volume budget is 10 nL (tolerance 0 nL; effective limit 10 nL).", "ui_surface": "dialog", "ui_title": "Optimization failed", "selected_control": "OK", "workflow_state": "draft_dirty", "queue_state": "idle", "runtime_active": false, "activation_count": 0},
+      "identity_keys": {"design_id": "m12-editor-one-stock-infeasible-v1", "stock_ids": {"Feasibility A": "unresolved-draft-stock"}, "printer_head_ids": {"none": "unassigned"}, "calibration_ids": {"none": "unapplied"}, "plan_id": "absent-before-finalization", "progress_id": "draft-progress"},
+      "setup": {"driver": "editor_safeguard", "specification": {"experiment": {"name": "m12-editor-one-stock-infeasible-v1", "plate_name": "shallow-384_well_plate", "replicates": 1, "selected_well_ids": ["A1", "A2"], "excluded_well_ids": [], "printed_volume_nL": 10, "final_volume_nL": 500, "printed_volume_tolerance_nL": 0, "randomize_assignments": false, "random_seed": null, "allow_two_stock_solutions": false}, "reagents": [{"stock_label": "Feasibility A", "group": "Additive", "printing_mode": "droplet", "starting_concentration": 0, "targets": [0.1, 0.2], "units": "mM", "fixed_stock_concentration": null, "droplet_volume_nL": 10}], "optimization_attempts": [{"allow_two_stock_solutions": false, "expected_outcome": "rejected", "expected_dialog_title": "Optimization failed", "expected_message": "Showing last valid stock plan; current stock inputs are not feasible. Feasibility A requires up to 20 nL per reaction, but the printed-volume budget is 10 nL (tolerance 0 nL; effective limit 10 nL)."}], "expected": {"terminal": "optimization_rejected", "dialog_title": "Optimization failed", "message": "Showing last valid stock plan; current stock inputs are not feasible. Feasibility A requires up to 20 nL per reaction, but the printed-volume budget is 10 nL (tolerance 0 nL; effective limit 10 nL).", "code": "single_stock_volume_budget_exceeded"}}},
+      "fault": null, "direct_required": true, "manifest_required": true, "fresh_process_required": true, "replay_required": false, "visible_required": false
+    },
+    {
+      "case_id": "two_stock_infeasible_finalize_rejected",
+      "family": "editor", "fixture_id": "compact_editor_two_stock_infeasible_v1",
+      "operator_action_id": "editor.optimize_generate_via_ui", "operator_action_label": "Optimize & Generate",
+      "invalid_invariant": "no one- or two-stock plan fits a five-nanoliter printed-volume budget",
+      "expected": {"outcome_kind": "typed_rejection", "classification": "optimizer_infeasible", "code": "single_stock_volume_budget_exceeded", "message": "Showing last valid stock plan; current stock inputs are not feasible. Feasibility A requires up to 20 nL per reaction, but the printed-volume budget is 5 nL (tolerance 0 nL; effective limit 5 nL).", "ui_surface": "dialog", "ui_title": "Optimization failed", "selected_control": "OK", "workflow_state": "draft_dirty", "queue_state": "idle", "runtime_active": false, "activation_count": 0},
+      "identity_keys": {"design_id": "m12-editor-two-stock-infeasible-v1", "stock_ids": {"Feasibility A": "unresolved-draft-stock"}, "printer_head_ids": {"none": "unassigned"}, "calibration_ids": {"none": "unapplied"}, "plan_id": "absent-before-finalization", "progress_id": "draft-progress"},
+      "setup": {"driver": "editor_safeguard", "specification": {"experiment": {"name": "m12-editor-two-stock-infeasible-v1", "plate_name": "shallow-384_well_plate", "replicates": 1, "selected_well_ids": ["A1", "A2"], "excluded_well_ids": [], "printed_volume_nL": 5, "final_volume_nL": 500, "printed_volume_tolerance_nL": 0, "randomize_assignments": false, "random_seed": null, "allow_two_stock_solutions": true}, "reagents": [{"stock_label": "Feasibility A", "group": "Additive", "printing_mode": "droplet", "starting_concentration": 0, "targets": [0.1, 0.2], "units": "mM", "fixed_stock_concentration": null, "droplet_volume_nL": 10}], "optimization_attempts": [{"allow_two_stock_solutions": true, "expected_outcome": "rejected", "expected_dialog_title": "Optimization failed", "expected_message": "Showing last valid stock plan; current stock inputs are not feasible. Feasibility A requires up to 20 nL per reaction, but the printed-volume budget is 5 nL (tolerance 0 nL; effective limit 5 nL)."}], "expected": {"terminal": "optimization_rejected", "dialog_title": "Optimization failed", "message": "Showing last valid stock plan; current stock inputs are not feasible. Feasibility A requires up to 20 nL per reaction, but the printed-volume budget is 5 nL (tolerance 0 nL; effective limit 5 nL).", "code": "single_stock_volume_budget_exceeded"}}},
+      "fault": null, "direct_required": true, "manifest_required": true, "fresh_process_required": true, "replay_required": false, "visible_required": false
+    },
+    {
+      "case_id": "capacity_plus_one_finalize_rejected",
+      "family": "editor", "fixture_id": "compact_editor_capacity_plus_one_v1",
+      "operator_action_id": "editor.finish_via_ui", "operator_action_label": "Finalize Design",
+      "invalid_invariant": "five generated reactions exceed four printable wells",
+      "expected": {"outcome_kind": "typed_rejection", "classification": "editor_capacity_invalid", "code": "insufficient_well_capacity", "message": "Not enough available wells for this experiment design.\n\nRequired reactions: 5\nAvailable wells on 'shallow-384_well_plate': 4\n\nChoose a larger plate, reduce the design size, adjust printable wells, or include more wells.", "ui_surface": "dialog", "ui_title": "Insufficient Well Capacity", "selected_control": "OK", "workflow_state": "draft_generated", "queue_state": "idle", "runtime_active": false, "activation_count": 0},
+      "identity_keys": {"design_id": "m12-editor-capacity-plus-one-v1", "stock_ids": {"Capacity A_10.00_x": "Capacity A_10.00_x"}, "printer_head_ids": {"none": "unassigned"}, "calibration_ids": {"none": "unapplied"}, "plan_id": "absent-before-finalization", "progress_id": "draft-progress"},
+      "setup": {"driver": "editor_safeguard", "specification": {"experiment": {"name": "m12-editor-capacity-plus-one-v1", "plate_name": "shallow-384_well_plate", "replicates": 5, "selected_well_ids": ["B1", "B2", "B3", "B4"], "excluded_well_ids": [], "printed_volume_nL": 100, "final_volume_nL": 100, "printed_volume_tolerance_nL": 0, "randomize_assignments": false, "random_seed": null, "allow_two_stock_solutions": false, "expected_reaction_count": 5}, "reagents": [{"stock_label": "Capacity A", "group": "Additive", "printing_mode": "droplet", "starting_concentration": 0, "targets": [1], "units": "x", "fixed_stock_concentration": 10, "droplet_volume_nL": 10}], "optimization_attempts": [{"allow_two_stock_solutions": false, "expected_outcome": "generated"}], "expected": {"terminal": "capacity_rejected", "dialog_title": "Insufficient Well Capacity", "message": "Not enough available wells for this experiment design.\n\nRequired reactions: 5\nAvailable wells on 'shallow-384_well_plate': 4\n\nChoose a larger plate, reduce the design size, adjust printable wells, or include more wells.", "code": "insufficient_well_capacity"}}},
+      "fault": null, "direct_required": true, "manifest_required": true, "fresh_process_required": true, "replay_required": false, "visible_required": false
+    },
+    {
+      "case_id": "invalid_uploaded_well_rejected",
+      "family": "editor", "fixture_id": "compact_editor_upload_out_of_bounds_v1",
+      "operator_action_id": "editor.upload_design_apply_via_ui", "operator_action_label": "Apply to Experiment Editor",
+      "invalid_invariant": "uploaded well G16 is outside the selected 96-well plate",
+      "expected": {"outcome_kind": "typed_rejection", "classification": "editor_upload_invalid", "code": "explicit_well_assignment_invalid", "message": "Explicit well assignments are invalid for plate '96well-8x12' (8x12). Out of bounds for plate '96well-8x12' (8x12): G16.", "ui_surface": "dialog", "ui_title": "Invalid well assignments", "selected_control": "OK", "workflow_state": "draft_dirty", "queue_state": "idle", "runtime_active": false, "activation_count": 0},
+      "identity_keys": {"design_id": "m12-editor-upload-out-of-bounds-v1", "stock_ids": {"Upload A": "unresolved-upload-stock"}, "printer_head_ids": {"none": "unassigned"}, "calibration_ids": {"none": "unapplied"}, "plan_id": "absent-before-upload", "progress_id": "draft-progress"},
+      "setup": {"driver": "editor_safeguard", "specification": {"experiment": {"name": "m12-editor-upload-out-of-bounds-v1", "plate_name": "96well-8x12", "replicates": 1, "selected_well_ids": ["A1"], "excluded_well_ids": [], "printed_volume_nL": 100, "final_volume_nL": 100, "printed_volume_tolerance_nL": 0, "randomize_assignments": false, "random_seed": null, "allow_two_stock_solutions": false}, "reagents": [{"stock_label": "Upload Seed", "group": "Additive", "printing_mode": "droplet", "starting_concentration": 0, "targets": [1], "units": "x", "fixed_stock_concentration": 10, "droplet_volume_nL": 10}], "optimization_attempts": [{"allow_two_stock_solutions": false, "expected_outcome": "rejected"}], "upload_rows": [{"Well": "G16", "Upload A [x]": 1}], "expected": {"terminal": "upload_well_rejected", "dialog_title": "Invalid well assignments", "message": "Explicit well assignments are invalid for plate '96well-8x12' (8x12). Out of bounds for plate '96well-8x12' (8x12): G16.", "code": "explicit_well_assignment_invalid"}}},
+      "fault": null, "direct_required": true, "manifest_required": true, "fresh_process_required": true, "replay_required": false, "visible_required": false
+    },
+    {
+      "case_id": "excluded_uploaded_well_rejected",
+      "family": "editor", "fixture_id": "compact_editor_upload_excluded_v1",
+      "operator_action_id": "editor.upload_design_apply_via_ui", "operator_action_label": "Apply to Experiment Editor",
+      "invalid_invariant": "uploaded well A1 is excluded from the selected plate",
+      "expected": {"outcome_kind": "typed_rejection", "classification": "editor_upload_invalid", "code": "explicit_well_assignment_invalid", "message": "Explicit well assignments are invalid for plate '96well-8x12' (8x12). Excluded wells: A1.", "ui_surface": "dialog", "ui_title": "Invalid well assignments", "selected_control": "OK", "workflow_state": "draft_dirty", "queue_state": "idle", "runtime_active": false, "activation_count": 0},
+      "identity_keys": {"design_id": "m12-editor-upload-excluded-v1", "stock_ids": {"Upload A": "unresolved-upload-stock"}, "printer_head_ids": {"none": "unassigned"}, "calibration_ids": {"none": "unapplied"}, "plan_id": "absent-before-upload", "progress_id": "draft-progress"},
+      "setup": {"driver": "editor_safeguard", "specification": {"experiment": {"name": "m12-editor-upload-excluded-v1", "plate_name": "96well-8x12", "replicates": 1, "selected_well_ids": ["A1", "A2"], "excluded_well_ids": ["A1"], "printed_volume_nL": 100, "final_volume_nL": 100, "printed_volume_tolerance_nL": 0, "randomize_assignments": false, "random_seed": null, "allow_two_stock_solutions": false}, "reagents": [{"stock_label": "Upload Seed", "group": "Additive", "printing_mode": "droplet", "starting_concentration": 0, "targets": [1], "units": "x", "fixed_stock_concentration": 10, "droplet_volume_nL": 10}], "optimization_attempts": [{"allow_two_stock_solutions": false, "expected_outcome": "rejected"}], "upload_rows": [{"Well": "A1", "Upload A [x]": 1}], "expected": {"terminal": "upload_well_rejected", "dialog_title": "Invalid well assignments", "message": "Explicit well assignments are invalid for plate '96well-8x12' (8x12). Excluded wells: A1.", "code": "explicit_well_assignment_invalid"}}},
+      "fault": null, "direct_required": true, "manifest_required": true, "fresh_process_required": true, "replay_required": false, "visible_required": false
+    },
+    {
+      "case_id": "dirty_invalid_finalize_rejected",
+      "family": "editor", "fixture_id": "compact_editor_dirty_invalid_v1",
+      "operator_action_id": "editor.finish_via_ui", "operator_action_label": "Finalize Design",
+      "invalid_invariant": "a valid generated design is made dirty by an invalid volume edit before finalization",
+      "expected": {"outcome_kind": "typed_rejection", "classification": "editor_input_invalid", "code": "printed_exceeds_final_volume", "message": "Showing last valid stock plan; current volume settings are invalid. Printed Volume (20 nL) cannot exceed Final Reaction Volume (10 nL). Lower Printed Volume or increase Final Reaction Volume.", "ui_surface": "dialog", "ui_title": "Invalid volumes", "selected_control": "OK", "workflow_state": "draft_dirty", "queue_state": "idle", "runtime_active": false, "activation_count": 0},
+      "identity_keys": {"design_id": "m12-editor-dirty-invalid-v1", "stock_ids": {"Dirty A_1.00_x": "Dirty A_1.00_x"}, "printer_head_ids": {"none": "unassigned"}, "calibration_ids": {"none": "unapplied"}, "plan_id": "absent-before-finalization", "progress_id": "draft-progress"},
+      "setup": {"driver": "editor_safeguard", "specification": {"experiment": {"name": "m12-editor-dirty-invalid-v1", "plate_name": "shallow-384_well_plate", "replicates": 1, "selected_well_ids": ["A1"], "excluded_well_ids": [], "printed_volume_nL": 10, "final_volume_nL": 10, "printed_volume_tolerance_nL": 0, "randomize_assignments": false, "random_seed": null, "allow_two_stock_solutions": false}, "reagents": [{"stock_label": "Dirty A", "group": "Additive", "printing_mode": "droplet", "starting_concentration": 0, "targets": [1], "units": "x", "fixed_stock_concentration": 1, "droplet_volume_nL": 10}], "optimization_attempts": [{"allow_two_stock_solutions": false, "expected_outcome": "generated"}], "pre_finalize_mutation": {"printed_volume_nL": 20, "final_volume_nL": 10}, "expected": {"terminal": "dirty_invalid_rejected", "dialog_title": "Invalid volumes", "message": "Showing last valid stock plan; current volume settings are invalid. Printed Volume (20 nL) cannot exceed Final Reaction Volume (10 nL). Lower Printed Volume or increase Final Reaction Volume.", "code": "printed_exceeds_final_volume"}}},
+      "fault": null, "direct_required": true, "manifest_required": true, "fresh_process_required": true, "replay_required": false, "visible_required": false
+    }
+  ]
+}

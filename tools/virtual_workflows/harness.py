@@ -185,7 +185,10 @@ class AutomationHarness:
             }
         )
 
-    def _launch_application_session(self) -> Mapping[str, Any]:
+    def _launch_application_session(
+        self,
+        prelaunch_prepare: Callable[[Path], None] | None = None,
+    ) -> Mapping[str, Any]:
         """Construct, launch, and bind one canonical retained session."""
 
         if self.session is not None:
@@ -240,6 +243,8 @@ class AutomationHarness:
             self.session_id = observed_session_id
             self.scenario_root = Path(session.session_root).resolve()
             self.context.scenario_root = self.scenario_root
+            if prelaunch_prepare is not None:
+                prelaunch_prepare(self.scenario_root)
             font = apply_and_validate_sil_application_font(session.app)
             view = session.launch()
             components = session.components
@@ -284,11 +289,16 @@ class AutomationHarness:
                 self.session = None
             raise
 
-    def start(self) -> dict[str, Any]:
+    def start(
+        self,
+        prelaunch_prepare: Callable[[Path], None] | None = None,
+    ) -> dict[str, Any]:
         """Construct and launch the canonical retained SimulationSession."""
 
         return execute_action(
-            self.context, "app.launch_simulated", self._launch_application_session,
+            self.context,
+            "app.launch_simulated",
+            lambda: self._launch_application_session(prelaunch_prepare),
             interaction_surface=InteractionSurface.HARNESS,
         )
 
