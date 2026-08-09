@@ -1667,12 +1667,33 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
         *,
         expected_name: str,
     ) -> dict[str, Any]:
-        """Load one completed execution read-only without runtime activation."""
+        """Display one completed execution read-only without runtime activation."""
 
         from pathlib import Path
         from tools.virtual_workflows.actions import capture_milestone, execute_action
 
         directory = Path(experiment_dir).resolve()
+
+        def dispatch_snapshot() -> dict[str, int]:
+            instrumentation = getattr(self.context, "instrumentation", None)
+            machine = getattr(self.context, "machine", None)
+            return {
+                "intent_begins": len(
+                    getattr(instrumentation, "intent_begins", ()) or ()
+                ),
+                "intent_attachments": len(
+                    getattr(instrumentation, "intent_attachments", ()) or ()
+                ),
+                "intent_completions": len(
+                    getattr(instrumentation, "intent_completions", ()) or ()
+                ),
+                "simulator_dispenses": len(
+                    getattr(instrumentation, "simulator_dispenses", ()) or ()
+                ),
+                "machine_commands": len(
+                    getattr(machine, "command_event_history", ()) or ()
+                ),
+            }
 
         def inspect_loaded(dialog) -> Mapping[str, Any]:
             plan = self.context.experiment_model.get_execution_plan_snapshot()
@@ -1693,7 +1714,7 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 for well in progress_rows
                 for details in (well.get("reagents") or {}).values()
             )
-            checks = {
+            initial_checks = {
                 "name_matches": dialog.exp_name_edit.text() == expected_name,
                 "path_matches": Path(
                     self.context.experiment_model.experiment_dir_path
@@ -1706,14 +1727,150 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 and not bool(eligibility.get("can_start_hardware"))
                 and not bool(eligibility.get("can_resume_hardware")),
                 "runtime_inactive": not runtime_active,
-                "action_is_execution_locked": dialog.finish_btn.text()
-                == "Execution Locked",
-                "action_disabled": not bool(dialog.finish_btn.isEnabled()),
-                "read_only_guidance": "read-only" in status_text.casefold()
-                and "hardware activation is blocked" in status_text.casefold(),
+                "action_is_view_completed": dialog.finish_btn.text()
+                == "View Completed Experiment",
+                "action_enabled": bool(dialog.finish_btn.isEnabled()),
+                "read_only_guidance": "execution complete" in status_text.casefold()
+                and "view completed experiment" in status_text.casefold(),
                 "visible_lock_banner": not dialog.lifecycle_banner.isHidden()
                 and "locked and read-only" in banner_text.casefold()
-                and "hardware loading is unavailable" in banner_text.casefold(),
+                and "hardware start and resume remain unavailable"
+                in banner_text.casefold(),
+            }
+            if not all(initial_checks.values()):
+                raise RuntimeError(
+                    "completed execution did not expose its read-only view: "
+                    f"{initial_checks}"
+                )
+
+            dispatch_before = dispatch_snapshot()
+            self.click(dialog.finish_btn)
+            if dialog.isVisible():
+                raise RuntimeError("View Completed Experiment did not close the editor")
+            self.context.pump_events()
+
+            model = self.context.model
+            experiment_model = self.context.experiment_model
+            well_plate = model.well_plate
+            assignments = {
+                well.well_id: well.get_assigned_reaction().unique_id
+                for well in well_plate.get_all_wells()
+                if well.get_assigned_reaction() is not None
+            }
+            expected_assignments = {
+                well.well_id: well.reaction_id for well in plan.wells
+            }
+            expected_targets = {
+                well.well_id: {
+                    dispense.stock_id: int(dispense.target_dispenses)
+                    for dispense in well.dispenses
+                }
+                for well in plan.wells
+            }
+            expected_added = {
+                plan_well.well_id: {
+                    dispense.stock_id: int(
+                        self.context.experiment_model.progress_data[
+                            plan_well.well_id
+                        ]["reagents"][dispense.stock_id].get(
+                            "added_droplets", 0
+                        )
+                        or 0
+                    )
+                    for dispense in plan_well.dispenses
+                }
+                for plan_well in plan.wells
+            }
+            displayed_targets = {}
+            displayed_added = {}
+            completed_wells = []
+            completed_styles = {}
+            plate_widget = self.context.view.well_plate_widget
+            for plan_well in plan.wells:
+                runtime_well = well_plate.get_well(plan_well.well_id)
+                reaction = runtime_well.get_assigned_reaction()
+                displayed_targets[plan_well.well_id] = {
+                    stock_id: int(reagent.target_droplets)
+                    for stock_id, reagent in reaction.get_all_reagents().items()
+                }
+                displayed_added[plan_well.well_id] = {
+                    stock_id: int(reagent.added_droplets)
+                    for stock_id, reagent in reaction.get_all_reagents().items()
+                }
+                if reaction.check_all_complete():
+                    completed_wells.append(plan_well.well_id)
+                label = plate_widget.well_labels[
+                    runtime_well.row_num
+                ][runtime_well.col - 1]
+                completed_styles[plan_well.well_id] = str(label.styleSheet() or "")
+
+            expected_stock_ids = {stock.stock_id for stock in plan.stocks}
+            display_heads = model.get_completed_execution_display_heads()
+            display_stock_ids = {head.get_stock_id() for head in display_heads}
+            reagent_rack_assignments = [
+                index
+                for index, slot in enumerate(model.rack_model.slots)
+                if getattr(slot, "printer_head", None) is not None
+                and not bool(
+                    getattr(slot.printer_head, "calibration_chip", False)
+                )
+            ]
+            projected_eligibility = (
+                experiment_model.get_execution_resume_eligibility() or {}
+            )
+            projected_runtime_active = bool(
+                experiment_model.is_authoritative_execution_runtime_active()
+            )
+            array_state = self.context.controller.get_array_run_state()
+            start_button = plate_widget.start_print_array_button
+            guide = self.context.view.experiment_task_list
+            dispatch_after = dispatch_snapshot()
+            checks = {
+                **initial_checks,
+                "dialog_closed_after_explicit_action": not dialog.isVisible(),
+                "display_projection_active": bool(
+                    model.is_completed_execution_view_active()
+                ),
+                "runtime_still_inactive": not projected_runtime_active,
+                "durable_runtime_checkpoint_inactive": not bool(
+                    experiment_model.uses_durable_execution_checkpoint()
+                ),
+                "controller_still_idle": array_state == "idle",
+                "eligibility_still_terminal_analysis_only": (
+                    projected_eligibility.get("status") == "analysis_only"
+                    and not projected_eligibility.get("can_activate_runtime")
+                    and not projected_eligibility.get("can_start_hardware")
+                    and not projected_eligibility.get("can_resume_hardware")
+                ),
+                "plate_identity_exact": (
+                    well_plate.get_current_plate_name() == plan.plate.name
+                    and well_plate.get_plate_dimensions()
+                    == (int(plan.plate.rows), int(plan.plate.columns))
+                ),
+                "well_assignments_exact": assignments == expected_assignments,
+                "targets_exact": displayed_targets == expected_targets,
+                "added_progress_exact": displayed_added == expected_added
+                and expected_added == expected_targets,
+                "all_assigned_wells_complete": set(completed_wells)
+                == set(expected_assignments),
+                "all_assigned_wells_visibly_complete": all(
+                    "border: 1px solid white" in style
+                    for style in completed_styles.values()
+                ),
+                "display_heads_exact": display_stock_ids == expected_stock_ids,
+                "no_reagent_rack_assignments_invented": not reagent_rack_assignments,
+                "start_control_disabled": (
+                    start_button.text() == "Experiment Complete"
+                    and not start_button.isEnabled()
+                ),
+                "mutation_controls_disabled": (
+                    not plate_widget.stock_prep_button.isEnabled()
+                    and not plate_widget.calibration_button.isEnabled()
+                ),
+                "guide_reports_complete": guide.next_label.text()
+                == "Next: Experiment complete",
+                "no_machine_or_simulator_dispatch": dispatch_after
+                == dispatch_before,
             }
             evidence = {
                 "checks": checks,
@@ -1722,13 +1879,25 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 "plan_id": str(plan.plan_id),
                 "plan_revision": int(plan.plan_revision),
                 "plan_state": str(plan.state.value),
-                "eligibility": eligibility,
-                "runtime_active": runtime_active,
-                "action_label": str(dialog.finish_btn.text() or ""),
-                "action_enabled": bool(dialog.finish_btn.isEnabled()),
+                "eligibility": projected_eligibility,
+                "runtime_active": projected_runtime_active,
+                "array_state": array_state,
+                "action_label": "View Completed Experiment",
+                "action_enabled": True,
                 "status_text": status_text,
                 "banner_text": banner_text,
                 "activation_performed": False,
+                "display_projection_performed": True,
+                "runtime_assignments": assignments,
+                "expected_assignments": expected_assignments,
+                "displayed_targets": displayed_targets,
+                "displayed_added": displayed_added,
+                "persisted_added": expected_added,
+                "completed_well_ids": sorted(completed_wells),
+                "display_stock_ids": sorted(display_stock_ids),
+                "reagent_rack_assignments": reagent_rack_assignments,
+                "dispatch_before": dispatch_before,
+                "dispatch_after": dispatch_after,
                 "file_selection_mechanic": "qt_file_dialog_directory_selection",
             }
             if not all(checks.values()):
@@ -1739,11 +1908,8 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 self.context,
                 "terminal_reloaded",
                 evidence=evidence,
-                widget=dialog,
+                widget=self.context.view,
             )
-            QtTest.QTest.keyClick(dialog, QtCore.Qt.Key.Key_Escape)
-            if dialog.isVisible():
-                raise RuntimeError("completed inspection editor did not close")
             return evidence
 
         def record_loaded(dialog) -> Mapping[str, Any]:

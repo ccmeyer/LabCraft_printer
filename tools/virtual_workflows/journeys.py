@@ -3265,7 +3265,7 @@ def _run_completed_terminal_reload(
     *,
     expected_name: str | None = None,
 ) -> None:
-    """Rotate sessions and inspect a completed bundle without activation."""
+    """Rotate sessions and display a completed bundle without activation."""
 
     from tools.virtual_workflows.authoritative_evidence import (
         compare_directories,

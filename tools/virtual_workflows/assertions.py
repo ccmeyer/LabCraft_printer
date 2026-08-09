@@ -2551,7 +2551,7 @@ def completed_terminal_reload_assertion(
     loader: Mapping[str, Any],
     directory_comparisons: Mapping[str, Mapping[str, Any]],
 ) -> AssertionResult:
-    """Prove a completed bundle survives a fresh read-only UI session exactly."""
+    """Prove a completed bundle survives an exact display-only fresh session."""
 
     def inspect() -> tuple[bool, Mapping[str, Any]]:
         close = dict(first_close)
@@ -2579,7 +2579,8 @@ def completed_terminal_reload_assertion(
             "ui_completed_read_only": all(
                 bool(value) for value in dict(loaded.get("checks") or {}).values()
             )
-            and not bool(loaded.get("activation_performed")),
+            and not bool(loaded.get("activation_performed"))
+            and bool(loaded.get("display_projection_performed")),
             "plan_identity_exact": before.plan_id == after.plan_id
             and before.plan_revision == after.plan_revision,
             "completed_state_exact": before.plan_state == after.plan_state
@@ -2592,7 +2593,10 @@ def completed_terminal_reload_assertion(
             "plan_exact": before.plan_json == after.plan_json,
             "well_assignments_exact": before.plan_well_ids == after.plan_well_ids
             and before.plan_assignments == after.plan_assignments,
-            "runtime_projection_not_activated": not after.runtime_assignments,
+            "display_projection_matches_plan": after.runtime_assignments
+            == after.plan_assignments
+            and dict(loaded.get("runtime_assignments") or {})
+            == dict(after.plan_assignments),
             "revision_history_exact": before.history_json == after.history_json,
             "progress_exact": before.progress_plan_id == after.progress_plan_id
             and before.progress_plan_revision == after.progress_plan_revision

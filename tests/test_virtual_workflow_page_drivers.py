@@ -684,22 +684,62 @@ def test_completed_loader_inspects_terminal_bundle_without_activation(
 
     dialog = QtWidgets.QDialog()
     dialog.exp_name_edit = QtWidgets.QLineEdit("expected", dialog)
-    dialog.finish_btn = QtWidgets.QPushButton("Execution Locked", dialog)
-    dialog.finish_btn.setEnabled(False)
+    dialog.finish_btn = QtWidgets.QPushButton("View Completed Experiment", dialog)
     dialog.status_lbl = QtWidgets.QLabel(
-        "Execution plan loaded read-only for analysis; hardware activation is blocked.",
+        "Execution complete. Press View Completed Experiment to populate the exact saved state read-only.",
         dialog,
     )
     dialog.lifecycle_banner = QtWidgets.QLabel(
-        "This saved execution is locked and read-only. Hardware loading is unavailable.",
+        "This completed execution is locked and read-only. Hardware start and resume remain unavailable.",
         dialog,
     )
+    dialog.finish_btn.clicked.connect(dialog.accept)
     dialog.show()
     qapp.processEvents()
-    plan = SimpleNamespace(
-        plan_id="plan-1", plan_revision=5, state=SimpleNamespace(value="completed")
+    dispense = SimpleNamespace(stock_id="stock", target_dispenses=15)
+    plan_well = SimpleNamespace(
+        well_id="A1", reaction_id="reaction-1", dispenses=(dispense,)
     )
-    context = _context(qapp, QtWidgets.QWidget())
+    plan = SimpleNamespace(
+        plan_id="plan-1",
+        plan_revision=5,
+        state=SimpleNamespace(value="completed"),
+        plate=SimpleNamespace(name="plate", rows=1, columns=1),
+        stocks=(SimpleNamespace(stock_id="stock"),),
+        wells=(plan_well,),
+    )
+    reagent = SimpleNamespace(target_droplets=15, added_droplets=15)
+    reaction = SimpleNamespace(
+        unique_id="reaction-1",
+        get_all_reagents=lambda: {"stock": reagent},
+        check_all_complete=lambda: True,
+    )
+    runtime_well = SimpleNamespace(
+        well_id="A1",
+        row_num=0,
+        col=1,
+        get_assigned_reaction=lambda: reaction,
+    )
+    completed_label = QtWidgets.QLabel()
+    completed_label.setStyleSheet("border: 1px solid white")
+    start_button = QtWidgets.QPushButton("Experiment Complete")
+    start_button.setEnabled(False)
+    stock_prep_button = QtWidgets.QPushButton()
+    stock_prep_button.setEnabled(False)
+    calibration_button = QtWidgets.QPushButton()
+    calibration_button.setEnabled(False)
+    main_view = QtWidgets.QWidget()
+    main_view.well_plate_widget = SimpleNamespace(
+        well_labels=[[completed_label]],
+        start_print_array_button=start_button,
+        stock_prep_button=stock_prep_button,
+        calibration_button=calibration_button,
+    )
+    main_view.experiment_task_list = SimpleNamespace(
+        next_label=QtWidgets.QLabel("Next: Experiment complete")
+    )
+    main_view.show()
+    context = _context(qapp, main_view)
     context.scenario_root = tmp_path
     context.experiment_model = SimpleNamespace(
         get_execution_plan_snapshot=lambda: plan,
@@ -710,6 +750,7 @@ def test_completed_loader_inspects_terminal_bundle_without_activation(
             "can_resume_hardware": False,
         },
         is_authoritative_execution_runtime_active=lambda: False,
+        uses_durable_execution_checkpoint=lambda: False,
         experiment_dir_path=str(tmp_path),
         progress_data={
             "A1": {"reagents": {
@@ -717,6 +758,22 @@ def test_completed_loader_inspects_terminal_bundle_without_activation(
             }}
         },
     )
+    context.model = SimpleNamespace(
+        well_plate=SimpleNamespace(
+            get_all_wells=lambda: [runtime_well],
+            get_well=lambda _well_id: runtime_well,
+            get_current_plate_name=lambda: "plate",
+            get_plate_dimensions=lambda: (1, 1),
+        ),
+        rack_model=SimpleNamespace(slots=[]),
+        is_completed_execution_view_active=lambda: True,
+        get_completed_execution_display_heads=lambda: (
+            SimpleNamespace(get_stock_id=lambda: "stock"),
+        ),
+    )
+    context.controller = SimpleNamespace(get_array_run_state=lambda: "idle")
+    context.instrumentation = SimpleNamespace()
+    context.machine = SimpleNamespace(command_event_history=[])
     driver = ExperimentLoaderDriver(context)
     monkeypatch.setattr(actions, "capture_milestone", lambda *args, **kwargs: {})
     monkeypatch.setattr(
@@ -733,10 +790,13 @@ def test_completed_loader_inspects_terminal_bundle_without_activation(
 
     assert all(evidence["checks"].values())
     assert evidence["activation_performed"] is False
+    assert evidence["display_projection_performed"] is True
+    assert evidence["runtime_assignments"] == {"A1": "reaction-1"}
     assert context.action_results[-1]["action_id"] == (
         "experiment.inspect_completed_via_ui"
     )
     assert not dialog.isVisible()
+    main_view.close()
 
 
 def test_rack_driver_requires_one_unambiguous_stock_slot(qapp):

@@ -55,7 +55,7 @@ def test_completed_terminal_reload_requires_exact_read_only_fresh_session():
         plan_json="{\"state\":\"completed\"}",
         plan_well_ids=("A1",),
         plan_assignments=(("A1", "reaction-1"),),
-        runtime_assignments=(),
+        runtime_assignments=(("A1", "reaction-1"),),
         history_json=("revision",),
         progress_plan_id="plan-1",
         progress_plan_revision=5,
@@ -99,6 +99,8 @@ def test_completed_terminal_reload_requires_exact_read_only_fresh_session():
         "loader": {
             "checks": {"completed": True},
             "activation_performed": False,
+            "display_projection_performed": True,
+            "runtime_assignments": {"A1": "reaction-1"},
         },
         "directory_comparisons": {
             "after_close": comparison,
