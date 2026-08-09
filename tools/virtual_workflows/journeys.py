@@ -41,6 +41,7 @@ from tools.virtual_workflows.assertions import (
     rack_head_assertion,
     real_application_assertion,
     randomized_joined_design_assertion,
+    optimizer_360_design_assertion,
     simulation_identity_assertion,
     sustained_evidence_assertions,
     SoftStopResumeExpectation,
@@ -107,6 +108,12 @@ from tools.virtual_workflows.joined_interaction_cases import (
     JOINED_INTERACTION_FIXTURE_PATH,
     joined_fixture_sha256,
 )
+from tools.virtual_workflows.optimizer_360_cases import (
+    OPTIMIZER_360_CASE,
+    OPTIMIZER_360_CASE_ID,
+    OPTIMIZER_360_FIXTURE_PATH,
+    RANGE_A_STOCK_ID,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -146,6 +153,11 @@ EXPLORATION_SCENARIO_NAME = "seeded_editor_prepared_guard"
 RANDOMIZED_CALIBRATION_WORKLOAD_ID = JOINED_INTERACTION_CASE_ID
 RANDOMIZED_CALIBRATION_SCENARIO_NAME = "randomized_calibration_reload_execution"
 RANDOMIZED_CALIBRATION_SCENARIO_VERSION = "1"
+OPTIMIZER_360_WORKLOAD_ID = OPTIMIZER_360_CASE_ID
+OPTIMIZER_360_SCENARIO_NAME = (
+    OPTIMIZER_360_CASE.identity.scenario_name
+)
+OPTIMIZER_360_SCENARIO_VERSION = "1"
 
 MATRIX_CASE_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -212,6 +224,13 @@ JOINED_CALIBRATED_CHECKPOINT_REQUIRED_ASSERTIONS = (
 RANDOMIZED_CALIBRATION_REQUIRED_ASSERTIONS = (
     *JOINED_CALIBRATED_CHECKPOINT_REQUIRED_ASSERTIONS,
     "artifacts.required_present",
+)
+OPTIMIZER_360_FIRST_CALIBRATION_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "experiment.editor_create_finalize",
+    "experiment.optimizer_360_design_exact",
+    "execution.calibrated_zero_progress_exact",
 )
 EXPERIMENT_DESIGN_REJECTED_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -1437,6 +1456,127 @@ def _experiment_design_body(runtime: JourneyRuntime) -> None:
             ),
         },
     )
+
+
+def run_optimizer_360_first_calibration_checkpoint(runtime: JourneyRuntime) -> None:
+    """Drive the real editor/optimizer through Range A zero-progress Apply."""
+
+    from tools.virtual_workflows.experiment_design_cases import editor_specification
+
+    case = OPTIMIZER_360_CASE
+    context = runtime.context
+    runtime.add_assertion(simulation_identity_assertion(context))
+    runtime.add_assertion(real_application_assertion(context))
+    action_start = len(context.action_results)
+    driver = run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(
+            editor_specification(case.design_case),
+            use_harness_action_runner=True,
+            capture_editor_milestones=False,
+        ),
+    )
+    runtime.add_assertion(
+        editor_create_finalize_assertion(
+            context,
+            action_start=action_start,
+            action_end=len(context.action_results),
+            optimization_action_ids=("editor.optimize_generate_via_ui",),
+            capture_editor_milestones=False,
+        )
+    )
+    capture_milestone(
+        context,
+        "optimizer_stocks_generated",
+        evidence={
+            "case_id": case.case_id,
+            "random_seed": case.editor.random_seed,
+            "fixed_stocks_blank": all(
+                row.fixed_stock_concentration is None
+                for row in case.design_case.reagents
+            ),
+        },
+    )
+    design_result, prepared = optimizer_360_design_assertion(
+        context,
+        case=case,
+        driver_evidence=driver,
+    )
+    runtime.add_assertion(design_result)
+    capture_milestone(
+        context,
+        "prepared_randomized",
+        evidence={
+            "plan_id": prepared.plan_id,
+            "plan_revision": prepared.plan_revision,
+            "assignment_sha256": case.design_case.expected.assignment_sha256(),
+            "design_sha256": prepared.design_sha256,
+            "core_file_hashes": prepared.core_file_hashes,
+        },
+    )
+    runtime.observations["optimizer_360_calibration_lifecycle"] = {
+        "prepared": dict(design_result.evidence)
+    }
+
+    runtime.run_steps(machine_startup_steps())
+    observer = ExecutionObserver(
+        context,
+        experiment_dir=Path(prepared.experiment_dir),
+        completed_count=lambda: 0,
+        pass_context=lambda: {
+            "stock_id": RANGE_A_STOCK_ID,
+            "phase": "calibration_only",
+        },
+    )
+    runtime.register_restorable("optimizer_360_calibration_execution", observer)
+    observer.install()
+    calibration = case.calibrations[0]
+    boundary = run_stock_calibration_only(
+        runtime,
+        CalibrationOnlySpec(
+            stock_id=calibration.stock_id,
+            printer_head_id=calibration.printer_head_id,
+            pulse_width_us=calibration.print_pulse_width_us,
+            pressure_psi=2.0,
+            frequency_hz=100,
+            initial_volume_uL=100.0,
+            expected_volume_nL=float(calibration.droplet_volume_nL),
+        ),
+    )
+    runtime.restore_all()
+    observer_snapshot = runtime.observations[
+        "optimizer_360_calibration_execution_snapshot"
+    ]
+    calibrated_result, calibrated = calibrated_zero_progress_assertion(
+        context,
+        case=case,
+        prepared_snapshot=prepared,
+        calibration_evidence=boundary,
+        observer=observer_snapshot,
+        oracle_checkpoint_id="range_a_calibrated",
+        legacy_evidence_names=False,
+    )
+    runtime.add_assertion(calibrated_result)
+    capture_milestone(
+        context,
+        "range_a_calibrated",
+        evidence={
+            "plan_id": calibrated.plan_id,
+            "plan_revision": calibrated.plan_revision,
+            "stock_id": calibration.stock_id,
+            "printer_head_id": calibration.printer_head_id,
+            "total_added_droplets": calibrated.total_added_droplets,
+            "core_file_hashes": calibrated.core_file_hashes,
+        },
+    )
+    runtime.observations["optimizer_360_calibration_lifecycle"].update(
+        {
+            "range_a_calibrated": dict(calibrated_result.evidence),
+        }
+    )
+    runtime.observations["optimizer_360_prepared_snapshot"] = prepared
+    runtime.observations["optimizer_360_calibrated_snapshot"] = calibrated
+    runtime.observations["optimizer_360_session_1_observer"] = observer_snapshot
 
 
 def run_joined_calibrated_checkpoint(runtime: JourneyRuntime) -> None:
@@ -4268,6 +4408,8 @@ __all__ = [
     "JOURNEY_DEFINITIONS",
     "JOINED_CALIBRATED_CHECKPOINT_REQUIRED_ASSERTIONS",
     "JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS",
+    "OPTIMIZER_360_FIRST_CALIBRATION_REQUIRED_ASSERTIONS",
+    "OPTIMIZER_360_WORKLOAD_ID",
     "JourneyRunConfig",
     "MULTI_STOCK_REQUIRED_ASSERTIONS",
     "MULTI_STOCK_REQUIRED_UI_ACTIONS",
@@ -4290,6 +4432,7 @@ __all__ = [
     "run_composed_journey",
     "run_matrix_case",
     "run_joined_calibrated_checkpoint",
+    "run_optimizer_360_first_calibration_checkpoint",
     "run_exploration_sequence",
     "run_editor_create_finalize_journey",
     "run_disconnect_fail_closed_24_journey",

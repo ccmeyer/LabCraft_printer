@@ -102,7 +102,17 @@ def test_optimizer_inputs_reactions_assignment_and_row_p_exclusion_are_literal()
     assert [row.max_stock_concentration for row in case.design_case.reagents] == [
         "400", "100", "1600", "20"
     ]
-    assert [row.concentration for row in case.stocks] == ["200", "100", "1000", "20", "1"]
+    assert [row.concentration for row in case.stocks] == [
+        "222.22222222222223", "100", "555.5555555555555", "20", "1"
+    ]
+    assert case.optimizer_expectations.approximate_targets == 7
+    assert case.optimizer_expectations.unreachable_targets == 0
+    assert case.optimizer_expectations.achieved_maps() == {
+        "Range A": {target: target for target in ("1", "2", "3", "5", "8", "13", "21", "34", "55", "89")},
+        "Range B": {"0.5": "0.45", "2": "1.8", "4": "4.05", "8": "8.1"},
+        "Range C": {"100": "100", "140": "140", "190": "190"},
+        "Range D": {"0.1": "0.09", "0.5": "0.54", "2": "1.98"},
+    }
     assert len(reactions) == len(assignments) == 360
     assert dict(reactions[0].targets) == {
         "Range A": "1", "Range B": "0.5", "Range C": "100", "Range D": "0.1"
@@ -124,12 +134,12 @@ def test_optimizer_inputs_reactions_assignment_and_row_p_exclusion_are_literal()
 def test_every_checkpoint_expands_to_identity_keyed_counts_and_literal_totals():
     case = OPTIMIZER_360_CASE
     expected_totals = {
-        "prepared": (8316, 2610, 10320, 3120, 47634, 72000),
-        "range_a_calibrated": (6948, 2610, 10320, 3120, 47634, 70632),
-        "range_b_calibrated": (6948, 1890, 10320, 3120, 47535, 69813),
-        "range_c_calibrated": (6948, 1890, 6480, 3120, 47535, 65973),
-        "range_d_calibrated": (6948, 1890, 6480, 1800, 47407, 64525),
-        "all_stocks_calibrated": (6948, 1890, 6480, 1800, 23706, 40824),
+        "prepared": (8316, 2880, 20640, 3480, 44604, 79920),
+        "range_a_calibrated": (6948, 2880, 20640, 3480, 44676, 78624),
+        "range_b_calibrated": (6948, 2070, 20640, 3480, 44640, 77778),
+        "range_c_calibrated": (6948, 2070, 12960, 3480, 44550, 70008),
+        "range_d_calibrated": (6948, 2070, 12960, 1920, 44568, 68466),
+        "all_stocks_calibrated": (6948, 2070, 12960, 1920, 22310, 46208),
     }
     expected_keys = {
         (stock_id, assignment.well_id)
@@ -150,9 +160,9 @@ def test_every_checkpoint_expands_to_identity_keyed_counts_and_literal_totals():
     final = case.count_map("all_stocks_calibrated").target_maps()
     assert list(prepared[RANGE_A_STOCK_ID].values()) == [1, 2, 3, 5, 8, 13, 21, 34, 55, 89]
     assert list(final[RANGE_A_STOCK_ID].values()) == [1, 2, 2, 4, 7, 11, 18, 28, 46, 74]
-    assert list(final[RANGE_B_STOCK_ID].values()) == [1, 3, 6, 11]
-    assert list(final[RANGE_C_STOCK_ID].values()) == [12, 18, 24]
-    assert list(final[RANGE_D_STOCK_ID].values()) == [1, 3, 11]
+    assert list(final[RANGE_B_STOCK_ID].values()) == [1, 3, 6, 13]
+    assert list(final[RANGE_C_STOCK_ID].values()) == [25, 35, 48]
+    assert list(final[RANGE_D_STOCK_ID].values()) == [1, 3, 12]
 
 
 def test_five_calibrations_passes_revisions_and_terminal_exact_once_are_literal():
@@ -167,10 +177,10 @@ def test_five_calibrations_passes_revisions_and_terminal_exact_once_are_literal(
         360, 720, 1080, 1440, 1800
     ]
     assert [row.expected_droplets for row in case.execution_passes] == [
-        6948, 1890, 6480, 1800, 23706
+        6948, 2070, 12960, 1920, 22310
     ]
     assert case.terminal.expected_intents == 1800
-    assert case.terminal.expected_droplets == 40824
+    assert case.terminal.expected_droplets == 46208
     assert case.terminal.terminal_revision == 8
 
 
@@ -195,7 +205,7 @@ def test_five_calibrations_passes_revisions_and_terminal_exact_once_are_literal(
         ),
         replace(
             OPTIMIZER_360_CASE,
-            terminal=replace(OPTIMIZER_360_CASE.terminal, expected_droplets=40823),
+            terminal=replace(OPTIMIZER_360_CASE.terminal, expected_droplets=46207),
         ),
     ],
 )

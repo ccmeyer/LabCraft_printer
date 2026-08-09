@@ -1,8 +1,11 @@
 # Milestone 11A Execution Plan: Optimizer-Driven 360-Reaction Calibration Lifecycle
 
-Status: in progress  
-Date: 2026-08-08  
-Predecessor: Milestone 11 (complete and immutable)  
+Status: in progress
+
+Date: 2026-08-08
+
+Predecessor: Milestone 11 (complete and immutable)
+
 Next action after closeout: Milestone 12
 
 ## Purpose and safety boundary
@@ -39,15 +42,17 @@ full-factorial reactions, seed-4321 randomized assignments to rows A–O of a
 384-well plate, and row P exclusion.
 
 The optimizer inputs leave fixed-stock fields blank, disable two-stock
-solutions, and require exact optimized concentrations 200/100/1000/20. All
-stocks begin at 9 nL. Range A, Range B, Range C, Range D, and Water are then
+solutions, and require the production-selected concentrations
+222.22222222222223/100/555.5555555555555/20. The literal target preview has
+seven nearest-achievable targets and zero unreachable targets. All stocks begin
+at 9 nL. Range A, Range B, Range C, Range D, and Water are then
 calibrated to 10.8/12.6/14.4/16.2/18 nL using distinct heads and pulse widths
 1400/1500/1600/1700/1800 microseconds.
 
 The revision chain is 1 prepared, 2 first-calibration lock, 3 Range A applied
 and fresh loaded/activated, 4–7 remaining applies, and 8 terminal/reloaded.
 Session 1 and session 3 dispatch nothing. Session 2 owns exactly 1,800 intents
-and 40,824 droplets in Range A, Range B, Range C, Range D, Water order.
+and 46,208 droplets in Range A, Range B, Range C, Range D, Water order.
 
 ## Slices
 
@@ -63,7 +68,8 @@ Commit: `test: define optimizer 360 calibration lifecycle contract`
 ### Slice 11A.2 — Real editor, optimizer, and first calibration
 
 Drive the real Qt editor with blank fixed stocks and literal maxima. Assert the
-exact optimized stocks, 360 reactions, zero approximate/unreachable targets,
+exact optimized stocks, 360 reactions, seven literal nearest-achievable targets,
+zero unreachable targets,
 authoritative reaction/assignment/count truth, and prepared file hashes. Apply
 Range A calibration through the real dialog and assert revisions 2–3, zero
 progress, exact Range A and Water truth, and unchanged B/C/D truth.
@@ -85,7 +91,7 @@ Commit: `test: add five-stock calibrated session rotation`
 
 Execute five explicit passes with cumulative boundaries 360/720/1080/1440/1800.
 Reconcile begin, attachment, simulator command, durable completion, progress,
-and added-count evidence exactly once for 40,824 droplets. Reload terminal
+and added-count evidence exactly once for 46,208 droplets. Reload terminal
 revision 8 without activation. Register the capability and scenario only in
 Windows `host_stress`; exclude lifecycle, standard, and Pi suites.
 
@@ -113,4 +119,3 @@ revisions 1–6, 24 intents, 80 droplets, and byte-equivalent normalized truth.
 Rollback is additive: remove the new case, fixture, scenario/capability/suite
 entries, generic wrappers used only by Milestone 11A, tests, and Milestone 11A
 documentation. Historical Milestone 9–11 evidence remains untouched.
-

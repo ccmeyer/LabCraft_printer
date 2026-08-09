@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -42,9 +43,9 @@ OPTIMIZER_360_FIXTURE_PATH = (
     Path(__file__).resolve().parent / "fixtures" / f"{OPTIMIZER_360_CASE_ID}.json"
 )
 
-RANGE_A_STOCK_ID = "Range A_200.00_x"
+RANGE_A_STOCK_ID = "Range A_222.22_x"
 RANGE_B_STOCK_ID = "Range B_100.00_x"
-RANGE_C_STOCK_ID = "Range C_1000.00_x"
+RANGE_C_STOCK_ID = "Range C_555.56_x"
 RANGE_D_STOCK_ID = "Range D_20.00_x"
 WATER_STOCK_ID = "Water_1.00_--"
 OPTIMIZER_360_STOCK_IDS = (
@@ -64,19 +65,22 @@ OPTIMIZER_360_COUNT_CHECKPOINT_IDS = (
 )
 
 EXPECTED_FIXTURE_SHA256 = (
-    "7295bc808a7a7731c34aa69c69bf841e7c185a9c293df3b8ebe59fb86fd2fdaa"
+    "d7f4de4aafeaf4a66751872d017d89393c263d48b5ffefa1b0e1690efaa10783"
 )
 EXPECTED_CASE_SHA256 = (
-    "0751f6c0f551f7a2f162e61f57addc1597d40aac196665156849d1d948fdc313"
+    "f238d4d90b822fdf52d4170b1f6fc1871b3d73f56df3aad543637f3e5d4078d8"
 )
 EXPECTED_REACTION_MULTISET_SHA256 = (
     "5acfa8580c581231275e2b6f17ec757d71df5dcc4696196e1c0f9b2176ee7afd"
+)
+EXPECTED_ACHIEVED_REACTION_MULTISET_SHA256 = (
+    "418cf4a50cc0015c52b9b093a5df9096df98930dc0f58f42aa37c30830fe64f0"
 )
 EXPECTED_ASSIGNMENT_SHA256 = (
     "5f84bfd4cd7c2c0d4b289b6797c50feeab9739a65d56ac2fc3949da030ab3ed2"
 )
 EXPECTED_COUNT_ORACLE_SHA256 = (
-    "84dd458fea7dee1371481e764a09dd67998d6fbb895580ad9ad949087a6f8d8d"
+    "3f86a60425d2c0d6abf0839d9f0fca16a41a6e398125053dd849d2e9b397458f"
 )
 
 
@@ -276,6 +280,45 @@ class Optimizer360Qualification:
 
 
 @dataclass(frozen=True)
+class Optimizer360Expectations:
+    approximate_targets: int
+    unreachable_targets: int
+    achieved_target_concentrations: tuple[
+        tuple[str, tuple[tuple[str, str], ...]], ...
+    ]
+
+    def __post_init__(self) -> None:
+        for field in ("approximate_targets", "unreachable_targets"):
+            value = getattr(self, field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise Optimizer360CaseError(f"{field} must be a non-negative integer")
+        reagents = [reagent for reagent, _ in self.achieved_target_concentrations]
+        if len(reagents) != len(set(reagents)):
+            raise Optimizer360CaseError("achieved-concentration reagents must be unique")
+        for reagent, rows in self.achieved_target_concentrations:
+            _identity(reagent, "achieved-concentration reagent")
+            requested = [target for target, _ in rows]
+            if len(requested) != len(set(requested)):
+                raise Optimizer360CaseError("achieved-concentration targets must be unique")
+            for target, achieved in rows:
+                _identity(target, "requested concentration")
+                _identity(achieved, "achieved concentration")
+
+    def achieved_maps(self) -> dict[str, dict[str, str]]:
+        return {
+            reagent: dict(rows)
+            for reagent, rows in self.achieved_target_concentrations
+        }
+
+    def normalized(self) -> dict[str, Any]:
+        return {
+            "approximate_targets": self.approximate_targets,
+            "unreachable_targets": self.unreachable_targets,
+            "achieved_target_concentrations": self.achieved_maps(),
+        }
+
+
+@dataclass(frozen=True)
 class Optimizer360Terminal:
     expected_intents: int
     expected_droplets: int
@@ -302,6 +345,7 @@ class Optimizer360Case:
     checkpoints: tuple[JoinedCheckpoint, ...]
     count_maps: tuple[Optimizer360CountMap, ...]
     aggregate_totals: tuple[tuple[str, tuple[tuple[str, int], ...]], ...]
+    optimizer_expectations: Optimizer360Expectations
     execution_passes: tuple[Optimizer360ExecutionPass, ...]
     qualification: Optimizer360Qualification
     terminal: Optimizer360Terminal
@@ -345,6 +389,30 @@ class Optimizer360Case:
             raise Optimizer360CaseError(f"unknown aggregate checkpoint: {checkpoint_id}")
         return matches[0]
 
+    def achieved_design_oracle(self) -> dict[str, Any]:
+        """Project requested reactions to literal nearest-achievable truth."""
+
+        payload = copy.deepcopy(self.design_case.normalized())
+        achieved = self.optimizer_expectations.achieved_maps()
+        multiset: list[dict[str, Any]] = []
+        for reaction in payload["expected"]["reactions"]:
+            for target in reaction["targets"]:
+                requested = str(target["target"])
+                target["target"] = achieved[str(target["reagent"])][requested]
+            multiset.append(
+                {
+                    "replicate": reaction["replicate"],
+                    "targets": copy.deepcopy(reaction["targets"]),
+                }
+            )
+        multiset.sort(key=_canonical_json)
+        payload["expected"]["reaction_multiset_sha256"] = _sha256_json(multiset)
+        payload["expected"]["assignments"].sort(key=lambda row: row["well_id"])
+        payload["expected"]["assignment_sha256"] = _sha256_json(
+            payload["expected"]["assignments"]
+        )
+        return payload
+
     def normalized(self) -> dict[str, Any]:
         return {
             "case_id": self.case_id,
@@ -360,6 +428,7 @@ class Optimizer360Case:
                 checkpoint_id: dict(rows)
                 for checkpoint_id, rows in self.aggregate_totals
             },
+            "optimizer_expectations": self.optimizer_expectations.normalized(),
             "execution_passes": [row.normalized() for row in self.execution_passes],
             "qualification": self.qualification.normalized(),
             "terminal": self.terminal.normalized(),
@@ -380,7 +449,8 @@ def _parse_case(payload: Mapping[str, Any]) -> Optimizer360Case:
         {
             "case_id", "schema_version", "identity", "experiment", "reagents",
             "stocks", "reactions", "assignments", "calibrations", "checkpoints",
-            "count_maps", "aggregate_totals", "execution_passes", "qualification",
+            "count_maps", "aggregate_totals", "optimizer_expectations",
+            "execution_passes", "qualification",
             "terminal",
         },
         "fixture",
@@ -389,6 +459,7 @@ def _parse_case(payload: Mapping[str, Any]) -> Optimizer360Case:
     experiment_payload = payload["experiment"]
     qualification_payload = payload["qualification"]
     terminal_payload = payload["terminal"]
+    optimizer_payload = payload["optimizer_expectations"]
     _keys(identity_payload, set(Optimizer360Identity.__dataclass_fields__), "identity")
     _keys(
         experiment_payload,
@@ -397,6 +468,11 @@ def _parse_case(payload: Mapping[str, Any]) -> Optimizer360Case:
     )
     _keys(qualification_payload, set(Optimizer360Qualification.__dataclass_fields__), "qualification")
     _keys(terminal_payload, set(Optimizer360Terminal.__dataclass_fields__), "terminal")
+    _keys(
+        optimizer_payload,
+        set(Optimizer360Expectations.__dataclass_fields__),
+        "optimizer expectations",
+    )
 
     experiment = DesignExperimentInput(
         **{
@@ -475,6 +551,16 @@ def _parse_case(payload: Mapping[str, Any]) -> Optimizer360Case:
             (checkpoint_id, tuple(rows.items()))
             for checkpoint_id, rows in payload["aggregate_totals"].items()
         ),
+        optimizer_expectations=Optimizer360Expectations(
+            approximate_targets=optimizer_payload["approximate_targets"],
+            unreachable_targets=optimizer_payload["unreachable_targets"],
+            achieved_target_concentrations=tuple(
+                (reagent, tuple(rows.items()))
+                for reagent, rows in optimizer_payload[
+                    "achieved_target_concentrations"
+                ].items()
+            ),
+        ),
         execution_passes=tuple(
             Optimizer360ExecutionPass(**row) for row in payload["execution_passes"]
         ),
@@ -512,8 +598,8 @@ def validate_optimizer_360_case(case: Optimizer360Case) -> None:
         or len(experiment.selected_well_ids) != 360
         or any(well.startswith("P") for well in experiment.selected_well_ids)
         or experiment.excluded_well_ids
-        or experiment.printed_volume_nL != "1800"
-        or experiment.final_volume_nL != "1800"
+        or experiment.printed_volume_nL != "2000"
+        or experiment.final_volume_nL != "2000"
         or experiment.printed_volume_tolerance_nL != "0"
         or experiment.randomize_assignments is not True
         or experiment.random_seed != 4321
@@ -540,9 +626,9 @@ def validate_optimizer_360_case(case: Optimizer360Case) -> None:
         for row in case.stocks
     )
     if stock_identity != (
-        (RANGE_A_STOCK_ID, "Range A", "200", "x", "non_fill"),
+        (RANGE_A_STOCK_ID, "Range A", "222.22222222222223", "x", "non_fill"),
         (RANGE_B_STOCK_ID, "Range B", "100", "x", "non_fill"),
-        (RANGE_C_STOCK_ID, "Range C", "1000", "x", "non_fill"),
+        (RANGE_C_STOCK_ID, "Range C", "555.5555555555555", "x", "non_fill"),
         (RANGE_D_STOCK_ID, "Range D", "20", "x", "non_fill"),
         (WATER_STOCK_ID, "Water", "1", "--", "fill"),
     ):
@@ -587,6 +673,18 @@ def validate_optimizer_360_case(case: Optimizer360Case) -> None:
         raise Optimizer360CaseError("calibration/head/revision joins drifted")
     if len({row.printer_head_id for row in case.calibrations}) != 5:
         raise Optimizer360CaseError("each execution stock requires a distinct head")
+
+    if case.optimizer_expectations.normalized() != {
+        "approximate_targets": 7,
+        "unreachable_targets": 0,
+        "achieved_target_concentrations": {
+            "Range A": {target: target for target in ("1", "2", "3", "5", "8", "13", "21", "34", "55", "89")},
+            "Range B": {"0.5": "0.45", "2": "1.8", "4": "4.05", "8": "8.1"},
+            "Range C": {target: target for target in ("100", "140", "190")},
+            "Range D": {"0.1": "0.09", "0.5": "0.54", "2": "1.98"},
+        },
+    }:
+        raise Optimizer360CaseError("nearest-achievable optimizer truth drifted")
 
     checkpoint_identity = tuple(
         (
@@ -662,20 +760,20 @@ def validate_optimizer_360_case(case: Optimizer360Case) -> None:
     )
     if pass_identity != (
         (1, RANGE_A_STOCK_ID, 360, 6948, 360, "range_a_pass_complete"),
-        (2, RANGE_B_STOCK_ID, 360, 1890, 720, "range_b_pass_complete"),
-        (3, RANGE_C_STOCK_ID, 360, 6480, 1080, "range_c_pass_complete"),
-        (4, RANGE_D_STOCK_ID, 360, 1800, 1440, "range_d_pass_complete"),
-        (5, WATER_STOCK_ID, 360, 23706, 1800, "water_pass_complete"),
+        (2, RANGE_B_STOCK_ID, 360, 2070, 720, "range_b_pass_complete"),
+        (3, RANGE_C_STOCK_ID, 360, 12960, 1080, "range_c_pass_complete"),
+        (4, RANGE_D_STOCK_ID, 360, 1920, 1440, "range_d_pass_complete"),
+        (5, WATER_STOCK_ID, 360, 22310, 1800, "water_pass_complete"),
     ):
         raise Optimizer360CaseError("execution pass identity/boundary contract drifted")
-    if case.terminal != Optimizer360Terminal(1800, 40824, 1800, 5, 3, 8):
+    if case.terminal != Optimizer360Terminal(1800, 46208, 1800, 5, 3, 8):
         raise Optimizer360CaseError("terminal exact-once contract drifted")
     final = case.oracle("all_stocks_calibrated").keyed()
     if max(final.values()) > 1000 or min(final.values()) <= 0:
         raise Optimizer360CaseError("simulator command limits drifted")
     if (
         sum(row.expected_intents for row in case.execution_passes) != 1800
-        or sum(row.expected_droplets for row in case.execution_passes) != 40824
+        or sum(row.expected_droplets for row in case.execution_passes) != 46208
     ):
         raise Optimizer360CaseError("pass totals differ from terminal truth")
     if case.qualification.normalized() != {
@@ -699,6 +797,7 @@ def validate_optimizer_360_case(case: Optimizer360Case) -> None:
         "fixture": EXPECTED_FIXTURE_SHA256,
         "case": EXPECTED_CASE_SHA256,
         "reaction": EXPECTED_REACTION_MULTISET_SHA256,
+        "achieved_reaction": EXPECTED_ACHIEVED_REACTION_MULTISET_SHA256,
         "assignment": EXPECTED_ASSIGNMENT_SHA256,
         "count": EXPECTED_COUNT_ORACLE_SHA256,
     }
@@ -707,6 +806,7 @@ def validate_optimizer_360_case(case: Optimizer360Case) -> None:
             "fixture": optimizer_360_fixture_sha256(),
             "case": case.sha256(),
             "reaction": case.design_case.expected.reaction_multiset_sha256(),
+            "achieved_reaction": case.achieved_design_oracle()["expected"]["reaction_multiset_sha256"],
             "assignment": case.design_case.expected.assignment_sha256(),
             "count": case.count_oracle_sha256(),
         }
@@ -735,7 +835,8 @@ OPTIMIZER_360_CASE = load_optimizer_360_case()
 
 
 __all__ = [
-    "EXPECTED_ASSIGNMENT_SHA256", "EXPECTED_CASE_SHA256",
+    "EXPECTED_ACHIEVED_REACTION_MULTISET_SHA256", "EXPECTED_ASSIGNMENT_SHA256",
+    "EXPECTED_CASE_SHA256",
     "EXPECTED_COUNT_ORACLE_SHA256", "EXPECTED_FIXTURE_SHA256",
     "EXPECTED_REACTION_MULTISET_SHA256", "OPTIMIZER_360_CAPABILITY",
     "OPTIMIZER_360_CASE", "OPTIMIZER_360_CASE_ID",
@@ -743,7 +844,8 @@ __all__ = [
     "OPTIMIZER_360_SCENARIO_NAME", "OPTIMIZER_360_STOCK_IDS",
     "Optimizer360Case", "Optimizer360CaseError", "Optimizer360CountMap",
     "Optimizer360ExecutionPass", "Optimizer360Identity",
-    "Optimizer360Qualification", "Optimizer360Terminal", "RANGE_A_STOCK_ID",
+    "Optimizer360Expectations", "Optimizer360Qualification",
+    "Optimizer360Terminal", "RANGE_A_STOCK_ID",
     "RANGE_B_STOCK_ID", "RANGE_C_STOCK_ID", "RANGE_D_STOCK_ID",
     "WATER_STOCK_ID", "load_optimizer_360_case", "optimizer_360_fixture_sha256",
     "validate_optimizer_360_case",

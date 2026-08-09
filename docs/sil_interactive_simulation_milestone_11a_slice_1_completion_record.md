@@ -1,7 +1,9 @@
 # Milestone 11A Slice 1 Completion Record
 
-Status: complete  
-Date: 2026-08-08  
+Status: complete
+
+Date: 2026-08-08
+
 Commit boundary: `test: define optimizer 360 calibration lifecycle contract`
 
 ## Delivered
@@ -22,11 +24,17 @@ Commit boundary: `test: define optimizer 360 calibration lifecycle contract`
 
 ## Frozen hashes
 
-- Fixture SHA-256: `7295bc808a7a7731c34aa69c69bf841e7c185a9c293df3b8ebe59fb86fd2fdaa`
-- Normalized case SHA-256: `0751f6c0f551f7a2f162e61f57addc1597d40aac196665156849d1d948fdc313`
+- Fixture SHA-256: `d7f4de4aafeaf4a66751872d017d89393c263d48b5ffefa1b0e1690efaa10783`
+- Normalized case SHA-256: `f238d4d90b822fdf52d4170b1f6fc1871b3d73f56df3aad543637f3e5d4078d8`
 - Reaction multiset SHA-256: `5acfa8580c581231275e2b6f17ec757d71df5dcc4696196e1c0f9b2176ee7afd`
+- Nearest-achievable reaction multiset SHA-256: `418cf4a50cc0015c52b9b093a5df9096df98930dc0f58f42aa37c30830fe64f0`
 - Assignment SHA-256: `5f84bfd4cd7c2c0d4b289b6797c50feeab9739a65d56ac2fc3949da030ab3ed2`
-- Expanded count-oracle SHA-256: `84dd458fea7dee1371481e764a09dd67998d6fbb895580ad9ad949087a6f8d8d`
+- Expanded count-oracle SHA-256: `3f86a60425d2c0d6abf0839d9f0fca16a41a6e398125053dd849d2e9b397458f`
+
+The hashes were re-frozen during Slice 2 after comparison with the user-created
+2,000 nL production experiment established that the original 1,800 nL
+zero-approximation oracle encoded a different optimizer policy. Production code
+was not changed.
 
 ## Compatibility evidence
 
@@ -49,4 +57,3 @@ Qt editor/optimizer execution, calibration Apply, session rotation, five-pass
 execution, registry/manifest changes, retained SIL evidence, replay, visible
 qualification, lifecycle/regression suites, and the complete Python suite are
 deliberately deferred to later slices.
-

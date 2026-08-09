@@ -3415,6 +3415,123 @@ def randomized_joined_design_assertion(
     )
 
 
+def optimizer_360_design_assertion(
+    context: Any,
+    *,
+    case: Any,
+    driver_evidence: Mapping[str, Any],
+) -> tuple[AssertionResult, Any]:
+    """Join real editor/optimizer output to standalone literal 360 truth."""
+
+    base, snapshot = experiment_design_case_oracle_assertion(
+        context,
+        case=case.achieved_design_oracle(),
+        driver_evidence=driver_evidence,
+    )
+    counts = capture_count_snapshot(context)
+    expected = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("prepared").rows
+        ),
+        label="optimizer 360 prepared literal",
+    )
+    observed = {
+        name: normalize_stock_well_counts(
+            counts[name], label=f"optimizer 360 prepared {name}"
+        )
+        for name in ("plan_targets", "progress_targets", "runtime_targets")
+    }
+    preview_rows = [
+        dict(row)
+        for rows in context.experiment_model.get_target_preview_map().values()
+        for row in rows
+    ]
+    approximate_targets = sum(
+        1
+        for row in preview_rows
+        if bool(row.get("reachable"))
+        and abs(float(row.get("abs_error", 0.0))) > 1e-12
+    )
+    unreachable_targets = sum(
+        1 for row in preview_rows if not bool(row.get("reachable"))
+    )
+    expected_stocks = {
+        row.stock_id: row.concentration for row in case.stocks
+    }
+    plan_stocks = {
+        row.stock_id: row
+        for row in context.experiment_model.get_execution_plan_snapshot().stocks
+    }
+    observed_stocks = {
+        stock_id: str(row.concentration) for stock_id, row in plan_stocks.items()
+    }
+    checks = {
+        "design_oracle_passed": base.decision == "pass",
+        "revision_one_prepared": snapshot.plan_revision == 1
+        and snapshot.plan_state == "prepared",
+        "design_plan_hash_join_exact": snapshot.plan_design_sha256
+        == snapshot.design_sha256,
+        "optimizer_one_stock_per_reagent": len(plan_stocks) == 5
+        and set(plan_stocks) == set(expected_stocks),
+        "optimized_concentrations_exact": all(
+            stock_id in plan_stocks
+            and Decimal(str(plan_stocks[stock_id].concentration))
+            == Decimal(concentration)
+            for stock_id, concentration in expected_stocks.items()
+        ),
+        "approximate_targets_exact": approximate_targets
+        == case.optimizer_expectations.approximate_targets,
+        "unreachable_targets_exact": unreachable_targets
+        == case.optimizer_expectations.unreachable_targets,
+        "literal_plan_counts_exact": observed["plan_targets"] == expected,
+        "literal_progress_counts_exact": observed["progress_targets"] == expected,
+        "literal_runtime_counts_exact": observed["runtime_targets"] == expected,
+        "zero_progress": snapshot.total_added_droplets == 0,
+        "runtime_inactive": not snapshot.runtime_active,
+        "assignment_hash_exact": snapshot.assignments
+        == {row.well_id: row.reaction_id for row in case.assignments},
+        "action_cap_not_exceeded": len(context.action_results)
+        <= case.qualification.action_cap,
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "case_id": case.case_id,
+        "prepared": snapshot.prepared_evidence(),
+        "core_file_hashes": snapshot.core_file_hashes,
+        "plan_design_sha256": snapshot.plan_design_sha256,
+        "expected_stocks": expected_stocks,
+        "observed_stocks": observed_stocks,
+        "approximate_targets": approximate_targets,
+        "unreachable_targets": unreachable_targets,
+        "preview_row_count": len(preview_rows),
+        "counts": counts,
+        "design_oracle": dict(base.evidence),
+    }
+    return (
+        AssertionResult(
+            "experiment.optimizer_360_design_exact",
+            "prepared_randomized",
+            "pass" if not evidence["failed_checks"] else "fail",
+            ("ui", "model", "persistence"),
+            evidence,
+            (
+                None
+                if not evidence["failed_checks"]
+                else "optimizer 360 design was not exact: "
+                + ", ".join(evidence["failed_checks"])
+                + f"; expected_stocks={expected_stocks}"
+                + f"; observed_stocks={observed_stocks}"
+                + f"; approximate_targets={approximate_targets}"
+                + f"; unreachable_targets={unreachable_targets}"
+                + f"; design_oracle_failed={base.evidence.get('failed_checks')}"
+            ),
+        ),
+        snapshot,
+    )
+
+
 def calibrated_zero_progress_assertion(
     context: Any,
     *,
@@ -3422,6 +3539,8 @@ def calibrated_zero_progress_assertion(
     prepared_snapshot: Any,
     calibration_evidence: Mapping[str, Any],
     observer: Mapping[str, Any],
+    oracle_checkpoint_id: str = "calibrated_zero_progress",
+    legacy_evidence_names: bool = True,
 ) -> tuple[AssertionResult, Any]:
     """Prove the boundary calibration changed counts but never executed them."""
 
@@ -3429,14 +3548,14 @@ def calibrated_zero_progress_assertion(
     from tools.virtual_workflows.authoritative_evidence import (
         capture_authoritative_bundle,
     )
-    from tools.virtual_workflows.joined_interaction_cases import DESIGN_A_STOCK_ID
-
     snapshot = capture_authoritative_bundle(context)
     counts = capture_count_snapshot(context)
+    first_calibration = case.calibrations[0]
+    calibrated_stock_id = first_calibration.stock_id
     expected = normalize_stock_well_counts(
         (
             StockWellCount(row.stock_id, row.well_id, row.target_droplets)
-            for row in case.oracle("calibrated_zero_progress").rows
+            for row in case.oracle(oracle_checkpoint_id).rows
         ),
         label="joined calibrated literal",
     )
@@ -3456,8 +3575,12 @@ def calibrated_zero_progress_assertion(
     records = [record.to_dict() for record in document.records.values()]
     record = records[0] if len(records) == 1 else {}
     plan_stocks = {stock.stock_id: stock for stock in context.experiment_model.get_execution_plan_snapshot().stocks}
-    design_a = plan_stocks.get(DESIGN_A_STOCK_ID)
-    other_stocks = [stock for stock_id, stock in plan_stocks.items() if stock_id != DESIGN_A_STOCK_ID]
+    calibrated_stock = plan_stocks.get(calibrated_stock_id)
+    other_stocks = [
+        stock
+        for stock_id, stock in plan_stocks.items()
+        if stock_id != calibrated_stock_id
+    ]
     lifecycle = dict(observer.get("lifecycle") or {})
     execution_collections = (
         "begins", "attachments", "completions", "discard_batches",
@@ -3504,16 +3627,27 @@ def calibrated_zero_progress_assertion(
         "zero_added_progress": all(row.droplets == 0 for row in added)
         and snapshot.total_added_droplets == 0
         and not snapshot.completed_well_ids,
-        "single_design_a_calibration": len(records) == 1
-        and record.get("stock_id") == DESIGN_A_STOCK_ID,
+        (
+            "single_design_a_calibration"
+            if legacy_evidence_names
+            else "single_first_stock_calibration"
+        ): len(records) == 1
+        and record.get("stock_id") == calibrated_stock_id,
         "calibration_head_exact": record.get("printer_head_id")
-        == "virtual-head-m11-design-a-v1",
-        "calibration_pulse_volume_exact": int(record.get("pw_us") or 0) == 1800
-        and math.isclose(float(record.get("effective_volume_nL") or 0), 18.0),
-        "plan_calibration_join_exact": design_a is not None
-        and design_a.printer_head_id == record.get("printer_head_id")
-        and design_a.calibration_record_key == record.get("record_id")
-        and math.isclose(float(design_a.effective_volume_nL), 18.0),
+        == first_calibration.printer_head_id,
+        "calibration_pulse_volume_exact": int(record.get("pw_us") or 0)
+        == first_calibration.print_pulse_width_us
+        and math.isclose(
+            float(record.get("effective_volume_nL") or 0),
+            float(first_calibration.droplet_volume_nL),
+        ),
+        "plan_calibration_join_exact": calibrated_stock is not None
+        and calibrated_stock.printer_head_id == record.get("printer_head_id")
+        and calibrated_stock.calibration_record_key == record.get("record_id")
+        and math.isclose(
+            float(calibrated_stock.effective_volume_nL),
+            float(first_calibration.droplet_volume_nL),
+        ),
         "other_stock_calibration_absent": all(
             stock.printer_head_id is None and stock.calibration_record_key is None
             for stock in other_stocks
@@ -4988,6 +5122,7 @@ __all__ = [
     "rack_head_assertion",
     "real_application_assertion",
     "randomized_joined_design_assertion",
+    "optimizer_360_design_assertion",
     "regression_evidence_assertions",
     "simulation_identity_assertion",
     "synthetic_calibration_contract",
