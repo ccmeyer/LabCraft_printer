@@ -775,7 +775,7 @@ def _drive_editor_post_start_lock_and_copy(
                     "unexpected source QFileDialog while creating editable copy"
                 )
             if isinstance(modal, QtWidgets.QInputDialog):
-                if modal.windowTitle() != "Duplicate Experiment Design":
+                if modal.windowTitle() != "Create Editable Copy":
                     raise RuntimeError(
                         f"unexpected input dialog title: {modal.windowTitle()!r}"
                     )
@@ -889,8 +889,8 @@ def _drive_editor_post_start_lock_and_copy(
                             matrix["banner_visible"],
                         ),
                         (
-                            "execution_loaded_label",
-                            matrix["action_label"] == "Execution Loaded",
+                            "experiment_loaded_label",
+                            matrix["action_label"] == "Experiment Loaded",
                         ),
                     )
                     if not passed
@@ -928,7 +928,7 @@ def _drive_editor_post_start_lock_and_copy(
                     raise RuntimeError("locked name control accepted an edit")
                 if int(dialog.result()) != result_before or not dialog.isVisible():
                     raise RuntimeError(
-                        "disabled Execution Loaded action closed the locked editor"
+                        "disabled Experiment Loaded action closed the locked editor"
                     )
                 evidence = {"name_unchanged": True, "finish_rejected": True}
                 state["in_place_rejection"] = evidence
@@ -951,7 +951,7 @@ def _drive_editor_post_start_lock_and_copy(
                     with _expected_dialogs(
                         context.app,
                         (
-                            "Duplicate Experiment Design",
+                            "Create Editable Copy",
                             "EditableCopyNameDialog",
                         ),
                     ):
@@ -1009,7 +1009,7 @@ def _drive_editor_post_start_lock_and_copy(
                     and dialog.volume_tolerance_spin.isEnabled()
                     and dialog.run_btn.isEnabled()
                     and dialog.finish_btn.isEnabled()
-                    and dialog.finish_btn.text() == "Finalize Design"
+                    and dialog.finish_btn.text() == "Finalize Experiment"
                 )
                 if not editable:
                     raise RuntimeError("editable copy controls remained locked")
@@ -1069,19 +1069,19 @@ def _drive_editor_post_start_lock_and_copy(
             )
 
             def finalize_copy() -> Mapping[str, Any]:
-                if dialog.finish_btn.text() != "Finalize Design":
+                if dialog.finish_btn.text() != "Finalize Experiment":
                     raise RuntimeError(
-                        "editable copy did not expose Finalize Design"
+                        "editable copy did not expose Finalize Experiment"
                     )
                 click(dialog.finish_btn)
                 if dialog.result() != QtWidgets.QDialog.DialogCode.Accepted:
                     raise RuntimeError(
-                        "copy editor did not accept after Finalize Design"
+                        "copy editor did not accept after Finalize Experiment"
                     )
                 return {
                     "dialog_result": int(dialog.result()),
                     "apply_requested": bool(dialog._apply_requested),
-                    "action_label": "Finalize Design",
+                    "action_label": "Finalize Experiment",
                 }
 
             run_action("editor.finalize_copy_via_ui", finalize_copy)
@@ -1340,18 +1340,17 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             eligibility_check = f"eligibility_{expected_eligibility_status}"
             checks = {
                 "name_matches": dialog.exp_name_edit.text() == expected_name,
-                "action_is_load_execution": dialog.finish_btn.text()
-                == "Load Execution",
+                "action_is_load_experiment": dialog.finish_btn.text()
+                == "Load Experiment",
                 "finish_enabled": bool(dialog.finish_btn.isEnabled()),
                 eligibility_check: eligibility.get("status")
                 == expected_eligibility_status,
                 "runtime_inactive": not runtime_active,
-                "read_only_guidance": "execution plan validated"
-                in status_text.casefold()
-                and "load execution" in status_text.casefold(),
+                "read_only_guidance": "ready to load" in status_text.casefold()
+                and "load experiment" in status_text.casefold(),
                 "visible_lock_banner": not dialog.lifecycle_banner.isHidden()
-                and "load execution" in banner_text.casefold()
-                and "without starting or resuming printing"
+                and "load experiment" in banner_text.casefold()
+                and "will not start or resume automatically"
                 in banner_text.casefold(),
             }
             loaded_path = Path(self.context.experiment_model.experiment_file_path)
@@ -1391,11 +1390,11 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             return evidence
 
         def activate_evidence(dialog) -> Mapping[str, Any]:
-            if dialog.finish_btn.text() != "Load Execution":
-                raise RuntimeError("saved runtime did not expose Load Execution")
+            if dialog.finish_btn.text() != "Load Experiment":
+                raise RuntimeError("saved experiment did not expose Load Experiment")
             self.click(dialog.finish_btn)
             if dialog.isVisible():
-                raise RuntimeError("Load Execution did not close the editor")
+                raise RuntimeError("Load Experiment did not close the editor")
             eligibility = (
                 self.context.experiment_model.get_execution_resume_eligibility() or {}
             )
@@ -1417,7 +1416,7 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 "eligibility": eligibility,
                 "runtime_active": runtime_active,
                 "array_state": array_state,
-                "action_label": "Load Execution",
+                "action_label": "Load Experiment",
                 "reload_boundary": (
                     dict(after_activation()) if after_activation is not None else {}
                 ),
@@ -1490,10 +1489,8 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 if "No such file or directory" not in raw_message or expected_suffix not in portable_raw:
                     raise RuntimeError("missing progress classification did not identify the exact copied path")
                 normalized_message = case.expected.message
-            if (
-                raw_code != case.expected.code
-                or normalized_message != case.expected.message
-            ):
+            technical_message = str(case.setup["technical_message"])
+            if raw_code != case.expected.code or normalized_message != technical_message:
                 raise RuntimeError(
                     "authoritative classification drifted: "
                     f"code={raw_code!r}, message={raw_message!r}"
@@ -1501,13 +1498,19 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             status_text = str(dialog.status_lbl.text() or "")
             banner_text = str(dialog.lifecycle_banner.text() or "")
             action_label = str(dialog.finish_btn.text() or "")
+            operator_message = dialog._user_facing_eligibility_reason(
+                eligibility,
+                plan_state=dialog._execution_plan_state_text(model),
+            )
             if (
-                action_label != "Execution Locked"
+                action_label != "Experiment Locked"
                 or dialog.finish_btn.isEnabled()
                 or model.is_authoritative_execution_runtime_active()
                 or self.context.controller.get_array_run_state() != "idle"
-                or raw_message not in status_text
-                or raw_message not in banner_text
+                or operator_message not in status_text
+                or operator_message not in banner_text
+                or raw_message in status_text
+                or raw_message in banner_text
             ):
                 raise RuntimeError("rejected authoritative editor state is not exact")
             evidence = {
@@ -1578,7 +1581,7 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 "after": after,
                 "ui": {
                     "title": None,
-                    "message": normalized_message,
+                    "message": operator_message,
                     "raw_message": raw_message,
                     "selected_control": action_label,
                     "status_text": status_text,
@@ -1731,11 +1734,11 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 "action_is_view_completed": dialog.finish_btn.text()
                 == "View Completed Experiment",
                 "action_enabled": bool(dialog.finish_btn.isEnabled()),
-                "read_only_guidance": "execution complete" in status_text.casefold()
+                "read_only_guidance": "experiment complete" in status_text.casefold()
                 and "view completed experiment" in status_text.casefold(),
                 "visible_lock_banner": not dialog.lifecycle_banner.isHidden()
                 and "locked and read-only" in banner_text.casefold()
-                and "hardware start and resume remain unavailable"
+                and "printing cannot be started or resumed"
                 in banner_text.casefold(),
             }
             if not all(initial_checks.values()):

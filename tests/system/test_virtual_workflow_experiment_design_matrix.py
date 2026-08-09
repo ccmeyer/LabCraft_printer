@@ -178,7 +178,9 @@ def test_experiment_design_positive_case_is_exact(
         assert attempts[0][
             "authoritative_execution_artifacts_unchanged"
         ] is True
-        assert attempts[0]["warning"]["title"] == "Optimization failed"
+        assert attempts[0]["warning"]["title"] == (
+            "Could not update reactions and stock solutions"
+        )
         assert attempts[0]["dirty_after"] is True
         assert attempts[0]["dialog_open_after"] is True
     else:
@@ -215,7 +217,7 @@ def test_experiment_design_positive_case_is_exact(
         pytest.param(
             "fixed_stock_exceeds_max_rejected",
             "formulation_rejected",
-            "Optimization failed",
+            "Could not update reactions and stock solutions",
             ("exceeds max stock",),
             False,
             id="fixed_stock_exceeds_max_rejected",

@@ -49,7 +49,7 @@ EXPECTED_CASE_SHA256 = {
         "30ee17fcd869f6c3989d39b50d7e484ed8de233e5af6fc1f2c47cfac40230e17"
     ),
     "two_stock_required": (
-        "b9bd401c9f223c1576bc98938c75b2a7401958dad2048a2d048f95d4fbda2fff"
+        "be49593fd1cf20fdce550fe350d6eca5b37c275a5c5373e69c616cc89def5c96"
     ),
     "custom_wells_with_exclusions": (
         "d7226b2e801489066516b46206274706a85749c4a73cfdfa4cc3df289f4391cf"
@@ -64,17 +64,17 @@ EXPECTED_CASE_SHA256 = {
         "16af7c74a8e4d5840e24317b20996a1bc511a1d26641e5e4a5dce10b31fca21a"
     ),
     "fixed_stock_exceeds_max_rejected": (
-        "c386c67a6d5da03ff4a376f5631189881fb16b9d49f758a5a94a42bca10bcca9"
+        "6ca924d668e36b8b5b6dbd32bc9fcc965acb41b31f14af1723de243270174932"
     ),
 }
 EXPECTED_PLANNED_CATALOG_SHA256 = (
-    "15ec261cf19bec2f2758d76f8c8102d0d246eef02ff165a4bdb104b1a9e8dfcd"
+    "17c879cbe5963ea5ddcbcb8bf298f781784310534db5d91eebd9cb1e7b42d326"
 )
 EXPECTED_TEST_LOCAL_DEFINITION_SHA256 = (
-    "65dfb3e5a1e4ae2d7f212b9c873f8e8b660adfa1b3f5bc49080657664f35abc3"
+    "aa58a764c644a69a37d3c7c4aa9ce788d43bb10bee25da606305d3bcb010cbc9"
 )
 EXPECTED_TEST_LOCAL_PLAN_SHA256 = (
-    "479142fd63f85b73e3d6fc1956ef87176e2465d419ca310963aba0755550ce51"
+    "71f416313e0e915c03e25abb92fffa7f2b80543ef12b3238d3f320894210081c"
 )
 
 
@@ -253,7 +253,7 @@ def test_executable_prefix_and_editor_projection_are_additive_and_exact():
         "formulation_rejected"
     )
     assert formulation_rejected["expected"]["dialog_title"] == (
-        "Optimization failed"
+        "Could not update reactions and stock solutions"
     )
 
 

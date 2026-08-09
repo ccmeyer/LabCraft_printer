@@ -2897,7 +2897,7 @@ def experiment_finalization_rejected_no_mutation_assertion(
             and warning.get("dismissed") is True
             and warning.get("screenshot_captured") is True
             and rejection.get("activation_count") == 1
-            and rejection.get("action_label") == "Finalize Design"
+            and rejection.get("action_label") == "Finalize Experiment"
         ),
         "dialog_remained_unaccepted": (
             rejection.get("dialog_before", {}).get("visible") is True

@@ -739,7 +739,7 @@
         "id": "editor_safeguards_v1",
         "case_count": 8,
         "case_ids": ["impossible_fixed_target_finalize_rejected", "printed_exceeds_final_finalize_rejected", "one_stock_infeasible_finalize_rejected", "two_stock_infeasible_finalize_rejected", "capacity_plus_one_finalize_rejected", "invalid_uploaded_well_rejected", "excluded_uploaded_well_rejected", "dirty_invalid_finalize_rejected"],
-        "catalog_sha256": "7b75e9776402641a1b8b00527b394de8296f5ed29875af52c05970de328d7da5",
+        "catalog_sha256": "18b02f4fbdec0f01ca950ad3b572a7bd99962a6dffcaeca9a9c8c4ddbf37e670",
         "required_assertion_ids": ["safeguard_rejection_no_mutation_no_dispatch"],
         "test_node_ids": ["tests/system/test_virtual_workflow_editor_safeguards.py::test_editor_safeguard_real_operator_action_is_exact_and_quiescent"]
       },
@@ -747,7 +747,7 @@
         "id": "execution_preflight_safeguards_v1",
         "case_count": 17,
         "case_ids": ["calibration_head_mode_cancelled", "calibration_pulse_profile_cancelled", "start_missing_applied_calibration_cancelled", "start_stale_design_volume_cancelled", "start_pulse_width_mismatch_cancelled", "start_pressure_mismatch_cancelled", "wrong_stock_calibration_binding_rejected", "wrong_printer_head_calibration_binding_rejected", "reordered_stock_rows_keyed_valid", "regenerated_design_stale_calibration_rejected", "inspected_not_activated_start_rejected", "invalid_activation_rejected", "active_execution_edit_rejected", "progressed_stock_recalibration_rejected", "start_while_active_rejected", "resume_at_invalid_boundary_rejected", "head_exchange_at_invalid_boundary_rejected"],
-        "catalog_sha256": "0a4169cfc5f844e25cc02c1af74ab9b26b01d82a9703470b85adfc0b0ed763c2",
+        "catalog_sha256": "40402ed3ac390b4c642e2328c1ff41d5b9352ad4f602220cb6c95271b767fa75",
         "required_assertion_ids": ["safeguard_rejection_no_mutation_no_dispatch"],
         "test_node_ids": ["tests/system/test_virtual_workflow_execution_preflight_safeguards.py::test_execution_preflight_real_operator_surface_is_exact_and_quiescent"]
       },
@@ -755,7 +755,7 @@
         "id": "authoritative_persistence_safeguards_v1",
         "case_count": 9,
         "case_ids": ["unreflected_pending_intent_blocked", "positive_progress_without_checkpoint_blocked", "checkpoint_plan_revision_conflict_blocked", "checkpoint_progress_fingerprint_conflict_blocked", "progress_plan_revision_conflict_invalid", "latest_plan_history_conflict_invalid", "progressed_calibration_link_missing_invalid", "design_plan_hash_conflict_invalid", "incomplete_authoritative_bundle_invalid"],
-        "catalog_sha256": "64fffe3723489cb812358be06f146c22fd72cf36c4fc61292d5820154a06656c",
+        "catalog_sha256": "8ce5cad77540dfaba3e1448a9bf35e9ffaf3340010c0c636cee2c7af361f5f13",
         "required_assertion_ids": ["safeguard_rejection_no_mutation_no_dispatch"],
         "test_node_ids": ["tests/system/test_virtual_workflow_persistence_safeguards.py::test_persistence_fault_real_load_is_exact_inactive_and_nonmutating"]
       }

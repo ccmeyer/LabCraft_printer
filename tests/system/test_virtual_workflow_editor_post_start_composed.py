@@ -127,7 +127,7 @@ def test_composed_editor_post_start_lock_report(qapp, tmp_path):
     assert boundary["source_locked"]["plan_revision"] == 2
     assert boundary["source_locked"]["lock_reason"] == "printing_started"
     assert boundary["locked_editor"]["all_mutating_controls_locked"] is True
-    assert boundary["locked_editor"]["action_label"] == "Execution Loaded"
+    assert boundary["locked_editor"]["action_label"] == "Experiment Loaded"
     assert "Calibration may still update" in boundary["locked_editor"][
         "banner_text"
     ]

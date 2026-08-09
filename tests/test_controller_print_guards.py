@@ -328,7 +328,10 @@ def test_authoritative_intent_write_failure_prevents_dispense_queueing():
 
     c.print_droplets.assert_not_called()
     em.set_execution_plan_sync_error.assert_called_once()
-    assert "checkpoint unavailable" in c.error_occurred_signal.calls[-1][1]
+    assert "saved progress record could not be created" in (
+        c.error_occurred_signal.calls[-1][1]
+    )
+    assert "checkpoint unavailable" not in c.error_occurred_signal.calls[-1][1]
 
 
 def _restore_calls(restore_accels=None):
@@ -1871,8 +1874,8 @@ def test_print_array_blocks_read_only_legacy_execution_before_hardware_actions()
     Controller.print_array(c)
 
     message = c.error_occurred_signal.calls[0][1]
-    assert "read-only for analysis" in message
-    assert "resume" in message
+    assert "older experiment is open view-only" in message
+    assert "cannot be used for printing" in message
     c.close_gripper.assert_not_called()
     c.move_to_location.assert_not_called()
 
@@ -1889,7 +1892,7 @@ def test_print_array_blocks_after_execution_plan_finalization_failure():
     Controller.print_array(c)
 
     message = c.error_occurred_signal.calls[0][1]
-    assert "did not finish creating its execution artifacts" in message
+    assert "was not finalized successfully" in message
     c.close_gripper.assert_not_called()
     c.move_to_location.assert_not_called()
 
@@ -1905,7 +1908,9 @@ def test_print_array_blocks_execution_plan_sync_error_before_hardware_actions():
 
     Controller.print_array(c)
 
-    assert "not synchronized" in c.error_occurred_signal.calls[0][1]
+    assert "saved experiment data is incomplete" in (
+        c.error_occurred_signal.calls[0][1]
+    )
     c.close_gripper.assert_not_called()
     c.move_to_location.assert_not_called()
 
@@ -1939,7 +1944,9 @@ def test_print_array_lock_failure_prevents_hardware_actions():
 
     Controller.print_array(c)
 
-    assert "durably locked" in c.error_occurred_signal.calls[0][1]
+    assert "could not be saved in its locked state" in (
+        c.error_occurred_signal.calls[0][1]
+    )
     c.close_gripper.assert_not_called()
     c.move_to_location.assert_not_called()
 

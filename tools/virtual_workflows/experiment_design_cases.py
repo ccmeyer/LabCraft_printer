@@ -869,7 +869,7 @@ EXPERIMENT_DESIGN_CASES: tuple[ExperimentDesignCase, ...] = (
             DesignOptimizationAttempt(
                 False,
                 "rejected",
-                "Optimization failed",
+                "Could not update reactions and stock solutions",
                 (
                     "requires up to 20 nL per reaction",
                     "printed-volume budget is 10 nL",
@@ -1100,14 +1100,14 @@ EXPERIMENT_DESIGN_CASES: tuple[ExperimentDesignCase, ...] = (
             DesignOptimizationAttempt(
                 False,
                 "rejected",
-                "Optimization failed",
+                "Could not update reactions and stock solutions",
                 ("exceeds max stock",),
             ),
         ),
         expected=ExpectedDesignOutcome(
             terminal="formulation_rejected",
             reaction_count=1,
-            dialog_title="Optimization failed",
+            dialog_title="Could not update reactions and stock solutions",
             message_fragments=("exceeds max stock",),
         ),
         coverage_tags=frozenset(

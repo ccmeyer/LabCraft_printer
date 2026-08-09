@@ -172,7 +172,7 @@ def test_editor_create_finalize_lifecycle_report(qapp, tmp_path):
         item
         for item in workflow["action_results"]
         if item["action_id"] == "editor.finish_via_ui"
-    )["evidence"]["action_label"] == "Finalize Design"
+    )["evidence"]["action_label"] == "Finalize Experiment"
     assert {item["status"] for item in workflow["cleanup_results"]} == {"pass"}
     assertions = {
         item["assertion_id"]: item for item in workflow["assertion_results"]
@@ -359,17 +359,17 @@ def test_editor_prestart_rename_refinalize_lifecycle_report(qapp, tmp_path):
         item
         for item in workflow["action_results"]
         if item["action_id"] == "editor.finish_via_ui"
-    )["evidence"]["action_label"] == "Finalize Design"
+    )["evidence"]["action_label"] == "Finalize Experiment"
     assert next(
         item
         for item in workflow["action_results"]
         if item["action_id"] == "editor.rename_prepared_via_ui"
-    )["evidence"]["action_label"] == "Finalize Design"
+    )["evidence"]["action_label"] == "Finalize Experiment"
     assert next(
         item
         for item in workflow["action_results"]
         if item["action_id"] == "editor.refinalize_prepared_via_ui"
-    )["evidence"]["action_label"] == "Finalize Design"
+    )["evidence"]["action_label"] == "Finalize Experiment"
     assert {item["status"] for item in workflow["cleanup_results"]} == {"pass"}
     assertions = {
         item["assertion_id"]: item for item in workflow["assertion_results"]

@@ -3421,10 +3421,10 @@ def drive_editor_create_finalize(
 
             def finish() -> Mapping[str, Any]:
                 action_label = str(dialog.finish_btn.text() or "")
-                if action_label != "Finalize Design":
+                if action_label != "Finalize Experiment":
                     raise RuntimeError(
                         f"editable design exposed {action_label!r}; "
-                        "expected 'Finalize Design'"
+                        "expected 'Finalize Experiment'"
                     )
                 click(dialog.finish_btn)
                 _ensure_editor_deadline(
@@ -3432,7 +3432,7 @@ def drive_editor_create_finalize(
                 )
                 if dialog.result() != QtWidgets.QDialog.DialogCode.Accepted:
                     raise RuntimeError(
-                        "editor did not accept after Finalize Design"
+                        "editor did not accept after Finalize Experiment"
                     )
                 return {
                     "dialog_result": int(dialog.result()),
@@ -3453,13 +3453,13 @@ def drive_editor_create_finalize(
                         "rejected finalization requires warning truth"
                     )
                 action_label = str(dialog.finish_btn.text() or "")
-                if action_label != "Finalize Design":
+                if action_label != "Finalize Experiment":
                     raise RuntimeError(
                         f"editable design exposed {action_label!r}; "
-                        "expected 'Finalize Design'"
+                        "expected 'Finalize Experiment'"
                     )
                 if not dialog.finish_btn.isEnabled():
-                    raise RuntimeError("Finalize Design was not visibly actionable")
+                    raise RuntimeError("Finalize Experiment was not visibly actionable")
 
                 before = rejected_finalization_guard_state()
                 dialog_before = {
@@ -4005,9 +4005,9 @@ def drive_editor_prestart_rename_refinalize(
                     raise RuntimeError(
                         "prepared editor did not reopen with the initial name"
                     )
-                if dialog.finish_btn.text() != "Finalize Design":
+                if dialog.finish_btn.text() != "Finalize Experiment":
                     raise RuntimeError(
-                        "prepared design did not expose Finalize Design before edits"
+                        "prepared design did not expose Finalize Experiment before edits"
                     )
                 if dialog.auto_update_chk.isChecked():
                     toggle_checkbox(dialog.auto_update_chk)
@@ -4203,9 +4203,9 @@ def drive_editor_prestart_rename_refinalize(
 
             def refinalize() -> Mapping[str, Any]:
                 action_label = str(dialog.finish_btn.text() or "")
-                if action_label != "Finalize Design":
+                if action_label != "Finalize Experiment":
                     raise RuntimeError(
-                        "prepared design did not retain Finalize Design after edits"
+                        "prepared design did not retain Finalize Experiment after edits"
                     )
                 click(dialog.finish_btn)
                 _ensure_editor_deadline(
@@ -4215,7 +4215,7 @@ def drive_editor_prestart_rename_refinalize(
                 )
                 if dialog.result() != QtWidgets.QDialog.DialogCode.Accepted:
                     raise RuntimeError(
-                        "prepared editor did not accept after Finalize Design"
+                        "prepared editor did not accept after Finalize Experiment"
                     )
                 return {
                     "dialog_result": int(dialog.result()),
@@ -4720,8 +4720,8 @@ def drive_editor_prepared_sequence(
                 if dialog._design_optimization_dirty or not dialog.finish_btn.isEnabled():
                     raise RuntimeError("terminal Refinalize was not eligible")
                 action_label = str(dialog.finish_btn.text() or "")
-                if action_label != "Finalize Design":
-                    raise RuntimeError("prepared design did not expose Finalize Design")
+                if action_label != "Finalize Experiment":
+                    raise RuntimeError("prepared design did not expose Finalize Experiment")
                 click(dialog.finish_btn)
                 if dialog.result() != QtWidgets.QDialog.DialogCode.Accepted:
                     raise RuntimeError("prepared editor did not accept terminal Refinalize")

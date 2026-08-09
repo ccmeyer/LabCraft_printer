@@ -651,7 +651,7 @@ def test_authoritative_loader_rejects_wrong_load_execution_label(
     dialog = SimpleNamespace(
         exp_name_edit=label("expected"),
         finish_btn=SimpleNamespace(text=lambda: "Finish", isEnabled=lambda: True),
-        status_lbl=label("Execution plan validated; load execution."),
+        status_lbl=label("This experiment is ready to load. Press Load Experiment."),
         lifecycle_banner=SimpleNamespace(
             text=lambda: "Load execution without starting or resuming printing",
             isHidden=lambda: False,
@@ -686,11 +686,11 @@ def test_completed_loader_inspects_terminal_bundle_without_activation(
     dialog.exp_name_edit = QtWidgets.QLineEdit("expected", dialog)
     dialog.finish_btn = QtWidgets.QPushButton("View Completed Experiment", dialog)
     dialog.status_lbl = QtWidgets.QLabel(
-        "Execution complete. Press View Completed Experiment to populate the exact saved state read-only.",
+        "Experiment complete. Press View Completed Experiment to display the saved experiment read-only.",
         dialog,
     )
     dialog.lifecycle_banner = QtWidgets.QLabel(
-        "This completed execution is locked and read-only. Hardware start and resume remain unavailable.",
+            "This completed experiment is locked and read-only. Printing cannot be started or resumed.",
         dialog,
     )
     dialog.finish_btn.clicked.connect(dialog.accept)

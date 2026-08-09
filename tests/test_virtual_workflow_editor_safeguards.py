@@ -13,7 +13,7 @@ from tools.virtual_workflows.matrices import get_matrix_definition
 
 
 EXPECTED_SOURCE_CATALOG_SHA256 = (
-    "5fb1e7d20a552607384777a9797e1c97aa0a79f5a7d8feeff20db320dad06ca7"
+    "ec6732b7422beb66817535c9ae54406b9c2166f5e071bc15218c0f73109627a9"
 )
 
 

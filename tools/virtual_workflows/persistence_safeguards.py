@@ -74,14 +74,35 @@ def _load_source() -> dict[str, Any]:
 
 
 def _expand_case(row: Mapping[str, Any]) -> SafeguardCase:
+    technical_message = str(row["message"])
+    operator_messages = {
+        "blocked_ambiguous_intent": (
+            "The app cannot determine whether some droplets were printed. Printing "
+            "is unavailable to prevent duplicate dispensing."
+        ),
+        "blocked_missing_checkpoint": (
+            "Saved progress is incomplete, so this experiment cannot be resumed safely."
+        ),
+        "blocked_checkpoint_reference": (
+            "The saved progress does not match this version of the experiment. "
+            "Printing is unavailable."
+        ),
+        "blocked_checkpoint_progress": (
+            "The saved progress does not match the experiment data. Printing is "
+            "unavailable."
+        ),
+        "authoritative_bundle_invalid": (
+            "The saved experiment data could not be validated. Printing is unavailable."
+        ),
+    }
     expected = ExpectedSafeguardOutcome(
         outcome_kind="persistence_classification",
         classification=str(row["classification"]),
         code=str(row["code"]),
-        message=str(row["message"]),
+        message=operator_messages[str(row["classification"])],
         ui_surface="load_status",
         ui_title=None,
-        selected_control="Execution Locked",
+        selected_control="Experiment Locked",
         workflow_state="analysis_only_inactive",
         queue_state="idle",
     )
@@ -105,6 +126,7 @@ def _expand_case(row: Mapping[str, Any]) -> SafeguardCase:
             "driver": "persistence_safeguard",
             "baseline_kind": str(row["baseline_kind"]),
             "mutation_kind": str(row["mutation_kind"]),
+            "technical_message": technical_message,
         },
         fault=fault,
         fresh_process_required=True,

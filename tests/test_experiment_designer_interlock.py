@@ -256,7 +256,7 @@ def test_experiment_designer_save_replaces_untouched_prepared_plan(
     )
     dialog.model.save_experiment.assert_not_called()
     assert dialog._apply_requested is True
-    assert "replaced" in dialog.status_lbl.text()
+    assert "Experiment saved:" in dialog.status_lbl.text()
 
 
 def test_experiment_designer_locks_edit_actions_when_gripper_loaded(qapp):
@@ -406,7 +406,7 @@ def test_active_execution_finish_handler_cannot_activate_or_close(qapp):
     dialog.main_window.activate_authoritative_execution.assert_not_called()
     dialog.accept.assert_not_called()
     assert dialog._apply_requested is False
-    assert "create an editable copy" in dialog.status_lbl.text()
+    assert "Create Editable Copy" in dialog.status_lbl.text()
 
 
 def test_inactive_persisted_execution_keeps_eligible_activation(qapp):
@@ -430,7 +430,7 @@ def test_inactive_persisted_execution_keeps_eligible_activation(qapp):
     assert dialog.finish_btn.isEnabled() is True
     assert dialog.duplicate_btn.isEnabled() is True
     assert dialog.lifecycle_banner.isVisible() is True
-    assert "without starting or resuming printing" in dialog.lifecycle_banner.text()
+    assert "will not start or resume automatically" in dialog.lifecycle_banner.text()
 
 
 def test_prepared_execution_remains_editable(qapp):
@@ -504,11 +504,26 @@ def test_gripper_lock_overrides_active_execution_editable_copy(qapp):
 
 
 @pytest.mark.parametrize(
-    "plan_state,eligibility_status,reason",
+    "plan_state,eligibility_status,reason,operator_message",
     [
-        ("active", "blocked", "A durable checkpoint is inconsistent."),
-        ("completed", "completed", "Execution is already complete."),
-        ("aborted", "aborted", "Execution was aborted."),
+        (
+            "active",
+            "blocked",
+            "A durable checkpoint is inconsistent.",
+            "saved experiment data could not be validated",
+        ),
+        (
+            "completed",
+            "completed",
+            "Execution is already complete.",
+            "experiment is complete and can be viewed",
+        ),
+        (
+            "aborted",
+            "aborted",
+            "Execution was aborted.",
+            "experiment was stopped and cannot be resumed",
+        ),
     ],
 )
 def test_nonactivatable_execution_has_locked_action_and_reason_banner(
@@ -516,6 +531,7 @@ def test_nonactivatable_execution_has_locked_action_and_reason_banner(
     plan_state,
     eligibility_status,
     reason,
+    operator_message,
 ):
     dialog = _build_dialog_stub(
         gripper_loaded=False,
@@ -534,8 +550,8 @@ def test_nonactivatable_execution_has_locked_action_and_reason_banner(
     assert dialog.finish_btn.text() == ExperimentDesignDialog.ACTION_EXECUTION_LOCKED
     assert dialog.finish_btn.isEnabled() is False
     assert dialog.lifecycle_banner.isVisible() is True
-    assert "Hardware loading is unavailable" in dialog.lifecycle_banner.text()
-    assert reason in dialog.lifecycle_banner.text()
+    assert operator_message in dialog.lifecycle_banner.text().casefold()
+    assert reason not in dialog.lifecycle_banner.text()
 
 
 def test_exact_completed_execution_has_enabled_read_only_view_action(qapp):
@@ -564,8 +580,8 @@ def test_exact_completed_execution_has_enabled_read_only_view_action(qapp):
     assert dialog.run_btn.isEnabled() is False
     assert dialog.save_btn.isEnabled() is False
     assert dialog.lifecycle_banner.isVisible() is True
-    assert "populate the saved plate" in dialog.lifecycle_banner.text()
-    assert "Hardware start and resume remain unavailable" in dialog.lifecycle_banner.text()
+    assert "display the saved plate" in dialog.lifecycle_banner.text()
+    assert "Printing cannot be started or resumed" in dialog.lifecycle_banner.text()
 
 
 def test_analysis_only_status_without_exact_completed_state_stays_locked(qapp):
@@ -697,7 +713,7 @@ def test_create_editable_copy_uses_current_source_and_wide_name_dialog(
     assert source_path.read_bytes() == source_before
     assert observed["minimum_width"] >= 640
     assert observed["name_field_minimum_width"] >= 480
-    assert "Current source: Current Source" in observed["label"]
+    assert "Current experiment: Current Source" in observed["label"]
     assert "New experiment" in dialog.status_lbl.text()
 
 
@@ -767,7 +783,7 @@ def test_editable_copy_button_disabled_for_inconsistent_current_paths(
     ExperimentDesignDialog._refresh_editable_copy_availability(dialog)
 
     assert dialog.duplicate_btn.isEnabled() is False
-    assert "do not identify the same design" in dialog.duplicate_btn.toolTip()
+    assert "do not identify the same experiment" in dialog.duplicate_btn.toolTip()
 
 
 def test_create_editable_copy_rejects_unwritable_parent_before_model_call(

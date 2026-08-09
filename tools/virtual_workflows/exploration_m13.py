@@ -25,12 +25,12 @@ FROZEN_SEEDS = (13, 29, 47, 83, 131, 197)
 DIAGNOSTIC_COMPATIBILITY_SEEDS = (1, 101)
 MAX_DIAGNOSTIC_SEEDS = 4
 EXPECTED_STATE_MODEL_SHA256 = "71e7ca63e564a3a841bb95f9bf157fb3d491dbf2e4b80cdf027c956dab884cc8"
-EXPECTED_OPERATION_CATALOG_SHA256 = "9445809961d52f0a92cd004d374fbc38b2fc20c688ef337ff0d90ba09f8ca88d"
+EXPECTED_OPERATION_CATALOG_SHA256 = "de7cdb01967b5e9fe1da4d2759017e6d2fd75c9e32379f01b616b90fb0cbd106"
 EXPECTED_ORACLE_LEDGER_SHA256 = "7ca216df7d28fd8c01e94efebb5c51ba0db249a8fde3dfa6385de5381d77351e"
 EXPECTED_FROZEN_SET_SHA256 = "1b4a2b4f9b56295428f9b2565ba048960ba0957b282e1c3d7296e57908a14a4e"
 EXPECTED_FIXTURE_PROJECTION_SHA256 = "5687adab7dabbe7d94112fb18b2c8eb8e8740b655c47b2352010c635cf028043"
-EXPECTED_CATALOG_SHA256 = "0d11d8dda4400620ffb053234ae29280cf776b4a8db812af9b7517da4db5825d"
-EXPECTED_CAMPAIGN_SHA256 = "fe1930114a7dc848b4a5a6c148d56907f661ae7b757450e6785a91673962e2c5"
+EXPECTED_CATALOG_SHA256 = "9d444efa4382fdcc4762fb3b7e232beaf633fb8abc2ff9ec4121655a61a6cc5c"
+EXPECTED_CAMPAIGN_SHA256 = "aa4ae1175d6c34d03cae876b29d38820a690e3db0307183303326fe520283de3"
 EXPECTED_SEQUENCE_SHA256 = (
     "992abf215250df32bbe9a23d47aba3b26faab96964082d66a29a4dd14f0d1fdd",
     "d07f1d44869e0849cfd652e09c6b2adc1c6bfd05f70512a166deb823113ee6f4",
@@ -643,8 +643,12 @@ def normalized_operation_catalog() -> dict[str, Any]:
         "excluded_operations": {
             "editor.add_reagent_via_ui": "no complete real-Qt add/reload identity oracle",
             "editor.remove_reagent_via_ui": "no complete real-Qt remove/reload identity oracle",
-            "editor.optimize_via_ui": "qualified operator action is combined Optimize & Generate",
-            "editor.generate_via_ui": "qualified operator action is combined Optimize & Generate",
+            "editor.optimize_via_ui": (
+                "qualified operator action is Update Reactions and Stock Solutions"
+            ),
+            "editor.generate_via_ui": (
+                "qualified operator action is Update Reactions and Stock Solutions"
+            ),
             "execution.refill_resume": "deferred while volume tracking is disabled",
             "persistence.mutate_active_authority": "prohibited outside isolated M12 fault fixtures",
         },

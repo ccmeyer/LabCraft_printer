@@ -92,10 +92,10 @@ def test_editor_post_start_lock_lifecycle_report(qapp, tmp_path):
     assert boundary["source_after_copy"]["files_byte_identical"] is True
     locked_editor = boundary["locked_editor"]
     assert locked_editor["banner_visible"] is True
-    assert locked_editor["action_label"] == "Execution Loaded"
+    assert locked_editor["action_label"] == "Experiment Loaded"
     assert "Calibration may still update" in locked_editor["banner_text"]
     copy_evidence = boundary["editable_copy_before_finalize"]
-    assert copy_evidence["action_label"] == "Finalize Design"
+    assert copy_evidence["action_label"] == "Finalize Experiment"
     assert (
         Path(copy_evidence["source_auto_selected"]).resolve()
         == Path(boundary["source_locked"]["experiment_dir"]).resolve()

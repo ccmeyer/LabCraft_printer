@@ -952,7 +952,7 @@ Run the editor create/finalize lifecycle directly with:
 
 This scenario clicks the real Experiment Editor button, creates a fresh design,
 selects A1 and A2 through the Printable Wells dialog, enters one fixed 1x
-droplet stock, optimizes and generates, and presses `Finalize Design`. It validates the
+droplet stock, updates reactions and stock solutions, and presses `Finalize Experiment`. It validates the
 prepared execution plan, immutable revision, compact progress, both key CSVs,
 and the absence of calibration/printing history. It then reloads the saved
 design and activates the authoritative runtime without rebuilding the design.
@@ -971,33 +971,33 @@ Run the prepared rename/refinalize regression directly with:
 This scenario first creates the minimal A1/A2 prepared experiment, then
 reopens the real editor and changes the name, replicate count, selected wells,
 printed/final volumes, reagent targets, reagent mode, and fill mode. It
-optimizes again and presses `Finalize Design`. Its target contract requires a single
+updates again and presses `Finalize Experiment`. Its target contract requires a single
 renamed directory, a fresh revision-1 prepared plan for A1-A6, archived
 superseded prepared artifacts, zero progress, consistent key files/runtime
 assignments, and a `ready_to_start` reload.
 
 An untouched `PREPARED` execution remains editable after disk reload. Both
-Save and `Finalize Design` publish material pre-start edits through the same transactional
+Save and `Finalize Experiment` publish material pre-start edits through the same transactional
 replacement path. Started, progressed, resumed, calibrated, or invalid
 executions remain fail-closed and require the editable-copy workflow instead.
 
 The Experiment Editor exposes five explicit lifecycle actions:
 
-- `Finalize Design` is enabled for a new draft or editable `PREPARED` design.
+- `Finalize Experiment` is enabled for a new draft or editable `PREPARED` design.
   A `ready_to_start` eligibility result does not relabel an editable design.
-- `Load Execution` is enabled for a locked, inactive saved execution whose
+- `Load Experiment` is enabled for a locked, inactive saved experiment whose
   authoritative runtime can be reconstructed.
 - `View Completed Experiment` is enabled only for a valid authoritative
   `COMPLETED` execution. It closes the editor and populates the main plate,
   stock, reaction, well-assignment, target, and final-progress display from
   the saved plan and progress. Every assigned well is shown complete and the
   Experiment Guide reports `Next: Experiment complete`.
-- `Execution Loaded` is disabled when that authoritative runtime is already
+- `Experiment Loaded` is disabled when that saved experiment is already
   active.
-- `Execution Locked` is disabled for blocked, aborted, invalid, ambiguous, or
+- `Experiment Locked` is disabled for blocked, stopped, invalid, ambiguous, or
   otherwise non-activatable saved executions.
 
-`Load Execution` only reconstructs the saved runtime. It does not start or
+`Load Experiment` only restores the saved experiment setup and progress. It does not start or
 resume printing; the operator must still use the applicable print/start or
 resume action. Locked executions show a full-width lifecycle banner while the
 lower status line remains available for transient details and errors.
@@ -1139,11 +1139,11 @@ This scenario uses one `QApplication` but constructs two independent
 Model/Controller/MainWindow/simulator sessions over the same isolated
 scenario root. The first session reaches a clean paused checkpoint and tears
 down. The second opens the real Experiment Editor, selects the persisted
-folder, and selects `Load Execution` before a real UI resume.
+folder, and selects `Load Experiment` before a real UI resume.
 
 The scenario is active in the lifecycle suite. The persisted design is loaded
 through the real editor without changing its authoritative disk identity,
-`Load Execution` reconstructs the exact partial runtime without starting or
+`Load Experiment` restores the exact partial progress without starting or
 resuming printing, and the real
 `Resume Print` path completes A1-A24 without replaying any pair completed by
 the first session. A passing report contains eight ordered screenshots, both

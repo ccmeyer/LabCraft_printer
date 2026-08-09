@@ -1861,7 +1861,10 @@ class ExperimentModel(QObject):
         if self.is_execution_design_locked():
             return {
                 "best": None,
-                "reason": "The execution design is locked and cannot be re-optimized.",
+                "reason": (
+                    "This experiment is locked. Reactions and stock solutions cannot "
+                    "be changed."
+                ),
                 "issues_by_key": {},
                 "read_only": True,
             }
@@ -8493,7 +8496,7 @@ class ExperimentModel(QObject):
                 )
                 self._audit_execution_plan_event(
                     "execution_plan_locked",
-                    "Execution plan locked",
+                    "Experiment finalized",
                     {
                         "plan_id": candidate.plan_id,
                         "previous_revision": plan.plan_revision,
@@ -8531,7 +8534,7 @@ class ExperimentModel(QObject):
                 self._write_execution_plan_exports(candidate, {})
                 self._audit_execution_plan_event(
                     "execution_plan_printer_head_bound",
-                    "Execution printer head bound",
+                    "Printer head linked to experiment",
                     {
                         "plan_id": candidate.plan_id,
                         "previous_revision": plan.plan_revision,
@@ -8787,7 +8790,7 @@ class ExperimentModel(QObject):
                 status = "replaced"
                 self._audit_execution_plan_event(
                     "prepared_execution_replaced",
-                    "Untouched prepared execution replaced after editor changes",
+                    "Finalized experiment updated after editor changes",
                     details={
                         "previous_plan_id": existing.plan_id,
                         "replacement_plan_id": candidate.plan_id,
@@ -9261,7 +9264,7 @@ class ExperimentModel(QObject):
         self.set_execution_plan_sync_error(None)
         self._audit_execution_plan_event(
             "execution_plan_locked",
-            "Execution plan locked",
+            "Experiment finalized",
             {
                 "plan_id": candidate.plan_id,
                 "previous_revision": plan.plan_revision,
@@ -9454,7 +9457,7 @@ class ExperimentModel(QObject):
             self._install_validated_authoritative_terminal_bundle(validated)
             self._audit_execution_plan_event(
                 "execution_plan_completed",
-                "Execution completed",
+                "Experiment completed",
                 {
                     "plan_id": candidate.plan_id,
                     "plan_revision": candidate.plan_revision,
@@ -9605,7 +9608,9 @@ class ExperimentModel(QObject):
             self.set_execution_plan_sync_error(None)
             self._audit_execution_plan_event(
                 "execution_plan_completed" if terminal is ExecutionPlanState.COMPLETED else "execution_plan_abandoned",
-                "Execution completed" if terminal is ExecutionPlanState.COMPLETED else "Execution abandoned",
+                "Experiment completed"
+                if terminal is ExecutionPlanState.COMPLETED
+                else "Experiment stopped",
                 {
                     "plan_id": candidate.plan_id,
                     "plan_revision": candidate.plan_revision,
@@ -9703,7 +9708,7 @@ class ExperimentModel(QObject):
         self.set_execution_plan_sync_error(None)
         self._audit_execution_plan_event(
             "execution_plan_printer_head_bound",
-            "Execution printer head bound",
+            "Printer head linked to experiment",
             {
                 "plan_id": candidate.plan_id,
                 "previous_revision": plan.plan_revision,
@@ -10109,7 +10114,7 @@ class ExperimentModel(QObject):
         self.applied_imaging_calibration_changed.emit(record.to_dict())
         self._audit_execution_plan_event(
             "execution_plan_calibration_revised",
-            "Execution plan calibrated",
+            "Experiment calibration updated",
             {
                 "plan_id": candidate.plan_id,
                 "previous_revision": plan.plan_revision,
@@ -11942,7 +11947,7 @@ class ExperimentModel(QObject):
                     audit_path=Path(self.experiment_audit_file_path)
                 ).record(
                     "prepared_execution_replaced",
-                    "Untouched prepared execution replaced after experiment rename",
+                    "Finalized experiment updated after experiment rename",
                     details={
                         "previous_plan_id": original_plan.plan_id,
                         "replacement_plan_id": candidate.plan_id,
@@ -12073,7 +12078,7 @@ class ExperimentModel(QObject):
             audit_path=result.destination / ExperimentAuditLog.FILE_NAME
         ).record(
             "legacy_execution_migrated",
-            "Recorded legacy execution migrated as an analysis-only copy",
+            "Older experiment converted to a view-only copy",
             details={
                 "plan_id": result.plan.plan_id,
                 "source_folder": Path(source_dir).name,
@@ -16147,7 +16152,7 @@ class Model(QObject):
         )
         self.record_experiment_audit_event(
             "experiment_loaded",
-            "Experiment loaded into runtime",
+            "Experiment loaded",
             details={
                 "load_progress": bool(load_progress),
                 "plate_name": self.well_plate.get_current_plate_name(),
@@ -16374,7 +16379,7 @@ class Model(QObject):
         )
         self.record_experiment_audit_event(
             "authoritative_execution_activated",
-            "Authoritative execution activated in runtime",
+            "Experiment loaded",
             details={
                 "plan_id": bundle.plan.plan_id,
                 "plan_revision": bundle.plan.plan_revision,

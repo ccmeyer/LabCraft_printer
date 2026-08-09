@@ -181,8 +181,8 @@ def test_reaction_preview_dialog_is_read_only_and_summarizes_rows(qapp):
     assert dialog.table.columnCount() == len(_preview_df().columns)
     assert "Total rows: 2" in dialog.status_lbl.text()
     assert "Base rows: 1" in dialog.status_lbl.text()
-    assert "Unique-condition rows: 1" in dialog.status_lbl.text()
-    assert "Expanded unique-condition replicates: 1" in dialog.status_lbl.text()
+    assert "Additional-condition rows: 1" in dialog.status_lbl.text()
+    assert "Additional reactions after replicates: 1" in dialog.status_lbl.text()
     assert not bool(dialog.table.item(0, 0).flags() & View.Qt.ItemFlag.ItemIsEditable)
 
 
@@ -224,7 +224,9 @@ def test_preview_button_runs_generation_when_dirty_and_opens_dialog(qapp, monkey
     ExperimentDesignDialog._on_preview_reactions(dialog)
 
     assert dialog._optimization_calls
-    assert dialog._optimization_calls[0]["failure_title"] == "Optimization failed"
+    assert dialog._optimization_calls[0]["failure_title"] == (
+        "Could not update reactions and stock solutions"
+    )
     assert opened["parent"] is dialog
     assert opened["exec"] is True
     pd.testing.assert_frame_equal(opened["df"], preview_df)

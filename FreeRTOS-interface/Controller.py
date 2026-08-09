@@ -3412,9 +3412,9 @@ class Controller(QObject):
                 if callable(setter):
                     setter(exc)
                 self.error_occurred_signal.emit(
-                    "Execution Checkpoint Error",
-                    "The simulator canceled queued work, but its durable print intents "
-                    "could not be reconciled. Resume remains blocked.",
+                    "Saved Progress Error",
+                    "The simulator canceled queued work, but the saved progress could "
+                    "not be updated safely. Continuing remains unavailable.",
                 )
 
         progress_status = self._get_experiment_progress_status_for_array()
@@ -3859,9 +3859,10 @@ class Controller(QObject):
                     if callable(setter):
                         setter(exc)
                     self.error_occurred_signal.emit(
-                        "Execution Checkpoint Error",
+                        "Saved Progress Error",
                         "The queue was cleared safely, but the canceled look-ahead "
-                        "print intents could not be synchronized. Resume remains blocked.",
+                        "work could not be reconciled with saved progress. Continuing "
+                        "remains unavailable.",
                     )
 
         try:
@@ -5287,9 +5288,9 @@ class Controller(QObject):
             if callable(setter):
                 setter(exc)
             self.error_occurred_signal.emit(
-                "Execution Progress Error",
+                "Progress Save Error",
                 "The dispense completed, but progress could not be saved. Printing is "
-                "blocked because the command boundary is now ambiguous.",
+                "unavailable because the app cannot safely determine where to continue.",
             )
             return False
         try:
@@ -5301,9 +5302,9 @@ class Controller(QObject):
         except Exception as exc:
             self.model.experiment_model.set_execution_plan_sync_error(exc)
             self.error_occurred_signal.emit(
-                "Execution Checkpoint Error",
-                "Progress was saved, but its durable print intent could not be completed. "
-                "Printing is blocked until the checkpoint is repaired.",
+                "Saved Progress Error",
+                "Progress was saved, but the print could not be marked complete. Printing "
+                "is unavailable until the saved progress is recovered.",
             )
             return False
         return True
@@ -5631,8 +5632,10 @@ class Controller(QObject):
                 experiment_model.set_execution_plan_sync_error(exc)
                 self.error_occurred_signal.emit(
                     'Print Array Error',
-                    f'Failed to persist a print intent for well {well.well_id}: {exc}',
+                    f'Printing did not start for well {well.well_id} because its saved '
+                    'progress record could not be created.',
                 )
+                print(f"Could not create saved progress record for {well.well_id}: {exc}")
                 self._complete_array_finalize("hard_abort")
                 return False
         dispense_command = self.print_droplets(
@@ -5665,9 +5668,11 @@ class Controller(QObject):
                 if callable(setter):
                     setter(exc)
                 self.error_occurred_signal.emit(
-                    'Execution Checkpoint Error',
-                    f'The dispense was queued but its command boundary could not be saved: {exc}',
+                    'Saved Progress Error',
+                    'The dispense was queued, but the app could not save enough progress '
+                    'information to continue safely. Printing has stopped.',
                 )
+                print(f"Could not attach saved progress to queued dispense: {exc}")
                 self._complete_array_finalize("hard_abort")
                 return False
 
@@ -5830,9 +5835,11 @@ class Controller(QObject):
         except Exception as exc:
             audit_details["terminal_transition_error"] = str(exc)
             self.error_occurred_signal.emit(
-                "Execution synchronization error",
-                f"The array stopped, but its terminal execution state could not be synchronized: {exc}",
+                "Experiment Progress Error",
+                "Printing stopped, but the experiment could not be marked complete. "
+                "Review the saved progress before printing again.",
             )
+            print(f"Could not synchronize final experiment state: {exc}")
         self._array_context = None
 
         if reason in {"soft_stop", "refill_required"}:
@@ -5914,10 +5921,10 @@ class Controller(QObject):
         can_reset = getattr(experiment_model, "can_reset_array_progress", None)
         if callable(can_reset) and not can_reset():
             message = (
-                "Recorded dispense counts are physical execution history and cannot be reset in place. "
-                "Create an editable copy and finalize a new execution instead."
+                "Recorded dispense counts are physical progress and cannot be reset in "
+                "place. Create an editable copy and finalize it as a new experiment instead."
             )
-            self.error_occurred_signal.emit("Cannot reset recorded execution", message)
+            self.error_occurred_signal.emit("Cannot reset recorded experiment", message)
             return False
         active_printer_head = self.model.rack_model.get_gripper_printer_head()
         if active_printer_head is None:
@@ -5951,10 +5958,10 @@ class Controller(QObject):
         can_reset = getattr(experiment_model, "can_reset_array_progress", None)
         if callable(can_reset) and not can_reset():
             message = (
-                "Recorded dispense counts are physical execution history and cannot be reset in place. "
-                "Create an editable copy and finalize a new execution instead."
+                "Recorded dispense counts are physical progress and cannot be reset in "
+                "place. Create an editable copy and finalize it as a new experiment instead."
             )
-            self.error_occurred_signal.emit("Cannot reset recorded execution", message)
+            self.error_occurred_signal.emit("Cannot reset recorded experiment", message)
             return False
         self.model.well_plate.reset_all_wells()
         self.model.experiment_model.create_progress_file()
@@ -6292,8 +6299,8 @@ class Controller(QObject):
         )
         if callable(finalization_error_getter) and finalization_error_getter():
             message = (
-                "This experiment did not finish creating its execution artifacts. "
-                "Printing is blocked until finalization succeeds or the experiment is reset."
+                "This experiment was not finalized successfully. Printing is unavailable "
+                "until it is finalized again or reset."
             )
             self.error_occurred_signal.emit('Error', message)
             print(f'Cannot print: {message}')
@@ -6308,8 +6315,8 @@ class Controller(QObject):
             and not callable(lock_plan)
         ):
             message = (
-                "Execution-plan files are not synchronized. Printing is blocked until "
-                "the same operation is retried successfully or the experiment is reset."
+                "The saved experiment data is incomplete. Printing is unavailable until "
+                "the previous operation succeeds or the experiment is reset."
             )
             self.error_occurred_signal.emit('Error', message)
             print(f'Cannot print: {message}')
@@ -6317,8 +6324,7 @@ class Controller(QObject):
         read_only_getter = getattr(experiment_model, "is_read_only_legacy_execution", None)
         if callable(read_only_getter) and read_only_getter():
             message = (
-                "This recorded legacy execution is loaded read-only for analysis. "
-                "Printing and hardware resume are disabled until validated resume support is available."
+                "This older experiment is open view-only. It cannot be used for printing."
             )
             self.error_occurred_signal.emit('Error', message)
             print(f'Cannot print: {message}')
@@ -6336,8 +6342,8 @@ class Controller(QObject):
             and not authoritative_runtime_active
         ):
             message = (
-                "This execution has been inspected but not activated. Use the experiment "
-                "editor's explicit activation action before starting hardware."
+                "This experiment is open for viewing but has not been loaded for printing. "
+                "Select Load Experiment in the Experiment Editor first."
             )
             self.error_occurred_signal.emit('Error', message)
             print(f'Cannot print: {message}')
@@ -6369,12 +6375,16 @@ class Controller(QObject):
                 self.model.rack_model.get_gripper_printer_head()
             )
             if not bool(validation.get("ok")):
-                message = str(
+                technical_message = str(
                     validation.get("message")
-                    or "The authoritative execution context does not match the loaded hardware."
+                    or "The saved experiment does not match the loaded printer head."
+                )
+                message = (
+                    "The loaded printer head or its saved calibration does not match this "
+                    "experiment. Printing is unavailable."
                 )
                 self.error_occurred_signal.emit("Error", message)
-                print(f"Cannot print: {message}")
+                print(f"Cannot print: {technical_message}")
                 return
         
         if not self.model.machine_model.regulating_print_pressure:
@@ -6479,9 +6489,10 @@ class Controller(QObject):
                         experiment_model.ensure_execution_resume_checkpoint()
             except Exception as exc:
                 message = (
-                    "Printing did not start because the execution plan could not be "
-                    f"durably locked: {exc}"
+                    "Printing did not start because the experiment could not be saved in "
+                    "its locked state. See the application logs for details."
                 )
+                print(f"Could not lock experiment before printing: {exc}")
                 self.error_occurred_signal.emit("Error", message)
                 print(f"Cannot print: {message}")
                 return

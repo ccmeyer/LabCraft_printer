@@ -88,13 +88,13 @@ def test_milestone_11_joined_contract_is_frozen_with_complete_registration():
     from tools.virtual_workflows.registry import registered_scenario_ids
 
     assert JOINED_INTERACTION_CASE.sha256() == (
-        "3081ebadd38a9e9de465f67e855ce63a471d7f9092e65e9f7881da1923d509cd"
+        "77ae121969768739a057a415ea12b076e6404b48332f2ab44d997e99431d0874"
     )
     assert JOINED_INTERACTION_CASE.count_oracle_sha256() == (
         "468d78216fd52f326898c5b5625f6ae591995c642118a72ddb1cdf0cb5790814"
     )
     assert joined_fixture_sha256() == (
-        "bf9631efdf2e0ad04e2310b378330a87941d05c157d69a6c47b69b645dbbe118"
+            "579d7cb186347dfc55fbbdcd58c571cb3ce9feff61260436099a928f9a887ef1"
     )
     assert JOINED_INTERACTION_CASE_ID in registered_scenario_ids()
     registry = get_registered_scenario(JOINED_INTERACTION_CASE_ID)

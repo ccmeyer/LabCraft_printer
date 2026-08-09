@@ -20,10 +20,10 @@ from tools.virtual_workflows.safeguards import SafeguardContractError
 
 
 EXPECTED_SOURCE_CATALOG_SHA256 = (
-    "0a945b0394be7641f366dda40187f1bbf0b760af341b4940f35fc4ffc1c84b8c"
+    "f1642ad998cad4793755890ab0ae79067a5c5c837bc25c8bfba9963d0c27ccc0"
 )
 EXPECTED_MATRIX_CATALOG_SHA256 = (
-    "64fffe3723489cb812358be06f146c22fd72cf36c4fc61292d5820154a06656c"
+    "8ce5cad77540dfaba3e1448a9bf35e9ffaf3340010c0c636cee2c7af361f5f13"
 )
 EXPECTED_CATALOG_FILE_SHA256 = (
     "78e029fca7cdf29fa8fcb6fbab5d682692945bc7c8eda48a69d31430c47b2122"
@@ -91,10 +91,10 @@ def test_faulted_copy_has_exact_production_classification(tmp_path, case_id):
             assert "No such file or directory" in raw_message
             assert "progress.json" in raw_message
         else:
-            assert raw_message == case.expected.message
+            assert raw_message == case.setup["technical_message"]
     else:
         assert bundle.eligibility.status == case.expected.classification
-        assert bundle.eligibility.reason == case.expected.message
+        assert bundle.eligibility.reason == case.setup["technical_message"]
         assert not bundle.eligibility.can_activate_runtime
 
 

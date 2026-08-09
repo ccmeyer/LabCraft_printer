@@ -677,7 +677,7 @@ def _rejected_finalization_fixture():
             "observed_outcome": "rejected",
             "reaction_count_after": 5,
             "activation_count": 1,
-            "action_label": "Finalize Design",
+            "action_label": "Finalize Experiment",
             "warning": {
                 "entered": True,
                 "title": "Insufficient Well Capacity",
