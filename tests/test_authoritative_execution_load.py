@@ -1,7 +1,10 @@
 import hashlib
 import json
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from AuthoritativeExecutionLoad import (
     build_execution_runtime_spec,
@@ -27,6 +30,7 @@ from ExecutionResumeStore import (
     save_execution_resume,
 )
 from Model import Model
+from test_execution_terminal_cache import _ready_completion
 
 
 PLAN_ID = "f33cf5d6-2f38-4ca7-86fd-74f73baac81d"
@@ -96,6 +100,13 @@ def _hashes(directory):
         for path in directory.rglob("*")
         if path.is_file()
     }
+
+
+def _complete_execution(experiment_model_factory):
+    model, experiment = _ready_completion(experiment_model_factory)
+    completed = experiment.try_complete_execution_plan()
+    assert completed.state is ExecutionPlanState.COMPLETED
+    return model, experiment, completed
 
 
 def test_authoritative_inspection_is_nonmutating_and_builds_exact_runtime(tmp_path):
@@ -350,3 +361,155 @@ def test_explicit_activation_reconstructs_finalized_runtime_without_optimizer(
     )
     assert result["plan"].plan_revision > saved_plan.plan_revision
     assert Path(loaded_em.experiment_file_path).read_bytes() == design_bytes
+
+
+def test_completed_execution_view_projects_exact_finished_runtime_without_writes(
+    experiment_model_factory,
+    monkeypatch,
+):
+    _source, source_experiment, completed = _complete_execution(
+        experiment_model_factory
+    )
+    loaded = experiment_model_factory()
+    loaded_experiment = loaded.experiment_model
+    loaded_experiment.load_experiment(
+        source_experiment.experiment_file_path,
+        source_experiment.experiment_dir_path,
+    )
+    before = _hashes(Path(source_experiment.experiment_dir_path))
+
+    monkeypatch.setattr(
+        loaded_experiment,
+        "ensure_execution_resume_checkpoint",
+        lambda: pytest.fail("completed viewing created or repaired a checkpoint"),
+    )
+    monkeypatch.setattr(
+        loaded_experiment,
+        "_write_execution_plan_exports",
+        lambda *_args, **_kwargs: pytest.fail("completed viewing rewrote exports"),
+    )
+    monkeypatch.setattr(
+        loaded,
+        "record_experiment_audit_event",
+        lambda *_args, **_kwargs: pytest.fail("completed viewing wrote an audit event"),
+    )
+    monkeypatch.setattr(
+        loaded,
+        "assign_printer_heads",
+        lambda: pytest.fail("completed viewing assigned printer heads to the rack"),
+    )
+
+    eligibility = loaded.load_completed_execution_view()
+
+    assert eligibility == {
+        "status": "analysis_only",
+        "can_activate_runtime": False,
+        "can_start_hardware": False,
+        "can_resume_hardware": False,
+        "reason": eligibility["reason"],
+        "repairable_intent_ids": [],
+        "ambiguous_intent_ids": [],
+    }
+    assert loaded.is_completed_execution_view_active()
+    assert loaded_experiment.can_view_completed_execution()
+    assert not loaded_experiment.is_authoritative_execution_runtime_active()
+    assert loaded_experiment._active_authoritative_execution_session is None
+    assert not loaded_experiment.uses_durable_execution_checkpoint()
+    assert _hashes(Path(source_experiment.experiment_dir_path)) == before
+
+    stock_ids = {
+        stock.stock_id for stock in loaded.stock_solutions.get_all_stock_solutions()
+    }
+    assert stock_ids == {stock.stock_id for stock in completed.stocks}
+    assert {
+        head.get_stock_id() for head in loaded.get_completed_execution_display_heads()
+    } == stock_ids
+    for saved_well in completed.wells:
+        reaction = loaded.well_plate.get_well(
+            saved_well.well_id
+        ).get_assigned_reaction()
+        assert reaction.unique_id == saved_well.reaction_id
+        assert reaction.get_all_target_droplets() == {
+            dispense.stock_id: dispense.target_dispenses
+            for dispense in saved_well.dispenses
+        }
+        for dispense in saved_well.dispenses:
+            reagent = reaction.get_reagent_by_id(dispense.stock_id)
+            assert reagent.added_droplets == dispense.target_dispenses
+            assert reagent.completed
+        assert reaction.check_all_complete()
+
+
+def test_completed_execution_view_rejects_aborted_terminal_bundle(
+    experiment_model_factory,
+    monkeypatch,
+):
+    _source, source_experiment, _completed = _complete_execution(
+        experiment_model_factory
+    )
+    loaded = experiment_model_factory()
+    loaded_experiment = loaded.experiment_model
+    loaded_experiment.load_experiment(
+        source_experiment.experiment_file_path,
+        source_experiment.experiment_dir_path,
+    )
+    completed_bundle = loaded_experiment.get_authoritative_execution_bundle()
+    aborted_bundle = replace(
+        completed_bundle,
+        plan=replace(completed_bundle.plan, state=ExecutionPlanState.ABORTED),
+    )
+
+    def refresh_aborted():
+        loaded_experiment._authoritative_execution_bundle = aborted_bundle
+        return aborted_bundle
+
+    monkeypatch.setattr(
+        loaded_experiment,
+        "_refresh_authoritative_execution_bundle",
+        refresh_aborted,
+    )
+
+    with pytest.raises(RuntimeError, match="Only a valid completed execution"):
+        loaded.load_completed_execution_view()
+
+    assert not loaded.is_completed_execution_view_active()
+    assert not loaded_experiment.can_view_completed_execution()
+    assert not loaded_experiment.is_authoritative_execution_runtime_active()
+
+
+def test_completed_execution_projection_failure_preserves_live_runtime(
+    experiment_model_factory,
+    monkeypatch,
+):
+    _source, source_experiment, _completed = _complete_execution(
+        experiment_model_factory
+    )
+    loaded = experiment_model_factory()
+    loaded_experiment = loaded.experiment_model
+    loaded_experiment.load_experiment(
+        source_experiment.experiment_file_path,
+        source_experiment.experiment_dir_path,
+    )
+    stock_manager_before = loaded.stock_solutions
+    reactions_before = loaded.reaction_collection
+    assignments_before = {
+        well.well_id: well.get_assigned_reaction()
+        for well in loaded.well_plate.get_all_wells()
+    }
+    monkeypatch.setattr(
+        loaded,
+        "_build_authoritative_runtime_projection",
+        lambda _bundle: (_ for _ in ()).throw(RuntimeError("projection failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="projection failed"):
+        loaded.load_completed_execution_view()
+
+    assert loaded.stock_solutions is stock_manager_before
+    assert loaded.reaction_collection is reactions_before
+    assert {
+        well.well_id: well.get_assigned_reaction()
+        for well in loaded.well_plate.get_all_wells()
+    } == assignments_before
+    assert not loaded.is_completed_execution_view_active()
+    assert not loaded_experiment.is_authoritative_execution_runtime_active()

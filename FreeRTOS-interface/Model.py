@@ -151,6 +151,16 @@ class _AuthoritativePrintPreflight:
     printer_head_id: str
 
 
+@dataclass(frozen=True)
+class _AuthoritativeRuntimeProjection:
+    spec: Any
+    stock_manager: Any
+    reaction_collection: Any
+    reactions: tuple[Any, ...]
+    well_ids: tuple[str, ...]
+    stock_specs: dict[str, Any]
+
+
 def _format_stock_display_sig_figs(value, sig_figs: int = 3) -> str:
     try:
         dec_value = Decimal(str(value))
@@ -7424,6 +7434,20 @@ class ExperimentModel(QObject):
             "repairable_intent_ids": list(eligibility.repairable_intent_ids),
             "ambiguous_intent_ids": list(eligibility.ambiguous_intent_ids),
         }
+
+    def can_view_completed_execution(self) -> bool:
+        """Return whether the loaded bundle is a valid display-only completion."""
+        bundle = self.get_authoritative_execution_bundle()
+        if bundle is None or not bundle.valid or bundle.plan is None:
+            return False
+        eligibility = bundle.eligibility
+        return bool(
+            bundle.plan.state is ExecutionPlanState.COMPLETED
+            and eligibility.status == "analysis_only"
+            and not eligibility.can_activate_runtime
+            and not eligibility.can_start_hardware
+            and not eligibility.can_resume_hardware
+        )
 
     def is_authoritative_execution_runtime_active(self) -> bool:
         return bool(getattr(self, "_authoritative_runtime_active", False))
@@ -16266,6 +16290,8 @@ class Model(QObject):
 
     def _clear_runtime_experiment_without_signal(self):
         """Clear runtime execution state without announcing a successful load."""
+        self._completed_execution_view_active = False
+        self._completed_execution_display_heads = ()
         if self.stock_solutions is not None:
             self.stock_solutions.clear_all_stock_solutions()
         if self.reaction_collection is not None:
@@ -16315,8 +16341,53 @@ class Model(QObject):
         eligibility = bundle.eligibility
         if not eligibility.can_activate_runtime or eligibility.status.startswith("blocked_"):
             raise RuntimeError(eligibility.reason)
-        spec = build_execution_runtime_spec(bundle)
+        projection = self._build_authoritative_runtime_projection(bundle)
 
+        # The checkpoint write is an explicit activation side effect. It occurs only
+        # after every saved runtime identity has been validated and built in memory.
+        self.experiment_model.ensure_execution_resume_checkpoint()
+
+        self._clear_runtime_experiment_without_signal()
+        self.well_plate.set_plate_format(projection.spec.plate_name)
+        self.stock_solutions = projection.stock_manager
+        self.reaction_collection = projection.reaction_collection
+        self.well_plate.assign_reactions_to_specific_wells(
+            list(projection.reactions),
+            list(projection.well_ids),
+        )
+        self.well_plate.apply_calibration_data()
+        self.assign_printer_heads()
+
+        self._apply_saved_printer_head_projection(
+            list(getattr(getattr(self, "printer_head_manager", None), "printer_heads", []) or []),
+            projection.stock_specs,
+        )
+
+        self.experiment_model.set_runtime_context(
+            self.well_plate,
+            self.reaction_collection,
+        )
+        self.experiment_model._authoritative_runtime_active = True
+        self.experiment_model._write_execution_plan_exports(
+            bundle.plan,
+            self.experiment_model.to_dict(),
+        )
+        self.record_experiment_audit_event(
+            "authoritative_execution_activated",
+            "Authoritative execution activated in runtime",
+            details={
+                "plan_id": bundle.plan.plan_id,
+                "plan_revision": bundle.plan.plan_revision,
+                "resume_status": eligibility.status,
+                "reaction_count": len(projection.reactions),
+            },
+        )
+        self.experiment_loaded.emit()
+        return self.experiment_model.get_execution_resume_eligibility()
+
+    def _build_authoritative_runtime_projection(self, bundle):
+        """Build and validate saved runtime state without mutating the live model."""
+        spec = build_execution_runtime_spec(bundle)
         try:
             plate_data = self.well_plate.get_plate_data_by_name(spec.plate_name)
         except Exception as exc:
@@ -16328,9 +16399,10 @@ class Model(QObject):
             or int(plate_data.get("columns", -1)) != spec.plate_columns
         ):
             raise RuntimeError("The current plate catalog differs from the saved execution plate.")
-        well_ids = [well.well_id for well in spec.wells]
+
+        well_ids = tuple(well.well_id for well in spec.wells)
         self.well_plate.validate_explicit_well_ids(
-            well_ids,
+            list(well_ids),
             plate_name=spec.plate_name,
             excluded_wells=set(),
         )
@@ -16367,22 +16439,18 @@ class Model(QObject):
             reaction_collection.add_reaction(reaction)
             reactions.append(reaction)
 
-        # The checkpoint write is an explicit activation side effect. It occurs only
-        # after every saved runtime identity has been validated and built in memory.
-        self.experiment_model.ensure_execution_resume_checkpoint()
+        return _AuthoritativeRuntimeProjection(
+            spec=spec,
+            stock_manager=stock_manager,
+            reaction_collection=reaction_collection,
+            reactions=tuple(reactions),
+            well_ids=well_ids,
+            stock_specs=stock_specs,
+        )
 
-        self._clear_runtime_experiment_without_signal()
-        self.well_plate.set_plate_format(spec.plate_name)
-        self.stock_solutions = stock_manager
-        self.reaction_collection = reaction_collection
-        self.well_plate.assign_reactions_to_specific_wells(reactions, well_ids)
-        self.well_plate.apply_calibration_data()
-        self.assign_printer_heads()
-
-        printer_head_manager = getattr(self, "printer_head_manager", None)
-        for printer_head in list(
-            getattr(printer_head_manager, "printer_heads", []) or []
-        ):
+    @staticmethod
+    def _apply_saved_printer_head_projection(printer_heads, stock_specs):
+        for printer_head in printer_heads:
             if getattr(printer_head, "calibration_chip", False):
                 continue
             saved = stock_specs.get(printer_head.get_stock_id())
@@ -16392,27 +16460,54 @@ class Model(QObject):
                 printer_head.printer_head_id = saved.printer_head_id
             printer_head.target_droplet_volume = saved.effective_volume_nL
 
+    def _build_completed_execution_display_heads(self, projection):
+        colors = list(getattr(self, "printer_head_colors", {}).values())
+        if not colors:
+            colors = ["#808080"]
+        heads = []
+        for index, stock in enumerate(projection.stock_manager.get_all_stock_solutions()):
+            head = PrinterHead(stock, color=colors[(index + 1) % len(colors)])
+            heads.append(head)
+        self._apply_saved_printer_head_projection(heads, projection.stock_specs)
+        return tuple(heads)
+
+    def load_completed_execution_view(self):
+        """Project a validated completed execution into the UI without activating it."""
+        bundle = self.experiment_model._refresh_authoritative_execution_bundle()
+        if not self.experiment_model.can_view_completed_execution():
+            raise RuntimeError(
+                "Only a valid completed execution can be opened in the read-only view. "
+                + str(bundle.eligibility.reason)
+            )
+
+        projection = self._build_authoritative_runtime_projection(bundle)
+        display_heads = self._build_completed_execution_display_heads(projection)
+
+        self.well_plate.clear_all_wells()
+        self.well_plate.set_plate_format(projection.spec.plate_name)
+        self.stock_solutions = projection.stock_manager
+        self.reaction_collection = projection.reaction_collection
+        self.well_plate.assign_reactions_to_specific_wells(
+            list(projection.reactions),
+            list(projection.well_ids),
+        )
+        self.well_plate.apply_calibration_data()
+        self._completed_execution_display_heads = display_heads
+        self._completed_execution_view_active = True
         self.experiment_model.set_runtime_context(
             self.well_plate,
             self.reaction_collection,
         )
-        self.experiment_model._authoritative_runtime_active = True
-        self.experiment_model._write_execution_plan_exports(
-            bundle.plan,
-            self.experiment_model.to_dict(),
-        )
-        self.record_experiment_audit_event(
-            "authoritative_execution_activated",
-            "Authoritative execution activated in runtime",
-            details={
-                "plan_id": bundle.plan.plan_id,
-                "plan_revision": bundle.plan.plan_revision,
-                "resume_status": eligibility.status,
-                "reaction_count": len(reactions),
-            },
-        )
+        self.experiment_model._authoritative_runtime_active = False
+        self.experiment_model._active_authoritative_execution_session = None
         self.experiment_loaded.emit()
         return self.experiment_model.get_execution_resume_eligibility()
+
+    def is_completed_execution_view_active(self):
+        return bool(getattr(self, "_completed_execution_view_active", False))
+
+    def get_completed_execution_display_heads(self):
+        return tuple(getattr(self, "_completed_execution_display_heads", ()) or ())
 
     def assign_printer_heads(self):
         """Assign printer heads to the slots in the rack."""
