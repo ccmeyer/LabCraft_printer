@@ -1692,6 +1692,19 @@ class MainWindow(QMainWindow):
         else:
             self.controller._set_array_run_state("idle")
         return eligibility
+
+    def view_completed_execution(self):
+        """Populate a completed execution for inspection without activating it."""
+        state_getter = getattr(self.controller, "get_array_run_state", None)
+        array_state = state_getter() if callable(state_getter) else "idle"
+        queue_checker = getattr(self.controller, "check_if_all_completed", None)
+        queue_empty = bool(queue_checker()) if callable(queue_checker) else True
+        if array_state != "idle" or not queue_empty:
+            raise RuntimeError(
+                "A completed experiment can be viewed only while the array runner "
+                "is idle and the command queue is empty."
+            )
+        return self.model.load_completed_execution_view()
     
     def closeEvent(self, event):
         """Handle the window close event."""
@@ -4941,6 +4954,18 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         button.setStyleSheet(f"background-color: {color}; color: white;")
 
     def update_start_print_array_button(self, *_args):
+        completed_view_getter = getattr(
+            self.model, "is_completed_execution_view_active", None
+        )
+        if callable(completed_view_getter) and completed_view_getter():
+            self.start_print_array_button.setText("Experiment Complete")
+            self._set_array_button_state(
+                self.start_print_array_button,
+                False,
+                'dark_blue',
+            )
+            return
+
         has_head = self.model.rack_model.gripper_printer_head is not None
         state_getter = getattr(self.controller, "get_array_run_state", None)
         array_state = state_getter() if callable(state_getter) else "idle"
@@ -4964,6 +4989,12 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self._set_array_button_state(self.start_print_array_button, has_head, 'dark_blue')
 
     def start_print_array(self):
+        completed_view_getter = getattr(
+            self.model, "is_completed_execution_view_active", None
+        )
+        if callable(completed_view_getter) and completed_view_getter():
+            return
+
         state_getter = getattr(self.controller, "get_array_run_state", None)
         array_state = state_getter() if callable(state_getter) else "idle"
 
@@ -5251,7 +5282,28 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                     idx = self.reagent_selection.findText(stock_formatted)
                 self.reagent_selection.setCurrentIndex(idx)
             max_concentration = self.model.reaction_collection.get_max_droplets(stock_id)
-            printer_head = self.model.printer_head_manager.get_printer_head_by_id(stock_id)
+            printer_head = None
+            completed_view_getter = getattr(
+                self.model, "is_completed_execution_view_active", None
+            )
+            if callable(completed_view_getter) and completed_view_getter():
+                display_heads_getter = getattr(
+                    self.model, "get_completed_execution_display_heads", None
+                )
+                display_heads = (
+                    display_heads_getter()
+                    if callable(display_heads_getter)
+                    else ()
+                )
+                printer_head = next(
+                    (
+                        head for head in display_heads
+                        if head.get_stock_id() == stock_id
+                    ),
+                    None,
+                )
+            if printer_head is None:
+                printer_head = self.model.printer_head_manager.get_printer_head_by_id(stock_id)
             color = printer_head.get_color()
         else:
             max_concentration = 0
@@ -5371,6 +5423,18 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.reagent_selection.setCurrentIndex(0)
 
         self.update_well_colors()  # Update with a default reagent on load
+        completed_view_getter = getattr(
+            self.model, "is_completed_execution_view_active", None
+        )
+        completed_view = bool(
+            callable(completed_view_getter) and completed_view_getter()
+        )
+        for button_name in ("stock_prep_button", "calibration_button"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(not completed_view)
+        if getattr(self, "start_print_array_button", None) is not None:
+            self.update_start_print_array_button()
         print('Completed experiment load')
 
     def open_calibration_dialog(self):
@@ -5379,6 +5443,11 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         This function will be triggered when the calibration button is pressed.
         """
         # Create an instance of the CalibrationDialog
+        completed_view_getter = getattr(
+            self.model, "is_completed_execution_view_active", None
+        )
+        if callable(completed_view_getter) and completed_view_getter():
+            return
         if not self.model.machine_model.motors_are_enabled() or not self.model.machine_model.motors_are_homed():
             self.main_window.popup_message("Motors Not Enabled or Homed","Please enable and home the motors before calibrating the well plate.")
             return
@@ -5416,6 +5485,11 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             print("Experiment file generated and loaded.")
 
     def open_stock_prep_dialog(self):
+        completed_view_getter = getattr(
+            self.model, "is_completed_execution_view_active", None
+        )
+        if callable(completed_view_getter) and completed_view_getter():
+            return
         dialog = StockPrepDialog(self.model.experiment_model, self.main_window)
         dialog.exec()
 
@@ -8463,6 +8537,10 @@ class ExperimentTaskListWidget(QGroupBox):
 
         return any(self._well_assigned_reaction(well) is not None for well in self._all_wells())
 
+    def _completed_execution_view_active(self):
+        getter = getattr(self.model, "is_completed_execution_view_active", None)
+        return bool(callable(getter) and getter())
+
     def _queue_idle(self):
         checker = getattr(self.controller, "check_if_all_completed", None)
         if callable(checker):
@@ -8473,6 +8551,16 @@ class ExperimentTaskListWidget(QGroupBox):
         return True
 
     def _global_tasks(self):
+        if self._completed_execution_view_active():
+            return [
+                {
+                    "key": "experiment",
+                    "label": "Completed experiment loaded read-only",
+                    "done": self._experiment_ready(),
+                    "next": "Load the completed experiment",
+                    "blocking": "The saved completed state could not be displayed.",
+                }
+            ]
         machine_model = getattr(self.model, "machine_model", None)
         well_plate = getattr(self.model, "well_plate", None)
         return [
@@ -8527,6 +8615,8 @@ class ExperimentTaskListWidget(QGroupBox):
         return None
 
     def _active_head(self):
+        if self._completed_execution_view_active():
+            return None
         rack = getattr(self.model, "rack_model", None)
         getter = getattr(rack, "get_gripper_printer_head", None)
         if callable(getter):
@@ -8554,6 +8644,12 @@ class ExperimentTaskListWidget(QGroupBox):
         return self._call_bool(head, "is_calibration_chip", False)
 
     def _discover_heads(self):
+        if self._completed_execution_view_active():
+            getter = getattr(
+                self.model, "get_completed_execution_display_heads", None
+            )
+            return list(getter() or ()) if callable(getter) else []
+
         heads = []
         manager = getattr(self.model, "printer_head_manager", None)
         heads.extend(list(getattr(manager, "printer_heads", []) or []))
@@ -8840,8 +8936,9 @@ class ExperimentTaskListWidget(QGroupBox):
         is_active = active is head or (
             active is not None and self._head_key(active) == self._head_key(head)
         )
-        applied = self._applied_calibration_record(head) is not None
-        calibrated = self._head_calibrated(head)
+        completed_view = self._completed_execution_view_active()
+        applied = completed_view or self._applied_calibration_record(head) is not None
+        calibrated = completed_view or self._head_calibrated(head)
         progress = self._head_print_progress(head)
         has_work = progress["total_wells"] > 0
         printed = has_work and progress["remaining_droplets"] <= 0
@@ -8864,7 +8961,11 @@ class ExperimentTaskListWidget(QGroupBox):
             "done": applied,
             "blocking": "" if calibrated else "Complete or select a calibration result first.",
         }
-        manual_refuel_task = self._manual_refuel_task_for_head(head, is_active=is_active)
+        manual_refuel_task = (
+            None
+            if completed_view
+            else self._manual_refuel_task_for_head(head, is_active=is_active)
+        )
         print_task = {
             "key": "print",
             "label": "Print array",
@@ -10906,6 +11007,7 @@ class ExperimentDesignDialog(QDialog):
 
     ACTION_FINALIZE_DESIGN = "Finalize Design"
     ACTION_LOAD_EXECUTION = "Load Execution"
+    ACTION_VIEW_COMPLETED_EXECUTION = "View Completed Experiment"
     ACTION_EXECUTION_LOADED = "Execution Loaded"
     ACTION_EXECUTION_LOCKED = "Execution Locked"
 
@@ -12190,6 +12292,33 @@ class ExperimentDesignDialog(QDialog):
                 "eligibility": dict(eligibility),
             }
 
+        can_view_completed_getter = getattr(
+            self.model, "can_view_completed_execution", None
+        )
+        can_view_completed = bool(
+            plan_state == "completed"
+            and callable(can_view_completed_getter)
+            and can_view_completed_getter()
+            and eligibility.get("status") == "analysis_only"
+            and not eligibility.get("can_activate_runtime")
+            and not eligibility.get("can_start_hardware")
+            and not eligibility.get("can_resume_hardware")
+        )
+        if can_view_completed:
+            return {
+                "state": "completed_view_available",
+                "action_text": self.ACTION_VIEW_COMPLETED_EXECUTION,
+                "action_enabled": True,
+                "banner_text": (
+                    "This completed execution is locked and read-only. Select View "
+                    "Completed Experiment to populate the saved plate, reagents, wells, "
+                    "and final progress for inspection. Hardware start and resume remain "
+                    "unavailable. Create an editable copy to change the design."
+                ),
+                "plan_state": plan_state,
+                "eligibility": dict(eligibility),
+            }
+
         can_activate = bool(eligibility.get("can_activate_runtime"))
         reason = str(eligibility.get("reason") or "").strip()
         if can_activate:
@@ -12230,7 +12359,11 @@ class ExperimentDesignDialog(QDialog):
         if finish_btn is not None:
             finish_btn.setText(lifecycle["action_text"])
             finish_btn.setEnabled(bool(lifecycle["action_enabled"]))
-            if lifecycle["state"] == "saved_execution":
+            if lifecycle["state"] == "completed_view_available":
+                finish_btn.setToolTip(
+                    "Populate the completed saved state for read-only inspection."
+                )
+            elif lifecycle["state"] == "saved_execution":
                 finish_btn.setToolTip(
                     "Reconstruct the saved runtime. This does not start or resume printing."
                 )
@@ -14823,10 +14956,20 @@ class ExperimentDesignDialog(QDialog):
             eligibility = eligibility_getter() if callable(eligibility_getter) else None
             reason = str((eligibility or {}).get("reason") or "")
             status = str((eligibility or {}).get("status") or "")
+            completed_view_getter = getattr(
+                self.model, "can_view_completed_execution", None
+            )
+            can_view_completed = bool(
+                callable(completed_view_getter) and completed_view_getter()
+            )
             base_message = (
-                "Execution plan validated. Press Load Execution to reconstruct the exact saved runtime."
-                if status in {"ready_to_start", "ready_to_resume", "repairable_checkpoint"}
-                else "Execution plan loaded read-only for analysis; hardware activation is blocked."
+                "Execution complete. Press View Completed Experiment to populate the exact saved state read-only."
+                if can_view_completed
+                else (
+                    "Execution plan validated. Press Load Execution to reconstruct the exact saved runtime."
+                    if status in {"ready_to_start", "ready_to_resume", "repairable_checkpoint"}
+                    else "Execution plan loaded read-only for analysis; hardware activation is blocked."
+                )
             )
             self._progress_lock_status_message = (
                 "\n".join(item for item in (base_message, reason, sync_error) if item)
@@ -14881,21 +15024,72 @@ class ExperimentDesignDialog(QDialog):
         bundle_getter = getattr(self.model, "get_authoritative_execution_bundle", None)
         bundle = bundle_getter() if callable(bundle_getter) else None
         if bundle is not None and self._model_execution_is_read_only(self.model):
+            eligibility_getter = getattr(
+                self.model, "get_execution_resume_eligibility", None
+            )
+            eligibility = (
+                eligibility_getter() if callable(eligibility_getter) else None
+            ) or {}
+            completed_view_getter = getattr(
+                self.model, "can_view_completed_execution", None
+            )
+            can_view_completed = bool(
+                callable(completed_view_getter)
+                and completed_view_getter()
+                and self._execution_plan_state_text(self.model) == "completed"
+                and eligibility.get("status") == "analysis_only"
+                and not eligibility.get("can_activate_runtime")
+                and not eligibility.get("can_start_hardware")
+                and not eligibility.get("can_resume_hardware")
+            )
             try:
-                if self.main_window is None or not hasattr(
-                    self.main_window, "activate_authoritative_execution"
-                ):
-                    raise RuntimeError("The execution activation path is unavailable.")
-                eligibility = self.main_window.activate_authoritative_execution()
+                if can_view_completed:
+                    if self.main_window is None or not hasattr(
+                        self.main_window, "view_completed_execution"
+                    ):
+                        raise RuntimeError(
+                            "The completed-execution view path is unavailable."
+                        )
+                    eligibility = self.main_window.view_completed_execution()
+                elif eligibility.get("can_activate_runtime"):
+                    if self.main_window is None or not hasattr(
+                        self.main_window, "activate_authoritative_execution"
+                    ):
+                        raise RuntimeError("The execution activation path is unavailable.")
+                    eligibility = self.main_window.activate_authoritative_execution()
+                else:
+                    self._set_status(
+                        str(eligibility.get("reason") or "This execution cannot be loaded.")
+                    )
+                    return
                 self._apply_requested = True
                 self._set_status(
-                    str((eligibility or {}).get("reason") or "Execution activated.")
+                    str(
+                        (eligibility or {}).get("reason")
+                        or (
+                            "Completed execution displayed read-only."
+                            if can_view_completed
+                            else "Execution activated."
+                        )
+                    )
                 )
                 self.accept()
             except Exception as exc:
-                message = str(exc) or "Could not activate the saved execution."
+                message = str(exc) or (
+                    "Could not display the completed execution."
+                    if can_view_completed
+                    else "Could not activate the saved execution."
+                )
                 self._set_status(message)
-                QMessageBox.warning(self, "Could not activate execution", message)
+                QMessageBox.warning(
+                    self,
+                    (
+                        "Could not view completed experiment"
+                        if can_view_completed
+                        else "Could not activate execution"
+                    ),
+                    message,
+                )
             return
         if self._model_execution_is_read_only(self.model):
             self._set_status(

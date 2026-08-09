@@ -32,6 +32,7 @@ def _build_dialog_stub(
     runtime_active: bool = False,
     resume_eligibility=None,
     plan_state: str | None = None,
+    can_view_completed: bool = False,
 ):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog._uploaded_design_active = False
@@ -96,6 +97,7 @@ def _build_dialog_stub(
         has_explicit_well_assignments=lambda: manual_assignments,
         is_execution_design_locked=lambda: execution_locked,
         is_authoritative_execution_runtime_active=lambda: runtime_active,
+        can_view_completed_execution=lambda: can_view_completed,
         is_read_only_legacy_execution=lambda: False,
         get_execution_resume_eligibility=lambda: resume_eligibility,
         get_execution_plan_snapshot=lambda: (
@@ -534,6 +536,89 @@ def test_nonactivatable_execution_has_locked_action_and_reason_banner(
     assert dialog.lifecycle_banner.isVisible() is True
     assert "Hardware loading is unavailable" in dialog.lifecycle_banner.text()
     assert reason in dialog.lifecycle_banner.text()
+
+
+def test_exact_completed_execution_has_enabled_read_only_view_action(qapp):
+    dialog = _build_dialog_stub(
+        gripper_loaded=False,
+        execution_locked=True,
+        runtime_active=False,
+        resume_eligibility={
+            "status": "analysis_only",
+            "can_activate_runtime": False,
+            "can_start_hardware": False,
+            "can_resume_hardware": False,
+            "reason": "Execution plan state is completed.",
+        },
+        plan_state="completed",
+        can_view_completed=True,
+    )
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert (
+        dialog.finish_btn.text()
+        == ExperimentDesignDialog.ACTION_VIEW_COMPLETED_EXECUTION
+    )
+    assert dialog.finish_btn.isEnabled() is True
+    assert dialog.run_btn.isEnabled() is False
+    assert dialog.save_btn.isEnabled() is False
+    assert dialog.lifecycle_banner.isVisible() is True
+    assert "populate the saved plate" in dialog.lifecycle_banner.text()
+    assert "Hardware start and resume remain unavailable" in dialog.lifecycle_banner.text()
+
+
+def test_analysis_only_status_without_exact_completed_state_stays_locked(qapp):
+    dialog = _build_dialog_stub(
+        gripper_loaded=False,
+        execution_locked=True,
+        runtime_active=False,
+        resume_eligibility={
+            "status": "analysis_only",
+            "can_activate_runtime": False,
+            "can_start_hardware": False,
+            "can_resume_hardware": False,
+            "reason": "Analysis only.",
+        },
+        plan_state="active",
+        can_view_completed=True,
+    )
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert dialog.finish_btn.text() == ExperimentDesignDialog.ACTION_EXECUTION_LOCKED
+    assert dialog.finish_btn.isEnabled() is False
+
+
+def test_completed_view_action_uses_display_path_without_activation(qapp):
+    dialog = _build_dialog_stub(
+        gripper_loaded=False,
+        execution_locked=True,
+        runtime_active=False,
+        resume_eligibility={
+            "status": "analysis_only",
+            "can_activate_runtime": False,
+            "can_start_hardware": False,
+            "can_resume_hardware": False,
+            "reason": "Execution plan state is completed.",
+        },
+        plan_state="completed",
+        can_view_completed=True,
+    )
+    dialog.model.get_authoritative_execution_bundle = lambda: {"plan": {}}
+    dialog.main_window.view_completed_execution = Mock(
+        return_value={"status": "analysis_only"}
+    )
+    dialog.main_window.activate_authoritative_execution = Mock()
+    dialog.accept = Mock()
+    dialog._apply_requested = False
+
+    ExperimentDesignDialog._on_finish(dialog)
+
+    dialog.main_window.view_completed_execution.assert_called_once_with()
+    dialog.main_window.activate_authoritative_execution.assert_not_called()
+    dialog.accept.assert_called_once_with()
+    assert dialog._apply_requested is True
 
 
 def _build_duplicate_dialog(qapp, source_dir: Path):

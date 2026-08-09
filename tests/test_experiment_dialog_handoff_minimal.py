@@ -65,6 +65,42 @@ def test_complete_experiment_design_uses_transactional_prepared_commit(
     load_mock.assert_not_called()
 
 
+def test_view_completed_execution_requires_idle_queue_and_only_projects_display():
+    main_window = MainWindow.__new__(MainWindow)
+    project = Mock(return_value={"status": "analysis_only"})
+    main_window.model = SimpleNamespace(load_completed_execution_view=project)
+    main_window.controller = SimpleNamespace(
+        get_array_run_state=Mock(return_value="idle"),
+        check_if_all_completed=Mock(return_value=True),
+        _set_array_run_state=Mock(),
+    )
+
+    result = MainWindow.view_completed_execution(main_window)
+
+    assert result == {"status": "analysis_only"}
+    project.assert_called_once_with()
+    main_window.controller._set_array_run_state.assert_not_called()
+
+
+def test_view_completed_execution_rejects_nonidle_controller_without_projection():
+    main_window = MainWindow.__new__(MainWindow)
+    project = Mock()
+    main_window.model = SimpleNamespace(load_completed_execution_view=project)
+    main_window.controller = SimpleNamespace(
+        get_array_run_state=Mock(return_value="resume_ready"),
+        check_if_all_completed=Mock(return_value=True),
+    )
+
+    try:
+        MainWindow.view_completed_execution(main_window)
+    except RuntimeError as exc:
+        assert "array runner is idle" in str(exc)
+    else:
+        raise AssertionError("non-idle completed view was accepted")
+
+    project.assert_not_called()
+
+
 def _dialog_for_progress_policy(prompt_policy):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog.model = SimpleNamespace(

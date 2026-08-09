@@ -132,6 +132,55 @@ def test_update_well_colors_only_touches_named_well():
     assert widget.update_calls == 0
 
 
+def test_completed_view_uses_detached_display_head_for_complete_well_color():
+    reaction = SimpleNamespace(
+        get_target_droplets_for_stock=lambda _stock_id: 7,
+        check_stock_complete=lambda _stock_id: True,
+    )
+    well = SimpleNamespace(
+        well_id="A1",
+        row_num=0,
+        col=1,
+        assigned_reaction=reaction,
+    )
+    display_head = SimpleNamespace(
+        get_stock_id=lambda: "ReagentA_1.00_mM",
+        get_color=lambda: "#224466",
+    )
+    widget = _BatchingWidget()
+    widget.well_labels = [[_Label()]]
+    widget.reagent_selection = SimpleNamespace(
+        currentIndex=lambda: 0,
+        itemData=lambda _index: "ReagentA_1.00_mM",
+    )
+    widget.model = SimpleNamespace(
+        is_completed_execution_view_active=lambda: True,
+        get_completed_execution_display_heads=lambda: (display_head,),
+        reaction_collection=SimpleNamespace(
+            is_empty=lambda: False,
+            get_max_droplets=lambda _stock_id: 7,
+        ),
+        stock_solutions=SimpleNamespace(
+            get_stock_by_id=lambda _stock_id: SimpleNamespace(units="mM"),
+        ),
+        printer_head_manager=SimpleNamespace(
+            get_printer_head_by_id=lambda _stock_id: (_ for _ in ()).throw(
+                AssertionError("completed view consulted physical rack heads")
+            )
+        ),
+        well_plate=SimpleNamespace(
+            get_plate_dimensions=lambda: (8, 12),
+            get_all_wells=lambda: [well],
+        ),
+        get_well_stock_final_concentration=lambda _well_id, _stock_id: 0.25,
+    )
+
+    WellPlateWidget.update_well_colors(widget)
+
+    assert "rgba(34,68,102" in widget.well_labels[0][0].style
+    assert "border: 1px solid white" in widget.well_labels[0][0].style
+
+
 def test_unknown_well_id_falls_back_to_batched_full_refresh():
     rxn = SimpleNamespace(
         get_target_droplets_for_stock=lambda sid: 7,
