@@ -999,6 +999,7 @@ def test_editor_revision_driver_delegates_to_existing_bounded_mechanics(
         "experiment": {"refinalized_replicates": 3},
         "reagent": {"refinalized_targets": [0.5, 1.0]},
         "action_runner": runner,
+        "capture_milestones": True,
     }
 
 

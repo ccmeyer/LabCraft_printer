@@ -596,6 +596,7 @@ class ExperimentEditorDriver(_QTestSurfaceDriver):
         renamed_name: str,
         experiment: Mapping[str, Any],
         reagent: Mapping[str, Any],
+        capture_milestones: bool = True,
     ) -> dict[str, Any]:
         """Rename, edit, regenerate, and refinalize one prepared design."""
 
@@ -610,6 +611,7 @@ class ExperimentEditorDriver(_QTestSurfaceDriver):
             experiment=experiment,
             reagent=reagent,
             action_runner=self.action_runner,
+            capture_milestones=capture_milestones,
         )
 
     def run_prepared_sequence(

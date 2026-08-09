@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import math
 import os
 import sys
@@ -102,6 +103,37 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sequence",
         help="Run exactly one sequence from the selected --exploration.",
+    )
+    parser.add_argument(
+        "--seed-tier",
+        choices=("frozen", "diagnostic"),
+        help="Select the versioned frozen or explicit diagnostic exploration tier.",
+    )
+    parser.add_argument(
+        "--diagnostic-seed",
+        action="append",
+        default=[],
+        type=int,
+        help=(
+            "Explicit nonblocking diagnostic exploration seed; repeatable and "
+            "valid only with --seed-tier diagnostic."
+        ),
+    )
+    parser.add_argument(
+        "--exploration-plan",
+        type=Path,
+        help=(
+            "Replay a retained Milestone 13 aggregate plan exactly; valid only "
+            "with the Milestone 13 exploration and no --sequence."
+        ),
+    )
+    parser.add_argument(
+        "--normalized-sequence",
+        type=Path,
+        help=(
+            "Replay one retained Milestone 13 normalized sequence exactly; "
+            "requires --sequence."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -522,16 +554,76 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--case requires --matrix")
     if args.sequence is not None and args.exploration is None:
         parser.error("--sequence requires --exploration")
+    if args.seed_tier is not None and args.exploration is None:
+        parser.error("--seed-tier requires --exploration")
+    if args.diagnostic_seed and args.exploration is None:
+        parser.error("--diagnostic-seed requires --exploration")
+    if args.exploration_plan is not None and args.exploration is None:
+        parser.error("--exploration-plan requires --exploration")
+    if args.normalized_sequence is not None and args.sequence is None:
+        parser.error("--normalized-sequence requires --sequence")
     if args.exploration is not None:
         from tools.virtual_workflows.exploration import get_sequence
+        from tools.virtual_workflows.exploration_m13 import (
+            CAMPAIGN_ID as M13_CAMPAIGN_ID,
+            generate_diagnostic_sequence,
+            sequence_from_normalized,
+            sequence_ids as m13_sequence_ids,
+        )
+
+        is_m13 = args.exploration == M13_CAMPAIGN_ID
+        if not is_m13 and (args.seed_tier is not None or args.diagnostic_seed):
+            parser.error("seed tiers are not supported by this exploration campaign")
+        if not is_m13 and (
+            args.exploration_plan is not None
+            or args.normalized_sequence is not None
+        ):
+            parser.error("retained plan/sequence replay is Milestone 13 only")
+        if is_m13:
+            args.seed_tier = args.seed_tier or "frozen"
+            if args.seed_tier == "diagnostic" and not args.diagnostic_seed:
+                parser.error("diagnostic tier requires --diagnostic-seed")
+            if args.seed_tier == "frozen" and args.diagnostic_seed:
+                parser.error("--diagnostic-seed requires --seed-tier diagnostic")
+            if args.exploration_plan is not None:
+                if args.sequence is not None or args.normalized_sequence is not None:
+                    parser.error("--exploration-plan cannot be combined with a sequence")
+                if args.diagnostic_seed or _option_was_supplied(raw_argv, "--seed-tier"):
+                    parser.error("a retained exploration plan owns its seed tier")
+            retained_sequence = None
+            if args.normalized_sequence is not None:
+                try:
+                    retained_payload = json.loads(
+                        args.normalized_sequence.resolve().read_text(encoding="utf-8")
+                    )
+                    retained_sequence = sequence_from_normalized(retained_payload)
+                except Exception as exc:
+                    parser.error(f"invalid retained normalized sequence: {exc}")
+                if retained_sequence.sequence_id != args.sequence:
+                    parser.error("retained normalized sequence ID does not match --sequence")
+                args.seed_tier = retained_sequence.seed_tier
+            elif args.seed_tier == "diagnostic" and args.sequence is not None:
+                if len(args.diagnostic_seed) != 1:
+                    parser.error("a diagnostic sequence requires exactly one diagnostic seed")
+                retained_sequence = generate_diagnostic_sequence(args.diagnostic_seed[0])
+                if retained_sequence.sequence_id != args.sequence:
+                    parser.error("diagnostic sequence ID does not match its seed")
+            elif args.sequence is not None and args.sequence not in set(m13_sequence_ids()):
+                parser.error("unsupported frozen Milestone 13 sequence")
+            args._m13_retained_sequence = retained_sequence
+        else:
+            args.seed_tier = "frozen"
 
         if args.sequence is None and _option_was_supplied(raw_argv, "--seed"):
             parser.error("a full exploration campaign uses its frozen seed set")
         if args.sequence is not None:
             try:
-                sequence_seed = get_sequence(
-                    args.exploration, args.sequence
-                ).seed
+                if is_m13 and args._m13_retained_sequence is not None:
+                    sequence_seed = args._m13_retained_sequence.seed
+                else:
+                    sequence_seed = get_sequence(
+                        args.exploration, args.sequence
+                    ).seed
             except Exception as exc:
                 parser.error(str(exc))
             if (
@@ -672,6 +764,8 @@ def main(argv: list[str] | None = None) -> int:
                     sequence_id=args.sequence,
                     timeout_seconds=args.timeout_seconds,
                     execution_authorized=False,
+                    seed_tier=args.seed_tier,
+                    diagnostic_seeds=tuple(args.diagnostic_seed),
                 )
                 print(deterministic_json(plan), end="")
                 return 0
@@ -845,27 +939,62 @@ def main(argv: list[str] | None = None) -> int:
             from tools.virtual_workflows.exploration import resolve_exploration_plan
 
             if args.sequence is None:
-                from tools.virtual_workflows.exploration_runner import (
-                    ExplorationRunConfig,
-                    execute_exploration,
+                from tools.virtual_workflows.exploration_m13 import (
+                    CAMPAIGN_ID as M13_CAMPAIGN_ID,
                 )
 
-                plan = resolve_exploration_plan(
-                    args.exploration,
-                    timeout_seconds=args.timeout_seconds,
-                )
-                result = execute_exploration(
-                    ExplorationRunConfig(
-                        plan=plan,
-                        output_root=exploration_output_root,
-                        speed_multiplier=args.speed_multiplier,
-                        visible=args.visible,
-                        qt_platform=args.qt_platform,
-                        replay_command=_exploration_replay_command(
-                            args, exploration_output_root
-                        ),
+                if args.exploration == M13_CAMPAIGN_ID:
+                    from tools.virtual_workflows.exploration_runner_m13 import (
+                        M13ExplorationRunConfig,
+                        execute_m13_exploration,
+                        load_m13_plan,
                     )
-                )
+
+                    plan = (
+                        load_m13_plan(args.exploration_plan)
+                        if args.exploration_plan is not None
+                        else resolve_exploration_plan(
+                            args.exploration,
+                            timeout_seconds=args.timeout_seconds,
+                            execution_authorized=True,
+                            seed_tier=args.seed_tier,
+                            diagnostic_seeds=tuple(args.diagnostic_seed),
+                        )
+                    )
+                    result = execute_m13_exploration(
+                        M13ExplorationRunConfig(
+                            plan=plan,
+                            output_root=exploration_output_root,
+                            speed_multiplier=args.speed_multiplier,
+                            visible=args.visible,
+                            qt_platform=args.qt_platform,
+                            replay_command=_exploration_replay_command(
+                                args, exploration_output_root
+                            ),
+                        )
+                    )
+                else:
+                    from tools.virtual_workflows.exploration_runner import (
+                        ExplorationRunConfig,
+                        execute_exploration,
+                    )
+
+                    plan = resolve_exploration_plan(
+                        args.exploration,
+                        timeout_seconds=args.timeout_seconds,
+                    )
+                    result = execute_exploration(
+                        ExplorationRunConfig(
+                            plan=plan,
+                            output_root=exploration_output_root,
+                            speed_multiplier=args.speed_multiplier,
+                            visible=args.visible,
+                            qt_platform=args.qt_platform,
+                            replay_command=_exploration_replay_command(
+                                args, exploration_output_root
+                            ),
+                        )
+                    )
                 print(result.summary_path.read_text(encoding="utf-8"), end="")
                 print(f"Exploration aggregate: {result.aggregate_path}")
                 print(
@@ -890,7 +1019,7 @@ def main(argv: list[str] | None = None) -> int:
 
             report = run_exploration_sequence(
                 JourneyRunConfig(
-                    scenario_id=EXPLORATION_WORKLOAD_ID,
+                    scenario_id=args.exploration,
                     output_root=exploration_output_root,
                     visible=args.visible,
                     seed=args.seed,
@@ -899,6 +1028,11 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 campaign_id=args.exploration,
                 sequence_id=args.sequence,
+                normalized_sequence=(
+                    args._m13_retained_sequence.normalized()
+                    if getattr(args, "_m13_retained_sequence", None) is not None
+                    else None
+                ),
             )
             report_path = _report_path(report)
             print(report_path.with_name("summary.txt").read_text(encoding="utf-8"), end="")

@@ -1889,7 +1889,7 @@ Rollback:
 
 ### Milestone 13: Bounded seeded design/calibration exploration
 
-Status: `planned after Milestones 9-12 are stable`
+Status: `complete (2026-08-09)`
 
 Goal:
 
@@ -1953,6 +1953,36 @@ Exploration policy:
   disabled and `execution.refill_resume` remains deferred;
 - do not mutate active authoritative files except through an explicitly
   isolated Milestone 12 fault fixture.
+
+Completion summary:
+
+- the versioned 12-state/26-operation catalog and frozen seeds
+  `13, 29, 47, 83, 131, 197` are implemented without changing the M8 campaign;
+- both legal and all four illegal/recovery sequences pass real-Qt direct and
+  exact replay, with required visible Slice 13.2/13.3 representatives;
+- every rejected operation reuses its exact M12 case and shared no-mutation/
+  no-dispatch oracle, then reaches the compact `4/2/8/44` terminal authority;
+- the qualified strict budget is 18 semantic operations, 80 ledger rows,
+  three sessions/two rotations, four screenshots, 256 files/48 MiB, and
+  270/300 seconds per sequence; the six-sequence action cap is 480;
+- current catalog/campaign hashes are
+  `0d11d8dda4400620ffb053234ae29280cf776b4a8db812af9b7517da4db5825d`
+  and
+  `fe1930114a7dc848b4a5a6c148d56907f661ae7b757450e6785a91673962e2c5`.
+- schema-v2 frozen aggregate direct/replay pass 6/6 with complete semantic
+  coverage; diagnostic seed 1 direct/replay remains retained and non-gating;
+  the unchanged M8 schema-v1 aggregate/replay passes 10/10.
+- all 12 states, 34 declared transitions, 26 operations, and eight rejection
+  classes are covered by passing frozen children; direct, aggregate, exact
+  replay, and the four required visible direct/replay representatives pass;
+- source-current deterministic Milestones 9-12, lifecycle, and host-regression
+  direct/replay pass, and the immutable optimizer-360 control retains all six
+  frozen hashes, three sessions, revisions 1-8, 1,800 intents, and 46,208
+  droplets;
+- final focused tests pass `356/356`, assigned real-Qt/system tests pass
+  `66 passed, 3 skipped`, and the exact default suite passes
+  `4290 passed, 134 skipped`; the known 384x10 host-stress mismatch remains
+  separately scoped and was not run.
 
 Gate:
 
@@ -2438,10 +2468,17 @@ closed in five slices with 34 compact safeguards, complete manifest-registered
 direct/replay matrices, ten visible direct/replay representatives, the
 immutable optimizer-360 direct/replay positive control, lifecycle and
 host-regression direct/replay, 611 focused tests, 34 safeguard system tests,
-and the exact default Python suite (`4269 passed, 127 skipped`). Milestone 13
-remains out of scope and cannot begin until this Milestones 9-12 baseline,
-including the Milestone 11A positive control, is confirmed stable at its own
-start boundary.
+and the exact default Python suite (`4269 passed, 127 skipped`). Milestone 13's
+start boundary passed on 2026-08-09 at `cc9656e3`: all selected deterministic
+Milestone 9-12 direct/replay controls, the immutable Milestone 11A
+optimizer-360 direct/replay control, lifecycle and host-regression
+direct/replay, 342 focused tests, 53 selected real-Qt tests with 3 skips, and
+the exact default Python suite (`4269 passed, 127 skipped`) were green. Slice
+13.1 is complete: the execution-disabled v2 planning contract freezes 12
+states, 26 admitted operations, six reviewed sequences, seed tiers, budgets,
+and hashes while preserving the Milestone 8 schema-v1 campaign. Slice 13.2 is
+next for the two real-Qt legal terminal sequences; generated execution remains
+disabled until that slice's review boundary is recorded.
 Milestone 10 closed as follows:
 
 1. Slice 10.1 is complete: the complete typed nine-case catalog, independent

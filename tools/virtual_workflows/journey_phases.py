@@ -370,6 +370,7 @@ class PrecalibratedStockPassSpec:
     calibration_mode: str = "droplet"
     refuel_pulse_width_us: int | None = None
     refuel_pressure_psi: float | None = None
+    capture_completed_milestone: bool = True
 
     def __post_init__(self) -> None:
         if not self.stock_id or not self.printer_head_id:
@@ -528,6 +529,8 @@ def normalized_prepared_revision_steps(
 def run_prepared_editor_revision(
     runtime: JourneyRuntime,
     spec: PreparedEditorRevisionSpec,
+    *,
+    capture_milestones: bool = True,
 ) -> dict[str, Any]:
     result = ExperimentEditorDriver(
         runtime.context,
@@ -537,6 +540,7 @@ def run_prepared_editor_revision(
         renamed_name=spec.renamed_name,
         experiment=spec.experiment_values(),
         reagent=spec.reagent_values(),
+        capture_milestones=capture_milestones,
     )
     runtime.harness.assert_no_unexpected_dialog()
     return dict(result)
@@ -1252,6 +1256,11 @@ def run_stock_calibration_only(
             SemanticStep("calibration.apply_via_ui", InteractionSurface.UI, apply),
         )
     )
+    rack.wait_until(
+        lambda: runtime.context.machine.check_if_all_completed(),
+        "calibration-only simulator drain boundary",
+        timeout_seconds=min(20.0, runtime.context.deadline.remaining_seconds()),
+    )
     returned: Mapping[str, Any] | None = None
     if spec.return_head:
         def return_head(_runtime: JourneyRuntime) -> Mapping[str, Any]:
@@ -1292,6 +1301,7 @@ def run_stock_calibration_only(
         "generated": generated,
         "selected": selected,
         "count_transition": transition,
+        "queue_drained": bool(runtime.context.machine.check_if_all_completed()),
         "return": dict(returned or {}),
     }
     runtime.observations.setdefault("calibration_count_transitions", []).append(
@@ -1304,6 +1314,9 @@ def run_stock_calibration_only(
 def run_precalibrated_stock_passes(
     runtime: JourneyRuntime,
     pass_specs: Sequence[PrecalibratedStockPassSpec],
+    *,
+    after_pass: Callable[[JourneyRuntime, int, PrecalibratedStockPassSpec], Any]
+    | None = None,
 ) -> None:
     """Execute explicit stock-ID passes without reopening calibration."""
 
@@ -1417,15 +1430,18 @@ def run_precalibrated_stock_passes(
                 ),
             )
         )
-        capture_milestone(
-            runtime.context,
-            spec.completed_milestone,
-            evidence={
-                "stock_id": spec.stock_id,
-                "printer_head_id": spec.printer_head_id,
-                "completion_count": spec.expected_completion_count,
-            },
-        )
+        if spec.capture_completed_milestone:
+            capture_milestone(
+                runtime.context,
+                spec.completed_milestone,
+                evidence={
+                    "stock_id": spec.stock_id,
+                    "printer_head_id": spec.printer_head_id,
+                    "completion_count": spec.expected_completion_count,
+                },
+            )
+        if after_pass is not None:
+            after_pass(runtime, index, spec)
         if spec.return_head and not returned_before_validation:
             runtime.run_steps(
                 (
@@ -1599,6 +1615,8 @@ def run_clean_authoritative_session_rotation_boundary(
     pass_context: Callable[[], Mapping[str, Any] | None],
     inspect_loaded: Callable[[], Mapping[str, Any]] | None = None,
     inspect_activated: Callable[[], Mapping[str, Any]] | None = None,
+    loaded_hook: Callable[[JourneyRuntime], Any] | None = None,
+    activated_hook: Callable[[JourneyRuntime], Any] | None = None,
     observer_key: str = "session_2_execution",
 ) -> Mapping[str, Any]:
     """Rotate and explicitly activate a clean authoritative start boundary."""
@@ -1660,6 +1678,8 @@ def run_clean_authoritative_session_rotation_boundary(
         boundaries["loaded"] = evidence
         if inspect_loaded is not None:
             inspections["loaded"] = dict(inspect_loaded())
+        if loaded_hook is not None:
+            loaded_hook(runtime)
         return evidence
 
     def validate_activated() -> Mapping[str, Any]:
@@ -1678,6 +1698,8 @@ def run_clean_authoritative_session_rotation_boundary(
         boundaries.update({"loaded": loaded, "activated": activation})
         if inspect_activated is not None:
             inspections["activated"] = dict(inspect_activated())
+        if activated_hook is not None:
+            activated_hook(runtime)
         return activation
 
     editor = ExperimentLoaderDriver(context).load_authoritative_execution(

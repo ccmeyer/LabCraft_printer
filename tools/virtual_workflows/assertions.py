@@ -3342,6 +3342,301 @@ def experiment_prepared_runtime_reconstructed_assertion(
     )
 
 
+def m13_compact_prepared_assertion(
+    context: Any,
+    *,
+    case: Any,
+    driver_evidence: Mapping[str, Any],
+    previous_snapshot: Any | None = None,
+    revision_evidence: Mapping[str, Any] | None = None,
+) -> tuple[AssertionResult, Any]:
+    """Join a compact generated legal design to literal M10-style truth."""
+
+    base, snapshot = experiment_design_case_oracle_assertion(
+        context,
+        case=case.design_case.normalized(),
+        driver_evidence=driver_evidence,
+    )
+
+    revised = previous_snapshot is not None
+    lineage_checks = {
+        "literal_design_oracle_passed": base.decision == "pass",
+        "prepared_zero_progress": snapshot.plan_state == "prepared"
+        and snapshot.total_added_droplets == 0
+        and not snapshot.runtime_active,
+        "durable_assignments_exact": snapshot.assignments
+        == {row.well_id: row.reaction_id for row in case.assignments},
+        "revision_mode_exact": (
+            previous_snapshot is None
+            or (
+                snapshot.design_sha256 != previous_snapshot.design_sha256
+                and snapshot.plan_id != previous_snapshot.plan_id
+                and snapshot.experiment_dir != previous_snapshot.experiment_dir
+                and snapshot.progress_plan_id == snapshot.plan_id
+                and snapshot.progress_plan_revision == snapshot.plan_revision
+            )
+        ),
+        "revision_driver_exact": (
+            previous_snapshot is None
+            or (
+                bool(revision_evidence)
+                and bool(revision_evidence.get("prepared_design_changed"))
+                and bool(revision_evidence.get("refinalized"))
+            )
+        ),
+    }
+    evidence = {
+        "checks": lineage_checks,
+        "failed_checks": [
+            name for name, passed in lineage_checks.items() if not passed
+        ],
+        "case_id": case.case_id,
+        "mode": "refinalized" if revised else "finalized",
+        "literal_design_oracle": dict(base.evidence),
+        "prepared": snapshot.prepared_evidence(),
+        "previous": (
+            None
+            if previous_snapshot is None
+            else previous_snapshot.prepared_evidence()
+        ),
+        "revision_driver": dict(revision_evidence or {}),
+    }
+    return (
+        AssertionResult(
+            "exploration.m13_compact_prepared_exact",
+            "prepared_zero_progress",
+            "pass" if not evidence["failed_checks"] else "fail",
+            ("ui", "controller", "model", "persistence"),
+            evidence,
+            (
+                None
+                if not evidence["failed_checks"]
+                else "M13 compact prepared boundary failed: "
+                + ", ".join(evidence["failed_checks"])
+            ),
+        ),
+        snapshot,
+    )
+
+
+def m13_legal_sequence_assertion(
+    context: Any,
+    *,
+    sequence: Any,
+    case: Any,
+    application_sessions: list[Mapping[str, Any]],
+) -> AssertionResult:
+    """Prove a legal generated plan used its real operator surfaces and caps."""
+
+    action_ids = [str(row.get("action_id") or "") for row in context.action_results]
+    action_set = set(action_ids)
+    surface_actions = {
+        "editor.change_existing_reagent_via_ui": "editor.edit_prepared_design_via_ui",
+        "editor.toggle_two_stock_via_ui": "editor.configure_design_via_ui",
+        "editor.change_printable_wells_via_ui": "editor.configure_design_via_ui",
+        "editor.set_randomization_seed_via_ui": "editor.configure_design_via_ui",
+        "editor.optimize_generate_via_ui": "editor.optimize_generate_via_ui",
+        "editor.regenerate_prepared_design_via_ui": "editor.regenerate_prepared_design_via_ui",
+        "editor.finalize_via_ui": "editor.finish_via_ui",
+        "editor.refinalize_prepared_via_ui": "editor.refinalize_prepared_via_ui",
+        "head.stage_matching_via_ui": "head.stage_via_ui",
+        "calibration.generate_via_ui": "calibration.generate_via_ui",
+        "calibration.select_via_ui": "calibration.select_via_ui",
+        "calibration.apply_via_ui": "calibration.apply_via_ui",
+        "app.close_simulated_session": "app.close_simulated_session",
+        "experiment.reload_inactive_via_ui": "experiment.load_authoritative_via_ui",
+        "experiment.activate_authoritative_via_ui": "experiment.activate_authoritative_via_ui",
+        "array.start_pass_via_ui": "array.start_via_ui",
+    }
+    normalized = sequence.normalized()
+    operation_rows = list(normalized["steps"])
+    operation_checks = {
+        str(row["operation_id"]): surface_actions.get(str(row["operation_id"]))
+        in action_set
+        for row in operation_rows
+    }
+    checks = {
+        "all_operations_accepted": all(
+            row["expected_outcome"] == "accepted" for row in operation_rows
+        ),
+        "every_operation_has_real_operator_evidence": all(operation_checks.values()),
+        "state_continuity_exact": all(
+            previous["to_state"] == current["from_state"]
+            for previous, current in zip(operation_rows, operation_rows[1:])
+        ),
+        "terminal_state_exact": operation_rows[-1]["to_state"] == "terminal",
+        "semantic_operation_cap": len(operation_rows) <= 18,
+        "action_ledger_cap": len(action_ids) <= 80,
+        "session_cap": len(application_sessions) <= 3,
+        "session_rotation_cap": max(0, len(application_sessions) - 1) <= 2,
+        "screenshot_cap": len(context.screenshots) <= 4,
+        "compact_workload_exact": (
+            case.design_case.expected.reaction_count,
+            len(case.stocks),
+            case.terminal.expected_intents,
+            case.terminal.expected_droplets,
+        )
+        == (4, 2, 8, 44),
+        "no_unexpected_dialogs": not context.unexpected_dialogs,
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "sequence": normalized,
+        "operation_surface_checks": operation_checks,
+        "action_ids": action_ids,
+        "action_count": len(action_ids),
+        "application_sessions": [dict(row) for row in application_sessions],
+        "screenshot_names": sorted(context.screenshots),
+        "workload": {
+            "reactions": 4,
+            "stocks": 2,
+            "intents": 8,
+            "droplets": 44,
+        },
+    }
+    return AssertionResult(
+        "exploration.m13_legal_sequence_exact",
+        "terminal",
+        "pass" if not evidence["failed_checks"] else "fail",
+        ("ui", "controller", "model", "persistence", "simulator", "session"),
+        evidence,
+        (
+            None
+            if not evidence["failed_checks"]
+            else "M13 legal sequence contract failed: "
+            + ", ".join(evidence["failed_checks"])
+        ),
+    )
+
+
+def m13_rejection_continuity_assertion(
+    *,
+    operation_id: str,
+    case_id: str,
+    shared_result: AssertionResult,
+    outer_before: Any,
+    outer_after: Any,
+) -> AssertionResult:
+    """Join one exact M12 rejection to unchanged current M13 authority."""
+
+    before = outer_before.to_dict()
+    after = outer_after.to_dict()
+    checks = {
+        "shared_m12_oracle_passed": shared_result.decision == "pass",
+        "outer_persistence_unchanged": before["persistence"] == after["persistence"],
+        "outer_model_unchanged": before["model"] == after["model"],
+        "outer_lifecycle_unchanged": before["lifecycle"] == after["lifecycle"],
+        "outer_queue_unchanged": before["queue"] == after["queue"],
+        "outer_dispatch_unchanged": before["dispatch"] == after["dispatch"],
+        "outer_hash_unchanged": outer_before.sha256 == outer_after.sha256,
+    }
+    evidence = {
+        "operation_id": operation_id,
+        "case_id": case_id,
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "shared_oracle": dict(shared_result.evidence),
+        "outer_before_sha256": outer_before.sha256,
+        "outer_after_sha256": outer_after.sha256,
+        "outer_before": before,
+        "outer_after": after,
+    }
+    return AssertionResult(
+        f"exploration.m13_rejection.{case_id}",
+        "safely_rejected",
+        "pass" if not evidence["failed_checks"] else "fail",
+        (
+            "operator_action",
+            "ui_evidence",
+            "persistence",
+            "model",
+            "lifecycle",
+            "queue",
+            "simulator",
+        ),
+        evidence,
+        (
+            None
+            if not evidence["failed_checks"]
+            else "M13 rejection continuity failed: "
+            + ", ".join(evidence["failed_checks"])
+        ),
+    )
+
+
+def m13_illegal_recovery_sequence_assertion(
+    context: Any,
+    *,
+    sequence: Any,
+    case: Any,
+    rejection_evidence: Mapping[str, Mapping[str, Any]],
+    application_sessions: list[Mapping[str, Any]],
+) -> AssertionResult:
+    """Prove rejected operations stayed continuous and recovery reached terminal."""
+
+    normalized = sequence.normalized()
+    steps = list(normalized["steps"])
+    rejected = [row for row in steps if row["expected_outcome"] == "rejected"]
+    checks = {
+        "contains_rejected_operations": bool(rejected),
+        "every_rejection_retains_state": all(
+            row["from_state"] == row["to_state"] for row in rejected
+        ),
+        "every_rejection_has_exact_oracle": all(
+            str(row["operation_id"]) in rejection_evidence for row in rejected
+        ),
+        "every_rejection_oracle_passed": all(
+            dict(rejection_evidence.get(str(row["operation_id"]), {})).get(
+                "decision"
+            )
+            == "pass"
+            for row in rejected
+        ),
+        "state_continuity_exact": all(
+            previous["to_state"] == current["from_state"]
+            for previous, current in zip(steps, steps[1:])
+        ),
+        "terminal_state_exact": steps[-1]["to_state"] == "terminal",
+        "semantic_operation_cap": len(steps) <= 18,
+        "action_ledger_cap": len(context.action_results) <= 80,
+        "session_cap": len(application_sessions) <= 3,
+        "screenshot_cap": len(context.screenshots) <= 4,
+        "compact_workload_exact": (
+            case.design_case.expected.reaction_count,
+            len(case.stocks),
+            case.terminal.expected_intents,
+            case.terminal.expected_droplets,
+        )
+        == (4, 2, 8, 44),
+        "no_unexpected_dialogs": not context.unexpected_dialogs,
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "sequence": normalized,
+        "rejections": {
+            key: dict(value) for key, value in rejection_evidence.items()
+        },
+        "action_count": len(context.action_results),
+        "screenshot_names": sorted(context.screenshots),
+        "application_sessions": [dict(row) for row in application_sessions],
+    }
+    return AssertionResult(
+        "exploration.m13_illegal_recovery_exact",
+        "terminal",
+        "pass" if not evidence["failed_checks"] else "fail",
+        ("ui", "persistence", "model", "lifecycle", "simulator", "session"),
+        evidence,
+        (
+            None
+            if not evidence["failed_checks"]
+            else "M13 illegal/recovery sequence failed: "
+            + ", ".join(evidence["failed_checks"])
+        ),
+    )
+
+
 def randomized_joined_design_assertion(
     context: Any,
     *,
@@ -5134,6 +5429,10 @@ __all__ = [
     "joined_remaining_calibrations_assertion",
     "joined_terminal_lifecycle_reconciliation",
     "joined_terminal_execution_assertion",
+    "m13_compact_prepared_assertion",
+    "m13_illegal_recovery_sequence_assertion",
+    "m13_legal_sequence_assertion",
+    "m13_rejection_continuity_assertion",
     "cleanup_assertion",
     "evaluate_assertion",
     "editor_artifacts_cleanup_assertion",

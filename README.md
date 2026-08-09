@@ -1828,6 +1828,62 @@ remain separate from registered capability coverage and do not schedule tests.
 Pi, hardware, protocol, firmware, unbounded random walks, fault injection,
 repetition, baselines, and comparisons remain unavailable in exploration mode.
 
+### Bounded design/calibration lifecycle exploration
+
+Milestone 13 adds the separately versioned
+`design_calibration_lifecycle_v1` campaign without changing the Milestone 8
+campaign or its schema-v1 replay contract. Its six release-blocking frozen
+sequences use seeds `13, 29, 47, 83, 131, 197`; explicitly selected diagnostic
+seeds are retained but never alter the frozen gate unless deliberately reviewed
+and promoted.
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration design_calibration_lifecycle_v1 --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration design_calibration_lifecycle_v1 `
+  --output-root verification_reports\exploration `
+  --speed-multiplier 1000 --timeout-seconds 270 --qt-platform offscreen
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration design_calibration_lifecycle_v1 `
+  --sequence seed_47_illegal_editor_recovery_terminal `
+  --output-root verification_reports\exploration `
+  --speed-multiplier 1000 --timeout-seconds 270 --qt-platform offscreen
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration design_calibration_lifecycle_v1 `
+  --seed-tier diagnostic --diagnostic-seed 1 `
+  --output-root verification_reports\exploration `
+  --speed-multiplier 1000 --timeout-seconds 270 --qt-platform offscreen
+```
+
+Always run the emitted `run.replay_command` verbatim. Frozen replay consumes
+the retained normalized sequence or campaign plan and verifies its SHA-256; it
+does not regenerate authoritative failure evidence from a seed. The aggregate
+must report complete semantic coverage for all 12 states, 34 declared
+transitions, 26 admitted operations, and eight rejection classes. Seed count
+and action count are not coverage.
+
+Each sequence fails closed above 18 semantic operations, 80 action rows, three
+sessions/two rotations, four screenshots, 256 retained files/48 MiB, a
+270-second scenario deadline, or a 300-second child watchdog. The six-sequence
+campaign caps those values at 108/480, 18/12, 24, 1,600 files/320 MiB, and
+1,800 seconds. Normal fixtures stay compact at four reactions, two stocks,
+eight intents, and 44 droplets per sequence. The immutable
+`optimizer_360_calibration_reload_execution_v1` case remains a separate stress
+oracle; do not substitute it into every generated sequence.
+
+Illegal/recovery sequences drive the real Qt rejection, require the exact
+typed operator evidence, immediately reuse the Milestone 12 no-mutation/no-
+dispatch oracle, and recover through valid actions on the same authoritative
+lineage. Original failing normalized sequences are immutable evidence. The v1
+campaign deliberately has no reducer; any future reduction must be separately
+labeled diagnostic evidence and may never replace the original. Exploration
+remains supplemental to deterministic Milestones 9-12 evidence and is not a
+registered capability-coverage aggregate.
+
 The report's responsiveness phase timings include `ui.pressure_render`, the
 count and duration distribution for the real pressure-plot update slot. The
 text summary shows its count, p95, and maximum. This diagnostic covers the

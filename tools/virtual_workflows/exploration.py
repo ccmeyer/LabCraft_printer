@@ -221,12 +221,20 @@ _validate_catalog()
 
 
 def sequence_ids(campaign_id: str = CAMPAIGN_ID) -> tuple[str, ...]:
+    from tools.virtual_workflows import exploration_m13
+
+    if campaign_id == exploration_m13.CAMPAIGN_ID:
+        return exploration_m13.sequence_ids()
     if campaign_id != CAMPAIGN_ID:
         raise ExplorationValidationError(f"unsupported campaign: {campaign_id!r}")
     return tuple(item.sequence_id for item in SEQUENCES)
 
 
 def get_sequence(campaign_id: str, sequence_id: str) -> ExplorationSequence:
+    from tools.virtual_workflows import exploration_m13
+
+    if campaign_id == exploration_m13.CAMPAIGN_ID:
+        return exploration_m13.get_sequence(sequence_id)  # type: ignore[return-value]
     if campaign_id != CAMPAIGN_ID:
         raise ExplorationValidationError(f"unsupported campaign: {campaign_id!r}")
     matches = [item for item in SEQUENCES if item.sequence_id == sequence_id]
@@ -235,7 +243,13 @@ def get_sequence(campaign_id: str, sequence_id: str) -> ExplorationSequence:
     return matches[0]
 
 
-def normalized_catalog() -> dict[str, Any]:
+def normalized_catalog(campaign_id: str = CAMPAIGN_ID) -> dict[str, Any]:
+    from tools.virtual_workflows import exploration_m13
+
+    if campaign_id == exploration_m13.CAMPAIGN_ID:
+        return exploration_m13.normalized_frozen_catalog()
+    if campaign_id != CAMPAIGN_ID:
+        raise ExplorationValidationError(f"unsupported campaign: {campaign_id!r}")
     return {
         "campaign_id": CAMPAIGN_ID,
         "generator_version": GENERATOR_VERSION,
@@ -246,8 +260,12 @@ def normalized_catalog() -> dict[str, Any]:
     }
 
 
-def catalog_sha256() -> str:
-    return _sha256_json(normalized_catalog())
+def catalog_sha256(campaign_id: str = CAMPAIGN_ID) -> str:
+    from tools.virtual_workflows import exploration_m13
+
+    if campaign_id == exploration_m13.CAMPAIGN_ID:
+        return exploration_m13.catalog_sha256()
+    return _sha256_json(normalized_catalog(campaign_id))
 
 
 def resolve_exploration_plan(
@@ -256,9 +274,25 @@ def resolve_exploration_plan(
     sequence_id: str | None = None,
     timeout_seconds: float = 60.0,
     execution_authorized: bool = True,
+    seed_tier: str = "frozen",
+    diagnostic_seeds: tuple[int, ...] = (),
 ) -> dict[str, Any]:
+    from tools.virtual_workflows import exploration_m13
+
+    if campaign_id == exploration_m13.CAMPAIGN_ID:
+        return exploration_m13.resolve_plan(
+            sequence_id=sequence_id,
+            timeout_seconds=timeout_seconds,
+            execution_authorized=execution_authorized,
+            seed_tier=seed_tier,
+            diagnostic_seeds=diagnostic_seeds,
+        )
     if campaign_id != CAMPAIGN_ID:
         raise ExplorationValidationError(f"unsupported campaign: {campaign_id!r}")
+    if seed_tier != "frozen" or diagnostic_seeds:
+        raise ExplorationValidationError(
+            "Milestone 8 exploration does not support diagnostic seed tiers"
+        )
     selected = (get_sequence(campaign_id, sequence_id),) if sequence_id else SEQUENCES
     return {
         "schema_name": EXPLORATION_PLAN_SCHEMA_NAME,
@@ -287,6 +321,12 @@ def resolve_exploration_plan(
 def build_sequence_fixture(
     campaign_id: str, sequence_id: str
 ) -> tuple[dict[str, Any], Path]:
+    from tools.virtual_workflows import exploration_m13
+
+    if campaign_id == exploration_m13.CAMPAIGN_ID:
+        raise ExplorationValidationError(
+            "Milestone 13 generated fixtures are unavailable in Slice 13.1"
+        )
     sequence = get_sequence(campaign_id, sequence_id)
     fixture = copy.deepcopy(load_editor_prestart_rename_refinalize_fixture())
     fixture["fixture_id"] = f"{campaign_id}__{sequence_id}"
@@ -303,6 +343,8 @@ def build_sequence_fixture(
 
 
 def exploration_catalog() -> dict[str, Any]:
+    from tools.virtual_workflows.exploration_m13 import catalog_descriptor
+
     return {
         "schema_name": "labcraft.virtual_workflow_exploration_catalog",
         "schema_version": EXPLORATION_SCHEMA_VERSION,
@@ -317,7 +359,8 @@ def exploration_catalog() -> dict[str, Any]:
                 "catalog_sha256": catalog_sha256(),
                 "platform": "windows_sil",
                 "execution": "manual_on_demand",
-            }
+            },
+            catalog_descriptor(),
         ],
     }
 

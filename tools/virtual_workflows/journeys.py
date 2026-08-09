@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tools.virtual_workflows.actions import (
+    capture_execution_preflight_boundary,
     capture_milestone,
     drive_execution_preflight_safeguard,
 )
@@ -42,6 +43,10 @@ from tools.virtual_workflows.assertions import (
     experiment_prepared_runtime_reconstructed_assertion,
     machine_ready_assertion,
     matrix_case_assertions,
+    m13_compact_prepared_assertion,
+    m13_illegal_recovery_sequence_assertion,
+    m13_legal_sequence_assertion,
+    m13_rejection_continuity_assertion,
     mixed_mode_lifecycle_assertions,
     multi_stock_artifacts_assertion,
     multi_stock_prepared_assertion,
@@ -128,10 +133,19 @@ from tools.virtual_workflows.optimizer_360_cases import (
     OPTIMIZER_360_FIXTURE_PATH,
     RANGE_A_STOCK_ID,
 )
+from tools.virtual_workflows.m13_interaction_cases import (
+    COMPACT_CASE as M13_COMPACT_CASE,
+    REFINALIZED_COMPACT_CASE as M13_REFINALIZED_COMPACT_CASE,
+    fixture_projection as m13_fixture_projection,
+)
 from tools.virtual_workflows.safeguards import (
     ExpectedSafeguardOutcome,
     capture_safeguard_boundary,
     safeguard_rejection_no_mutation_no_dispatch_assertion,
+)
+from tools.virtual_workflows.editor_safeguards import get_editor_safeguard_case
+from tools.virtual_workflows.execution_preflight_safeguards import (
+    get_execution_preflight_case,
 )
 
 
@@ -176,6 +190,8 @@ PERSISTENCE_SAFEGUARD_MATRIX_SCENARIO_NAME = (
 )
 EXPLORATION_WORKLOAD_ID = "editor_prepared_guard_v1"
 EXPLORATION_SCENARIO_NAME = "seeded_editor_prepared_guard"
+M13_EXPLORATION_WORKLOAD_ID = "design_calibration_lifecycle_v1"
+M13_EXPLORATION_SCENARIO_NAME = "seeded_design_calibration_lifecycle"
 RANDOMIZED_CALIBRATION_WORKLOAD_ID = JOINED_INTERACTION_CASE_ID
 RANDOMIZED_CALIBRATION_SCENARIO_NAME = "randomized_calibration_reload_execution"
 RANDOMIZED_CALIBRATION_SCENARIO_VERSION = "1"
@@ -319,6 +335,24 @@ EXPLORATION_REQUIRED_ASSERTIONS = (
     "exploration.sequence_plan_applied",
     "exploration.expected_rejection_safe",
     "exploration.recovery_terminal_valid",
+    "artifacts.required_present",
+)
+M13_LEGAL_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "experiment.editor_create_finalize",
+    "experiment.design_case_oracle_exact",
+    "exploration.m13_compact_prepared_exact",
+    "execution.calibrated_zero_progress_exact",
+    "ui.fresh_application_session_constructed",
+    "execution.first_session_teardown_clean",
+    "execution.authoritative_reload_valid",
+    "execution.authoritative_runtime_rehydrated",
+    "execution.clean_session_rotation_exact",
+    "execution.remaining_calibrations_exact",
+    "execution.completed_terminal_reload_exact",
+    "execution.randomized_calibration_terminal_exact",
+    "exploration.m13_legal_sequence_exact",
     "artifacts.required_present",
 )
 MULTI_STOCK_REQUIRED_ASSERTIONS = (
@@ -522,6 +556,9 @@ EDITOR_REVISION_REQUIRED_SCREENSHOTS = frozenset(
 EXPLORATION_REQUIRED_SCREENSHOTS = frozenset(
     {"editor_opened", "generated", "initial_finalized", "reloaded", "validated"}
 )
+M13_LEGAL_REQUIRED_SCREENSHOTS = frozenset(
+    {"prepared", "fresh_loaded", "fresh_activated", "terminal_reloaded"}
+)
 MULTI_STOCK_REQUIRED_SCREENSHOTS = frozenset(
     {
         "editor_opened",
@@ -649,7 +686,9 @@ class JourneyRunConfig:
     pi_hardware_proof_path: Path | None = None
 
     def __post_init__(self) -> None:
-        if self.scenario_id not in JOURNEY_DEFINITION_IDS:
+        if self.scenario_id not in JOURNEY_DEFINITION_IDS | {
+            M13_EXPLORATION_WORKLOAD_ID
+        }:
             raise ValueError(f"unsupported composed journey: {self.scenario_id!r}")
         object.__setattr__(self, "output_root", Path(self.output_root).resolve())
         if self.inject_ui_stall_ms < 0:
@@ -2327,6 +2366,574 @@ def run_joined_calibrated_checkpoint(runtime: JourneyRuntime) -> None:
             "terminal": dict(terminal_result.evidence),
         }
     )
+
+
+def _m13_boundary(
+    runtime: JourneyRuntime,
+    *,
+    identity_keys: Mapping[str, Any],
+    workflow_state: str,
+):
+    observed = capture_execution_preflight_boundary(
+        runtime.context,
+        identity_keys=identity_keys,
+        workflow_state=workflow_state,
+    )
+    return capture_safeguard_boundary(
+        persistence=observed["persistence"],
+        model=observed["model"],
+        lifecycle=observed["lifecycle"],
+        queue=observed["queue"],
+        dispatch=observed["dispatch"],
+    )
+
+
+def _m13_record_rejection(
+    runtime: JourneyRuntime,
+    *,
+    operation_id: str,
+    case: Any,
+    shared_result: Any,
+    outer_before: Any,
+    outer_after: Any,
+    driven: Mapping[str, Any],
+) -> None:
+    result = m13_rejection_continuity_assertion(
+        operation_id=operation_id,
+        case_id=case.case_id,
+        shared_result=shared_result,
+        outer_before=outer_before,
+        outer_after=outer_after,
+    )
+    runtime.add_assertion(result)
+    runtime.observations.setdefault("m13_rejections", {})[operation_id] = {
+        "decision": result.decision,
+        "assertion_id": result.assertion_id,
+        "case_id": case.case_id,
+        "case_sha256": case.contract_sha256,
+        "shared_oracle": dict(shared_result.evidence),
+        "outer_oracle": dict(result.evidence),
+        "driver": dict(driven),
+    }
+
+
+def _m13_run_preflight_rejection(
+    runtime: JourneyRuntime,
+    *,
+    operation_id: str,
+    case_id: str,
+    workflow_state: str,
+) -> None:
+    context = runtime.context
+    case = get_execution_preflight_case(case_id)
+    original_runtime = bool(
+        context.experiment_model.is_authoritative_execution_runtime_active()
+    )
+    original_array_state = context.controller.get_array_run_state()
+    outer_before = _m13_boundary(
+        runtime,
+        identity_keys=case.identity_keys,
+        workflow_state=workflow_state,
+    )
+    driven = drive_execution_preflight_safeguard(
+        context,
+        case,
+        capture_rejection_screenshot=False,
+    )
+
+    def boundary(values: Mapping[str, Any]):
+        return capture_safeguard_boundary(
+            persistence=dict(values["persistence"]),
+            model=dict(values["model"]),
+            lifecycle=dict(values["lifecycle"]),
+            queue=dict(values["queue"]),
+            dispatch=dict(values["dispatch"]),
+        )
+
+    ui = dict(driven["ui"])
+    observed = ExpectedSafeguardOutcome(
+        outcome_kind=case.expected.outcome_kind,
+        classification=case.expected.classification,
+        code=case.expected.code,
+        message=str(ui["message"]),
+        ui_surface=case.expected.ui_surface,
+        ui_title=ui.get("title"),
+        selected_control=ui.get("selected_control"),
+        workflow_state=case.expected.workflow_state,
+        queue_state=str(driven["after"]["queue"]["array_state"]),
+        runtime_active=bool(driven["after"]["lifecycle"]["runtime_active"]),
+        activation_count=0,
+    )
+    shared = safeguard_rejection_no_mutation_no_dispatch_assertion(
+        case=case,
+        before=boundary(driven["before"]),
+        after=boundary(driven["after"]),
+        observed=observed,
+        checkpoint="after_m13_generated_rejection",
+    )
+    context.experiment_model._authoritative_runtime_active = original_runtime
+    context.controller._set_array_run_state(original_array_state)
+    context.view.well_plate_widget.update_start_print_array_button()
+    context.app.processEvents()
+    outer_after = _m13_boundary(
+        runtime,
+        identity_keys=case.identity_keys,
+        workflow_state=workflow_state,
+    )
+    _m13_record_rejection(
+        runtime,
+        operation_id=operation_id,
+        case=case,
+        shared_result=shared,
+        outer_before=outer_before,
+        outer_after=outer_after,
+        driven=driven,
+    )
+
+
+def _m13_run_editor_rejection(
+    runtime: JourneyRuntime,
+    *,
+    operation_id: str,
+    case_id: str,
+) -> None:
+    case = get_editor_safeguard_case(case_id)
+    specification = dict(case.setup["specification"])
+    # Reuse the Milestone 12 rich boundary projection so the generated
+    # rejection is checked by the same persistence/model/lifecycle/queue/
+    # dispatch oracle as its deterministic source case.
+    specification["safeguard_boundary_sync"] = True
+    driver = run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(
+            specification,
+            use_harness_action_runner=True,
+            capture_editor_milestones=False,
+        ),
+    )
+    rejection = dict(driver.get("finalization_rejection") or {})
+    before_values = rejection.get("before") or rejection.get(
+        "execution_artifacts_before"
+    )
+    after_values = rejection.get("after") or rejection.get(
+        "execution_artifacts_after"
+    )
+    if not isinstance(before_values, Mapping) or not isinstance(
+        after_values, Mapping
+    ):
+        raise RuntimeError("M13 editor rejection omitted its exact boundary")
+
+    def boundary(values: Mapping[str, Any]):
+        return capture_safeguard_boundary(
+            persistence={
+                "experiment_dir": values.get("experiment_dir"),
+                "directory_inventory": values.get("directory_inventory", {}),
+                "execution_artifacts": values.get("execution_artifacts", {}),
+            },
+            model=dict(values.get("model") or {}),
+            lifecycle=dict(values.get("lifecycle") or {}),
+            queue=dict(values.get("queue") or {}),
+            dispatch=dict(values.get("dispatch") or {}),
+        )
+
+    before = boundary(before_values)
+    after = boundary(after_values)
+    warning = dict(rejection.get("warning") or {})
+    issue_codes = tuple(str(value) for value in rejection.get("issue_codes", ()))
+    observed_code = str(rejection.get("observed_code") or "")
+    if not observed_code and case.expected.code in issue_codes:
+        observed_code = case.expected.code
+    elif not observed_code and len(issue_codes) == 1:
+        observed_code = issue_codes[0]
+    observed = ExpectedSafeguardOutcome(
+        outcome_kind=case.expected.outcome_kind,
+        classification=case.expected.classification,
+        code=observed_code,
+        message=str(warning.get("text") or ""),
+        ui_surface="dialog",
+        ui_title=str(warning.get("title") or ""),
+        selected_control="OK" if warning.get("dismissed") else None,
+        workflow_state=(
+            "draft_dirty"
+            if bool(after_values.get("lifecycle", {}).get("dirty"))
+            else "draft_generated"
+        ),
+        queue_state=str(after_values.get("queue", {}).get("array_state") or ""),
+        runtime_active=bool(
+            after_values.get("lifecycle", {}).get("runtime_active")
+        ),
+        activation_count=0,
+    )
+    shared = safeguard_rejection_no_mutation_no_dispatch_assertion(
+        case=case,
+        before=before,
+        after=after,
+        observed=observed,
+        checkpoint="after_m13_generated_editor_rejection",
+    )
+    _m13_record_rejection(
+        runtime,
+        operation_id=operation_id,
+        case=case,
+        shared_result=shared,
+        outer_before=before,
+        outer_after=after,
+        driven={"driver": driver},
+    )
+
+
+def run_m13_legal_sequence_lifecycle(runtime: JourneyRuntime) -> None:
+    """Execute one compact generated sequence through terminal reload."""
+
+    from tools.virtual_workflows.experiment_design_cases import editor_specification
+    from tools.virtual_workflows.exploration_m13 import (
+        get_sequence,
+        sequence_from_normalized,
+    )
+
+    retained = runtime.fixture.get("normalized_sequence")
+    sequence = (
+        sequence_from_normalized(retained)
+        if isinstance(retained, Mapping)
+        else get_sequence(str(runtime.fixture["sequence_id"]))
+    )
+    supported_roles = {
+        "legal_design_calibration_terminal",
+        "legal_refinalize_reload_terminal",
+        "illegal_editor_recovery_terminal",
+        "illegal_calibration_recovery_terminal",
+        "illegal_identity_activation_recovery_terminal",
+        "illegal_progress_lock_recovery_terminal",
+    }
+    if sequence.role not in supported_roles:
+        raise ValueError("unsupported Milestone 13 sequence role")
+    context = runtime.context
+    case = M13_COMPACT_CASE
+    runtime.observations["m13_sequence"] = sequence
+    runtime.observations["m13_case"] = case
+    runtime.observations["m13_lifecycle"] = {}
+    runtime.observations["m13_rejections"] = {}
+    if sequence.role == "illegal_editor_recovery_terminal":
+        _m13_run_editor_rejection(
+            runtime,
+            operation_id="editor.finalize_invalid_via_ui",
+            case_id="printed_exceeds_final_finalize_rejected",
+        )
+        _m13_run_editor_rejection(
+            runtime,
+            operation_id="editor.optimize_one_stock_invalid_via_ui",
+            case_id="one_stock_infeasible_finalize_rejected",
+        )
+    runtime.add_assertion(simulation_identity_assertion(context))
+    runtime.add_assertion(real_application_assertion(context))
+    action_start = len(context.action_results)
+    driver = run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(
+            editor_specification(case.design_case),
+            use_harness_action_runner=True,
+            capture_editor_milestones=False,
+        ),
+    )
+    runtime.add_assertion(
+        editor_create_finalize_assertion(
+            context,
+            action_start=action_start,
+            action_end=len(context.action_results),
+            optimization_action_ids=("editor.optimize_generate_via_ui",),
+            capture_editor_milestones=False,
+        )
+    )
+    design_result, initial_prepared = experiment_design_case_oracle_assertion(
+        context,
+        case=case.design_case.normalized(),
+        driver_evidence=driver,
+    )
+    runtime.add_assertion(design_result)
+    revision_evidence: Mapping[str, Any] | None = None
+    previous = None
+    if sequence.role == "legal_refinalize_reload_terminal":
+        previous = initial_prepared
+        case = M13_REFINALIZED_COMPACT_CASE
+        revision_evidence = run_prepared_editor_revision(
+            runtime,
+            PreparedEditorRevisionSpec(
+                initial_name=M13_COMPACT_CASE.editor.experiment_name,
+                renamed_name=case.editor.experiment_name,
+                replicates=2,
+                well_ids=tuple(case.editor.selected_well_ids),
+                printed_volume_nL=100.0,
+                final_volume_nL=100.0,
+                fill_printing_mode="droplet",
+                fill_droplet_volume_nL=9.0,
+                reagent_printing_mode="droplet",
+                reagent_targets=(0.9, 1.8),
+                reagent_droplet_volume_nL=10.0,
+            ),
+            capture_milestones=False,
+        )
+    prepared_result, prepared = m13_compact_prepared_assertion(
+        context,
+        case=case,
+        driver_evidence=driver,
+        previous_snapshot=previous,
+        revision_evidence=revision_evidence,
+    )
+    runtime.add_assertion(prepared_result)
+    capture_milestone(
+        context,
+        "prepared",
+        evidence={
+            "sequence_id": sequence.sequence_id,
+            "plan_id": prepared.plan_id,
+            "plan_revision": prepared.plan_revision,
+            "design_sha256": prepared.design_sha256,
+        },
+    )
+    runtime.observations["m13_case"] = case
+    runtime.observations["m13_lifecycle"]["prepared"] = dict(
+        prepared_result.evidence
+    )
+    if sequence.role == "illegal_calibration_recovery_terminal":
+        _m13_run_preflight_rejection(
+            runtime,
+            operation_id="calibration.attempt_mismatch_cancel_via_ui",
+            case_id="calibration_head_mode_cancelled",
+            workflow_state="prepared_zero_progress",
+        )
+
+    runtime.run_steps(machine_startup_steps())
+    observer = ExecutionObserver(
+        context,
+        experiment_dir=Path(prepared.experiment_dir),
+        completed_count=lambda: 0,
+        pass_context=lambda: {
+            "stock_id": case.calibrations[0].stock_id,
+            "phase": "calibration_only",
+        },
+    )
+    runtime.register_restorable("m13_session_1_execution", observer)
+    observer.install()
+    first_calibration = case.calibrations[0]
+    first_boundary = run_stock_calibration_only(
+        runtime,
+        CalibrationOnlySpec(
+            stock_id=first_calibration.stock_id,
+            printer_head_id=first_calibration.printer_head_id,
+            pulse_width_us=first_calibration.print_pulse_width_us,
+            pressure_psi=2.0,
+            frequency_hz=100,
+            initial_volume_uL=100.0,
+            expected_volume_nL=float(first_calibration.droplet_volume_nL),
+        ),
+    )
+    runtime.restore_all()
+    first_observer = runtime.observations["m13_session_1_execution_snapshot"]
+    calibrated_result, calibrated = calibrated_zero_progress_assertion(
+        context,
+        case=case,
+        prepared_snapshot=prepared,
+        calibration_evidence=first_boundary,
+        observer=first_observer,
+        legacy_evidence_names=False,
+    )
+    runtime.add_assertion(calibrated_result)
+    runtime.observations["m13_lifecycle"]["calibrated_zero_progress"] = dict(
+        calibrated_result.evidence
+    )
+
+    rotation = run_clean_authoritative_session_rotation_boundary(
+        runtime,
+        experiment_dir=calibrated.experiment_dir,
+        expected_name=case.editor.experiment_name,
+        completed_count=lambda: 0,
+        pass_context=lambda: _current_pass_context(runtime),
+        inspect_loaded=lambda: capture_count_snapshot(context),
+        inspect_activated=lambda: capture_count_snapshot(context),
+        loaded_hook=(
+            lambda current: _m13_run_preflight_rejection(
+                current,
+                operation_id="array.start_inactive_via_ui",
+                case_id="inspected_not_activated_start_rejected",
+                workflow_state="reloaded_inactive",
+            )
+            if sequence.role == "illegal_identity_activation_recovery_terminal"
+            else None
+        ),
+        activated_hook=(
+            lambda current: _m13_run_preflight_rejection(
+                current,
+                operation_id="array.start_wrong_identity_via_ui",
+                case_id="wrong_printer_head_calibration_binding_rejected",
+                workflow_state="active_zero_progress",
+            )
+            if sequence.role == "illegal_identity_activation_recovery_terminal"
+            else None
+        ),
+        observer_key="m13_session_2_execution",
+    )
+    second_observer = runtime.observations["execution_observer"].snapshot()
+    rotation_result = clean_joined_session_rotation_assertion(
+        context,
+        case=case,
+        rotation=rotation,
+        first_session_observer=first_observer,
+        second_session_observer=second_observer,
+    )
+    runtime.add_assertion(rotation_result)
+    runtime.observations["m13_lifecycle"]["clean_session_rotation"] = dict(
+        rotation_result.evidence
+    )
+
+    runtime.observations.update(
+        {
+            "expected_wells": tuple(case.editor.selected_well_ids),
+            "expected_stock_ids": tuple(row.stock_id for row in case.execution_passes),
+            "completed_wells": [],
+            "array_completions": [],
+            "pass_boundaries": [],
+            "head_staging": [],
+            "returned_head_ids": [],
+            "starvation_events": [],
+            "current_pass": {"index": -1, "starting_count": 0, "stock_id": None},
+        }
+    )
+    _connect_execution_signals(runtime, array_complete=True, machine_errors=True)
+    _install_starvation_observer(runtime)
+    runtime.run_steps(machine_startup_steps())
+
+    remaining_evidence: list[Mapping[str, Any]] = []
+    for calibration in case.calibrations[1:]:
+        remaining_evidence.append(
+            run_stock_calibration_only(
+                runtime,
+                CalibrationOnlySpec(
+                    stock_id=calibration.stock_id,
+                    printer_head_id=calibration.printer_head_id,
+                    pulse_width_us=calibration.print_pulse_width_us,
+                    pressure_psi=2.0,
+                    frequency_hz=100,
+                    initial_volume_uL=100.0,
+                    expected_volume_nL=float(calibration.droplet_volume_nL),
+                    apply_success_title="Applied (Fill)",
+                    enable_pressure_regulation=True,
+                    return_head=True,
+                ),
+            )
+        )
+    remaining_result, fully_calibrated = joined_remaining_calibrations_assertion(
+        context,
+        case=case,
+        calibration_evidence=remaining_evidence,
+    )
+    runtime.add_assertion(remaining_result)
+    runtime.observations["m13_lifecycle"]["remaining_calibrations"] = dict(
+        remaining_result.evidence
+    )
+
+    calibrations_by_stock = {row.stock_id: row for row in case.calibrations}
+    cumulative = 0
+    pass_specs: list[PrecalibratedStockPassSpec] = []
+    for execution_pass in case.execution_passes:
+        cumulative += execution_pass.expected_intents
+        calibration = calibrations_by_stock[execution_pass.stock_id]
+        pass_specs.append(
+            PrecalibratedStockPassSpec(
+                stock_id=execution_pass.stock_id,
+                printer_head_id=calibration.printer_head_id,
+                pulse_width_us=calibration.print_pulse_width_us,
+                pressure_psi=2.0,
+                frequency_hz=100,
+                initial_volume_uL=100.0,
+                expected_volume_nL=float(calibration.droplet_volume_nL),
+                expected_completion_count=cumulative,
+                expected_plan_state=(
+                    "completed"
+                    if execution_pass.order == len(case.execution_passes)
+                    else "active"
+                ),
+                completed_milestone=f"m13_pass_{execution_pass.order}_complete",
+                start_dialog_titles=(
+                    ("Start Print Array", "Evaporation Plate Dock Check")
+                    if execution_pass.order == 1
+                    else ("Start Print Array",)
+                ),
+                return_head=True,
+                capture_completed_milestone=False,
+            )
+        )
+    def after_m13_pass(
+        current: JourneyRuntime,
+        index: int,
+        _spec: PrecalibratedStockPassSpec,
+    ) -> None:
+        if sequence.role != "illegal_progress_lock_recovery_terminal" or index != 0:
+            return
+        for operation_id, case_id in (
+            (
+                "editor.attempt_progressed_edit_via_ui",
+                "active_execution_edit_rejected",
+            ),
+            (
+                "calibration.attempt_progressed_apply_via_ui",
+                "progressed_stock_recalibration_rejected",
+            ),
+            (
+                "array.start_while_active_via_ui",
+                "start_while_active_rejected",
+            ),
+            (
+                "head.attempt_unsafe_exchange_via_ui",
+                "head_exchange_at_invalid_boundary_rejected",
+            ),
+        ):
+            _m13_run_preflight_rejection(
+                current,
+                operation_id=operation_id,
+                case_id=case_id,
+                workflow_state="progressed_locked",
+            )
+
+    run_precalibrated_stock_passes(
+        runtime,
+        tuple(pass_specs),
+        after_pass=after_m13_pass,
+    )
+    terminal_counts = capture_count_snapshot(context)
+    runtime.restore_all()
+    session_2_observer = runtime.observations["m13_session_2_execution_snapshot"]
+    _run_completed_terminal_reload(runtime, expected_name=case.editor.experiment_name)
+    terminal_result = joined_terminal_execution_assertion(
+        context,
+        case=case,
+        terminal_counts=terminal_counts,
+        terminal_reload=runtime.observations["completed_terminal_reload"],
+        observer=session_2_observer,
+        first_session_observer=first_observer,
+        pass_boundaries=runtime.observations["pass_boundaries"],
+        starvation_events=runtime.observations["starvation_events"],
+        application_sessions=runtime.harness.application_sessions,
+    )
+    runtime.add_assertion(terminal_result)
+    runtime.observations["m13_lifecycle"]["terminal"] = dict(
+        terminal_result.evidence
+    )
+    if sequence.role.startswith("legal_"):
+        final_sequence_result = m13_legal_sequence_assertion(
+            context,
+            sequence=sequence,
+            case=case,
+            application_sessions=runtime.harness.application_sessions,
+        )
+    else:
+        final_sequence_result = m13_illegal_recovery_sequence_assertion(
+            context,
+            sequence=sequence,
+            case=case,
+            rejection_evidence=runtime.observations["m13_rejections"],
+            application_sessions=runtime.harness.application_sessions,
+        )
+    runtime.add_assertion(final_sequence_result)
 
 
 def _editor_revision_body(runtime: JourneyRuntime) -> None:
@@ -4136,6 +4743,126 @@ def _randomized_calibration_payload(
     )
 
 
+def _m13_legal_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    from tools.virtual_workflows.exploration_m13 import (
+        CAMPAIGN_ID,
+        GENERATOR_VERSION,
+        campaign_sha256,
+        catalog_sha256,
+        resolve_plan,
+        sequence_sha256,
+    )
+
+    sequence = runtime.observations["m13_sequence"]
+    case = runtime.observations["m13_case"]
+    if sequence.seed_tier == "frozen":
+        plan = resolve_plan(
+            sequence_id=sequence.sequence_id,
+            timeout_seconds=runtime.harness.config.timeout_seconds,
+            execution_authorized=False,
+        )
+        sequence_row = plan["sequences"][0]
+    else:
+        sequence_row = {
+            "order": 1,
+            "sequence": sequence.normalized(),
+            "sequence_sha256": sequence_sha256(sequence),
+        }
+    decisions = _decisions(runtime)
+    evidence = _assertion_evidence(runtime)
+    passed = all(
+        decisions.get(assertion_id) == "pass"
+        for assertion_id in runtime.definition.required_assertion_ids
+        if assertion_id != "artifacts.required_present"
+    )
+    status = "measured" if passed else "partial"
+    terminal = evidence.get("execution.randomized_calibration_terminal_exact", {})
+    semantic = evidence.get("exploration.m13_legal_sequence_exact", {}) or evidence.get(
+        "exploration.m13_illegal_recovery_exact", {}
+    )
+    return ComposedReportPayload(
+        workload={
+            **_base_workload(runtime),
+            "campaign_id": CAMPAIGN_ID,
+            "generator_version": GENERATOR_VERSION,
+            "catalog_sha256": catalog_sha256(),
+            "campaign_sha256": campaign_sha256(),
+            "sequence_id": sequence.sequence_id,
+            "sequence_sha256": sequence_row["sequence_sha256"],
+            "case_id": case.case_id,
+            "case_sha256": case.sha256(),
+            "reaction_count": 4,
+            "stock_count": 2,
+            "expected_intent_count": 8,
+            "expected_droplets": 44,
+            "action_cap": 80,
+            "screenshot_cap": 4,
+            "speed_multiplier": runtime.harness.config.speed_multiplier,
+            "timeout_seconds": runtime.harness.config.timeout_seconds,
+        },
+        workflow_status=status,
+        workflow_values={
+            "sequence_exploration": {
+                "campaign_id": CAMPAIGN_ID,
+                "generator_version": GENERATOR_VERSION,
+                "catalog_sha256": catalog_sha256(),
+                "campaign_sha256": campaign_sha256(),
+                "seed_tier": sequence.seed_tier,
+                "sequence": sequence_row["sequence"],
+                "sequence_sha256": sequence_row["sequence_sha256"],
+                "reached_transitions": list(sequence_row["sequence"]["steps"]),
+                "semantic_oracle": dict(semantic),
+            },
+            "expected_stock_well_completion_count": 8,
+            "completed_stock_well_count": len(
+                runtime.observations.get("completed_wells") or ()
+            ),
+            "application_sessions": [
+                dict(row) for row in runtime.harness.application_sessions
+            ],
+            "cleanup_results": [dict(teardown)],
+            "action_count": len(runtime.context.action_results),
+            "action_cap": 80,
+            "screenshots": sorted(runtime.context.screenshots),
+            "screenshot_cap": 4,
+        },
+        queue={
+            "status": status,
+            "values": {
+                "queue_drained_at_terminal": bool(
+                    (terminal.get("checks") or {}).get(
+                        "session_three_zero_dispatch"
+                    )
+                ),
+                "simulator_dispense_overflow_count": int(
+                    terminal.get("simulator_dispense_overflow_count", 0) or 0
+                ),
+            },
+        },
+        persistence={
+            "status": status,
+            "values": {
+                "assertion_decisions": decisions,
+                "m13_lifecycle": dict(runtime.observations["m13_lifecycle"]),
+                "terminal": terminal,
+                "case_contract": {
+                    "case_id": case.case_id,
+                    "case_sha256": case.sha256(),
+                    "design_case_sha256": case.design_case.sha256(),
+                },
+            },
+        },
+        limitations=(
+            "Milestone 13 generated exploration supplements and does not replace deterministic Milestone 9-12 evidence.",
+            "The simulator verifies application-side intent, persistence, and DISPENSE semantics, not firmware or protocol behavior.",
+            "No physical motion, pressure response, calibration quality, camera, balance, collision, or droplet-quality claim is made.",
+            "Generated runtime IDs, timestamps, paths, and command sequence identities may differ across exact replay.",
+        ),
+    )
+
+
 def _optimizer_360_payload(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> ComposedReportPayload:
@@ -4333,6 +5060,16 @@ def _randomized_calibration_artifact(
     return multi_stock_artifacts_assertion(
         screenshots=runtime.context.screenshots,
         required_screenshots=set(RANDOMIZED_CALIBRATION_REQUIRED_SCREENSHOTS),
+        teardown=teardown,
+    )
+
+
+def _m13_legal_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return multi_stock_artifacts_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(M13_LEGAL_REQUIRED_SCREENSHOTS),
         teardown=teardown,
     )
 
@@ -4587,6 +5324,23 @@ def _randomized_calibration_summary(
         f"Status: {report['classification']['status']}\n"
         f"Intents: {len(terminal['intent_counts'])} / 24\n"
         f"Droplets: {terminal['terminal']['total_added_droplets']} / 80\n"
+        f"Application sessions: {len(runtime.harness.application_sessions)}\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _m13_legal_summary(
+    report: Mapping[str, Any], runtime: JourneyRuntime
+) -> str:
+    sequence = runtime.observations.get("m13_sequence")
+    terminal = dict(runtime.observations.get("m13_lifecycle", {}).get("terminal") or {})
+    return (
+        "Milestone 13 compact legal design/calibration lifecycle\n"
+        f"Sequence: {getattr(sequence, 'sequence_id', 'not_reached')}\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Intents: {len(terminal.get('intent_counts') or ())} / 8\n"
+        f"Droplets: {(terminal.get('terminal') or {}).get('total_added_droplets', 0)} / 44\n"
         f"Application sessions: {len(runtime.harness.application_sessions)}\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
@@ -5323,13 +6077,131 @@ def run_matrix_case(
     return runner(config, matrix_id=matrix_id, case_id=case_id)
 
 
+def _m13_fixture_projection_for_sequence(sequence: Any):
+    fixture, source = m13_fixture_projection(sequence.sequence_id)
+    fixture["normalized_sequence"] = sequence.normalized()
+    return fixture, source
+
+
 def run_exploration_sequence(
     config: JourneyRunConfig,
     *,
     campaign_id: str,
     sequence_id: str,
+    normalized_sequence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one generated editor sequence through the shared journey body."""
+
+    if campaign_id == M13_EXPLORATION_WORKLOAD_ID:
+        from tools.virtual_workflows.exploration_m13 import (
+            M13_REJECTION_CASES,
+            get_sequence,
+            sequence_from_normalized,
+        )
+
+        sequence = (
+            sequence_from_normalized(normalized_sequence)
+            if normalized_sequence is not None
+            else get_sequence(sequence_id)
+        )
+        if sequence.sequence_id != sequence_id:
+            raise ValueError("retained normalized sequence identity drifted")
+        rejected_operations = tuple(
+            step.operation_id
+            for step in sequence.steps
+            if step.operation_id in M13_REJECTION_CASES
+        )
+        rejection_cases = tuple(
+            (
+                operation_id,
+                get_editor_safeguard_case(M13_REJECTION_CASES[operation_id])
+                if operation_id
+                in {
+                    "editor.finalize_invalid_via_ui",
+                    "editor.optimize_one_stock_invalid_via_ui",
+                }
+                else get_execution_preflight_case(
+                    M13_REJECTION_CASES[operation_id]
+                ),
+            )
+            for operation_id in rejected_operations
+        )
+        revision_actions = (
+            frozenset(
+                {
+                    "editor.rename_prepared_via_ui",
+                    "editor.edit_prepared_design_via_ui",
+                    "editor.regenerate_prepared_design_via_ui",
+                    "editor.refinalize_prepared_via_ui",
+                }
+            )
+            if sequence.role == "legal_refinalize_reload_terminal"
+            else frozenset()
+        )
+        definition = JourneyDefinition(
+            registry_id=M13_EXPLORATION_WORKLOAD_ID,
+            scenario_name=M13_EXPLORATION_SCENARIO_NAME,
+            scenario_version="1",
+            workload_id=M13_EXPLORATION_WORKLOAD_ID,
+            required_action_ids=(
+                _RANDOMIZED_CALIBRATION_ACTIONS
+                | revision_actions
+                | frozenset(case.operator_action_id for _operation, case in rejection_cases)
+            ),
+            required_ui_action_ids=(
+                RANDOMIZED_CALIBRATION_REQUIRED_UI_ACTIONS
+                | revision_actions
+                | frozenset(case.operator_action_id for _operation, case in rejection_cases)
+            ),
+            required_assertion_ids=(
+                M13_LEGAL_REQUIRED_ASSERTIONS
+                if not rejected_operations
+                else (
+                    *(
+                        assertion_id
+                        for assertion_id in M13_LEGAL_REQUIRED_ASSERTIONS
+                        if assertion_id
+                        not in {
+                            "exploration.m13_legal_sequence_exact",
+                            "artifacts.required_present",
+                        }
+                    ),
+                    *(
+                        f"exploration.m13_rejection.{case.case_id}"
+                        for _operation, case in rejection_cases
+                    ),
+                    "exploration.m13_illegal_recovery_exact",
+                    "artifacts.required_present",
+                )
+            ),
+            required_screenshots=M13_LEGAL_REQUIRED_SCREENSHOTS,
+            fixture_loader=lambda: _m13_fixture_projection_for_sequence(sequence),
+            body=run_m13_legal_sequence_lifecycle,
+            artifact_assertion=_m13_legal_artifact,
+            payload_builder=_m13_legal_payload,
+            summary_builder=_m13_legal_summary,
+        )
+        return JourneyExecutor().run(
+            definition,
+            config,
+            fixture_bundle=_m13_fixture_projection_for_sequence(sequence),
+            replay_selector_args=(
+                "--exploration",
+                campaign_id,
+                "--sequence",
+                sequence_id,
+                *(
+                    (
+                        "--seed-tier",
+                        "diagnostic",
+                        "--diagnostic-seed",
+                        str(sequence.seed),
+                    )
+                    if sequence.seed_tier == "diagnostic"
+                    else ()
+                ),
+            ),
+        )
 
     if config.scenario_id != EXPLORATION_WORKLOAD_ID:
         raise ValueError("exploration requires the prepared-guard composed base")

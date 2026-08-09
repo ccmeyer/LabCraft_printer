@@ -32,6 +32,7 @@ an explicit non-dry-run selector starts children.
 | Calibration volume or exact prepared/preview/commanded/completed droplet counts | `calibration_requantization_v1` matrix | visible boundary or `stream_to_droplet_40_to_10_8` case |
 | Experiment formulation, stock feasibility, well selection/randomization, capacity, or Finalize safeguards | `experiment_design_pairwise_v1` matrix | visible positive and rejected-boundary cases |
 | Prepared-editor ordering or activation guards | `editor_prepared_guard_v1` exploration | selected legal/illegal visible sequences |
+| Composed editor, calibration, persistence, identity, and lifecycle orderings | `design_calibration_lifecycle_v1` exploration | frozen campaign plus required visible representatives; diagnostic seeds stay non-gating |
 | General execution or durability changes | `host_regression` | `host_stress` for sustained effects |
 | Rack, revision history, responsiveness, resource growth, or scalability | `host_stress` | retained visible 384×10 evidence or a separately justified visible run |
 | Pi transport, process isolation, bundle, replay, or Pi-specific environment | `pi_primary` | separately authorized `pi_stress` only for sustained Pi characterization |
@@ -55,6 +56,7 @@ Inspect a selection before executing it:
 .\env\Scripts\python.exe tools\run_virtual_workflow.py --matrix calibration_requantization_v1 --dry-run
 .\env\Scripts\python.exe tools\run_virtual_workflow.py --matrix experiment_design_pairwise_v1 --dry-run
 .\env\Scripts\python.exe tools\run_virtual_workflow.py --exploration editor_prepared_guard_v1 --dry-run
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --exploration design_calibration_lifecycle_v1 --dry-run
 ```
 
 Common Windows commands:
@@ -91,6 +93,11 @@ Common Windows commands:
   --speed-multiplier 1000 --timeout-seconds 60
 
 .\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration design_calibration_lifecycle_v1 `
+  --output-root verification_reports\exploration `
+  --speed-multiplier 1000 --timeout-seconds 270 --qt-platform offscreen
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
   --suite host_regression --output-root verification_reports\suites `
   --seed 1 --speed-multiplier 1000
 
@@ -98,6 +105,57 @@ Common Windows commands:
   --suite host_stress --output-root verification_reports\suites `
   --seed 1 --speed-multiplier 1000
 ```
+
+### Milestone 13 frozen and diagnostic exploration
+
+The frozen `design_calibration_lifecycle_v1` campaign contains six reviewed
+normalized sequences in this exact seed order: `13, 29, 47, 83, 131, 197`.
+Run the complete campaign for its release gate. Select one sequence only for
+focused diagnosis or visible review:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration design_calibration_lifecycle_v1 `
+  --sequence seed_131_illegal_identity_activation_recovery_terminal `
+  --output-root verification_reports\exploration `
+  --speed-multiplier 1000 --timeout-seconds 270 --qt-platform offscreen
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration design_calibration_lifecycle_v1 `
+  --seed-tier diagnostic --diagnostic-seed 1 `
+  --output-root verification_reports\exploration `
+  --speed-multiplier 1000 --timeout-seconds 270 --qt-platform offscreen
+```
+
+Diagnostic selection is explicit and capped at four seeds per invocation. Its
+aggregate must say `release_gate.status: not_applicable`; never copy a sampled
+seed into the frozen set or use it to change release classification without a
+reviewed catalog/version update. Always execute the report or aggregate's
+`run.replay_command` verbatim. Frozen replay reads and hashes the retained
+normalized bytes. Do not reconstruct the sequence from its seed, edit an
+original failure, or replace it with a reduced derivative.
+
+Accept the frozen aggregate only when all six children pass and
+`semantic_coverage.json` reports complete passing-child coverage of 12 states,
+34 transitions, 26 admitted operations, and eight rejection classes. Confirm
+the aggregate budget checks: no more than 108 semantic operations, 480 action
+rows, 18 sessions/12 rotations, 24 screenshots, 1,600 files/320 MiB, 24
+reactions, 12 stocks, 48 intents, 264 droplets, or 1,800 seconds. Per-sequence
+limits are 18/80, three sessions/two rotations, four screenshots, 256 files/48
+MiB, four reactions/two stocks/eight intents/44 droplets, a 270-second
+deadline, and a 300-second watchdog. Any overrun fails closed.
+
+For illegal sequences, inspect the literal typed rejection, immediate
+Milestone 12 no-mutation/no-dispatch snapshot, unchanged authoritative
+identity, valid same-lineage recovery, terminal reload, and cleanup. Do not
+accept a recovery that closes, resets, or hides unsafe state. Retain the four
+screenshots (`prepared`, `fresh_loaded`, `fresh_activated`, and
+`terminal_reloaded`) for required visible direct/replay representatives at
+seeds 13, 47, 131, and 197. This campaign is supplemental; run its assigned
+Milestone 9-12 deterministic compatibility and the separate immutable
+optimizer-360 control for qualification. Do not run `pi_stress`, claim hardware
+coverage, add refill/resume, or require the known failing 384x10 host-stress
+aggregate.
 
 For visible Windows evidence, set `QT_QPA_PLATFORM=windows`, add `--visible`,
 and use a realistic bounded speed such as 20x. Run the exact replay command

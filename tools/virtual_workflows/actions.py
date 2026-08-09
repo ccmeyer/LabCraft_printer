@@ -1758,6 +1758,9 @@ def capture_execution_preflight_boundary(
 def drive_execution_preflight_safeguard(
     context: ScenarioContext,
     case: Any,
+    *,
+    capture_rejection_screenshot: bool = True,
+    rejection_milestone_name: str = "rejection_observed",
 ) -> dict[str, Any]:
     """Drive one literal real-Qt safeguard boundary and retain exact evidence.
 
@@ -1816,12 +1819,13 @@ def drive_execution_preflight_safeguard(
             registry, entry = register_dialog(expected.ui_title, "CalibrationModePreflightDialog")
 
             def cancel() -> None:
-                capture_milestone(
-                    context,
-                    "rejection_observed",
-                    evidence={"code": expected.code, "message": expected.message},
-                    widget=dialog,
-                )
+                if capture_rejection_screenshot:
+                    capture_milestone(
+                        context,
+                        rejection_milestone_name,
+                        evidence={"code": expected.code, "message": expected.message},
+                        widget=dialog,
+                    )
                 button = next(
                     button for button in dialog.findChildren(QtWidgets.QPushButton)
                     if button.text() == "Cancel"
@@ -1877,12 +1881,13 @@ def drive_execution_preflight_safeguard(
                     if active.windowTitle() == expected.ui_title and not state["choice"]:
                         if active.text() != expected.message:
                             raise RuntimeError("Start preflight message did not match exactly")
-                        capture_milestone(
-                            context,
-                            "rejection_observed",
-                            evidence={"code": expected.code, "message": active.text()},
-                            widget=active,
-                        )
+                        if capture_rejection_screenshot:
+                            capture_milestone(
+                                context,
+                                rejection_milestone_name,
+                                evidence={"code": expected.code, "message": active.text()},
+                                widget=active,
+                            )
                         cancel = next(
                             child for child in active.buttons()
                             if child.text().replace("&", "") == "Cancel"
@@ -1926,12 +1931,13 @@ def drive_execution_preflight_safeguard(
                         or active.text() != expected.message
                     ):
                         raise RuntimeError("operator message did not match exactly")
-                    capture_milestone(
-                        context,
-                        "rejection_observed",
-                        evidence={"code": expected.code, "message": active.text()},
-                        widget=active,
-                    )
+                    if capture_rejection_screenshot:
+                        capture_milestone(
+                            context,
+                            rejection_milestone_name,
+                            evidence={"code": expected.code, "message": active.text()},
+                            widget=active,
+                        )
                     safe_button = active.button(QtWidgets.QMessageBox.Ok)
                     if safe_button is None:
                         raise RuntimeError("operator message has no OK control")
@@ -1962,17 +1968,18 @@ def drive_execution_preflight_safeguard(
                 context.app.processEvents()
                 ui["action_label"] = button.text()
                 ui["control_enabled"] = bool(button.isEnabled())
-                capture_milestone(
-                    context,
-                    "rejection_observed",
-                    evidence={
-                        "code": expected.code,
-                        "message": expected.message,
-                        "button_text": button.text(),
-                        "button_enabled": bool(button.isEnabled()),
-                    },
-                    widget=context.view.well_plate_widget,
-                )
+                if capture_rejection_screenshot:
+                    capture_milestone(
+                        context,
+                        rejection_milestone_name,
+                        evidence={
+                            "code": expected.code,
+                            "message": expected.message,
+                            "button_text": button.text(),
+                            "button_enabled": bool(button.isEnabled()),
+                        },
+                        widget=context.view.well_plate_widget,
+                    )
                 QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
                 ui["selected_control"] = button.text()
             else:
@@ -1988,17 +1995,18 @@ def drive_execution_preflight_safeguard(
                 dialog.show()
                 context.app.processEvents()
                 ui["control_enabled"] = bool(button.isEnabled())
-                capture_milestone(
-                    context,
-                    "rejection_observed",
-                    evidence={
-                        "code": expected.code,
-                        "message": expected.message,
-                        "button_text": button.text(),
-                        "button_enabled": bool(button.isEnabled()),
-                    },
-                    widget=dialog,
-                )
+                if capture_rejection_screenshot:
+                    capture_milestone(
+                        context,
+                        rejection_milestone_name,
+                        evidence={
+                            "code": expected.code,
+                            "message": expected.message,
+                            "button_text": button.text(),
+                            "button_enabled": bool(button.isEnabled()),
+                        },
+                        widget=dialog,
+                    )
                 QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
                 ui["selected_control"] = button.text()
                 dialog.close()
@@ -3760,6 +3768,7 @@ def drive_editor_prestart_rename_refinalize(
     experiment: Mapping[str, Any],
     reagent: Mapping[str, Any],
     action_runner: Callable[..., dict[str, Any]] | None = None,
+    capture_milestones: bool = True,
 ) -> dict[str, Any]:
     """Reopen and materially revise a prepared design through real Qt controls."""
 
@@ -3967,18 +3976,19 @@ def drive_editor_prestart_rename_refinalize(
                 },
                 allowed_dialogs=(dialog,),
             )
-            capture_milestone(
-                context,
-                "rename_editor_opened",
-                evidence={
-                    "experiment_name": dialog.exp_name_edit.text(),
-                    "editable": (
-                        dialog.exp_name_edit.isEnabled()
-                        and not dialog.exp_name_edit.isReadOnly()
-                    ),
-                },
-                widget=dialog,
-            )
+            if capture_milestones:
+                capture_milestone(
+                    context,
+                    "rename_editor_opened",
+                    evidence={
+                        "experiment_name": dialog.exp_name_edit.text(),
+                        "editable": (
+                            dialog.exp_name_edit.isEnabled()
+                            and not dialog.exp_name_edit.isReadOnly()
+                        ),
+                    },
+                    widget=dialog,
+                )
 
             def rename() -> Mapping[str, Any]:
                 _ensure_editor_deadline(
@@ -4036,16 +4046,17 @@ def drive_editor_prestart_rename_refinalize(
                 rename,
                 allowed_dialogs=(dialog,),
             )
-            capture_milestone(
-                context,
-                "renamed",
-                evidence={
-                    "initial_name": initial_name,
-                    "renamed_name": renamed_name,
-                    "non_name_controls_unchanged": True,
-                },
-                widget=dialog,
-            )
+            if capture_milestones:
+                capture_milestone(
+                    context,
+                    "renamed",
+                    evidence={
+                        "initial_name": initial_name,
+                        "renamed_name": renamed_name,
+                        "non_name_controls_unchanged": True,
+                    },
+                    widget=dialog,
+                )
 
             def edit_prepared_design() -> Mapping[str, Any]:
                 _ensure_editor_deadline(
@@ -4139,12 +4150,13 @@ def drive_editor_prestart_rename_refinalize(
                 edit_prepared_design,
                 allowed_dialogs=(dialog,),
             )
-            capture_milestone(
-                context,
-                "prepared_design_edited",
-                evidence=edit_evidence,
-                widget=dialog,
-            )
+            if capture_milestones:
+                capture_milestone(
+                    context,
+                    "prepared_design_edited",
+                    evidence=edit_evidence,
+                    widget=dialog,
+                )
 
             def regenerate() -> Mapping[str, Any]:
                 with _expected_editor_progress_dialog(context):
@@ -4181,12 +4193,13 @@ def drive_editor_prestart_rename_refinalize(
                 regenerate,
                 allowed_dialogs=(dialog,),
             )
-            capture_milestone(
-                context,
-                "regenerated",
-                evidence=regeneration_evidence,
-                widget=dialog,
-            )
+            if capture_milestones:
+                capture_milestone(
+                    context,
+                    "regenerated",
+                    evidence=regeneration_evidence,
+                    widget=dialog,
+                )
 
             def refinalize() -> Mapping[str, Any]:
                 action_label = str(dialog.finish_btn.text() or "")
@@ -4217,12 +4230,13 @@ def drive_editor_prestart_rename_refinalize(
                 "editor.refinalize_prepared_via_ui",
                 refinalize,
             )
-            capture_milestone(
-                context,
-                "refinalized",
-                evidence={"experiment_name": renamed_name},
-                widget=dialog,
-            )
+            if capture_milestones:
+                capture_milestone(
+                    context,
+                    "refinalized",
+                    evidence={"experiment_name": renamed_name},
+                    widget=dialog,
+                )
             state["finished"] = True
         except BaseException as exc:
             state["error"] = exc
