@@ -4074,16 +4074,39 @@ def joined_terminal_lifecycle_reconciliation(
             == int(begin.get("commanded_droplets", 0) or 0)
         )
     expected_pass_ids = [row.stock_id for row in case.execution_passes]
+    expected_intents = int(case.terminal.expected_intents)
+    expected_droplets = int(case.terminal.expected_droplets)
+    cumulative = 0
+    expected_boundaries: list[tuple[str, int, str]] = []
+    for execution_pass in case.execution_passes:
+        cumulative = int(
+            getattr(
+                execution_pass,
+                "cumulative_completion",
+                cumulative + int(execution_pass.expected_intents),
+            )
+        )
+        expected_boundaries.append(
+            (
+                execution_pass.stock_id,
+                cumulative,
+                (
+                    "completed"
+                    if execution_pass.order == len(case.execution_passes)
+                    else "active"
+                ),
+            )
+        )
     pass_starts = [
         str(row.get("stock_id") or "")
         for row in lifecycle.get("pass_starts", ())
     ]
     checks = {
-        "intent_pairs_and_counts_exact": len(begins) == 24
-        and len(set(begin_ids)) == 24
+        "intent_pairs_and_counts_exact": len(begins) == expected_intents
+        and len(set(begin_ids)) == expected_intents
         and observed_map == expected_map,
-        "attachments_exact_once": len(attachments) == 24
-        and len(attachments_by_id) == 24
+        "attachments_exact_once": len(attachments) == expected_intents
+        and len(attachments_by_id) == expected_intents
         and set(attachments_by_id) == set(begin_ids)
         and len(
             {
@@ -4092,18 +4115,17 @@ def joined_terminal_lifecycle_reconciliation(
                 if (sequence := command_sequence(row)) is not None
             }
         )
-        == 24,
-        "simulator_commands_exact_once": len(simulator) == 24
-        and len(simulator_by_sequence) == 24
+        == expected_intents,
+        "simulator_commands_exact_once": len(simulator) == expected_intents
+        and len(simulator_by_sequence) == expected_intents
         and all(command_join_checks.values()),
-        "completion_ids_exact_once": len(completions) == 24
+        "completion_ids_exact_once": len(completions) == expected_intents
         and Counter(str(value) for value in completions) == Counter(begin_ids),
         "droplet_total_exact": sum(observed_map.values())
         == sum(
             int(row.get("commanded_droplets", 0) or 0) for row in simulator
         )
-        == case.terminal.expected_droplets
-        == 80,
+        == expected_droplets,
         "no_discard_or_overflow": not lifecycle.get("discard_batches")
         and int(lifecycle.get("simulator_dispense_overflow_count", 0) or 0) == 0,
         "pass_order_exact": pass_starts == expected_pass_ids,
@@ -4115,11 +4137,7 @@ def joined_terminal_lifecycle_reconciliation(
             )
             for row in pass_boundaries
         ]
-        == [
-            (expected_pass_ids[0], 8, "active"),
-            (expected_pass_ids[1], 16, "active"),
-            (expected_pass_ids[2], 24, "completed"),
-        ],
+        == expected_boundaries,
     }
     return {
         "checks": checks,
@@ -4205,6 +4223,15 @@ def joined_terminal_execution_assertion(
         "terminal_transitions",
         "soft_stop_events",
     )
+    terminal_revision = int(
+        getattr(
+            case.terminal,
+            "terminal_revision",
+            case.calibrations[-1].output_revision + 1,
+        )
+    )
+    expected_history = list(range(1, terminal_revision + 1))
+    expected_sessions = int(case.terminal.application_sessions)
     checks = {
         "terminal_plan_progress_runtime_targets_exact": all(
             normalized_terminal[name] == expected
@@ -4219,10 +4246,10 @@ def joined_terminal_execution_assertion(
         "revision_history_one_through_six": [
             int(row.get("plan_revision", 0)) for row in after.history
         ]
-        == [1, 2, 3, 4, 5, 6],
+        == expected_history,
         "terminal_revision_six_analysis_only": before.plan_revision
         == after.plan_revision
-        == 6
+        == terminal_revision
         and before.plan_state == after.plan_state == "completed"
         and before.eligibility_status == after.eligibility_status == "analysis_only",
         "terminal_references_exact": (
@@ -4231,7 +4258,12 @@ def joined_terminal_execution_assertion(
             after.resume_plan_id,
             after.resume_plan_revision,
         )
-        == (after.plan_id, 6, after.plan_id, 6),
+        == (
+            after.plan_id,
+            terminal_revision,
+            after.plan_id,
+            terminal_revision,
+        ),
         "calibration_records_exact": set(records) == set(calibration_by_stock)
         and all(
             records[stock_id].get("printer_head_id") == row.printer_head_id
@@ -4243,14 +4275,15 @@ def joined_terminal_execution_assertion(
             )
             for stock_id, row in calibration_by_stock.items()
         ),
-        "three_distinct_application_sessions": len(application_sessions) == 3
+        "three_distinct_application_sessions": len(application_sessions)
+        == expected_sessions
         and len(
             {
                 str(row.get("application_session_id"))
                 for row in application_sessions
             }
         )
-        == 3,
+        == expected_sessions,
         "session_one_zero_dispatch": all(
             not first_lifecycle.get(name) for name in zero_keys
         ),

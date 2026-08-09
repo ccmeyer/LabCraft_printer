@@ -109,6 +109,11 @@ from tools.virtual_workflows.joined_interaction_cases import (
     joined_fixture_sha256,
 )
 from tools.virtual_workflows.optimizer_360_cases import (
+    EXPECTED_ACHIEVED_REACTION_MULTISET_SHA256,
+    EXPECTED_ASSIGNMENT_SHA256,
+    EXPECTED_COUNT_ORACLE_SHA256,
+    EXPECTED_FIXTURE_SHA256,
+    EXPECTED_REACTION_MULTISET_SHA256,
     OPTIMIZER_360_CASE,
     OPTIMIZER_360_CASE_ID,
     OPTIMIZER_360_FIXTURE_PATH,
@@ -240,6 +245,15 @@ OPTIMIZER_360_CALIBRATION_CHAIN_REQUIRED_ASSERTIONS = (
     "execution.authoritative_runtime_rehydrated",
     "execution.clean_session_rotation_exact",
     "execution.remaining_calibrations_exact",
+)
+OPTIMIZER_360_LIFECYCLE_REQUIRED_ASSERTIONS = (
+    *OPTIMIZER_360_CALIBRATION_CHAIN_REQUIRED_ASSERTIONS,
+    "execution.completed_terminal_reload_exact",
+    "execution.randomized_calibration_terminal_exact",
+)
+OPTIMIZER_360_REQUIRED_ASSERTIONS = (
+    *OPTIMIZER_360_LIFECYCLE_REQUIRED_ASSERTIONS,
+    "artifacts.required_present",
 )
 EXPERIMENT_DESIGN_REJECTED_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -528,6 +542,9 @@ DISCONNECT_REQUIRED_SCREENSHOTS = frozenset(
 RANDOMIZED_CALIBRATION_REQUIRED_SCREENSHOTS = frozenset(
     JOINED_INTERACTION_CASE.qualification.required_screenshots
 )
+OPTIMIZER_360_REQUIRED_SCREENSHOTS = frozenset(
+    OPTIMIZER_360_CASE.qualification.required_screenshots
+)
 
 _COMMON_ACTIONS = frozenset(
     {"app.launch_simulated", "artifact.capture_milestone", "scenario.teardown"}
@@ -681,6 +698,10 @@ def _randomized_calibration_fixture() -> tuple[dict[str, Any], Path]:
         JOINED_INTERACTION_CASE.normalized(),
         JOINED_INTERACTION_FIXTURE_PATH,
     )
+
+
+def _optimizer_360_fixture() -> tuple[dict[str, Any], Path]:
+    return OPTIMIZER_360_CASE.normalized(), OPTIMIZER_360_FIXTURE_PATH
 
 
 def _editor_fixture() -> tuple[dict[str, Any], Path]:
@@ -1690,6 +1711,85 @@ def run_optimizer_360_calibration_chain(runtime: JourneyRuntime) -> None:
     ] = dict(result.evidence)
     runtime.observations["optimizer_360_fully_calibrated_snapshot"] = (
         fully_calibrated
+    )
+
+
+def run_optimizer_360_full_lifecycle(runtime: JourneyRuntime) -> None:
+    """Execute and terminally reload all 1,800 literal stock/well intents."""
+
+    run_optimizer_360_calibration_chain(runtime)
+    case = OPTIMIZER_360_CASE
+    context = runtime.context
+    calibrations_by_stock = {row.stock_id: row for row in case.calibrations}
+    pass_specs = tuple(
+        PrecalibratedStockPassSpec(
+            stock_id=execution_pass.stock_id,
+            printer_head_id=calibrations_by_stock[
+                execution_pass.stock_id
+            ].printer_head_id,
+            pulse_width_us=calibrations_by_stock[
+                execution_pass.stock_id
+            ].print_pulse_width_us,
+            pressure_psi=2.0,
+            frequency_hz=100,
+            initial_volume_uL=100.0,
+            expected_volume_nL=float(
+                calibrations_by_stock[execution_pass.stock_id].droplet_volume_nL
+            ),
+            expected_completion_count=execution_pass.cumulative_completion,
+            expected_plan_state=(
+                "completed"
+                if execution_pass.order == len(case.execution_passes)
+                else "active"
+            ),
+            completed_milestone=execution_pass.milestone,
+            staging_slot=(execution_pass.order - 1) % 4,
+            start_dialog_titles=(
+                ("Start Print Array", "Evaporation Plate Dock Check")
+                if execution_pass.order == 1
+                else ("Start Print Array",)
+            ),
+        )
+        for execution_pass in case.execution_passes
+    )
+    run_precalibrated_stock_passes(runtime, pass_specs)
+    terminal_counts = capture_count_snapshot(context)
+    capture_milestone(
+        context,
+        "completed",
+        evidence={
+            "completion_count": len(runtime.observations["completed_wells"]),
+            "plan_revision": context.experiment_model
+            .get_execution_plan_snapshot()
+            .plan_revision,
+            "expected_intents": case.terminal.expected_intents,
+            "expected_droplets": case.terminal.expected_droplets,
+        },
+    )
+    runtime.restore_all()
+    session_2_observer = runtime.observations[
+        "optimizer_360_session_2_execution_snapshot"
+    ]
+    _run_completed_terminal_reload(
+        runtime,
+        expected_name=case.editor.name,
+    )
+    terminal_result = joined_terminal_execution_assertion(
+        context,
+        case=case,
+        terminal_counts=terminal_counts,
+        terminal_reload=runtime.observations["completed_terminal_reload"],
+        observer=session_2_observer,
+        first_session_observer=runtime.observations[
+            "optimizer_360_session_1_observer"
+        ],
+        pass_boundaries=runtime.observations["pass_boundaries"],
+        starvation_events=runtime.observations["starvation_events"],
+        application_sessions=runtime.harness.application_sessions,
+    )
+    runtime.add_assertion(terminal_result)
+    runtime.observations["optimizer_360_calibration_lifecycle"]["terminal"] = (
+        dict(terminal_result.evidence)
     )
 
 
@@ -3585,6 +3685,93 @@ def _randomized_calibration_payload(
         },
         workflow_status=status,
         workflow_values={
+            "expected_stock_well_completion_count": case.terminal.expected_completed_wells,
+            "completed_stock_well_count": len(completed),
+            "completed_well_ids": completed,
+            "array_complete_count": len(runtime.observations.get("array_completions") or ()),
+            "application_sessions": [dict(row) for row in runtime.harness.application_sessions],
+            "cleanup_results": [dict(teardown)],
+            "action_count": len(runtime.context.action_results),
+            "action_cap": case.qualification.action_cap,
+        },
+        queue={
+            "status": status,
+            "values": {
+                "unexpected_starvation_count": len(runtime.observations.get("starvation_events") or ()),
+                "queue_drained_at_terminal": bool((terminal.get("checks") or {}).get("session_three_zero_dispatch")),
+                "simulator_dispense_overflow_count": int(terminal.get("simulator_dispense_overflow_count", 0) or 0),
+            },
+        },
+        persistence={
+            "status": status,
+            "values": {
+                "assertion_decisions": decisions,
+                "randomized_calibration_lifecycle": lifecycle,
+                "terminal": terminal,
+                "case_contract": {
+                    "case_id": case.case_id,
+                    "case_sha256": case.sha256(),
+                    "count_oracle_sha256": case.count_oracle_sha256(),
+                    "fixture_sha256": joined_fixture_sha256(),
+                },
+            },
+        },
+        limitations=(
+            "The three application compositions share one in-process QApplication and retained SIL root; direct CLI and suite runs provide fresh operating-system processes.",
+            "The simulator verifies application-side intent, persistence, and DISPENSE semantics, not firmware or protocol behavior.",
+            "No physical motion, pressure response, calibration quality, camera, balance, collision, or droplet-quality claim is made.",
+            "Generated plan IDs, record IDs, timestamps, paths, and command sequence identities may differ across replay.",
+        ),
+    )
+
+
+def _optimizer_360_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    case = OPTIMIZER_360_CASE
+    decisions = _decisions(runtime)
+    evidence = _assertion_evidence(runtime)
+    passed = all(
+        decisions.get(assertion_id) == "pass"
+        for assertion_id in runtime.definition.required_assertion_ids
+    )
+    status = "measured" if passed else "partial"
+    terminal = evidence.get("execution.randomized_calibration_terminal_exact", {})
+    lifecycle = dict(
+        runtime.observations.get("optimizer_360_calibration_lifecycle") or {}
+    )
+    completed = list(runtime.observations.get("completed_wells") or ())
+    return ComposedReportPayload(
+        workload={
+            **_base_workload(runtime),
+            "case_id": case.case_id,
+            "case_sha256": case.sha256(),
+            "fixture_sha256": EXPECTED_FIXTURE_SHA256,
+            "count_oracle_sha256": EXPECTED_COUNT_ORACLE_SHA256,
+            "requested_reaction_multiset_sha256": (
+                EXPECTED_REACTION_MULTISET_SHA256
+            ),
+            "achieved_reaction_multiset_sha256": (
+                EXPECTED_ACHIEVED_REACTION_MULTISET_SHA256
+            ),
+            "assignment_sha256": EXPECTED_ASSIGNMENT_SHA256,
+            "design_randomization_seed": case.editor.random_seed,
+            "plate_name": case.editor.plate_name,
+            "well_ids": list(case.editor.selected_well_ids),
+            "excluded_well_ids": list(case.editor.excluded_well_ids),
+            "stock_ids": [row.stock_id for row in case.stocks],
+            "stock_count": len(case.stocks),
+            "array_passes": len(case.execution_passes),
+            "expected_completion_count": case.terminal.expected_completed_wells,
+            "expected_intent_count": case.terminal.expected_intents,
+            "expected_droplets": case.terminal.expected_droplets,
+            "action_cap": case.qualification.action_cap,
+            "simulator_evidence_cap": case.qualification.simulator_evidence_cap,
+            "speed_multiplier": runtime.harness.config.speed_multiplier,
+            "timeout_seconds": runtime.harness.config.timeout_seconds,
+        },
+        workflow_status=status,
+        workflow_values={
             "expected_stock_well_completion_count": (
                 case.terminal.expected_completed_wells
             ),
@@ -3620,18 +3807,18 @@ def _randomized_calibration_payload(
             "status": status,
             "values": {
                 "assertion_decisions": decisions,
-                "randomized_calibration_lifecycle": lifecycle,
+                "optimizer_360_calibration_lifecycle": lifecycle,
                 "terminal": terminal,
                 "case_contract": {
                     "case_id": case.case_id,
                     "case_sha256": case.sha256(),
-                    "count_oracle_sha256": case.count_oracle_sha256(),
-                    "fixture_sha256": joined_fixture_sha256(),
+                    "fixture_sha256": EXPECTED_FIXTURE_SHA256,
+                    "count_oracle_sha256": EXPECTED_COUNT_ORACLE_SHA256,
                 },
             },
         },
         limitations=(
-            "The three application compositions share one in-process QApplication and retained SIL root; direct CLI and suite runs provide fresh operating-system processes.",
+            "The three application compositions share one in-process QApplication; direct and replay invocations each start in a fresh operating-system process.",
             "The simulator verifies application-side intent, persistence, and DISPENSE semantics, not firmware or protocol behavior.",
             "No physical motion, pressure response, calibration quality, camera, balance, collision, or droplet-quality claim is made.",
             "Generated plan IDs, record IDs, timestamps, paths, and command sequence identities may differ across replay.",
@@ -3705,6 +3892,16 @@ def _randomized_calibration_artifact(
     return multi_stock_artifacts_assertion(
         screenshots=runtime.context.screenshots,
         required_screenshots=set(RANDOMIZED_CALIBRATION_REQUIRED_SCREENSHOTS),
+        teardown=teardown,
+    )
+
+
+def _optimizer_360_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return multi_stock_artifacts_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(OPTIMIZER_360_REQUIRED_SCREENSHOTS),
         teardown=teardown,
     )
 
@@ -3894,6 +4091,24 @@ def _randomized_calibration_summary(
         f"Status: {report['classification']['status']}\n"
         f"Intents: {len(terminal['intent_counts'])} / 24\n"
         f"Droplets: {terminal['terminal']['total_added_droplets']} / 80\n"
+        f"Application sessions: {len(runtime.harness.application_sessions)}\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _optimizer_360_summary(
+    report: Mapping[str, Any], runtime: JourneyRuntime
+) -> str:
+    case = OPTIMIZER_360_CASE
+    terminal = runtime.observations["optimizer_360_calibration_lifecycle"][
+        "terminal"
+    ]
+    return (
+        "Milestone 11A optimizer 360 calibration/reload execution lifecycle\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Intents: {len(terminal['intent_counts'])} / {case.terminal.expected_intents}\n"
+        f"Droplets: {terminal['terminal']['total_added_droplets']} / {case.terminal.expected_droplets}\n"
         f"Application sessions: {len(runtime.harness.application_sessions)}\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
@@ -4150,6 +4365,21 @@ RANDOMIZED_CALIBRATION_DEFINITION = JourneyDefinition(
     payload_builder=_randomized_calibration_payload,
     summary_builder=_randomized_calibration_summary,
 )
+OPTIMIZER_360_DEFINITION = JourneyDefinition(
+    registry_id=OPTIMIZER_360_WORKLOAD_ID,
+    scenario_name=OPTIMIZER_360_SCENARIO_NAME,
+    scenario_version=OPTIMIZER_360_SCENARIO_VERSION,
+    workload_id=OPTIMIZER_360_WORKLOAD_ID,
+    required_action_ids=_RANDOMIZED_CALIBRATION_ACTIONS,
+    required_ui_action_ids=RANDOMIZED_CALIBRATION_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=OPTIMIZER_360_REQUIRED_ASSERTIONS,
+    required_screenshots=OPTIMIZER_360_REQUIRED_SCREENSHOTS,
+    fixture_loader=_optimizer_360_fixture,
+    body=run_optimizer_360_full_lifecycle,
+    artifact_assertion=_optimizer_360_artifact,
+    payload_builder=_optimizer_360_payload,
+    summary_builder=_optimizer_360_summary,
+)
 DISCONNECT_DEFINITION = JourneyDefinition(
     registry_id=DISCONNECT_WORKLOAD_ID,
     scenario_name=DISCONNECT_SCENARIO_NAME,
@@ -4192,6 +4422,7 @@ JOURNEY_DEFINITIONS = {
         AUTHORITATIVE_RELOAD_DEFINITION,
         DISCONNECT_DEFINITION,
         RANDOMIZED_CALIBRATION_DEFINITION,
+        OPTIMIZER_360_DEFINITION,
     )
 }
 JOURNEY_DEFINITION_IDS = frozenset(JOURNEY_DEFINITIONS)
@@ -4524,6 +4755,9 @@ __all__ = [
     "JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS",
     "OPTIMIZER_360_FIRST_CALIBRATION_REQUIRED_ASSERTIONS",
     "OPTIMIZER_360_CALIBRATION_CHAIN_REQUIRED_ASSERTIONS",
+    "OPTIMIZER_360_LIFECYCLE_REQUIRED_ASSERTIONS",
+    "OPTIMIZER_360_REQUIRED_ASSERTIONS",
+    "OPTIMIZER_360_REQUIRED_SCREENSHOTS",
     "OPTIMIZER_360_WORKLOAD_ID",
     "JourneyRunConfig",
     "MULTI_STOCK_REQUIRED_ASSERTIONS",
@@ -4549,6 +4783,7 @@ __all__ = [
     "run_joined_calibrated_checkpoint",
     "run_optimizer_360_first_calibration_checkpoint",
     "run_optimizer_360_calibration_chain",
+    "run_optimizer_360_full_lifecycle",
     "run_exploration_sequence",
     "run_editor_create_finalize_journey",
     "run_disconnect_fail_closed_24_journey",

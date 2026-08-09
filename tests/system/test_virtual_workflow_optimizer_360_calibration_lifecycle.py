@@ -11,9 +11,13 @@ from tools.virtual_workflows.harness import AutomationHarness, AutomationHarness
 from tools.virtual_workflows.journeys import (
     OPTIMIZER_360_CALIBRATION_CHAIN_REQUIRED_ASSERTIONS,
     OPTIMIZER_360_FIRST_CALIBRATION_REQUIRED_ASSERTIONS,
+    OPTIMIZER_360_REQUIRED_ASSERTIONS,
+    OPTIMIZER_360_REQUIRED_SCREENSHOTS,
     run_optimizer_360_calibration_chain,
     run_optimizer_360_first_calibration_checkpoint,
 )
+from tools.virtual_workflows.registry import run_registered_scenario
+from tools.virtual_workflows.report import validate_report_v1
 from tools.virtual_workflows.optimizer_360_cases import (
     OPTIMIZER_360_CASE,
     OPTIMIZER_360_FIXTURE_PATH,
@@ -162,3 +166,59 @@ def test_optimizer_360_fresh_rotation_and_all_calibrations_are_exact(qapp, tmp_p
     assert teardown["status"] == "pass"
     assert teardown["evidence"]["close_succeeded"] is True
     assert teardown["evidence"]["session_lock_present"] is False
+
+
+def test_registered_optimizer_360_calibration_reload_execution_report(qapp, tmp_path):
+    case = OPTIMIZER_360_CASE
+    report = run_registered_scenario(
+        case.case_id,
+        output_root=tmp_path,
+        visible=False,
+        seed=case.qualification.cli_seed,
+        speed_multiplier=1000.0,
+        timeout_seconds=case.qualification.offscreen_timeout_seconds,
+        run_id="registered-optimizer-360-calibration-reload",
+    )
+    validate_report_v1(report)
+    workflow = report["metrics"]["workflow"]["values"]
+    assert report["classification"]["status"] == "pass", json.dumps(
+        {
+            "errors": workflow["errors"],
+            "failed_actions": [
+                row for row in workflow["action_results"] if row["status"] == "fail"
+            ],
+            "assertions": workflow["assertion_results"],
+        },
+        indent=2,
+    )
+    assert report["run"]["scenario_name"] == case.identity.scenario_name
+    assert report["workload"]["case_sha256"] == case.sha256()
+    assert report["workload"]["count_oracle_sha256"] == case.count_oracle_sha256()
+    assert report["workload"]["expected_completion_count"] == 1800
+    assert report["workload"]["expected_droplets"] == 46208
+    assert workflow["completed_stock_well_count"] == 1800
+    assert workflow["array_complete_count"] == 5
+    assert workflow["action_count"] <= workflow["action_cap"] == 160
+    assert {
+        row["assertion_id"]: row["decision"]
+        for row in workflow["assertion_results"]
+    } == {assertion_id: "pass" for assertion_id in OPTIMIZER_360_REQUIRED_ASSERTIONS}
+    assert set(report["artifacts"]["screenshots"]) == set(
+        OPTIMIZER_360_REQUIRED_SCREENSHOTS
+    )
+
+    terminal = report["metrics"]["persistence"]["values"][
+        "optimizer_360_calibration_lifecycle"
+    ]["terminal"]
+    assert terminal["terminal"]["plan_revision"] == 8
+    assert terminal["terminal"]["plan_state"] == "completed"
+    assert terminal["terminal"]["total_added_droplets"] == 46208
+    assert len(terminal["intent_counts"]) == 1800
+    assert len(terminal["simulator_dispenses"]) == 1800
+    assert len(terminal["application_sessions"]) == 3
+    assert all(terminal["checks"].values())
+    assert report["metrics"]["queue"]["values"] == {
+        "unexpected_starvation_count": 0,
+        "queue_drained_at_terminal": True,
+        "simulator_dispense_overflow_count": 0,
+    }

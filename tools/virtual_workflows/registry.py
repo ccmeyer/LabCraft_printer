@@ -229,6 +229,19 @@ _SCENARIO_DEFINITIONS = {
         supports_injected_stall=False,
         supports_report_sets=False,
     ),
+    "optimizer_360_calibration_reload_execution_v1": ScenarioDefinition(
+        registry_id="optimizer_360_calibration_reload_execution_v1",
+        workload_id="optimizer_360_calibration_reload_execution_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "optimizer_360_calibration_reload_execution_v1.json"
+        ),
+        expected_completion_count=1800,
+        scenario_name="optimizer_360_calibration_reload_execution",
+        runner_family="composed_journey",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
 }
 REGISTERED_SCENARIOS: Mapping[str, ScenarioDefinition] = MappingProxyType(
     _SCENARIO_DEFINITIONS

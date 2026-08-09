@@ -48,6 +48,10 @@ from tools.virtual_workflows.joined_interaction_cases import (
     JOINED_INTERACTION_CASE_ID,
     JOINED_INTERACTION_FIXTURE_PATH,
 )
+from tools.virtual_workflows.optimizer_360_cases import (
+    OPTIMIZER_360_CASE_ID,
+    OPTIMIZER_360_FIXTURE_PATH,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -80,6 +84,7 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         MIXED_MODE_WORKLOAD_ID,
         DISCONNECT_WORKLOAD_ID,
         JOINED_INTERACTION_CASE_ID,
+        OPTIMIZER_360_CASE_ID,
     )
 
     for scenario_id in (WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID):
@@ -195,6 +200,28 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         "ui.real_app_construction",
         "execution.randomized_calibration_reload_execution",
     ]
+    optimizer_360 = _row(payload, "scenarios", OPTIMIZER_360_CASE_ID)
+    assert optimizer_360["status"] == "active"
+    assert optimizer_360["tier"] == "stress"
+    assert optimizer_360["suite_ids"] == ["host_stress"]
+    assert optimizer_360["supported_platforms"] == ["windows_sil"]
+    assert optimizer_360["timeout_seconds"] == 600
+    assert optimizer_360["workload_fixture_path"] == (
+        OPTIMIZER_360_FIXTURE_PATH.relative_to(REPO_ROOT).as_posix()
+    )
+    assert optimizer_360["capability_ids"] == [
+        "sil.hardware_isolation.host",
+        "ui.real_app_construction",
+        "execution.optimizer_360_calibration_reload_execution",
+    ]
+    host_stress = _row(payload, "suites", "host_stress")
+    assert host_stress["scenario_ids"] == [
+        "print_array_stress_384x10_v1",
+        OPTIMIZER_360_CASE_ID,
+    ]
+    assert OPTIMIZER_360_CASE_ID not in _row(
+        payload, "suites", "pi_stress"
+    )["scenario_ids"]
     multi_stock = _row(payload, "scenarios", MULTI_STOCK_WORKLOAD_ID)
     assert multi_stock["status"] == "active"
     assert multi_stock["suite_ids"] == ["lifecycle"]
