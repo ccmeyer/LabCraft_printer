@@ -1670,6 +1670,7 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
         """Display one completed execution read-only without runtime activation."""
 
         from pathlib import Path
+        from ExecutionPlan import canonical_sha256
         from tools.virtual_workflows.actions import capture_milestone, execute_action
 
         directory = Path(experiment_dir).resolve()
@@ -1890,6 +1891,12 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 "display_projection_performed": True,
                 "runtime_assignments": assignments,
                 "expected_assignments": expected_assignments,
+                "runtime_assignment_count": len(assignments),
+                "expected_assignment_count": len(expected_assignments),
+                "runtime_assignments_sha256": canonical_sha256(assignments),
+                "expected_assignments_sha256": canonical_sha256(
+                    expected_assignments
+                ),
                 "displayed_targets": displayed_targets,
                 "displayed_added": displayed_added,
                 "persisted_added": expected_added,

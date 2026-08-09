@@ -981,21 +981,34 @@ Save and `Finalize Design` publish material pre-start edits through the same tra
 replacement path. Started, progressed, resumed, calibrated, or invalid
 executions remain fail-closed and require the editable-copy workflow instead.
 
-The Experiment Editor exposes four explicit lifecycle actions:
+The Experiment Editor exposes five explicit lifecycle actions:
 
 - `Finalize Design` is enabled for a new draft or editable `PREPARED` design.
   A `ready_to_start` eligibility result does not relabel an editable design.
 - `Load Execution` is enabled for a locked, inactive saved execution whose
   authoritative runtime can be reconstructed.
+- `View Completed Experiment` is enabled only for a valid authoritative
+  `COMPLETED` execution. It closes the editor and populates the main plate,
+  stock, reaction, well-assignment, target, and final-progress display from
+  the saved plan and progress. Every assigned well is shown complete and the
+  Experiment Guide reports `Next: Experiment complete`.
 - `Execution Loaded` is disabled when that authoritative runtime is already
   active.
-- `Execution Locked` is disabled for blocked, terminal, invalid, or otherwise
-  non-activatable saved executions.
+- `Execution Locked` is disabled for blocked, aborted, invalid, ambiguous, or
+  otherwise non-activatable saved executions.
 
 `Load Execution` only reconstructs the saved runtime. It does not start or
 resume printing; the operator must still use the applicable print/start or
 resume action. Locked executions show a full-width lifecycle banner while the
 lower status line remains available for transient details and errors.
+
+`View Completed Experiment` is display-only. It does not activate the
+authoritative runtime, create or repair a resume checkpoint, rewrite exports
+or audit files, assign saved reagent heads to physical rack slots, change the
+Controller out of `idle`, or send machine/simulator commands. Start Array,
+plate calibration, and stock-preparation controls remain disabled while this
+completed projection is displayed. Use `Create Editable Copy...` for any
+change; the completed source remains byte-identical.
 
 Run the post-start editor boundary directly with:
 

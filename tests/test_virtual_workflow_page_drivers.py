@@ -792,6 +792,10 @@ def test_completed_loader_inspects_terminal_bundle_without_activation(
     assert evidence["activation_performed"] is False
     assert evidence["display_projection_performed"] is True
     assert evidence["runtime_assignments"] == {"A1": "reaction-1"}
+    assert evidence["runtime_assignment_count"] == 1
+    assert evidence["runtime_assignments_sha256"] == (
+        evidence["expected_assignments_sha256"]
+    )
     assert context.action_results[-1]["action_id"] == (
         "experiment.inspect_completed_via_ui"
     )

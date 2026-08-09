@@ -2593,10 +2593,15 @@ def completed_terminal_reload_assertion(
             "plan_exact": before.plan_json == after.plan_json,
             "well_assignments_exact": before.plan_well_ids == after.plan_well_ids
             and before.plan_assignments == after.plan_assignments,
-            "display_projection_matches_plan": after.runtime_assignments
-            == after.plan_assignments
-            and dict(loaded.get("runtime_assignments") or {})
-            == dict(after.plan_assignments),
+            "display_projection_matches_plan": dict(after.runtime_assignments)
+            == dict(after.plan_assignments)
+            and int(loaded.get("runtime_assignment_count", -1))
+            == len(after.plan_assignments)
+            and int(loaded.get("expected_assignment_count", -1))
+            == len(after.plan_assignments)
+            and bool(loaded.get("runtime_assignments_sha256"))
+            and loaded.get("runtime_assignments_sha256")
+            == loaded.get("expected_assignments_sha256"),
             "revision_history_exact": before.history_json == after.history_json,
             "progress_exact": before.progress_plan_id == after.progress_plan_id
             and before.progress_plan_revision == after.progress_plan_revision
