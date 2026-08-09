@@ -3702,12 +3702,11 @@ def clean_joined_session_rotation_assertion(
     rotation: Mapping[str, Any],
     first_session_observer: Mapping[str, Any],
     second_session_observer: Mapping[str, Any],
+    oracle_checkpoint_id: str = "calibrated_zero_progress",
 ) -> AssertionResult:
     """Join a fresh clean-start activation to literal persisted case truth."""
 
     from ExecutionCalibrationStore import load_execution_calibrations
-    from tools.virtual_workflows.joined_interaction_cases import DESIGN_A_STOCK_ID
-
     source = rotation["source_bundle"]
     loaded = rotation["loaded_bundle"]
     activated = rotation["activated_bundle"]
@@ -3715,7 +3714,7 @@ def clean_joined_session_rotation_assertion(
     expected = normalize_stock_well_counts(
         (
             StockWellCount(row.stock_id, row.well_id, row.target_droplets)
-            for row in case.oracle("calibrated_zero_progress").rows
+            for row in case.oracle(oracle_checkpoint_id).rows
         ),
         label="joined fresh literal",
     )
@@ -3745,7 +3744,9 @@ def clean_joined_session_rotation_assertion(
         stock.stock_id: stock
         for stock in context.experiment_model.get_execution_plan_snapshot().stocks
     }
-    design_a = stocks.get(DESIGN_A_STOCK_ID)
+    first_calibration = case.calibrations[0]
+    calibrated_stock = stocks.get(first_calibration.stock_id)
+    calibrated_revision = first_calibration.output_revision
     lifecycle_keys = (
         "begins",
         "attachments",
@@ -3785,7 +3786,7 @@ def clean_joined_session_rotation_assertion(
         "revision_three_active_exact": source.plan_revision
         == loaded.plan_revision
         == activated.plan_revision
-        == 3
+        == calibrated_revision
         and source.plan_state == loaded.plan_state == activated.plan_state == "active",
         "assignments_exact": source.assignments
         == activated.assignments
@@ -3794,7 +3795,7 @@ def clean_joined_session_rotation_assertion(
         == activated.expected_assignments
         == {row.well_id: row.reaction_id for row in case.assignments},
         "history_exact": [int(row.get("plan_revision", 0)) for row in activated.history]
-        == [1, 2, 3],
+        == list(range(1, calibrated_revision + 1)),
         "loaded_inactive_ready_to_start": not loaded.runtime_active
         and loaded.eligibility_status == "ready_to_start"
         and not loaded.resume_present,
@@ -3804,13 +3805,13 @@ def clean_joined_session_rotation_assertion(
         "activated_clean_resume_reference_exact": activated.resume_present
         and activated.resume_state == "clean"
         and (activated.resume_plan_id, activated.resume_plan_revision)
-        == (activated.plan_id, 3)
+        == (activated.plan_id, calibrated_revision)
         and activated.resume_intent_count == 0,
         "progress_reference_exact": (
             source.progress_plan_id,
             source.progress_plan_revision,
         )
-        == (source.plan_id, 3)
+        == (source.plan_id, calibrated_revision)
         == (loaded.progress_plan_id, loaded.progress_plan_revision)
         == (activated.progress_plan_id, activated.progress_plan_revision),
         "loaded_literal_counts_exact": all(
@@ -3831,11 +3832,11 @@ def clean_joined_session_rotation_assertion(
             for row in values.get("progress_added", ())
         ),
         "calibration_head_join_exact": len(record_rows) == 1
-        and record.get("stock_id") == DESIGN_A_STOCK_ID
-        and record.get("printer_head_id") == "virtual-head-m11-design-a-v1"
-        and design_a is not None
-        and design_a.calibration_record_key == record.get("record_id")
-        and design_a.printer_head_id == record.get("printer_head_id"),
+        and record.get("stock_id") == first_calibration.stock_id
+        and record.get("printer_head_id") == first_calibration.printer_head_id
+        and calibrated_stock is not None
+        and calibrated_stock.calibration_record_key == record.get("record_id")
+        and calibrated_stock.printer_head_id == record.get("printer_head_id"),
         "first_session_zero_execution": all(
             not lifecycle_1.get(name) for name in lifecycle_keys
         ),
@@ -3881,6 +3882,7 @@ def joined_remaining_calibrations_assertion(
     *,
     case: Any,
     calibration_evidence: list[Mapping[str, Any]],
+    oracle_checkpoint_id: str = "all_stocks_calibrated",
 ) -> tuple[AssertionResult, Any]:
     """Prove all joined calibrations and literal revision-5 counts by ID."""
 
@@ -3894,7 +3896,7 @@ def joined_remaining_calibrations_assertion(
     expected = normalize_stock_well_counts(
         (
             StockWellCount(row.stock_id, row.well_id, row.target_droplets)
-            for row in case.oracle("all_stocks_calibrated").rows
+            for row in case.oracle(oracle_checkpoint_id).rows
         ),
         label="joined all-calibrated literal",
     )
@@ -3937,24 +3939,25 @@ def joined_remaining_calibrations_assertion(
         )
         for stock_id, calibration in calibrations.items()
     }
+    final_revision = case.calibrations[-1].output_revision
     checks = {
         "revision_history_exact": [
             int(item.get("plan_revision", 0)) for item in snapshot.history
         ]
-        == [1, 2, 3, 4, 5],
-        "revision_five_active": snapshot.plan_revision == 5
+        == list(range(1, final_revision + 1)),
+        "revision_five_active": snapshot.plan_revision == final_revision
         and snapshot.plan_state == "active",
         "progress_reference_revision_five": (
             snapshot.progress_plan_id,
             snapshot.progress_plan_revision,
         )
-        == (snapshot.plan_id, 5),
+        == (snapshot.plan_id, final_revision),
         "resume_reference_revision_five": snapshot.resume_present
         and snapshot.resume_state == "clean"
         and (snapshot.resume_plan_id, snapshot.resume_plan_revision)
-        == (snapshot.plan_id, 5)
+        == (snapshot.plan_id, final_revision)
         and snapshot.resume_intent_count == 0,
-        "three_calibration_records": len(records) == 3
+        "three_calibration_records": len(records) == len(case.calibrations)
         and set(records) == set(calibrations),
         "calibration_stock_head_record_joins": all(identity_checks.values()),
         "literal_plan_counts_exact": observed["plan_targets"] == expected,
@@ -3965,7 +3968,7 @@ def joined_remaining_calibrations_assertion(
         "remaining_calibration_order_exact": [
             str(row.get("stock_id")) for row in calibration_evidence
         ]
-        == [case.calibrations[1].stock_id, case.calibrations[2].stock_id],
+        == [row.stock_id for row in case.calibrations[1:]],
         "remaining_heads_returned": all(
             (row.get("return") or {}).get("returned") is True
             for row in calibration_evidence

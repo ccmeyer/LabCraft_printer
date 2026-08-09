@@ -232,6 +232,15 @@ OPTIMIZER_360_FIRST_CALIBRATION_REQUIRED_ASSERTIONS = (
     "experiment.optimizer_360_design_exact",
     "execution.calibrated_zero_progress_exact",
 )
+OPTIMIZER_360_CALIBRATION_CHAIN_REQUIRED_ASSERTIONS = (
+    *OPTIMIZER_360_FIRST_CALIBRATION_REQUIRED_ASSERTIONS,
+    "ui.fresh_application_session_constructed",
+    "execution.first_session_teardown_clean",
+    "execution.authoritative_reload_valid",
+    "execution.authoritative_runtime_rehydrated",
+    "execution.clean_session_rotation_exact",
+    "execution.remaining_calibrations_exact",
+)
 EXPERIMENT_DESIGN_REJECTED_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
     "ui.real_app_constructed",
@@ -1577,6 +1586,111 @@ def run_optimizer_360_first_calibration_checkpoint(runtime: JourneyRuntime) -> N
     runtime.observations["optimizer_360_prepared_snapshot"] = prepared
     runtime.observations["optimizer_360_calibrated_snapshot"] = calibrated
     runtime.observations["optimizer_360_session_1_observer"] = observer_snapshot
+
+
+def run_optimizer_360_calibration_chain(runtime: JourneyRuntime) -> None:
+    """Continue the corrected optimizer case through all five calibrations."""
+
+    run_optimizer_360_first_calibration_checkpoint(runtime)
+    case = OPTIMIZER_360_CASE
+    context = runtime.context
+    calibrated = runtime.observations["optimizer_360_calibrated_snapshot"]
+    first_observer = runtime.observations["optimizer_360_session_1_observer"]
+
+    rotation = run_clean_authoritative_session_rotation_boundary(
+        runtime,
+        experiment_dir=calibrated.experiment_dir,
+        expected_name=str(calibrated.metadata.get("name") or ""),
+        completed_count=lambda: 0,
+        pass_context=lambda: _current_pass_context(runtime),
+        inspect_loaded=lambda: capture_count_snapshot(context),
+        inspect_activated=lambda: capture_count_snapshot(context),
+        observer_key="optimizer_360_session_2_execution",
+    )
+    second_observer = runtime.observations["execution_observer"].snapshot()
+    fresh_result = clean_joined_session_rotation_assertion(
+        context,
+        case=case,
+        rotation=rotation,
+        first_session_observer=first_observer,
+        second_session_observer=second_observer,
+        oracle_checkpoint_id="range_a_calibrated",
+    )
+    runtime.add_assertion(fresh_result)
+    runtime.observations["optimizer_360_calibration_lifecycle"][
+        "clean_session_rotation"
+    ] = dict(fresh_result.evidence)
+
+    runtime.observations.update(
+        {
+            "expected_wells": tuple(case.editor.selected_well_ids),
+            "expected_stock_ids": tuple(
+                row.stock_id for row in case.execution_passes
+            ),
+            "completed_wells": [],
+            "array_completions": [],
+            "pass_boundaries": [],
+            "head_staging": [],
+            "returned_head_ids": [],
+            "starvation_events": [],
+            "current_pass": {"index": -1, "starting_count": 0, "stock_id": None},
+        }
+    )
+    _connect_execution_signals(runtime, array_complete=True, machine_errors=True)
+    _install_starvation_observer(runtime)
+    runtime.run_steps(machine_startup_steps())
+
+    remaining: list[Mapping[str, Any]] = []
+    milestone_by_stock = {
+        case.calibrations[1].stock_id: "range_b_calibrated",
+        case.calibrations[2].stock_id: "range_c_calibrated",
+        case.calibrations[3].stock_id: "range_d_calibrated",
+        case.calibrations[4].stock_id: "all_stocks_calibrated",
+    }
+    for calibration in case.calibrations[1:]:
+        evidence = run_stock_calibration_only(
+            runtime,
+            CalibrationOnlySpec(
+                stock_id=calibration.stock_id,
+                printer_head_id=calibration.printer_head_id,
+                pulse_width_us=calibration.print_pulse_width_us,
+                pressure_psi=2.0,
+                frequency_hz=100,
+                initial_volume_uL=100.0,
+                expected_volume_nL=float(calibration.droplet_volume_nL),
+                staging_slot=(calibration.order - 1) % 4,
+                apply_success_title=(
+                    "Applied (Fill)"
+                    if calibration.reagent_name == "Water"
+                    else "Applied"
+                ),
+                enable_pressure_regulation=calibration.order == 2,
+                return_head=True,
+            ),
+        )
+        remaining.append(evidence)
+        current = context.experiment_model.get_execution_plan_snapshot()
+        capture_milestone(
+            context,
+            milestone_by_stock[calibration.stock_id],
+            evidence={
+                "stock_id": calibration.stock_id,
+                "printer_head_id": calibration.printer_head_id,
+                "plan_revision": current.plan_revision,
+            },
+        )
+    result, fully_calibrated = joined_remaining_calibrations_assertion(
+        context,
+        case=case,
+        calibration_evidence=remaining,
+    )
+    runtime.add_assertion(result)
+    runtime.observations["optimizer_360_calibration_lifecycle"][
+        "remaining_calibrations"
+    ] = dict(result.evidence)
+    runtime.observations["optimizer_360_fully_calibrated_snapshot"] = (
+        fully_calibrated
+    )
 
 
 def run_joined_calibrated_checkpoint(runtime: JourneyRuntime) -> None:
@@ -4409,6 +4523,7 @@ __all__ = [
     "JOINED_CALIBRATED_CHECKPOINT_REQUIRED_ASSERTIONS",
     "JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS",
     "OPTIMIZER_360_FIRST_CALIBRATION_REQUIRED_ASSERTIONS",
+    "OPTIMIZER_360_CALIBRATION_CHAIN_REQUIRED_ASSERTIONS",
     "OPTIMIZER_360_WORKLOAD_ID",
     "JourneyRunConfig",
     "MULTI_STOCK_REQUIRED_ASSERTIONS",
@@ -4433,6 +4548,7 @@ __all__ = [
     "run_matrix_case",
     "run_joined_calibrated_checkpoint",
     "run_optimizer_360_first_calibration_checkpoint",
+    "run_optimizer_360_calibration_chain",
     "run_exploration_sequence",
     "run_editor_create_finalize_journey",
     "run_disconnect_fail_closed_24_journey",
