@@ -149,7 +149,7 @@ def test_qualification_contract_is_exact_and_scenario_is_registered_complete():
         "design_a_pass_complete", "design_b_pass_complete",
         "water_pass_complete", "completed", "terminal_reloaded",
     )
-    assert registered_scenario_ids()[-1] == JOINED_INTERACTION_CASE_ID
+    assert JOINED_INTERACTION_CASE_ID in registered_scenario_ids()
 
 
 @pytest.mark.parametrize(

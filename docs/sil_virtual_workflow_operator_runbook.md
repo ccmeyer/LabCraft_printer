@@ -254,6 +254,52 @@ the default Python suite (`4192 passed, 90 skipped`). See
 `docs/sil_interactive_simulation_milestone_11_slice_5_completion_record.md`
 for retained paths, hashes, exact evidence, and limitations.
 
+## Optimizer 360 calibration/reload host stress
+
+Use `optimizer_360_calibration_reload_execution_v1` for changes that can affect
+optimizer-selected stocks, high-cardinality randomized designs, repeated
+calibration requantization, ID-keyed execution, or terminal reconstruction.
+It is Windows-only and belongs only to `host_stress`; never select it through a
+Pi lane.
+
+Inspect and run offscreen evidence:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario optimizer_360_calibration_reload_execution_v1 --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario optimizer_360_calibration_reload_execution_v1 `
+  --output-root verification_reports\milestone_11a\offscreen_direct `
+  --seed 1 --speed-multiplier 20 --timeout-seconds 600 `
+  --qt-platform offscreen
+```
+
+Run visible Windows evidence:
+
+```powershell
+$env:QT_QPA_PLATFORM = "windows"
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario optimizer_360_calibration_reload_execution_v1 `
+  --output-root verification_reports\milestone_11a\visible_direct `
+  --seed 1 --speed-multiplier 20 --timeout-seconds 900 --visible
+```
+
+Always run the emitted `run.replay_command` exactly. Require optimizer stocks
+222.22222222222223, 100, 555.5555555555555, and 20; seven approximate and zero
+unreachable targets; 360 assigned wells in rows A-O; all 24 row-P wells
+unassigned; and five applied calibration records. Terminal evidence must show
+pass boundaries 360/720/1080/1440/1800, 1,800 unique begins/attachments/
+DISPENSE commands/completions, 46,208 droplets, revisions 1-8, three distinct
+application sessions, no dispatch in sessions 1 and 3, and zero overflow,
+discard, duplicate, or starvation evidence.
+
+At the Milestone 11A closeout source, the new child passes in `host_stress`.
+The complete aggregate remains red because the older 384x10 child compares its
+per-stock 1300-1390 us fixture values with the existing fixed 1355 us stress
+staging value. Retain that report as a separate finding; do not change the new
+oracle, production behavior, or timeout to conceal it.
+
 ## Evidence layout and authority
 
 Generated data remains beneath the ignored `verification_reports/` tree:

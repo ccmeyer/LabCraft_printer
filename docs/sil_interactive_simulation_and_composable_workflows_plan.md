@@ -1738,6 +1738,39 @@ Rollback:
 - retain independently useful Milestone 9 and 10 matrix coverage;
 - revert a generalized reload phase only if it has no other validated caller.
 
+### Milestone 11A: Optimizer-driven 360-reaction calibration lifecycle
+
+Status: `complete` (2026-08-08; five independently reviewed commits).
+
+Delivered:
+
+- one Windows-only, on-demand `host_stress` scenario,
+  `optimizer_360_calibration_reload_execution_v1`;
+- production optimizer coverage with blank fixed-stock fields, four reagents,
+  360 randomized reactions, and literal nearest-achievable target truth;
+- five stock-specific calibration applications from 9 nL to distinct 10.8,
+  12.6, 14.4, 16.2, and 18 nL effective volumes;
+- clean revision-3 session rotation, exact revision-7 calibrated state, five
+  stock passes, 1,800 durable intents, 46,208 droplets, and a read-only
+  terminal revision-8 third-session reload;
+- direct/replay offscreen and visible evidence plus focused, lifecycle,
+  regression, and complete Python-suite qualification.
+
+Qualification note:
+
+- the new scenario passed as the second child of the complete `host_stress`
+  aggregate;
+- the aggregate remained failing solely because the pre-existing 384x10 child
+  stages fixed 1355 us stress calibration while its fixture assertion expects
+  per-stock 1300-1390 us values;
+- Milestone 11A does not alter that prior fixture, production behavior, or its
+  evidence. A correction remains separately reviewable.
+
+Rollback:
+
+- remove the new case, scenario/capability registration, tests, and generic
+  wrappers unused by Milestone 11 while retaining all Milestones 9-11 truth.
+
 ### Milestone 12: Editor, execution-preflight, and persistence safeguards
 
 Status: `planned`
@@ -2202,6 +2235,9 @@ Rollback order:
   generalization while retaining existing editor journeys.
 - Milestone 11 removes the joined interaction journey while retaining the
   independently useful Milestone 9 and 10 matrices.
+- Milestone 11A removes only the optimizer-driven 360-reaction case,
+  host-stress registration, and case-parameterized wrappers unused by
+  Milestone 11.
 - Milestone 12 removes one safeguard catalog or isolated fault builder at a
   time without weakening production guards.
 - Milestone 13 removes the new generated campaign while retaining every
@@ -2284,7 +2320,7 @@ authoritative reload/resume coverage.
 
 ## Definition Of Done
 
-Milestones 0-11 are complete. The expanded effort is complete when:
+Milestones 0-11 and 11A are complete. The expanded effort is complete when:
 
 - a dedicated visible interactive launcher safely constructs the real
   application in simulation mode;
@@ -2334,7 +2370,7 @@ Milestones 0-11 are complete. The expanded effort is complete when:
 
 ## Current Next Action
 
-Milestones 7, 8, 9, 10, and 11 are complete. Their operator capabilities
+Milestones 7, 8, 9, 10, 11, and 11A are complete. Their operator capabilities
 remain the current qualified baseline. Milestone 12 is the current next action.
 Milestone 10 closed as follows:
 
@@ -2378,6 +2414,21 @@ regression suite/replays, focused compatibility checks, and the complete
 default Python suite; retained evidence and all eleven visible screenshots
 were audited. Milestone 12 planning is now the current next action. Any future
 production defect still requires a separate reviewed correction plan.
+
+Milestone 11A is complete in five independently reviewed slices recorded in
+`docs/sil_interactive_simulation_milestone_11a_execution_plan.md`. It adds the
+Windows-only `optimizer_360_calibration_reload_execution_v1` host-stress case:
+360 randomized four-reagent reactions, four optimizer-selected reagent stocks
+plus Water, five distinct calibration volumes, 1,800 exact stock/well intents,
+46,208 droplets, and terminal revision-8 reconstruction across three
+application sessions. Offscreen and visible direct runs and exact replays,
+the existing Milestone 11 scenario, lifecycle, host regression, focused tests,
+and the complete default Python suite passed. The complete host-stress
+aggregate was also run: the new child passed, while the pre-existing 384x10
+child retained its independently scoped pulse-width fixture/staging mismatch.
+That finding is recorded without changing its fixture or production behavior;
+any correction requires a separate reviewed plan. Milestone 12 remains the
+current next action.
 
 The Milestone 9 count oracle is stable and is reused only to normalize
 observed stock/well plan and runtime counts. Milestone 10 expected values remain

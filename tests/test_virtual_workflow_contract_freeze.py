@@ -96,7 +96,7 @@ def test_milestone_11_joined_contract_is_frozen_with_complete_registration():
     assert joined_fixture_sha256() == (
         "bf9631efdf2e0ad04e2310b378330a87941d05c157d69a6c47b69b645dbbe118"
     )
-    assert registered_scenario_ids()[-1] == JOINED_INTERACTION_CASE_ID
+    assert JOINED_INTERACTION_CASE_ID in registered_scenario_ids()
     registry = get_registered_scenario(JOINED_INTERACTION_CASE_ID)
     journey = get_journey_definition(JOINED_INTERACTION_CASE_ID)
     assert registry.runner_family == "composed_journey"
