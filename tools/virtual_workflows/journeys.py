@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -19,6 +21,7 @@ from tools.virtual_workflows.persistence_safeguards import (
     prepare_persistence_fault,
 )
 from tools.virtual_workflows.assertions import (
+    AssertionResult,
     ExecutionLifecycleExpectation,
     calibration_assertion,
     cleanup_assertion,
@@ -157,6 +160,9 @@ SMOKE_SCENARIO_VERSION = "1"
 EDITOR_WORKLOAD_ID = "experiment_editor_create_finalize_v1"
 EDITOR_SCENARIO_NAME = "experiment_editor_create_finalize"
 EDITOR_SCENARIO_VERSION = "1"
+LEGACY_READ_ONLY_WORKLOAD_ID = "legacy_experiment_read_only_v1"
+LEGACY_READ_ONLY_SCENARIO_NAME = "legacy_experiment_read_only"
+LEGACY_READ_ONLY_SCENARIO_VERSION = "1"
 EDITOR_REVISION_WORKLOAD_ID = "experiment_editor_prestart_rename_refinalize_v1"
 EDITOR_REVISION_SCENARIO_NAME = "experiment_editor_prestart_rename_refinalize"
 EDITOR_REVISION_SCENARIO_VERSION = "1"
@@ -239,6 +245,30 @@ EDITOR_REQUIRED_ASSERTIONS = (
     "experiment.runtime_assignments_match",
     "experiment.key_files_consistent",
     "artifacts.required_present",
+)
+LEGACY_READ_ONLY_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "experiment.legacy_read_only_exact",
+    "analysis.legacy_plate_reader_ready",
+    "experiment.legacy_editable_copy_fresh",
+    "experiment.legacy_source_unchanged",
+    "artifacts.required_present",
+)
+LEGACY_READ_ONLY_REQUIRED_UI_ACTIONS = frozenset(
+    {
+        "experiment.inspect_legacy_via_ui",
+        "analysis.open_plate_reader_via_ui",
+        "editor.create_editable_copy_via_ui",
+    }
+)
+LEGACY_READ_ONLY_REQUIRED_SCREENSHOTS = frozenset(
+    {
+        "legacy_editor",
+        "legacy_main",
+        "legacy_plate_reader",
+        "legacy_editable_copy",
+    }
 )
 EXPERIMENT_DESIGN_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
@@ -789,6 +819,15 @@ def _editor_fixture() -> tuple[dict[str, Any], Path]:
 
     path = Path(__file__).resolve().parent / "fixtures" / f"{EDITOR_WORKLOAD_ID}.json"
     return load_editor_create_finalize_fixture(path), path
+
+
+def _legacy_read_only_fixture() -> tuple[dict[str, Any], Path]:
+    path = (
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / f"{LEGACY_READ_ONLY_WORKLOAD_ID}.json"
+    )
+    return json.loads(path.read_text(encoding="utf-8")), path
 
 
 def _editor_revision_fixture() -> tuple[dict[str, Any], Path]:
@@ -1415,6 +1454,160 @@ def _editor_body(runtime: JourneyRuntime) -> None:
             "eligibility_status": reload_result.evidence.get("eligibility_status"),
             "assertion_count": len(EDITOR_REQUIRED_ASSERTIONS),
         },
+    )
+
+
+def _hash_legacy_fixture(directory: Path) -> dict[str, str]:
+    source_names = {
+        "experiment_design.json",
+        "progress.json",
+        "key.csv",
+        "concentration_key.csv",
+        "plate_reader_export.txt",
+    }
+    return {
+        path.relative_to(directory).as_posix(): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in sorted(directory.iterdir())
+        if path.is_file() and path.name in source_names
+    }
+
+
+def _materialize_legacy_read_only_fixture(runtime: JourneyRuntime) -> tuple[Path, Path]:
+    fixture = runtime.fixture
+    directory = (
+        Path(runtime.context.experiment_model.experiments_root)
+        / fixture["experiment_name"]
+    )
+    directory.mkdir(parents=True, exist_ok=False)
+    for name, payload in (
+        ("experiment_design.json", fixture["experiment_design"]),
+        ("progress.json", fixture["progress"]),
+    ):
+        (directory / name).write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    (directory / "key.csv").write_text(
+        fixture["key_csv"], encoding="utf-8"
+    )
+    (directory / "concentration_key.csv").write_text(
+        fixture["concentration_key_csv"], encoding="utf-8"
+    )
+    plate_reader_path = directory / "plate_reader_export.txt"
+    rows = [
+        ["##BLOCKS= 1"],
+        [
+            "Plate:", "Plate1", "1.3", "TimeFormat", "Kinetic",
+            "Fluorescence", "FALSE", "Raw", "FALSE", "2", "600", "60",
+            "", "", "", "1", "510 ", "1", "5", "96", "485 ",
+            "Manual", "", "", "", "10", "High", "", "", "1", "16",
+            "485 ", "", "",
+        ],
+        ["Time", "Temperature(C)", "A1", "A2"],
+        ["00:00:00", "37", "10", "20"],
+        ["00:01:00", "37", "11", "21"],
+        [],
+        ["~End"],
+    ]
+    with plate_reader_path.open("w", encoding="utf-16", newline="") as handle:
+        csv.writer(handle, delimiter="\t").writerows(rows)
+    return directory, plate_reader_path
+
+
+def _legacy_read_only_body(runtime: JourneyRuntime) -> None:
+    context = runtime.context
+    runtime.add_assertion(simulation_identity_assertion(context))
+    runtime.add_assertion(real_application_assertion(context))
+    directory, plate_reader_path = _materialize_legacy_read_only_fixture(runtime)
+    source_before = _hash_legacy_fixture(directory)
+
+    loader = ExperimentLoaderDriver(context).inspect_legacy_execution(
+        directory,
+        expected_name=str(runtime.fixture["experiment_name"]),
+    )
+    runtime.observations["legacy_loader"] = loader
+    runtime.add_assertion(
+        AssertionResult(
+            "experiment.legacy_read_only_exact",
+            "legacy_main",
+            "pass" if all(loader["checks"].values()) else "fail",
+            ("ui", "model", "simulator"),
+            loader,
+        )
+    )
+
+    analysis = ExperimentLoaderDriver(
+        context
+    ).validate_legacy_plate_reader_analysis(
+        directory,
+        plate_reader_path,
+        action_runner=runtime.harness.run_action,
+    )
+    runtime.observations["legacy_analysis"] = analysis
+    runtime.add_assertion(
+        AssertionResult(
+            "analysis.legacy_plate_reader_ready",
+            "legacy_plate_reader",
+            "pass"
+            if analysis["paths_prefilled"]
+            and analysis["preview_valid"]
+            and analysis["preview_ok"]
+            and not analysis["preview_errors"]
+            else "fail",
+            ("ui", "controller", "analysis"),
+            analysis,
+        )
+    )
+
+    copy_name = f"{runtime.fixture['experiment_name']}-editable-copy"
+    editable_copy = ExperimentLoaderDriver(context).create_legacy_editable_copy(
+        directory,
+        copy_name=copy_name,
+    )
+    runtime.observations["legacy_editable_copy"] = editable_copy
+    copy_checks = {
+        key: bool(editable_copy[key])
+        for key in (
+            "name_dialog_handled",
+            "controls_editable",
+            "legacy_state_cleared",
+            "progress_empty",
+            "no_execution_plan",
+            "no_resume_checkpoint",
+        )
+    }
+    runtime.add_assertion(
+        AssertionResult(
+            "experiment.legacy_editable_copy_fresh",
+            "legacy_editable_copy",
+            "pass" if all(copy_checks.values()) else "fail",
+            ("ui", "model", "persistence"),
+            {**editable_copy, "checks": copy_checks},
+        )
+    )
+
+    source_after = _hash_legacy_fixture(directory)
+    source_evidence = {
+        "source_unchanged": source_after == source_before,
+        "before": source_before,
+        "after": source_after,
+        "derived_files": sorted(
+            path.relative_to(directory).as_posix()
+            for path in directory.iterdir()
+            if path.is_file() and path.name not in source_before
+        ),
+    }
+    runtime.observations["legacy_source"] = source_evidence
+    runtime.add_assertion(
+        AssertionResult(
+            "experiment.legacy_source_unchanged",
+            "legacy_plate_reader",
+            "pass" if source_evidence["source_unchanged"] else "fail",
+            ("persistence",),
+            source_evidence,
+        )
     )
 
 
@@ -3986,6 +4179,41 @@ def _editor_payload(
     )
 
 
+def _legacy_read_only_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    loader = dict(runtime.observations.get("legacy_loader") or {})
+    analysis = dict(runtime.observations.get("legacy_analysis") or {})
+    editable_copy = dict(
+        runtime.observations.get("legacy_editable_copy") or {}
+    )
+    source = dict(runtime.observations.get("legacy_source") or {})
+    return ComposedReportPayload(
+        workload={
+            **_base_workload(runtime),
+            "experiment_name": runtime.fixture["experiment_name"],
+            "plate_name": runtime.fixture["plate_name"],
+            "well_ids": ["A1", "A2"],
+            "expected_completion_count": 1,
+            "speed_multiplier": runtime.harness.config.speed_multiplier,
+            "timeout_seconds": runtime.harness.config.timeout_seconds,
+        },
+        workflow_values={
+            "loader": loader,
+            "analysis": analysis,
+            "editable_copy": editable_copy,
+            "cleanup_results": [dict(teardown)],
+        },
+        persistence={
+            "status": "measured",
+            "values": source,
+        },
+        limitations=(
+            "The workflow validates application behavior with simulated hardware; no physical commands are permitted.",
+        ),
+    )
+
+
 def _experiment_design_payload(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> ComposedReportPayload:
@@ -5114,6 +5342,16 @@ def _authoritative_reload_artifact(
     )
 
 
+def _legacy_read_only_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return multi_stock_artifacts_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(LEGACY_READ_ONLY_REQUIRED_SCREENSHOTS),
+        teardown=teardown,
+    )
+
+
 def _regression_artifact(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> Any:
@@ -5142,6 +5380,21 @@ def _editor_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> str:
         f"Status: {report['classification']['status']}\n"
         f"Assertions: {passed} / {len(EDITOR_REQUIRED_ASSERTIONS)}\n"
         f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _legacy_read_only_summary(
+    report: Mapping[str, Any], runtime: JourneyRuntime
+) -> str:
+    passed = sum(
+        row["decision"] == "pass"
+        for row in runtime.harness.assertion_results
+    )
+    return (
+        "Older experiment read-only view and plate-reader analysis\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Assertions: {passed} / {len(LEGACY_READ_ONLY_REQUIRED_ASSERTIONS)}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
     )
 
@@ -5414,6 +5667,30 @@ EDITOR_DEFINITION = JourneyDefinition(
     payload_builder=_editor_payload,
     summary_builder=_editor_summary,
 )
+LEGACY_READ_ONLY_DEFINITION = JourneyDefinition(
+    registry_id=LEGACY_READ_ONLY_WORKLOAD_ID,
+    scenario_name=LEGACY_READ_ONLY_SCENARIO_NAME,
+    scenario_version=LEGACY_READ_ONLY_SCENARIO_VERSION,
+    workload_id=LEGACY_READ_ONLY_WORKLOAD_ID,
+    required_action_ids=frozenset(
+        {
+            "app.launch_simulated",
+            "experiment.inspect_legacy_via_ui",
+            "analysis.open_plate_reader_via_ui",
+            "editor.create_editable_copy_via_ui",
+            "artifact.capture_milestone",
+            "scenario.teardown",
+        }
+    ),
+    required_ui_action_ids=LEGACY_READ_ONLY_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=LEGACY_READ_ONLY_REQUIRED_ASSERTIONS,
+    required_screenshots=LEGACY_READ_ONLY_REQUIRED_SCREENSHOTS,
+    fixture_loader=_legacy_read_only_fixture,
+    body=_legacy_read_only_body,
+    artifact_assertion=_legacy_read_only_artifact,
+    payload_builder=_legacy_read_only_payload,
+    summary_builder=_legacy_read_only_summary,
+)
 EDITOR_REVISION_DEFINITION = JourneyDefinition(
     registry_id=EDITOR_REVISION_WORKLOAD_ID,
     scenario_name=EDITOR_REVISION_SCENARIO_NAME,
@@ -5662,6 +5939,7 @@ JOURNEY_DEFINITIONS = {
         SMOKE_DEFINITION,
         REGRESSION_DEFINITION,
         EDITOR_DEFINITION,
+        LEGACY_READ_ONLY_DEFINITION,
         EDITOR_REVISION_DEFINITION,
         EXPLORATION_DEFINITION,
         POST_START_LOCK_DEFINITION,

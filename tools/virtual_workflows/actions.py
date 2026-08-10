@@ -159,6 +159,12 @@ PERSISTENCE_SAFEGUARD_ACTION_IDS = frozenset(
         "experiment.attempt_locked_activation_via_ui",
     }
 )
+LEGACY_READ_ONLY_ACTION_IDS = frozenset(
+    {
+        "experiment.inspect_legacy_via_ui",
+        "analysis.open_plate_reader_via_ui",
+    }
+)
 ACTION_IDS = (
     AUTHORITATIVE_RELOAD_ACTION_IDS
     | MULTI_STOCK_LIFECYCLE_ACTION_IDS
@@ -171,6 +177,7 @@ ACTION_IDS = (
     | EDITOR_SAFEGUARD_ACTION_IDS
     | EXECUTION_PREFLIGHT_SAFEGUARD_ACTION_IDS
     | PERSISTENCE_SAFEGUARD_ACTION_IDS
+    | LEGACY_READ_ONLY_ACTION_IDS
 )
 
 
@@ -200,6 +207,8 @@ ACTION_INTERACTION_SURFACES.update(
         "experiment.load_authoritative_via_ui": InteractionSurface.UI,
         "experiment.inspect_completed_via_ui": InteractionSurface.UI,
         "experiment.activate_authoritative_via_ui": InteractionSurface.UI,
+        "experiment.inspect_legacy_via_ui": InteractionSurface.UI,
+        "analysis.open_plate_reader_via_ui": InteractionSurface.UI,
         "experiment.activate_authoritative": InteractionSurface.MODEL,
         "execution.lock_for_printing": InteractionSurface.MODEL,
         **{

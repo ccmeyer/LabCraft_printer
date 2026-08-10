@@ -352,6 +352,18 @@
       "max_evidence_age_days": null
     },
     {
+      "id": "experiment.legacy_read_only_view",
+      "risk": "Older experiment data could fail to populate the application or accidentally enable hardware actions.",
+      "owner_role": "application verification maintainers",
+      "status": "covered",
+      "required_verification_layers": ["contract", "host_sil"],
+      "active_scenario_ids": ["legacy_experiment_read_only_v1"],
+      "required_assertion_ids": ["experiment.legacy_read_only_exact", "analysis.legacy_plate_reader_ready", "experiment.legacy_editable_copy_fresh", "experiment.legacy_source_unchanged"],
+      "related_source_areas": ["FreeRTOS-interface/Model.py", "FreeRTOS-interface/View.py", "tools/virtual_workflows/page_drivers.py"],
+      "limitations": ["The scenario validates reconstructed application state and analysis inputs with simulated hardware, not physical printing."],
+      "max_evidence_age_days": 30
+    },
+    {
       "id": "hardware.motion_pressure_droplet",
       "risk": "Software evidence could be misrepresented as physical print-quality evidence.",
       "owner_role": "hardware verification maintainers",
@@ -624,6 +636,26 @@
       "limitations": ["The scenario uses three fresh application compositions in one process-wide QApplication and an in-process simulator; it does not validate firmware, protocol framing, physical calibration, motion, pressure, cameras, balance, or droplet quality."],
       "test_node_ids": ["tests/system/test_virtual_workflow_optimizer_360_calibration_lifecycle.py::test_registered_optimizer_360_calibration_reload_execution_report"],
       "pi_safety_evidence": []
+    },
+    {
+      "id": "legacy_experiment_read_only_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "legacy_experiment_read_only_v1",
+      "workload_fixture_id": "legacy_experiment_read_only_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/legacy_experiment_read_only_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 60,
+      "action_ids": ["app.launch_simulated", "experiment.inspect_legacy_via_ui", "analysis.open_plate_reader_via_ui", "editor.create_editable_copy_via_ui", "artifact.capture_milestone", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "experiment.legacy_read_only_exact", "analysis.legacy_plate_reader_ready", "experiment.legacy_editable_copy_fresh", "experiment.legacy_source_unchanged", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "experiment.legacy_read_only_view"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The scenario uses an in-process simulator and does not validate firmware, physical motion, pressure, or droplet quality."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_legacy_read_only.py::test_legacy_read_only_fixture_contract_is_exact", "tests/system/test_virtual_workflow_legacy_read_only.py::test_registered_legacy_read_only_report"],
+      "pi_safety_evidence": []
     }
   ],
   "suites": [
@@ -640,7 +672,7 @@
       "status": "active",
       "kind": "lifecycle",
       "platform": "windows_sil",
-      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1", "print_array_mixed_mode_24x2_v1", "print_array_disconnect_mid_array_24_v1", "randomized_calibration_reload_execution_v1"],
+      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "legacy_experiment_read_only_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1", "print_array_mixed_mode_24x2_v1", "print_array_disconnect_mid_array_24_v1", "randomized_calibration_reload_execution_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -1158,6 +1190,18 @@
         "interaction_surface": "ui"
       },
       {
+        "id": "experiment.inspect_legacy_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "analysis.open_plate_reader_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
+      },
+      {
         "id": "experiment.activate_authoritative_via_ui",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py",
@@ -1530,6 +1574,30 @@
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.randomized_calibration_lifecycle.terminal",
         "test_node_ids": ["tests/system/test_virtual_workflow_randomized_calibration_lifecycle.py::test_registered_randomized_calibration_reload_execution_report"]
+      },
+      {
+        "id": "experiment.legacy_read_only_exact",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.loader",
+        "test_node_ids": ["tests/system/test_virtual_workflow_legacy_read_only.py::test_registered_legacy_read_only_report"]
+      },
+      {
+        "id": "analysis.legacy_plate_reader_ready",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.analysis",
+        "test_node_ids": ["tests/system/test_virtual_workflow_legacy_read_only.py::test_registered_legacy_read_only_report"]
+      },
+      {
+        "id": "experiment.legacy_editable_copy_fresh",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.editable_copy",
+        "test_node_ids": ["tests/system/test_virtual_workflow_legacy_read_only.py::test_registered_legacy_read_only_report"]
+      },
+      {
+        "id": "experiment.legacy_source_unchanged",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values",
+        "test_node_ids": ["tests/system/test_virtual_workflow_legacy_read_only.py::test_registered_legacy_read_only_report"]
       }
     ]
   }

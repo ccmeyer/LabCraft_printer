@@ -848,6 +848,33 @@ Prerequisites:
 
 ### SIL scenario registry and capability manifest
 
+The `legacy_experiment_read_only_v1` scenario materializes a deterministic
+older experiment with one complete well and one partial well. It uses the real
+Experiment Editor to select **View Older Experiment**, verifies the exact saved
+targets and progress in the main window, validates the prefilled plate-reader
+analysis preview, and creates a fresh editable copy. The report records source
+hashes, disabled hardware controls, and zero machine/simulator dispatch.
+
+Run it offscreen or visibly:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario legacy_experiment_read_only_v1 `
+  --output-root verification_reports\legacy_read_only
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario legacy_experiment_read_only_v1 `
+  --visible `
+  --output-root verification_reports\legacy_read_only_visible
+```
+
+The lifecycle pytest entry point is:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_virtual_workflow_legacy_read_only.py
+```
+
 The 24-well smoke, 96-well regression, and 384x10 stress IDs are
 registered in
 `tools/virtual_workflows/registry.py`. The CLI obtains its `--scenario`
@@ -864,10 +891,10 @@ identity `labcraft.sil_capability_coverage` version 1. It records capabilities,
 registered scenarios, planned/active suites, intended schedules, embedded
 action/assertion IDs, limitations, and freshness policy. Generated reports do
 not rewrite it. The `standard` suite is active and selects only
-`print_array_smoke_24_v1`. The active `lifecycle` suite contains the three
-verified editor scenarios plus the verified 24-well soft-stop/resume
-scenario. Candidate gates remain executable directly but do not join the
-suite until they pass; suite/capability CLI selection is not available yet.
+`print_array_smoke_24_v1`. The active `lifecycle` suite includes the verified
+editor, older-experiment read-only, and 24-well soft-stop/resume scenarios.
+Candidate gates remain executable directly but do not join the suite until
+they pass; suite/capability CLI selection is not available yet.
 
 Validate registry/fixture drift, manifest references, portable paths, test
 nodes, Pi safety requirements, and current capability claims with:

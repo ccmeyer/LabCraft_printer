@@ -47,7 +47,6 @@ import CalibrationClasses
 import importlib
 from typing import Mapping, Sequence, Optional, Any, List, Dict, Tuple, Set
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
-from LegacyExecutionMigration import migrate_legacy_execution_copy as migrate_legacy_execution_directory
 from ApplicationComposition import PRODUCTION_RUNTIME_CONTEXT, SIMULATION_RUNTIME_CONTEXT
 
 MassCalibrationDialog = None
@@ -70,32 +69,6 @@ PROMPTABLE_MANUAL_REFUEL_CHECK_CODES = {
 
 _VOLUME_INPUT_ERROR_STYLE = "border:1px solid #8a0303;"
 _VOLUME_INPUT_ISSUE_KEY = ("__metadata__", "volumes")
-
-
-class LegacyExecutionMigrationWorker(QThread):
-    succeeded = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, source_dir: str, destination: str | None = None, parent=None):
-        super().__init__(parent)
-        self.source_dir = str(source_dir)
-        self.destination = destination
-        self._cancel_requested = False
-
-    def cancel(self):
-        self._cancel_requested = True
-
-    def run(self):
-        try:
-            result = migrate_legacy_execution_directory(
-                self.source_dir,
-                self.destination,
-                cancel_check=lambda: self._cancel_requested,
-            )
-        except Exception as exc:
-            self.failed.emit(str(exc))
-            return
-        self.succeeded.emit(result)
 
 
 class EditableCopyNameDialog(QInputDialog):
@@ -1725,6 +1698,19 @@ class MainWindow(QMainWindow):
                 "is idle and the command queue is empty."
             )
         return self.model.load_completed_execution_view()
+
+    def view_read_only_experiment(self):
+        """Populate a validated older experiment without activating hardware."""
+        state_getter = getattr(self.controller, "get_array_run_state", None)
+        array_state = state_getter() if callable(state_getter) else "idle"
+        queue_checker = getattr(self.controller, "check_if_all_completed", None)
+        queue_empty = bool(queue_checker()) if callable(queue_checker) else True
+        if array_state != "idle" or not queue_empty:
+            raise RuntimeError(
+                "A read-only experiment can be viewed only while the array runner "
+                "is idle and the command queue is empty."
+            )
+        return self.model.load_read_only_experiment_view()
     
     def closeEvent(self, event):
         """Handle the window close event."""
@@ -5027,11 +5013,21 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         button.setStyleSheet(f"background-color: {color}; color: white;")
 
     def update_start_print_array_button(self, *_args):
-        completed_view_getter = getattr(
-            self.model, "is_completed_execution_view_active", None
+        read_only_view_getter = getattr(
+            self.model, "is_read_only_experiment_view_active", None
         )
-        if callable(completed_view_getter) and completed_view_getter():
-            self.start_print_array_button.setText("Experiment Complete")
+        if not callable(read_only_view_getter):
+            read_only_view_getter = getattr(
+                self.model, "is_completed_execution_view_active", None
+            )
+        if callable(read_only_view_getter) and read_only_view_getter():
+            completed_getter = getattr(
+                self.model, "is_completed_execution_view_active", None
+            )
+            completed = bool(callable(completed_getter) and completed_getter())
+            self.start_print_array_button.setText(
+                "Experiment Complete" if completed else "Experiment Read-Only"
+            )
             self._set_array_button_state(
                 self.start_print_array_button,
                 False,
@@ -5062,10 +5058,14 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self._set_array_button_state(self.start_print_array_button, has_head, 'dark_blue')
 
     def start_print_array(self):
-        completed_view_getter = getattr(
-            self.model, "is_completed_execution_view_active", None
+        read_only_view_getter = getattr(
+            self.model, "is_read_only_experiment_view_active", None
         )
-        if callable(completed_view_getter) and completed_view_getter():
+        if not callable(read_only_view_getter):
+            read_only_view_getter = getattr(
+                self.model, "is_completed_execution_view_active", None
+            )
+        if callable(read_only_view_getter) and read_only_view_getter():
             return
 
         state_getter = getattr(self.controller, "get_array_run_state", None)
@@ -5356,13 +5356,21 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 self.reagent_selection.setCurrentIndex(idx)
             max_concentration = self.model.reaction_collection.get_max_droplets(stock_id)
             printer_head = None
-            completed_view_getter = getattr(
-                self.model, "is_completed_execution_view_active", None
+            read_only_view_getter = getattr(
+                self.model, "is_read_only_experiment_view_active", None
             )
-            if callable(completed_view_getter) and completed_view_getter():
-                display_heads_getter = getattr(
-                    self.model, "get_completed_execution_display_heads", None
+            if not callable(read_only_view_getter):
+                read_only_view_getter = getattr(
+                    self.model, "is_completed_execution_view_active", None
                 )
+            if callable(read_only_view_getter) and read_only_view_getter():
+                display_heads_getter = getattr(
+                    self.model, "get_read_only_experiment_display_heads", None
+                )
+                if not callable(display_heads_getter):
+                    display_heads_getter = getattr(
+                        self.model, "get_completed_execution_display_heads", None
+                    )
                 display_heads = (
                     display_heads_getter()
                     if callable(display_heads_getter)
@@ -5496,16 +5504,20 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.reagent_selection.setCurrentIndex(0)
 
         self.update_well_colors()  # Update with a default reagent on load
-        completed_view_getter = getattr(
-            self.model, "is_completed_execution_view_active", None
+        read_only_view_getter = getattr(
+            self.model, "is_read_only_experiment_view_active", None
         )
-        completed_view = bool(
-            callable(completed_view_getter) and completed_view_getter()
+        if not callable(read_only_view_getter):
+            read_only_view_getter = getattr(
+                self.model, "is_completed_execution_view_active", None
+            )
+        read_only_view = bool(
+            callable(read_only_view_getter) and read_only_view_getter()
         )
         for button_name in ("stock_prep_button", "calibration_button"):
             button = getattr(self, button_name, None)
             if button is not None:
-                button.setEnabled(not completed_view)
+                button.setEnabled(not read_only_view)
         if getattr(self, "start_print_array_button", None) is not None:
             self.update_start_print_array_button()
         print('Completed experiment load')
@@ -5516,10 +5528,14 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         This function will be triggered when the calibration button is pressed.
         """
         # Create an instance of the CalibrationDialog
-        completed_view_getter = getattr(
-            self.model, "is_completed_execution_view_active", None
+        read_only_view_getter = getattr(
+            self.model, "is_read_only_experiment_view_active", None
         )
-        if callable(completed_view_getter) and completed_view_getter():
+        if not callable(read_only_view_getter):
+            read_only_view_getter = getattr(
+                self.model, "is_completed_execution_view_active", None
+            )
+        if callable(read_only_view_getter) and read_only_view_getter():
             return
         if not self.model.machine_model.motors_are_enabled() or not self.model.machine_model.motors_are_homed():
             self.main_window.popup_message("Motors Not Enabled or Homed","Please enable and home the motors before calibrating the well plate.")
@@ -5558,10 +5574,14 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             print("Experiment file generated and loaded.")
 
     def open_stock_prep_dialog(self):
-        completed_view_getter = getattr(
-            self.model, "is_completed_execution_view_active", None
+        read_only_view_getter = getattr(
+            self.model, "is_read_only_experiment_view_active", None
         )
-        if callable(completed_view_getter) and completed_view_getter():
+        if not callable(read_only_view_getter):
+            read_only_view_getter = getattr(
+                self.model, "is_completed_execution_view_active", None
+            )
+        if callable(read_only_view_getter) and read_only_view_getter():
             return
         dialog = StockPrepDialog(self.model.experiment_model, self.main_window)
         dialog.exec()
@@ -8610,6 +8630,12 @@ class ExperimentTaskListWidget(QGroupBox):
 
         return any(self._well_assigned_reaction(well) is not None for well in self._all_wells())
 
+    def _read_only_experiment_view_active(self):
+        getter = getattr(self.model, "is_read_only_experiment_view_active", None)
+        if not callable(getter):
+            getter = getattr(self.model, "is_completed_execution_view_active", None)
+        return bool(callable(getter) and getter())
+
     def _completed_execution_view_active(self):
         getter = getattr(self.model, "is_completed_execution_view_active", None)
         return bool(callable(getter) and getter())
@@ -8624,14 +8650,23 @@ class ExperimentTaskListWidget(QGroupBox):
         return True
 
     def _global_tasks(self):
-        if self._completed_execution_view_active():
+        if self._read_only_experiment_view_active():
+            completed = self._completed_execution_view_active()
             return [
                 {
                     "key": "experiment",
-                    "label": "Completed experiment loaded read-only",
+                    "label": (
+                        "Completed experiment loaded read-only"
+                        if completed
+                        else "Older experiment loaded read-only"
+                    ),
                     "done": self._experiment_ready(),
-                    "next": "Load the completed experiment",
-                    "blocking": "The saved completed state could not be displayed.",
+                    "next": (
+                        "Load the completed experiment"
+                        if completed
+                        else "Load the older experiment"
+                    ),
+                    "blocking": "The saved experiment could not be displayed.",
                 }
             ]
         machine_model = getattr(self.model, "machine_model", None)
@@ -8688,7 +8723,7 @@ class ExperimentTaskListWidget(QGroupBox):
         return None
 
     def _active_head(self):
-        if self._completed_execution_view_active():
+        if self._read_only_experiment_view_active():
             return None
         rack = getattr(self.model, "rack_model", None)
         getter = getattr(rack, "get_gripper_printer_head", None)
@@ -8717,10 +8752,16 @@ class ExperimentTaskListWidget(QGroupBox):
         return self._call_bool(head, "is_calibration_chip", False)
 
     def _discover_heads(self):
-        if self._completed_execution_view_active():
+        if self._read_only_experiment_view_active():
             getter = getattr(
-                self.model, "get_completed_execution_display_heads", None
+                self.model, "get_read_only_experiment_display_heads", None
             )
+            if not callable(getter):
+                getter = getattr(
+                    self.model, "get_completed_execution_display_heads", None
+                )
+            if not self._completed_execution_view_active():
+                return []
             return list(getter() or ()) if callable(getter) else []
 
         heads = []
@@ -9142,6 +9183,13 @@ class ExperimentTaskListWidget(QGroupBox):
         global_task = self._first_incomplete_global_task()
         if global_task is not None:
             return f"Next: {global_task['next']}", global_task.get("blocking", "")
+
+        if self._read_only_experiment_view_active():
+            return (
+                ("Next: Experiment complete", "")
+                if self._completed_execution_view_active()
+                else ("Next: Read-only experiment", "")
+            )
 
         for context in head_contexts:
             if context["is_active"] and context["current_task"] is not None:
@@ -11092,6 +11140,7 @@ class ExperimentDesignDialog(QDialog):
     ACTION_FINALIZE_DESIGN = "Finalize Experiment"
     ACTION_LOAD_EXECUTION = "Load Experiment"
     ACTION_VIEW_COMPLETED_EXECUTION = "View Completed Experiment"
+    ACTION_VIEW_OLDER_EXPERIMENT = "View Older Experiment"
     ACTION_EXECUTION_LOADED = "Experiment Loaded"
     ACTION_EXECUTION_LOCKED = "Experiment Locked"
 
@@ -11414,11 +11463,6 @@ class ExperimentDesignDialog(QDialog):
         self.duplicate_btn = QPushButton("Create Editable Copy...")
         self.duplicate_btn.clicked.connect(self._on_duplicate_design)
         controls_col.addWidget(self.duplicate_btn)
-
-        self.migrate_legacy_btn = QPushButton("Convert Older Experiment...")
-        self.migrate_legacy_btn.clicked.connect(self._on_migrate_legacy_copy)
-        self.migrate_legacy_btn.setEnabled(False)
-        controls_col.addWidget(self.migrate_legacy_btn)
 
         self.save_btn = QPushButton("Save Design…")
         self.save_btn.clicked.connect(self._on_save_design)
@@ -12440,6 +12484,44 @@ class ExperimentDesignDialog(QDialog):
                 "eligibility": dict(eligibility),
             }
 
+        can_view_legacy_getter = getattr(
+            self.model, "can_view_legacy_execution", None
+        )
+        can_view_legacy = bool(
+            callable(can_view_legacy_getter) and can_view_legacy_getter()
+        )
+        if can_view_legacy:
+            completed = plan_state == "completed"
+            return {
+                "state": (
+                    "completed_view_available"
+                    if completed
+                    else "legacy_view_available"
+                ),
+                "action_text": (
+                    self.ACTION_VIEW_COMPLETED_EXECUTION
+                    if completed
+                    else self.ACTION_VIEW_OLDER_EXPERIMENT
+                ),
+                "action_enabled": True,
+                "banner_text": (
+                    "This completed experiment is locked and read-only. Select View "
+                    "Completed Experiment to display the saved plate, stock solutions, "
+                    "wells, and final progress. Printing cannot be started or resumed. "
+                    "Select Create Editable Copy to change the experiment settings."
+                    if completed
+                    else (
+                        "This older experiment is locked and read-only. Select View "
+                        "Older Experiment to display the saved plate, stock solutions, "
+                        "wells, and recorded progress. Printing cannot be started or "
+                        "resumed. Select Create Editable Copy to change the experiment "
+                        "settings."
+                    )
+                ),
+                "plan_state": plan_state,
+                "eligibility": dict(eligibility),
+            }
+
         can_view_completed_getter = getattr(
             self.model, "can_view_completed_execution", None
         )
@@ -12509,6 +12591,10 @@ class ExperimentDesignDialog(QDialog):
             if lifecycle["state"] == "completed_view_available":
                 finish_btn.setToolTip(
                     "Display the completed experiment and its final progress read-only."
+                )
+            elif lifecycle["state"] == "legacy_view_available":
+                finish_btn.setToolTip(
+                    "Display the older experiment and its recorded progress read-only."
                 )
             elif lifecycle["state"] == "saved_execution":
                 finish_btn.setToolTip(
@@ -13301,13 +13387,6 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_editor_lifecycle_state()
         self._refresh_editable_copy_availability()
         self._apply_gripper_edit_lock_state()
-        migrate_button = getattr(self, "migrate_legacy_btn", None)
-        if migrate_button is not None:
-            legacy_getter = getattr(self.model, "is_read_only_legacy_execution", None)
-            migrate_button.setEnabled(
-                bool(callable(legacy_getter) and legacy_getter())
-                and not getattr(self, "_editing_locked_by_gripper", False)
-            )
 
     def _apply_uploaded_design_mode_to_ui(self, active: bool):
         self._uploaded_design_active = bool(active)
@@ -15015,91 +15094,6 @@ class ExperimentDesignDialog(QDialog):
             f"New experiment: {new_experiment_path}"
         )
 
-    def _on_migrate_legacy_copy(self):
-        source = getattr(self.model, "experiment_dir_path", None)
-        if not source or not self.model.is_read_only_legacy_execution():
-            self._set_status("Open an older experiment before converting it.")
-            return
-        response = QMessageBox.question(
-            self,
-            "Convert Older Experiment",
-            "Create a view-only copy of this older experiment with its saved analysis "
-            "data? The copy cannot be used for printing.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if response != QMessageBox.Yes:
-            return
-        progress = QtWidgets.QProgressDialog(
-            "Copying and validating the older experiment...",
-            "Cancel",
-            0,
-            0,
-            self,
-        )
-        progress.setWindowTitle("Convert Older Experiment")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        worker = LegacyExecutionMigrationWorker(source, parent=self)
-        self._legacy_migration_worker = worker
-        self._legacy_migration_progress = progress
-
-        def _cleanup_worker():
-            progress.close()
-            worker.deleteLater()
-            self._legacy_migration_worker = None
-            self._legacy_migration_progress = None
-
-        def _migration_failed(message):
-            if "canceled" in str(message).lower():
-                self._set_status("Conversion canceled; the original experiment was unchanged.")
-            else:
-                print(f"[ExperimentDesignDialog] older experiment conversion error: {message}")
-                user_message = (
-                    "The older experiment could not be converted. See the application "
-                    "logs for details."
-                )
-                QMessageBox.warning(
-                    self,
-                    "Could not convert older experiment",
-                    user_message,
-                )
-                self._set_status(user_message)
-
-        def _migration_succeeded(result):
-            try:
-                self.model.open_migrated_legacy_execution_copy(result, source)
-                self._progress_reset_confirmed = False
-                self._set_progress_protection(True)
-                self._uploaded_design_active = self.model.has_uploaded_design()
-                self._load_factors_into_table()
-                self._sync_controls_from_model()
-                self._refresh_stock_table()
-                self._update_summary_labels()
-                self._refresh_all_lock_states()
-                self._set_status(
-                    f"View-only copy of the older experiment opened from: {result.destination}"
-                )
-            except Exception as exc:
-                print(f"[ExperimentDesignDialog] converted experiment open error: {exc}")
-                user_message = (
-                    "The converted experiment was saved but could not be opened. See the "
-                    "application logs for details."
-                )
-                QMessageBox.warning(
-                    self,
-                    "Could not open converted experiment",
-                    user_message,
-                )
-                self._set_status(user_message)
-
-        progress.canceled.connect(worker.cancel)
-        worker.failed.connect(_migration_failed)
-        worker.succeeded.connect(_migration_succeeded)
-        worker.finished.connect(_cleanup_worker)
-        worker.start()
-        progress.show()
-
     def _on_load_design(self):
         # Default directory = Experiments
         default_dir = None
@@ -15148,13 +15142,19 @@ class ExperimentDesignDialog(QDialog):
                 if issue.get("severity") in {"warning", "fatal"}
             ]
             fatal = any(issue.get("severity") == "fatal" for issue in issues)
+            completed = self._execution_plan_state_text(self.model) == "completed"
             base_message = (
                 "This older experiment was opened view-only. Some saved data could not "
                 "be validated, so printing is unavailable."
                 if fatal
                 else (
-                    "This older experiment was opened view-only. It cannot be used for "
-                    "printing."
+                    "Experiment complete. Press View Completed Experiment to display "
+                    "the saved experiment and its final progress read-only."
+                    if completed
+                    else (
+                        "Older experiment loaded read-only. Press View Older Experiment "
+                        "to display its saved plate, wells, and recorded progress."
+                    )
                 )
             )
             if warning_messages:
@@ -15248,6 +15248,42 @@ class ExperimentDesignDialog(QDialog):
                 "This experiment has started. Its settings are locked and read-only. "
                 "Select Create Editable Copy to make changes."
             )
+            return
+        can_view_legacy_getter = getattr(
+            self.model, "can_view_legacy_execution", None
+        )
+        can_view_legacy = bool(
+            callable(can_view_legacy_getter) and can_view_legacy_getter()
+        )
+        if can_view_legacy:
+            completed = self._execution_plan_state_text(self.model) == "completed"
+            try:
+                if self.main_window is None or not hasattr(
+                    self.main_window, "view_read_only_experiment"
+                ):
+                    raise RuntimeError(
+                        "The older experiment cannot currently be displayed."
+                    )
+                self.main_window.view_read_only_experiment()
+                self._apply_requested = True
+                self._set_status(
+                    "Completed experiment displayed read-only."
+                    if completed
+                    else "Older experiment displayed read-only."
+                )
+                self.accept()
+            except Exception as exc:
+                print(f"[ExperimentDesignDialog] older experiment view error: {exc}")
+                message = (
+                    "The older experiment could not be displayed. See the application "
+                    "logs for details."
+                )
+                self._set_status(message)
+                QMessageBox.warning(
+                    self,
+                    "Could not view older experiment",
+                    message,
+                )
             return
         bundle_getter = getattr(self.model, "get_authoritative_execution_bundle", None)
         bundle = bundle_getter() if callable(bundle_getter) else None

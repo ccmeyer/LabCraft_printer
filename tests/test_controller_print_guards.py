@@ -1880,6 +1880,22 @@ def test_print_array_blocks_read_only_legacy_execution_before_hardware_actions()
     c.move_to_location.assert_not_called()
 
 
+def test_print_array_blocks_general_read_only_view_before_hardware_actions():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    c.model.is_read_only_experiment_view_active = Mock(return_value=True)
+
+    Controller.print_array(c)
+
+    message = c.error_occurred_signal.calls[0][1]
+    assert "open read-only" in message
+    assert "cannot be used for printing" in message
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+
+
 def test_print_array_blocks_after_execution_plan_finalization_failure():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),

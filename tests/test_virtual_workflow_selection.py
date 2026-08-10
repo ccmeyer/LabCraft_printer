@@ -84,6 +84,7 @@ def test_lifecycle_suite_preserves_manifest_order_and_per_scenario_timeouts():
         "experiment_editor_create_finalize_v1",
         "experiment_editor_prestart_rename_refinalize_v1",
         "experiment_editor_post_start_lock_v1",
+        "legacy_experiment_read_only_v1",
         "print_array_soft_stop_resume_24_v1",
         "authoritative_reload_resume_24_v1",
         "print_array_multi_stock_24x2_v1",
@@ -91,9 +92,10 @@ def test_lifecycle_suite_preserves_manifest_order_and_per_scenario_timeouts():
         "print_array_disconnect_mid_array_24_v1",
         JOINED_INTERACTION_CASE_ID,
     ]
-    assert [row["order"] for row in plan["scenarios"]] == list(range(1, 10))
+    assert [row["order"] for row in plan["scenarios"]] == list(range(1, 11))
     assert {row["seed"] for row in plan["scenarios"]} == {7}
     assert [row["timeout_seconds"] for row in plan["scenarios"]] == [
+        60.0,
         60.0,
         60.0,
         60.0,

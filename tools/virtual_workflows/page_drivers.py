@@ -1933,6 +1933,439 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             directory, purpose="completed", on_loaded=record_loaded
         )["loaded"]
 
+    def inspect_legacy_execution(
+        self,
+        experiment_dir,
+        *,
+        expected_name: str,
+    ) -> dict[str, Any]:
+        """Display one reconstructed older experiment through the real editor."""
+
+        from pathlib import Path
+        from tools.virtual_workflows.actions import capture_milestone, execute_action
+
+        directory = Path(experiment_dir).resolve()
+
+        def dispatch_snapshot() -> dict[str, int]:
+            instrumentation = getattr(self.context, "instrumentation", None)
+            machine = getattr(self.context, "machine", None)
+            return {
+                "intent_begins": len(
+                    getattr(instrumentation, "intent_begins", ()) or ()
+                ),
+                "simulator_dispenses": len(
+                    getattr(instrumentation, "simulator_dispenses", ()) or ()
+                ),
+                "machine_commands": len(
+                    getattr(machine, "command_event_history", ()) or ()
+                ),
+            }
+
+        def inspect_loaded(dialog) -> Mapping[str, Any]:
+            experiment_model = self.context.experiment_model
+            plan = experiment_model.get_execution_plan_snapshot()
+            status_text = str(dialog.status_lbl.text() or "")
+            banner_text = str(dialog.lifecycle_banner.text() or "")
+            initial_checks = {
+                "name_matches": dialog.exp_name_edit.text() == expected_name,
+                "path_matches": Path(experiment_model.experiment_dir_path).resolve()
+                == directory,
+                "legacy_read_only": experiment_model.is_read_only_legacy_execution(),
+                "legacy_view_available": experiment_model.can_view_legacy_execution(),
+                "plan_partial": str(plan.state.value) == "active",
+                "action_is_view_older": dialog.finish_btn.text()
+                == "View Older Experiment",
+                "action_enabled": bool(dialog.finish_btn.isEnabled()),
+                "read_only_guidance": "view older experiment"
+                in status_text.casefold(),
+                "visible_lock_banner": not dialog.lifecycle_banner.isHidden()
+                and "locked and read-only" in banner_text.casefold()
+                and "printing cannot be started or resumed"
+                in banner_text.casefold(),
+            }
+            if not all(initial_checks.values()):
+                raise RuntimeError(
+                    "older experiment did not expose its read-only view: "
+                    f"{initial_checks}"
+                )
+            capture_milestone(
+                self.context,
+                "legacy_editor",
+                evidence=initial_checks,
+                widget=dialog,
+            )
+
+            dispatch_before = dispatch_snapshot()
+            self.click(dialog.finish_btn)
+            if dialog.isVisible():
+                raise RuntimeError("View Older Experiment did not close the editor")
+            self.context.pump_events()
+
+            model = self.context.model
+            displayed_targets = {}
+            displayed_added = {}
+            completed_wells = []
+            for plan_well in plan.wells:
+                reaction = model.well_plate.get_well(
+                    plan_well.well_id
+                ).get_assigned_reaction()
+                displayed_targets[plan_well.well_id] = {
+                    stock_id: int(reagent.target_droplets)
+                    for stock_id, reagent in reaction.get_all_reagents().items()
+                }
+                displayed_added[plan_well.well_id] = {
+                    stock_id: int(reagent.added_droplets)
+                    for stock_id, reagent in reaction.get_all_reagents().items()
+                }
+                if reaction.check_all_complete():
+                    completed_wells.append(plan_well.well_id)
+
+            expected_targets = {
+                well.well_id: {
+                    dispense.stock_id: int(dispense.target_dispenses)
+                    for dispense in well.dispenses
+                }
+                for well in plan.wells
+            }
+            expected_added = {
+                well.well_id: {
+                    dispense.stock_id: int(
+                        experiment_model.progress_data[well.well_id]["reagents"][
+                            dispense.stock_id
+                        ].get("added_droplets", 0)
+                        or 0
+                    )
+                    for dispense in well.dispenses
+                }
+                for well in plan.wells
+            }
+            plate_widget = self.context.view.well_plate_widget
+            checks = {
+                **initial_checks,
+                "display_projection_active": model.is_read_only_experiment_view_active(),
+                "not_completed_view": not model.is_completed_execution_view_active(),
+                "runtime_inactive": not experiment_model.is_authoritative_execution_runtime_active(),
+                "targets_exact": displayed_targets == expected_targets,
+                "added_progress_exact": displayed_added == expected_added,
+                "mixed_completion_visible": completed_wells == ["A1"],
+                "start_control_disabled": (
+                    plate_widget.start_print_array_button.text()
+                    == "Experiment Read-Only"
+                    and not plate_widget.start_print_array_button.isEnabled()
+                ),
+                "mutation_controls_disabled": (
+                    not plate_widget.stock_prep_button.isEnabled()
+                    and not plate_widget.calibration_button.isEnabled()
+                ),
+                "no_machine_or_simulator_dispatch": dispatch_snapshot()
+                == dispatch_before,
+            }
+            if not all(checks.values()):
+                raise RuntimeError(
+                    f"older experiment read-only projection was not exact: {checks}"
+                )
+            capture_milestone(
+                self.context,
+                "legacy_main",
+                evidence=checks,
+            )
+            return {
+                "checks": checks,
+                "experiment_dir": str(directory),
+                "experiment_name": expected_name,
+                "plan_state": str(plan.state.value),
+                "displayed_targets": displayed_targets,
+                "displayed_added": displayed_added,
+                "completed_well_ids": completed_wells,
+                "status_text": status_text,
+                "banner_text": banner_text,
+                "dispatch_before": dispatch_before,
+                "dispatch_after": dispatch_snapshot(),
+            }
+
+        def record_loaded(dialog) -> Mapping[str, Any]:
+            return execute_action(
+                self.context,
+                "experiment.inspect_legacy_via_ui",
+                lambda: inspect_loaded(dialog),
+            )["evidence"]
+
+        return self._drive_directory_load(
+            directory,
+            purpose="older experiment",
+            on_loaded=record_loaded,
+        )["loaded"]
+
+    def create_legacy_editable_copy(
+        self,
+        experiment_dir,
+        *,
+        copy_name: str,
+    ) -> dict[str, Any]:
+        """Create a fresh editable copy from an older experiment via the editor."""
+
+        import json
+        from pathlib import Path
+        from View import ExperimentDesignDialog
+        from tools.virtual_workflows.actions import capture_milestone, execute_action
+
+        directory = Path(experiment_dir).resolve()
+        destination = (directory.parent / copy_name).resolve()
+
+        button = self.view.well_plate_widget.design_experiment_button
+        if not button.isVisible() or not button.isEnabled():
+            raise RuntimeError("Experiment Editor control is not visible and enabled")
+        state: dict[str, Any] = {
+            "policy_clicked": False,
+            "name_handled": False,
+            "error": None,
+            "evidence": None,
+        }
+
+        def drive_progress_and_name_dialogs() -> None:
+            modal = self.app.activeModalWidget()
+            if modal is None:
+                return
+            try:
+                if isinstance(modal, QtWidgets.QMessageBox):
+                    if state["policy_clicked"]:
+                        return
+                    copy_button = next(
+                        (
+                            item
+                            for item in modal.buttons()
+                            if item.text() == "Create Editable Copy"
+                        ),
+                        None,
+                    )
+                    if (
+                        modal.windowTitle() != "Saved Progress Found"
+                        or copy_button is None
+                    ):
+                        raise RuntimeError(
+                            "unexpected saved-progress prompt while creating copy"
+                        )
+                    state["policy_clicked"] = True
+                    QtTest.QTest.mouseClick(
+                        copy_button,
+                        QtCore.Qt.MouseButton.LeftButton,
+                    )
+                    return
+                if isinstance(modal, QtWidgets.QInputDialog):
+                    if state["name_handled"]:
+                        return
+                    line_edit = modal.findChild(QtWidgets.QLineEdit)
+                    button_box = modal.findChild(QtWidgets.QDialogButtonBox)
+                    accept = (
+                        button_box.button(QtWidgets.QDialogButtonBox.Ok)
+                        if button_box is not None
+                        else None
+                    )
+                    if (
+                        modal.windowTitle() != "Create Editable Copy"
+                        or line_edit is None
+                        or accept is None
+                    ):
+                        raise RuntimeError("editable-copy name controls are missing")
+                    line_edit.setFocus()
+                    QtTest.QTest.keyClick(
+                        line_edit,
+                        QtCore.Qt.Key.Key_A,
+                        QtCore.Qt.KeyboardModifier.ControlModifier,
+                    )
+                    QtTest.QTest.keyClicks(line_edit, copy_name)
+                    state["name_handled"] = True
+                    QtTest.QTest.mouseClick(
+                        accept,
+                        QtCore.Qt.MouseButton.LeftButton,
+                    )
+                    return
+                raise RuntimeError(
+                    "unexpected modal while creating editable copy: "
+                    f"{type(modal).__name__} {modal.windowTitle()!r}"
+                )
+            except BaseException as exc:
+                state["error"] = exc
+                if isinstance(modal, QtWidgets.QDialog) and modal.isVisible():
+                    modal.reject()
+
+        def operation() -> Mapping[str, Any]:
+            modal_timer = QtCore.QTimer(self.app)
+            modal_timer.setInterval(5)
+            modal_timer.timeout.connect(drive_progress_and_name_dialogs)
+            modal_timer.start()
+            try:
+                with _expected_dialogs(
+                    self.app,
+                    ("Saved Progress Found", "QMessageBox"),
+                    ("Create Editable Copy", "EditableCopyNameDialog"),
+                ):
+                    self.click(button)
+            finally:
+                modal_timer.stop()
+                modal_timer.deleteLater()
+            if state["error"] is not None:
+                raise state["error"]
+            if not state["policy_clicked"] or not state["name_handled"]:
+                raise RuntimeError(
+                    "saved-progress editable-copy choices were not completed"
+                )
+            if Path(self.context.experiment_model.experiment_dir_path).resolve() != destination:
+                raise RuntimeError("editable copy did not become the active design")
+
+            progress = json.loads(
+                (destination / "progress.json").read_text(encoding="utf-8")
+            )
+            inspection: dict[str, Any] = {"entered": False, "error": None}
+
+            def inspect_copy_editor() -> None:
+                modal = self.app.activeModalWidget()
+                try:
+                    if not isinstance(modal, ExperimentDesignDialog):
+                        raise RuntimeError(
+                            "editable copy editor did not open for inspection"
+                        )
+                    inspection["entered"] = True
+                    controls_editable = (
+                        modal.exp_name_edit.isEnabled()
+                        and not modal.exp_name_edit.isReadOnly()
+                        and modal.run_btn.isEnabled()
+                        and modal.finish_btn.isEnabled()
+                        and modal.finish_btn.text() == "Finalize Experiment"
+                    )
+                    evidence = {
+                        "source": str(directory),
+                        "destination": str(destination),
+                        "copy_name": str(modal.exp_name_edit.text()),
+                        "progress_policy_selected": bool(state["policy_clicked"]),
+                        "name_dialog_handled": bool(state["name_handled"]),
+                        "controls_editable": controls_editable,
+                        "legacy_state_cleared": not modal.model.is_read_only_legacy_execution(),
+                        "progress_empty": progress == {},
+                        "no_execution_plan": not (
+                            destination / "execution_plan.json"
+                        ).exists(),
+                        "no_resume_checkpoint": not (
+                            destination / "execution_resume.json"
+                        ).exists(),
+                    }
+                    capture_milestone(
+                        self.context,
+                        "legacy_editable_copy",
+                        evidence=evidence,
+                        widget=modal,
+                    )
+                    state["evidence"] = evidence
+                    modal.reject()
+                except BaseException as exc:
+                    inspection["error"] = exc
+                    if isinstance(modal, QtWidgets.QDialog) and modal.isVisible():
+                        modal.reject()
+
+            QtCore.QTimer.singleShot(0, inspect_copy_editor)
+            with _expected_dialogs(
+                self.app,
+                ("Experiment Design (v2)", "ExperimentDesignDialog"),
+            ):
+                self.click(button)
+            if inspection["error"] is not None:
+                raise inspection["error"]
+            if not inspection["entered"] or state["evidence"] is None:
+                raise RuntimeError("editable copy editor inspection did not finish")
+            if not all(
+                value
+                for key, value in state["evidence"].items()
+                if key not in {"source", "destination", "copy_name"}
+            ):
+                raise RuntimeError(
+                    f"editable copy was not fresh and editable: {state['evidence']}"
+                )
+            return dict(state["evidence"])
+
+        return execute_action(
+            self.context,
+            "editor.create_editable_copy_via_ui",
+            operation,
+        )["evidence"]
+
+    def validate_legacy_plate_reader_analysis(
+        self,
+        experiment_dir,
+        plate_reader_path,
+        *,
+        action_runner: Callable[..., dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Open the real analysis window and validate its prefilled legacy inputs."""
+
+        from tools.virtual_workflows.actions import capture_milestone
+
+        directory = Path(experiment_dir).resolve()
+        plate_path = Path(plate_reader_path).resolve()
+
+        def operation() -> Mapping[str, Any]:
+            button = self.view.plate_reader_analysis_button
+            if not button.isVisible() or not button.isEnabled():
+                raise RuntimeError("plate-reader analysis control is unavailable")
+            self.click(button)
+            self.wait_until(
+                lambda: getattr(
+                    self.view, "_plate_reader_analysis_window", None
+                )
+                is not None,
+                "plate-reader analysis window",
+                timeout_seconds=5.0,
+            )
+            window = getattr(self.view, "_plate_reader_analysis_window", None)
+            if window is None:
+                raise RuntimeError("plate-reader analysis window did not open")
+            window.show()
+            self.context.pump_events()
+            if window.isHidden():
+                raise RuntimeError(
+                    "plate-reader analysis window did not become visible"
+                )
+            window.plate_reader_file_edit.setText(str(plate_path))
+            self.context.pump_events()
+            paths_prefilled = (
+                Path(window.experiment_dir_edit.text()).resolve() == directory
+                and Path(window.key_file_edit.text()).resolve()
+                == (directory / "concentration_key.csv").resolve()
+            )
+            self.click(window.validate_preview_button)
+            self.wait_until(
+                lambda: not bool(getattr(window, "_previewing", False)),
+                "legacy plate-reader validation preview",
+                timeout_seconds=20.0,
+            )
+            preview = dict(getattr(window, "_last_preview_payload", {}) or {})
+            evidence = {
+                "paths_prefilled": paths_prefilled,
+                "preview_valid": bool(getattr(window, "_preview_valid", False)),
+                "preview_ok": bool(preview.get("ok")),
+                "preview_errors": list(preview.get("errors", []) or []),
+                "experiment_dir": window.experiment_dir_edit.text(),
+                "key_file": window.key_file_edit.text(),
+                "plate_reader_file": window.plate_reader_file_edit.text(),
+            }
+            capture_milestone(
+                self.context,
+                "legacy_plate_reader",
+                evidence=evidence,
+                widget=window,
+            )
+            window.close()
+            self.context.pump_events()
+            return evidence
+
+        with _expected_dialogs(
+            self.app,
+            ("Plate Reader Analysis", "PlateReaderAnalysisWindow"),
+        ):
+            return action_runner(
+                "analysis.open_plate_reader_via_ui",
+                operation,
+            )["evidence"]
+
 
 class RackDriver(_QTestSurfaceDriver):
     """QTest mechanics for rack volume, confirmation, and head loading."""

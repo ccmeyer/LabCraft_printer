@@ -247,10 +247,12 @@ optimization limit. Progress preserves all added counts while targets and its
 stock optimization. `experiment_design.json` remains byte-identical throughout
 locking, calibration, manual-refuel checks, and retries.
 
-Mixed-volume dispense segments remain later work. Legacy executions remain
-non-migrating, read-only snapshots unless the user explicitly creates the
-analysis-only migration copy described below; merely opening any experiment
-never creates or repairs execution artifacts.
+Mixed-volume dispense segments remain later work. A recorded older experiment
+is reconstructed without changing its folder and can be explicitly displayed
+in the main window read-only. The saved plan defines plate, stocks, wells, and
+targets; recorded progress defines actual added counts, with missing historical
+counts displayed as zero. Merely opening or viewing an experiment never creates
+or repairs execution artifacts.
 
 ## Authoritative load and resume in Slice 5
 
@@ -331,7 +333,7 @@ Calibration of an unprinted stock remains available after authoritative
 activation and uses the Slice 4 revision path; stocks with positive added counts
 remain immutable.
 
-## Reset, copies, migration, and terminal states in Slice 6
+## Reset, copies, archival conversion, and terminal states in Slice 6
 
 Recorded dispense counts are physical facts. Progress clearing and the Reset
 Single/All Array actions first classify the folder and fail before changing
@@ -352,8 +354,17 @@ copy contains a normalized design, empty `progress.json`, empty
 Calibration-copy requests are rejected because physical evidence cannot grant
 authority to a new execution.
 
-Recorded legacy migration is explicit and always creates a full sibling copy.
-It copies historical files and raw analysis data, preserves
+Direct read-only viewing is the normal path for recorded older experiments. A
+completed reconstruction is offered as **View Completed Experiment**; partial,
+stopped, or otherwise recorded history is offered as **View Older Experiment**.
+Both populate the saved plate and exact progress for analysis while keeping all
+printing, calibration, reset, and other hardware actions unavailable. Plate
+reader analysis continues to use the original folder, and **Create Editable
+Copy** creates a fresh design with no historical progress.
+
+Legacy conversion remains an optional backend archival operation rather than a
+normal editor action. It always creates a full separate copy. It copies
+historical files and raw analysis data, preserves
 `experiment_design.json` byte-for-byte, reconstructs normalized progress, and
 persists the deterministic legacy plan as revision 1 and the latest mirror.
 Compatible calibration/manual-check evidence is converted to strict sidecar

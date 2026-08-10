@@ -8,6 +8,7 @@ import pytest
 
 from AuthoritativeExecutionLoad import (
     build_execution_runtime_spec,
+    build_execution_runtime_spec_from_plan,
     inspect_authoritative_execution,
 )
 from ExecutionPlan import (
@@ -107,6 +108,23 @@ def _complete_execution(experiment_model_factory):
     completed = experiment.try_complete_execution_plan()
     assert completed.state is ExecutionPlanState.COMPLETED
     return model, experiment, completed
+
+
+def test_source_neutral_runtime_spec_preserves_recorded_over_target_and_defaults_missing(
+    tmp_path,
+):
+    _design, plan = _write_bundle(tmp_path)
+    stock_id = plan.stocks[0].stock_id
+
+    recorded = build_execution_runtime_spec_from_plan(
+        plan,
+        {"A1": {"reagents": {stock_id: {"added_droplets": 19}}}},
+    )
+    missing = build_execution_runtime_spec_from_plan(plan, {})
+
+    assert recorded.wells[0].targets[stock_id] == 16
+    assert recorded.wells[0].added[stock_id] == 19
+    assert missing.wells[0].added[stock_id] == 0
 
 
 def test_authoritative_inspection_is_nonmutating_and_builds_exact_runtime(tmp_path):

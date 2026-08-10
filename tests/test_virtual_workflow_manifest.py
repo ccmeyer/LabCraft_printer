@@ -43,6 +43,7 @@ from tools.virtual_workflows.editor_scenarios import (
     RENAME_WORKLOAD_ID as EDITOR_RENAME_WORKLOAD_ID,
     WORKLOAD_ID as EDITOR_WORKLOAD_ID,
 )
+from tools.virtual_workflows.journeys import LEGACY_READ_ONLY_WORKLOAD_ID
 from tools.virtual_workflows.actions import ACTION_INTERACTION_SURFACES
 from tools.virtual_workflows.joined_interaction_cases import (
     JOINED_INTERACTION_CASE_ID,
@@ -82,6 +83,7 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         SOFT_STOP_RESUME_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
+        LEGACY_READ_ONLY_WORKLOAD_ID,
         MIXED_MODE_WORKLOAD_ID,
         DISCONNECT_WORKLOAD_ID,
         JOINED_INTERACTION_CASE_ID,
@@ -155,6 +157,7 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         "experiment_editor_create_finalize_v1",
         "experiment_editor_prestart_rename_refinalize_v1",
         "experiment_editor_post_start_lock_v1",
+        LEGACY_READ_ONLY_WORKLOAD_ID,
         "print_array_soft_stop_resume_24_v1",
             AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
             MULTI_STOCK_WORKLOAD_ID,

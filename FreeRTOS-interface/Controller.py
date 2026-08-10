@@ -6294,6 +6294,16 @@ class Controller(QObject):
         required number of droplets for the currently loaded printer head.
         '''
         experiment_model = getattr(self.model, "experiment_model", None)
+        read_only_view_getter = getattr(
+            self.model, "is_read_only_experiment_view_active", None
+        )
+        if callable(read_only_view_getter) and read_only_view_getter():
+            message = (
+                "This experiment is open read-only. It cannot be used for printing."
+            )
+            self.error_occurred_signal.emit("Error", message)
+            print(f"Cannot print: {message}")
+            return
         finalization_error_getter = getattr(
             experiment_model, "get_execution_plan_finalization_error", None
         )

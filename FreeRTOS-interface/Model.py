@@ -76,6 +76,7 @@ from ExecutionPlanRevision import (
 from AuthoritativeExecutionLoad import (
     advance_authoritative_execution_revision,
     build_execution_runtime_spec,
+    build_execution_runtime_spec_from_plan,
     inspect_authoritative_execution,
     reconcile_authoritative_execution_runtime,
 )
@@ -7450,6 +7451,18 @@ class ExperimentModel(QObject):
             and not eligibility.can_activate_runtime
             and not eligibility.can_start_hardware
             and not eligibility.can_resume_hardware
+        )
+
+    def can_view_legacy_execution(self) -> bool:
+        """Return whether a recorded older experiment can be displayed safely."""
+        reconstruction = getattr(self, "_legacy_execution_reconstruction", None)
+        return bool(
+            self.is_read_only_legacy_execution()
+            and reconstruction is not None
+            and reconstruction.classification
+            is LegacyExecutionClassification.RECORDED_EXECUTION
+            and reconstruction.plan is not None
+            and not reconstruction.has_fatal_issues
         )
 
     def is_authoritative_execution_runtime_active(self) -> bool:
@@ -16295,6 +16308,8 @@ class Model(QObject):
 
     def _clear_runtime_experiment_without_signal(self):
         """Clear runtime execution state without announcing a successful load."""
+        self._read_only_experiment_view_active = False
+        self._read_only_experiment_display_heads = ()
         self._completed_execution_view_active = False
         self._completed_execution_display_heads = ()
         if self.stock_solutions is not None:
@@ -16393,6 +16408,23 @@ class Model(QObject):
     def _build_authoritative_runtime_projection(self, bundle):
         """Build and validate saved runtime state without mutating the live model."""
         spec = build_execution_runtime_spec(bundle)
+        return self._build_execution_runtime_projection(spec)
+
+    def _build_legacy_runtime_projection(self):
+        """Build a validated display projection from an in-memory legacy snapshot."""
+        if not self.experiment_model.can_view_legacy_execution():
+            raise RuntimeError(
+                "This older experiment does not contain enough validated data to display."
+            )
+        plan = self.experiment_model.get_reconstructed_execution_plan()
+        spec = build_execution_runtime_spec_from_plan(
+            plan,
+            self.experiment_model.progress_data,
+        )
+        return self._build_execution_runtime_projection(spec)
+
+    def _build_execution_runtime_projection(self, spec):
+        """Build and validate a plan/progress projection without mutating live state."""
         try:
             plate_data = self.well_plate.get_plate_data_by_name(spec.plate_name)
         except Exception as exc:
@@ -16465,7 +16497,7 @@ class Model(QObject):
                 printer_head.printer_head_id = saved.printer_head_id
             printer_head.target_droplet_volume = saved.effective_volume_nL
 
-    def _build_completed_execution_display_heads(self, projection):
+    def _build_read_only_experiment_display_heads(self, projection):
         colors = list(getattr(self, "printer_head_colors", {}).values())
         if not colors:
             colors = ["#808080"]
@@ -16476,17 +16508,8 @@ class Model(QObject):
         self._apply_saved_printer_head_projection(heads, projection.stock_specs)
         return tuple(heads)
 
-    def load_completed_execution_view(self):
-        """Project a validated completed execution into the UI without activating it."""
-        bundle = self.experiment_model._refresh_authoritative_execution_bundle()
-        if not self.experiment_model.can_view_completed_execution():
-            raise RuntimeError(
-                "Only a valid completed execution can be opened in the read-only view. "
-                + str(bundle.eligibility.reason)
-            )
-
-        projection = self._build_authoritative_runtime_projection(bundle)
-        display_heads = self._build_completed_execution_display_heads(projection)
+    def _apply_read_only_experiment_projection(self, projection):
+        display_heads = self._build_read_only_experiment_display_heads(projection)
 
         self.well_plate.clear_all_wells()
         self.well_plate.set_plate_format(projection.spec.plate_name)
@@ -16497,8 +16520,13 @@ class Model(QObject):
             list(projection.well_ids),
         )
         self.well_plate.apply_calibration_data()
+        self._read_only_experiment_display_heads = display_heads
+        self._read_only_experiment_view_active = True
         self._completed_execution_display_heads = display_heads
-        self._completed_execution_view_active = True
+        plan = self.experiment_model.get_execution_plan_snapshot()
+        self._completed_execution_view_active = bool(
+            plan is not None and plan.state is ExecutionPlanState.COMPLETED
+        )
         self.experiment_model.set_runtime_context(
             self.well_plate,
             self.reaction_collection,
@@ -16506,13 +16534,58 @@ class Model(QObject):
         self.experiment_model._authoritative_runtime_active = False
         self.experiment_model._active_authoritative_execution_session = None
         self.experiment_loaded.emit()
+
+    def load_read_only_experiment_view(self):
+        """Display a completed or safely reconstructed older experiment read-only."""
+        if self.experiment_model.can_view_legacy_execution():
+            projection = self._build_legacy_runtime_projection()
+            self._apply_read_only_experiment_projection(projection)
+            return {
+                "status": "analysis_only",
+                "can_activate_runtime": False,
+                "can_start_hardware": False,
+                "can_resume_hardware": False,
+                "reason": "This older experiment is permanently view-only.",
+                "repairable_intent_ids": [],
+                "ambiguous_intent_ids": [],
+            }
+
+        bundle = self.experiment_model._refresh_authoritative_execution_bundle()
+        if not self.experiment_model.can_view_completed_execution():
+            raise RuntimeError(
+                "Only a valid completed experiment or validated older experiment can "
+                "be opened in the read-only view. " + str(bundle.eligibility.reason)
+            )
+        projection = self._build_authoritative_runtime_projection(bundle)
+        self._apply_read_only_experiment_projection(projection)
         return self.experiment_model.get_execution_resume_eligibility()
 
+    def load_completed_execution_view(self):
+        """Compatibility wrapper for the general read-only experiment view."""
+        bundle = self.experiment_model._refresh_authoritative_execution_bundle()
+        if not self.experiment_model.can_view_completed_execution():
+            raise RuntimeError(
+                "Only a valid completed execution can be opened in the read-only view. "
+                + str(bundle.eligibility.reason)
+            )
+        projection = self._build_authoritative_runtime_projection(bundle)
+        self._apply_read_only_experiment_projection(projection)
+        return self.experiment_model.get_execution_resume_eligibility()
+
+    def is_read_only_experiment_view_active(self):
+        return bool(getattr(self, "_read_only_experiment_view_active", False))
+
+    def get_read_only_experiment_display_heads(self):
+        return tuple(getattr(self, "_read_only_experiment_display_heads", ()) or ())
+
     def is_completed_execution_view_active(self):
-        return bool(getattr(self, "_completed_execution_view_active", False))
+        return bool(
+            self.is_read_only_experiment_view_active()
+            and getattr(self, "_completed_execution_view_active", False)
+        )
 
     def get_completed_execution_display_heads(self):
-        return tuple(getattr(self, "_completed_execution_display_heads", ()) or ())
+        return self.get_read_only_experiment_display_heads()
 
     def assign_printer_heads(self):
         """Assign printer heads to the slots in the rack."""

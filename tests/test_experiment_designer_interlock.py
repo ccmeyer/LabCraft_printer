@@ -33,6 +33,8 @@ def _build_dialog_stub(
     resume_eligibility=None,
     plan_state: str | None = None,
     can_view_completed: bool = False,
+    can_view_legacy: bool = False,
+    legacy_read_only: bool = False,
 ):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog._uploaded_design_active = False
@@ -91,6 +93,7 @@ def _build_dialog_stub(
     rack_model = SimpleNamespace(get_gripper_printer_head=lambda: object() if gripper_loaded else None)
     dialog.main_window = SimpleNamespace(
         complete_experiment_design=Mock(),
+        view_read_only_experiment=Mock(),
         model=SimpleNamespace(rack_model=rack_model),
     )
     dialog.model = SimpleNamespace(
@@ -98,7 +101,8 @@ def _build_dialog_stub(
         is_execution_design_locked=lambda: execution_locked,
         is_authoritative_execution_runtime_active=lambda: runtime_active,
         can_view_completed_execution=lambda: can_view_completed,
-        is_read_only_legacy_execution=lambda: False,
+        can_view_legacy_execution=lambda: can_view_legacy,
+        is_read_only_legacy_execution=lambda: legacy_read_only,
         get_execution_resume_eligibility=lambda: resume_eligibility,
         get_execution_plan_snapshot=lambda: (
             SimpleNamespace(state=SimpleNamespace(value=plan_state))
@@ -113,6 +117,56 @@ def _build_dialog_stub(
         None,
     )
     return dialog
+
+
+def test_completed_legacy_experiment_uses_completed_view_action(qapp):
+    dialog = _build_dialog_stub(
+        False,
+        plan_state="completed",
+        can_view_legacy=True,
+        legacy_read_only=True,
+    )
+
+    lifecycle = dialog._classify_editor_lifecycle()
+
+    assert lifecycle["state"] == "completed_view_available"
+    assert lifecycle["action_text"] == "View Completed Experiment"
+    assert lifecycle["action_enabled"] is True
+    assert "Printing cannot be started or resumed" in lifecycle["banner_text"]
+
+
+def test_partial_legacy_experiment_uses_older_experiment_action(qapp):
+    dialog = _build_dialog_stub(
+        False,
+        plan_state="active",
+        can_view_legacy=True,
+        legacy_read_only=True,
+    )
+
+    lifecycle = dialog._classify_editor_lifecycle()
+
+    assert lifecycle["state"] == "legacy_view_available"
+    assert lifecycle["action_text"] == "View Older Experiment"
+    assert lifecycle["action_enabled"] is True
+    assert "recorded progress" in lifecycle["banner_text"]
+
+
+def test_legacy_view_action_populates_main_window_and_closes_editor(qapp):
+    dialog = _build_dialog_stub(
+        False,
+        plan_state="active",
+        can_view_legacy=True,
+        legacy_read_only=True,
+    )
+    dialog.accept = Mock()
+    dialog._apply_requested = False
+
+    ExperimentDesignDialog._on_finish(dialog)
+
+    dialog.main_window.view_read_only_experiment.assert_called_once_with()
+    dialog.accept.assert_called_once_with()
+    assert dialog._apply_requested is True
+    assert "Older experiment displayed read-only" in dialog.status_lbl.text()
 
 
 def _assert_mutating_controls_disabled(dialog):
