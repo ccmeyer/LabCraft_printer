@@ -2242,6 +2242,234 @@ class CalibrationDialogDriver:
             QtTest.QTest.qWait(10)
         raise RuntimeError(f"timed out waiting for {description}")
 
+    def _select_printing_mode_tab(self, target_mode: str) -> None:
+        target_mode = str(target_mode or "").strip().lower()
+        if target_mode == "droplet":
+            tab = self.dialog.droplet_tab
+        elif target_mode == "stream":
+            tab = self.dialog.stream_tab
+        else:
+            raise ValueError("target_mode must be droplet or stream")
+        self.dialog.calibration_tabs.setCurrentWidget(tab)
+        self.app.processEvents()
+
+    def _expand_printing_controls(self) -> None:
+        toggle = getattr(self.dialog, "printing_controls_toggle", None)
+        if toggle is None:
+            raise RuntimeError("printing controls toggle is missing")
+        if not toggle.isChecked():
+            QtTest.QTest.mouseClick(toggle, QtCore.Qt.MouseButton.LeftButton)
+            self.app.processEvents()
+        if not toggle.isChecked():
+            raise RuntimeError("printing controls did not expand")
+
+    def _replace_spin_value(self, widget: Any, value: int | float) -> None:
+        if widget is None or not widget.isVisible() or not widget.isEnabled():
+            raise RuntimeError("requested printing control is not visible and enabled")
+        editor = widget.lineEdit()
+        QtTest.QTest.mouseClick(editor, QtCore.Qt.MouseButton.LeftButton)
+        QtTest.QTest.keyClick(
+            editor,
+            QtCore.Qt.Key.Key_A,
+            QtCore.Qt.KeyboardModifier.ControlModifier,
+        )
+        QtTest.QTest.keyClicks(editor, str(value))
+        QtTest.QTest.keyClick(editor, QtCore.Qt.Key.Key_Enter)
+        self.app.processEvents()
+
+    def _printing_queue_empty(self) -> bool:
+        controller = getattr(self.dialog, "controller", None)
+        machine = getattr(controller, "machine", None)
+        getter = getattr(machine, "check_if_all_completed", None)
+        return bool(getter()) if callable(getter) else True
+
+    def inspect_printing_controls(self, target_mode: str) -> dict[str, Any]:
+        """Inspect the real printing-control surface for one workflow tab."""
+
+        self._select_printing_mode_tab(target_mode)
+        self._expand_printing_controls()
+        section = getattr(self.dialog, "printing_controls_section", None)
+        combo = getattr(self.dialog, "print_profile_combo", None)
+        button = getattr(self.dialog, "print_profile_apply_button", None)
+        required = (
+            section,
+            combo,
+            button,
+            getattr(self.dialog, "target_print_pressure_spinbox", None),
+            getattr(self.dialog, "target_refuel_pressure_spinbox", None),
+            getattr(self.dialog, "print_pulse_width_spinbox", None),
+            getattr(self.dialog, "refuel_pulse_width_spinbox", None),
+        )
+        if any(widget is None for widget in required):
+            raise RuntimeError("printing controls are incomplete")
+        profiles = [combo.itemData(index) for index in range(combo.count())]
+        selected = combo.currentData()
+        return {
+            "target_mode": str(target_mode).strip().lower(),
+            "section_visible": bool(section.isVisible()),
+            "expanded": bool(self.dialog.printing_controls_toggle.isChecked()),
+            "controls_enabled": bool(
+                self.dialog.target_print_pressure_spinbox.isEnabled()
+            ),
+            "profile_ids": [
+                str(profile.get("id") or "")
+                for profile in profiles
+                if isinstance(profile, dict)
+            ],
+            "selected_profile_id": (
+                str(selected.get("id") or "")
+                if isinstance(selected, dict)
+                else None
+            ),
+            "profile_button_text": button.text(),
+            "target_print_pressure_psi": float(
+                self.dialog.target_print_pressure_spinbox.value()
+            ),
+            "target_refuel_pressure_psi": float(
+                self.dialog.target_refuel_pressure_spinbox.value()
+            ),
+            "print_pulse_width_us": int(
+                self.dialog.print_pulse_width_spinbox.value()
+            ),
+            "refuel_pulse_width_us": int(
+                self.dialog.refuel_pulse_width_spinbox.value()
+            ),
+            "current_print_pressure_text": self.dialog.current_print_pressure_value.text(),
+            "current_refuel_pressure_text": self.dialog.current_refuel_pressure_value.text(),
+        }
+
+    def set_printing_controls(
+        self,
+        target_mode: str,
+        *,
+        print_pressure_psi: float,
+        refuel_pressure_psi: float,
+        print_pulse_width_us: int,
+        refuel_pulse_width_us: int,
+    ) -> dict[str, Any]:
+        """Edit all four settings through the visible dialog controls."""
+
+        state = self.inspect_printing_controls(target_mode)
+        if not state["section_visible"] or not state["controls_enabled"]:
+            raise RuntimeError("printing controls are not available")
+        requested = (
+            (self.dialog.target_print_pressure_spinbox, float(print_pressure_psi)),
+            (self.dialog.target_refuel_pressure_spinbox, float(refuel_pressure_psi)),
+            (self.dialog.print_pulse_width_spinbox, int(print_pulse_width_us)),
+            (self.dialog.refuel_pulse_width_spinbox, int(refuel_pulse_width_us)),
+        )
+        for widget, value in requested:
+            self._replace_spin_value(widget, value)
+        machine_model = getattr(getattr(self.dialog, "model", None), "machine_model", None)
+
+        def converged() -> bool:
+            getters = (
+                ("get_target_print_pressure", float(print_pressure_psi), 0.005),
+                ("get_target_refuel_pressure", float(refuel_pressure_psi), 0.005),
+                ("get_print_pulse_width", int(print_pulse_width_us), 0),
+                ("get_refuel_pulse_width", int(refuel_pulse_width_us), 0),
+            )
+            for getter_name, expected, tolerance in getters:
+                getter = getattr(machine_model, getter_name, None)
+                if callable(getter) and abs(float(getter()) - float(expected)) > tolerance:
+                    return False
+            return self._printing_queue_empty()
+
+        self.wait_until(converged, "printing settings convergence")
+        return self.inspect_printing_controls(target_mode)
+
+    def apply_print_profile_from_panel(
+        self,
+        target_mode: str,
+        profile_id: str,
+    ) -> dict[str, Any]:
+        """Select and apply one tab-filtered profile through the dialog."""
+
+        state = self.inspect_printing_controls(target_mode)
+        combo = self.dialog.print_profile_combo
+        match = next(
+            (
+                index
+                for index in range(combo.count())
+                if isinstance(combo.itemData(index), dict)
+                and str(combo.itemData(index).get("id") or "") == str(profile_id)
+            ),
+            -1,
+        )
+        if match < 0:
+            raise RuntimeError(
+                f"print profile is unavailable for {target_mode}: {profile_id}"
+            )
+        combo.setCurrentIndex(match)
+        self.app.processEvents()
+        button = self.dialog.print_profile_apply_button
+        if button.text() != "Loaded":
+            if not button.isVisible() or not button.isEnabled():
+                raise RuntimeError(
+                    f"print profile cannot be applied: {button.text()}"
+                )
+            QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+            self.wait_until(
+                lambda: button.text() == "Loaded" and self._printing_queue_empty(),
+                f"print profile {profile_id} convergence",
+            )
+        evidence = self.inspect_printing_controls(target_mode)
+        if evidence["selected_profile_id"] != str(profile_id):
+            raise RuntimeError("selected print profile drifted during application")
+        return evidence
+
+    def inspect_live_pressure_plot(self) -> dict[str, Any]:
+        """Return read-only evidence from the imager's live-pressure chart."""
+
+        section = getattr(self.dialog, "live_pressure_section", None)
+        toggle = getattr(self.dialog, "live_pressure_toggle", None)
+        timer = getattr(self.dialog, "live_pressure_render_timer", None)
+        axis_x = getattr(self.dialog, "live_pressure_axis_x", None)
+        axis_y = getattr(self.dialog, "live_pressure_axis_y", None)
+        named_series = {
+            "print": getattr(self.dialog, "live_print_pressure_series", None),
+            "refuel": getattr(self.dialog, "live_refuel_pressure_series", None),
+            "target_print": getattr(
+                self.dialog, "live_target_print_pressure_series", None
+            ),
+            "target_refuel": getattr(
+                self.dialog, "live_target_refuel_pressure_series", None
+            ),
+        }
+        required = (section, toggle, timer, axis_x, axis_y, *named_series.values())
+        if any(item is None for item in required):
+            raise RuntimeError("live pressure plot is incomplete")
+
+        def inspect_series(series: Any) -> dict[str, Any]:
+            count = int(series.count())
+            latest = float(series.at(count - 1).y()) if count else None
+            return {
+                "name": str(series.name()),
+                "count": count,
+                "latest_value": latest,
+            }
+
+        series_evidence = {
+            key: inspect_series(series) for key, series in named_series.items()
+        }
+        return {
+            "section_visible": bool(section.isVisible()),
+            "expanded": bool(toggle.isChecked()),
+            "timer_active": bool(timer.isActive()),
+            "series": series_evidence,
+            "series_names": [
+                evidence["name"] for evidence in series_evidence.values()
+            ],
+            "target_print_pressure_psi": series_evidence["target_print"][
+                "latest_value"
+            ],
+            "target_refuel_pressure_psi": series_evidence["target_refuel"][
+                "latest_value"
+            ],
+            "axis_x": {"minimum": float(axis_x.min()), "maximum": float(axis_x.max())},
+            "axis_y": {"minimum": float(axis_y.min()), "maximum": float(axis_y.max())},
+        }
+
     def inspect_presentation(self) -> dict[str, Any]:
         banner = self.dialog.findChild(QtWidgets.QLabel, "syntheticCalibrationBanner")
         mode_label = self.dialog.findChild(

@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock
 
+import pytest
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QMessageBox
@@ -351,8 +352,69 @@ def test_pressure_updates_are_coalesced_and_render_latest_values(qapp):
     assert box.refuel_series.count() == 2
     assert box.refuel_series.at(1).y() == 0.625
     assert box.target_print_pressure_series.count() == 2
+    assert box.target_refuel_pressure_series.count() == 2
+    assert box.target_refuel_pressure_series.at(1).y() == 1.0
     assert box.current_print_pressure_value.text() == "1.750"
     assert box.current_refuel_pressure_value.text() == "0.625"
+
+
+def test_pressure_render_suspension_stops_requests_and_catches_up_once(qapp):
+    events = []
+    popups = []
+    machine_model = _FakeMachineModel()
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(machine_model, events),
+        _make_controller(events),
+    )
+    render = Mock(wraps=box.update_pressure)
+    box.update_pressure = render
+
+    machine_model.pressure_updated.emit()
+    assert box._pressure_render_timer.isActive()
+    box.set_pressure_render_suspended(True)
+    assert box._pressure_render_suspended is True
+    assert not box._pressure_render_timer.isActive()
+
+    machine_model.print_pressure_readings = [1.8, 1.9]
+    machine_model.refuel_pressure_readings = [0.7, 0.8]
+    for _ in range(10):
+        machine_model.pressure_updated.emit()
+    assert not box._pressure_render_timer.isActive()
+    assert render.call_count == 0
+
+    box.set_pressure_render_suspended(False)
+    assert render.call_count == 1
+    assert box.print_series.at(1).y() == 1.9
+    assert box.refuel_series.at(1).y() == 0.8
+
+    box.set_pressure_render_suspended(False)
+    assert render.call_count == 1
+    box.set_pressure_render_suspended(True)
+    box.set_pressure_render_suspended(True)
+    box.set_pressure_render_suspended(False)
+    assert render.call_count == 2
+
+
+def test_stale_imager_cleanup_does_not_resume_active_renderer(qapp):
+    events = []
+    popups = []
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(_FakeMachineModel(), events),
+        _make_controller(events),
+    )
+    stale_dialog = object()
+    active_dialog = object()
+    box._set_active_droplet_imager_dialog(active_dialog)
+
+    box._clear_droplet_imager_launch_state(stale_dialog)
+
+    assert box._droplet_imager_dialog is active_dialog
+    assert box._pressure_render_suspended is True
+    box._clear_droplet_imager_launch_state(active_dialog)
+    assert box._droplet_imager_dialog is None
+    assert box._pressure_render_suspended is False
 
 
 def test_pressure_render_timer_stops_when_widget_closes(qapp):
@@ -777,6 +839,7 @@ def test_current_profile_calibrate_pressure_opens_droplet_imager_at_camera(monke
     main_window.popup_yes_no.assert_not_called()
     controller.move_to_location.assert_not_called()
     model.reload_refuel_model.assert_not_called()
+    assert box._pressure_render_suspended is False
 
 
 def test_current_profile_calibrate_pressure_rejects_duplicate_while_droplet_dialog_open(monkeypatch, qapp):
@@ -812,7 +875,9 @@ def test_current_profile_calibrate_pressure_rejects_duplicate_while_droplet_dial
 
         def exec(self):
             events.append("droplet_dialog_exec")
+            assert box._pressure_render_suspended is True
             box.calibrate_pressure()
+            assert box._pressure_render_suspended is True
             return 0
 
     monkeypatch.setattr(View.importlib, "reload", lambda module: module)
@@ -836,6 +901,90 @@ def test_current_profile_calibrate_pressure_rejects_duplicate_while_droplet_dial
     ]
     main_window.popup_yes_no.assert_not_called()
     controller.move_to_location.assert_not_called()
+    assert box._pressure_render_suspended is False
+
+
+def test_manual_optics_launch_transfers_and_restores_pressure_rendering(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(_FakeMachineModel(), events)
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    class _OpticsDialog:
+        def __init__(self, *_args, **kwargs):
+            assert kwargs["service_mode"] is True
+            assert kwargs["initial_tab"] == "optics"
+            self.finished = _SignalStub()
+
+        def exec(self):
+            assert box._pressure_render_suspended is True
+            events.append("optics_exec")
+            return 7
+
+    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
+    monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _OpticsDialog)
+
+    assert box._launch_manual_optics_calibration_dialog() == 7
+    assert events[-1] == "optics_exec"
+    assert box._droplet_imager_dialog is None
+    assert box._pressure_render_suspended is False
+
+
+def test_failed_simulation_dialog_open_restores_pressure_rendering(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    main_window.runtime_context = View.SIMULATION_RUNTIME_CONTEXT
+    model = _make_model(_FakeMachineModel(), events)
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    class _FailedDialog(View.QtWidgets.QDialog):
+        def __init__(self, *_args, **_kwargs):
+            super().__init__()
+
+        def open(self):
+            assert box._pressure_render_suspended is True
+            raise RuntimeError("show failed")
+
+    monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _FailedDialog)
+
+    with pytest.raises(RuntimeError, match="show failed"):
+        box._launch_simulation_calibration_dialog()
+    assert box._droplet_imager_dialog is None
+    assert box._pressure_render_suspended is False
+
+
+def test_result_only_dialog_transfers_pressure_rendering_until_finished(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    main_window.runtime_context = View.SIMULATION_RUNTIME_CONTEXT
+    model = _make_model(_FakeMachineModel(), events)
+    model.calibration_manager = SimpleNamespace(
+        _transient_characterization_candidate={
+            "candidate": SimpleNamespace(candidate_id="candidate-1")
+        }
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    class _ResultDialog(View.QtWidgets.QDialog):
+        def __init__(self, *_args, **kwargs):
+            super().__init__()
+            assert kwargs["result_presentation_only"] is True
+            assert kwargs["transient_candidate_id"] == "candidate-1"
+
+    monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _ResultDialog)
+
+    dialog = box.open_simulated_calibration_result("candidate-1")
+    assert box._pressure_render_suspended is True
+    dialog.reject()
+    qapp.processEvents()
+    assert box._droplet_imager_dialog is None
+    assert box._pressure_render_suspended is False
 
 
 def test_current_profile_calibrate_pressure_rejects_duplicate_while_camera_move_pending(monkeypatch, qapp):
@@ -1617,6 +1766,7 @@ def test_simulation_calibration_close_advances_manual_refuel_handoff(monkeypatch
 
     dialog = box._launch_simulation_calibration_dialog()
     assert dialog is box._droplet_imager_dialog
+    assert box._pressure_render_suspended is True
     assert not box.calibrate_pressure_button.isEnabled()
     assert box.request_manual_refuel_check_after_imager_close() is True
 
@@ -1624,6 +1774,7 @@ def test_simulation_calibration_close_advances_manual_refuel_handoff(monkeypatch
     qapp.processEvents()
 
     assert box._droplet_imager_dialog is None
+    assert box._pressure_render_suspended is False
     assert box.calibrate_pressure_button.isEnabled()
     assert box._manual_refuel_check_after_imager_pending is False
     controller.move_to_location.assert_called_once()

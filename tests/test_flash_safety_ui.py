@@ -115,9 +115,18 @@ def _build_droplet_dialog(monkeypatch, qapp):
         droplet_camera_model=cam,
         calibration_manager=_make_calibration_manager_stub(),
         machine_model=SimpleNamespace(
+            machine_connected=True,
+            machine_state_updated=SignalStub(),
+            pressure_updated=SignalStub(),
+            printing_parameters_updated=SignalStub(),
+            is_connected=lambda: True,
             get_print_pressure_bounds=lambda: (0.10, 5.00),
             get_print_pulse_width=lambda: 1400,
+            get_refuel_pulse_width=lambda: 3000,
             get_current_print_pressure=lambda: 0.80,
+            get_current_refuel_pressure=lambda: 0.30,
+            get_target_print_pressure=lambda: 0.60,
+            get_target_refuel_pressure=lambda: 0.30,
         ),
     )
     controller = SimpleNamespace(

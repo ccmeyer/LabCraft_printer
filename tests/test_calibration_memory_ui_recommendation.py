@@ -406,11 +406,27 @@ def test_apply_previewed_droplet_volume_refreshes_recommendation(monkeypatch, qa
 def _build_real_dialog_for_layout(monkeypatch, qapp, *, reset_quick_controls=True, main_window=None):
     if reset_quick_controls:
         monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
+        monkeypatch.setattr(
+            DropletImagingDialog,
+            "_printing_controls_expanded_default",
+            True,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            DropletImagingDialog,
+            "_live_pressure_expanded_default",
+            True,
+            raising=False,
+        )
         if main_window is not None:
             if hasattr(main_window, "_droplet_imaging_quick_controls_expanded"):
                 delattr(main_window, "_droplet_imaging_quick_controls_expanded")
             if hasattr(main_window, "_droplet_imaging_info_panel_sections_expanded"):
                 delattr(main_window, "_droplet_imaging_info_panel_sections_expanded")
+            if hasattr(main_window, "_droplet_imaging_printing_controls_expanded"):
+                delattr(main_window, "_droplet_imaging_printing_controls_expanded")
+            if hasattr(main_window, "_droplet_imaging_live_pressure_expanded"):
+                delattr(main_window, "_droplet_imaging_live_pressure_expanded")
             if hasattr(main_window, "_droplet_imaging_applied_summary_rows"):
                 delattr(main_window, "_droplet_imaging_applied_summary_rows")
     for method_name in (
@@ -450,9 +466,20 @@ def _build_real_dialog_for_layout(monkeypatch, qapp, *, reset_quick_controls=Tru
         _emit_readiness=lambda: None,
     )
     machine_model = SimpleNamespace(
+        machine_connected=True,
+        machine_state_updated=SignalStub(),
+        pressure_updated=SignalStub(),
+        printing_parameters_updated=SignalStub(),
         get_print_pressure_bounds=lambda: (0.10, 5.00),
         get_print_pulse_width=lambda: 1400,
+        get_refuel_pulse_width=lambda: 3000,
         get_current_print_pressure=lambda: 0.80,
+        get_current_refuel_pressure=lambda: 0.30,
+        get_target_print_pressure=lambda: 0.60,
+        get_target_refuel_pressure=lambda: 0.30,
+        get_print_pressure_readings=lambda: [0.55, 0.60],
+        get_refuel_pressure_readings=lambda: [0.28, 0.30],
+        is_connected=lambda: True,
     )
     model = SimpleNamespace(
         droplet_camera_model=droplet_camera_model,
@@ -496,7 +523,9 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert dialog.calibration_tabs.parentWidget() is dialog.control_panel
     assert dialog.run_options_group.parentWidget() is dialog.control_panel
     assert dialog.control_panel.layout().itemAt(2).widget() is dialog.calibration_tabs
-    assert dialog.control_panel.layout().itemAt(3).widget() is dialog.run_options_group
+    assert dialog.control_panel.layout().itemAt(3).widget() is dialog.printing_controls_section
+    assert dialog.control_panel.layout().itemAt(4).widget() is dialog.live_pressure_section
+    assert dialog.control_panel.layout().itemAt(5).widget() is dialog.run_options_group
     assert dialog.reagent_title_label.parentWidget() is dialog.reagent_title_widget
     assert dialog.reagent_stock_label.parentWidget() is dialog.reagent_title_widget
     assert dialog.debug_scroll.parentWidget() is dialog.debug_tab
@@ -529,7 +558,9 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert dialog.stream_tab.isAncestorOf(dialog.calibrate_online_stream_button) is True
     assert dialog.droplet_tab.isAncestorOf(dialog.calibrate_online_stream_button) is False
     assert dialog.acquisition_controls_section.isAncestorOf(dialog.flash_delay_spinbox) is True
-    assert dialog.acquisition_controls_section.isAncestorOf(dialog.print_pulse_width_spinbox) is True
+    assert dialog.acquisition_controls_section.isAncestorOf(dialog.print_pulse_width_spinbox) is False
+    assert dialog.printing_controls_section.isAncestorOf(dialog.print_pulse_width_spinbox) is True
+    assert dialog.printing_controls_section.isAncestorOf(dialog.refuel_pulse_width_spinbox) is True
     assert dialog.acquisition_controls_section.isAncestorOf(dialog.flash_button) is True
     assert dialog.debug_tab.isAncestorOf(dialog.flash_button) is False
     assert dialog.debug_tab.isAncestorOf(dialog.flash_duration_spinbox) is True
@@ -597,6 +628,63 @@ def test_real_dialog_quick_controls_start_collapsed_and_remember_last_state(monk
     assert reopened.acquisition_controls_toggle.isChecked() is True
     assert reopened.acquisition_controls_content.isHidden() is False
 
+    reopened.deleteLater()
+
+
+def test_real_dialog_printing_controls_start_expanded_and_remember_last_state(monkeypatch, qapp):
+    main_window = SimpleNamespace(color_dict={})
+    dialog = _build_real_dialog_for_layout(monkeypatch, qapp, main_window=main_window)
+
+    assert dialog.printing_controls_toggle.isChecked() is True
+    assert dialog.printing_controls_content.isHidden() is False
+
+    dialog.printing_controls_toggle.click()
+    qapp.processEvents()
+
+    assert dialog.printing_controls_toggle.isChecked() is False
+    assert dialog.printing_controls_content.isHidden() is True
+    assert getattr(main_window, "_droplet_imaging_printing_controls_expanded") is False
+
+    dialog.deleteLater()
+    qapp.processEvents()
+
+    reopened = _build_real_dialog_for_layout(
+        monkeypatch,
+        qapp,
+        reset_quick_controls=False,
+        main_window=main_window,
+    )
+
+    assert reopened.printing_controls_toggle.isChecked() is False
+    assert reopened.printing_controls_content.isHidden() is True
+
+    reopened.deleteLater()
+
+
+def test_real_dialog_live_pressure_starts_expanded_and_remembers_last_state(monkeypatch, qapp):
+    main_window = SimpleNamespace(color_dict={})
+    dialog = _build_real_dialog_for_layout(monkeypatch, qapp, main_window=main_window)
+
+    assert dialog.live_pressure_toggle.isChecked() is True
+    assert dialog.live_pressure_content.isHidden() is False
+
+    dialog.live_pressure_toggle.click()
+    qapp.processEvents()
+
+    assert dialog.live_pressure_toggle.isChecked() is False
+    assert dialog.live_pressure_content.isHidden() is True
+    assert getattr(main_window, "_droplet_imaging_live_pressure_expanded") is False
+
+    dialog.deleteLater()
+    qapp.processEvents()
+    reopened = _build_real_dialog_for_layout(
+        monkeypatch,
+        qapp,
+        reset_quick_controls=False,
+        main_window=main_window,
+    )
+    assert reopened.live_pressure_toggle.isChecked() is False
+    assert reopened.live_pressure_content.isHidden() is True
     reopened.deleteLater()
 
 

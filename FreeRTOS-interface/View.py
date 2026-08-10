@@ -3028,6 +3028,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._pressure_render_timer.setSingleShot(True)
         self._pressure_render_timer.setInterval(self.PRESSURE_RENDER_INTERVAL_MS)
         self._pressure_render_timer.timeout.connect(lambda: self.update_pressure())
+        self._pressure_render_suspended = False
 
         prof = getattr(self.main_window, "profile", None)
         self.legacy_mode = prof.name == "legacy" if prof else True
@@ -3522,8 +3523,21 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def _request_pressure_render(self):
         """Coalesce frequent pressure updates into a bounded trailing render."""
+        if self._pressure_render_suspended:
+            return
         if not self._pressure_render_timer.isActive():
             self._pressure_render_timer.start()
+
+    def set_pressure_render_suspended(self, suspended: bool):
+        """Transfer pressure-chart rendering without interrupting model sampling."""
+        suspended = bool(suspended)
+        if suspended == self._pressure_render_suspended:
+            return
+        self._pressure_render_suspended = suspended
+        if suspended:
+            self._pressure_render_timer.stop()
+            return
+        self.update_pressure()
 
     def update_pressure(self):
         """Immediately render the latest pressure values and labels."""
@@ -3561,8 +3575,22 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             ]
         )
 
-        min_pressure = min([*comp_log,target_print_pressure]) - 0.5
-        max_pressure = max([*comp_log,target_print_pressure]) + 0.5
+        target_pressures = [target_print_pressure]
+        if not self.legacy_mode:
+            target_refuel_pressure = self.model.machine_model.get_target_refuel_pressure()
+            self.target_refuel_pressure_series.replace(
+                [
+                    QtCore.QPointF(0, float(target_refuel_pressure)),
+                    QtCore.QPointF(
+                        max(0, len(refuel_log) - 1),
+                        float(target_refuel_pressure),
+                    ),
+                ]
+            )
+            target_pressures.append(target_refuel_pressure)
+
+        min_pressure = min([*comp_log, *target_pressures]) - 0.5
+        max_pressure = max([*comp_log, *target_pressures]) + 0.5
         self.axisY.setRange(min_pressure, max_pressure)
 
         self.current_print_pressure_value.setText(f"{print_log[-1]:.3f}")
@@ -3676,9 +3704,18 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._refresh_droplet_imager_button_state()
 
     def _clear_droplet_imager_launch_state(self, dialog=None):
-        if dialog is None or getattr(self, "_droplet_imager_dialog", None) is dialog:
+        active_dialog = getattr(self, "_droplet_imager_dialog", None)
+        cleared_active_dialog = dialog is None or active_dialog is dialog
+        if cleared_active_dialog:
             self._droplet_imager_dialog = None
+            self.set_pressure_render_suspended(False)
         self._droplet_imager_launch_pending = False
+        self._refresh_droplet_imager_button_state()
+
+    def _set_active_droplet_imager_dialog(self, dialog):
+        """Make one constructed imager dialog the active pressure renderer."""
+        self._droplet_imager_dialog = dialog
+        self.set_pressure_render_suspended(dialog is not None)
         self._refresh_droplet_imager_button_state()
 
     def _focus_active_droplet_imager_dialog(self):
@@ -3833,8 +3870,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 open_refuel_camera_callback=self.refuel_camera,
                 post_apply_manual_refuel_check_callback=self.request_manual_refuel_check_after_imager_close,
             )
-            self._droplet_imager_dialog = droplet_imaging_dialog
-            self._refresh_droplet_imager_button_state()
+            self._set_active_droplet_imager_dialog(droplet_imaging_dialog)
             finished_signal = getattr(droplet_imaging_dialog, "finished", None)
             if finished_signal is not None:
                 try:
@@ -3876,7 +3912,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                     self._simulation_manual_refuel_deferred_callback
                 ),
             )
-            self._droplet_imager_dialog = dialog
+            self._set_active_droplet_imager_dialog(dialog)
             self._droplet_imager_launch_pending = False
             finished_signal = getattr(dialog, "finished", None)
             if finished_signal is not None:
@@ -3920,7 +3956,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 result_presentation_only=True,
                 transient_candidate_id=str(candidate_id),
             )
-            self._droplet_imager_dialog = dialog
+            self._set_active_droplet_imager_dialog(dialog)
             self._droplet_imager_launch_pending = False
             finished_signal = getattr(dialog, "finished", None)
             if finished_signal is not None:
@@ -3935,6 +3971,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def _launch_manual_optics_calibration_dialog(self):
         """Open the droplet imager directly to the manual optics-calibration tab."""
+        if self._droplet_imager_launch_is_active():
+            self._reject_duplicate_droplet_imager_launch()
+            return self._droplet_imager_dialog
         try:
             self.controller.disconnect_droplet_camera_signals()
         except Exception:
@@ -3957,7 +3996,19 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             initial_tab="optics",
             open_refuel_camera_callback=self.refuel_camera,
         )
-        droplet_imaging_dialog.exec()
+        self._set_active_droplet_imager_dialog(droplet_imaging_dialog)
+        finished_signal = getattr(droplet_imaging_dialog, "finished", None)
+        if finished_signal is not None:
+            try:
+                finished_signal.connect(
+                    lambda _result=None, dialog=droplet_imaging_dialog: self._clear_droplet_imager_launch_state(dialog)
+                )
+            except Exception:
+                pass
+        try:
+            return droplet_imaging_dialog.exec()
+        finally:
+            self._clear_droplet_imager_launch_state(droplet_imaging_dialog)
 
     def _guided_optics_location_pair(self):
         try:
