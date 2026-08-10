@@ -572,6 +572,20 @@ def test_imager_printing_controls_round_trip_through_virtual_machine(qapp, tmp_p
         assert abs(live_stream["target_print_pressure_psi"] - 0.8) <= 0.005
         assert abs(live_stream["target_refuel_pressure_psi"] - 0.8) <= 0.005
 
+        post_profile_override = driver.set_printing_controls(
+            "stream",
+            print_pressure_psi=0.9,
+            refuel_pressure_psi=0.7,
+            print_pulse_width_us=2650,
+            refuel_pulse_width_us=6250,
+        )
+        assert post_profile_override["controls_enabled"] is True
+        assert post_profile_override["profile_button_text"] == "Apply"
+        assert post_profile_override["target_print_pressure_psi"] == 0.9
+        assert post_profile_override["target_refuel_pressure_psi"] == 0.7
+        assert post_profile_override["print_pulse_width_us"] == 2650
+        assert post_profile_override["refuel_pulse_width_us"] == 6250
+
         dialog.close()
         qapp.processEvents()
         dialog = None

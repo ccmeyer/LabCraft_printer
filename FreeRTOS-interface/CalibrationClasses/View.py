@@ -7611,6 +7611,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _finish_print_profile_apply(self):
         self._print_profile_apply_pending = False
         self._sync_printing_controls_from_model()
+        self._refresh_printing_controls_enabled_state()
 
     def _handle_printing_controls_transport_fault(self, _report=None):
         self._print_profile_apply_pending = False

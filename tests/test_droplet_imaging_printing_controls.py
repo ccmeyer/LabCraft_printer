@@ -251,6 +251,17 @@ def test_profile_application_waits_for_callback_and_preserves_head_mode(
     assert dialog.print_pulse_width_spinbox.value() == 1300
     assert dialog.refuel_pulse_width_spinbox.value() == 3000
     assert host.head.printing_mode == "droplet"
+    assert dialog.target_print_pressure_spinbox.isEnabled() is True
+    assert dialog.target_refuel_pressure_spinbox.isEnabled() is True
+    assert dialog.print_pulse_width_spinbox.isEnabled() is True
+    assert dialog.refuel_pulse_width_spinbox.isEnabled() is True
+    assert dialog.print_profile_combo.isEnabled() is True
+
+    dialog.target_print_pressure_spinbox.setValue(0.68)
+    qapp.processEvents()
+
+    assert host.settings["target_print"] == 0.68
+    assert dialog.print_profile_apply_button.text() == "Apply"
 
 
 def test_printing_controls_and_pressure_shortcuts_fail_closed(
