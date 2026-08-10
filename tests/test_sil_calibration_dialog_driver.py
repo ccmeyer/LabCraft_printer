@@ -19,6 +19,7 @@ from tools.sil.synthetic_calibration import (
     SyntheticCalibrationProvider,
 )
 from tools.virtual_workflows.page_drivers import CalibrationDialogDriver
+from utilities import apply_pressure_plot_style
 
 
 class _Dialog(QtWidgets.QDialog):
@@ -165,6 +166,20 @@ class _Dialog(QtWidgets.QDialog):
         ):
             series.attachAxis(self.live_pressure_axis_x)
             series.attachAxis(self.live_pressure_axis_y)
+        apply_pressure_plot_style(
+            self.live_pressure_chart,
+            (self.live_pressure_axis_x, self.live_pressure_axis_y),
+            colors={
+                "light_blue": "#275fb8",
+                "white": "#ffffff",
+                "light_gray": "#c4c4c4",
+                "mid_gray": "#6e6e6e",
+            },
+            print_series=self.live_print_pressure_series,
+            refuel_series=self.live_refuel_pressure_series,
+            target_print_series=self.live_target_print_pressure_series,
+            target_refuel_series=self.live_target_refuel_pressure_series,
+        )
         self.live_pressure_chart_view = QtCharts.QChartView(self.live_pressure_chart)
         self.live_pressure_render_timer = QtCore.QTimer(self)
         self.live_pressure_render_timer.setSingleShot(True)
@@ -395,11 +410,19 @@ def test_calibration_dialog_driver_inspects_live_pressure_plot(qapp):
         "Print target",
         "Refuel target",
     ]
-    assert evidence["series"]["print"] == {
-        "name": "Print",
-        "count": 2,
-        "latest_value": 1.2,
-    }
+    assert evidence["series"]["print"]["name"] == "Print"
+    assert evidence["series"]["print"]["count"] == 2
+    assert evidence["series"]["print"]["latest_value"] == 1.2
+    assert evidence["series"]["print"]["color"] == "#275fb8"
+    assert evidence["series"]["print"]["opacity"] == pytest.approx(1.0)
+    assert evidence["series"]["print"]["line_width"] == pytest.approx(1.25)
+    assert evidence["series"]["print"]["line_style"] == "solid"
+    assert evidence["series"]["target_print"]["color"] == "#275fb8"
+    assert evidence["series"]["target_print"]["line_style"] == "dash"
+    assert evidence["series"]["refuel"]["color"] == "#ffffff"
+    assert evidence["series"]["target_refuel"]["color"] == "#ffffff"
+    assert evidence["animation"] == "none"
+    assert evidence["legend_entries"] == ["Print", "Refuel"]
     assert evidence["target_print_pressure_psi"] == 1.2
     assert evidence["target_refuel_pressure_psi"] == 0.4
     assert evidence["axis_x"] == {"minimum": 0.0, "maximum": 1.0}

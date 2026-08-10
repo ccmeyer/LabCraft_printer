@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from PySide6 import QtCore, QtCharts
 from PySide6.QtTest import QSignalSpy
 
 from tests.calibration_test_utils import SignalStub, ensure_calibration_import_stubs
@@ -335,6 +336,36 @@ def test_live_pressure_plot_renders_four_series_on_every_tab(printing_dialog, qa
         dialog.live_target_print_pressure_series.name(),
         dialog.live_target_refuel_pressure_series.name(),
     ] == ["Print", "Refuel", "Print target", "Refuel target"]
+    assert dialog.live_print_pressure_series.pen().color().name() == "#275fb8"
+    assert dialog.live_refuel_pressure_series.pen().color().name() == "#ffffff"
+    assert (
+        dialog.live_target_print_pressure_series.pen().color()
+        == dialog.live_print_pressure_series.pen().color()
+    )
+    assert (
+        dialog.live_target_refuel_pressure_series.pen().color()
+        == dialog.live_refuel_pressure_series.pen().color()
+    )
+    for series in (
+        dialog.live_print_pressure_series,
+        dialog.live_refuel_pressure_series,
+    ):
+        assert series.pen().widthF() == pytest.approx(1.25)
+        assert series.pen().style() == QtCore.Qt.PenStyle.SolidLine
+    for series in (
+        dialog.live_target_print_pressure_series,
+        dialog.live_target_refuel_pressure_series,
+    ):
+        assert series.pen().widthF() == pytest.approx(1.25)
+        assert series.pen().style() == QtCore.Qt.PenStyle.DashLine
+    assert dialog.live_pressure_chart.property("pressureLegendEntries") == [
+        "Print",
+        "Refuel",
+    ]
+    assert (
+        dialog.live_pressure_chart.animationOptions()
+        == QtCharts.QChart.AnimationOption.NoAnimation
+    )
     assert dialog.live_print_pressure_series.count() == 3
     assert dialog.live_print_pressure_series.at(2).y() == pytest.approx(0.62)
     assert dialog.live_refuel_pressure_series.at(2).y() == pytest.approx(0.32)

@@ -41,7 +41,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime
 from pathlib import Path
 import cv2
-from utilities import ShortcutManager
+from utilities import ShortcutManager, apply_pressure_plot_style
 from ExperimentAuditReader import ExperimentAuditReader, build_audit_markdown
 import CalibrationClasses
 import importlib
@@ -3352,21 +3352,17 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.chart_view = QtCharts.QChartView(self.chart)
         
         self.print_series = QtCharts.QLineSeries()
-        self.print_series.setColor(QtCore.Qt.white)
         self.chart.addSeries(self.print_series)
 
         if not self.legacy_mode:
             self.refuel_series = QtCharts.QLineSeries()
-            self.refuel_series.setColor(QtCore.Qt.white)
             self.chart.addSeries(self.refuel_series)
 
         self.target_print_pressure_series = QtCharts.QLineSeries()  # Create a new line series for the target pressure
-        self.target_print_pressure_series.setColor(QtCore.Qt.red)  # Set the line color to red
         self.chart.addSeries(self.target_print_pressure_series)
 
         if not self.legacy_mode:
                 self.target_refuel_pressure_series = QtCharts.QLineSeries()  # Create a new line series for the target pressure
-                self.target_refuel_pressure_series.setColor(QtCore.Qt.red)
                 self.chart.addSeries(self.target_refuel_pressure_series)
 
         self.axisX = QtCharts.QValueAxis()
@@ -3392,7 +3388,17 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.target_refuel_pressure_series.attachAxis(self.axisX)
             self.target_refuel_pressure_series.attachAxis(self.axisY)
 
-        self.chart.legend().hide()  # Hide the legend
+        self.pressure_plot_style = apply_pressure_plot_style(
+            self.chart,
+            (self.axisX, self.axisY),
+            colors=self.color_dict,
+            print_series=self.print_series,
+            refuel_series=(self.refuel_series if not self.legacy_mode else None),
+            target_print_series=self.target_print_pressure_series,
+            target_refuel_series=(
+                self.target_refuel_pressure_series if not self.legacy_mode else None
+            ),
+        )
         self.chart_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.chart_view, row_offset + 3, 0,1,4)

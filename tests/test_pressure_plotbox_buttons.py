@@ -268,6 +268,37 @@ def test_legacy_profile_pressure_box_hides_refuel_camera_button(qapp):
     assert hasattr(box, "calibrate_pressure_button")
     assert hasattr(box, "print_frequency_spinbox")
     assert not hasattr(box, "refuel_camera_button")
+    assert box.chart.property("pressureLegendEntries") == ["Print"]
+
+
+def test_pressure_plot_uses_shared_channel_and_target_styling(qapp):
+    events = []
+    popups = []
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(_FakeMachineModel(), events),
+        _make_controller(events),
+    )
+
+    assert box.print_series.name() == "Print"
+    assert box.refuel_series.name() == "Refuel"
+    assert box.target_print_pressure_series.name() == "Print target"
+    assert box.target_refuel_pressure_series.name() == "Refuel target"
+    assert box.print_series.pen().color().name() == "#60a5fa"
+    assert box.refuel_series.pen().color().name() == "#ffffff"
+    assert box.target_print_pressure_series.pen().color() == box.print_series.pen().color()
+    assert box.target_refuel_pressure_series.pen().color() == box.refuel_series.pen().color()
+    for series in (box.print_series, box.refuel_series):
+        assert series.pen().widthF() == pytest.approx(1.25)
+        assert series.pen().style() == Qt.PenStyle.SolidLine
+    for series in (
+        box.target_print_pressure_series,
+        box.target_refuel_pressure_series,
+    ):
+        assert series.pen().widthF() == pytest.approx(1.25)
+        assert series.pen().style() == Qt.PenStyle.DashLine
+    assert box.chart.property("pressureLegendEntries") == ["Print", "Refuel"]
+    assert box.chart.animationOptions() == View.QtCharts.QChart.AnimationOption.NoAnimation
 
 
 def test_pressure_box_frequency_spinbox_calls_controller(qapp):

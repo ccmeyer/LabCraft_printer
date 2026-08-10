@@ -531,12 +531,32 @@ def test_imager_printing_controls_round_trip_through_virtual_machine(qapp, tmp_p
                     driver.inspect_live_pressure_plot()["target_print_pressure_psi"]
                     - 0.72
                 ) <= 0.005
+                and abs(
+                    driver.inspect_live_pressure_plot()["target_refuel_pressure_psi"]
+                    - 0.42
+                ) <= 0.005
             ),
             "live pressure samples and direct targets",
         )
         live_direct = driver.inspect_live_pressure_plot()
         assert abs(live_direct["target_print_pressure_psi"] - 0.72) <= 0.005
         assert abs(live_direct["target_refuel_pressure_psi"] - 0.42) <= 0.005
+        assert live_direct["legend_entries"] == ["Print", "Refuel"]
+        assert live_direct["animation"] == "none"
+        assert live_direct["series"]["print"]["color"] == (
+            box.print_series.pen().color().name()
+        )
+        assert live_direct["series"]["refuel"]["color"] == (
+            box.refuel_series.pen().color().name()
+        )
+        assert live_direct["series"]["target_print"]["color"] == (
+            box.target_print_pressure_series.pen().color().name()
+        )
+        assert live_direct["series"]["target_refuel"]["color"] == (
+            box.target_refuel_pressure_series.pen().color().name()
+        )
+        assert live_direct["series"]["print"]["line_width"] == 1.25
+        assert live_direct["series"]["target_print"]["line_style"] == "dash"
         assert [
             box.print_series.at(index).y()
             for index in range(box.print_series.count())

@@ -2857,6 +2857,7 @@ class CalibrationDialogDriver:
         section = getattr(self.dialog, "live_pressure_section", None)
         toggle = getattr(self.dialog, "live_pressure_toggle", None)
         timer = getattr(self.dialog, "live_pressure_render_timer", None)
+        chart = getattr(self.dialog, "live_pressure_chart", None)
         axis_x = getattr(self.dialog, "live_pressure_axis_x", None)
         axis_y = getattr(self.dialog, "live_pressure_axis_y", None)
         named_series = {
@@ -2869,17 +2870,37 @@ class CalibrationDialogDriver:
                 self.dialog, "live_target_refuel_pressure_series", None
             ),
         }
-        required = (section, toggle, timer, axis_x, axis_y, *named_series.values())
+        required = (
+            section,
+            toggle,
+            timer,
+            chart,
+            axis_x,
+            axis_y,
+            *named_series.values(),
+        )
         if any(item is None for item in required):
             raise RuntimeError("live pressure plot is incomplete")
 
         def inspect_series(series: Any) -> dict[str, Any]:
             count = int(series.count())
             latest = float(series.at(count - 1).y()) if count else None
+            pen = series.pen()
+            pen_style = pen.style()
+            if pen_style == QtCore.Qt.PenStyle.SolidLine:
+                line_style = "solid"
+            elif pen_style == QtCore.Qt.PenStyle.DashLine:
+                line_style = "dash"
+            else:
+                line_style = str(pen_style)
             return {
                 "name": str(series.name()),
                 "count": count,
                 "latest_value": latest,
+                "color": str(pen.color().name()).lower(),
+                "opacity": float(pen.color().alphaF()),
+                "line_width": float(pen.widthF()),
+                "line_style": line_style,
             }
 
         series_evidence = {
@@ -2892,6 +2913,20 @@ class CalibrationDialogDriver:
             "series": series_evidence,
             "series_names": [
                 evidence["name"] for evidence in series_evidence.values()
+            ],
+            "animation": (
+                "none" if not bool(chart.animationOptions()) else str(chart.animationOptions())
+            ),
+            "legend_entries": [
+                str(label)
+                for label in (
+                    chart.property("pressureLegendEntries")
+                    or [
+                        marker.label()
+                        for marker in chart.legend().markers()
+                        if marker.isVisible()
+                    ]
+                )
             ],
             "target_print_pressure_psi": series_evidence["target_print"][
                 "latest_value"

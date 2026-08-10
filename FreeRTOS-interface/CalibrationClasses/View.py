@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 import cv2
-from utilities import ShortcutManager
+from utilities import ShortcutManager, apply_pressure_plot_style
 from CalibrationRecordExport import CalibrationRecordExportError, export_calibration_records
 from .Model import NozzlePositionChecklistStore
 from hardware.null_devices import NullCamera
@@ -7220,25 +7220,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.live_pressure_chart.setMargins(QtCore.QMargins(2, 2, 2, 2))
 
         self.live_print_pressure_series = QtCharts.QLineSeries()
-        self.live_print_pressure_series.setName("Print")
-        self.live_print_pressure_series.setPen(
-            self._make_chart_pen("light_blue", "#60a5fa", width=2)
-        )
         self.live_refuel_pressure_series = QtCharts.QLineSeries()
-        self.live_refuel_pressure_series.setName("Refuel")
-        self.live_refuel_pressure_series.setPen(
-            self._make_chart_pen("green", "#34d399", width=2)
-        )
         self.live_target_print_pressure_series = QtCharts.QLineSeries()
-        self.live_target_print_pressure_series.setName("Print target")
-        self.live_target_print_pressure_series.setPen(
-            self._make_chart_pen("orange", "#f59e0b", width=2, style=Qt.DashLine)
-        )
         self.live_target_refuel_pressure_series = QtCharts.QLineSeries()
-        self.live_target_refuel_pressure_series.setName("Refuel target")
-        self.live_target_refuel_pressure_series.setPen(
-            self._make_chart_pen("purple", "#c084fc", width=2, style=Qt.DashLine)
-        )
 
         self.live_pressure_axis_x = QtCharts.QValueAxis()
         self.live_pressure_axis_x.setTitleText("Recent samples")
@@ -7260,12 +7244,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
             series.attachAxis(self.live_pressure_axis_x)
             series.attachAxis(self.live_pressure_axis_y)
 
-        legend = self.live_pressure_chart.legend()
-        legend.setVisible(True)
-        legend.setAlignment(Qt.AlignBottom)
-        legend_font = legend.font()
-        legend_font.setPointSize(7)
-        legend.setFont(legend_font)
+        self.live_pressure_plot_style = apply_pressure_plot_style(
+            self.live_pressure_chart,
+            (self.live_pressure_axis_x, self.live_pressure_axis_y),
+            colors=self.color_dict,
+            print_series=self.live_print_pressure_series,
+            refuel_series=self.live_refuel_pressure_series,
+            target_print_series=self.live_target_print_pressure_series,
+            target_refuel_series=self.live_target_refuel_pressure_series,
+        )
 
         self.live_pressure_chart_view = QtCharts.QChartView(self.live_pressure_chart)
         self.live_pressure_chart_view.setObjectName("livePressureChartView")

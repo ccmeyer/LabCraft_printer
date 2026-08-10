@@ -2,6 +2,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from pprint import pformat
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +27,53 @@ def _wait_until(qapp, predicate, *, timeout_ms=3000):
         QtTest.QTest.qWait(1)
     qapp.processEvents()
     assert predicate(), "condition did not become true before timeout"
+
+
+def _wait_while_progressing(
+    qapp,
+    predicate,
+    progress,
+    diagnostics,
+    *,
+    no_progress_timeout_ms=10000,
+    hard_timeout_ms=120000,
+):
+    started_at = time.monotonic()
+    last_progress_at = started_at
+    last_progress = progress()
+
+    while True:
+        qapp.processEvents()
+        if predicate():
+            return
+
+        now = time.monotonic()
+        current_progress = progress()
+        if current_progress != last_progress:
+            last_progress = current_progress
+            last_progress_at = now
+
+        elapsed_ms = (now - started_at) * 1000.0
+        idle_ms = (now - last_progress_at) * 1000.0
+        if idle_ms >= no_progress_timeout_ms or elapsed_ms >= hard_timeout_ms:
+            reason = (
+                "no forward progress"
+                if idle_ms >= no_progress_timeout_ms
+                else "absolute safety limit reached"
+            )
+            snapshot = {
+                "reason": reason,
+                "elapsed_ms": round(elapsed_ms, 3),
+                "idle_ms": round(idle_ms, 3),
+                "progress": current_progress,
+                **diagnostics(),
+            }
+            pytest.fail(
+                "condition did not become true while progress was monitored:\n"
+                + pformat(snapshot, sort_dicts=False)
+            )
+
+        QtTest.QTest.qWait(1)
 
 
 def _make_machine(qapp, test_profile, *, config=None):
@@ -322,10 +370,59 @@ def test_two_well_lookahead_soak_never_loses_handler_driven_work(
 
     queue_one()
     queue_one()
-    _wait_until(
+
+    def diagnostics():
+        active = machine._active_command
+        return {
+            "parameters": {
+                "speed_multiplier": speed_multiplier,
+                "completion_delay_ms": completion_delay_ms,
+                "total": total,
+            },
+            "created": created,
+            "completed_count": len(completed),
+            "pending_count": len(pending),
+            "pending": dict(pending),
+            "drains": list(drains),
+            "active_command": (
+                None
+                if active is None
+                else {
+                    "command_number": active.command_number,
+                    "command_type": active.command_type,
+                    "status": active.status,
+                }
+            ),
+            "command_timer": {
+                "active": machine._command_timer.isActive(),
+                "remaining_time_ms": machine._command_timer.remainingTime(),
+            },
+            "queue": [
+                {
+                    "command_number": command.command_number,
+                    "command_type": command.command_type,
+                    "status": command.status,
+                }
+                for command in machine.command_queue.queue
+            ],
+            "sequence": {
+                "last_accepted": machine.state.last_accepted,
+                "last_completed": machine.state.last_completed,
+                "last_retired": machine.state.last_retired,
+            },
+            "recent_lifecycle_events": list(machine.command_event_history),
+        }
+
+    _wait_while_progressing(
         qapp,
         lambda: len(completed) == total and machine.check_if_all_completed(),
-        timeout_ms=30000,
+        lambda: (
+            len(completed),
+            machine.state.last_accepted,
+            machine.state.last_completed,
+            machine.state.last_retired,
+        ),
+        diagnostics,
     )
 
     assert created == total
