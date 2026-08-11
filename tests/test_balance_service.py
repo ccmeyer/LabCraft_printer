@@ -372,7 +372,7 @@ def test_disconnect_cancels_active_request_and_is_idempotent(qapp):
     assert service.close().accepted
 
 
-def test_open_failure_requires_explicit_error_reset(qapp):
+def test_open_failure_can_close_without_explicit_error_reset(qapp):
     factory = FakeFactory(open_error=OSError("permission denied"))
     service = BalanceService(transport_factory=factory)
     errors = []
@@ -387,11 +387,11 @@ def test_open_failure_requires_explicit_error_reset(qapp):
             service.connect_balance("/dev/serial/by-id/hpb").rejection_reason
             is BalanceCommandRejectReason.INVALID_STATE
         )
-        assert service.disconnect_balance().accepted
-        assert service.connection_snapshot.state is BalanceConnectionState.DISCONNECTED
+        assert service.close().accepted
+        assert service.connection_snapshot.state is BalanceConnectionState.CLOSED
     finally:
         if service.connection_snapshot.state is BalanceConnectionState.ERROR:
-            service.disconnect_balance()
+            service.close()
         _wait(qapp, lambda: not service.worker_running)
         qapp.processEvents()
         assert service.close().accepted
@@ -419,7 +419,6 @@ def test_read_failure_emits_typed_error_and_terminal_transport_result(qapp):
         assert errors[0].request_id == request.request_id
     finally:
         _wait(qapp, lambda: not service.worker_running)
-        service.disconnect_balance()
         qapp.processEvents()
         assert service.close().accepted
 
@@ -450,7 +449,7 @@ def test_invalid_transport_data_terminates_request_as_service_error(qapp):
         assert service.close().accepted
 
 
-def test_close_failure_is_typed_and_leaves_error_for_explicit_reset(qapp):
+def test_transport_close_failure_is_typed_and_service_can_close(qapp):
     transport = FakeTransport(close_error=OSError("close failed"))
     factory = FakeFactory(transport)
     service = BalanceService(transport_factory=factory)
@@ -464,9 +463,9 @@ def test_close_failure_is_typed_and_leaves_error_for_explicit_reset(qapp):
 
     assert any(error.code is BalanceServiceErrorCode.TRANSPORT_CLOSE_FAILED for error in errors)
     assert transport.close_count == 1
-    assert service.disconnect_balance().accepted
     qapp.processEvents()
     assert service.close().accepted
+    assert service.connection_snapshot.state is BalanceConnectionState.CLOSED
 
 
 def test_diagnostics_are_bounded_and_incomplete_tail_is_flushed(qapp):
@@ -510,9 +509,9 @@ def test_shutdown_timeout_does_not_force_terminate_worker(qapp):
     finally:
         gate.set()
         _wait(qapp, lambda: not service.worker_running)
-        service.disconnect_balance()
         qapp.processEvents()
         assert service.close().accepted
+        assert service.connection_snapshot.state is BalanceConnectionState.CLOSED
 
 
 def test_repeated_connection_cycles_leave_no_worker_or_open_transport(qapp):

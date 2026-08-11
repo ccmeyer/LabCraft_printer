@@ -935,11 +935,11 @@ class BalanceService(QtCore.QObject):
                     BalanceCommandRejectReason.INVALID_STATE,
                     error.detail,
                 )
-        if self._state is BalanceConnectionState.ERROR:
-            return _rejected(
-                BalanceCommandRejectReason.INVALID_STATE,
-                "balance service stopped with an error",
-            )
+        if worker is not None:
+            try:
+                self._last_diagnostics = worker.diagnostics_snapshot()
+            except RuntimeError:
+                pass
         self._thread = None
         self._worker = None
         self._active_request = None
