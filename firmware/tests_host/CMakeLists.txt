@@ -31,6 +31,7 @@ add_executable(fw_tests
     tests/test_motion_qualification_math.cpp
     tests/test_stepper_profile_math.cpp
     tests/test_normalized_cosine_profile.cpp
+    tests/test_coordinated_xy_planner.cpp
     tests/test_stepper_isr_instrumentation.cpp
     tests/test_stepper_instrumentation_report.cpp
     tests/test_stepper_limit_policy.cpp
@@ -67,6 +68,7 @@ add_executable(fw_tests
     ../Core/Src/MotionQualificationMath.cpp
     ../Core/Src/StepperProfileMath.cpp
     ../Core/Src/NormalizedCosineProfile.cpp
+    ../Core/Src/CoordinatedXyPlanner.cpp
     ../Core/Src/StepperIsrInstrumentation.cpp
     ../Core/Src/StepperInstrumentationReport.cpp
     ../Core/Src/CrashLogCodec.c

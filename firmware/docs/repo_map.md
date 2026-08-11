@@ -84,6 +84,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `firmware/Core/Inc/StepperIsrInstrumentation.h`, `firmware/Core/Src/StepperIsrInstrumentation.cpp`
   - `firmware/Core/Inc/StepperInstrumentationReport.h`, `firmware/Core/Src/StepperInstrumentationReport.cpp`
   - `firmware/Core/Inc/NormalizedCosineProfile.h`, `firmware/Core/Src/NormalizedCosineProfile.cpp`
+  - `firmware/Core/Inc/CoordinatedXyPlanner.h`, `firmware/Core/Src/CoordinatedXyPlanner.cpp`
   - `firmware/Core/Inc/Gantry.h`, `firmware/Core/Src/Gantry.cpp`
   - `firmware/Core/Inc/TMC2208Driver.h`, `firmware/Core/Src/TMC2208Driver.cpp`
 - Key functions:
@@ -91,6 +92,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `Stepper::home` accepts a cooperative cancellation token and returns distinct succeeded, failed, or canceled outcomes; every blocking home phase polls the token and restores home-only motion settings before exit.
   - `StepperIsrInstrumentation` is the compile-gated, fixed-size X/Y legacy ISR measurement state. `StepperInstrumentationReport` validates completed snapshots and formats compact post-move metrics; neither helper changes timer periods, pulse accounting, or routing.
   - `NormalizedCosineProfile` is the unrouted Milestone 2 pure profile module. It owns the 257-point Q20 cosine LUT, Q0.32 quotient/remainder cursor, bounded integer interpolation, and cached current ARR. It has no HAL or FreeRTOS dependency; `prepare()` may divide, while ISR-callable `currentArr()`/`advance()` do not.
+  - `CoordinatedXyPlanner` is the unrouted Milestone 3 pure planner. It derives a shared X/Y master rate and acceleration, prepares normalized cosine ramps, and emits cached complete-step ARR/DDA mask events with exact centered-error endpoint counts. Preparation may divide; its per-step cursor has no HAL, FreeRTOS, timer, GPIO, floating-point, or allocation dependency.
   - C wrappers used by orchestrator/main: `MX_STEPPERX_Home`, `MX_STEPPERY_Home`, etc.
   - `Gantry::moveBy`, `Gantry::moveTo`
 

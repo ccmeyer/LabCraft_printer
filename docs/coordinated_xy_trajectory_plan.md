@@ -221,7 +221,7 @@ Every milestone that touches motion must preserve these invariants:
 | 0. Baseline and decisions | `verified` | Reproducible legacy source/build, reset, motion, and straightness evidence recorded | Baseline source/build/HIL artifacts complete |
 | 1. Behavior-preserving instrumentation | `verified` | Legacy timing, pending-interrupt, reset, pulse, status, and straightness evidence recorded | Milestone 1 evidence complete |
 | 2. Fixed-point normalized LUT | `verified` | Unrouted 257-point Q20 profile and explicit non-motion target benchmark pass | Error and cycle budgets accepted |
-| 3. Pure coordinated XY planner | `not_started` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
+| 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `not_started` | Timer/pulse integration exists without normal routing | Build, low-rate bench, cancel, and limit gates pass |
 | 5. Route normal Gantry XY motion | `not_started` | `ABSOLUTE_XY` uses coordinated executor | Status, completion, and unchanged-path regressions pass |
 | 6. Performance and motion HIL qualification | `not_started` | Speed ladder, straightness, lost-step, and reset evidence pass | Acceptance matrix complete |
@@ -229,12 +229,10 @@ Every milestone that touches motion must preserve these invariants:
 
 ## Next Planned Action
 
-Milestone 2 is verified in
-`docs/coordinated_xy_milestone2_lut.md`. Commit its source, documentation, and
-matching tracked binary as one milestone commit. Then prepare the smallest
-host-only Milestone 3 slice: define the pure coordinated X/Y plan and DDA event
-trace, prove exact endpoint/pulse behavior exhaustively, and keep all timers,
-GPIO, normal routing, homing, Z, and pressure motion unchanged.
+Milestone 3 is verified in
+`docs/coordinated_xy_milestone3_planner.md`. Create and review the concrete
+Milestone 4 plan for gated timer/GPIO integration before changing any runtime
+motion owner, callback, pin, timer, completion, cancel, or limit behavior.
 
 ## Milestone 0: Baseline And Decisions
 
@@ -430,7 +428,9 @@ point, or division in the ISR.
 
 ## Milestone 3: Pure Coordinated XY Planner
 
-Status: `not_started`
+Status: `verified`
+
+Evidence record: `docs/coordinated_xy_milestone3_planner.md`
 
 ### Goal
 
@@ -464,11 +464,12 @@ without HAL, timers, GPIO, or real hardware.
 - Maximum supported step counts do not overflow accumulators.
 - Deterministic output across repeated runs.
 
-### Likely files
+### Implemented files
 
-- the pure coordinated math module from Milestone 2
-- host event-trace helper under `firmware/tests_host/`
-- `firmware/tests_host/tests/test_coordinated_xy_math.cpp`
+- `firmware/Core/Inc/CoordinatedXyPlanner.h`
+- `firmware/Core/Src/CoordinatedXyPlanner.cpp`
+- `firmware/tests_host/tests/test_coordinated_xy_planner.cpp`
+- `firmware/tests_host/CMakeLists.txt`
 
 ### Proceed criteria
 
