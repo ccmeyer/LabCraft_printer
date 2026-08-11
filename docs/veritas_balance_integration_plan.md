@@ -4,7 +4,7 @@
 
 - Date: 2026-08-10
 - Branch: `feature/balance_integration`
-- Status: Slices 0-6 hardware exercised; unified GPIO/serial ejection accounting correction implemented awaiting HIL
+- Status: Balance workflow and unified ejection accounting hardware verified; automatic CP2102 discovery awaits post-change smoke validation
 - Scope: implementation plan and slice verification record
 - Target hardware: Veritas/BEL HPB balance connected to the Raspberry Pi through a proper RS-232-to-USB adapter
 - Target workflow: stream gravimetric data collection only
@@ -1021,7 +1021,7 @@ Rollback:
 
 ## Prerequisite: MCU Log-Port Identity Hardening
 
-Status: `implemented_awaiting_hil`
+Status: `implemented_awaiting_post_change_smoke`
 
 The separate MCU firmware log channel previously relied on the literal device
 `/dev/ttyUSB0`. Attaching the Prolific balance adapter could change Linux USB
@@ -1029,17 +1029,21 @@ enumeration and route the log reader to the balance, preventing `FLASH_ARMED`
 and normal firmware logs from reaching the imager on both `main` and the
 balance branch.
 
-The production/current call path now passes an explicit `MACHINE_LOG_PORT`
-from settings into `Machine`. Immediately after `HELLO_ACK`, a read-only
-identity resolver maps the persistent by-id alias to its system device and
-requires CP2102 `10c4:ea60` before `LogReader` opens it at 115200 baud. There is
-no `ttyUSB` fallback. Missing configuration, metadata, device, identity, or an
-open failure leaves flash disarmed, prevents transport readiness and command
-execution, closes the command connection, and reports an actionable error
-without resetting the MCU.
+The production/current call path now treats `MACHINE_LOG_PORT` as an optional
+preference. Immediately after `HELLO_ACK`, a read-only identity resolver
+accepts a valid preferred path or discovers the sole attached CP2102
+`10c4:ea60`. It prefers that device's deterministic by-id alias and never
+selects by `ttyUSB` order, product-name regex, or fuzzy matching. Zero identity
+matches and ambiguous multiple matches fail closed before `LogReader` opens.
+Missing metadata, identity ambiguity, or an open failure leaves flash
+disarmed, prevents transport readiness and command execution, closes the
+command connection, and reports an actionable error without resetting the
+MCU.
 
-The balance Controller now reserves the configured and resolved MCU log path
-and all matching aliases in addition to its existing CP2102 classification.
+The balance Controller now reserves only the successfully validated MCU log
+identity and its aliases in addition to its existing CP2102 classification.
+A stale configured path that currently resolves to the Prolific adapter cannot
+hide the balance after logging falls back to the unique CP2102.
 The Prolific adapter remains the only verified HPB adapter. Import and object
 construction do not enumerate or open ports; legacy and simulation do not
 resolve the log path. Existing ignored local settings without the new key use
@@ -1051,10 +1055,11 @@ construction, BalanceService, and stream balance integration. An additional
 41 command-transport, connection-retry, and reset-report tests passed. The full
 suite remains deferred to final all-slices validation.
 
-Pi acceptance requires booting with both adapters attached, confirming normal
-MCU logs and `FLASH_ARMED`, connecting the Prolific balance, and verifying that
-both streams continue simultaneously regardless of their `ttyUSB` numbering.
-Slice 6 HIL remains paused until this prerequisite passes.
+The prior persistent-alias implementation passed Pi operation with both
+adapters attached. The new unique-identity fallback must still be smoke-tested
+at its final commit by starting with blank and stale `MACHINE_LOG_PORT` values,
+confirming normal MCU logs and `FLASH_ARMED`, and confirming that the Prolific
+balance remains available regardless of `ttyUSB` numbering.
 
 Rollback removes the identity resolver/configuration seam and restores the old
 log construction. Operationally, the balance must remain unplugged after such
@@ -1062,7 +1067,7 @@ a rollback because the old `ttyUSB0` behavior is enumeration-dependent.
 
 ## Slice 6: Ending Mass, Provenance, And Confirmed Save
 
-Status: `implemented_awaiting_hil`
+Status: `hardware_verified`
 
 Goal:
 
@@ -1142,10 +1147,12 @@ Proceed criteria:
 
 Manual/HIL check:
 
-- Pending. Complete one balance-backed ending candidate and confirmed save on
-  the Raspberry Pi, then verify the CSV row, both provenance payloads in the
-  sidecar, gripper restoration, and camera return. Slice 7 remains gated on
-  this check.
+- Operator-reported complete on the development Raspberry Pi on 2026-08-10 at
+  commit `6494bb57550dcbf4398606707fa5e2eac50f9590`. The HPB-625i used the
+  Prolific `067b:23a3` adapter while the MCU logger used CP2102 `10c4:ea60`.
+  Starting and ending candidates, explicit confirmation, manual fallback, the
+  CSV row, sidecar provenance, gripper restoration, and camera return behaved
+  as documented.
 
 Rollback:
 
@@ -1154,7 +1161,7 @@ Rollback:
 
 ## Pre-Start Loading And Ejection-Aware Baseline Reuse
 
-Status: `implemented_awaiting_hil`
+Status: `hardware_verified`
 
 Goal:
 
@@ -1218,6 +1225,12 @@ Pi acceptance:
 5. Check CSV and sidecar command/camera counts, carry provenance, camera and
    gripper restoration, MCU logs, and simultaneous balance readings.
 
+Operator-reported complete on the development Raspberry Pi on 2026-08-10 at
+commit `6494bb57550dcbf4398606707fa5e2eac50f9590`: pre-start loading, camera
+return before calibration, same-tube baseline reuse, invalidation after an
+intervening ejection, provenance, and simultaneous logger/balance operation
+all behaved as documented.
+
 Rollback:
 
 - Remove the ledger and new starting states, restore direct starting-balance
@@ -1226,7 +1239,7 @@ Rollback:
 
 ## Unified GPIO And Serial Ejection Accounting Correction
 
-Status: `implemented_awaiting_hil`
+Status: `hardware_verified`
 
 Root cause:
 
@@ -1274,6 +1287,12 @@ Pi acceptance:
    continue simultaneously.
 5. Perform one controlled extra camera capture and verify it invalidates the
    reusable baseline. Do not deliberately induce a flash hardware fault.
+
+Operator-reported complete on the development Raspberry Pi on 2026-08-10 at
+commit `6494bb57550dcbf4398606707fa5e2eac50f9590`: scheduled and recorded
+counts agreed, CSV `Num Prints` and mass-per-print used the unified nonzero
+count, sidecar source deltas were present, simultaneous streams remained
+healthy, and an extra ejection invalidated baseline reuse.
 
 Rollback:
 
