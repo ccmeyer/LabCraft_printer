@@ -3940,7 +3940,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         # ---------------- Connections ----------------
         self.model.droplet_camera_model.droplet_image_updated.connect(self.update_image)
-        self.model.droplet_camera_model.droplet_image_updated.connect(self._on_droplet_capture_finished)
+        self.model.droplet_camera_model.droplet_image_updated.connect(
+            self._on_droplet_capture_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self.model.droplet_camera_model.flash_signal.connect(self.update_flash_info)
         self.model.calibration_manager.analyzedImageUpdated.connect(self.display_analyzed_image)
         online_stream_debug_signal = getattr(self.model.calibration_manager, "onlineStreamDebugUpdated", None)

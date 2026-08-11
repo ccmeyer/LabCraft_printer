@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+from PySide6 import QtCore
 
 from tests.calibration_test_utils import SignalStub, ensure_calibration_import_stubs
 
@@ -35,7 +36,7 @@ _PRINT_PROFILES = [
 
 
 class _DropletCameraModelStub:
-    def __init__(self):
+    def __init__(self, *, droplet_image_updated=None):
         self.flash_duration = 1000
         self.flash_delay = 2000
         self.num_droplets = 1
@@ -45,7 +46,11 @@ class _DropletCameraModelStub:
         self.flash_session_armed = False
         self.flash_fault_latched = False
         self.flash_fault_reason = ""
-        self.droplet_image_updated = SignalStub()
+        self.droplet_image_updated = (
+            droplet_image_updated
+            if droplet_image_updated is not None
+            else SignalStub()
+        )
         self.flash_signal = SignalStub()
 
     def get_flash_duration(self):
@@ -395,6 +400,7 @@ def _build_dialog(
     print_pressure=0.80,
     preflight_enabled=False,
     print_profiles=None,
+    droplet_camera_model=None,
     **dialog_kwargs,
 ):
     monkeypatch.setattr(DropletImagingDialog, "_quick_controls_expanded_default", False, raising=False)
@@ -424,7 +430,11 @@ def _build_dialog(
         print_pressure=print_pressure,
     )
     model = SimpleNamespace(
-        droplet_camera_model=_DropletCameraModelStub(),
+        droplet_camera_model=(
+            droplet_camera_model
+            if droplet_camera_model is not None
+            else _DropletCameraModelStub()
+        ),
         calibration_manager=manager,
         machine_model=machine_model,
         rack_model=SimpleNamespace(get_gripper_printer_head=lambda: printer_head),
@@ -434,6 +444,102 @@ def _build_dialog(
     dialog = DropletImagingDialog(SimpleNamespace(color_dict={}, model=model), model, controller, **dialog_kwargs)
     qapp.processEvents()
     return dialog, manager, controller
+
+
+class _DropletImageSignalEmitter(QtCore.QObject):
+    image_updated = QtCore.Signal()
+
+
+def _authoritative_capture_ui_state(controller):
+    return {
+        "pending_active": bool(getattr(controller, "pending_capture_active", False)),
+        "pending_request_id": getattr(controller, "pending_capture_request_id", None),
+        "dirty_shutdown": False,
+        "last_result_dirty_shutdown": False,
+    }
+
+
+def _build_signal_ordering_dialog(monkeypatch, qapp):
+    emitter = _DropletImageSignalEmitter()
+    camera_model = _DropletCameraModelStub(
+        droplet_image_updated=emitter.image_updated,
+    )
+    dialog, manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        service_mode=True,
+        initial_tab="optics",
+        droplet_camera_model=camera_model,
+    )
+    controller.pending_capture_active = False
+    controller.pending_capture_request_id = None
+    controller.get_droplet_capture_ui_state = lambda: _authoritative_capture_ui_state(controller)
+    dialog._optics_session_active = True
+    dialog._refresh_optics_controls()
+    return dialog, manager, controller, emitter
+
+
+def test_queued_capture_completion_refreshes_optics_after_controller_clears(monkeypatch, qapp):
+    dialog, _manager, controller, emitter = _build_signal_ordering_dialog(monkeypatch, qapp)
+    controller.pending_capture_active = True
+    controller.pending_capture_request_id = "old-request"
+    dialog._set_capture_request_pending(True)
+
+    emitter.image_updated.emit()
+
+    assert dialog.optics_capture_frame_button.isEnabled() is False
+    assert dialog.optics_reject_last_button.isEnabled() is False
+    assert dialog.optics_analyze_button.isEnabled() is False
+
+    controller.pending_capture_active = False
+    controller.pending_capture_request_id = None
+    qapp.processEvents()
+
+    assert dialog._capture_request_pending is False
+    assert dialog.optics_capture_frame_button.isEnabled() is True
+    assert dialog.optics_reject_last_button.isEnabled() is True
+    assert dialog.optics_analyze_button.isEnabled() is True
+
+    dialog.deleteLater()
+
+
+def test_queued_old_completion_does_not_unlock_a_new_pending_capture(monkeypatch, qapp):
+    dialog, _manager, controller, emitter = _build_signal_ordering_dialog(monkeypatch, qapp)
+    controller.pending_capture_active = True
+    controller.pending_capture_request_id = "old-request"
+    dialog._set_capture_request_pending(True)
+
+    emitter.image_updated.emit()
+    controller.pending_capture_request_id = "new-request"
+    qapp.processEvents()
+
+    assert dialog._capture_request_pending is True
+    assert dialog.optics_capture_frame_button.isEnabled() is False
+    assert dialog.optics_reject_last_button.isEnabled() is False
+    assert dialog.optics_analyze_button.isEnabled() is False
+    assert dialog.flash_button.isEnabled() is False
+
+    dialog.deleteLater()
+
+
+def test_queued_capture_completion_preserves_active_calibration_lock(monkeypatch, qapp):
+    dialog, manager, controller, emitter = _build_signal_ordering_dialog(monkeypatch, qapp)
+    controller.pending_capture_active = True
+    controller.pending_capture_request_id = "calibration-request"
+    dialog._set_capture_request_pending(True)
+    manager.activeCalibration = object()
+    dialog._refresh_manual_control_lock_state()
+
+    emitter.image_updated.emit()
+    controller.pending_capture_active = False
+    controller.pending_capture_request_id = None
+    qapp.processEvents()
+
+    assert dialog._capture_request_pending is False
+    assert dialog.flash_button.isEnabled() is False
+    assert dialog.flash_delay_spinbox.isEnabled() is False
+
+    dialog.deleteLater()
 
 
 def test_droplet_imaging_dialog_defaults_to_droplet_tab_without_stream_head(monkeypatch, qapp):
