@@ -1,0 +1,3 @@
+/tools/virtual_workflows/fixtures/randomized_calibration_reload_execution_v1.json text eol=lf
+/tools/virtual_workflows/fixtures/execution_preflight_safeguards_v1.json text eol=lf
+/tools/virtual_workflows/fixtures/authoritative_persistence_safeguards_v1.json text eol=lf
