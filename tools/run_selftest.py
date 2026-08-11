@@ -681,7 +681,31 @@ def _operator_prompt_message(stage: str) -> str:
             "The machine is at the 384-well plate start with Z homed/up. "
             "Position the evaporation plate, confirm the area is clear, then continue."
         )
+    if stage == "coord_x_limit_press":
+        return (
+            "With the XY motors disabled and stationary, manually press and hold the X limit switch, "
+            "then continue. Keep the switch held until the next prompt."
+        )
+    if stage == "coord_x_limit_release":
+        return "Release the X limit switch, confirm it is fully released, then continue."
+    if stage == "coord_y_limit_press":
+        return (
+            "With the XY motors disabled and stationary, manually press and hold the Y limit switch, "
+            "then continue. Keep the switch held until the next prompt."
+        )
+    if stage == "coord_y_limit_release":
+        return "Release the Y limit switch, confirm it is fully released, then continue."
     return "Confirm the operator-gated self-test step is ready to continue."
+
+
+def _is_operator_prompt_stage(stage: str) -> bool:
+    return stage in {
+        "evap_plate_confirm",
+        "coord_x_limit_press",
+        "coord_x_limit_release",
+        "coord_y_limit_press",
+        "coord_y_limit_release",
+    }
 
 
 def _read_operator_prompt_response(args, message: str) -> bool:
@@ -1199,11 +1223,12 @@ def run(args: argparse.Namespace) -> int:
         motion_timing_suite = bool(getattr(args, "motion_timing_suite", False))
         motion_envelope_suite = bool(getattr(args, "motion_envelope_suite", False))
         profile_lut_benchmark = bool(getattr(args, "profile_lut_benchmark", False))
+        coordinated_xy_executor_suite = bool(getattr(args, "coordinated_xy_executor_suite", False))
         pressure_regulator_suite = bool(getattr(args, "pressure_regulator_suite", False))
         refuel_vacuum_suite = bool(getattr(args, "refuel_vacuum_suite", False))
         valve_characterization_suite = bool(getattr(args, "valve_characterization_suite", False))
         valve_gap_sweep_suite = bool(getattr(args, "valve_gap_sweep_suite", False))
-        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
+        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2049 if coordinated_xy_executor_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
             pressure_sweep_suite if pressure_sweep_suite is not None else (
                 CUSTOM_PRESSURE_TRACE_TEST_ID if custom_trace_config is not None else pressure_trace_test
             )
@@ -1424,7 +1449,7 @@ def run(args: argparse.Namespace) -> int:
                                 "metrics": dict(last_progress),
                             },
                         )
-                        if stage == "evap_plate_confirm" and stage not in operator_prompted_stages:
+                        if _is_operator_prompt_stage(stage) and stage not in operator_prompted_stages:
                             operator_prompted_stages.add(stage)
                             prompt_message = _operator_prompt_message(stage)
                             _emit_selftest_event(
@@ -1543,6 +1568,30 @@ def run(args: argparse.Namespace) -> int:
                 },
             )
             print(f"Timed out waiting for CMD_SELFTEST_DONE ({timeout_reason}).")
+            timeout_abort_sent = False
+            timeout_abort_error = None
+            if timeout_reason != "mcu_reset_report_seen":
+                try:
+                    # A host watchdog timeout must actively stop a diagnostic;
+                    # closing the serial port alone leaves the MCU test running.
+                    ser.write(build_control(CMD_SELFTEST_ABORT, 0x7D, run_id))
+                    timeout_abort_sent = True
+                    print("Sent CMD_SELFTEST_ABORT after host timeout.")
+                except Exception as exc:
+                    timeout_abort_error = str(exc)
+                    print(f"Failed to send CMD_SELFTEST_ABORT after host timeout: {exc}")
+            host_checks.append(
+                {
+                    "name": "selftest_timeout_abort",
+                    "pass": timeout_abort_sent or timeout_reason == "mcu_reset_report_seen",
+                    "details": {
+                        "reason": timeout_reason,
+                        "sent": timeout_abort_sent,
+                        "error": timeout_abort_error,
+                    },
+                    "timestamp": now_iso(),
+                }
+            )
             aborted = True
             rc = 3
         elif aborted:
@@ -1811,6 +1860,7 @@ def main() -> int:
     selector_group.add_argument("--motion-timing-suite", action="store_true")
     selector_group.add_argument("--motion-envelope-suite", action="store_true")
     selector_group.add_argument("--profile-lut-benchmark", action="store_true")
+    selector_group.add_argument("--coordinated-xy-executor-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-stress-suite", action="store_true")
     selector_group.add_argument("--valve-characterization-suite", action="store_true")

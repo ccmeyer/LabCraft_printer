@@ -17,6 +17,8 @@
 #include "event_groups.h"
 #include <cstdint>
 
+class Gantry;
+
 // maximum number of steppers we’ll track
 static constexpr int MAX_STEPPERS = 5;
 
@@ -113,7 +115,7 @@ public:
   static void dispatch(TIM_HandleTypeDef* htim);
 
   /// True if you’re mid‐move
-  bool isBusy() const { return _togglesRemaining > 0; }
+  bool isBusy() const { return _togglesRemaining > 0 || _coordinatedReserved; }
 
   /// Current full-step position
   int32_t getPosition() const { return _pos; }
@@ -180,6 +182,8 @@ public:
 
 
 private:
+  friend class Gantry;
+
   // hardware bindings
   TIM_HandleTypeDef* _htim      = nullptr;
   GPIO_TypeDef*      _stepPort  = nullptr;
@@ -209,6 +213,9 @@ private:
   int32_t  _pos        = 0;
   int32_t  _targetPos  = 0;
   bool     _direction  = true;
+  volatile bool _coordinatedReserved = false;
+  volatile bool _homeSequenceActive = false;
+  volatile bool _legacyMoveStartPending = false;
 
   // motion profile
   uint32_t _totalToggles     = 0;   // 2×full steps
@@ -244,6 +251,15 @@ private:
 
   // called each timer tick
   void          _stepTick();
+  bool          _tryReserveCoordinated();
+  void          _releaseCoordinatedReservation();
+  void          _prepareCoordinatedAxis(bool participating,
+                                        bool direction,
+                                        int32_t targetPosition);
+  void          _writeCoordinatedStep(bool high);
+  void          _accountCoordinatedPulse();
+  void          _finishCoordinatedAxis(bool aborted);
+  bool          _coordinatedStepIsLow() const;
 
   // your existing members …
   GPIO_TypeDef*   _limPort    = nullptr;

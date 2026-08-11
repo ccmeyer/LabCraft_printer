@@ -222,17 +222,23 @@ Every milestone that touches motion must preserve these invariants:
 | 1. Behavior-preserving instrumentation | `verified` | Legacy timing, pending-interrupt, reset, pulse, status, and straightness evidence recorded | Milestone 1 evidence complete |
 | 2. Fixed-point normalized LUT | `verified` | Unrouted 257-point Q20 profile and explicit non-motion target benchmark pass | Error and cycle budgets accepted |
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
-| 4. Shared XY executor behind a gate | `not_started` | Timer/pulse integration exists without normal routing | Build, low-rate bench, cancel, and limit gates pass |
+| 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `not_started` | `ABSOLUTE_XY` uses coordinated executor | Status, completion, and unchanged-path regressions pass |
 | 6. Performance and motion HIL qualification | `not_started` | Speed ladder, straightness, lost-step, and reset evidence pass | Acceptance matrix complete |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
 
-Milestone 3 is verified in
-`docs/coordinated_xy_milestone3_planner.md`. Create and review the concrete
-Milestone 4 plan for gated timer/GPIO integration before changing any runtime
-motion owner, callback, pin, timer, completion, cancel, or limit behavior.
+Milestone 4 is verified at its 3 kHz gated integration scope. The corrected
+exact-binary suite passed SAFE 28/28 and coordinated executor results 2040-2046
+7/7, including low-rate sequential homing, pause/resume, cancel/recovery,
+injected limit aborts, exact pulse/callback counts, low STEP terminal state,
+and a 2,119-cycle worst case against the 2,250-cycle gate. The operator reported
+straight-looking equal and asymmetric motion, with the explicit caveat that
+the low speed made the short ramps difficult to judge. Next, create and review
+the concrete Milestone 5 plan; production-rate visual and starvation evidence
+remains a Milestone 6 requirement. Evidence is recorded in
+`docs/coordinated_xy_milestone4_executor.md`.
 
 ## Milestone 0: Baseline And Decisions
 
@@ -484,7 +490,11 @@ without HAL, timers, GPIO, or real hardware.
 
 ## Milestone 4: Shared XY Executor Behind A Gate
 
-Status: `not_started`
+Status: `verified`
+
+Loaded verification status: `passed_3khz_gate`
+
+Evidence record: `docs/coordinated_xy_milestone4_executor.md`
 
 ### Goal
 
@@ -525,6 +535,19 @@ production routing on the legacy path until bench safety behavior is verified.
 - `firmware/Core/Src/Stepper.cpp`
 - `firmware/Core/Src/main.c` only if existing user callback routing is used
 - pure host-testable ownership/completion policy helper and tests
+
+### Implemented shape
+
+- `CoordinatedXyExecutor` owns the pure two-edge state machine and priority
+  rules for pause, cancel, and X/Y limit requests.
+- `Gantry` owns plan preparation, both-axis reservation, TIM2 master dispatch,
+  TIM7 exclusion, hardware cleanup, completion bits, and diagnostic snapshots.
+- `Stepper` exposes Gantry-only pin/position/target hooks and rejects direct or
+  homing starts while coordinated reservations exist.
+- `LC_COORDINATED_XY_EXECUTOR_ENABLE=1` compiles the diagnostic path while
+  `LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE=0` keeps ordinary motion legacy.
+- Explicit FULL selector `2049` and manifest `coordinated_xy_executor_v1`
+  contain the seven 3 kHz loaded qualification results.
 
 ### Validation
 

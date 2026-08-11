@@ -171,6 +171,26 @@ def test_load_profile_lut_benchmark_manifest_freezes_non_motion_cycle_gates():
     assert metrics["irq_restore"]["equals"] == 1
 
 
+def test_load_coordinated_xy_executor_manifest_freezes_loaded_safety_gates():
+    manifest = load_manifest("coordinated_xy_executor_v1")
+
+    assert manifest.manifest_id == "coordinated_xy_executor_v1"
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2040, 2041, 2042, 2043, 2044, 2045, 2046)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--coordinated-xy-executor-suite",)
+    assert {item["fixture_id"] for item in manifest.fixtures} == {"motion_clear_envelope_v1"}
+    assert "3 kHz" in manifest.fixtures[0]["operator_note"]
+    assert "visually straight" in manifest.fixtures[0]["operator_note"]
+    assert manifest.analysis_rules["2040"]["metrics"]["i2"]["equals"] == 4000
+    assert manifest.analysis_rules["2043"]["metrics"]["i2"]["equals"] == 6000
+    assert manifest.analysis_rules["2044"]["metrics"]["stable"]["equals"] == 1
+    assert manifest.analysis_rules["2045"]["metrics"]["lat"]["max"] == 1
+    assert manifest.analysis_rules["2046"]["metrics"]["xd"]["max"] == 25
+    assert manifest.analysis_rules["2046"]["metrics"]["cy"]["max"] == 2250
+
+
 def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture():
     manifest = load_manifest("motion_envelope_v1")
 

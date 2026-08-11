@@ -7,9 +7,12 @@
 
 #include "Gantry.h"
 #include "Stepper.h"
+#include "Orchestrator.h"
 #include "cmsis_os.h"      // for osDelay
+#include "task.h"
 #include <algorithm>       // for std::max
 #include <cmath>           // for std::abs
+#include <limits>
 #include <utility>   // <-- for std::pair
 
 // the three C APIs you already have for your steppers:
@@ -29,6 +32,76 @@ extern "C" int32_t MX_STEPPERX_GetPos(void);
 extern "C" int32_t MX_STEPPERY_GetPos(void);
 extern "C" int32_t MX_STEPPERZ_GetPos(void);
 
+extern TIM_HandleTypeDef htim2;
+extern TIM_HandleTypeDef htim7;
+
+namespace {
+
+#if defined(__GNUC__) && !defined(UNIT_TEST)
+#define LC_COORDINATED_HW_OPTIMIZED __attribute__((optimize("O2"), hot))
+#else
+#define LC_COORDINATED_HW_OPTIMIZED
+#endif
+
+bool gantryIsApb2Timer(TIM_TypeDef* instance) {
+  return instance == TIM1 || instance == TIM8 || instance == TIM9 ||
+         instance == TIM10 || instance == TIM11;
+}
+
+uint32_t gantryTimerInputHz(TIM_HandleTypeDef* timer, uint16_t prescaler) {
+  RCC_ClkInitTypeDef clocks{};
+  uint32_t flashLatency = 0u;
+  HAL_RCC_GetClockConfig(&clocks, &flashLatency);
+  const bool apb2 = gantryIsApb2Timer(timer->Instance);
+  const uint32_t pclk = apb2 ? HAL_RCC_GetPCLK2Freq() : HAL_RCC_GetPCLK1Freq();
+  const bool doubled = apb2
+      ? clocks.APB2CLKDivider != RCC_HCLK_DIV1
+      : clocks.APB1CLKDivider != RCC_HCLK_DIV1;
+  return (doubled ? pclk * 2u : pclk) / (static_cast<uint32_t>(prescaler) + 1u);
+}
+
+uint32_t gantryTimerMaxArr(TIM_HandleTypeDef* timer) {
+  return (timer->Instance == TIM2 || timer->Instance == TIM5)
+      ? std::numeric_limits<uint32_t>::max()
+      : 0xFFFFu;
+}
+
+LC_COORDINATED_HW_OPTIMIZED
+uint32_t gantryCycleNow() {
+  return DWT->CYCCNT;
+}
+
+void gantryEnableCycleCounter() {
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0u) {
+    DWT->CYCCNT = 0u;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+  }
+}
+
+LC_COORDINATED_HW_OPTIMIZED
+void gantryStopAndClearUpdateTimer(TIM_HandleTypeDef* timer) {
+  if (timer == nullptr || timer->Instance == nullptr) return;
+
+  // Coordinated execution owns these base timers exclusively. Avoid the
+  // comparatively expensive HAL stop path on the terminal edge so the final
+  // pulse has the same bounded ISR budget as every other edge.
+  timer->Instance->DIER &= ~TIM_IT_UPDATE;
+  timer->Instance->CR1 &= ~TIM_CR1_CEN;
+  timer->Instance->SR = ~TIM_FLAG_UPDATE;
+  // HAL_TIM_Base_Start_IT() refuses a timer whose handle is still BUSY.
+  // Mirror HAL_TIM_Base_Stop_IT()'s ownership handoff so a terminal
+  // coordinated move can be followed immediately by a legacy move.
+  timer->State = HAL_TIM_STATE_READY;
+}
+
+bool coordinatedStartAccepted(CoordinatedStartStatus status) {
+  return status == CoordinatedStartStatus::Started ||
+         status == CoordinatedStartStatus::Immediate;
+}
+
+}  // namespace
+
 
 //----------------------------------------------------------------------
 // Singleton
@@ -46,6 +119,18 @@ void Gantry::begin() {
 }
 
 void Gantry::moveTo(int32_t x, int32_t y, uint32_t feedHz) {
+#if LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE != 0
+	const GantryPosition current = getPosition();
+	const CoordinatedStartStatus status = startCoordinatedXY(
+	    static_cast<int64_t>(x) - current.x,
+	    static_cast<int64_t>(y) - current.y,
+	    0u);
+	if (!coordinatedStartAccepted(status)) {
+	  xEventGroupSetBits(Orchestrator::getDoneEvents(),
+	                     BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+	}
+	return;
+#else
 	int32_t currX = MX_STEPPERX_GetPos();
 	int32_t currY = MX_STEPPERY_GetPos();
 
@@ -53,9 +138,20 @@ void Gantry::moveTo(int32_t x, int32_t y, uint32_t feedHz) {
 	int32_t dy = y - currY;
 
 	moveBy(dx,dy,0,feedHz);
+#endif
 }
 //----------------------------------------------------------------------
 void Gantry::moveBy(int32_t dx, int32_t dy, int32_t dz, uint32_t /*feedHz unused*/) {
+#if LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE != 0
+  if (dz == 0) {
+    const CoordinatedStartStatus status = startCoordinatedXY(dx, dy, 0u);
+    if (!coordinatedStartAccepted(status)) {
+      xEventGroupSetBits(Orchestrator::getDoneEvents(),
+                         BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+    }
+    return;
+  }
+#endif
   const uint32_t Nx = (uint32_t)std::abs(dx);
   const uint32_t Ny = (uint32_t)std::abs(dy);
   const uint32_t Nz = (uint32_t)std::abs(dz);
@@ -88,6 +184,310 @@ void Gantry::moveBy(int32_t dx, int32_t dy, int32_t dz, uint32_t /*feedHz unused
   MX_STEPPERY_Move(dy >= 0, Ny, fy, /*accelSteps ignored*/ 0u);
   MX_STEPPERZ_Move(dz >= 0, Nz, fz, /*accelSteps ignored*/ 0u);
 }
+
+CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
+                                                  int64_t dy,
+                                                  uint32_t requestedRateHz) {
+#if LC_COORDINATED_XY_EXECUTOR_ENABLE == 0
+  (void)dx;
+  (void)dy;
+  (void)requestedRateHz;
+  _coordinatedStartStatus = CoordinatedStartStatus::Disabled;
+  return _coordinatedStartStatus;
+#else
+  Stepper* sx = Stepper::stepperX();
+  Stepper* sy = Stepper::stepperY();
+  Stepper* sz = Stepper::stepperZ();
+  if (sx == nullptr || sy == nullptr || sz == nullptr ||
+      sx->_htim != &htim2 || sy->_htim != &htim7 ||
+      sx->_htim == sy->_htim) {
+    _coordinatedStartStatus = CoordinatedStartStatus::HardwareMismatch;
+    return _coordinatedStartStatus;
+  }
+
+  taskENTER_CRITICAL();
+  const bool alreadyActive = _coordinatedTimerOwned ||
+      CoordinatedXyExecutor::isActive(_coordinatedCursor);
+  taskEXIT_CRITICAL();
+  if (alreadyActive || sz->isBusy() || sz->_homeSequenceActive ||
+      sz->_legacyMoveStartPending) {
+    _coordinatedStartStatus = CoordinatedStartStatus::Busy;
+    return _coordinatedStartStatus;
+  }
+
+  const int64_t targetX = static_cast<int64_t>(sx->_pos) + dx;
+  const int64_t targetY = static_cast<int64_t>(sy->_pos) + dy;
+  if (targetX < std::numeric_limits<int32_t>::min() ||
+      targetX > std::numeric_limits<int32_t>::max() ||
+      targetY < std::numeric_limits<int32_t>::min() ||
+      targetY > std::numeric_limits<int32_t>::max()) {
+    _coordinatedStartStatus = CoordinatedStartStatus::PositionOutOfRange;
+    return _coordinatedStartStatus;
+  }
+
+  auto accelerationLimit = [](Stepper* stepper) -> uint32_t {
+    const float acceleration = stepper->accelStepsPerSec2();
+    if (!std::isfinite(acceleration) || acceleration < 1.0f ||
+        acceleration > static_cast<float>(std::numeric_limits<uint32_t>::max())) {
+      return 0u;
+    }
+    return static_cast<uint32_t>(acceleration);
+  };
+
+  CoordinatedXyPlanner::PlanRequest request{};
+  request.deltaX = dx;
+  request.deltaY = dy;
+  request.requestedMasterRateHz = requestedRateHz;
+  request.xLimits = {sx->maxSpeedHz(), accelerationLimit(sx)};
+  request.yLimits = {sy->maxSpeedHz(), accelerationLimit(sy)};
+  request.timer = {
+      gantryTimerInputHz(sx->_htim, sx->_prescaler),
+      gantryTimerMaxArr(sx->_htim),
+      2000u,
+  };
+
+  CoordinatedXyPlanner::CoordinatedXyPlan plan{};
+  const CoordinatedXyPlanner::PlanStatus planStatus =
+      CoordinatedXyPlanner::prepare(request, plan);
+  if (planStatus == CoordinatedXyPlanner::PlanStatus::Immediate) {
+    _coordinatedPlan = plan;
+    (void)CoordinatedXyExecutor::arm(plan, _coordinatedCursor);
+    _coordinatedStartStatus = CoordinatedStartStatus::Immediate;
+    xEventGroupClearBits(Orchestrator::getDoneEvents(),
+                         BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+    xEventGroupSetBits(Orchestrator::getDoneEvents(),
+                       BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+    return _coordinatedStartStatus;
+  }
+  if (planStatus != CoordinatedXyPlanner::PlanStatus::Ready) {
+    _coordinatedStartStatus = CoordinatedStartStatus::InvalidPlan;
+    return _coordinatedStartStatus;
+  }
+  if (sx->_isLimitAsserted() || sy->_isLimitAsserted()) {
+    _coordinatedStartStatus = CoordinatedStartStatus::LimitAsserted;
+    return _coordinatedStartStatus;
+  }
+
+  CoordinatedXyExecutor::Cursor executorCursor{};
+  if (CoordinatedXyExecutor::arm(plan, executorCursor) !=
+      CoordinatedXyExecutor::ArmStatus::Ready) {
+    _coordinatedStartStatus = CoordinatedStartStatus::InvalidPlan;
+    return _coordinatedStartStatus;
+  }
+
+  const CoordinatedXyExecutor::AxisReservationState xReservation{
+      sx->_togglesRemaining != 0u || sx->_legacyMoveStartPending,
+      sx->_homeSequenceActive,
+      sx->_coordinatedReserved,
+  };
+  const CoordinatedXyExecutor::AxisReservationState yReservation{
+      sy->_togglesRemaining != 0u || sy->_legacyMoveStartPending,
+      sy->_homeSequenceActive,
+      sy->_coordinatedReserved,
+  };
+  if (CoordinatedXyExecutor::evaluateReservation(xReservation, yReservation) !=
+      CoordinatedXyExecutor::ReservationStatus::Ready) {
+    _coordinatedStartStatus = CoordinatedStartStatus::Busy;
+    return _coordinatedStartStatus;
+  }
+
+  if (!sx->_tryReserveCoordinated()) {
+    _coordinatedStartStatus = CoordinatedStartStatus::Busy;
+    return _coordinatedStartStatus;
+  }
+  if (!sy->_tryReserveCoordinated()) {
+    sx->_releaseCoordinatedReservation();
+    _coordinatedStartStatus = CoordinatedStartStatus::Busy;
+    return _coordinatedStartStatus;
+  }
+
+  // The position and limit checks above are intentionally repeated after both
+  // reservations. A legacy move may finish between planning and reservation;
+  // once reserved, neither position can change before the coordinated start.
+  const int64_t reservedTargetX = static_cast<int64_t>(sx->_pos) + dx;
+  const int64_t reservedTargetY = static_cast<int64_t>(sy->_pos) + dy;
+  if (reservedTargetX < std::numeric_limits<int32_t>::min() ||
+      reservedTargetX > std::numeric_limits<int32_t>::max() ||
+      reservedTargetY < std::numeric_limits<int32_t>::min() ||
+      reservedTargetY > std::numeric_limits<int32_t>::max()) {
+    sy->_releaseCoordinatedReservation();
+    sx->_releaseCoordinatedReservation();
+    _coordinatedStartStatus = CoordinatedStartStatus::PositionOutOfRange;
+    return _coordinatedStartStatus;
+  }
+  if (sx->_isLimitAsserted() || sy->_isLimitAsserted()) {
+    sy->_releaseCoordinatedReservation();
+    sx->_releaseCoordinatedReservation();
+    _coordinatedStartStatus = CoordinatedStartStatus::LimitAsserted;
+    return _coordinatedStartStatus;
+  }
+
+  HAL_TIM_Base_Stop_IT(sx->_htim);
+  HAL_TIM_Base_Stop_IT(sy->_htim);
+  __HAL_TIM_CLEAR_FLAG(sx->_htim, TIM_FLAG_UPDATE);
+  __HAL_TIM_CLEAR_FLAG(sy->_htim, TIM_FLAG_UPDATE);
+
+  const bool xParticipates = plan.xSteps != 0u;
+  const bool yParticipates = plan.ySteps != 0u;
+  sx->_prepareCoordinatedAxis(
+      xParticipates,
+      plan.xDirection == CoordinatedXyPlanner::Direction::Positive,
+      static_cast<int32_t>(reservedTargetX));
+  sy->_prepareCoordinatedAxis(
+      yParticipates,
+      plan.yDirection == CoordinatedXyPlanner::Direction::Positive,
+      static_cast<int32_t>(reservedTargetY));
+
+  _coordinatedPlan = plan;
+  _coordinatedCursor = executorCursor;
+  _coordinatedX = sx;
+  _coordinatedY = sy;
+  _coordinatedMasterTimer = sx->_htim;
+  _resetCoordinatedInstrumentation(_coordinatedCursor.cachedEvent.arr);
+  xEventGroupClearBits(Orchestrator::getDoneEvents(),
+                       BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+
+  __HAL_TIM_SET_PRESCALER(_coordinatedMasterTimer, sx->_prescaler);
+  __HAL_TIM_SET_AUTORELOAD(_coordinatedMasterTimer,
+                           _coordinatedCursor.cachedEvent.arr);
+  __HAL_TIM_SET_COUNTER(_coordinatedMasterTimer, 0u);
+  __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
+
+  taskENTER_CRITICAL();
+  _coordinatedTimerOwned = true;
+  const CoordinatedXyExecutor::ControlDisposition startDisposition =
+      CoordinatedXyExecutor::start(_coordinatedCursor);
+  taskEXIT_CRITICAL();
+  if (startDisposition != CoordinatedXyExecutor::ControlDisposition::Deferred ||
+      HAL_TIM_Base_Start_IT(_coordinatedMasterTimer) != HAL_OK) {
+    taskENTER_CRITICAL();
+    (void)CoordinatedXyExecutor::requestCancel(_coordinatedCursor);
+    _finishCoordinatedHardware(true);
+    taskEXIT_CRITICAL();
+    _coordinatedStartStatus = CoordinatedStartStatus::HardwareMismatch;
+    return _coordinatedStartStatus;
+  }
+
+  _coordinatedStartStatus = CoordinatedStartStatus::Started;
+  return _coordinatedStartStatus;
+#endif
+}
+
+void Gantry::_resetCoordinatedInstrumentation(uint32_t firstArr) {
+  gantryEnableCycleCounter();
+  _coordinatedTim7Interrupts = 0u;
+  _coordinatedPendingUpdateCount = 0u;
+  _coordinatedMaxIsrCycles = 0u;
+  _coordinatedArrMin = firstArr;
+  _coordinatedArrMax = firstArr;
+}
+
+LC_COORDINATED_HW_OPTIMIZED
+void Gantry::_observeCoordinatedArr(uint32_t arr) {
+  if (arr < _coordinatedArrMin) _coordinatedArrMin = arr;
+  if (arr > _coordinatedArrMax) _coordinatedArrMax = arr;
+}
+
+LC_COORDINATED_HW_OPTIMIZED
+void Gantry::_finishCoordinatedHardware(bool aborted) {
+  gantryStopAndClearUpdateTimer(_coordinatedMasterTimer);
+  if (_coordinatedY != nullptr) {
+    gantryStopAndClearUpdateTimer(_coordinatedY->_htim);
+  }
+  if (_coordinatedX != nullptr) {
+    _coordinatedX->_finishCoordinatedAxis(aborted);
+  }
+  if (_coordinatedY != nullptr) {
+    _coordinatedY->_finishCoordinatedAxis(aborted);
+  }
+  _coordinatedTimerOwned = false;
+}
+
+LC_COORDINATED_HW_OPTIMIZED
+void Gantry::_finishCoordinatedFromIsr(bool aborted, BaseType_t* woken) {
+  _finishCoordinatedHardware(aborted);
+  xEventGroupSetBitsFromISR(Orchestrator::getDoneEvents(),
+                            BIT_STEPPER1_DONE | BIT_STEPPER2_DONE,
+                            woken);
+}
+
+LC_COORDINATED_HW_OPTIMIZED
+bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
+#if LC_COORDINATED_XY_EXECUTOR_ENABLE == 0
+  (void)htim;
+  return false;
+#else
+  if (!_coordinatedTimerOwned || htim == nullptr) return false;
+  if (_coordinatedY != nullptr && htim == _coordinatedY->_htim) {
+    ++_coordinatedTim7Interrupts;
+    HAL_TIM_Base_Stop_IT(htim);
+    __HAL_TIM_CLEAR_FLAG(htim, TIM_FLAG_UPDATE);
+    return true;
+  }
+  if (htim != _coordinatedMasterTimer) return false;
+
+  const uint32_t entryCycle = gantryCycleNow();
+  CoordinatedXyExecutor::TickResult tick{};
+  const CoordinatedXyExecutor::TickStatus status =
+      CoordinatedXyExecutor::onTimerUpdate(
+          _coordinatedPlan, _coordinatedCursor, tick);
+  _observeCoordinatedArr(tick.arr);
+  const uint8_t tickMask = static_cast<uint8_t>(tick.mask);
+  const bool stepX =
+      (tickMask & static_cast<uint8_t>(CoordinatedXyPlanner::StepMask::X)) != 0u;
+  const bool stepY =
+      (tickMask & static_cast<uint8_t>(CoordinatedXyPlanner::StepMask::Y)) != 0u;
+
+  if (status == CoordinatedXyExecutor::TickStatus::Raised) {
+    if (stepX) {
+      _coordinatedX->_writeCoordinatedStep(true);
+    }
+    if (stepY) {
+      _coordinatedY->_writeCoordinatedStep(true);
+    }
+  } else if (tick.accountCompletePulse) {
+    if (stepX) {
+      _coordinatedX->_writeCoordinatedStep(false);
+      _coordinatedX->_accountCoordinatedPulse();
+    }
+    if (stepY) {
+      _coordinatedY->_writeCoordinatedStep(false);
+      _coordinatedY->_accountCoordinatedPulse();
+    }
+  }
+
+  if (tick.updateArr) {
+    _observeCoordinatedArr(tick.nextArr);
+    __HAL_TIM_SET_AUTORELOAD(_coordinatedMasterTimer, tick.nextArr);
+  }
+
+  BaseType_t woken = pdFALSE;
+  if (tick.stopTimer) {
+    if (status == CoordinatedXyExecutor::TickStatus::Paused) {
+      HAL_TIM_Base_Stop_IT(_coordinatedMasterTimer);
+      __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
+    } else {
+      const bool aborted = status != CoordinatedXyExecutor::TickStatus::Completed;
+      _finishCoordinatedFromIsr(aborted, &woken);
+    }
+  } else if (__HAL_TIM_GET_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE) != RESET) {
+    ++_coordinatedPendingUpdateCount;
+  }
+
+  const uint32_t cycles = gantryCycleNow() - entryCycle;
+  if (cycles > _coordinatedMaxIsrCycles) {
+    _coordinatedMaxIsrCycles = cycles;
+  }
+  portYIELD_FROM_ISR(woken);
+  return true;
+#endif
+}
+
+bool Gantry::dispatchCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
+  return _instance != nullptr && _instance->_handleCoordinatedTimerFromIsr(htim);
+}
+
+#undef LC_COORDINATED_HW_OPTIMIZED
 
 //// moveBy: fan-in three axes so they finish simultaneously
 //void Gantry::moveBy(int32_t dx, int32_t dy, int32_t dz, uint32_t feedHz) {
@@ -211,20 +611,199 @@ void Gantry::setAccelProfileAll(Stepper::AccelProfile p) {
   if (auto s = Stepper::stepperZ()) s->setAccelProfile(p);
 }
 
+void Gantry::_pauseCoordinatedTask() {
+  taskENTER_CRITICAL();
+  const CoordinatedXyExecutor::ControlDisposition disposition =
+      CoordinatedXyExecutor::requestPause(_coordinatedCursor);
+  if (disposition == CoordinatedXyExecutor::ControlDisposition::StopNow &&
+      _coordinatedMasterTimer != nullptr) {
+    HAL_TIM_Base_Stop_IT(_coordinatedMasterTimer);
+    __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
+  }
+  taskEXIT_CRITICAL();
+}
+
+void Gantry::_resumeCoordinatedTask() {
+  taskENTER_CRITICAL();
+  const CoordinatedXyExecutor::ControlDisposition disposition =
+      CoordinatedXyExecutor::resume(_coordinatedCursor);
+  if (disposition == CoordinatedXyExecutor::ControlDisposition::Deferred &&
+      _coordinatedMasterTimer != nullptr) {
+    __HAL_TIM_SET_AUTORELOAD(_coordinatedMasterTimer,
+                             _coordinatedCursor.cachedEvent.arr);
+    __HAL_TIM_SET_COUNTER(_coordinatedMasterTimer, 0u);
+    __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
+    (void)HAL_TIM_Base_Start_IT(_coordinatedMasterTimer);
+  }
+  taskEXIT_CRITICAL();
+}
+
+bool Gantry::_cancelCoordinatedTask(uint32_t* risingEdgesBefore,
+                                    uint32_t* fallingEdgesBefore) {
+  bool signalDone = false;
+  taskENTER_CRITICAL();
+  if (risingEdgesBefore != nullptr) {
+    *risingEdgesBefore = _coordinatedCursor.risingEdges;
+  }
+  if (fallingEdgesBefore != nullptr) {
+    *fallingEdgesBefore = _coordinatedCursor.fallingEdges;
+  }
+  const CoordinatedXyExecutor::ControlDisposition disposition =
+      CoordinatedXyExecutor::requestCancel(_coordinatedCursor);
+  if (disposition == CoordinatedXyExecutor::ControlDisposition::StopNow) {
+    _finishCoordinatedHardware(true);
+    signalDone = true;
+  }
+  taskEXIT_CRITICAL();
+  if (signalDone) {
+    xEventGroupSetBits(Orchestrator::getDoneEvents(),
+                       BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+  }
+  return disposition == CoordinatedXyExecutor::ControlDisposition::Deferred ||
+         disposition == CoordinatedXyExecutor::ControlDisposition::StopNow;
+}
+
+bool Gantry::_requestCoordinatedLimitAbortTask(Stepper::Axis axis,
+                                                uint32_t* risingEdgesBefore,
+                                                uint32_t* fallingEdgesBefore) {
+  if (axis != Stepper::X_AXIS && axis != Stepper::Y_AXIS) return false;
+  bool signalDone = false;
+  taskENTER_CRITICAL();
+  if (risingEdgesBefore != nullptr) {
+    *risingEdgesBefore = _coordinatedCursor.risingEdges;
+  }
+  if (fallingEdgesBefore != nullptr) {
+    *fallingEdgesBefore = _coordinatedCursor.fallingEdges;
+  }
+  const CoordinatedXyExecutor::ControlDisposition disposition =
+      CoordinatedXyExecutor::requestLimitAbort(
+          _coordinatedCursor,
+          axis == Stepper::X_AXIS ? CoordinatedXyExecutor::LimitAxis::X
+                                  : CoordinatedXyExecutor::LimitAxis::Y);
+  if (disposition == CoordinatedXyExecutor::ControlDisposition::StopNow) {
+    _finishCoordinatedHardware(true);
+    signalDone = true;
+  }
+  taskEXIT_CRITICAL();
+  if (signalDone) {
+    xEventGroupSetBits(Orchestrator::getDoneEvents(),
+                       BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+  }
+  return disposition == CoordinatedXyExecutor::ControlDisposition::Deferred ||
+         disposition == CoordinatedXyExecutor::ControlDisposition::StopNow ||
+         disposition == CoordinatedXyExecutor::ControlDisposition::AlreadySatisfied;
+}
+
+bool Gantry::requestCoordinatedLimitAbortForDiagnostics(Stepper::Axis axis) {
+  return _requestCoordinatedLimitAbortTask(axis);
+}
+
+bool Gantry::requestCoordinatedCancelForDiagnostics(
+    uint32_t& risingEdgesBefore,
+    uint32_t& fallingEdgesBefore) {
+  return _cancelCoordinatedTask(&risingEdgesBefore, &fallingEdgesBefore);
+}
+
+bool Gantry::requestCoordinatedLimitAbortForDiagnostics(
+    Stepper::Axis axis,
+    uint32_t& risingEdgesBefore,
+    uint32_t& fallingEdgesBefore) {
+  return _requestCoordinatedLimitAbortTask(
+      axis, &risingEdgesBefore, &fallingEdgesBefore);
+}
+
+void Gantry::requestCoordinatedLimitAbortFromIsr(Stepper::Axis axis) {
+#if LC_COORDINATED_XY_EXECUTOR_ENABLE != 0
+  Gantry* gantry = _instance;
+  if (gantry == nullptr ||
+      (axis != Stepper::X_AXIS && axis != Stepper::Y_AXIS)) {
+    return;
+  }
+  const CoordinatedXyExecutor::ControlDisposition disposition =
+      CoordinatedXyExecutor::requestLimitAbort(
+          gantry->_coordinatedCursor,
+          axis == Stepper::X_AXIS ? CoordinatedXyExecutor::LimitAxis::X
+                                  : CoordinatedXyExecutor::LimitAxis::Y);
+  if (disposition == CoordinatedXyExecutor::ControlDisposition::StopNow) {
+    BaseType_t woken = pdFALSE;
+    gantry->_finishCoordinatedFromIsr(true, &woken);
+    portYIELD_FROM_ISR(woken);
+  }
+#else
+  (void)axis;
+#endif
+}
+
 void Gantry::pauseXYZMotors() {
+  if (_instance != nullptr &&
+      CoordinatedXyExecutor::isActive(_instance->_coordinatedCursor)) {
+    _instance->_pauseCoordinatedTask();
+    if (auto* z = Stepper::stepperZ()) z->pauseMove();
+    return;
+  }
   for (auto axis : { Stepper::X_AXIS, Stepper::Y_AXIS, Stepper::Z_AXIS }) {
 	if (auto s = Stepper::getAxis(axis)) s->pauseMove();
   }
 }
 void Gantry::resumeXYZMotors() {
+  if (_instance != nullptr &&
+      CoordinatedXyExecutor::isActive(_instance->_coordinatedCursor)) {
+    _instance->_resumeCoordinatedTask();
+    if (auto* z = Stepper::stepperZ()) z->resumeMove();
+    return;
+  }
   for (auto axis : { Stepper::X_AXIS, Stepper::Y_AXIS, Stepper::Z_AXIS }) {
 	if (auto s = Stepper::getAxis(axis)) s->resumeMove();
   }
 }
 void Gantry::cancelXYZMotors() {
+  if (_instance != nullptr &&
+      CoordinatedXyExecutor::isActive(_instance->_coordinatedCursor)) {
+    (void)_instance->_cancelCoordinatedTask();
+    if (auto* z = Stepper::stepperZ()) z->cancelMove();
+    return;
+  }
   for (auto axis : { Stepper::X_AXIS, Stepper::Y_AXIS, Stepper::Z_AXIS }) {
 	if (auto s = Stepper::getAxis(axis)) s->cancelMove();
   }
+}
+
+CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
+  CoordinatedXySnapshot snapshot{};
+  taskENTER_CRITICAL();
+  snapshot.startStatus = _coordinatedStartStatus;
+  snapshot.state = _coordinatedCursor.state;
+  snapshot.terminalReason = _coordinatedCursor.terminalReason;
+  snapshot.requestedXSteps = _coordinatedPlan.xSteps;
+  snapshot.requestedYSteps = _coordinatedPlan.ySteps;
+  snapshot.emittedXSteps = _coordinatedCursor.xEmittedSteps;
+  snapshot.emittedYSteps = _coordinatedCursor.yEmittedSteps;
+  snapshot.masterSteps = _coordinatedPlan.masterSteps;
+  snapshot.timer2Interrupts = _coordinatedCursor.timerInterrupts;
+  snapshot.timer7Interrupts = _coordinatedTim7Interrupts;
+  snapshot.risingEdges = _coordinatedCursor.risingEdges;
+  snapshot.fallingEdges = _coordinatedCursor.fallingEdges;
+  snapshot.arrMin = _coordinatedArrMin;
+  snapshot.arrMax = _coordinatedArrMax;
+  snapshot.pendingUpdateCount = _coordinatedPendingUpdateCount;
+  snapshot.maxIsrCycles = _coordinatedMaxIsrCycles;
+  snapshot.maskChecksum = _coordinatedCursor.maskChecksum;
+  snapshot.arrChecksum = _coordinatedCursor.arrChecksum;
+  snapshot.timerOwned = _coordinatedTimerOwned;
+  if (_coordinatedX != nullptr) {
+    snapshot.xPosition = _coordinatedX->_pos;
+    snapshot.xTarget = _coordinatedX->_targetPos;
+    snapshot.xStepLow = _coordinatedX->_coordinatedStepIsLow();
+  }
+  if (_coordinatedY != nullptr) {
+    snapshot.yPosition = _coordinatedY->_pos;
+    snapshot.yTarget = _coordinatedY->_targetPos;
+    snapshot.yStepLow = _coordinatedY->_coordinatedStepIsLow();
+  }
+  taskEXIT_CRITICAL();
+  snapshot.doneBits = static_cast<uint32_t>(
+      xEventGroupGetBits(Orchestrator::getDoneEvents()));
+  return snapshot;
 }
 
 GantryPosition Gantry::getPosition() const {

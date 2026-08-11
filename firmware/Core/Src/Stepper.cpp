@@ -9,6 +9,7 @@
 #include "ExtiDebounce.h"
 #include "StepperProfileMath.h"
 #include "Orchestrator.h"          // for getDoneEvents()
+#include "Gantry.h"
 #include "CrashLog.h"
 #include "Logger.h"
 #include "FreeRTOS.h"
@@ -186,6 +187,7 @@ void Stepper::moveTo(bool sign, uint32_t newPos, uint32_t freqHz, uint32_t accel
   int32_t delta  = target - _pos;
 
   if (delta == 0) {
+	if (_coordinatedReserved) return;
 	#if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
 	if (stepperInstrumentationAxis(_axis)) {
 	  stepperEnableCycleCounter();
@@ -205,12 +207,20 @@ void Stepper::moveTo(bool sign, uint32_t newPos, uint32_t freqHz, uint32_t accel
 }
 
 void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*accelSteps ignored*/) {
-  if (!_htim || _togglesRemaining != 0) return;
+  if (!_htim) return;
+  taskENTER_CRITICAL();
+  if (_togglesRemaining != 0u || _coordinatedReserved || _legacyMoveStartPending) {
+    taskEXIT_CRITICAL();
+    return;
+  }
+  _legacyMoveStartPending = true;
+  taskEXIT_CRITICAL();
 
   _prepareForNewMove();
   _resetMoveLimitState();
 
   if (steps == 0u) {
+	_legacyMoveStartPending = false;
   #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
     if (stepperInstrumentationAxis(_axis)) {
       stepperEnableCycleCounter();
@@ -253,6 +263,7 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
 
   _accelToggles = plan.accelToggles;
   _decelToggles = plan.decelToggles;
+  _legacyMoveStartPending = false;
 
   // ---------- GPIO DIR/EN ----------
   HAL_GPIO_WritePin(_dirPort,  _dirPin,  hwDir ? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -284,7 +295,7 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
 }
 
 void Stepper::setSpeedHz(uint32_t freqHz) {
-  if (!_htim || !_togglesRemaining) return;
+  if (!_htim || !_togglesRemaining || _coordinatedReserved) return;
 
   const uint32_t tclkEff = timer_input_hz(_htim, _prescaler);
   const uint32_t maxARR  = timer_max_arr(_htim);
@@ -364,6 +375,14 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   using HomeInterruptionPolicy::Outcome;
   _homeDiagnosticSnapshot = HomeDiagnosticSnapshot{};
 
+  taskENTER_CRITICAL();
+  if (_coordinatedReserved || _homeSequenceActive) {
+    taskEXIT_CRITICAL();
+    return Outcome::Failed;
+  }
+  _homeSequenceActive = true;
+  taskEXIT_CRITICAL();
+
   CrashHomeAxis crashAxis = CRASH_HOME_AXIS_X;
   switch (_axis) {
     case X_AXIS: crashAxis = CRASH_HOME_AXIS_X; break;
@@ -377,6 +396,9 @@ HomeInterruptionPolicy::Outcome Stepper::home(
     CrashLog_SetHomeCheckpoint(crashAxis, checkpoint);
   };
   auto finishOutcome = [&](Outcome outcome) {
+	taskENTER_CRITICAL();
+	_homeSequenceActive = false;
+	taskEXIT_CRITICAL();
     CrashHomePhase phase = CRASH_HOME_PHASE_FAILED;
     if (outcome == Outcome::Succeeded) phase = CRASH_HOME_PHASE_SUCCEEDED;
     else if (outcome == Outcome::Canceled) phase = CRASH_HOME_PHASE_CANCELED;
@@ -763,7 +785,7 @@ bool Stepper::_stopHomeMoveFromLevelPoll()
 
 void Stepper::stop() {
 
-  if (!_htim) return;
+  if (!_htim || _coordinatedReserved) return;
 
   HAL_TIM_Base_Stop_IT(_htim);
 
@@ -912,6 +934,108 @@ void Stepper::_logLimitDebug(const char* reason) const
       (unsigned long)pr);
 }
 
+bool Stepper::_tryReserveCoordinated()
+{
+  taskENTER_CRITICAL();
+  const bool available = _htim != nullptr &&
+                         (_axis == X_AXIS || _axis == Y_AXIS) &&
+                         !_coordinatedReserved &&
+                         !_homeSequenceActive &&
+                         !_legacyMoveStartPending &&
+                         _togglesRemaining == 0u;
+  if (available) {
+    _coordinatedReserved = true;
+  }
+  taskEXIT_CRITICAL();
+  return available;
+}
+
+void Stepper::_releaseCoordinatedReservation()
+{
+  _coordinatedReserved = false;
+}
+
+void Stepper::_prepareCoordinatedAxis(bool participating,
+                                      bool direction,
+                                      int32_t targetPosition)
+{
+  if (!_coordinatedReserved) return;
+
+  _prepareForNewMove();
+  _resetMoveLimitState();
+  _writeCoordinatedStep(false);
+  _targetPos = targetPosition;
+  _direction = direction;
+  _lastDirection = direction;
+  _inSoftStop = false;
+  _totalToggles = 0u;
+  _togglesRemaining = 0u;
+  _togglesDone = 0u;
+  _accelToggles = 0u;
+  _decelToggles = 0u;
+
+  if (!participating) return;
+
+  const bool hwDirection = direction ^ _invertDirection;
+  HAL_GPIO_WritePin(_dirPort,
+                    _dirPin,
+                    hwDirection ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  if (_dualDriver) {
+    HAL_GPIO_WritePin(_dirPort2,
+                      _dirPin2,
+                      hwDirection ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  }
+  enableMotor();
+}
+
+#if defined(__GNUC__) && !defined(UNIT_TEST)
+#define LC_COORDINATED_GPIO_OPTIMIZED __attribute__((optimize("O2"), hot))
+#else
+#define LC_COORDINATED_GPIO_OPTIMIZED
+#endif
+
+LC_COORDINATED_GPIO_OPTIMIZED
+void Stepper::_writeCoordinatedStep(bool high)
+{
+  const uint32_t primaryWrite = high
+      ? static_cast<uint32_t>(_stepPin)
+      : static_cast<uint32_t>(_stepPin) << 16u;
+  _stepPort->BSRR = primaryWrite;
+  if (_dualDriver) {
+    const uint32_t secondaryWrite = high
+        ? static_cast<uint32_t>(_stepPin2)
+        : static_cast<uint32_t>(_stepPin2) << 16u;
+    _stepPort2->BSRR = secondaryWrite;
+  }
+}
+
+LC_COORDINATED_GPIO_OPTIMIZED
+void Stepper::_accountCoordinatedPulse()
+{
+  if (!_coordinatedReserved) return;
+  _pos += _direction ? 1 : -1;
+}
+
+LC_COORDINATED_GPIO_OPTIMIZED
+void Stepper::_finishCoordinatedAxis(bool aborted)
+{
+  _writeCoordinatedStep(false);
+  if (aborted) {
+    _targetPos = _pos;
+  }
+  _inSoftStop = false;
+  _coordinatedReserved = false;
+}
+
+bool Stepper::_coordinatedStepIsLow() const
+{
+  if (_stepPort == nullptr || (_stepPort->ODR & _stepPin) != 0u) return false;
+  return !_dualDriver ||
+         (_stepPort2 != nullptr && (_stepPort2->ODR & _stepPin2) == 0u);
+}
+
+#undef LC_COORDINATED_GPIO_OPTIMIZED
+
 void Stepper::enableMotor() {
   HAL_GPIO_WritePin(_enPort, _enPin, GPIO_PIN_RESET);
   if (_dualDriver) {
@@ -927,11 +1051,12 @@ void Stepper::disableMotor() {
 }
 
 void Stepper::pauseMove() {
-  if (!_htim) return;
+  if (!_htim || _coordinatedReserved) return;
   HAL_TIM_Base_Stop_IT(_htim);
 }
 
 void Stepper::resumeMove() {
+	if (_coordinatedReserved) return;
 	uint32_t newSteps = (_togglesRemaining +1) / 2;
 	_togglesRemaining = _togglesDone = 0;
 	_accelToggles = _decelToggles = 0;
@@ -941,7 +1066,7 @@ void Stepper::resumeMove() {
 
 void Stepper::cancelMove() {
   // stop *and* clear all counts
-  if (!_htim || _togglesRemaining == 0) return;
+  if (!_htim || _togglesRemaining == 0 || _coordinatedReserved) return;
   #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
   if (stepperInstrumentationAxis(_axis)) {
     StepperIsrInstrumentation::markAborted(_isrInstrumentation);
@@ -956,6 +1081,36 @@ void Stepper::_stepTick() {
   const bool instrumentThisAxis = stepperInstrumentationAxis(_axis);
   const uint32_t instrumentationEntryCycle = instrumentThisAxis ? stepperCycleNow() : 0u;
   #endif
+
+  // Homing must not depend on the lower-priority EXTI debounce timer or a
+  // task-level GPIO poll getting CPU time. At high legacy edge rates those
+  // paths can be delayed by the timer interrupts themselves. Re-sample the
+  // switch in the timer ISR and hard-stop before doing profile math or
+  // emitting another edge.
+  if (_togglesRemaining != 0u && _softStopOnLimit &&
+      _homeHardStopOnLimit && (_limitSeenThisMove || _isLimitAsserted())) {
+    if (!_limitSeenThisMove) {
+      _limitSeenThisMove = true;
+      ++_limitHitCount;
+    }
+    _limitHandledThisMove = true;
+    // If the prior callback raised STEP, this callback is its normal falling
+    // edge. Account that one completed pulse before stop() clears the toggle
+    // state. If STEP is already low, no new pulse is emitted or accounted.
+    if ((_togglesDone & 1u) != 0u) {
+      _pos += (_direction ? +1 : -1);
+    }
+    stop();
+    _stepPort->BSRR = static_cast<uint32_t>(_stepPin) << 16u;
+    if (_dualDriver) {
+      _stepPort2->BSRR = static_cast<uint32_t>(_stepPin2) << 16u;
+    }
+    BaseType_t woken = pdFALSE;
+    xEventGroupSetBitsFromISR(
+        Orchestrator::getDoneEvents(), _doneBit, &woken);
+    portYIELD_FROM_ISR(woken);
+    return;
+  }
 
   uint32_t done = _togglesDone;
   uint32_t rem  = _togglesRemaining;
@@ -1054,6 +1209,11 @@ void Stepper::_stepTick() {
 
 // dispatch timer IRQ to correct axis
 void Stepper::dispatch(TIM_HandleTypeDef* htim) {
+#if LC_COORDINATED_XY_EXECUTOR_ENABLE != 0
+  if (Gantry::dispatchCoordinatedTimerFromIsr(htim)) {
+    return;
+  }
+#endif
   for (int i = 0; i < NUM_AXES; ++i) {
     Stepper* s = _axes[i];
     if (s && s->_htim == htim) {
@@ -1084,7 +1244,7 @@ void Stepper::configureLimitPin(GPIO_TypeDef* port, uint16_t pin) {
                     | (0x6 /* port G */ << shift);
 
   // 4) Enable & prioritize the EXTI9_5_IRQn
-  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 6, 0);
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 }
 
@@ -1136,7 +1296,11 @@ void Stepper::attachLimitSwitch(GPIO_TypeDef* port,
   else if (line <= 9)      _extiIRQn = EXTI9_5_IRQn;
   else                     _extiIRQn = EXTI15_10_IRQn;
 
-  HAL_NVIC_SetPriority(_extiIRQn, 6, 0);
+  // Match the step-timer interrupt priority. EXTI9_5 has a lower IRQ number
+  // than TIM2/TIM7, so a pending physical limit can run at the next exception
+  // boundary instead of being perpetually outranked by saturated step timers.
+  // Priority 5 remains FreeRTOS FromISR-safe for this project.
+  HAL_NVIC_SetPriority(_extiIRQn, 5, 0);
   __HAL_GPIO_EXTI_CLEAR_FLAG(pin);
 
   // 4) Create one-shot debounce timer
@@ -1168,11 +1332,18 @@ void Stepper::_onRawLimitInterruptFromIsr()
     ++_limitHitCount;
   }
 
+  const bool coordinatedLimit = pressed && _coordinatedReserved;
+  if (coordinatedLimit) {
+    _limitHandledThisMove = true;
+    Gantry::requestCoordinatedLimitAbortFromIsr(_axis);
+  }
+
   const auto latchedAction = StepperLimitPolicy::decideLatchedLimitAction(
       _togglesRemaining != 0u,
       _softStopOnLimit,
       _homeHardStopOnLimit);
-  if (pressed && latchedAction != StepperLimitPolicy::LatchedLimitAction::ConfirmLater) {
+  if (!coordinatedLimit && pressed &&
+      latchedAction != StepperLimitPolicy::LatchedLimitAction::ConfirmLater) {
     _limitHandledThisMove = true;
     _onLimitTriggeredFromIsr(&woken);
   }
@@ -1207,14 +1378,22 @@ void Stepper::onLimitTriggered()
 {
 //  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
 
+  if (_coordinatedReserved) {
+    if (Gantry::instance() != nullptr) {
+      (void)Gantry::instance()->requestCoordinatedLimitAbortForDiagnostics(_axis);
+    }
+    return;
+  }
+
   if (_togglesRemaining == 0u) {
     return;
   }
 
   if (_softStopOnLimit && _togglesRemaining != 0) {
     if (_homeHardStopOnLimit) {
-      stop();
-      xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
+      // Latch only. The timer ISR owns the next falling edge and terminal
+      // done notification so STEP cannot be stranded high by a task stop.
+      _limitSeenThisMove = true;
       return;
     }
     // Gentle stop: reshape the current move into a decel tail and let the ISR finish it
@@ -1266,17 +1445,21 @@ void Stepper::_unmaskExtiLine()
 
 void Stepper::_onLimitTriggeredFromIsr(BaseType_t* pxHigherPriorityTaskWoken)
 {
+  if (_coordinatedReserved) {
+    Gantry::requestCoordinatedLimitAbortFromIsr(_axis);
+    return;
+  }
+
   if (_togglesRemaining == 0u) {
     return;
   }
 
   if (_softStopOnLimit && _togglesRemaining != 0) {
     if (_homeHardStopOnLimit) {
-      stop();
-      xEventGroupSetBitsFromISR(
-          Orchestrator::getDoneEvents(),
-          _doneBit,
-          pxHigherPriorityTaskWoken);
+      // Latch only. The next step-timer update completes any active high
+      // pulse, forces STEP low, and signals done. This bounds latency to one
+      // timer edge without truncating a pulse or leaving STEP asserted.
+      _limitSeenThisMove = true;
       return;
     }
     _requestSoftStop();
@@ -1351,6 +1534,7 @@ extern "C" void MX_STEPPERX_Init(void) {
 		   0,					// Prescaler
 		   invertDir,				// Invert direction
 		   homeDir);				// Home direction
+  s1.setHomeHardStopOnLimit(true);
   s1.attachLimitSwitch(GPIOG,GPIO_PIN_6,pdMS_TO_TICKS(15));
   s1.addDriver(GPIOG, GPIO_PIN_4,    // STEP
                GPIOC, GPIO_PIN_1,    // DIR
@@ -1375,6 +1559,7 @@ extern "C" void MX_STEPPERY_Init(void) {
 		   0,					// Prescaler
 		   invertDir,			// Invert direction
 		   homeDir);			// Home direction
+  s2.setHomeHardStopOnLimit(true);
   s2.attachLimitSwitch(GPIOG,GPIO_PIN_9,pdMS_TO_TICKS(15));
 }
 

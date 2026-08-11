@@ -2651,6 +2651,29 @@ restoration, and a deterministic checksum. The manifest enforces the 180 MHz,
 225-cycle maximum, 4x speedup, 1,800-cycle preparation, two-tick error, and
 interrupt-restoration gates.
 
+The Milestone 4 gated coordinated-executor suite is hardware-blocked after an
+unsafe XY homing attempt. Do not run it until the printer is powered down and
+inspected for mechanical damage, both X/Y limit-switch actuators, mounts, and
+wiring have been checked, and a fresh operator authorization is given. After
+that review, the command remains:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-executor-suite --out hil_reports/coordinated_xy_executor.json
+python3 tools/run_qualification.py --manifest coordinated_xy_executor_v1 --operator-prompts --fixture motion_clear_envelope_v1 --machine-id LC-001 --raw-report hil_reports/coordinated_xy_executor.json
+```
+
+`--coordinated-xy-executor-suite` explicitly selects P3 value `2049`. Before
+any motion, it disables both XY motors and requires manual press/release
+verification of each physical limit input. A failed input check aborts the
+suite. After hands are removed, it homes Z and homes X/Y sequentially at a
+reduced 3 kHz/1 kHz rate, moves to `(5000,5000)` at the legacy 6 kHz safety
+rate, and runs short X-only, Y-only, equal, asymmetric, pause/resume, cancel,
+and injected-limit cases at 3 kHz. The operator must keep the entire motion
+envelope clear, stop immediately on unexpected contact, and report whether the
+equal and asymmetric ramping paths appear straight. The tracked firmware keeps
+`LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE=0`; ordinary `ABSOLUTE_XY` remains on
+the legacy independent X/TIM2 and Y/TIM7 executors.
+
 Outputs:
 
 - Suite reports: `hil_reports/qualification/<machine_id>/<timestamp>/`

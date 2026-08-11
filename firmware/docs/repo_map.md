@@ -85,6 +85,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `firmware/Core/Inc/StepperInstrumentationReport.h`, `firmware/Core/Src/StepperInstrumentationReport.cpp`
   - `firmware/Core/Inc/NormalizedCosineProfile.h`, `firmware/Core/Src/NormalizedCosineProfile.cpp`
   - `firmware/Core/Inc/CoordinatedXyPlanner.h`, `firmware/Core/Src/CoordinatedXyPlanner.cpp`
+  - `firmware/Core/Inc/CoordinatedXyExecutor.h`, `firmware/Core/Src/CoordinatedXyExecutor.cpp`
   - `firmware/Core/Inc/Gantry.h`, `firmware/Core/Src/Gantry.cpp`
   - `firmware/Core/Inc/TMC2208Driver.h`, `firmware/Core/Src/TMC2208Driver.cpp`
 - Key functions:
@@ -92,7 +93,9 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `Stepper::home` accepts a cooperative cancellation token and returns distinct succeeded, failed, or canceled outcomes; every blocking home phase polls the token and restores home-only motion settings before exit.
   - `StepperIsrInstrumentation` is the compile-gated, fixed-size X/Y legacy ISR measurement state. `StepperInstrumentationReport` validates completed snapshots and formats compact post-move metrics; neither helper changes timer periods, pulse accounting, or routing.
   - `NormalizedCosineProfile` is the unrouted Milestone 2 pure profile module. It owns the 257-point Q20 cosine LUT, Q0.32 quotient/remainder cursor, bounded integer interpolation, and cached current ARR. It has no HAL or FreeRTOS dependency; `prepare()` may divide, while ISR-callable `currentArr()`/`advance()` do not.
-  - `CoordinatedXyPlanner` is the unrouted Milestone 3 pure planner. It derives a shared X/Y master rate and acceleration, prepares normalized cosine ramps, and emits cached complete-step ARR/DDA mask events with exact centered-error endpoint counts. Preparation may divide; its per-step cursor has no HAL, FreeRTOS, timer, GPIO, floating-point, or allocation dependency.
+  - `CoordinatedXyPlanner` derives a shared X/Y master rate and acceleration, prepares normalized cosine ramps, and emits cached complete-step ARR/DDA mask events with exact centered-error endpoint counts. Preparation may divide; its per-step cursor has no HAL, FreeRTOS, timer, GPIO, floating-point, or allocation dependency. Milestone 4 uses it only through the explicit coordinated-executor diagnostic; ordinary motion remains legacy-routed.
+  - `CoordinatedXyExecutor` is the pure Milestone 4 two-edge state machine. It caches one planner event for STEP high and low, advances/accounting only on the falling edge, and implements bounded pause, resume, cancel, limit-priority, and terminal behavior without HAL or FreeRTOS dependencies.
+  - `Gantry::startCoordinatedXY` is the gated hardware adapter. It reserves both X/Y steppers, checks position/limit/timer constraints, keeps TIM7 stopped, and drives shared DDA/LUT events from TIM2. `Stepper` owns narrow Gantry-only reservation, pin, direction, position, target, and EXTI limit-forwarding hooks. `LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE` remains `0`, so `Gantry::moveTo` and ordinary `ABSOLUTE_XY` still use independent legacy timers.
   - C wrappers used by orchestrator/main: `MX_STEPPERX_Home`, `MX_STEPPERY_Home`, etc.
   - `Gantry::moveBy`, `Gantry::moveTo`
 
@@ -245,6 +248,7 @@ Script notes:
   - Runs protocol selftest and writes the main JSON report.
   - `--motion-timing-suite` selects existing self-test selector `2029`; no protocol layout changes are required.
   - `--profile-lut-benchmark` selects existing P3 selector `2039` and returns only non-motion SAFE result `2030`; `profile_lut_benchmark_v1` supplies the permanent qualification gates.
+  - `--coordinated-xy-executor-suite` selects P3 selector `2049` under `FULL`. It first disables XY and verifies manual press/release of both physical limit inputs, then homes X/Y sequentially at reduced rate, anchors at `(5000,5000)`, and runs the gated TIM2-master executor at 3 kHz for results `2040`-`2046`. `coordinated_xy_executor_v1` requires the clear-motion-envelope fixture and evaluates pulse counts, edge counts, pause/cancel/limit behavior, pin idle state, ISR cycles, recovery, and teardown-home drift. Hardware qualification is blocked after the 2026-08-11 unsafe homing attempt until physical inspection and fresh operator authorization.
   - Optional camera benchmark mode:
     - `--camera-benchmark`
     - `--camera-benchmark-order auto|pre_selftest|post_selftest` (default `auto`)

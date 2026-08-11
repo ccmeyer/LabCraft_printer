@@ -21,6 +21,7 @@ def test_discover_suite_entries_lists_current_manifests():
         "xy_motion_v1",
         "motion_timing_v1",
         "profile_lut_benchmark_v1",
+        "coordinated_xy_executor_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "refuel_vacuum_v1",
@@ -143,6 +144,25 @@ def test_profile_lut_benchmark_suite_is_safe_non_motion_and_exposes_cycle_gates(
     assert "lut_max" in rows[0].metrics
     assert "speedup_x100" in rows[0].metrics
     assert "Non-motion" in rows[0].evaluates
+
+
+def test_coordinated_xy_executor_suite_exposes_loaded_motion_safety_gates():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    executor = entries["coordinated_xy_executor_v1"].manifest
+
+    assert executor.profile == "FULL"
+    assert executor.requires_operator_prompts is True
+    assert required_fixture_ids(executor) == ("motion_clear_envelope_v1",)
+    rows = {row.test_id: row for row in build_test_plan_rows(executor)}
+    assert list(rows) == [2040, 2041, 2042, 2043, 2044, 2045, 2046]
+    assert rows[2040].name == "Coordinated XY X-only low-rate"
+    assert rows[2043].name == "Coordinated XY asymmetric low-rate"
+    assert rows[2046].name == "Coordinated XY limit abort"
+    assert all(row.subsystem == "Motion" for row in rows.values())
+    assert "i2" in rows[2042].metrics
+    assert "stable" in rows[2044].metrics
+    assert "lat" in rows[2045].metrics
+    assert "xd" in rows[2046].metrics
 
 
 def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():

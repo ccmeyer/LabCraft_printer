@@ -7,6 +7,12 @@ namespace CoordinatedXyPlanner {
 
 namespace {
 
+#if defined(__GNUC__) && !defined(UNIT_TEST)
+#define LC_COORDINATED_STEP_OPTIMIZED __attribute__((optimize("O2"), hot))
+#else
+#define LC_COORDINATED_STEP_OPTIMIZED
+#endif
+
 constexpr uint64_t kNanosecondsPerSecond = 1000000000ULL;
 
 bool magnitudeOf(int64_t value, uint32_t& magnitude) {
@@ -66,6 +72,7 @@ uint32_t scaledComponent(uint32_t masterValue,
       (static_cast<uint64_t>(masterValue) * axisSteps) / masterSteps);
 }
 
+LC_COORDINATED_STEP_OPTIMIZED
 bool planMatchesCursor(const CoordinatedXyPlan& plan, const Cursor& cursor) {
   return plan.status == PlanStatus::Ready &&
          cursor.expectedMasterSteps == plan.masterSteps &&
@@ -73,6 +80,7 @@ bool planMatchesCursor(const CoordinatedXyPlan& plan, const Cursor& cursor) {
          cursor.expectedYSteps == plan.ySteps;
 }
 
+LC_COORDINATED_STEP_OPTIMIZED
 StepMask nextMask(const CoordinatedXyPlan& plan, Cursor& cursor) {
   StepMask mask = StepMask::None;
   if (plan.xSteps != 0u) {
@@ -92,6 +100,7 @@ StepMask nextMask(const CoordinatedXyPlan& plan, Cursor& cursor) {
   return mask;
 }
 
+LC_COORDINATED_STEP_OPTIMIZED
 void primeEvent(const CoordinatedXyPlan& plan, Cursor& cursor) {
   StepEvent event{};
   event.masterStepIndex = cursor.completedMasterSteps;
@@ -313,6 +322,7 @@ TraceStatus begin(const CoordinatedXyPlan& plan, Cursor& cursor) {
   return TraceStatus::Ready;
 }
 
+LC_COORDINATED_STEP_OPTIMIZED
 TraceStatus currentEvent(const Cursor& cursor, StepEvent& event) {
   if (cursor.complete) return TraceStatus::Complete;
   if (!cursor.active) return TraceStatus::InvalidState;
@@ -320,16 +330,18 @@ TraceStatus currentEvent(const Cursor& cursor, StepEvent& event) {
   return TraceStatus::Ready;
 }
 
+LC_COORDINATED_STEP_OPTIMIZED
 TraceStatus completeCurrentStep(const CoordinatedXyPlan& plan, Cursor& cursor) {
   if (!cursor.active || cursor.complete || !planMatchesCursor(plan, cursor) ||
       cursor.cachedEvent.masterStepIndex != cursor.completedMasterSteps) {
     return TraceStatus::InvalidState;
   }
 
-  if (contains(cursor.cachedEvent.mask, StepMask::X)) {
+  const uint8_t eventMask = static_cast<uint8_t>(cursor.cachedEvent.mask);
+  if ((eventMask & static_cast<uint8_t>(StepMask::X)) != 0u) {
     ++cursor.xEmittedSteps;
   }
-  if (contains(cursor.cachedEvent.mask, StepMask::Y)) {
+  if ((eventMask & static_cast<uint8_t>(StepMask::Y)) != 0u) {
     ++cursor.yEmittedSteps;
   }
 
@@ -366,5 +378,7 @@ TraceStatus completeCurrentStep(const CoordinatedXyPlan& plan, Cursor& cursor) {
 bool isComplete(const Cursor& cursor) {
   return cursor.complete;
 }
+
+#undef LC_COORDINATED_STEP_OPTIMIZED
 
 }  // namespace CoordinatedXyPlanner
