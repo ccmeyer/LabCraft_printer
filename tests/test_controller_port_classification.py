@@ -33,6 +33,7 @@ def _experimental_controller(
     machine_port="",
     machine_log_port=None,
     resolved_machine_log_port=None,
+    machine_log_identity=None,
 ):
     controller = Controller.__new__(Controller)
     controller.runtime_context = PRODUCTION_RUNTIME_CONTEXT
@@ -45,6 +46,7 @@ def _experimental_controller(
         get_machine_port=lambda: machine_port,
         get_machine_log_port=lambda: machine_log_port,
         get_resolved_machine_log_port=lambda: resolved_machine_log_port,
+        get_machine_log_port_identity=lambda: machine_log_identity,
     )
     controller.error_occurred_signal = Emitter()
     controller.experimental_balance_connection_changed = Emitter()
@@ -207,7 +209,7 @@ def test_experimental_listing_excludes_active_machine_even_with_balance_metadata
     assert controller.list_experimental_balance_ports() == ()
 
 
-def test_experimental_listing_reserves_mcu_log_port_even_with_balance_metadata(
+def test_experimental_listing_does_not_reserve_unvalidated_stale_log_preference(
     monkeypatch,
 ):
     alias = "/dev/serial/by-id/usb-Silicon_Labs_CP2102-if00-port0"
@@ -233,7 +235,51 @@ def test_experimental_listing_reserves_mcu_log_port_even_with_balance_metadata(
         "_resolved_serial_path",
         lambda path: system_device if str(path) in {alias, system_device} else str(path),
     )
-    controller = _experimental_controller(machine_log_port=alias)
+    service = _CommandService()
+    controller = _experimental_controller(
+        service=service,
+        machine_log_port=alias,
+    )
+
+    listed = controller.list_experimental_balance_ports()
+
+    assert [item.system_device for item in listed] == [system_device]
+    assert controller.connect_experimental_balance(system_device) is True
+    assert service.connect_calls == [system_device]
+
+
+def test_experimental_listing_reserves_validated_mcu_log_identity(
+    monkeypatch,
+):
+    alias = "/dev/serial/by-id/usb-Silicon_Labs_CP2102-if00-port0"
+    system_device = "/dev/ttyUSB0"
+    monkeypatch.setattr(
+        controller_mod,
+        "comports",
+        lambda: [
+            SimpleNamespace(
+                device=system_device,
+                vid=0x067B,
+                pid=0x23A3,
+                description="Prolific balance",
+                manufacturer="Prolific",
+                product="USB serial",
+                serial_number="misleading",
+            )
+        ],
+    )
+    monkeypatch.setattr(controller_mod, "_serial_by_id_aliases", lambda: {})
+    monkeypatch.setattr(
+        controller_mod,
+        "_resolved_serial_path",
+        lambda path: system_device if str(path) in {alias, system_device} else str(path),
+    )
+    identity = SimpleNamespace(
+        requested_path=alias,
+        system_device=system_device,
+        by_id_paths=(alias,),
+    )
+    controller = _experimental_controller(machine_log_identity=identity)
 
     assert controller.list_experimental_balance_ports() == ()
 

@@ -15248,11 +15248,7 @@ class Model(QObject):
     def get_default_machine_log_port(self):
         if not self.profile.has_log_channel:
             return None
-        if 'MACHINE_LOG_PORT' not in self.settings:
-            from hardware.serial_ports import DEFAULT_CURRENT_MCU_LOG_PORT
-
-            return DEFAULT_CURRENT_MCU_LOG_PORT
-        return self.settings['MACHINE_LOG_PORT']
+        return self.settings.get('MACHINE_LOG_PORT', '')
     
     def get_default_balance_port(self):
         return self.settings['BALANCE_PORT']

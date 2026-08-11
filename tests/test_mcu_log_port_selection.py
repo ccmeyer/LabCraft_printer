@@ -9,9 +9,17 @@ from hardware.serial_ports import (
     DEFAULT_CURRENT_MCU_LOG_PORT,
     MCU_LOG_EXPECTED_VID_PID,
     SerialPortIdentity,
+    SerialPortSelectionMethod,
     SerialPortValidationError,
     SerialPortValidationReason,
     resolve_explicit_usb_serial_port,
+    resolve_preferred_usb_serial_port,
+)
+
+
+TEST_CP2102_ALIAS = (
+    "/dev/serial/by-id/"
+    "usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0"
 )
 
 
@@ -34,7 +42,7 @@ def _path_resolver(mapping):
 @pytest.mark.parametrize("cp_device", ["/dev/ttyUSB0", "/dev/ttyUSB1"])
 def test_explicit_cp2102_alias_is_stable_across_ttyusb_order(cp_device):
     balance_device = "/dev/ttyUSB1" if cp_device.endswith("0") else "/dev/ttyUSB0"
-    alias = DEFAULT_CURRENT_MCU_LOG_PORT
+    alias = TEST_CP2102_ALIAS
     paths = {
         alias: cp_device,
         cp_device: cp_device,
@@ -122,11 +130,125 @@ def test_resolver_never_falls_back_to_first_cp2102_device():
     assert caught.value.reason is SerialPortValidationReason.DEVICE_NOT_FOUND
 
 
+@pytest.mark.parametrize("cp_device", ["/dev/ttyUSB0", "/dev/ttyUSB1"])
+def test_preferred_resolver_discovers_unique_cp2102_independent_of_order(cp_device):
+    balance_device = "/dev/ttyUSB1" if cp_device.endswith("0") else "/dev/ttyUSB0"
+    alias = TEST_CP2102_ALIAS
+    paths = {
+        alias: cp_device,
+        cp_device: cp_device,
+        balance_device: balance_device,
+    }
+
+    identity = resolve_preferred_usb_serial_port(
+        "",
+        expected_vid_pid=MCU_LOG_EXPECTED_VID_PID,
+        port_infos=(
+            _port(balance_device, 0x067B, 0x23A3, product="Prolific"),
+            _port(cp_device, 0x10C4, 0xEA60, product="CP2102"),
+        ),
+        path_resolver=_path_resolver(paths),
+        aliases_by_device={cp_device: (alias,)},
+    )
+
+    assert identity.requested_path == alias
+    assert identity.system_device == cp_device
+    assert identity.selection_method is SerialPortSelectionMethod.UNIQUE_IDENTITY
+
+
+def test_preferred_resolver_falls_back_when_stale_path_points_to_balance():
+    stale = "/dev/ttyUSB0"
+    cp_device = "/dev/ttyUSB1"
+    alias = TEST_CP2102_ALIAS
+    path_resolver = _path_resolver(
+        {stale: stale, cp_device: cp_device, alias: cp_device}
+    )
+    identity = resolve_preferred_usb_serial_port(
+        stale,
+        expected_vid_pid=MCU_LOG_EXPECTED_VID_PID,
+        port_infos=(
+            _port(stale, 0x067B, 0x23A3, product="Prolific"),
+            _port(cp_device, 0x10C4, 0xEA60, product="CP2102"),
+        ),
+        path_resolver=path_resolver,
+        aliases_by_device={cp_device: (alias,)},
+    )
+
+    assert identity.requested_path == alias
+    assert identity.system_device == cp_device
+    assert (
+        identity.selection_method
+        is SerialPortSelectionMethod.UNIQUE_IDENTITY_FALLBACK
+    )
+
+
+def test_preferred_resolver_valid_path_disambiguates_multiple_cp2102_devices():
+    selected = "/dev/ttyUSB2"
+    alias = "/dev/serial/by-id/usb-Silicon_Labs_selected-if00-port0"
+    identity = resolve_preferred_usb_serial_port(
+        alias,
+        expected_vid_pid=MCU_LOG_EXPECTED_VID_PID,
+        port_infos=(
+            _port("/dev/ttyUSB1", 0x10C4, 0xEA60, serial_number="one"),
+            _port(selected, 0x10C4, 0xEA60, serial_number="two"),
+        ),
+        path_resolver=_path_resolver({alias: selected}),
+        aliases_by_device={selected: (alias,)},
+    )
+
+    assert identity.requested_path == alias
+    assert identity.system_device == selected
+    assert identity.selection_method is SerialPortSelectionMethod.PREFERRED_PATH
+
+
+def test_preferred_resolver_rejects_zero_or_ambiguous_identity_matches():
+    with pytest.raises(SerialPortValidationError) as missing:
+        resolve_preferred_usb_serial_port(
+            "",
+            expected_vid_pid=MCU_LOG_EXPECTED_VID_PID,
+            port_infos=(_port("/dev/ttyUSB0", 0x067B, 0x23A3),),
+            aliases_by_device={},
+        )
+    assert missing.value.reason is SerialPortValidationReason.NO_IDENTITY_MATCH
+    assert "067b:23a3" in missing.value.detail
+
+    with pytest.raises(SerialPortValidationError) as ambiguous:
+        resolve_preferred_usb_serial_port(
+            "",
+            expected_vid_pid=MCU_LOG_EXPECTED_VID_PID,
+            port_infos=(
+                _port("/dev/ttyUSB0", 0x10C4, 0xEA60, serial_number="one"),
+                _port("/dev/ttyUSB1", 0x10C4, 0xEA60, serial_number="two"),
+            ),
+            aliases_by_device={},
+        )
+    assert ambiguous.value.reason is SerialPortValidationReason.AMBIGUOUS_IDENTITY
+    assert "/dev/ttyUSB0" in ambiguous.value.detail
+    assert "/dev/ttyUSB1" in ambiguous.value.detail
+
+
+def test_preferred_resolver_deduplicates_one_physical_device():
+    device = "/dev/ttyUSB0"
+    identity = resolve_preferred_usb_serial_port(
+        "",
+        expected_vid_pid=MCU_LOG_EXPECTED_VID_PID,
+        port_infos=(
+            _port(device, 0x10C4, 0xEA60, serial_number="same"),
+            _port(device, 0x10C4, 0xEA60, serial_number="same"),
+        ),
+        aliases_by_device={},
+    )
+
+    assert identity.requested_path == device
+    assert identity.system_device == device
+
+
 def test_model_log_port_default_is_backward_compatible_without_mutation():
     settings = {"MACHINE_PORT": "/dev/ttyAMA0"}
     model = SimpleNamespace(profile=CURRENT_PROFILE, settings=settings)
 
     assert Model.get_default_machine_log_port(model) == DEFAULT_CURRENT_MCU_LOG_PORT
+    assert DEFAULT_CURRENT_MCU_LOG_PORT == ""
     assert "MACHINE_LOG_PORT" not in settings
 
     model.settings["MACHINE_LOG_PORT"] = ""
@@ -158,7 +280,7 @@ def test_constructing_machine_does_not_resolve_or_open_log_port(qapp):
     assert calls == []
 
 
-@pytest.mark.parametrize("configured_port", [None, "", 123])
+@pytest.mark.parametrize("configured_port", [123, object()])
 def test_invalid_machine_log_configuration_fails_before_resolution_or_open(
     qapp,
     configured_port,
@@ -215,7 +337,7 @@ class _FakeLogReader:
         return self.start_calls > 0
 
 
-def _identity(path=DEFAULT_CURRENT_MCU_LOG_PORT, system_device="/dev/ttyUSB1"):
+def _identity(path=TEST_CP2102_ALIAS, system_device="/dev/ttyUSB1"):
     return SerialPortIdentity(
         requested_path=path,
         system_device=system_device,
@@ -250,7 +372,7 @@ def test_begin_log_thread_passes_only_validated_explicit_port(qapp):
             has_droplet_camera=False,
             has_log_channel=True,
         ),
-        machine_log_port=DEFAULT_CURRENT_MCU_LOG_PORT,
+        machine_log_port=TEST_CP2102_ALIAS,
         log_reader_factory=factory,
         serial_identity_resolver=lambda path, **kwargs: (
             resolver_calls.append((path, kwargs["expected_vid_pid"])),
@@ -260,11 +382,59 @@ def test_begin_log_thread_passes_only_validated_explicit_port(qapp):
 
     assert machine.begin_log_thread() is True
     assert resolver_calls == [
-        (DEFAULT_CURRENT_MCU_LOG_PORT, MCU_LOG_EXPECTED_VID_PID)
+        (TEST_CP2102_ALIAS, MCU_LOG_EXPECTED_VID_PID)
     ]
-    assert opened == [DEFAULT_CURRENT_MCU_LOG_PORT]
+    assert opened == [TEST_CP2102_ALIAS]
     assert machine.log_reader.start_calls == 1
     assert machine.get_resolved_machine_log_port() == "/dev/ttyUSB1"
+
+
+def test_begin_log_thread_accepts_blank_preference_and_opens_selected_port(qapp):
+    opened = []
+    resolver_calls = []
+
+    def factory(baud, *, log_port, serial_factory):
+        opened.append(log_port)
+        return _FakeLogReader(
+            baud,
+            log_port=log_port,
+            serial_factory=serial_factory,
+        )
+
+    identity = SerialPortIdentity(
+        requested_path=TEST_CP2102_ALIAS,
+        system_device="/dev/ttyUSB1",
+        by_id_paths=(TEST_CP2102_ALIAS,),
+        vid="10c4",
+        pid="ea60",
+        vid_pid=MCU_LOG_EXPECTED_VID_PID,
+        description="CP2102 USB UART",
+        manufacturer="Silicon Labs",
+        product="CP2102",
+        serial_number="0001",
+        selection_method=SerialPortSelectionMethod.UNIQUE_IDENTITY,
+    )
+    machine = mfr.Machine(
+        SimpleNamespace(),
+        profile=SimpleNamespace(
+            name="current",
+            has_refuel_camera=False,
+            has_droplet_camera=False,
+            has_log_channel=True,
+        ),
+        machine_log_port="",
+        log_reader_factory=factory,
+        serial_identity_resolver=lambda path, **kwargs: (
+            resolver_calls.append((path, kwargs["expected_vid_pid"])),
+            identity,
+        )[1],
+    )
+
+    assert machine.begin_log_thread() is True
+    assert resolver_calls == [("", MCU_LOG_EXPECTED_VID_PID)]
+    assert opened == [TEST_CP2102_ALIAS]
+    assert machine.get_machine_log_port() == ""
+    assert machine.get_machine_log_port_identity() is identity
 
 
 def test_log_reader_requires_explicit_port_without_opening_serial(qapp):
@@ -289,7 +459,7 @@ def test_hello_ack_fails_closed_when_log_identity_is_invalid(qapp):
     error = SerialPortValidationError(
         SerialPortValidationReason.IDENTITY_MISMATCH,
         "observed Prolific adapter",
-        requested_path=DEFAULT_CURRENT_MCU_LOG_PORT,
+        requested_path=TEST_CP2102_ALIAS,
         expected_vid_pid=MCU_LOG_EXPECTED_VID_PID,
         observed_vid_pid="067b:23a3",
     )
@@ -301,7 +471,7 @@ def test_hello_ack_fails_closed_when_log_identity_is_invalid(qapp):
             has_droplet_camera=False,
             has_log_channel=True,
         ),
-        machine_log_port=DEFAULT_CURRENT_MCU_LOG_PORT,
+        machine_log_port=TEST_CP2102_ALIAS,
         serial_identity_resolver=lambda *_args, **_kwargs: (_ for _ in ()).throw(
             error
         ),
@@ -339,7 +509,7 @@ def test_hello_ack_marks_transport_ready_only_after_valid_log_start(qapp):
             has_droplet_camera=False,
             has_log_channel=True,
         ),
-        machine_log_port=DEFAULT_CURRENT_MCU_LOG_PORT,
+        machine_log_port=TEST_CP2102_ALIAS,
         log_reader_factory=_FakeLogReader,
         serial_identity_resolver=lambda *_args, **_kwargs: _identity(),
     )
@@ -355,7 +525,7 @@ def test_hello_ack_marks_transport_ready_only_after_valid_log_start(qapp):
     assert machine._transport_ready is True
     assert machine.execution_timer.isActive() is True
     assert machine.log_reader.start_calls == 1
-    assert machine.log_reader.log_port == DEFAULT_CURRENT_MCU_LOG_PORT
+    assert machine.log_reader.log_port == TEST_CP2102_ALIAS
 
     machine.execution_timer.stop()
     machine._stop_mcu_response_watchdog()
@@ -370,7 +540,7 @@ def test_log_open_failure_is_reported_without_transport_readiness(qapp):
             has_droplet_camera=False,
             has_log_channel=True,
         ),
-        machine_log_port=DEFAULT_CURRENT_MCU_LOG_PORT,
+        machine_log_port=TEST_CP2102_ALIAS,
         log_reader_factory=lambda *_args, **_kwargs: (_ for _ in ()).throw(
             OSError("injected open failure")
         ),

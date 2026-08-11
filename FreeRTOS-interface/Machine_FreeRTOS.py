@@ -30,7 +30,7 @@ from hardware.serial_ports import (
     MCU_LOG_EXPECTED_VID_PID,
     SerialPortValidationError,
     SerialPortValidationReason,
-    resolve_explicit_usb_serial_port,
+    resolve_preferred_usb_serial_port,
 )
 from HostBlackBoxLog import HostBlackBoxRecorder
 from GravimetricLedger import (
@@ -4180,7 +4180,7 @@ class Machine(QObject):
         droplet_camera_factory=None,
         log_reader_factory=None,
         machine_log_port=None,
-        serial_identity_resolver=resolve_explicit_usb_serial_port,
+        serial_identity_resolver=resolve_preferred_usb_serial_port,
     ):
         super().__init__()
         self.model = model
@@ -5429,10 +5429,10 @@ class Machine(QObject):
         reason_value = getattr(reason, "value", reason) or "open_failure"
         detail = str(getattr(error, "detail", "") or error)
         message = (
-            f"MCU log adapter {configured!r} is unavailable or invalid. "
+            f"MCU log adapter preference {configured!r} is unavailable or invalid. "
             f"Expected USB identity {MCU_LOG_EXPECTED_VID_PID}"
             + (f", observed {observed}" if observed else "")
-            + f". {detail} Verify MACHINE_LOG_PORT and the CP2102 connection, then reconnect."
+            + f". {detail} Verify the CP2102 connection or configure MACHINE_LOG_PORT to disambiguate, then reconnect."
         )
         self._last_log_start_error = message
         self._machine_log_identity = None
@@ -5492,10 +5492,12 @@ class Machine(QObject):
             return True
 
         configured_port = self._machine_log_port
-        if not isinstance(configured_port, str) or not configured_port.strip():
+        if configured_port is None:
+            configured_port = ""
+        if not isinstance(configured_port, str):
             error = SerialPortValidationError(
                 SerialPortValidationReason.INVALID_PATH,
-                "MACHINE_LOG_PORT must be a nonempty string.",
+                "MACHINE_LOG_PORT must be a string when configured.",
                 requested_path=(
                     configured_port if isinstance(configured_port, str) else None
                 ),
@@ -5546,12 +5548,19 @@ class Machine(QObject):
             self._record_black_box_event(
                 "mcu_log_channel_started",
                 {
-                    "configured_port": identity.requested_path,
+                    "configured_port": configured_port.strip() or None,
+                    "selected_port": identity.requested_path,
                     "system_device": identity.system_device,
                     "by_id_paths": list(getattr(identity, "by_id_paths", ())),
                     "vid_pid": getattr(identity, "vid_pid", None),
                     "product": getattr(identity, "product", None),
                     "manufacturer": getattr(identity, "manufacturer", None),
+                    "serial_number": getattr(identity, "serial_number", None),
+                    "selection_method": getattr(
+                        getattr(identity, "selection_method", None),
+                        "value",
+                        getattr(identity, "selection_method", None),
+                    ),
                 },
             )
             return True

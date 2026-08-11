@@ -1273,6 +1273,30 @@ class Controller(QObject):
             )
         )
 
+    def _validated_machine_serial_paths(self) -> tuple[str, ...]:
+        """Return only active or identity-validated printer serial paths."""
+
+        paths = []
+        active_machine_port = str(self.get_machine_port() or "").strip()
+        if active_machine_port:
+            paths.append(active_machine_port)
+
+        identity_getter = getattr(
+            self.machine,
+            "get_machine_log_port_identity",
+            None,
+        )
+        identity = identity_getter() if callable(identity_getter) else None
+        if identity is not None:
+            for value in (
+                getattr(identity, "requested_path", None),
+                getattr(identity, "system_device", None),
+                *tuple(getattr(identity, "by_id_paths", ()) or ()),
+            ):
+                if isinstance(value, str) and value.strip():
+                    paths.append(value.strip())
+        return tuple(dict.fromkeys(paths))
+
     def list_experimental_balance_ports(
         self,
     ) -> tuple[ExperimentalBalancePort, ...]:
@@ -1285,28 +1309,10 @@ class Controller(QObject):
             self._experimental_balance_ports = ()
             return ()
 
-        active_machine_port = str(self.get_machine_port() or "").strip()
-        reserved_devices = set()
-        if active_machine_port:
-            reserved_devices.add(_resolved_serial_path(active_machine_port))
-        log_port_getter = getattr(self.machine, "get_machine_log_port", None)
-        configured_log_port = (
-            log_port_getter() if callable(log_port_getter) else None
-        )
-        if isinstance(configured_log_port, str) and configured_log_port.strip():
-            reserved_devices.add(
-                _resolved_serial_path(configured_log_port.strip())
-            )
-        resolved_log_getter = getattr(
-            self.machine,
-            "get_resolved_machine_log_port",
-            None,
-        )
-        resolved_log_port = (
-            resolved_log_getter() if callable(resolved_log_getter) else None
-        )
-        if isinstance(resolved_log_port, str) and resolved_log_port.strip():
-            reserved_devices.add(_resolved_serial_path(resolved_log_port.strip()))
+        reserved_devices = {
+            _resolved_serial_path(path)
+            for path in self._validated_machine_serial_paths()
+        }
         aliases_by_device = _serial_by_id_aliases()
         descriptors = []
         seen_system_devices = set()
@@ -1386,26 +1392,7 @@ class Controller(QObject):
                 "Select a currently available balance adapter before connecting.",
             )
             return False
-        active_machine_port = str(self.get_machine_port() or "").strip()
-        reserved_paths = []
-        if active_machine_port:
-            reserved_paths.append(active_machine_port)
-        log_port_getter = getattr(self.machine, "get_machine_log_port", None)
-        configured_log_port = (
-            log_port_getter() if callable(log_port_getter) else None
-        )
-        if isinstance(configured_log_port, str) and configured_log_port.strip():
-            reserved_paths.append(configured_log_port.strip())
-        resolved_log_getter = getattr(
-            self.machine,
-            "get_resolved_machine_log_port",
-            None,
-        )
-        resolved_log_port = (
-            resolved_log_getter() if callable(resolved_log_getter) else None
-        )
-        if isinstance(resolved_log_port, str) and resolved_log_port.strip():
-            reserved_paths.append(resolved_log_port.strip())
+        reserved_paths = self._validated_machine_serial_paths()
         if any(
             _resolved_serial_path(descriptor.device_path)
             == _resolved_serial_path(reserved_path)
