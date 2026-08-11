@@ -7,7 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, QObject
 
 from hardware.profile import HardwareProfile
 
@@ -174,6 +174,24 @@ class ApplicationComponents:
         if not _close_experimental_balance_service(self.balance_service):
             return False
         self._closed = True
+
+        # Hiding a visible window can commit the editor that currently owns
+        # focus.  Teardown must not turn that deferred UI notification into a
+        # machine command after the transport has already disconnected.
+        signal_sources = [self.view]
+        find_children = getattr(self.view, "findChildren", None)
+        if callable(find_children):
+            try:
+                signal_sources.extend(find_children(QObject))
+            except RuntimeError:
+                pass
+        for source in signal_sources:
+            block_signals = getattr(source, "blockSignals", None)
+            if callable(block_signals):
+                try:
+                    block_signals(True)
+                except RuntimeError:
+                    pass
 
         timers = (
             getattr(getattr(self.view, "connection_widget", None), "_port_timer", None),

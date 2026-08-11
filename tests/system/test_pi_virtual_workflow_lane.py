@@ -57,6 +57,7 @@ def _preflight(root: Path, *, dirty: bool = False) -> dict:
         "output_root": str(root / "verification_reports" / "virtual_workflows"),
         "source_commit": "a" * 40,
         "dirty_worktree": dirty,
+        "source_tree_sha256": "d" * 64,
         "operating_system": "Linux",
         "architecture": "aarch64",
         "pi_model": "Raspberry Pi 5 Model B Rev 1.0",
@@ -103,6 +104,7 @@ def _report(run_id: str, scenario_root: Path) -> dict:
             "git_short_commit": "a" * 12,
             "dirty_worktree": False,
             "git_error": None,
+            "source_tree": {"sha256": "d" * 64},
         },
         "environment": {
             "operating_system": "Linux",
@@ -221,6 +223,7 @@ def _proof(preflight_path: Path, trace_path: Path, report_path: Path) -> dict:
         "audit_report_path": str(report_path),
         "audit_report_sha256": _sha256(report_path),
         "source_commit": preflight["source_commit"],
+        "source_tree_sha256": preflight["source_tree_sha256"],
         "qt_platform": preflight["qt_platform"],
         "pi_model": preflight["pi_model"],
         "private_dev": True,
@@ -276,6 +279,16 @@ def test_hardware_trace_accepts_private_dev_and_rejects_physical_devices(tmp_pat
     )
     assert proof.status == "pass"
     assert proof.forbidden_matches == []
+
+    mislabeled_report = _report("audit-mislabeled", scenario_root)
+    mislabeled_report["run"]["run_mode"] = "offscreen_windows_sil"
+    mislabeled_path = _write_json(
+        tmp_path / "audit" / "mislabeled-report.json", mislabeled_report
+    )
+    with pytest.raises(PiSilError, match="not a Pi SIL run"):
+        validate_pi_hardware_trace(
+            preflight_path, trace_path, mislabeled_path
+        )
 
     trace_path.write_text(
         'openat(AT_FDCWD, "/dev/ttyAMA0", O_RDWR) = 7</dev/ttyAMA0>\n',
@@ -452,6 +465,8 @@ def test_pi_shell_is_private_device_only_and_never_launches_production_app():
         "tools/run_virtual_workflow.py",
         "--target-pi",
         "validate-trace",
+        "replay-suite",
+        "--aggregate",
     ):
         assert required in source
     assert "FreeRTOS-interface/App.py" not in source
@@ -502,3 +517,86 @@ def test_remote_wrapper_dry_run_builds_preflight_proof_and_collection_commands()
     assert "'virtual_print_array_384x10_v1'" in result.stdout
     assert "'--emit-report-set'" in result.stdout
     assert "Dry run complete" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("suite_id", "replay_expected"),
+    [("pi_primary", True), ("pi_stress", False)],
+)
+def test_remote_wrapper_suite_dry_run_is_explicit_and_retains_evidence(
+    suite_id, replay_expected
+):
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("PowerShell is unavailable")
+    command = [
+        powershell,
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(REMOTE_TOOL),
+        "-PiHost",
+        "pi-test",
+        "-Suite",
+        suite_id,
+        "-Seed",
+        "1",
+        "-SpeedMultiplier",
+        "100",
+        "-DryRun",
+    ]
+    if replay_expected:
+        command.append("-ReplaySuite")
+    result = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"Suite: {suite_id}" in result.stdout
+    assert "'--suite'" in result.stdout
+    assert f"'{suite_id}'" in result.stdout
+    assert "'--aggregate'" in result.stdout
+    assert "pi-suite-" in result.stdout
+    assert "'--timeout-seconds'" not in result.stdout
+    assert "'cleanup'" not in result.stdout
+    assert ("'replay'" in result.stdout) is replay_expected
+    assert "no remote operation, artifact, or cleanup occurred" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        ["-Scenario", "virtual_print_array_96_v1"],
+        ["-WarmupRuns", "1"],
+        ["-HostLabel", "pi-test-label"],
+    ],
+)
+def test_remote_wrapper_suite_mode_rejects_legacy_scenario_controls(conflict):
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("PowerShell is unavailable")
+    result = subprocess.run(
+        [
+            powershell,
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REMOTE_TOOL),
+            "-PiHost",
+            "pi-test",
+            "-Suite",
+            "pi_primary",
+            "-DryRun",
+            *conflict,
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0

@@ -412,6 +412,294 @@ Milestone 5 qualifies the application-contract simulator for shared automation
 harness planning. It does not validate physical fluid behavior, cameras,
 balances, collision safety, firmware, protocol, or hardware performance.
 
+Milestone 6 is complete. The deterministic `virtual_print_array_24_v1` smoke
+now runs as a short composition over a shared `SimulationSession` harness and
+surface-specific QTest drivers. Connection, motor enable/home, experiment
+creation/finalization, print settings, rack volume/confirm/load, pressure
+regulation, normal synthetic calibration generation/selection/Apply, and
+array start all use visible, enabled normal Qt controls. Every action records
+its actual `ui`, `controller`, `model`, `simulator`, or `harness` interaction
+surface; successful normal-UI coverage fails if a required operator action is
+missing or labeled with another surface.
+
+Run the migrated smoke offscreen or visibly:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario virtual_print_array_24_v1 `
+  --output-root verification_reports\milestone6 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario virtual_print_array_24_v1 `
+  --output-root verification_reports\milestone6-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 300
+```
+
+The report directory retains `report.json`, summary, JSONL events, screenshots,
+separate action/assertion ledgers, and a SHA-256 evidence manifest. The report
+also records an exact replay command and links the retained isolated session
+root under `%TEMP%\LabCraft\SIL\composed-sessions`. Session roots intentionally
+remain outside the repository and production data roots. Unexpected dialogs,
+deadlines, unhealthy recorder evidence, incomplete assertions, and ambiguous
+cleanup fail closed with retained failure evidence.
+
+Replay compares fixture hash, seed, action order/surfaces, assertion decisions,
+calibration values, completion order, and terminal state. UUIDs, timestamps,
+durations, generated plan/head/run identities, and their identity-bearing
+hashes are expected to differ. Other workflow families retain their legacy
+runners until Milestone 7 parity gates; this milestone adds no Pi, protocol,
+firmware, hardware, performance, or production fault-injection behavior.
+
+Milestone 7 Slice 1 also migrates
+`experiment_editor_create_finalize_v1` to the shared harness. It creates and
+finalizes the tracked A1/A2 design through the normal editor controls, validates
+the revision-1 prepared bundle, and reopens it through **Experiment Editor →
+Load Design…** and Qt's folder dialog. Reload intentionally leaves the plan
+`PREPARED`, eligibility `ready_to_start`, the authoritative runtime inactive,
+and the resume sidecar absent; it does not use the legacy verification-only
+direct Model activation.
+
+Run the composed editor lifecycle offscreen or visibly:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario experiment_editor_create_finalize_v1 `
+  --output-root verification_reports\milestone7-slice1 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 60
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario experiment_editor_create_finalize_v1 `
+  --output-root verification_reports\milestone7-slice1-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 120
+```
+
+The create/finalize and prepared-load actions must report `ui`; assertions,
+screenshots, reporting, and teardown report `harness`. The legacy direct runner
+remains temporarily callable as a parity oracle, while prepared
+rename/refinalize and post-start lock/copy remain on the legacy editor runner.
+
+Milestone 7 Slice 2 migrates `print_array_multi_stock_24x2_v1` to the same
+composed harness. The normal Experiment Editor creates both A1-A24 reagent
+rows; normal rack controls set volume, Confirm, Load, and Unload each head;
+the normal calibration dialog applies 9 nL at 1300 us and 18 nL at 1800 us;
+and the normal array control starts both passes. Only deterministic fixture
+head-ID binding is a recorded `model` action, so it is excluded from UI
+coverage. The schema-v4 recipe uses 3.0x and 1.5x stocks to retain exactly one
+dispense per stock and a 27 nL final reaction volume.
+
+Run the Slice 2 journey offscreen or visibly, then execute the exact
+`run.replay_command` retained in `report.json`:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_multi_stock_24x2_v1 `
+  --output-root verification_reports\milestone7-slice2 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_multi_stock_24x2_v1 `
+  --output-root verification_reports\milestone7-slice2-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 300
+```
+
+The first pass must settle `ACTIVE`, idle, drained, and intent-clean before
+the first head is returned. The second must settle `COMPLETED` with 48 exact
+stock/well intent lifecycles before the final head is returned. Both retained
+heads, all three expected dialogs, action/assertion ledgers, observer evidence,
+screenshots, hashes, seed, and replay command remain inspectable.
+The full Python suite is deferred until the final Milestone 7 validation; each
+slice uses its documented targeted gates.
+
+Milestone 7 Slice 2.5 consolidates the three composed runners before another
+workflow is migrated. `JourneyDefinition`, `JourneyRuntime`, `SemanticStep`,
+and `JourneyExecutor` now own generic identity, execution, failure, restoration,
+artifact, report, and teardown behavior. Typed phase specifications own machine
+startup, editor preparation, and ordered stock/head passes. Registry dispatch
+calls one generic composed runner instead of branching on each scenario ID.
+
+The compatibility runners are now two-line delegates. The smoke, editor, and
+multi-stock journey bodies are 35, 50, and 56 lines respectively; changing
+validated stock values or stock order produces a new normalized plan without a
+new runner. Active parameter matrices and seeded sequence generation remain
+future work, but this typed boundary is their intended input rather than
+another monolithic workflow function.
+
+Run the Slice 2.5 focused composition and lifecycle gates:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_virtual_workflow_composition.py `
+  tests\test_virtual_workflow_journey_phases.py `
+  tests\test_virtual_workflow_report.py `
+  tests\test_virtual_workflow_manifest.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_virtual_workflow_smoke.py `
+  tests\system\test_virtual_workflow_editor_composed.py `
+  tests\system\test_virtual_workflow_multi_stock_composed.py
+```
+
+On Windows, if pytest's reused default temporary root reports an access error,
+select a fresh `--basetemp` below `%TEMP%\LabCraft`; do not place it inside the
+repository because `SimulationSession` correctly rejects roots overlapping
+repository or production data.
+
+Milestone 7 Slice 3 migrates
+`experiment_editor_prestart_rename_refinalize_v1` onto that composition layer.
+The journey creates the initial A1/A2 droplet design, then reopens the untouched
+prepared design and drives rename, six-well selection, 120 nL volumes, stream
+mode, 0.5x/1.0x targets, regeneration, and refinalization through normal Qt
+controls. It finally reloads the renamed directory through **Experiment Editor
+→ Load Design…** and Qt's folder dialog. It remains disconnected throughout
+and does not execute print commands.
+
+`PreparedEditorRevisionSpec` holds the varying names, wells, modes, targets,
+and volumes. `ExperimentEditorDriver` reuses the existing bounded modal QTest
+mechanics through the harness action runner, while one read-only assertion
+family owns the authoritative plan/archive/progress/key/audit checks. The
+scenario body is 76 lines and contains no QTest loop, report writer, or cleanup
+path. Ordinary prepared-design values therefore do not require another
+runner. Active matrices and seeded action-order exploration remain later work.
+
+Run the Slice 3 focused gates:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  --basetemp "$env:TEMP\LabCraft\pytest-m7-slice3-unit" `
+  tests\test_virtual_workflow_actions.py `
+  tests\test_virtual_workflow_page_drivers.py `
+  tests\test_virtual_workflow_journey_phases.py `
+  tests\test_virtual_workflow_assertions.py `
+  tests\test_virtual_workflow_composition.py `
+  tests\test_virtual_workflow_report.py `
+  tests\test_virtual_workflow_manifest.py `
+  tests\test_virtual_workflow_contract_freeze.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  --basetemp "$env:TEMP\LabCraft\pytest-m7-slice3-lifecycle" `
+  tests\system\test_virtual_workflow_editor_composed.py `
+  tests\system\test_virtual_workflow_editor_refinalize_composed.py `
+  tests\system\test_virtual_workflow_editor_lifecycle.py
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario experiment_editor_prestart_rename_refinalize_v1 `
+  --output-root verification_reports\milestone7-slice3-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 60
+```
+
+The emitted replay command must reproduce the fixture hash, seed, 23 ordered
+actions and surfaces, ten passing assertions, ten screenshot names, prepared
+terminal state, and pass classification. Generated IDs, paths, timestamps,
+durations, and identity-bearing hashes are intentionally nondeterministic. The
+full Python suite remains deferred until the final Milestone 7 validation.
+
+Milestone 7 Slice 3.5 consolidates the evidence and reporting added by the
+editor migrations. `authoritative_evidence.py` captures one immutable,
+JSON-safe view of design, plan/history, progress, resume, calibration, runtime
+assignments, key files, audit rows, and directory hashes without activating or
+repairing execution. The composed editor journeys, legacy authoritative reload
+validator, and legacy post-start lock/copy validator use the same readers and
+inventory contracts. `editor_reporting.py` supplies the common zero-print
+editor payload and leaves each journey adapter at 12 lines.
+
+Action-order assertions validate an explicit complete ledger window, including
+interleaved harness milestones, while retaining the existing UI-only evidence
+projection. Slice 3.5 adds no workflow, fixture, registry entry, capability
+claim, UI action, page-driver operation, or production behavior. Run its
+targeted gates with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_virtual_workflow_authoritative_evidence.py `
+  tests\test_virtual_workflow_editor_reporting.py `
+  tests\test_virtual_workflow_assertions.py `
+  tests\test_virtual_workflow_composition.py `
+  tests\test_virtual_workflow_report.py `
+  tests\test_virtual_workflow_contract_freeze.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_virtual_workflow_editor_composed.py `
+  tests\system\test_virtual_workflow_editor_refinalize_composed.py `
+  tests\system\test_virtual_workflow_editor_lifecycle.py `
+  tests\system\test_virtual_workflow_editor_post_start_lifecycle.py `
+  tests\system\test_virtual_workflow_authoritative_reload_lifecycle.py
+```
+
+The complete Python suite remains deferred until the final Milestone 7 gate.
+
+Milestone 7 Slice 4 migrates `print_array_soft_stop_resume_24_v1` to the
+generic composed runner. The normal editor, machine, rack, calibration, and
+array controls create the A1-A24 design, start printing, request `Stop After
+Well` at completion 6, prove the paused empty checkpoint and 250 ms
+quiescence window, and confirm `Resume Print Array` before completing all 24
+wells. `ArrayDriver` owns the bounded QTest start/stop/resume mechanics;
+`SoftStopResumeSpec` and the stop-boundary/resume phases are reusable by the
+later authoritative-reload journey. The legacy runner remains directly
+callable only as a parity oracle and for the still-unmigrated reload workflow.
+
+Run the composed lifecycle offscreen or visibly, then execute the exact replay
+command from `report.json`:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_soft_stop_resume_24_v1 `
+  --output-root verification_reports\milestone7-slice4 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 60
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_soft_stop_resume_24_v1 `
+  --output-root verification_reports\milestone7-slice4-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 60
+```
+
+The report retains eight screenshots (`editor_opened`, `generated`, `ready`,
+`printing`, `stop_requested`, `stopped`, `resumed`, and `completed`), exact UI
+action surfaces, paused and terminal oracle evidence, action/assertion
+ledgers, hashes, seed, replay command, and clean teardown. A direct run with
+`--speed-multiplier 1000` is useful for automation; use a smaller multiplier
+when visually inspecting transitions. If several Qt lifecycle tests share one
+process and a parity node is transiently incomplete, rerun that exact node in
+a fresh process/root before diagnosing the workflow. The full Python suite is
+still deferred until the final Milestone 7 validation.
+
+The Slice 4 migration is complete. Its touched runtime growth was net 598
+physical lines against the planned 450-line consolidation gate; the variance
+was explicitly accepted because most of the added code is reusable
+page-driver, phase, observer, and assertion infrastructure.
+
+Milestone 7 Slice 5 migrates `authoritative_reload_resume_24_v1` to generic
+composed dispatch. It creates and partially prints A1-A24 through normal UI
+controls, proves the soft-stop boundary, cleanly closes the first application
+composition, opens a fresh composition on the same retained SIL root, loads
+and activates the authoritative execution through Experiment Editor, reuses
+the persisted calibration, and resumes without replaying completed work. The
+legacy path remains directly callable as the fixed parity oracle.
+
+Run the composed lifecycle offscreen or visibly, then execute the exact replay
+command emitted in `report.json`:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario authoritative_reload_resume_24_v1 `
+  --output-root verification_reports\milestone7-slice5 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 60
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario authoritative_reload_resume_24_v1 `
+  --output-root verification_reports\milestone7-slice5-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 60
+```
+
+The report retains eight cross-session screenshots, both application-session
+recorder roots, exact UI/harness action surfaces, paused/load/activation/
+resume/terminal evidence, hashes, seed, and replay command. A visible run and
+its exact replay passed on 2026-08-06 with identical stable projections. If a
+nested editor or folder dialog is unexpected, mislabeled, or left open, the
+journey fails closed and retains its traceback, ledgers, manifest, available
+recorders, and failure screenshot. The complete Python suite remains deferred
+until the final Milestone 7 validation.
+
 The final retained Windows evidence is:
 
 ```text
@@ -560,11 +848,40 @@ Prerequisites:
 
 ### SIL scenario registry and capability manifest
 
-The 24-well smoke, existing 96-well regression, and 384x10 stress IDs are
+The `legacy_experiment_read_only_v1` scenario materializes a deterministic
+older experiment with one complete well and one partial well. It uses the real
+Experiment Editor to select **View Older Experiment**, verifies the exact saved
+targets and progress in the main window, validates the prefilled plate-reader
+analysis preview, and creates a fresh editable copy. The report records source
+hashes, disabled hardware controls, and zero machine/simulator dispatch.
+
+Run it offscreen or visibly:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario legacy_experiment_read_only_v1 `
+  --output-root verification_reports\legacy_read_only
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario legacy_experiment_read_only_v1 `
+  --visible `
+  --output-root verification_reports\legacy_read_only_visible
+```
+
+The lifecycle pytest entry point is:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_virtual_workflow_legacy_read_only.py
+```
+
+The 24-well smoke, 96-well regression, and 384x10 stress IDs are
 registered in
 `tools/virtual_workflows/registry.py`. The CLI obtains its `--scenario`
-choices from that registry, but continues to construct the existing
-`VirtualPrintArrayScenarioConfig` and execute the existing scenario runner.
+choices from that registry. All three IDs dispatch through generic composed
+journeys. The 384x10 legacy `VirtualPrintArrayScenarioConfig` runner remains
+directly callable as a parity oracle while Slice 8 terminal validation is
+pending.
 For compatibility, the CLI default remains `virtual_print_array_96_v1`;
 suite selection is not a CLI feature yet.
 
@@ -574,10 +891,10 @@ identity `labcraft.sil_capability_coverage` version 1. It records capabilities,
 registered scenarios, planned/active suites, intended schedules, embedded
 action/assertion IDs, limitations, and freshness policy. Generated reports do
 not rewrite it. The `standard` suite is active and selects only
-`print_array_smoke_24_v1`. The active `lifecycle` suite contains the three
-verified editor scenarios plus the verified 24-well soft-stop/resume
-scenario. Candidate gates remain executable directly but do not join the
-suite until they pass; suite/capability CLI selection is not available yet.
+`print_array_smoke_24_v1`. The active `lifecycle` suite includes the verified
+editor, older-experiment read-only, and 24-well soft-stop/resume scenarios.
+Candidate gates remain executable directly but do not join the suite until
+they pass; suite/capability CLI selection is not available yet.
 
 Validate registry/fixture drift, manifest references, portable paths, test
 nodes, Pi safety requirements, and current capability claims with:
@@ -633,6 +950,7 @@ Longer composed SIL tiers are opt-in:
 
 ```powershell
 .\env\Scripts\python.exe -m pytest -q --run-sil-regression `
+  tests\system\test_virtual_print_array_96_composed.py `
   tests\system\test_virtual_print_array_workflow.py
 
 .\env\Scripts\python.exe -m pytest -q --run-sil-stress `
@@ -661,7 +979,7 @@ Run the editor create/finalize lifecycle directly with:
 
 This scenario clicks the real Experiment Editor button, creates a fresh design,
 selects A1 and A2 through the Printable Wells dialog, enters one fixed 1x
-droplet stock, optimizes and generates, and presses `Finalize Design`. It validates the
+droplet stock, updates reactions and stock solutions, and presses `Finalize Experiment`. It validates the
 prepared execution plan, immutable revision, compact progress, both key CSVs,
 and the absence of calibration/printing history. It then reloads the saved
 design and activates the authoritative runtime without rebuilding the design.
@@ -680,31 +998,44 @@ Run the prepared rename/refinalize regression directly with:
 This scenario first creates the minimal A1/A2 prepared experiment, then
 reopens the real editor and changes the name, replicate count, selected wells,
 printed/final volumes, reagent targets, reagent mode, and fill mode. It
-optimizes again and presses `Finalize Design`. Its target contract requires a single
+updates again and presses `Finalize Experiment`. Its target contract requires a single
 renamed directory, a fresh revision-1 prepared plan for A1-A6, archived
 superseded prepared artifacts, zero progress, consistent key files/runtime
 assignments, and a `ready_to_start` reload.
 
 An untouched `PREPARED` execution remains editable after disk reload. Both
-Save and `Finalize Design` publish material pre-start edits through the same transactional
+Save and `Finalize Experiment` publish material pre-start edits through the same transactional
 replacement path. Started, progressed, resumed, calibrated, or invalid
 executions remain fail-closed and require the editable-copy workflow instead.
 
-The Experiment Editor exposes four explicit lifecycle actions:
+The Experiment Editor exposes five explicit lifecycle actions:
 
-- `Finalize Design` is enabled for a new draft or editable `PREPARED` design.
+- `Finalize Experiment` is enabled for a new draft or editable `PREPARED` design.
   A `ready_to_start` eligibility result does not relabel an editable design.
-- `Load Execution` is enabled for a locked, inactive saved execution whose
+- `Load Experiment` is enabled for a locked, inactive saved experiment whose
   authoritative runtime can be reconstructed.
-- `Execution Loaded` is disabled when that authoritative runtime is already
+- `View Completed Experiment` is enabled only for a valid authoritative
+  `COMPLETED` execution. It closes the editor and populates the main plate,
+  stock, reaction, well-assignment, target, and final-progress display from
+  the saved plan and progress. Every assigned well is shown complete and the
+  Experiment Guide reports `Next: Experiment complete`.
+- `Experiment Loaded` is disabled when that saved experiment is already
   active.
-- `Execution Locked` is disabled for blocked, terminal, invalid, or otherwise
-  non-activatable saved executions.
+- `Experiment Locked` is disabled for blocked, stopped, invalid, ambiguous, or
+  otherwise non-activatable saved executions.
 
-`Load Execution` only reconstructs the saved runtime. It does not start or
+`Load Experiment` only restores the saved experiment setup and progress. It does not start or
 resume printing; the operator must still use the applicable print/start or
 resume action. Locked executions show a full-width lifecycle banner while the
 lower status line remains available for transient details and errors.
+
+`View Completed Experiment` is display-only. It does not activate the
+authoritative runtime, create or repair a resume checkpoint, rewrite exports
+or audit files, assign saved reagent heads to physical rack slots, change the
+Controller out of `idle`, or send machine/simulator commands. Start Array,
+plate calibration, and stock-preparation controls remain disabled while this
+completed projection is displayed. Use `Create Editable Copy...` for any
+change; the completed source remains byte-identical.
 
 Run the post-start editor boundary directly with:
 
@@ -727,6 +1058,75 @@ finalizes as a distinct revision-1 `PREPARED` execution that is
 publishes the fresh copy beside the source directory; it does not open a
 source-folder selector or inherit execution, progress, calibration, or
 printing history. The scenario is active in the lifecycle suite.
+
+Milestone 7 Slice 6 routes this scenario through the shared composed journey
+runner. The normal editor controls still own source creation, locked-state
+inspection, in-place rejection, editable-copy creation, tolerance editing,
+finalization, and prepared-copy reload. The deliberate zero-progress
+authoritative activation and `printing_started` lock are recorded as `model`
+actions and are excluded from UI coverage; no machine is connected and no
+print command is issued. Raw QTest/modal handling now has one owner in
+`ExperimentEditorDriver`, and the retained direct runner delegates to the
+same page driver, authoritative evidence, and assertion policy for parity.
+
+Run the focused composed Slice 6 gate and a visible replayable journey with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_virtual_workflow_editor_post_start_composed.py `
+  tests\system\test_virtual_workflow_editor_post_start_lifecycle.py
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario experiment_editor_post_start_lock_v1 `
+  --output-root verification_reports\milestone7-slice6-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 60
+```
+
+Execute the exact `run.replay_command` retained in `report.json`. The stable
+fixture hash, action IDs/multiplicity/surfaces, assertion decisions,
+screenshots, source immutability, copy freshness, classification, and cleanup
+must match; generated identities, paths, timestamps, durations, and
+identity-bearing hashes may differ. If a Qt node materially exceeds its
+normal bounded runtime, rerun that exact node with a fresh `--basetemp` below
+`$env:TEMP\LabCraft`. The complete Python suite remains deferred until the
+final Milestone 7 validation.
+
+Milestone 7 Slice 7 migrates the default `virtual_print_array_96_v1`
+regression to the same shared one-stock composed journey as the 24-well
+smoke. The normal editor selects A1-D24, machine/rack/calibration/array
+controls report truthful UI surfaces, and a reusable regression evidence
+profile adds the 48-completion midpoint, responsiveness, resources,
+persistence I/O, queue-starvation, injected-stall, report-set, comparison,
+and paired local Pi-evidence contracts. The 384x10 stress runner remains
+unchanged.
+
+The frozen fixture still describes a 5 nL prepared design value and a 10 nL
+design target at 1300 us and 1.2 psi. The application-owned pulse-aware SIL
+calibration model deterministically measures 9 nL at 1300 us; the normal
+calibration dialog therefore applies 9 nL. Slice 7 records and validates the
+5-to-9 nL selected/applied result while preserving the fixture bytes and the
+10 nL design target. This is synthetic application-path evidence, not a
+physical volume-accuracy claim.
+
+Run the composed/direct parity and retained failure gates with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q --run-sil-regression `
+  tests\system\test_virtual_print_array_96_composed.py `
+  tests\system\test_virtual_print_array_workflow.py
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario virtual_print_array_96_v1 `
+  --output-root verification_reports\milestone7-slice7-visible `
+  --visible --seed 1 --speed-multiplier 2 --timeout-seconds 90
+```
+
+Inspect the six named screenshots (`editor_opened`, `generated`, `ready`,
+`printing`, `mid_array`, and `completed`) and execute the exact retained
+`run.replay_command`. A calibration-dialog timeout fails closed with retained
+evidence; retry that exact run once in a fresh output root. Two consecutive
+failures block the migration. The complete Python suite remains deferred to
+the final Milestone 7 validation.
 
 Before the first pressure-sweep, stream-volume, droplet `Calibrate All`, or
 stream `Calibrate All` start while the authoritative plan is still
@@ -766,11 +1166,11 @@ This scenario uses one `QApplication` but constructs two independent
 Model/Controller/MainWindow/simulator sessions over the same isolated
 scenario root. The first session reaches a clean paused checkpoint and tears
 down. The second opens the real Experiment Editor, selects the persisted
-folder, and selects `Load Execution` before a real UI resume.
+folder, and selects `Load Experiment` before a real UI resume.
 
 The scenario is active in the lifecycle suite. The persisted design is loaded
 through the real editor without changing its authoritative disk identity,
-`Load Execution` reconstructs the exact partial runtime without starting or
+`Load Experiment` restores the exact partial progress without starting or
 resuming printing, and the real
 `Resume Print` path completes A1-A24 without replaying any pair completed by
 the first session. A passing report contains eight ordered screenshots, both
@@ -787,15 +1187,17 @@ Run the multi-stock virtual-head lifecycle directly with:
   --timeout-seconds 60
 ```
 
-This scenario promotes the former stress-derived reduced test into a strict
-tracked A1-A24 by two-stock fixture. It stages two distinct virtual heads,
-starts each stock pass through the real UI, and requires an idle, drained
-simulator queue before the initial stage and the between-pass replacement.
+This composed scenario promotes the former stress-derived reduced test into a
+strict tracked A1-A24 by two-stock fixture. It creates the design, stages and
+returns both distinct virtual heads, calibrates both heads, and starts each
+stock pass through normal Qt controls. It requires an idle, drained simulator
+queue before the initial stage, between-pass exchange, and final return.
 The first pass must leave the original plan `ACTIVE`; the second must finish
 the same plan as `COMPLETED`. A passing report proves the stock/head identity,
 effective pulse width and pressure, two durable pass boundaries, and all 48
 stock/well pairs exactly once with no discarded or outstanding intents.
-It retains `stock_1_ready`, `stock_1_printing`, `stock_1_completed`,
+It also retains `editor_opened` and `generated`, followed by
+`stock_1_ready`, `stock_1_printing`, `stock_1_completed`,
 `stock_2_staged`, `stock_2_printing`, and `completed` screenshots.
 Responsiveness, resources, and performance are `not_applicable`.
 
@@ -842,8 +1244,13 @@ verification_reports/virtual_workflows/virtual_print_array_96_v1/<UTC>_<commit>/
 simulator, and authoritative persistence path for ten sequential stock passes
 over all 384 wells. The fixture contains ten calibrated droplet-mode heads and
 3,840 distinct stock/well completions. Between passes, the scenario performs a
-virtual operator head exchange while the command queue is idle; no physical
-head, port, camera, or other hardware dependency is used.
+virtual operator head exchange through the reusable rack Swap/Load/Unload
+driver while the command queue is idle; no physical head, port, camera, or
+other hardware dependency is used. The byte-identical fixture retains its
+10 nL design target and original head metadata. The composed recipe uses a
+fixed 1,355 us synthetic calibration, whose integer pulse-aware model result is
+9.99 nL, to preserve one normal-UI dispense per stock/well. This is synthetic
+application-path evidence, not a physical calibration claim.
 
 This is an opt-in characterization, not part of routine pytest or the accepted
 96-well comparison baseline:
@@ -883,6 +1290,640 @@ roots, and ready/printing/mid-array/completed screenshots. Failed runs retain a
 traceback and failure screenshot when possible. Generated reports are ignored
 by Git and are machine-specific.
 
+Slice 8 implementation, offscreen terminal validation, visible Windows
+qualification, and exact replay validation are complete.
+The reusable rack, final-pass deadline, pressure-readiness, and guarded
+ACTIVE-plan cache corrections remain in place. The diagnostic closeout adds a
+rolling 120-second no-progress watchdog with bounded Controller/simulator/
+checkpoint evidence and separates the composed and legacy-direct stress test
+nodes. Focused 100x/1,000x simulator and Controller soaks each preserved 4,000
+handler-driven lookahead operations, so no scheduler correction was made.
+
+An isolated real 384-completion persistence run completed in 4.009 seconds
+with a 12.573 ms maximum per completion, all 1,536 `fsync` and replacement
+calls, zero hot-path reads, and zero full progress rebuilds. Two subsequent
+composed stress runs each completed all 3,840 operations without failed actions
+or queue starvation. The first proved that nine apparent pressure-render gaps
+were the nine intentional inactive windows between stock passes. Active render
+intervals are now segmented by pass; the corrected run excluded those nine
+boundaries and measured a 256.192 ms maximum.
+
+The follow-up revision-history remediation now validates one calibration
+successor against the active session's already validated in-memory history.
+It preserves the existing atomic writes and pre/post-write file-identity
+guards; cold activation, partial-commit recovery, and terminal closeout still
+validate the complete immutable chain. Seven injected write failures prove
+that partial commits never advance the cache and recover through the existing
+full-validation path.
+
+The final composed 384x10 node passed all 3,840 operations in 383.65 seconds
+with zero starvation. Maximum event-loop gap was 685.460 ms,
+scheduling-lateness p99 was 81.616 ms, and active pressure-render maximum was
+252.072 ms. Nine cached calibration commits had a maximum of 181.185 ms and
+performed no full bundle refresh; terminal closeout retained one full-chain
+validation. The separate direct-parity node also passed.
+
+The retained pre-correction visible run and exact replay failed closed at
+1,536 operations on the same fifth-head rack Swap interaction. A focused
+real-session test now reaches that UI boundary without printing: it seeds ten
+heads, assigns four slots, and cycles the remaining six through the real rack
+Swap combobox. Diagnostics showed that Qt highlighted the correct popup row
+but suppressed the release inside its post-open double-click guard. The shared
+mouse-only driver now waits out that bounded guard before the item click.
+
+Run the fast rack-only gate headlessly or with a real Windows window:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle tests/system/test_virtual_workflow_rack_swap.py
+$env:QT_QPA_PLATFORM = "windows"
+.\env\Scripts\python.exe -m pytest -q -s --run-sil-lifecycle tests/system/test_virtual_workflow_rack_swap.py
+```
+
+Three fresh visible rack-only processes passed all six swaps in under nine
+seconds each. The subsequent full visible workflow and its exact emitted
+replay both completed 3,840/3,840 operations with zero failed actions, failed
+assertions, or starvation and drained terminal queues. Slice 8 is complete;
+the full pytest suite was deferred to final Milestone 7 validation.
+
+### Mid-array disconnect fail-closed workflow
+
+Milestone 7 Slice 9 adds the composed
+`print_array_disconnect_mid_array_24_v1` lifecycle. It creates the normal
+24-well one-stock experiment, starts through the real array control, and uses
+the normal connection button to disconnect after exactly six durable
+completions. The canonical simulator confirms that its queue is drained before
+the Controller retires the two canceled look-ahead intents. Unconfirmed or
+physical-runtime cancellation is never treated as safe to discard.
+
+The passing boundary retains an ACTIVE plan, Controller `resume_ready`,
+authoritative `ready_to_resume`, six completed stock/well pairs, a disconnected
+and unhomed machine, zero pending intents, and 250 ms of quiescence. It does not
+resume or finish the remaining wells; this focused scenario proves the
+disconnect boundary independently.
+
+Run it offscreen or through a visible Windows window:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_disconnect_mid_array_24_v1 `
+  --seed 19 `
+  --speed-multiplier 20 `
+  --timeout-seconds 60
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_disconnect_mid_array_24_v1 `
+  --seed 19 `
+  --speed-multiplier 20 `
+  --timeout-seconds 60 `
+  --visible
+```
+
+Reports retain the action/assertion ledgers, six named screenshots, state
+trace, hashes, seed, exact replay command, and cleanup evidence beneath
+`verification_reports/virtual_workflows/print_array_disconnect_mid_array_24_v1/`.
+If a visible teardown ever opens a command-error dialog, verify that application
+component cleanup blocks deferred child-widget signals before hiding and
+deleting the window. Slice 9 and the final Milestone 7 Python validation are
+complete; seeded exploration and manual suite selection remain Milestone 8
+work.
+
+### Mixed droplet/stream composed lifecycle
+
+Milestone 8 Slice 1 registers `print_array_mixed_mode_24x2_v1` in the manual
+lifecycle suite. The journey reuses the composed editor, rack, calibration,
+stock-pass, persistence, and teardown phases. It drives a 9 nL droplet pass
+and a 60 nL stream pass through normal Qt controls, performs two five-droplet
+trials in the real `ManualRefuelCheckDialog`, records Stable, and then crosses
+the normal stream array-start preflight. This is synthetic application-facing
+SIL evidence, not proof of physical printing, flow, pressure, or refueling.
+
+Run it offscreen or visibly, then use the exact replay command emitted in the
+report:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_mixed_mode_24x2_v1 `
+  --output-root verification_reports\milestone8-slice1 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90
+
+$env:QT_QPA_PLATFORM = "windows"
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario print_array_mixed_mode_24x2_v1 `
+  --output-root verification_reports\milestone8-slice1-visible `
+  --seed 1 --speed-multiplier 20 --timeout-seconds 120 --visible
+```
+
+Run the focused tests with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_virtual_workflow_page_drivers.py `
+  tests\test_virtual_workflow_actions.py `
+  tests\test_virtual_workflow_journey_phases.py `
+  tests\test_virtual_workflow_assertions.py `
+  tests\test_virtual_workflow_manifest.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\test_manual_refuel_check_dialog.py `
+  tests\test_sil_manual_refuel.py `
+  tests\system\test_sil_stream_calibration_lifecycle.py `
+  tests\system\test_virtual_workflow_mixed_mode_composed.py `
+  tests\system\test_virtual_workflow_multi_stock_composed.py `
+  tests\system\test_virtual_workflow_smoke.py
+```
+
+Reports retain nine screenshots, exact UI/harness action surfaces, the two
+calibration records, the passed manual-refuel record and ordering, 48 durable
+completion intents, hashes, seed, replay command, and clean teardown. The full
+pytest suite remains deferred to the final Milestone 8 validation.
+
+### Manual SIL selection and changed-source recommendations
+
+Milestone 8 Slice 2 adds a read-only planning surface over the validated
+capability manifest. Dry runs do not schedule or execute tests. Operators
+still decide when to run a journey; Milestone 8 Slice 3 adds explicit host
+execution for the same suite and capability selectors.
+Listing, recommendations, and dry runs print deterministic JSON to stdout and
+return before importing Qt or constructing the application; they do not create
+anything beneath `verification_reports/`.
+
+Inspect the catalog or produce plans with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --list all
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --suite standard --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --suite lifecycle --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --capability execution.mixed_droplet_stream_lifecycle --dry-run
+```
+
+The standard plan is frozen at `print_array_smoke_24_v1`, order 1, seed 1,
+and a 60-second timeout. A different explicit seed or timeout fails closed.
+Lifecycle plans retain the manifest order and each scenario's declared
+timeout. Omitting `--dry-run` now executes the selected Windows plan through
+the Slice 3 fresh-process aggregate runner.
+
+Request recommendations for all staged, unstaged, and untracked paths, or
+override Git discovery with one or more explicit repository paths:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --recommend-changed
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --recommend-changed `
+  --changed-path tools/virtual_workflows/page_drivers.py
+```
+
+Recommendations report matching capability status, source-area reasons, and
+ordered active scenarios, but never authorize execution. Deferred capability
+matches remain visible as gaps and cannot be selected. Pi plans additionally
+require `--target-pi`, `--pi-preflight`, and `--pi-hardware-proof`; those files
+are validated before a plan is emitted. Direct `--scenario` execution remains
+unchanged, and `--dry-run` alone plans the legacy default scenario.
+
+Run the Slice 2 focused gates with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests/test_virtual_workflow_selection.py `
+  tests/test_virtual_workflow_manifest.py `
+  tests/test_virtual_workflow_contract_freeze.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests/system/test_virtual_workflow_smoke.py
+```
+
+If selection reports manifest drift, validate the tracked manifest before
+running a scenario. If a Pi plan is rejected, regenerate or transfer matching
+preflight/hardware-isolation evidence rather than bypassing validation. No
+unattended scheduler, suite artifact writer, or cleanup command is introduced
+by this slice.
+
+### Isolated host SIL suite execution
+
+Milestone 8 Slice 3 executes `--suite` and `--capability` selections only when
+an operator invokes them. Each selected journey runs sequentially in a fresh
+Python child process through the unchanged direct `--scenario` CLI. This keeps
+Qt and application state out of the parent process and prevents state from one
+journey leaking into the next.
+
+Run the standard lane, a capability, or the complete lifecycle portfolio with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --suite standard --output-root verification_reports\suites `
+  --seed 1 --speed-multiplier 1000
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --capability execution.mixed_droplet_stream_lifecycle `
+  --output-root verification_reports\suites `
+  --seed 1 --speed-multiplier 1000
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --suite lifecycle --output-root verification_reports\suites `
+  --seed 1 --speed-multiplier 1000
+```
+
+Without an explicit output root, aggregates use
+`verification_reports/suites`. Each run contains the hashed selection plan,
+`aggregate.json`, `summary.txt`, and ordered `children/<order>_<scenario>/`
+directories. Child stdout/stderr and the authoritative report-v1 tree remain
+separate; the aggregate references and hashes them rather than copying their
+evidence.
+
+Every selected child runs even after an earlier failure. A child passes only
+when its process result agrees with exactly one valid, identity-matched report.
+The aggregate returns 0 for pass or warning, 2 for a completed failing
+selection, and 3 for orchestration or aggregate-writing failure. A per-child
+watchdog uses the selected scenario timeout plus 60 seconds, then terminates
+and, after five seconds, kills a still-running child while retaining logs.
+
+Pi execution, repetition, fault injection, report sets, baselines, comparisons,
+and performance-threshold controls remain unavailable for aggregate runs.
+Use direct `--scenario` execution for supported single-scenario controls. For
+visible qualification, set `QT_QPA_PLATFORM=windows`, add `--visible`, and run
+the exact replay command printed by the aggregate summary.
+
+### Capability coverage and source freshness
+
+Milestone 8 Slice 4 adds an offline, operator-invoked join from retained Slice
+3 aggregates to the tracked capability manifest. It does not schedule or run a
+workflow. Name every input explicitly; the evaluator validates the aggregate,
+its selection plan, child reports, and all referenced hashes before assessing
+required scenarios, assertions, semantic actions, declared interaction
+surfaces, verification layers, and source identity:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --coverage-from verification_reports\suites\capability__execution.mixed_droplet_stream_lifecycle\<run>\aggregate.json `
+  --output-root verification_reports\suites
+```
+
+Repeat `--coverage-from` to supply an explicit multi-aggregate evidence set.
+Coverage mode rejects scenario/suite execution, planning, Pi, visibility,
+timing, repetition, fault injection, baseline, and comparison controls. It
+never scans for a convenient latest result and never writes generated status
+back into the tracked manifest.
+
+Each evaluation creates
+`verification_reports/suites/coverage/<timestamp>_<run-id>/coverage.json` and
+`summary.txt`. Capabilities are classified as `pass`, `fail`, `incomplete`,
+`missing`, or `stale`. A narrower suite cannot claim a whole capability when
+other manifest-active scenarios are absent, and an action recorded through a
+different interaction surface cannot satisfy a UI claim. Exit code 0 means all
+in-scope capabilities passed, 2 means the evaluation completed with at least
+one non-pass capability, and 3 means input validation or artifact writing
+failed.
+
+Report-v1 source identity now includes a versioned source-tree fingerprint.
+It covers Git-tracked and non-ignored execution/verification inputs while
+excluding documentation, retained reports, caches, and runtime artifacts.
+This makes intentionally uncommitted but byte-matching evidence comparable
+without letting a later source change appear current. Legacy reports remain
+readable, but without the fingerprint they are `incomplete`; a complete
+otherwise-passing report with a different fingerprint is `stale`. Evidence
+age is always retained as informational metadata and does not schedule or gate
+manual testing.
+
+### Parameterized SIL calibration matrix
+
+Milestone 8 Slice 5 adds the operator-invoked
+`mixed_mode_calibration_v1` matrix. Its eight typed cases reuse the existing
+mixed-mode journey and tracked reference fixture while varying droplet/stream
+pairing, stock order, calibration profile, and manual-refuel outcome. Generated
+case data stays in memory; the matrix does not create a fixture or workflow
+body for each variation.
+
+Milestone 9 Slices 3-5 add `calibration_requantization_v1`. Its first three
+one-stock, 24-well droplet cases freeze exact catalog-owned count oracles for an
+idempotent `10 -> 10` calibration, an 8 nL to 9 nL volume increase producing
+`10 -> 9`, and a 10 nL to 9 nL volume decrease producing `10 -> 11`. Passing
+evidence reconciles the prepared plan, visible preview, calibrated plan,
+zero-progress persistence, runtime, durable intents, simulator commands, and
+terminal added counts by exact stock and well identity.
+
+Three appended grouped-oracle cases cover mixed `1 -> 1` and `10 -> 9`
+multi-target wells with zero fill omitted from dispatch, an executed stream
+`40 nL / 4 drops -> 10.8 nL / 15 drops` mode transition with exact completed
+bundle reload in a fresh application session, and fill-stock `4 -> 5`
+requantization while non-fill remains at 6 drops. Their positive intent counts
+are 36, 48, and 48 respectively.
+
+The final two cases complete the eight-case catalog. The missing-fill
+safeguard first records a valid 9 nL calibration, then drives a real
+`droplet_to_stream` 60 nL Apply whose zero-drop reagent preview would require
+an absent fill stock. It passes only when the real `Apply failed` dialog is
+shown, the authoritative bundle remains byte-identical, and no array start,
+durable intent, or simulator dispense occurs. The two-reagent isolation case
+completes reagent 1 at one drop per well before recalibrating reagent 2 from
+one to two drops. It requires 48 unique stock/well intents, exactly 72 total
+commanded droplets, and unchanged reagent-1 identity, assignments, targets,
+calibration linkage, and completed progress.
+
+List the catalog, inspect a deterministic plan, run all cases in isolated
+children, or run one replayable case with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --list matrices
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix mixed_mode_calibration_v1 --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix calibration_requantization_v1 --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix mixed_mode_calibration_v1 `
+  --output-root verification_reports\matrices `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix mixed_mode_calibration_v1 `
+  --case mixed_ba_baseline_unclear `
+  --output-root verification_reports\matrices `
+  --seed 1 --speed-multiplier 20 --timeout-seconds 120 --visible
+```
+
+An all-case run writes
+`verification_reports/matrices/mixed_mode_calibration_v1/<run>/` with the
+hashed `matrix_plan.json`, `aggregate.json`, summary, ordered child logs, and
+references to each authoritative report-v1 evidence tree. Children continue
+after an earlier failure, but any timeout, launch error, missing or ambiguous
+report, identity/hash mismatch, return-code disagreement, or failed case makes
+the aggregate fail.
+
+Three negative cases exercise the real “Manual Refuel Check Required” guard.
+They accept the initial Start confirmation, select the default-safe Cancel
+response, and pass only when the matching non-passed check and calibration
+fingerprint persist while completion count, plan state, queue, gripper, and
+execution intents prove that printing was not bypassed. Matrix aggregates are
+separate evidence and do not satisfy registered capability-manifest coverage.
+Pi, scheduling, repetition, fault injection, baseline, comparison, and
+performance controls remain unavailable in matrix mode.
+
+Run a selected requantization case offscreen with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix calibration_requantization_v1 `
+  --case stream_to_droplet_40_to_10_8 `
+  --output-root verification_reports\matrices `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90 `
+  --qt-platform offscreen
+```
+
+Inspect `metrics.persistence.values.dispense_count_evidence` in each retained
+report. `oracle_scope` must be
+`calibration_requantization_v1_catalog_oracle`, all reconciliation checks must
+pass, and the joined command count must match the catalog-owned positive intent
+count (24, 36, or 48). For the stream transition, also require
+`execution.completed_terminal_reload_exact` and the `terminal_reloaded`
+screenshot. Use the retained replay command; do not reconstruct a case from
+remembered values.
+
+For `zero_fill_missing_fill_rejected`, inspect
+`metrics.persistence.values.calibration_rejection_evidence` and require every
+check to pass, zero values for all dispatch counters, and screenshot
+`calibration_apply_blocked`. For `two_reagent_second_1_to_2_isolated`, inspect
+`metrics.persistence.values.two_reagent_isolation`; the support-stock progress
+and linkage checks, primary-only retarget check, exactly-once execution check,
+and 72-droplet total must all pass.
+
+Milestone 9 qualification completed against source commit `792a7b0`. The
+complete requantization and mixed-mode matrices, their exact aggregate
+replays, the eight-scenario lifecycle suite and replay, the 96-well host
+regression and replay, and visible `10 -> 9` and `10 -> 11` cases and replays
+all passed. The final default Python suite result was `4123 passed, 78 skipped`.
+Exact aggregate/report paths and hashes are retained in
+`docs/sil_interactive_simulation_milestone_9_slice_6_completion_record.md`.
+Use its commands and the current runner-emitted replay rather than treating
+these historical paths as a substitute for source-current qualification.
+
+### Experiment-design SIL matrix
+
+Milestone 10 adds the manually invoked `experiment_design_pairwise_v1`
+matrix. Its nine literal, independently derived cases cover a single-reagent
+control, multiple reagents and seeds, one- and two-stock feasibility, sparse
+custom wells and exclusions, exact capacity, capacity rejection, and fixed
+stock infeasibility without forming a Cartesian product.
+
+List or inspect the ordered catalog, run every case in a fresh Qt process, or
+run one visible representative with:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --list matrices
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix experiment_design_pairwise_v1 --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix experiment_design_pairwise_v1 `
+  --output-root verification_reports\matrices `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 90 `
+  --qt-platform offscreen
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix experiment_design_pairwise_v1 `
+  --case custom_wells_with_exclusions `
+  --output-root verification_reports\matrices `
+  --seed 1 --speed-multiplier 20 --timeout-seconds 120 --visible
+```
+
+Positive cases manipulate normal experiment-editor controls, finalize the
+design, reload the authoritative bundle, and compare the reconstructed stock,
+reaction, and well assignment to the catalog oracle. The two-stock case also
+proves the rejected one-stock attempt did not mutate authoritative execution
+artifacts. Negative cases stop at the real Finalize warning and require the
+experiment directory to remain byte-identical with no execution plan,
+runtime activation, durable intent, or simulator dispatch.
+
+For visible review, inspect `generated`, `well_picker_configured`,
+`finalization_rejected`, and `prepared_reloaded` screenshots when emitted.
+Run the exact replay printed by the aggregate or report. Matrix evidence is
+outside registered capability-manifest aggregation and does not replace
+source-current lifecycle or regression selection.
+
+Milestone 10 qualification completed against source commit `a373433`. The
+nine-case matrix and exact replay, five visible case/replay pairs, lifecycle
+and host-regression suites/replays, and default Python suite all passed. The
+suite result was `4146 passed, 88 skipped`. Exact retained paths, hashes, and
+limitations are in
+`docs/sil_interactive_simulation_milestone_10_slice_6_completion_record.md`.
+
+### Milestone 12 safeguard matrices
+
+Milestone 12 adds three Windows host-SIL matrices. They exercise real Qt
+operator actions and pass only when the exact typed/UI outcome and the shared
+no-mutation/no-dispatch oracle agree:
+
+- `editor_safeguards_v1` (8 compact Finalize/Upload Design boundaries);
+- `execution_preflight_safeguards_v1` (17 calibration, durable-identity, and
+  lifecycle boundaries, including one reordered-row positive identity case);
+- `authoritative_persistence_safeguards_v1` (9 isolated one-fault reload
+  classifications).
+
+Use the repository virtual environment on Windows. List or dry-run first, then
+run a complete catalog or one visible case:
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --list matrices
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix editor_safeguards_v1 --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix execution_preflight_safeguards_v1 `
+  --output-root verification_reports\milestone_12 `
+  --seed 1 --speed-multiplier 1000 --timeout-seconds 180
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --matrix authoritative_persistence_safeguards_v1 `
+  --case unreflected_pending_intent_blocked `
+  --output-root verification_reports\milestone_12_visible `
+  --seed 1 --speed-multiplier 20 --timeout-seconds 240 --visible
+```
+
+Run the exact replay command printed by each report or matrix aggregate; do
+not reconstruct a negative fixture from memory. A complete matrix writes a
+plan, aggregate, child logs, report-v1 trees, catalog/manifest hashes, and the
+tracked matrix-registration row. Persistence faults are created before launch
+only in test-owned copies beneath the current SIL scenario root. Never point a
+fault case at a user experiment.
+
+For a rejection report, inspect
+`metrics.persistence.values.safeguard_boundary`: `failed_checks` must be empty,
+all checks must be true, the observed typed/UI record must equal the literal
+expected record, and dispatch counters must remain unchanged. Persistence
+reports additionally retain `prelaunch_fault`, source/faulted inventories, and
+the one-path fault manifest. Visible reports retain the rejection dialog or
+locked-state screenshot; a missing-file screenshot naturally differs across
+replay because it shows the new isolated absolute path.
+
+The immutable Milestone 11A
+`optimizer_360_calibration_reload_execution_v1` scenario remains the complex
+positive control and is not a negative-case fixture. The preexisting
+`print_array_stress_384x10_v1` pulse-width fixture/staging mismatch is also not
+a Milestone 12 product failure. Use direct Milestone 12 matrices, the selected
+optimizer-360 compatibility run, `lifecycle`, and `host_regression` as the
+Milestone 12 gates; do not require or weaken evidence to make the entire
+`host_stress` aggregate green.
+
+If pytest cannot access its shared `%TEMP%\pytest-of-<user>` root in a sandbox,
+give focused runs a unique repository-contained `--basetemp` beneath
+`verification_reports`. The required final suite remains:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q
+```
+
+Allow at least 900000 ms when an external runner supplies a timeout.
+
+### Bounded seeded editor exploration
+
+Milestone 8 Slice 6 adds the manually invoked `editor_prepared_guard_v1`
+campaign. It generates one legal and one intentionally invalid prepared-editor
+sequence for each frozen seed `1, 7, 19, 42, 101`. All ten sequences reuse the
+tracked prepared-editor fixture and one dynamic journey; no per-seed fixture or
+journey body is written.
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py --list explorations
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration editor_prepared_guard_v1 --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration editor_prepared_guard_v1 `
+  --output-root verification_reports\exploration `
+  --speed-multiplier 1000 --timeout-seconds 60
+
+$env:QT_QPA_PLATFORM = "windows"
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration editor_prepared_guard_v1 `
+  --sequence seed_101_illegal `
+  --output-root verification_reports\exploration `
+  --speed-multiplier 20 --timeout-seconds 120 --visible
+```
+
+A full campaign runs ten fresh child processes and writes a hashed
+`exploration_plan.json`, `aggregate.json`, summary, child logs, and references
+to each authoritative report-v1 evidence tree beneath
+`verification_reports/exploration/editor_prepared_guard_v1/<run>/`. The full
+campaign uses its frozen seed set and rejects an explicit `--seed`; a selected
+sequence derives its seed from the sequence ID and rejects a mismatch.
+
+Illegal sequences temporarily set printed volume above final reaction volume,
+attempt Finalize through the real Qt control, dismiss the real `Invalid
+volumes` warning through QTest, and pass only when plan revision, files, audit
+history, directory identity, runtime activation, and modal state remain
+unchanged. They then restore valid values, regenerate, refinalize, and reload a
+prepared, `ready_to_start`, runtime-inactive design. Legal runs use 18 actions;
+the longest illegal run uses 23 of the 25-action limit. Exploration aggregates
+remain separate from registered capability coverage and do not schedule tests.
+Pi, hardware, protocol, firmware, unbounded random walks, fault injection,
+repetition, baselines, and comparisons remain unavailable in exploration mode.
+
+### Bounded design/calibration lifecycle exploration
+
+Milestone 13 adds the separately versioned
+`design_calibration_lifecycle_v1` campaign without changing the Milestone 8
+campaign or its schema-v1 replay contract. Its six release-blocking frozen
+sequences use seeds `13, 29, 47, 83, 131, 197`; explicitly selected diagnostic
+seeds are retained but never alter the frozen gate unless deliberately reviewed
+and promoted.
+
+```powershell
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration design_calibration_lifecycle_v1 --dry-run
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration design_calibration_lifecycle_v1 `
+  --output-root verification_reports\exploration `
+  --speed-multiplier 1000 --timeout-seconds 270 --qt-platform offscreen
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration design_calibration_lifecycle_v1 `
+  --sequence seed_47_illegal_editor_recovery_terminal `
+  --output-root verification_reports\exploration `
+  --speed-multiplier 1000 --timeout-seconds 270 --qt-platform offscreen
+
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --exploration design_calibration_lifecycle_v1 `
+  --seed-tier diagnostic --diagnostic-seed 1 `
+  --output-root verification_reports\exploration `
+  --speed-multiplier 1000 --timeout-seconds 270 --qt-platform offscreen
+```
+
+Always run the emitted `run.replay_command` verbatim. Frozen replay consumes
+the retained normalized sequence or campaign plan and verifies its SHA-256; it
+does not regenerate authoritative failure evidence from a seed. The aggregate
+must report complete semantic coverage for all 12 states, 34 declared
+transitions, 26 admitted operations, and eight rejection classes. Seed count
+and action count are not coverage.
+
+Each sequence fails closed above 18 semantic operations, 80 action rows, three
+sessions/two rotations, four screenshots, 256 retained files/48 MiB, a
+270-second scenario deadline, or a 300-second child watchdog. The six-sequence
+campaign caps those values at 108/480, 18/12, 24, 1,600 files/320 MiB, and
+1,800 seconds. Normal fixtures stay compact at four reactions, two stocks,
+eight intents, and 44 droplets per sequence. The immutable
+`optimizer_360_calibration_reload_execution_v1` case remains a separate stress
+oracle; do not substitute it into every generated sequence.
+
+Illegal/recovery sequences drive the real Qt rejection, require the exact
+typed operator evidence, immediately reuse the Milestone 12 no-mutation/no-
+dispatch oracle, and recover through valid actions on the same authoritative
+lineage. Original failing normalized sequences are immutable evidence. The v1
+campaign deliberately has no reducer; any future reduction must be separately
+labeled diagnostic evidence and may never replace the original. Exploration
+remains supplemental to deterministic Milestones 9-12 evidence and is not a
+registered capability-coverage aggregate.
+
 The report's responsiveness phase timings include `ui.pressure_render`, the
 count and duration distribution for the real pressure-plot update slot. The
 text summary shows its count, p95, and maximum. This diagnostic covers the
@@ -891,7 +1932,8 @@ compositor work, and it is not yet a performance gate. Pressure update signals
 are coalesced through a 100 ms single-shot timer, so the chart redraws at no
 more than approximately 10 Hz while always reading the latest model state.
 `pressure_render_assessment` records incoming signals, actual renders,
-coalesced updates, their ratio, the interval, and timer teardown state.
+coalesced updates, their ratio, the interval, excluded inactive pass
+boundaries, and timer teardown state.
 
 Individual well-state signals update only the named well label. Experiment
 loads, reagent changes, clears, plate changes, unknown well IDs, and explicit
@@ -1223,6 +2265,92 @@ The audit runs one accelerated scenario under `strace`. It fails if the
 private-device process accesses UART/serial, GPIO, camera/video, I2C, or USB/DFU
 paths. Its timings are safety evidence only and are never included in a
 performance report set.
+
+### Manual Pi SIL suites
+
+The complete operator decision table, failure triage, source-freshness rules,
+Pi authorization boundary, and non-destructive retention policy are maintained
+in `docs/sil_virtual_workflow_operator_runbook.md`.
+
+For pytest runs containing SIL session tests, use a unique `--basetemp` beneath
+`$env:LOCALAPPDATA\Temp\LabCraft`; an in-repository basetemp is rejected by the
+intentional session-root safety boundary.
+
+Milestone 8 Slice 7 routes the registered `pi_primary` and `pi_stress` suites
+through the same fresh-process aggregate contract used on Windows. Suite mode
+still performs one preflight and one traced 96-well proof before execution; the
+aggregate parent and every scenario child then remain inside the same
+Bubblewrap private-device and network namespace. Pi capability selectors are
+planning-only so they cannot launch the stress workload indirectly.
+
+Preview the bounded primary run and exact replay without contacting a Pi:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost pi-test `
+  -Suite pi_primary `
+  -Seed 1 `
+  -SpeedMultiplier 100 `
+  -ReplaySuite `
+  -DryRun
+```
+
+After separately authorizing the target and confirming that its checkout
+contains the exact source under test, remove `-DryRun` and use the approved host
+and user. `-ReplaySuite` validates and executes the first aggregate's exact
+allowlisted command, then retrieves one bundle containing both aggregates and
+their shared proof:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost <approved-host> `
+  -PiUser <approved-user> `
+  -Suite pi_primary `
+  -Seed 1 `
+  -SpeedMultiplier 100 `
+  -ReplaySuite
+```
+
+Suite timeouts default to the manifest: 180 seconds for `pi_primary` and 1,800
+seconds for `pi_stress`. A positive `-TimeoutSeconds` override is recorded in
+the exact replay. The 384x10 lane requires the explicit `-Suite pi_stress`; it
+is never implied by primary or capability execution.
+
+Suite artifacts use `labcraft.pi_sil_artifact_bundle` v2 and remain beneath the
+ignored `verification_reports/virtual_workflows/` tree locally and remotely.
+The wrapper verifies the archive sidecar, every member hash and size, both
+aggregate trees, all child report hashes, source identity, and proof/trace
+linkage before reporting success. Suite mode never invokes cleanup. Retain a
+failed run for diagnosis and use the separately bounded manifest cleanup command
+only after explicit review.
+
+The authorized Milestone 8 Slice 7 qualification on Raspberry Pi 5 passed the
+`pi_primary` suite and its exact replay at seed 1 and 100x simulator speed. Each
+fresh child completed 96/96 wells with all required assertions passing, zero
+unexpected dialogs, zero queue starvation, and clean teardown. The retained
+aggregate SHA-256 values are `25ec6c8389564041...` and `16799d1e19973d6a...`;
+the locally validated two-aggregate bundle SHA-256 is `ecb9fccc83017583...`.
+The remote evidence was intentionally retained and `pi_stress` was not run.
+See
+`docs/sil_interactive_simulation_milestone_8_slice_7_completion_record.md`
+for exact paths, full hashes, safety identity, and the focused bootstrap fixes.
+
+Milestone 8 final closeout requalified `pi_primary` after the final reusable
+Qt-driver corrections. The fresh primary and its exact replay each passed
+96/96 from commit `1e7efa86f95461a2865c075c717f06af06ae28cd` in a separate,
+clean Pi worktree. Their aggregate SHA-256 values are
+`c884a480054f31fff6d435e5cb0aae7efd9223d6525bff342ca9c2af1baa25f8`
+and `228fd7aad64d28d03a93511cdd37791825737e70ccfddba11261c7c3293172a6`;
+the validated 53-member bundle SHA-256 is
+`785bcbbc8e6d6e34eff13c11fd7fcc4f20c1afa54b349d53810e89deae7b8ff0`.
+No cleanup or `pi_stress` run occurred. The complete Windows/Pi evidence,
+focused and full-suite results, source identities, and retained paths are in
+`docs/sil_interactive_simulation_milestone_8_slice_8_completion_record.md`.
+
+If suite selection fails before Qt starts, verify the suite name, evidence file
+paths, source-tree identity, and Qt platform in preflight/proof. A completed
+failing aggregate returns `2` and is still bundled; orchestration or evidence
+validation failures return `3` and leave remote artifacts in place.
 
 From Windows, the operator-light wrapper performs preflight, proof, one warm-up,
 five measured runs, bundle retrieval, hash/path validation, and optional

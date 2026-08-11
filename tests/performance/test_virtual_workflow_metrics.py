@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -421,6 +422,55 @@ def test_real_qt_probe_surfaces_cleanup_failure(qapp, monkeypatch):
             observer_interval_ms=5,
             resource_interval_ms=100,
         )
+
+
+def test_real_qt_probe_schedules_first_stall_after_delayed_startup(
+    qapp,
+    monkeypatch,
+):
+    identity = collect_environment_identity(REPO_ROOT)
+    if identity["environment"]["qt"]["binding"] != "real":
+        pytest.skip("real PySide6 is required for the event-loop integration test")
+
+    original_start = QtEventLoopProbe.start
+    observer_ready_ns = []
+
+    def delayed_start(self, app):
+        time.sleep((probe_cli.INITIAL_IDLE_MS + 50) / 1000.0)
+        original_start(self, app)
+        observer_ready_ns.append(time.perf_counter_ns())
+
+    monkeypatch.setattr(QtEventLoopProbe, "start", delayed_start)
+
+    result = probe_cli._run_probe_iteration(
+        qapp,
+        stalls_ms=(50,),
+        heartbeat_interval_ms=10,
+        stack_capture_ms=250,
+        observer_interval_ms=5,
+        resource_interval_ms=100,
+    )
+
+    phase = next(
+        record
+        for record in result["responsiveness"]["phase_timings"]["records"]
+        if record["name"] == "injected_stall_1_50ms"
+    )
+    ready_to_stall_ms = (
+        phase["started_ns"] - observer_ready_ns[0]
+    ) / 1_000_000.0
+
+    assert ready_to_stall_ms >= probe_cli.INITIAL_IDLE_MS * 0.75
+    check = result["injected_stall_checks"][0]
+    assert check["phase_name"] == "injected_stall_1_50ms"
+    assert check["requested_duration_ms"] == 50
+    assert check["scheduled_offset_ms"] == probe_cli.INITIAL_IDLE_MS
+    assert check["detected"] is True
+    assert check["maximum_attributed_gap_ms"] >= 30
+    assert result["responsiveness"]["shutdown"] == {
+        "timer_active": False,
+        "observer_thread_alive": False,
+    }
 
 
 def test_real_qt_probe_detects_and_attributes_stalls_and_cleans_up(qapp):

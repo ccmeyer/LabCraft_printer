@@ -616,16 +616,15 @@ def test_cli_defaults_preserve_single_run_and_exit_mapping():
 def test_cli_repeated_collection_builds_one_report_set(
     tmp_path, monkeypatch, capsys
 ):
-    from tools.virtual_workflows import scenarios
-
     reports = [
         _report(run_id=f"cli-{index}")
         for index in range(6)
     ]
     index = 0
 
-    def fake_run(_config):
+    def fake_run(registry_id, **_config):
         nonlocal index
+        assert registry_id == "virtual_print_array_96_v1"
         report = reports[index]
         report_dir = tmp_path / f"raw-{index}"
         scenario_root = report_dir / "scenario-root"
@@ -639,7 +638,7 @@ def test_cli_repeated_collection_builds_one_report_set(
         index += 1
         return report
 
-    monkeypatch.setattr(scenarios, "run_virtual_print_array_scenario", fake_run)
+    monkeypatch.setattr("tools.run_virtual_workflow.run_registered_scenario", fake_run)
 
     exit_code = main(
         [
@@ -668,14 +667,12 @@ def test_cli_can_emit_one_measured_stress_report_set(
     monkeypatch,
     capsys,
 ):
-    from tools.virtual_workflows import scenarios
-
     report = _report(run_id="single-stress")
     report["workload"]["workload_id"] = "virtual_print_array_384x10_v1"
     report["workload"]["expected_completion_count"] = 3840
 
-    def fake_run(config):
-        assert config.scenario_id == "virtual_print_array_384x10_v1"
+    def fake_run(registry_id, **_config):
+        assert registry_id == "virtual_print_array_384x10_v1"
         report_dir = tmp_path / "raw"
         scenario_root = report_dir / "scenario-root"
         scenario_root.mkdir(parents=True)
@@ -687,7 +684,7 @@ def test_cli_can_emit_one_measured_stress_report_set(
         (report_dir / "summary.txt").write_text("synthetic\n", encoding="utf-8")
         return report
 
-    monkeypatch.setattr(scenarios, "run_virtual_print_array_scenario", fake_run)
+    monkeypatch.setattr("tools.run_virtual_workflow.run_registered_scenario", fake_run)
 
     exit_code = main(
         [

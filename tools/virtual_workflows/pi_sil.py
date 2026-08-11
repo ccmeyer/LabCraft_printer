@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -28,13 +29,18 @@ from tools.virtual_workflows.compare import (  # noqa: E402
     load_report_set,
     write_baseline_summary,
 )
-from tools.virtual_workflows.report import validate_report_v1  # noqa: E402
+from tools.virtual_workflows.report import (  # noqa: E402
+    collect_source_tree_identity,
+    validate_report_v1,
+)
+from tools.virtual_workflows.suite_runner import load_aggregate  # noqa: E402
 
 
 PI_PREFLIGHT_SCHEMA = "labcraft.pi_sil_preflight"
 PI_HARDWARE_PROOF_SCHEMA = "labcraft.pi_sil_hardware_proof"
 PI_ARTIFACT_MANIFEST_SCHEMA = "labcraft.pi_sil_artifact_bundle"
 PI_SIL_SCHEMA_VERSION = 1
+PI_SUITE_ARTIFACT_MANIFEST_VERSION = 2
 SANDBOX_METHOD = "bubblewrap_private_dev_v1"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "verification_reports" / "virtual_workflows"
 
@@ -258,6 +264,7 @@ class PiSilPreflightResult:
     output_root: str
     source_commit: str
     dirty_worktree: bool
+    source_tree_sha256: str
     operating_system: str
     architecture: str
     pi_model: str
@@ -319,6 +326,12 @@ def run_pi_preflight(
         raise PiSilError("Pi SIL output root is not ignored by Git")
     source_commit = _run_text(["git", "rev-parse", "HEAD"], cwd=root)
     dirty = bool(_run_text(["git", "status", "--porcelain"], cwd=root))
+    source_tree = collect_source_tree_identity(root)
+    source_tree_sha256 = source_tree.get("sha256")
+    if not isinstance(source_tree_sha256, str) or len(source_tree_sha256) != 64:
+        raise PiSilError(
+            "Pi SIL could not establish the executable source-tree identity"
+        )
     _atomic_storage_probe(output)
     qt = _qt_probe(root, qt_platform)
     filesystem = _filesystem_identity(output, root)
@@ -335,6 +348,7 @@ def run_pi_preflight(
         output_root=str(output),
         source_commit=source_commit,
         dirty_worktree=dirty,
+        source_tree_sha256=source_tree_sha256,
         operating_system=system_name,
         architecture=architecture,
         pi_model=pi_model,
@@ -380,6 +394,12 @@ def validate_pi_preflight(payload: Mapping[str, Any]) -> None:
         raise PiSilError("Pi preflight model is not a Raspberry Pi")
     if payload.get("qt_platform") not in {"offscreen", "minimal"}:
         raise PiSilError("Pi preflight Qt platform is unsupported")
+    source_tree_sha256 = payload.get("source_tree_sha256")
+    if source_tree_sha256 is not None and (
+        not isinstance(source_tree_sha256, str)
+        or len(source_tree_sha256) != 64
+    ):
+        raise PiSilError("Pi preflight source-tree identity is invalid")
     filesystem = payload.get("filesystem")
     if not isinstance(filesystem, Mapping) or not filesystem.get("filesystem_type"):
         raise PiSilError("Pi preflight filesystem identity is incomplete")
@@ -422,6 +442,7 @@ class PiSilHardwareProof:
     audit_report_path: str
     audit_report_sha256: str
     source_commit: str
+    source_tree_sha256: str | None
     qt_platform: str
     pi_model: str
     private_dev: bool
@@ -460,6 +481,13 @@ def validate_pi_hardware_trace(
         raise PiSilError("the traced Pi safety-audit scenario failed")
     if report["source"].get("git_commit") != preflight.get("source_commit"):
         raise PiSilError("the traced safety report source does not match preflight")
+    if preflight.get("source_tree_sha256") is not None and (
+        (report["source"].get("source_tree") or {}).get("sha256")
+        != preflight.get("source_tree_sha256")
+    ):
+        raise PiSilError(
+            "the traced safety report source tree does not match preflight"
+        )
     if report["run"].get("run_mode") != f"{preflight['qt_platform']}_pi_sil":
         raise PiSilError("the traced safety report is not a Pi SIL run")
     report_environment = report["environment"]
@@ -487,6 +515,7 @@ def validate_pi_hardware_trace(
         audit_report_path=str(report_source),
         audit_report_sha256=_sha256(report_source),
         source_commit=str(preflight["source_commit"]),
+        source_tree_sha256=preflight.get("source_tree_sha256"),
         qt_platform=str(preflight["qt_platform"]),
         pi_model=str(preflight["pi_model"]),
         private_dev=True,
@@ -528,6 +557,12 @@ def validate_pi_hardware_proof(payload: Mapping[str, Any]) -> None:
         raise PiSilError("Pi hardware proof is missing sandbox protections")
     if payload.get("forbidden_matches") != []:
         raise PiSilError("Pi hardware proof contains forbidden access")
+    source_tree_sha256 = payload.get("source_tree_sha256")
+    if source_tree_sha256 is not None and (
+        not isinstance(source_tree_sha256, str)
+        or len(source_tree_sha256) != 64
+    ):
+        raise PiSilError("Pi hardware-proof source-tree identity is invalid")
 
 
 def load_and_validate_pi_evidence(
@@ -546,6 +581,8 @@ def load_and_validate_pi_evidence(
         raise PiSilError("Pi hardware proof does not match the preflight file")
     if proof.get("source_commit") != preflight.get("source_commit"):
         raise PiSilError("Pi hardware proof and preflight source commits differ")
+    if proof.get("source_tree_sha256") != preflight.get("source_tree_sha256"):
+        raise PiSilError("Pi hardware proof and preflight source trees differ")
     if preflight.get("qt_platform") != expected_qt_platform:
         raise PiSilError("Pi preflight Qt platform differs from the requested platform")
     if proof.get("qt_platform") != expected_qt_platform:
@@ -684,6 +721,126 @@ def build_pi_artifact_bundle(
     return output, sidecar
 
 
+def _suite_archive_sources(
+    repo_root: Path,
+    aggregate_paths: Sequence[Path],
+    proof_path: Path,
+    trace_path: Path,
+) -> tuple[list[Path], list[Path]]:
+    if not 1 <= len(aggregate_paths) <= 2:
+        raise PiSilError("a Pi suite bundle requires one or two aggregates")
+    if len({path.resolve() for path in aggregate_paths}) != len(aggregate_paths):
+        raise PiSilError("Pi suite aggregate paths must be unique")
+    allowed = (repo_root / "verification_reports" / "virtual_workflows").resolve()
+    roots = [path.resolve().parent for path in aggregate_paths]
+    roots.append(proof_path.resolve().parent)
+    roots = sorted(set(roots), key=str)
+    for aggregate_path in aggregate_paths:
+        _require_beneath(aggregate_path, allowed, "suite aggregate")
+        try:
+            aggregate = load_aggregate(aggregate_path)
+        except Exception as exc:
+            raise PiSilError(f"invalid Pi suite aggregate: {exc}") from exc
+        if aggregate["run"].get("platform") != "pi_sil":
+            raise PiSilError("suite artifact bundle accepts only Pi aggregates")
+    for root in roots:
+        _require_beneath(root, allowed, "artifact root")
+    _require_beneath(trace_path, allowed, "hardware trace")
+    files: set[Path] = {proof_path.resolve(), trace_path.resolve()}
+    for root in roots:
+        for path in root.rglob("*"):
+            if path.is_symlink():
+                raise PiSilError(f"artifact bundle refuses symlink: {path}")
+            if path.is_file():
+                files.add(path.resolve())
+    return sorted(files, key=str), roots
+
+
+def build_pi_suite_artifact_bundle(
+    repo_root: str | Path,
+    aggregate_paths: Sequence[str | Path],
+    proof_path: str | Path,
+    trace_path: str | Path,
+    output_path: str | Path,
+) -> tuple[Path, Path]:
+    """Create a non-overwriting v2 bundle for one run and optional replay."""
+
+    root = Path(repo_root).resolve()
+    aggregates = tuple(Path(path).resolve() for path in aggregate_paths)
+    proof_source = Path(proof_path).resolve()
+    trace_source = Path(trace_path).resolve()
+    output = Path(output_path).resolve()
+    allowed = (root / "verification_reports" / "virtual_workflows").resolve()
+    _require_beneath(output, allowed, "artifact bundle")
+    proof = _read_json(proof_source)
+    validate_pi_hardware_proof(proof)
+    if _sha256(trace_source) != proof.get("trace_sha256"):
+        raise PiSilError("suite bundle trace does not match the hardware proof")
+    proof_hash = _sha256(proof_source)
+    for aggregate_path in aggregates:
+        try:
+            aggregate = load_aggregate(aggregate_path)
+        except Exception as exc:
+            raise PiSilError(f"invalid Pi suite aggregate: {exc}") from exc
+        pi_safety = aggregate["run"].get("pi_safety") or {}
+        expected_identity = {
+            "proof_sha256": proof_hash,
+            "trace_sha256": proof.get("trace_sha256"),
+            "source_commit": proof.get("source_commit"),
+            "source_tree_sha256": proof.get("source_tree_sha256"),
+        }
+        for field, expected in expected_identity.items():
+            if pi_safety.get(field) != expected:
+                raise PiSilError(
+                    f"suite aggregate {field} does not match bundle proof"
+                )
+    files, cleanup_roots = _suite_archive_sources(
+        root, aggregates, proof_source, trace_source
+    )
+    entries = [
+        {
+            "path": source.relative_to(root).as_posix(),
+            "size_bytes": source.stat().st_size,
+            "sha256": _sha256(source),
+        }
+        for source in files
+    ]
+    manifest = {
+        "schema_name": PI_ARTIFACT_MANIFEST_SCHEMA,
+        "schema_version": PI_SUITE_ARTIFACT_MANIFEST_VERSION,
+        "created_at_utc": _utc_now(),
+        "repo_root": str(root),
+        "entrypoint_kind": "suite_aggregate",
+        "aggregate_paths": [
+            path.relative_to(root).as_posix() for path in aggregates
+        ],
+        "proof_path": proof_source.relative_to(root).as_posix(),
+        "trace_path": trace_source.relative_to(root).as_posix(),
+        "files": entries,
+        "cleanup_roots": [
+            path.relative_to(root).as_posix() for path in cleanup_roots
+        ],
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists():
+        raise PiSilError(f"refusing to overwrite artifact bundle: {output}")
+    with zipfile.ZipFile(
+        output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+    ) as archive:
+        for source, entry in zip(files, entries):
+            archive.write(source, entry["path"])
+        archive.writestr(
+            "pi_sil_artifact_manifest.json",
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        )
+    sidecar = _write_json_atomic(f"{output}.manifest.json", manifest)
+    _write_json_atomic(
+        f"{output}.sha256.json",
+        {"path": output.name, "sha256": _sha256(output)},
+    )
+    return output, sidecar
+
+
 def _safe_archive_path(value: str) -> PurePosixPath:
     path = PurePosixPath(value)
     if path.is_absolute() or ".." in path.parts or not path.parts:
@@ -701,7 +858,10 @@ def _manifest_from_archive(archive: zipfile.ZipFile) -> dict[str, Any]:
         raise PiSilError("artifact manifest must be an object")
     if payload.get("schema_name") != PI_ARTIFACT_MANIFEST_SCHEMA:
         raise PiSilError("unsupported artifact manifest schema")
-    if payload.get("schema_version") != PI_SIL_SCHEMA_VERSION:
+    if payload.get("schema_version") not in {
+        PI_SIL_SCHEMA_VERSION,
+        PI_SUITE_ARTIFACT_MANIFEST_VERSION,
+    }:
         raise PiSilError("unsupported artifact manifest version")
     return payload
 
@@ -752,18 +912,68 @@ def extract_and_validate_pi_artifact_bundle(
                 raise PiSilError(f"artifact hash/size mismatch: {info.filename}")
             target.write_bytes(data)
 
-    report_set_path = destination / str(manifest["report_set_path"])
-    previous_cwd = Path.cwd()
-    try:
-        os.chdir(destination)
-        load_report_set(report_set_path)
-    finally:
-        os.chdir(previous_cwd)
-    proof = _read_json(destination / str(manifest["proof_path"]))
+    version = int(manifest["schema_version"])
+    suite_aggregates: list[dict[str, Any]] = []
+    if version == PI_SIL_SCHEMA_VERSION:
+        report_set_relative = _safe_archive_path(str(manifest["report_set_path"]))
+        report_set_path = destination.joinpath(*report_set_relative.parts).resolve()
+        _require_beneath(report_set_path, destination, "report-set extraction")
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(destination)
+            load_report_set(report_set_path)
+        finally:
+            os.chdir(previous_cwd)
+    else:
+        if manifest.get("entrypoint_kind") != "suite_aggregate":
+            raise PiSilError("suite artifact entrypoint kind is invalid")
+        aggregate_values = manifest.get("aggregate_paths")
+        if not isinstance(aggregate_values, list) or not 1 <= len(
+            aggregate_values
+        ) <= 2:
+            raise PiSilError("suite artifact aggregate paths are invalid")
+        if len(set(aggregate_values)) != len(aggregate_values):
+            raise PiSilError("suite artifact aggregate paths are duplicated")
+        for value in aggregate_values:
+            relative = _safe_archive_path(str(value))
+            aggregate_path = destination.joinpath(*relative.parts).resolve()
+            _require_beneath(
+                aggregate_path, destination, "suite aggregate extraction"
+            )
+            try:
+                aggregate = load_aggregate(aggregate_path)
+            except Exception as exc:
+                raise PiSilError(
+                    f"extracted Pi suite aggregate is invalid: {exc}"
+                ) from exc
+            if aggregate["run"].get("platform") != "pi_sil":
+                raise PiSilError("extracted suite aggregate is not Pi SIL")
+            suite_aggregates.append(aggregate)
+    proof_relative = _safe_archive_path(str(manifest["proof_path"]))
+    proof_extracted = destination.joinpath(*proof_relative.parts).resolve()
+    _require_beneath(proof_extracted, destination, "proof extraction")
+    trace_relative = _safe_archive_path(str(manifest["trace_path"]))
+    extracted_trace = destination.joinpath(*trace_relative.parts).resolve()
+    _require_beneath(extracted_trace, destination, "trace extraction")
+    proof = _read_json(proof_extracted)
     validate_pi_hardware_proof(proof)
-    extracted_trace = destination / str(manifest["trace_path"])
     if _sha256(extracted_trace) != proof.get("trace_sha256"):
         raise PiSilError("extracted hardware trace does not match the proof")
+    proof_hash = _sha256(proof_extracted)
+    for aggregate in suite_aggregates:
+        pi_safety = aggregate["run"].get("pi_safety") or {}
+        if pi_safety.get("proof_sha256") != proof_hash:
+            raise PiSilError("suite aggregate proof hash does not match bundle")
+        if pi_safety.get("trace_sha256") != proof.get("trace_sha256"):
+            raise PiSilError("suite aggregate trace hash does not match bundle")
+        if pi_safety.get("source_commit") != proof.get("source_commit"):
+            raise PiSilError("suite aggregate source does not match bundle proof")
+        if pi_safety.get("source_tree_sha256") != proof.get(
+            "source_tree_sha256"
+        ):
+            raise PiSilError(
+                "suite aggregate source tree does not match bundle proof"
+            )
     manifest_hashes = {
         str(entry.get("sha256"))
         for entry in manifest.get("files", [])
@@ -788,7 +998,10 @@ def cleanup_manifest_paths(
     manifest = _read_json(manifest_path)
     if manifest.get("schema_name") != PI_ARTIFACT_MANIFEST_SCHEMA:
         raise PiSilError("cleanup manifest schema is invalid")
-    if manifest.get("schema_version") != PI_SIL_SCHEMA_VERSION:
+    if manifest.get("schema_version") not in {
+        PI_SIL_SCHEMA_VERSION,
+        PI_SUITE_ARTIFACT_MANIFEST_VERSION,
+    }:
         raise PiSilError("cleanup manifest version is invalid")
     root = Path(repo_root).resolve()
     allowed = Path(output_root).resolve()
@@ -824,6 +1037,136 @@ def install_candidate_baseline(
     return write_baseline_summary(destination_path, payload, replace=False)
 
 
+def validate_pi_suite_replay_command(
+    aggregate_path: str | Path,
+    repo_root: str | Path,
+    output_root: str | Path,
+) -> tuple[str, ...]:
+    """Return one exact Pi suite replay after strict token/evidence validation."""
+
+    root = Path(repo_root).resolve()
+    allowed_output = Path(output_root).resolve()
+    _require_beneath(allowed_output, root, "Pi suite replay output root")
+    aggregate_source = Path(aggregate_path).resolve()
+    _require_beneath(
+        aggregate_source, allowed_output, "Pi suite replay aggregate"
+    )
+    try:
+        aggregate = load_aggregate(aggregate_source)
+    except Exception as exc:
+        raise PiSilError(f"invalid Pi suite replay aggregate: {exc}") from exc
+    run = aggregate["run"]
+    selector = run["selector"]
+    if run.get("platform") != "pi_sil" or selector.get("kind") != "suite":
+        raise PiSilError("replay accepts only Pi suite aggregates")
+    suite_id = selector.get("id")
+    if suite_id not in {"pi_primary", "pi_stress"}:
+        raise PiSilError("Pi suite replay selector is not allowlisted")
+    command = run.get("replay_command")
+    if not isinstance(command, list) or any(
+        not isinstance(item, str) or not item for item in command
+    ):
+        raise PiSilError("Pi suite replay command is invalid")
+    if len(command) < 16:
+        raise PiSilError("Pi suite replay command is incomplete")
+    if Path(command[0]).resolve() != Path(sys.executable).resolve():
+        raise PiSilError("Pi suite replay Python executable is not current")
+    runner = (
+        (root / command[1]).resolve()
+        if not Path(command[1]).is_absolute()
+        else Path(command[1]).resolve()
+    )
+    expected_runner = (root / "tools" / "run_virtual_workflow.py").resolve()
+    if runner != expected_runner:
+        raise PiSilError("Pi suite replay runner is not allowlisted")
+
+    options = command[2:]
+    allowed_flags = {
+        "--suite",
+        "--output-root",
+        "--seed",
+        "--speed-multiplier",
+        "--timeout-seconds",
+        "--qt-platform",
+        "--target-pi",
+        "--pi-preflight",
+        "--pi-hardware-proof",
+    }
+    values: dict[str, str | bool] = {}
+    index = 0
+    while index < len(options):
+        flag = options[index]
+        if flag not in allowed_flags or flag in values:
+            raise PiSilError(f"Pi suite replay option is invalid: {flag}")
+        if flag == "--target-pi":
+            values[flag] = True
+            index += 1
+            continue
+        if index + 1 >= len(options) or options[index + 1].startswith("--"):
+            raise PiSilError(f"Pi suite replay option has no value: {flag}")
+        values[flag] = options[index + 1]
+        index += 2
+    required = allowed_flags - {"--timeout-seconds"}
+    if set(values) - allowed_flags or not required <= set(values):
+        raise PiSilError("Pi suite replay options are incomplete")
+    if values["--suite"] != suite_id:
+        raise PiSilError("Pi suite replay selector differs from aggregate")
+    try:
+        seed = int(str(values["--seed"]))
+        speed = float(str(values["--speed-multiplier"]))
+        timeout = (
+            float(str(values["--timeout-seconds"]))
+            if "--timeout-seconds" in values
+            else None
+        )
+    except ValueError as exc:
+        raise PiSilError("Pi suite replay numeric option is invalid") from exc
+    if seed < 0 or not math.isfinite(speed) or speed <= 0:
+        raise PiSilError("Pi suite replay seed or speed is invalid")
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+        raise PiSilError("Pi suite replay timeout is invalid")
+    if values["--qt-platform"] != run.get("qt_platform"):
+        raise PiSilError("Pi suite replay Qt platform differs from aggregate")
+    replay_output = Path(str(values["--output-root"])).resolve()
+    _require_beneath(replay_output, allowed_output, "Pi suite replay output")
+    preflight_path = Path(str(values["--pi-preflight"])).resolve()
+    proof_path = Path(str(values["--pi-hardware-proof"])).resolve()
+    _require_beneath(preflight_path, allowed_output, "Pi replay preflight")
+    _require_beneath(proof_path, allowed_output, "Pi replay proof")
+    preflight, proof = load_and_validate_pi_evidence(
+        preflight_path,
+        proof_path,
+        expected_qt_platform=str(values["--qt-platform"]),
+    )
+    pi_safety = run.get("pi_safety") or {}
+    expected_identity = {
+        "preflight_sha256": _sha256(preflight_path),
+        "proof_sha256": _sha256(proof_path),
+        "trace_sha256": proof.get("trace_sha256"),
+        "source_commit": preflight.get("source_commit"),
+        "source_tree_sha256": preflight.get("source_tree_sha256"),
+    }
+    for field, expected in expected_identity.items():
+        if pi_safety.get(field) != expected:
+            raise PiSilError(f"Pi suite replay {field} differs from aggregate")
+    return tuple(command)
+
+
+def replay_pi_suite_aggregate(
+    aggregate_path: str | Path,
+    repo_root: str | Path,
+    output_root: str | Path,
+) -> int:
+    """Execute an allowlisted aggregate replay without invoking a shell."""
+
+    root = Path(repo_root).resolve()
+    command = validate_pi_suite_replay_command(
+        aggregate_path, root, output_root
+    )
+    result = subprocess.run(list(command), cwd=root, check=False)
+    return int(result.returncode)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -844,7 +1187,8 @@ def _parser() -> argparse.ArgumentParser:
 
     bundle = subparsers.add_parser("bundle")
     bundle.add_argument("--repo-root", type=Path, default=REPO_ROOT)
-    bundle.add_argument("--report-set", type=Path, required=True)
+    bundle.add_argument("--report-set", type=Path)
+    bundle.add_argument("--aggregate", type=Path, action="append", default=[])
     bundle.add_argument("--proof", type=Path, required=True)
     bundle.add_argument("--trace", type=Path, required=True)
     bundle.add_argument("--output", type=Path, required=True)
@@ -858,6 +1202,11 @@ def _parser() -> argparse.ArgumentParser:
     cleanup.add_argument("--manifest", type=Path, required=True)
     cleanup.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     cleanup.add_argument("--output-root", type=Path, required=True)
+
+    replay = subparsers.add_parser("replay-suite")
+    replay.add_argument("--aggregate", type=Path, required=True)
+    replay.add_argument("--repo-root", type=Path, default=REPO_ROOT)
+    replay.add_argument("--output-root", type=Path, required=True)
 
     install = subparsers.add_parser("install-baseline")
     install.add_argument("--source", type=Path, required=True)
@@ -883,29 +1232,53 @@ def main(argv: list[str] | None = None) -> int:
             path = write_pi_hardware_proof(args.output, proof)
             print(f"Pi SIL hardware proof: {path}")
         elif args.command == "bundle":
-            archive, manifest = build_pi_artifact_bundle(
-                args.repo_root,
-                args.report_set,
-                args.proof,
-                args.trace,
-                args.output,
-            )
+            if (args.report_set is None) == (not args.aggregate):
+                raise PiSilError(
+                    "bundle requires exactly one of --report-set or --aggregate"
+                )
+            if args.report_set is not None:
+                archive, manifest = build_pi_artifact_bundle(
+                    args.repo_root,
+                    args.report_set,
+                    args.proof,
+                    args.trace,
+                    args.output,
+                )
+            else:
+                archive, manifest = build_pi_suite_artifact_bundle(
+                    args.repo_root,
+                    args.aggregate,
+                    args.proof,
+                    args.trace,
+                    args.output,
+                )
             print(f"Pi SIL artifact bundle: {archive}")
             print(f"Pi SIL artifact manifest: {manifest}")
         elif args.command == "extract":
             manifest = extract_and_validate_pi_artifact_bundle(
                 args.archive, args.destination, args.manifest
             )
-            print(
-                "Pi SIL report set: "
-                f"{Path(args.destination).resolve() / manifest['report_set_path']}"
-            )
+            if manifest["schema_version"] == PI_SIL_SCHEMA_VERSION:
+                print(
+                    "Pi SIL report set: "
+                    f"{Path(args.destination).resolve() / manifest['report_set_path']}"
+                )
+            else:
+                for relative in manifest["aggregate_paths"]:
+                    print(
+                        "Pi SIL aggregate: "
+                        f"{Path(args.destination).resolve() / relative}"
+                    )
         elif args.command == "cleanup":
             removed = cleanup_manifest_paths(
                 args.manifest, args.repo_root, args.output_root
             )
             for path in removed:
                 print(f"Removed remote Pi SIL artifact root: {path}")
+        elif args.command == "replay-suite":
+            return replay_pi_suite_aggregate(
+                args.aggregate, args.repo_root, args.output_root
+            )
         elif args.command == "install-baseline":
             path = install_candidate_baseline(args.source, args.destination)
             print(f"Installed Pi SIL candidate baseline: {path}")
@@ -926,20 +1299,24 @@ __all__ = [
     "PI_HARDWARE_PROOF_SCHEMA",
     "PI_PREFLIGHT_SCHEMA",
     "PI_SIL_SCHEMA_VERSION",
+    "PI_SUITE_ARTIFACT_MANIFEST_VERSION",
     "SANDBOX_METHOD",
     "PiSilArtifactManifest",
     "PiSilError",
     "PiSilHardwareProof",
     "PiSilPreflightResult",
     "build_pi_artifact_bundle",
+    "build_pi_suite_artifact_bundle",
     "cleanup_manifest_paths",
     "extract_and_validate_pi_artifact_bundle",
     "install_candidate_baseline",
     "load_and_validate_pi_evidence",
     "pi_report_identity",
+    "replay_pi_suite_aggregate",
     "run_pi_preflight",
     "validate_pi_hardware_proof",
     "validate_pi_hardware_trace",
+    "validate_pi_suite_replay_command",
     "validate_pi_preflight",
     "write_pi_hardware_proof",
     "write_pi_preflight",

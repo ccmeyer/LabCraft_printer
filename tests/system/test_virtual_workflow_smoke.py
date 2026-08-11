@@ -4,14 +4,17 @@ from pathlib import Path
 
 import pytest
 
-from tools.virtual_workflows.actions import PRINT_ARRAY_ACTION_IDS
+from tools.virtual_workflows.actions import COMPOSED_SMOKE_ACTION_IDS
+from tools.virtual_workflows.journeys import (
+    SMOKE_REQUIRED_ASSERTIONS,
+    SMOKE_REQUIRED_UI_ACTIONS,
+)
+from tools.virtual_workflows.registry import run_registered_scenario
 from tools.virtual_workflows.report import validate_report_v1
 from tools.virtual_workflows.scenarios import (
     SMOKE_WORKLOAD_ID,
-    VirtualPrintArrayScenarioConfig,
     fixture_well_ids,
     load_virtual_print_array_fixture,
-    run_virtual_print_array_scenario,
 )
 
 
@@ -45,32 +48,20 @@ def test_smoke_fixture_contract_is_exact():
     assert len(fixture["stocks"]) == 1
     assert wells == tuple(f"A{column}" for column in range(1, 25))
 
-    config = VirtualPrintArrayScenarioConfig(
-        scenario_id=SMOKE_WORKLOAD_ID
-    )
-    assert config.inject_after_completion == 12
-    assert VirtualPrintArrayScenarioConfig(
-        scenario_id=SMOKE_WORKLOAD_ID,
-        inject_after_completion=24,
-    ).inject_after_completion == 24
-    with pytest.raises(ValueError, match="inject_after_completion"):
-        VirtualPrintArrayScenarioConfig(
-            scenario_id=SMOKE_WORKLOAD_ID,
-            inject_after_completion=25,
-        )
+    assert fixture["stocks"][0]["prepared_droplet_volume_nL"] == 9.0
+    assert fixture["stocks"][0]["droplet_volume_nL"] == 9.0
 
 
 @pytest.mark.sil_smoke
 def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
     started = time.perf_counter()
-    report = run_virtual_print_array_scenario(
-        VirtualPrintArrayScenarioConfig(
-            scenario_id=SMOKE_WORKLOAD_ID,
-            output_root=tmp_path,
-            speed_multiplier=1000.0,
-            timeout_seconds=60.0,
-            run_id="standard-smoke",
-        )
+    report = run_registered_scenario(
+        SMOKE_WORKLOAD_ID,
+        output_root=tmp_path,
+        speed_multiplier=1000.0,
+        timeout_seconds=60.0,
+        run_id="standard-smoke",
+        seed=7,
     )
     elapsed_seconds = time.perf_counter() - started
     validate_report_v1(report)
@@ -91,11 +82,8 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
     )
     assert report["run"]["scenario_name"] == "virtual_print_array"
     assert report["run"]["scenario_version"] == "1"
-    font = report["environment"]["qt"]["font"]
-    assert font["status"] == "pass"
-    assert font["raw_font_valid"] is True
-    assert font["sample_glyphs_renderable"] is True
-    assert font["available_family_count"] > 0
+    assert report["run"]["seed"] == 7
+    assert report["run"]["replay_command"][-1] == "60.0"
 
     expected_wells = [f"A{column}" for column in range(1, 25)]
     workload = report["workload"]
@@ -112,9 +100,11 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
     assert safety["simulated_port"] == "SIMULATED"
     assert not any(safety["hardware_interfaces"].values())
     assert safety["root_containment_valid"] is True
-    assert Path(safety["scenario_root"]).resolve().is_relative_to(
-        tmp_path.resolve()
-    )
+    scenario_root = Path(safety["scenario_root"]).resolve()
+    report_dir = Path(safety["report_dir"]).resolve()
+    assert not scenario_root.is_relative_to(Path.cwd().resolve())
+    assert report_dir.is_relative_to(tmp_path.resolve())
+    assert scenario_root.is_dir()
 
     workflow = report["metrics"]["workflow"]["values"]
     launch = next(
@@ -122,12 +112,14 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
         for item in workflow["action_results"]
         if item["action_id"] == "app.launch_simulated"
     )
-    assert launch["evidence"]["font_rendering"] == font
+    font = launch["evidence"]["font_rendering"]
+    assert font["status"] == "pass"
+    assert font["raw_font_valid"] is True
+    assert font["sample_glyphs_renderable"] is True
     assert workflow["completed_well_count"] == 24
     assert workflow["completed_stock_well_count"] == 24
     assert workflow["completed_well_ids"] == expected_wells
     assert workflow["well_update_count"] == 24
-    assert workflow["array_complete_count"] == 1
     assert workflow["errors"] == []
     assert workflow["unexpected_dialogs"] == []
     assert [item["title"] for item in workflow["dialogs"]] == [
@@ -136,80 +128,39 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
     ]
     assert {
         item["action_id"] for item in workflow["action_results"]
-    } == PRINT_ARRAY_ACTION_IDS
+    } == COMPOSED_SMOKE_ACTION_IDS
     assert {item["status"] for item in workflow["action_results"]} == {"pass"}
+    surfaces = {
+        item["action_id"]: item["interaction_surface"]
+        for item in workflow["action_results"]
+        if item["action_id"] in SMOKE_REQUIRED_UI_ACTIONS
+    }
+    assert surfaces == {action_id: "ui" for action_id in SMOKE_REQUIRED_UI_ACTIONS}
     assert [item["name"] for item in workflow["lifecycle_milestones"]] == [
+        "editor_opened",
+        "generated",
         "ready",
         "printing",
-        "mid_array",
         "completed",
     ]
-    assert len(workflow["cleanup_results"]) == 11
-    assert {item["status"] for item in workflow["cleanup_results"]} == {"pass"}
+    decisions = {
+        item["assertion_id"]: item["decision"]
+        for item in workflow["assertion_results"]
+    }
+    assert decisions == {item: "pass" for item in SMOKE_REQUIRED_ASSERTIONS}
 
     launch = next(
         item
         for item in workflow["action_results"]
         if item["action_id"] == "app.launch_simulated"
     )
-    banner = launch["evidence"]["simulation_banner"]
-    assert {
-        key: banner[key]
-        for key in ("present", "visible", "object_name")
-    } == {
-        "present": True,
-        "visible": True,
-        "object_name": "simulationIdentityBanner",
-    }
-    assert "SIMULATION" in banner["text"]
-    assert "NO HARDWARE CONNECTED" in banner["text"]
-    assert launch["evidence"]["plate_widget"] == {
-        "rows": 16,
-        "columns": 24,
-        "well_label_count": 384,
-    }
-
     queue = report["metrics"]["queue"]["values"]
-    assert queue["unexpected_starvation_count"] == 0
-    assert queue["simulator_cleanup"] == {
-        "command_timer_active": False,
-        "connection_timer_active": False,
-        "deferred_timer_count": 0,
-    }
+    assert queue["queue_drained_at_terminal"] is True
 
     persistence = report["metrics"]["persistence"]["values"]
-    assert persistence["intent_count"] == 24
-    assert persistence["stock_well_completion_count"] == 24
-    assert persistence["observed_completed_intent_count"] == 24
-    assert persistence["checkpoint_retained_intent_count"] == 0
-    assert persistence["checkpoint_pending_intent_count"] == 0
-    assert persistence["checkpoint_max_observed_intent_count"] <= 2
-    assert persistence["terminal_plan_state"] == "completed"
-    authoritative_io = persistence["authoritative_io"]
-    assert authoritative_io["hot_path_read_count"] == 0
-    assert authoritative_io["execution_resume_hot_path_disk_load_count"] == 0
-    assert authoritative_io["resume_save_fsync_count"] == 72
-    assert authoritative_io["resume_save_replace_count"] == 72
-    assert authoritative_io["progress_write_fsync_count"] == 24
-    assert authoritative_io["progress_write_replace_count"] == 24
-    assert authoritative_io["observer_restored"] is True
-    snapshot = persistence["progress_snapshot"]
-    assert snapshot["mode_counts"] == {
-        "full_rebuild": 0,
-        "cached_update": 24,
-    }
-    assert snapshot["observer_restored"] is True
+    assert persistence["terminal"]["plan_state"] == "completed"
+    assert persistence["terminal"]["checkpoint_intent_count"] == 0
 
-    responsiveness = report["metrics"]["responsiveness"]["values"]
-    assert responsiveness["shutdown"] == {
-        "timer_active": False,
-        "observer_thread_alive": False,
-    }
-    assert responsiveness["pressure_render_assessment"][
-        "timer_active_after_teardown"
-    ] is False
-
-    report_dir = Path(safety["scenario_root"]).parent
     assert json.loads(
         (report_dir / "report.json").read_text(encoding="utf-8")
     ) == report
@@ -217,18 +168,32 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
         "report.json",
         "summary.txt",
         "events.jsonl",
-        "stall_stacks.txt",
-        "application_stdout.log",
+        "action_ledger.json",
+        "assertion_ledger.json",
+        "evidence_manifest.json",
     ):
         assert (report_dir / name).is_file()
     assert not (report_dir / "failure_traceback.txt").exists()
     assert set(report["artifacts"]["screenshots"]) == {
+        "editor_opened",
+        "generated",
         "ready",
         "printing",
-        "mid_array",
         "completed",
     }
     for relative in report["artifacts"]["screenshots"].values():
         screenshot = report_dir / relative
         assert screenshot.is_file()
         assert screenshot.stat().st_size > 0
+
+    evidence_manifest = json.loads(
+        (report_dir / "evidence_manifest.json").read_text(encoding="utf-8")
+    )
+    assert "evidence_manifest.json" in evidence_manifest["excluded"]
+    assert {item["path"] for item in evidence_manifest["files"]} >= {
+        "report.json",
+        "summary.txt",
+        "events.jsonl",
+        "action_ledger.json",
+        "assertion_ledger.json",
+    }

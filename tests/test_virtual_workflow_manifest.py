@@ -24,8 +24,11 @@ from tools.virtual_workflows.registry import (
     validate_capability_manifest,
 )
 from tools.virtual_workflows.scenarios import (
-    AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
-    MULTI_STOCK_WORKLOAD_ID,
+            AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+            DISCONNECT_WORKLOAD_ID,
+            MULTI_STOCK_WORKLOAD_ID,
+            MIXED_MODE_WORKLOAD_ID,
+            STRESS_WORKLOAD_ID,
     SCENARIO_COMPLETION_COUNTS,
     SCENARIO_FIXTURES,
     SOFT_STOP_RESUME_WORKLOAD_ID,
@@ -39,8 +42,18 @@ from tools.virtual_workflows.editor_scenarios import (
     POST_START_LOCK_WORKLOAD_ID as EDITOR_POST_START_WORKLOAD_ID,
     RENAME_WORKLOAD_ID as EDITOR_RENAME_WORKLOAD_ID,
     WORKLOAD_ID as EDITOR_WORKLOAD_ID,
-    EditorLifecycleScenarioConfig,
 )
+from tools.virtual_workflows.journeys import LEGACY_READ_ONLY_WORKLOAD_ID
+from tools.virtual_workflows.actions import ACTION_INTERACTION_SURFACES
+from tools.virtual_workflows.joined_interaction_cases import (
+    JOINED_INTERACTION_CASE_ID,
+    JOINED_INTERACTION_FIXTURE_PATH,
+)
+from tools.virtual_workflows.optimizer_360_cases import (
+    OPTIMIZER_360_CASE_ID,
+    OPTIMIZER_360_FIXTURE_PATH,
+)
+from tools.virtual_workflows.matrices import get_matrix_definition
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +83,11 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         SOFT_STOP_RESUME_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
+        LEGACY_READ_ONLY_WORKLOAD_ID,
+        MIXED_MODE_WORKLOAD_ID,
+        DISCONNECT_WORKLOAD_ID,
+        JOINED_INTERACTION_CASE_ID,
+        OPTIMIZER_360_CASE_ID,
     )
 
     for scenario_id in (WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID):
@@ -100,6 +118,35 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert {
         scenario["registry_id"] for scenario in payload["scenarios"]
     } == set(registered_scenario_ids())
+    assert payload["policy"]["coverage_join_status"] == (
+        "implemented_milestone_8_slice_4"
+    )
+    assert payload["policy"]["safeguard_matrix_coverage_join_status"] == (
+        "implemented_milestone_12_slice_5"
+    )
+    safeguard_matrices = {
+        row["id"]: row
+        for row in payload["policy"]["safeguard_matrix_catalog"]
+    }
+    assert set(safeguard_matrices) == {
+        "editor_safeguards_v1",
+        "execution_preflight_safeguards_v1",
+        "authoritative_persistence_safeguards_v1",
+    }
+    for matrix_id, row in safeguard_matrices.items():
+        definition = get_matrix_definition(matrix_id)
+        assert row["case_ids"] == list(definition.case_ids())
+        assert row["case_count"] == len(definition.case_ids())
+        assert row["required_assertion_ids"] == [
+            "safeguard_rejection_no_mutation_no_dispatch"
+        ]
+    assert {
+        row["id"]: row["interaction_surface"]
+        for row in payload["policy"]["action_catalog"]
+    } == {
+        action_id: surface.value
+        for action_id, surface in ACTION_INTERACTION_SURFACES.items()
+    }
 
     standard = _row(payload, "suites", "standard")
     lifecycle = _row(payload, "suites", "lifecycle")
@@ -110,9 +157,13 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         "experiment_editor_create_finalize_v1",
         "experiment_editor_prestart_rename_refinalize_v1",
         "experiment_editor_post_start_lock_v1",
+        LEGACY_READ_ONLY_WORKLOAD_ID,
         "print_array_soft_stop_resume_24_v1",
-        AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
-        MULTI_STOCK_WORKLOAD_ID,
+            AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+            MULTI_STOCK_WORKLOAD_ID,
+            MIXED_MODE_WORKLOAD_ID,
+            DISCONNECT_WORKLOAD_ID,
+            JOINED_INTERACTION_CASE_ID,
     ]
     rename_scenario = _row(
         payload,
@@ -138,6 +189,18 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert soft_stop["status"] == "active"
     assert soft_stop["suite_ids"] == ["lifecycle"]
     assert soft_stop["registry_id"] == SOFT_STOP_RESUME_WORKLOAD_ID
+    assert "fixture.prepare_authoritative" not in soft_stop["action_ids"]
+    assert "array.resume_via_ui" in soft_stop["action_ids"]
+    assert soft_stop["required_artifacts"] == [
+        "report_json",
+        "summary_text",
+        "event_trace",
+        "action_ledger",
+        "assertion_ledger",
+        "evidence_manifest",
+        "screenshots",
+        "scenario_root",
+    ]
     authoritative_reload = _row(
         payload,
         "scenarios",
@@ -148,10 +211,79 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert authoritative_reload["registry_id"] == (
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID
     )
+    randomized = _row(payload, "scenarios", JOINED_INTERACTION_CASE_ID)
+    assert randomized["status"] == "active"
+    assert randomized["suite_ids"] == ["lifecycle"]
+    assert randomized["timeout_seconds"] == 180
+    assert randomized["workload_fixture_path"] == (
+        JOINED_INTERACTION_FIXTURE_PATH.relative_to(REPO_ROOT).as_posix()
+    )
+    assert randomized["capability_ids"] == [
+        "sil.hardware_isolation.host",
+        "ui.real_app_construction",
+        "execution.randomized_calibration_reload_execution",
+    ]
+    optimizer_360 = _row(payload, "scenarios", OPTIMIZER_360_CASE_ID)
+    assert optimizer_360["status"] == "active"
+    assert optimizer_360["tier"] == "stress"
+    assert optimizer_360["suite_ids"] == ["host_stress"]
+    assert optimizer_360["supported_platforms"] == ["windows_sil"]
+    assert optimizer_360["timeout_seconds"] == 600
+    assert optimizer_360["workload_fixture_path"] == (
+        OPTIMIZER_360_FIXTURE_PATH.relative_to(REPO_ROOT).as_posix()
+    )
+    assert optimizer_360["capability_ids"] == [
+        "sil.hardware_isolation.host",
+        "ui.real_app_construction",
+        "execution.optimizer_360_calibration_reload_execution",
+    ]
+    host_stress = _row(payload, "suites", "host_stress")
+    assert host_stress["scenario_ids"] == [
+        "print_array_stress_384x10_v1",
+        OPTIMIZER_360_CASE_ID,
+    ]
+    assert OPTIMIZER_360_CASE_ID not in _row(
+        payload, "suites", "pi_stress"
+    )["scenario_ids"]
     multi_stock = _row(payload, "scenarios", MULTI_STOCK_WORKLOAD_ID)
     assert multi_stock["status"] == "active"
     assert multi_stock["suite_ids"] == ["lifecycle"]
     assert multi_stock["registry_id"] == MULTI_STOCK_WORKLOAD_ID
+    assert "fixture.prepare_authoritative" not in multi_stock["action_ids"]
+    assert "head.stage_virtual" not in multi_stock["action_ids"]
+    assert {
+        "editor.configure_design_via_ui",
+        "head.bind_identity",
+        "head.stage_via_ui",
+        "head.return_via_ui",
+        "calibration.apply_via_ui",
+        "array.start_via_ui",
+    } <= set(multi_stock["action_ids"])
+    assert multi_stock["required_artifacts"] == [
+        "report_json",
+        "summary_text",
+        "event_trace",
+        "action_ledger",
+        "assertion_ledger",
+        "evidence_manifest",
+        "screenshots",
+        "scenario_root",
+    ]
+    disconnect = _row(payload, "scenarios", DISCONNECT_WORKLOAD_ID)
+    assert disconnect["status"] == "active"
+    assert disconnect["suite_ids"] == ["lifecycle"]
+    assert "machine.disconnect_via_ui" in disconnect["action_ids"]
+    assert "array.wait_for_completions" not in disconnect["action_ids"]
+    assert "execution.disconnect_fail_closed" in disconnect["assertion_ids"]
+    stress = _row(payload, "scenarios", "print_array_stress_384x10_v1")
+    assert "fixture.prepare_authoritative" not in stress["action_ids"]
+    assert "head.stage_virtual" not in stress["action_ids"]
+    assert {"head.bind_identity", "head.stage_via_ui", "head.return_via_ui",
+            "validation.stock_pass_boundary"} <= set(stress["action_ids"])
+    assert "ui.sustained_responsiveness_acceptable" in stress["assertion_ids"]
+    assert {"action_ledger", "assertion_ledger", "evidence_manifest"} <= set(
+        stress["required_artifacts"]
+    )
 
     smoke = _row(payload, "scenarios", "print_array_smoke_24_v1")
     assert smoke["registry_id"] == SMOKE_WORKLOAD_ID
@@ -211,10 +343,26 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert capabilities["execution.multi_stock_head_exchange"][
         "max_evidence_age_days"
     ] == 2
+    assert capabilities["execution.mixed_droplet_stream_lifecycle"][
+        "active_scenario_ids"
+    ] == [MIXED_MODE_WORKLOAD_ID]
+    assert capabilities["execution.disconnect_fail_closed"]["status"] == "covered"
+    assert capabilities["execution.disconnect_fail_closed"][
+        "active_scenario_ids"
+    ] == [DISCONNECT_WORKLOAD_ID]
     assert {
         schedule["automation_status"] for schedule in payload["schedules"]
-    } == {"not_configured"}
-    assert payload["policy"]["coverage_join_status"] == "deferred_to_slice_6"
+    } == {"manual"}
+    assert {schedule["cadence"] for schedule in payload["schedules"]} == {
+        "on_demand"
+    }
+    assert all(
+        schedule["id"] == f"{schedule['suite_id']}_on_demand"
+        for schedule in payload["schedules"]
+    )
+    assert payload["policy"]["coverage_join_status"] == (
+        "implemented_milestone_8_slice_4"
+    )
     assert payload["policy"]["generated_evidence_updates_manifest"] is False
 
 
@@ -245,6 +393,9 @@ def test_cli_scenario_surface_is_registry_driven_and_legacy_compatible():
     assert parser.parse_args(
         ["--scenario", MULTI_STOCK_WORKLOAD_ID]
     ).scenario == MULTI_STOCK_WORKLOAD_ID
+    assert parser.parse_args(
+        ["--scenario", MIXED_MODE_WORKLOAD_ID]
+    ).scenario == MIXED_MODE_WORKLOAD_ID
 
 
 @pytest.mark.parametrize(
@@ -253,6 +404,8 @@ def test_cli_scenario_surface_is_registry_driven_and_legacy_compatible():
         WORKLOAD_ID,
         STRESS_WORKLOAD_ID,
         SMOKE_WORKLOAD_ID,
+        EDITOR_WORKLOAD_ID,
+        EDITOR_RENAME_WORKLOAD_ID,
         SOFT_STOP_RESUME_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
@@ -263,7 +416,7 @@ def test_registry_dispatch_uses_existing_config_and_runner(
     tmp_path,
     monkeypatch,
 ):
-    from tools.virtual_workflows import scenarios
+    from tools.virtual_workflows import journeys, scenarios
 
     captured = []
 
@@ -272,6 +425,10 @@ def test_registry_dispatch_uses_existing_config_and_runner(
         return {"scenario_id": config.scenario_id}
 
     monkeypatch.setattr(scenarios, "run_virtual_print_array_scenario", fake_run)
+    monkeypatch.setattr(journeys, "run_virtual_print_array_24_journey", fake_run)
+    monkeypatch.setattr(journeys, "run_editor_create_finalize_journey", fake_run)
+    monkeypatch.setattr(journeys, "run_multi_stock_24x2_journey", fake_run)
+    monkeypatch.setattr(journeys, "run_composed_journey", fake_run)
 
     result = run_registered_scenario(
         scenario_id,
@@ -283,59 +440,37 @@ def test_registry_dispatch_uses_existing_config_and_runner(
     assert result == {"scenario_id": scenario_id}
     assert len(captured) == 1
     config = captured[0]
-    assert isinstance(config, VirtualPrintArrayScenarioConfig)
+    if scenario_id in {
+        WORKLOAD_ID,
+        SMOKE_WORKLOAD_ID,
+        EDITOR_WORKLOAD_ID,
+        EDITOR_RENAME_WORKLOAD_ID,
+        SOFT_STOP_RESUME_WORKLOAD_ID,
+        AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+        MULTI_STOCK_WORKLOAD_ID,
+        MIXED_MODE_WORKLOAD_ID,
+        STRESS_WORKLOAD_ID,
+    }:
+        from tools.virtual_workflows.journeys import JourneyRunConfig
+
+        assert isinstance(config, JourneyRunConfig)
+    else:
+        assert isinstance(config, VirtualPrintArrayScenarioConfig)
     assert config.scenario_id == scenario_id
-    assert config.fixture_path == SCENARIO_FIXTURES[scenario_id].resolve()
+    if scenario_id not in {
+        WORKLOAD_ID,
+        SMOKE_WORKLOAD_ID,
+        EDITOR_WORKLOAD_ID,
+        EDITOR_RENAME_WORKLOAD_ID,
+        SOFT_STOP_RESUME_WORKLOAD_ID,
+        AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
+        MULTI_STOCK_WORKLOAD_ID,
+        STRESS_WORKLOAD_ID,
+    }:
+        assert config.fixture_path == SCENARIO_FIXTURES[scenario_id].resolve()
     assert config.output_root == tmp_path.resolve()
     assert config.speed_multiplier == 25
     assert config.timeout_seconds == 90
-
-
-@pytest.mark.parametrize(
-    ("scenario_id", "runner_name"),
-    [
-        (EDITOR_WORKLOAD_ID, "run_editor_create_finalize_scenario"),
-        (
-            EDITOR_RENAME_WORKLOAD_ID,
-            "run_editor_prestart_rename_refinalize_scenario",
-        ),
-        (
-            EDITOR_POST_START_WORKLOAD_ID,
-            "run_editor_post_start_lock_scenario",
-        ),
-    ],
-)
-def test_registry_dispatches_editor_family_without_importing_it_for_inspection(
-    scenario_id,
-    runner_name,
-    tmp_path,
-    monkeypatch,
-):
-    from tools.virtual_workflows import editor_scenarios
-
-    captured = []
-
-    def fake_run(config):
-        captured.append(config)
-        return {"scenario_id": config.scenario_id}
-
-    monkeypatch.setattr(
-        editor_scenarios,
-        runner_name,
-        fake_run,
-    )
-    result = run_registered_scenario(
-        scenario_id,
-        output_root=tmp_path,
-        speed_multiplier=25,
-        timeout_seconds=60,
-    )
-
-    assert result == {"scenario_id": scenario_id}
-    assert len(captured) == 1
-    assert isinstance(captured[0], EditorLifecycleScenarioConfig)
-    assert captured[0].output_root == tmp_path.resolve()
-    assert captured[0].timeout_seconds == 60
 
 
 @pytest.mark.parametrize(

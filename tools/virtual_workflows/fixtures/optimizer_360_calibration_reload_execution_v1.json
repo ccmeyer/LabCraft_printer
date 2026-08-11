@@ -1,0 +1,8220 @@
+{
+  "case_id": "optimizer_360_calibration_reload_execution_v1",
+  "schema_version": 1,
+  "identity": {
+    "scenario_name": "optimizer_360_calibration_reload_execution",
+    "capability": "execution.optimizer_360_calibration_reload_execution",
+    "experiment_name": "sil-optimizer-360-calibration-v1",
+    "suite": "host_stress",
+    "tier": "stress",
+    "simulation_seed": 1
+  },
+  "experiment": {
+    "plate_name": "shallow-384_well_plate",
+    "replicates": 1,
+    "selected_well_ids": [
+      "A1",
+      "A2",
+      "A3",
+      "A4",
+      "A5",
+      "A6",
+      "A7",
+      "A8",
+      "A9",
+      "A10",
+      "A11",
+      "A12",
+      "A13",
+      "A14",
+      "A15",
+      "A16",
+      "A17",
+      "A18",
+      "A19",
+      "A20",
+      "A21",
+      "A22",
+      "A23",
+      "A24",
+      "B1",
+      "B2",
+      "B3",
+      "B4",
+      "B5",
+      "B6",
+      "B7",
+      "B8",
+      "B9",
+      "B10",
+      "B11",
+      "B12",
+      "B13",
+      "B14",
+      "B15",
+      "B16",
+      "B17",
+      "B18",
+      "B19",
+      "B20",
+      "B21",
+      "B22",
+      "B23",
+      "B24",
+      "C1",
+      "C2",
+      "C3",
+      "C4",
+      "C5",
+      "C6",
+      "C7",
+      "C8",
+      "C9",
+      "C10",
+      "C11",
+      "C12",
+      "C13",
+      "C14",
+      "C15",
+      "C16",
+      "C17",
+      "C18",
+      "C19",
+      "C20",
+      "C21",
+      "C22",
+      "C23",
+      "C24",
+      "D1",
+      "D2",
+      "D3",
+      "D4",
+      "D5",
+      "D6",
+      "D7",
+      "D8",
+      "D9",
+      "D10",
+      "D11",
+      "D12",
+      "D13",
+      "D14",
+      "D15",
+      "D16",
+      "D17",
+      "D18",
+      "D19",
+      "D20",
+      "D21",
+      "D22",
+      "D23",
+      "D24",
+      "E1",
+      "E2",
+      "E3",
+      "E4",
+      "E5",
+      "E6",
+      "E7",
+      "E8",
+      "E9",
+      "E10",
+      "E11",
+      "E12",
+      "E13",
+      "E14",
+      "E15",
+      "E16",
+      "E17",
+      "E18",
+      "E19",
+      "E20",
+      "E21",
+      "E22",
+      "E23",
+      "E24",
+      "F1",
+      "F2",
+      "F3",
+      "F4",
+      "F5",
+      "F6",
+      "F7",
+      "F8",
+      "F9",
+      "F10",
+      "F11",
+      "F12",
+      "F13",
+      "F14",
+      "F15",
+      "F16",
+      "F17",
+      "F18",
+      "F19",
+      "F20",
+      "F21",
+      "F22",
+      "F23",
+      "F24",
+      "G1",
+      "G2",
+      "G3",
+      "G4",
+      "G5",
+      "G6",
+      "G7",
+      "G8",
+      "G9",
+      "G10",
+      "G11",
+      "G12",
+      "G13",
+      "G14",
+      "G15",
+      "G16",
+      "G17",
+      "G18",
+      "G19",
+      "G20",
+      "G21",
+      "G22",
+      "G23",
+      "G24",
+      "H1",
+      "H2",
+      "H3",
+      "H4",
+      "H5",
+      "H6",
+      "H7",
+      "H8",
+      "H9",
+      "H10",
+      "H11",
+      "H12",
+      "H13",
+      "H14",
+      "H15",
+      "H16",
+      "H17",
+      "H18",
+      "H19",
+      "H20",
+      "H21",
+      "H22",
+      "H23",
+      "H24",
+      "I1",
+      "I2",
+      "I3",
+      "I4",
+      "I5",
+      "I6",
+      "I7",
+      "I8",
+      "I9",
+      "I10",
+      "I11",
+      "I12",
+      "I13",
+      "I14",
+      "I15",
+      "I16",
+      "I17",
+      "I18",
+      "I19",
+      "I20",
+      "I21",
+      "I22",
+      "I23",
+      "I24",
+      "J1",
+      "J2",
+      "J3",
+      "J4",
+      "J5",
+      "J6",
+      "J7",
+      "J8",
+      "J9",
+      "J10",
+      "J11",
+      "J12",
+      "J13",
+      "J14",
+      "J15",
+      "J16",
+      "J17",
+      "J18",
+      "J19",
+      "J20",
+      "J21",
+      "J22",
+      "J23",
+      "J24",
+      "K1",
+      "K2",
+      "K3",
+      "K4",
+      "K5",
+      "K6",
+      "K7",
+      "K8",
+      "K9",
+      "K10",
+      "K11",
+      "K12",
+      "K13",
+      "K14",
+      "K15",
+      "K16",
+      "K17",
+      "K18",
+      "K19",
+      "K20",
+      "K21",
+      "K22",
+      "K23",
+      "K24",
+      "L1",
+      "L2",
+      "L3",
+      "L4",
+      "L5",
+      "L6",
+      "L7",
+      "L8",
+      "L9",
+      "L10",
+      "L11",
+      "L12",
+      "L13",
+      "L14",
+      "L15",
+      "L16",
+      "L17",
+      "L18",
+      "L19",
+      "L20",
+      "L21",
+      "L22",
+      "L23",
+      "L24",
+      "M1",
+      "M2",
+      "M3",
+      "M4",
+      "M5",
+      "M6",
+      "M7",
+      "M8",
+      "M9",
+      "M10",
+      "M11",
+      "M12",
+      "M13",
+      "M14",
+      "M15",
+      "M16",
+      "M17",
+      "M18",
+      "M19",
+      "M20",
+      "M21",
+      "M22",
+      "M23",
+      "M24",
+      "N1",
+      "N2",
+      "N3",
+      "N4",
+      "N5",
+      "N6",
+      "N7",
+      "N8",
+      "N9",
+      "N10",
+      "N11",
+      "N12",
+      "N13",
+      "N14",
+      "N15",
+      "N16",
+      "N17",
+      "N18",
+      "N19",
+      "N20",
+      "N21",
+      "N22",
+      "N23",
+      "N24",
+      "O1",
+      "O2",
+      "O3",
+      "O4",
+      "O5",
+      "O6",
+      "O7",
+      "O8",
+      "O9",
+      "O10",
+      "O11",
+      "O12",
+      "O13",
+      "O14",
+      "O15",
+      "O16",
+      "O17",
+      "O18",
+      "O19",
+      "O20",
+      "O21",
+      "O22",
+      "O23",
+      "O24"
+    ],
+    "excluded_well_ids": [],
+    "printed_volume_nL": "2000",
+    "final_volume_nL": "2000",
+    "printed_volume_tolerance_nL": "0",
+    "randomize_assignments": true,
+    "random_seed": 4321,
+    "allow_two_stock_solutions": false
+  },
+  "reagents": [
+    {
+      "stock_label": "Range A",
+      "group": "Additive",
+      "printing_mode": "droplet",
+      "starting_concentration": "0",
+      "targets": [
+        "1",
+        "2",
+        "3",
+        "5",
+        "8",
+        "13",
+        "21",
+        "34",
+        "55",
+        "89"
+      ],
+      "units": "x",
+      "droplet_volume_nL": "9",
+      "fixed_stock_concentration": null,
+      "max_stock_concentration": "400"
+    },
+    {
+      "stock_label": "Range B",
+      "group": "Additive",
+      "printing_mode": "droplet",
+      "starting_concentration": "0",
+      "targets": [
+        "0.5",
+        "2",
+        "4",
+        "8"
+      ],
+      "units": "x",
+      "droplet_volume_nL": "9",
+      "fixed_stock_concentration": null,
+      "max_stock_concentration": "100"
+    },
+    {
+      "stock_label": "Range C",
+      "group": "Additive",
+      "printing_mode": "droplet",
+      "starting_concentration": "0",
+      "targets": [
+        "100",
+        "140",
+        "190"
+      ],
+      "units": "x",
+      "droplet_volume_nL": "9",
+      "fixed_stock_concentration": null,
+      "max_stock_concentration": "1600"
+    },
+    {
+      "stock_label": "Range D",
+      "group": "Additive",
+      "printing_mode": "droplet",
+      "starting_concentration": "0",
+      "targets": [
+        "0.1",
+        "0.5",
+        "2"
+      ],
+      "units": "x",
+      "droplet_volume_nL": "9",
+      "fixed_stock_concentration": null,
+      "max_stock_concentration": "20"
+    }
+  ],
+  "stocks": [
+    {
+      "stock_id": "Range A_222.22_x",
+      "reagent_name": "Range A",
+      "concentration": "222.22222222222223",
+      "units": "x",
+      "printing_mode": "droplet",
+      "role": "non_fill"
+    },
+    {
+      "stock_id": "Range B_100.00_x",
+      "reagent_name": "Range B",
+      "concentration": "100",
+      "units": "x",
+      "printing_mode": "droplet",
+      "role": "non_fill"
+    },
+    {
+      "stock_id": "Range C_555.56_x",
+      "reagent_name": "Range C",
+      "concentration": "555.5555555555555",
+      "units": "x",
+      "printing_mode": "droplet",
+      "role": "non_fill"
+    },
+    {
+      "stock_id": "Range D_20.00_x",
+      "reagent_name": "Range D",
+      "concentration": "20",
+      "units": "x",
+      "printing_mode": "droplet",
+      "role": "non_fill"
+    },
+    {
+      "stock_id": "Water_1.00_--",
+      "reagent_name": "Water",
+      "concentration": "1",
+      "units": "--",
+      "printing_mode": "droplet",
+      "role": "fill"
+    }
+  ],
+  "reactions": [
+    {
+      "reaction_id": "R1",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R2",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R3",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R4",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R5",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R6",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R7",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R8",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R9",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R10",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R11",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R12",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R13",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R14",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R15",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R16",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R17",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R18",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R19",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R20",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R21",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R22",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R23",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R24",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R25",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R26",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R27",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R28",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R29",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R30",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R31",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R32",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R33",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R34",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R35",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R36",
+      "replicate": 1,
+      "targets": {
+        "Range A": "1",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R37",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R38",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R39",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R40",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R41",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R42",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R43",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R44",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R45",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R46",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R47",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R48",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R49",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R50",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R51",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R52",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R53",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R54",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R55",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R56",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R57",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R58",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R59",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R60",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R61",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R62",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R63",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R64",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R65",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R66",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R67",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R68",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R69",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R70",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R71",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R72",
+      "replicate": 1,
+      "targets": {
+        "Range A": "2",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R73",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R74",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R75",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R76",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R77",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R78",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R79",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R80",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R81",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R82",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R83",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R84",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R85",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R86",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R87",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R88",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R89",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R90",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R91",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R92",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R93",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R94",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R95",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R96",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R97",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R98",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R99",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R100",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R101",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R102",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R103",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R104",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R105",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R106",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R107",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R108",
+      "replicate": 1,
+      "targets": {
+        "Range A": "3",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R109",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R110",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R111",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R112",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R113",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R114",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R115",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R116",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R117",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R118",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R119",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R120",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R121",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R122",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R123",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R124",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R125",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R126",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R127",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R128",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R129",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R130",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R131",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R132",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R133",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R134",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R135",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R136",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R137",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R138",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R139",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R140",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R141",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R142",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R143",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R144",
+      "replicate": 1,
+      "targets": {
+        "Range A": "5",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R145",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R146",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R147",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R148",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R149",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R150",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R151",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R152",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R153",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R154",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R155",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R156",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R157",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R158",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R159",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R160",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R161",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R162",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R163",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R164",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R165",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R166",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R167",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R168",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R169",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R170",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R171",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R172",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R173",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R174",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R175",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R176",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R177",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R178",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R179",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R180",
+      "replicate": 1,
+      "targets": {
+        "Range A": "8",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R181",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R182",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R183",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R184",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R185",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R186",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R187",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R188",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R189",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R190",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R191",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R192",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R193",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R194",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R195",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R196",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R197",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R198",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R199",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R200",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R201",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R202",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R203",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R204",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R205",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R206",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R207",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R208",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R209",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R210",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R211",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R212",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R213",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R214",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R215",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R216",
+      "replicate": 1,
+      "targets": {
+        "Range A": "13",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R217",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R218",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R219",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R220",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R221",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R222",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R223",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R224",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R225",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R226",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R227",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R228",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R229",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R230",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R231",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R232",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R233",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R234",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R235",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R236",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R237",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R238",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R239",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R240",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R241",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R242",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R243",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R244",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R245",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R246",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R247",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R248",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R249",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R250",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R251",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R252",
+      "replicate": 1,
+      "targets": {
+        "Range A": "21",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R253",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R254",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R255",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R256",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R257",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R258",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R259",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R260",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R261",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R262",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R263",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R264",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R265",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R266",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R267",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R268",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R269",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R270",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R271",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R272",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R273",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R274",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R275",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R276",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R277",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R278",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R279",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R280",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R281",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R282",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R283",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R284",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R285",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R286",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R287",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R288",
+      "replicate": 1,
+      "targets": {
+        "Range A": "34",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R289",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R290",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R291",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R292",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R293",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R294",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R295",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R296",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R297",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R298",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R299",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R300",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R301",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R302",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R303",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R304",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R305",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R306",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R307",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R308",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R309",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R310",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R311",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R312",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R313",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R314",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R315",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R316",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R317",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R318",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R319",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R320",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R321",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R322",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R323",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R324",
+      "replicate": 1,
+      "targets": {
+        "Range A": "55",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R325",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R326",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R327",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "0.5",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R328",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R329",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R330",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "0.5",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R331",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R332",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R333",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "0.5",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R334",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R335",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R336",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "2",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R337",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R338",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R339",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "2",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R340",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R341",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R342",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "2",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R343",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R344",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R345",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "4",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R346",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R347",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R348",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "4",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R349",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R350",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R351",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "4",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R352",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R353",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R354",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "8",
+        "Range C": "100",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R355",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R356",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R357",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "8",
+        "Range C": "140",
+        "Range D": "2"
+      }
+    },
+    {
+      "reaction_id": "R358",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.1"
+      }
+    },
+    {
+      "reaction_id": "R359",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "0.5"
+      }
+    },
+    {
+      "reaction_id": "R360",
+      "replicate": 1,
+      "targets": {
+        "Range A": "89",
+        "Range B": "8",
+        "Range C": "190",
+        "Range D": "2"
+      }
+    }
+  ],
+  "assignments": [
+    {
+      "well_id": "A1",
+      "reaction_id": "R66"
+    },
+    {
+      "well_id": "B1",
+      "reaction_id": "R136"
+    },
+    {
+      "well_id": "C1",
+      "reaction_id": "R163"
+    },
+    {
+      "well_id": "D1",
+      "reaction_id": "R155"
+    },
+    {
+      "well_id": "E1",
+      "reaction_id": "R358"
+    },
+    {
+      "well_id": "F1",
+      "reaction_id": "R133"
+    },
+    {
+      "well_id": "G1",
+      "reaction_id": "R86"
+    },
+    {
+      "well_id": "H1",
+      "reaction_id": "R224"
+    },
+    {
+      "well_id": "I1",
+      "reaction_id": "R107"
+    },
+    {
+      "well_id": "J1",
+      "reaction_id": "R146"
+    },
+    {
+      "well_id": "K1",
+      "reaction_id": "R332"
+    },
+    {
+      "well_id": "L1",
+      "reaction_id": "R85"
+    },
+    {
+      "well_id": "M1",
+      "reaction_id": "R214"
+    },
+    {
+      "well_id": "N1",
+      "reaction_id": "R215"
+    },
+    {
+      "well_id": "O1",
+      "reaction_id": "R153"
+    },
+    {
+      "well_id": "O2",
+      "reaction_id": "R72"
+    },
+    {
+      "well_id": "N2",
+      "reaction_id": "R73"
+    },
+    {
+      "well_id": "M2",
+      "reaction_id": "R45"
+    },
+    {
+      "well_id": "L2",
+      "reaction_id": "R246"
+    },
+    {
+      "well_id": "K2",
+      "reaction_id": "R134"
+    },
+    {
+      "well_id": "J2",
+      "reaction_id": "R142"
+    },
+    {
+      "well_id": "I2",
+      "reaction_id": "R112"
+    },
+    {
+      "well_id": "H2",
+      "reaction_id": "R260"
+    },
+    {
+      "well_id": "G2",
+      "reaction_id": "R137"
+    },
+    {
+      "well_id": "F2",
+      "reaction_id": "R139"
+    },
+    {
+      "well_id": "E2",
+      "reaction_id": "R300"
+    },
+    {
+      "well_id": "D2",
+      "reaction_id": "R189"
+    },
+    {
+      "well_id": "C2",
+      "reaction_id": "R105"
+    },
+    {
+      "well_id": "B2",
+      "reaction_id": "R191"
+    },
+    {
+      "well_id": "A2",
+      "reaction_id": "R19"
+    },
+    {
+      "well_id": "A3",
+      "reaction_id": "R65"
+    },
+    {
+      "well_id": "B3",
+      "reaction_id": "R125"
+    },
+    {
+      "well_id": "C3",
+      "reaction_id": "R190"
+    },
+    {
+      "well_id": "D3",
+      "reaction_id": "R40"
+    },
+    {
+      "well_id": "E3",
+      "reaction_id": "R233"
+    },
+    {
+      "well_id": "F3",
+      "reaction_id": "R82"
+    },
+    {
+      "well_id": "G3",
+      "reaction_id": "R327"
+    },
+    {
+      "well_id": "H3",
+      "reaction_id": "R360"
+    },
+    {
+      "well_id": "I3",
+      "reaction_id": "R164"
+    },
+    {
+      "well_id": "J3",
+      "reaction_id": "R35"
+    },
+    {
+      "well_id": "K3",
+      "reaction_id": "R10"
+    },
+    {
+      "well_id": "L3",
+      "reaction_id": "R252"
+    },
+    {
+      "well_id": "M3",
+      "reaction_id": "R296"
+    },
+    {
+      "well_id": "N3",
+      "reaction_id": "R222"
+    },
+    {
+      "well_id": "O3",
+      "reaction_id": "R41"
+    },
+    {
+      "well_id": "O4",
+      "reaction_id": "R130"
+    },
+    {
+      "well_id": "N4",
+      "reaction_id": "R183"
+    },
+    {
+      "well_id": "M4",
+      "reaction_id": "R156"
+    },
+    {
+      "well_id": "L4",
+      "reaction_id": "R348"
+    },
+    {
+      "well_id": "K4",
+      "reaction_id": "R258"
+    },
+    {
+      "well_id": "J4",
+      "reaction_id": "R123"
+    },
+    {
+      "well_id": "I4",
+      "reaction_id": "R160"
+    },
+    {
+      "well_id": "H4",
+      "reaction_id": "R295"
+    },
+    {
+      "well_id": "G4",
+      "reaction_id": "R124"
+    },
+    {
+      "well_id": "F4",
+      "reaction_id": "R60"
+    },
+    {
+      "well_id": "E4",
+      "reaction_id": "R342"
+    },
+    {
+      "well_id": "D4",
+      "reaction_id": "R83"
+    },
+    {
+      "well_id": "C4",
+      "reaction_id": "R80"
+    },
+    {
+      "well_id": "B4",
+      "reaction_id": "R151"
+    },
+    {
+      "well_id": "A4",
+      "reaction_id": "R343"
+    },
+    {
+      "well_id": "A5",
+      "reaction_id": "R279"
+    },
+    {
+      "well_id": "B5",
+      "reaction_id": "R182"
+    },
+    {
+      "well_id": "C5",
+      "reaction_id": "R212"
+    },
+    {
+      "well_id": "D5",
+      "reaction_id": "R357"
+    },
+    {
+      "well_id": "E5",
+      "reaction_id": "R15"
+    },
+    {
+      "well_id": "F5",
+      "reaction_id": "R109"
+    },
+    {
+      "well_id": "G5",
+      "reaction_id": "R106"
+    },
+    {
+      "well_id": "H5",
+      "reaction_id": "R355"
+    },
+    {
+      "well_id": "I5",
+      "reaction_id": "R187"
+    },
+    {
+      "well_id": "J5",
+      "reaction_id": "R99"
+    },
+    {
+      "well_id": "K5",
+      "reaction_id": "R161"
+    },
+    {
+      "well_id": "L5",
+      "reaction_id": "R341"
+    },
+    {
+      "well_id": "M5",
+      "reaction_id": "R129"
+    },
+    {
+      "well_id": "N5",
+      "reaction_id": "R228"
+    },
+    {
+      "well_id": "O5",
+      "reaction_id": "R165"
+    },
+    {
+      "well_id": "O6",
+      "reaction_id": "R25"
+    },
+    {
+      "well_id": "N6",
+      "reaction_id": "R117"
+    },
+    {
+      "well_id": "M6",
+      "reaction_id": "R1"
+    },
+    {
+      "well_id": "L6",
+      "reaction_id": "R352"
+    },
+    {
+      "well_id": "K6",
+      "reaction_id": "R181"
+    },
+    {
+      "well_id": "J6",
+      "reaction_id": "R13"
+    },
+    {
+      "well_id": "I6",
+      "reaction_id": "R205"
+    },
+    {
+      "well_id": "H6",
+      "reaction_id": "R356"
+    },
+    {
+      "well_id": "G6",
+      "reaction_id": "R87"
+    },
+    {
+      "well_id": "F6",
+      "reaction_id": "R115"
+    },
+    {
+      "well_id": "E6",
+      "reaction_id": "R241"
+    },
+    {
+      "well_id": "D6",
+      "reaction_id": "R290"
+    },
+    {
+      "well_id": "C6",
+      "reaction_id": "R345"
+    },
+    {
+      "well_id": "B6",
+      "reaction_id": "R227"
+    },
+    {
+      "well_id": "A6",
+      "reaction_id": "R11"
+    },
+    {
+      "well_id": "A7",
+      "reaction_id": "R176"
+    },
+    {
+      "well_id": "B7",
+      "reaction_id": "R78"
+    },
+    {
+      "well_id": "C7",
+      "reaction_id": "R37"
+    },
+    {
+      "well_id": "D7",
+      "reaction_id": "R20"
+    },
+    {
+      "well_id": "E7",
+      "reaction_id": "R235"
+    },
+    {
+      "well_id": "F7",
+      "reaction_id": "R90"
+    },
+    {
+      "well_id": "G7",
+      "reaction_id": "R294"
+    },
+    {
+      "well_id": "H7",
+      "reaction_id": "R64"
+    },
+    {
+      "well_id": "I7",
+      "reaction_id": "R127"
+    },
+    {
+      "well_id": "J7",
+      "reaction_id": "R280"
+    },
+    {
+      "well_id": "K7",
+      "reaction_id": "R9"
+    },
+    {
+      "well_id": "L7",
+      "reaction_id": "R5"
+    },
+    {
+      "well_id": "M7",
+      "reaction_id": "R247"
+    },
+    {
+      "well_id": "N7",
+      "reaction_id": "R157"
+    },
+    {
+      "well_id": "O7",
+      "reaction_id": "R289"
+    },
+    {
+      "well_id": "O8",
+      "reaction_id": "R38"
+    },
+    {
+      "well_id": "N8",
+      "reaction_id": "R318"
+    },
+    {
+      "well_id": "M8",
+      "reaction_id": "R178"
+    },
+    {
+      "well_id": "L8",
+      "reaction_id": "R270"
+    },
+    {
+      "well_id": "K8",
+      "reaction_id": "R49"
+    },
+    {
+      "well_id": "J8",
+      "reaction_id": "R17"
+    },
+    {
+      "well_id": "I8",
+      "reaction_id": "R281"
+    },
+    {
+      "well_id": "H8",
+      "reaction_id": "R201"
+    },
+    {
+      "well_id": "G8",
+      "reaction_id": "R238"
+    },
+    {
+      "well_id": "F8",
+      "reaction_id": "R8"
+    },
+    {
+      "well_id": "E8",
+      "reaction_id": "R349"
+    },
+    {
+      "well_id": "D8",
+      "reaction_id": "R339"
+    },
+    {
+      "well_id": "C8",
+      "reaction_id": "R70"
+    },
+    {
+      "well_id": "B8",
+      "reaction_id": "R350"
+    },
+    {
+      "well_id": "A8",
+      "reaction_id": "R303"
+    },
+    {
+      "well_id": "A9",
+      "reaction_id": "R116"
+    },
+    {
+      "well_id": "B9",
+      "reaction_id": "R170"
+    },
+    {
+      "well_id": "C9",
+      "reaction_id": "R336"
+    },
+    {
+      "well_id": "D9",
+      "reaction_id": "R76"
+    },
+    {
+      "well_id": "E9",
+      "reaction_id": "R323"
+    },
+    {
+      "well_id": "F9",
+      "reaction_id": "R328"
+    },
+    {
+      "well_id": "G9",
+      "reaction_id": "R319"
+    },
+    {
+      "well_id": "H9",
+      "reaction_id": "R48"
+    },
+    {
+      "well_id": "I9",
+      "reaction_id": "R63"
+    },
+    {
+      "well_id": "J9",
+      "reaction_id": "R69"
+    },
+    {
+      "well_id": "K9",
+      "reaction_id": "R185"
+    },
+    {
+      "well_id": "L9",
+      "reaction_id": "R293"
+    },
+    {
+      "well_id": "M9",
+      "reaction_id": "R114"
+    },
+    {
+      "well_id": "N9",
+      "reaction_id": "R269"
+    },
+    {
+      "well_id": "O9",
+      "reaction_id": "R234"
+    },
+    {
+      "well_id": "O10",
+      "reaction_id": "R208"
+    },
+    {
+      "well_id": "N10",
+      "reaction_id": "R55"
+    },
+    {
+      "well_id": "M10",
+      "reaction_id": "R122"
+    },
+    {
+      "well_id": "L10",
+      "reaction_id": "R150"
+    },
+    {
+      "well_id": "K10",
+      "reaction_id": "R68"
+    },
+    {
+      "well_id": "J10",
+      "reaction_id": "R118"
+    },
+    {
+      "well_id": "I10",
+      "reaction_id": "R263"
+    },
+    {
+      "well_id": "H10",
+      "reaction_id": "R141"
+    },
+    {
+      "well_id": "G10",
+      "reaction_id": "R93"
+    },
+    {
+      "well_id": "F10",
+      "reaction_id": "R226"
+    },
+    {
+      "well_id": "E10",
+      "reaction_id": "R315"
+    },
+    {
+      "well_id": "D10",
+      "reaction_id": "R257"
+    },
+    {
+      "well_id": "C10",
+      "reaction_id": "R101"
+    },
+    {
+      "well_id": "B10",
+      "reaction_id": "R243"
+    },
+    {
+      "well_id": "A10",
+      "reaction_id": "R46"
+    },
+    {
+      "well_id": "A11",
+      "reaction_id": "R95"
+    },
+    {
+      "well_id": "B11",
+      "reaction_id": "R283"
+    },
+    {
+      "well_id": "C11",
+      "reaction_id": "R245"
+    },
+    {
+      "well_id": "D11",
+      "reaction_id": "R6"
+    },
+    {
+      "well_id": "E11",
+      "reaction_id": "R62"
+    },
+    {
+      "well_id": "F11",
+      "reaction_id": "R14"
+    },
+    {
+      "well_id": "G11",
+      "reaction_id": "R249"
+    },
+    {
+      "well_id": "H11",
+      "reaction_id": "R347"
+    },
+    {
+      "well_id": "I11",
+      "reaction_id": "R285"
+    },
+    {
+      "well_id": "J11",
+      "reaction_id": "R274"
+    },
+    {
+      "well_id": "K11",
+      "reaction_id": "R259"
+    },
+    {
+      "well_id": "L11",
+      "reaction_id": "R186"
+    },
+    {
+      "well_id": "M11",
+      "reaction_id": "R255"
+    },
+    {
+      "well_id": "N11",
+      "reaction_id": "R196"
+    },
+    {
+      "well_id": "O11",
+      "reaction_id": "R16"
+    },
+    {
+      "well_id": "O12",
+      "reaction_id": "R42"
+    },
+    {
+      "well_id": "N12",
+      "reaction_id": "R110"
+    },
+    {
+      "well_id": "M12",
+      "reaction_id": "R325"
+    },
+    {
+      "well_id": "L12",
+      "reaction_id": "R316"
+    },
+    {
+      "well_id": "K12",
+      "reaction_id": "R333"
+    },
+    {
+      "well_id": "J12",
+      "reaction_id": "R74"
+    },
+    {
+      "well_id": "I12",
+      "reaction_id": "R264"
+    },
+    {
+      "well_id": "H12",
+      "reaction_id": "R94"
+    },
+    {
+      "well_id": "G12",
+      "reaction_id": "R102"
+    },
+    {
+      "well_id": "F12",
+      "reaction_id": "R92"
+    },
+    {
+      "well_id": "E12",
+      "reaction_id": "R267"
+    },
+    {
+      "well_id": "D12",
+      "reaction_id": "R61"
+    },
+    {
+      "well_id": "C12",
+      "reaction_id": "R3"
+    },
+    {
+      "well_id": "B12",
+      "reaction_id": "R265"
+    },
+    {
+      "well_id": "A12",
+      "reaction_id": "R166"
+    },
+    {
+      "well_id": "A13",
+      "reaction_id": "R198"
+    },
+    {
+      "well_id": "B13",
+      "reaction_id": "R89"
+    },
+    {
+      "well_id": "C13",
+      "reaction_id": "R219"
+    },
+    {
+      "well_id": "D13",
+      "reaction_id": "R311"
+    },
+    {
+      "well_id": "E13",
+      "reaction_id": "R26"
+    },
+    {
+      "well_id": "F13",
+      "reaction_id": "R81"
+    },
+    {
+      "well_id": "G13",
+      "reaction_id": "R24"
+    },
+    {
+      "well_id": "H13",
+      "reaction_id": "R184"
+    },
+    {
+      "well_id": "I13",
+      "reaction_id": "R334"
+    },
+    {
+      "well_id": "J13",
+      "reaction_id": "R197"
+    },
+    {
+      "well_id": "K13",
+      "reaction_id": "R168"
+    },
+    {
+      "well_id": "L13",
+      "reaction_id": "R210"
+    },
+    {
+      "well_id": "M13",
+      "reaction_id": "R330"
+    },
+    {
+      "well_id": "N13",
+      "reaction_id": "R51"
+    },
+    {
+      "well_id": "O13",
+      "reaction_id": "R174"
+    },
+    {
+      "well_id": "O14",
+      "reaction_id": "R147"
+    },
+    {
+      "well_id": "N14",
+      "reaction_id": "R275"
+    },
+    {
+      "well_id": "M14",
+      "reaction_id": "R284"
+    },
+    {
+      "well_id": "L14",
+      "reaction_id": "R322"
+    },
+    {
+      "well_id": "K14",
+      "reaction_id": "R317"
+    },
+    {
+      "well_id": "J14",
+      "reaction_id": "R199"
+    },
+    {
+      "well_id": "I14",
+      "reaction_id": "R312"
+    },
+    {
+      "well_id": "H14",
+      "reaction_id": "R179"
+    },
+    {
+      "well_id": "G14",
+      "reaction_id": "R140"
+    },
+    {
+      "well_id": "F14",
+      "reaction_id": "R220"
+    },
+    {
+      "well_id": "E14",
+      "reaction_id": "R266"
+    },
+    {
+      "well_id": "D14",
+      "reaction_id": "R256"
+    },
+    {
+      "well_id": "C14",
+      "reaction_id": "R44"
+    },
+    {
+      "well_id": "B14",
+      "reaction_id": "R286"
+    },
+    {
+      "well_id": "A14",
+      "reaction_id": "R18"
+    },
+    {
+      "well_id": "A15",
+      "reaction_id": "R77"
+    },
+    {
+      "well_id": "B15",
+      "reaction_id": "R261"
+    },
+    {
+      "well_id": "C15",
+      "reaction_id": "R354"
+    },
+    {
+      "well_id": "D15",
+      "reaction_id": "R240"
+    },
+    {
+      "well_id": "E15",
+      "reaction_id": "R251"
+    },
+    {
+      "well_id": "F15",
+      "reaction_id": "R204"
+    },
+    {
+      "well_id": "G15",
+      "reaction_id": "R351"
+    },
+    {
+      "well_id": "H15",
+      "reaction_id": "R221"
+    },
+    {
+      "well_id": "I15",
+      "reaction_id": "R297"
+    },
+    {
+      "well_id": "J15",
+      "reaction_id": "R39"
+    },
+    {
+      "well_id": "K15",
+      "reaction_id": "R21"
+    },
+    {
+      "well_id": "L15",
+      "reaction_id": "R272"
+    },
+    {
+      "well_id": "M15",
+      "reaction_id": "R237"
+    },
+    {
+      "well_id": "N15",
+      "reaction_id": "R202"
+    },
+    {
+      "well_id": "O15",
+      "reaction_id": "R305"
+    },
+    {
+      "well_id": "O16",
+      "reaction_id": "R236"
+    },
+    {
+      "well_id": "N16",
+      "reaction_id": "R207"
+    },
+    {
+      "well_id": "M16",
+      "reaction_id": "R276"
+    },
+    {
+      "well_id": "L16",
+      "reaction_id": "R58"
+    },
+    {
+      "well_id": "K16",
+      "reaction_id": "R308"
+    },
+    {
+      "well_id": "J16",
+      "reaction_id": "R2"
+    },
+    {
+      "well_id": "I16",
+      "reaction_id": "R239"
+    },
+    {
+      "well_id": "H16",
+      "reaction_id": "R103"
+    },
+    {
+      "well_id": "G16",
+      "reaction_id": "R268"
+    },
+    {
+      "well_id": "F16",
+      "reaction_id": "R128"
+    },
+    {
+      "well_id": "E16",
+      "reaction_id": "R148"
+    },
+    {
+      "well_id": "D16",
+      "reaction_id": "R359"
+    },
+    {
+      "well_id": "C16",
+      "reaction_id": "R278"
+    },
+    {
+      "well_id": "B16",
+      "reaction_id": "R84"
+    },
+    {
+      "well_id": "A16",
+      "reaction_id": "R53"
+    },
+    {
+      "well_id": "A17",
+      "reaction_id": "R335"
+    },
+    {
+      "well_id": "B17",
+      "reaction_id": "R314"
+    },
+    {
+      "well_id": "C17",
+      "reaction_id": "R12"
+    },
+    {
+      "well_id": "D17",
+      "reaction_id": "R195"
+    },
+    {
+      "well_id": "E17",
+      "reaction_id": "R292"
+    },
+    {
+      "well_id": "F17",
+      "reaction_id": "R242"
+    },
+    {
+      "well_id": "G17",
+      "reaction_id": "R162"
+    },
+    {
+      "well_id": "H17",
+      "reaction_id": "R254"
+    },
+    {
+      "well_id": "I17",
+      "reaction_id": "R67"
+    },
+    {
+      "well_id": "J17",
+      "reaction_id": "R291"
+    },
+    {
+      "well_id": "K17",
+      "reaction_id": "R75"
+    },
+    {
+      "well_id": "L17",
+      "reaction_id": "R213"
+    },
+    {
+      "well_id": "M17",
+      "reaction_id": "R253"
+    },
+    {
+      "well_id": "N17",
+      "reaction_id": "R7"
+    },
+    {
+      "well_id": "O17",
+      "reaction_id": "R262"
+    },
+    {
+      "well_id": "O18",
+      "reaction_id": "R111"
+    },
+    {
+      "well_id": "N18",
+      "reaction_id": "R167"
+    },
+    {
+      "well_id": "M18",
+      "reaction_id": "R171"
+    },
+    {
+      "well_id": "L18",
+      "reaction_id": "R97"
+    },
+    {
+      "well_id": "K18",
+      "reaction_id": "R30"
+    },
+    {
+      "well_id": "J18",
+      "reaction_id": "R169"
+    },
+    {
+      "well_id": "I18",
+      "reaction_id": "R299"
+    },
+    {
+      "well_id": "H18",
+      "reaction_id": "R194"
+    },
+    {
+      "well_id": "G18",
+      "reaction_id": "R298"
+    },
+    {
+      "well_id": "F18",
+      "reaction_id": "R71"
+    },
+    {
+      "well_id": "E18",
+      "reaction_id": "R121"
+    },
+    {
+      "well_id": "D18",
+      "reaction_id": "R144"
+    },
+    {
+      "well_id": "C18",
+      "reaction_id": "R193"
+    },
+    {
+      "well_id": "B18",
+      "reaction_id": "R145"
+    },
+    {
+      "well_id": "A18",
+      "reaction_id": "R31"
+    },
+    {
+      "well_id": "A19",
+      "reaction_id": "R338"
+    },
+    {
+      "well_id": "B19",
+      "reaction_id": "R52"
+    },
+    {
+      "well_id": "C19",
+      "reaction_id": "R216"
+    },
+    {
+      "well_id": "D19",
+      "reaction_id": "R230"
+    },
+    {
+      "well_id": "E19",
+      "reaction_id": "R43"
+    },
+    {
+      "well_id": "F19",
+      "reaction_id": "R306"
+    },
+    {
+      "well_id": "G19",
+      "reaction_id": "R143"
+    },
+    {
+      "well_id": "H19",
+      "reaction_id": "R277"
+    },
+    {
+      "well_id": "I19",
+      "reaction_id": "R98"
+    },
+    {
+      "well_id": "J19",
+      "reaction_id": "R344"
+    },
+    {
+      "well_id": "K19",
+      "reaction_id": "R54"
+    },
+    {
+      "well_id": "L19",
+      "reaction_id": "R326"
+    },
+    {
+      "well_id": "M19",
+      "reaction_id": "R175"
+    },
+    {
+      "well_id": "N19",
+      "reaction_id": "R217"
+    },
+    {
+      "well_id": "O19",
+      "reaction_id": "R282"
+    },
+    {
+      "well_id": "O20",
+      "reaction_id": "R304"
+    },
+    {
+      "well_id": "N20",
+      "reaction_id": "R27"
+    },
+    {
+      "well_id": "M20",
+      "reaction_id": "R271"
+    },
+    {
+      "well_id": "L20",
+      "reaction_id": "R313"
+    },
+    {
+      "well_id": "K20",
+      "reaction_id": "R138"
+    },
+    {
+      "well_id": "J20",
+      "reaction_id": "R104"
+    },
+    {
+      "well_id": "I20",
+      "reaction_id": "R32"
+    },
+    {
+      "well_id": "H20",
+      "reaction_id": "R23"
+    },
+    {
+      "well_id": "G20",
+      "reaction_id": "R159"
+    },
+    {
+      "well_id": "F20",
+      "reaction_id": "R47"
+    },
+    {
+      "well_id": "E20",
+      "reaction_id": "R50"
+    },
+    {
+      "well_id": "D20",
+      "reaction_id": "R287"
+    },
+    {
+      "well_id": "C20",
+      "reaction_id": "R248"
+    },
+    {
+      "well_id": "B20",
+      "reaction_id": "R154"
+    },
+    {
+      "well_id": "A20",
+      "reaction_id": "R57"
+    },
+    {
+      "well_id": "A21",
+      "reaction_id": "R324"
+    },
+    {
+      "well_id": "B21",
+      "reaction_id": "R192"
+    },
+    {
+      "well_id": "C21",
+      "reaction_id": "R232"
+    },
+    {
+      "well_id": "D21",
+      "reaction_id": "R203"
+    },
+    {
+      "well_id": "E21",
+      "reaction_id": "R158"
+    },
+    {
+      "well_id": "F21",
+      "reaction_id": "R34"
+    },
+    {
+      "well_id": "G21",
+      "reaction_id": "R126"
+    },
+    {
+      "well_id": "H21",
+      "reaction_id": "R177"
+    },
+    {
+      "well_id": "I21",
+      "reaction_id": "R310"
+    },
+    {
+      "well_id": "J21",
+      "reaction_id": "R320"
+    },
+    {
+      "well_id": "K21",
+      "reaction_id": "R132"
+    },
+    {
+      "well_id": "L21",
+      "reaction_id": "R172"
+    },
+    {
+      "well_id": "M21",
+      "reaction_id": "R36"
+    },
+    {
+      "well_id": "N21",
+      "reaction_id": "R56"
+    },
+    {
+      "well_id": "O21",
+      "reaction_id": "R200"
+    },
+    {
+      "well_id": "O22",
+      "reaction_id": "R218"
+    },
+    {
+      "well_id": "N22",
+      "reaction_id": "R180"
+    },
+    {
+      "well_id": "M22",
+      "reaction_id": "R331"
+    },
+    {
+      "well_id": "L22",
+      "reaction_id": "R152"
+    },
+    {
+      "well_id": "K22",
+      "reaction_id": "R100"
+    },
+    {
+      "well_id": "J22",
+      "reaction_id": "R244"
+    },
+    {
+      "well_id": "I22",
+      "reaction_id": "R307"
+    },
+    {
+      "well_id": "H22",
+      "reaction_id": "R113"
+    },
+    {
+      "well_id": "G22",
+      "reaction_id": "R340"
+    },
+    {
+      "well_id": "F22",
+      "reaction_id": "R173"
+    },
+    {
+      "well_id": "E22",
+      "reaction_id": "R288"
+    },
+    {
+      "well_id": "D22",
+      "reaction_id": "R108"
+    },
+    {
+      "well_id": "C22",
+      "reaction_id": "R321"
+    },
+    {
+      "well_id": "B22",
+      "reaction_id": "R302"
+    },
+    {
+      "well_id": "A22",
+      "reaction_id": "R135"
+    },
+    {
+      "well_id": "A23",
+      "reaction_id": "R120"
+    },
+    {
+      "well_id": "B23",
+      "reaction_id": "R225"
+    },
+    {
+      "well_id": "C23",
+      "reaction_id": "R79"
+    },
+    {
+      "well_id": "D23",
+      "reaction_id": "R273"
+    },
+    {
+      "well_id": "E23",
+      "reaction_id": "R353"
+    },
+    {
+      "well_id": "F23",
+      "reaction_id": "R4"
+    },
+    {
+      "well_id": "G23",
+      "reaction_id": "R231"
+    },
+    {
+      "well_id": "H23",
+      "reaction_id": "R88"
+    },
+    {
+      "well_id": "I23",
+      "reaction_id": "R229"
+    },
+    {
+      "well_id": "J23",
+      "reaction_id": "R223"
+    },
+    {
+      "well_id": "K23",
+      "reaction_id": "R337"
+    },
+    {
+      "well_id": "L23",
+      "reaction_id": "R206"
+    },
+    {
+      "well_id": "M23",
+      "reaction_id": "R119"
+    },
+    {
+      "well_id": "N23",
+      "reaction_id": "R309"
+    },
+    {
+      "well_id": "O23",
+      "reaction_id": "R211"
+    },
+    {
+      "well_id": "O24",
+      "reaction_id": "R149"
+    },
+    {
+      "well_id": "N24",
+      "reaction_id": "R250"
+    },
+    {
+      "well_id": "M24",
+      "reaction_id": "R28"
+    },
+    {
+      "well_id": "L24",
+      "reaction_id": "R301"
+    },
+    {
+      "well_id": "K24",
+      "reaction_id": "R96"
+    },
+    {
+      "well_id": "J24",
+      "reaction_id": "R22"
+    },
+    {
+      "well_id": "I24",
+      "reaction_id": "R346"
+    },
+    {
+      "well_id": "H24",
+      "reaction_id": "R59"
+    },
+    {
+      "well_id": "G24",
+      "reaction_id": "R188"
+    },
+    {
+      "well_id": "F24",
+      "reaction_id": "R329"
+    },
+    {
+      "well_id": "E24",
+      "reaction_id": "R91"
+    },
+    {
+      "well_id": "D24",
+      "reaction_id": "R33"
+    },
+    {
+      "well_id": "C24",
+      "reaction_id": "R209"
+    },
+    {
+      "well_id": "B24",
+      "reaction_id": "R29"
+    },
+    {
+      "well_id": "A24",
+      "reaction_id": "R131"
+    }
+  ],
+  "calibrations": [
+    {
+      "order": 1,
+      "stock_id": "Range A_222.22_x",
+      "reagent_name": "Range A",
+      "printer_head_id": "virtual-head-m11a-range-a-v1",
+      "print_pulse_width_us": 1400,
+      "droplet_volume_nL": "10.8",
+      "input_revision": 2,
+      "output_revision": 3
+    },
+    {
+      "order": 2,
+      "stock_id": "Range B_100.00_x",
+      "reagent_name": "Range B",
+      "printer_head_id": "virtual-head-m11a-range-b-v1",
+      "print_pulse_width_us": 1500,
+      "droplet_volume_nL": "12.6",
+      "input_revision": 3,
+      "output_revision": 4
+    },
+    {
+      "order": 3,
+      "stock_id": "Range C_555.56_x",
+      "reagent_name": "Range C",
+      "printer_head_id": "virtual-head-m11a-range-c-v1",
+      "print_pulse_width_us": 1600,
+      "droplet_volume_nL": "14.4",
+      "input_revision": 4,
+      "output_revision": 5
+    },
+    {
+      "order": 4,
+      "stock_id": "Range D_20.00_x",
+      "reagent_name": "Range D",
+      "printer_head_id": "virtual-head-m11a-range-d-v1",
+      "print_pulse_width_us": 1700,
+      "droplet_volume_nL": "16.2",
+      "input_revision": 5,
+      "output_revision": 6
+    },
+    {
+      "order": 5,
+      "stock_id": "Water_1.00_--",
+      "reagent_name": "Water",
+      "printer_head_id": "virtual-head-m11a-water-v1",
+      "print_pulse_width_us": 1800,
+      "droplet_volume_nL": "18",
+      "input_revision": 6,
+      "output_revision": 7
+    }
+  ],
+  "checkpoints": [
+    {
+      "checkpoint_id": "prepared",
+      "session": 1,
+      "phase": "prepared",
+      "plan_revision": 1,
+      "progress_reference_revision": 1,
+      "resume_reference_revision": null,
+      "eligibility": "calibration_required"
+    },
+    {
+      "checkpoint_id": "locked_for_range_a",
+      "session": 1,
+      "phase": "calibration_locked",
+      "plan_revision": 2,
+      "progress_reference_revision": 2,
+      "resume_reference_revision": null,
+      "eligibility": "calibration_required"
+    },
+    {
+      "checkpoint_id": "range_a_calibrated",
+      "session": 1,
+      "phase": "calibrated",
+      "plan_revision": 3,
+      "progress_reference_revision": 3,
+      "resume_reference_revision": null,
+      "eligibility": "ready_to_start"
+    },
+    {
+      "checkpoint_id": "fresh_loaded",
+      "session": 2,
+      "phase": "calibrated",
+      "plan_revision": 3,
+      "progress_reference_revision": 3,
+      "resume_reference_revision": null,
+      "eligibility": "ready_to_start"
+    },
+    {
+      "checkpoint_id": "fresh_activated",
+      "session": 2,
+      "phase": "calibrated",
+      "plan_revision": 3,
+      "progress_reference_revision": 3,
+      "resume_reference_revision": 3,
+      "eligibility": "active"
+    },
+    {
+      "checkpoint_id": "range_b_calibrated",
+      "session": 2,
+      "phase": "calibrated",
+      "plan_revision": 4,
+      "progress_reference_revision": 4,
+      "resume_reference_revision": 4,
+      "eligibility": "active"
+    },
+    {
+      "checkpoint_id": "range_c_calibrated",
+      "session": 2,
+      "phase": "calibrated",
+      "plan_revision": 5,
+      "progress_reference_revision": 5,
+      "resume_reference_revision": 5,
+      "eligibility": "active"
+    },
+    {
+      "checkpoint_id": "range_d_calibrated",
+      "session": 2,
+      "phase": "calibrated",
+      "plan_revision": 6,
+      "progress_reference_revision": 6,
+      "resume_reference_revision": 6,
+      "eligibility": "active"
+    },
+    {
+      "checkpoint_id": "all_stocks_calibrated",
+      "session": 2,
+      "phase": "calibrated",
+      "plan_revision": 7,
+      "progress_reference_revision": 7,
+      "resume_reference_revision": 7,
+      "eligibility": "active"
+    },
+    {
+      "checkpoint_id": "completed",
+      "session": 2,
+      "phase": "completed",
+      "plan_revision": 8,
+      "progress_reference_revision": 8,
+      "resume_reference_revision": 8,
+      "eligibility": "analysis_only"
+    },
+    {
+      "checkpoint_id": "terminal_reloaded",
+      "session": 3,
+      "phase": "completed",
+      "plan_revision": 8,
+      "progress_reference_revision": 8,
+      "resume_reference_revision": 8,
+      "eligibility": "analysis_only"
+    }
+  ],
+  "count_maps": {
+    "prepared": {
+      "non_fill_target_counts": {
+        "Range A_222.22_x": {
+          "1": 1,
+          "2": 2,
+          "3": 3,
+          "5": 5,
+          "8": 8,
+          "13": 13,
+          "21": 21,
+          "34": 34,
+          "55": 55,
+          "89": 89
+        },
+        "Range B_100.00_x": {
+          "0.5": 1,
+          "2": 4,
+          "4": 9,
+          "8": 18
+        },
+        "Range C_555.56_x": {
+          "100": 40,
+          "140": 56,
+          "190": 76
+        },
+        "Range D_20.00_x": {
+          "0.1": 1,
+          "0.5": 6,
+          "2": 22
+        }
+      },
+      "water_by_reaction": {
+        "R1": 179,
+        "R2": 174,
+        "R3": 158,
+        "R4": 163,
+        "R5": 158,
+        "R6": 142,
+        "R7": 143,
+        "R8": 138,
+        "R9": 122,
+        "R10": 176,
+        "R11": 171,
+        "R12": 155,
+        "R13": 160,
+        "R14": 155,
+        "R15": 139,
+        "R16": 140,
+        "R17": 135,
+        "R18": 119,
+        "R19": 171,
+        "R20": 166,
+        "R21": 150,
+        "R22": 155,
+        "R23": 150,
+        "R24": 134,
+        "R25": 135,
+        "R26": 130,
+        "R27": 114,
+        "R28": 162,
+        "R29": 157,
+        "R30": 141,
+        "R31": 146,
+        "R32": 141,
+        "R33": 125,
+        "R34": 126,
+        "R35": 121,
+        "R36": 105,
+        "R37": 178,
+        "R38": 173,
+        "R39": 157,
+        "R40": 162,
+        "R41": 157,
+        "R42": 141,
+        "R43": 142,
+        "R44": 137,
+        "R45": 121,
+        "R46": 175,
+        "R47": 170,
+        "R48": 154,
+        "R49": 159,
+        "R50": 154,
+        "R51": 138,
+        "R52": 139,
+        "R53": 134,
+        "R54": 118,
+        "R55": 170,
+        "R56": 165,
+        "R57": 149,
+        "R58": 154,
+        "R59": 149,
+        "R60": 133,
+        "R61": 134,
+        "R62": 129,
+        "R63": 113,
+        "R64": 161,
+        "R65": 156,
+        "R66": 140,
+        "R67": 145,
+        "R68": 140,
+        "R69": 124,
+        "R70": 125,
+        "R71": 120,
+        "R72": 104,
+        "R73": 177,
+        "R74": 172,
+        "R75": 156,
+        "R76": 161,
+        "R77": 156,
+        "R78": 140,
+        "R79": 141,
+        "R80": 136,
+        "R81": 120,
+        "R82": 174,
+        "R83": 169,
+        "R84": 153,
+        "R85": 158,
+        "R86": 153,
+        "R87": 137,
+        "R88": 138,
+        "R89": 133,
+        "R90": 117,
+        "R91": 169,
+        "R92": 164,
+        "R93": 148,
+        "R94": 153,
+        "R95": 148,
+        "R96": 132,
+        "R97": 133,
+        "R98": 128,
+        "R99": 112,
+        "R100": 160,
+        "R101": 155,
+        "R102": 139,
+        "R103": 144,
+        "R104": 139,
+        "R105": 123,
+        "R106": 124,
+        "R107": 119,
+        "R108": 103,
+        "R109": 175,
+        "R110": 170,
+        "R111": 154,
+        "R112": 159,
+        "R113": 154,
+        "R114": 138,
+        "R115": 139,
+        "R116": 134,
+        "R117": 118,
+        "R118": 172,
+        "R119": 167,
+        "R120": 151,
+        "R121": 156,
+        "R122": 151,
+        "R123": 135,
+        "R124": 136,
+        "R125": 131,
+        "R126": 115,
+        "R127": 167,
+        "R128": 162,
+        "R129": 146,
+        "R130": 151,
+        "R131": 146,
+        "R132": 130,
+        "R133": 131,
+        "R134": 126,
+        "R135": 110,
+        "R136": 158,
+        "R137": 153,
+        "R138": 137,
+        "R139": 142,
+        "R140": 137,
+        "R141": 121,
+        "R142": 122,
+        "R143": 117,
+        "R144": 101,
+        "R145": 172,
+        "R146": 167,
+        "R147": 151,
+        "R148": 156,
+        "R149": 151,
+        "R150": 135,
+        "R151": 136,
+        "R152": 131,
+        "R153": 115,
+        "R154": 169,
+        "R155": 164,
+        "R156": 148,
+        "R157": 153,
+        "R158": 148,
+        "R159": 132,
+        "R160": 133,
+        "R161": 128,
+        "R162": 112,
+        "R163": 164,
+        "R164": 159,
+        "R165": 143,
+        "R166": 148,
+        "R167": 143,
+        "R168": 127,
+        "R169": 128,
+        "R170": 123,
+        "R171": 107,
+        "R172": 155,
+        "R173": 150,
+        "R174": 134,
+        "R175": 139,
+        "R176": 134,
+        "R177": 118,
+        "R178": 119,
+        "R179": 114,
+        "R180": 98,
+        "R181": 167,
+        "R182": 162,
+        "R183": 146,
+        "R184": 151,
+        "R185": 146,
+        "R186": 130,
+        "R187": 131,
+        "R188": 126,
+        "R189": 110,
+        "R190": 164,
+        "R191": 159,
+        "R192": 143,
+        "R193": 148,
+        "R194": 143,
+        "R195": 127,
+        "R196": 128,
+        "R197": 123,
+        "R198": 107,
+        "R199": 159,
+        "R200": 154,
+        "R201": 138,
+        "R202": 143,
+        "R203": 138,
+        "R204": 122,
+        "R205": 123,
+        "R206": 118,
+        "R207": 102,
+        "R208": 150,
+        "R209": 145,
+        "R210": 129,
+        "R211": 134,
+        "R212": 129,
+        "R213": 113,
+        "R214": 114,
+        "R215": 109,
+        "R216": 93,
+        "R217": 159,
+        "R218": 154,
+        "R219": 138,
+        "R220": 143,
+        "R221": 138,
+        "R222": 122,
+        "R223": 123,
+        "R224": 118,
+        "R225": 102,
+        "R226": 156,
+        "R227": 151,
+        "R228": 135,
+        "R229": 140,
+        "R230": 135,
+        "R231": 119,
+        "R232": 120,
+        "R233": 115,
+        "R234": 99,
+        "R235": 151,
+        "R236": 146,
+        "R237": 130,
+        "R238": 135,
+        "R239": 130,
+        "R240": 114,
+        "R241": 115,
+        "R242": 110,
+        "R243": 94,
+        "R244": 142,
+        "R245": 137,
+        "R246": 121,
+        "R247": 126,
+        "R248": 121,
+        "R249": 105,
+        "R250": 106,
+        "R251": 101,
+        "R252": 85,
+        "R253": 146,
+        "R254": 141,
+        "R255": 125,
+        "R256": 130,
+        "R257": 125,
+        "R258": 109,
+        "R259": 110,
+        "R260": 105,
+        "R261": 89,
+        "R262": 143,
+        "R263": 138,
+        "R264": 122,
+        "R265": 127,
+        "R266": 122,
+        "R267": 106,
+        "R268": 107,
+        "R269": 102,
+        "R270": 86,
+        "R271": 138,
+        "R272": 133,
+        "R273": 117,
+        "R274": 122,
+        "R275": 117,
+        "R276": 101,
+        "R277": 102,
+        "R278": 97,
+        "R279": 81,
+        "R280": 129,
+        "R281": 124,
+        "R282": 108,
+        "R283": 113,
+        "R284": 108,
+        "R285": 92,
+        "R286": 93,
+        "R287": 88,
+        "R288": 72,
+        "R289": 125,
+        "R290": 120,
+        "R291": 104,
+        "R292": 109,
+        "R293": 104,
+        "R294": 88,
+        "R295": 89,
+        "R296": 84,
+        "R297": 68,
+        "R298": 122,
+        "R299": 117,
+        "R300": 101,
+        "R301": 106,
+        "R302": 101,
+        "R303": 85,
+        "R304": 86,
+        "R305": 81,
+        "R306": 65,
+        "R307": 117,
+        "R308": 112,
+        "R309": 96,
+        "R310": 101,
+        "R311": 96,
+        "R312": 80,
+        "R313": 81,
+        "R314": 76,
+        "R315": 60,
+        "R316": 108,
+        "R317": 103,
+        "R318": 87,
+        "R319": 92,
+        "R320": 87,
+        "R321": 71,
+        "R322": 72,
+        "R323": 67,
+        "R324": 51,
+        "R325": 91,
+        "R326": 86,
+        "R327": 70,
+        "R328": 75,
+        "R329": 70,
+        "R330": 54,
+        "R331": 55,
+        "R332": 50,
+        "R333": 34,
+        "R334": 88,
+        "R335": 83,
+        "R336": 67,
+        "R337": 72,
+        "R338": 67,
+        "R339": 51,
+        "R340": 52,
+        "R341": 47,
+        "R342": 31,
+        "R343": 83,
+        "R344": 78,
+        "R345": 62,
+        "R346": 67,
+        "R347": 62,
+        "R348": 46,
+        "R349": 47,
+        "R350": 42,
+        "R351": 26,
+        "R352": 74,
+        "R353": 69,
+        "R354": 53,
+        "R355": 58,
+        "R356": 53,
+        "R357": 37,
+        "R358": 38,
+        "R359": 33,
+        "R360": 17
+      }
+    },
+    "range_a_calibrated": {
+      "non_fill_target_counts": {
+        "Range A_222.22_x": {
+          "1": 1,
+          "2": 2,
+          "3": 2,
+          "5": 4,
+          "8": 7,
+          "13": 11,
+          "21": 18,
+          "34": 28,
+          "55": 46,
+          "89": 74
+        },
+        "Range B_100.00_x": {
+          "0.5": 1,
+          "2": 4,
+          "4": 9,
+          "8": 18
+        },
+        "Range C_555.56_x": {
+          "100": 40,
+          "140": 56,
+          "190": 76
+        },
+        "Range D_20.00_x": {
+          "0.1": 1,
+          "0.5": 6,
+          "2": 22
+        }
+      },
+      "water_by_reaction": {
+        "R1": 179,
+        "R2": 174,
+        "R3": 158,
+        "R4": 163,
+        "R5": 158,
+        "R6": 142,
+        "R7": 143,
+        "R8": 138,
+        "R9": 122,
+        "R10": 176,
+        "R11": 171,
+        "R12": 155,
+        "R13": 160,
+        "R14": 155,
+        "R15": 139,
+        "R16": 140,
+        "R17": 135,
+        "R18": 119,
+        "R19": 171,
+        "R20": 166,
+        "R21": 150,
+        "R22": 155,
+        "R23": 150,
+        "R24": 134,
+        "R25": 135,
+        "R26": 130,
+        "R27": 114,
+        "R28": 162,
+        "R29": 157,
+        "R30": 141,
+        "R31": 146,
+        "R32": 141,
+        "R33": 125,
+        "R34": 126,
+        "R35": 121,
+        "R36": 105,
+        "R37": 178,
+        "R38": 173,
+        "R39": 157,
+        "R40": 162,
+        "R41": 157,
+        "R42": 141,
+        "R43": 142,
+        "R44": 137,
+        "R45": 121,
+        "R46": 175,
+        "R47": 170,
+        "R48": 154,
+        "R49": 159,
+        "R50": 154,
+        "R51": 138,
+        "R52": 139,
+        "R53": 134,
+        "R54": 118,
+        "R55": 170,
+        "R56": 165,
+        "R57": 149,
+        "R58": 154,
+        "R59": 149,
+        "R60": 133,
+        "R61": 134,
+        "R62": 129,
+        "R63": 113,
+        "R64": 161,
+        "R65": 156,
+        "R66": 140,
+        "R67": 145,
+        "R68": 140,
+        "R69": 124,
+        "R70": 125,
+        "R71": 120,
+        "R72": 104,
+        "R73": 178,
+        "R74": 173,
+        "R75": 157,
+        "R76": 162,
+        "R77": 157,
+        "R78": 141,
+        "R79": 142,
+        "R80": 137,
+        "R81": 121,
+        "R82": 175,
+        "R83": 170,
+        "R84": 154,
+        "R85": 159,
+        "R86": 154,
+        "R87": 138,
+        "R88": 139,
+        "R89": 134,
+        "R90": 118,
+        "R91": 170,
+        "R92": 165,
+        "R93": 149,
+        "R94": 154,
+        "R95": 149,
+        "R96": 133,
+        "R97": 134,
+        "R98": 129,
+        "R99": 113,
+        "R100": 161,
+        "R101": 156,
+        "R102": 140,
+        "R103": 145,
+        "R104": 140,
+        "R105": 124,
+        "R106": 125,
+        "R107": 120,
+        "R108": 104,
+        "R109": 175,
+        "R110": 170,
+        "R111": 154,
+        "R112": 159,
+        "R113": 154,
+        "R114": 138,
+        "R115": 139,
+        "R116": 134,
+        "R117": 118,
+        "R118": 172,
+        "R119": 167,
+        "R120": 151,
+        "R121": 156,
+        "R122": 151,
+        "R123": 135,
+        "R124": 136,
+        "R125": 131,
+        "R126": 115,
+        "R127": 167,
+        "R128": 162,
+        "R129": 146,
+        "R130": 151,
+        "R131": 146,
+        "R132": 130,
+        "R133": 131,
+        "R134": 126,
+        "R135": 110,
+        "R136": 158,
+        "R137": 153,
+        "R138": 137,
+        "R139": 142,
+        "R140": 137,
+        "R141": 121,
+        "R142": 122,
+        "R143": 117,
+        "R144": 101,
+        "R145": 172,
+        "R146": 167,
+        "R147": 151,
+        "R148": 156,
+        "R149": 151,
+        "R150": 135,
+        "R151": 136,
+        "R152": 131,
+        "R153": 115,
+        "R154": 169,
+        "R155": 164,
+        "R156": 148,
+        "R157": 153,
+        "R158": 148,
+        "R159": 132,
+        "R160": 133,
+        "R161": 128,
+        "R162": 112,
+        "R163": 164,
+        "R164": 159,
+        "R165": 143,
+        "R166": 148,
+        "R167": 143,
+        "R168": 127,
+        "R169": 128,
+        "R170": 123,
+        "R171": 107,
+        "R172": 155,
+        "R173": 150,
+        "R174": 134,
+        "R175": 139,
+        "R176": 134,
+        "R177": 118,
+        "R178": 119,
+        "R179": 114,
+        "R180": 98,
+        "R181": 167,
+        "R182": 162,
+        "R183": 146,
+        "R184": 151,
+        "R185": 146,
+        "R186": 130,
+        "R187": 131,
+        "R188": 126,
+        "R189": 110,
+        "R190": 164,
+        "R191": 159,
+        "R192": 143,
+        "R193": 148,
+        "R194": 143,
+        "R195": 127,
+        "R196": 128,
+        "R197": 123,
+        "R198": 107,
+        "R199": 159,
+        "R200": 154,
+        "R201": 138,
+        "R202": 143,
+        "R203": 138,
+        "R204": 122,
+        "R205": 123,
+        "R206": 118,
+        "R207": 102,
+        "R208": 150,
+        "R209": 145,
+        "R210": 129,
+        "R211": 134,
+        "R212": 129,
+        "R213": 113,
+        "R214": 114,
+        "R215": 109,
+        "R216": 93,
+        "R217": 159,
+        "R218": 154,
+        "R219": 138,
+        "R220": 143,
+        "R221": 138,
+        "R222": 122,
+        "R223": 123,
+        "R224": 118,
+        "R225": 102,
+        "R226": 156,
+        "R227": 151,
+        "R228": 135,
+        "R229": 140,
+        "R230": 135,
+        "R231": 119,
+        "R232": 120,
+        "R233": 115,
+        "R234": 99,
+        "R235": 151,
+        "R236": 146,
+        "R237": 130,
+        "R238": 135,
+        "R239": 130,
+        "R240": 114,
+        "R241": 115,
+        "R242": 110,
+        "R243": 94,
+        "R244": 142,
+        "R245": 137,
+        "R246": 121,
+        "R247": 126,
+        "R248": 121,
+        "R249": 105,
+        "R250": 106,
+        "R251": 101,
+        "R252": 85,
+        "R253": 147,
+        "R254": 142,
+        "R255": 126,
+        "R256": 131,
+        "R257": 126,
+        "R258": 110,
+        "R259": 111,
+        "R260": 106,
+        "R261": 90,
+        "R262": 144,
+        "R263": 139,
+        "R264": 123,
+        "R265": 128,
+        "R266": 123,
+        "R267": 107,
+        "R268": 108,
+        "R269": 103,
+        "R270": 87,
+        "R271": 139,
+        "R272": 134,
+        "R273": 118,
+        "R274": 123,
+        "R275": 118,
+        "R276": 102,
+        "R277": 103,
+        "R278": 98,
+        "R279": 82,
+        "R280": 130,
+        "R281": 125,
+        "R282": 109,
+        "R283": 114,
+        "R284": 109,
+        "R285": 93,
+        "R286": 94,
+        "R287": 89,
+        "R288": 73,
+        "R289": 125,
+        "R290": 120,
+        "R291": 104,
+        "R292": 109,
+        "R293": 104,
+        "R294": 88,
+        "R295": 89,
+        "R296": 84,
+        "R297": 68,
+        "R298": 122,
+        "R299": 117,
+        "R300": 101,
+        "R301": 106,
+        "R302": 101,
+        "R303": 85,
+        "R304": 86,
+        "R305": 81,
+        "R306": 65,
+        "R307": 117,
+        "R308": 112,
+        "R309": 96,
+        "R310": 101,
+        "R311": 96,
+        "R312": 80,
+        "R313": 81,
+        "R314": 76,
+        "R315": 60,
+        "R316": 108,
+        "R317": 103,
+        "R318": 87,
+        "R319": 92,
+        "R320": 87,
+        "R321": 71,
+        "R322": 72,
+        "R323": 67,
+        "R324": 51,
+        "R325": 91,
+        "R326": 86,
+        "R327": 70,
+        "R328": 75,
+        "R329": 70,
+        "R330": 54,
+        "R331": 55,
+        "R332": 50,
+        "R333": 34,
+        "R334": 88,
+        "R335": 83,
+        "R336": 67,
+        "R337": 72,
+        "R338": 67,
+        "R339": 51,
+        "R340": 52,
+        "R341": 47,
+        "R342": 31,
+        "R343": 83,
+        "R344": 78,
+        "R345": 62,
+        "R346": 67,
+        "R347": 62,
+        "R348": 46,
+        "R349": 47,
+        "R350": 42,
+        "R351": 26,
+        "R352": 74,
+        "R353": 69,
+        "R354": 53,
+        "R355": 58,
+        "R356": 53,
+        "R357": 37,
+        "R358": 38,
+        "R359": 33,
+        "R360": 17
+      }
+    },
+    "range_b_calibrated": {
+      "non_fill_target_counts": {
+        "Range A_222.22_x": {
+          "1": 1,
+          "2": 2,
+          "3": 2,
+          "5": 4,
+          "8": 7,
+          "13": 11,
+          "21": 18,
+          "34": 28,
+          "55": 46,
+          "89": 74
+        },
+        "Range B_100.00_x": {
+          "0.5": 1,
+          "2": 3,
+          "4": 6,
+          "8": 13
+        },
+        "Range C_555.56_x": {
+          "100": 40,
+          "140": 56,
+          "190": 76
+        },
+        "Range D_20.00_x": {
+          "0.1": 1,
+          "0.5": 6,
+          "2": 22
+        }
+      },
+      "water_by_reaction": {
+        "R1": 179,
+        "R2": 174,
+        "R3": 158,
+        "R4": 163,
+        "R5": 158,
+        "R6": 142,
+        "R7": 143,
+        "R8": 138,
+        "R9": 122,
+        "R10": 176,
+        "R11": 171,
+        "R12": 155,
+        "R13": 160,
+        "R14": 155,
+        "R15": 139,
+        "R16": 140,
+        "R17": 135,
+        "R18": 119,
+        "R19": 172,
+        "R20": 167,
+        "R21": 151,
+        "R22": 156,
+        "R23": 151,
+        "R24": 135,
+        "R25": 136,
+        "R26": 131,
+        "R27": 115,
+        "R28": 162,
+        "R29": 157,
+        "R30": 141,
+        "R31": 146,
+        "R32": 141,
+        "R33": 125,
+        "R34": 126,
+        "R35": 121,
+        "R36": 105,
+        "R37": 177,
+        "R38": 172,
+        "R39": 156,
+        "R40": 161,
+        "R41": 156,
+        "R42": 140,
+        "R43": 141,
+        "R44": 136,
+        "R45": 120,
+        "R46": 175,
+        "R47": 170,
+        "R48": 154,
+        "R49": 159,
+        "R50": 154,
+        "R51": 138,
+        "R52": 139,
+        "R53": 134,
+        "R54": 118,
+        "R55": 170,
+        "R56": 165,
+        "R57": 149,
+        "R58": 154,
+        "R59": 149,
+        "R60": 133,
+        "R61": 134,
+        "R62": 129,
+        "R63": 113,
+        "R64": 161,
+        "R65": 156,
+        "R66": 140,
+        "R67": 145,
+        "R68": 140,
+        "R69": 124,
+        "R70": 125,
+        "R71": 120,
+        "R72": 104,
+        "R73": 177,
+        "R74": 172,
+        "R75": 156,
+        "R76": 161,
+        "R77": 156,
+        "R78": 140,
+        "R79": 141,
+        "R80": 136,
+        "R81": 120,
+        "R82": 175,
+        "R83": 170,
+        "R84": 154,
+        "R85": 159,
+        "R86": 154,
+        "R87": 138,
+        "R88": 139,
+        "R89": 134,
+        "R90": 118,
+        "R91": 170,
+        "R92": 165,
+        "R93": 149,
+        "R94": 154,
+        "R95": 149,
+        "R96": 133,
+        "R97": 134,
+        "R98": 129,
+        "R99": 113,
+        "R100": 161,
+        "R101": 156,
+        "R102": 140,
+        "R103": 145,
+        "R104": 140,
+        "R105": 124,
+        "R106": 125,
+        "R107": 120,
+        "R108": 104,
+        "R109": 175,
+        "R110": 170,
+        "R111": 154,
+        "R112": 159,
+        "R113": 154,
+        "R114": 138,
+        "R115": 139,
+        "R116": 134,
+        "R117": 118,
+        "R118": 172,
+        "R119": 167,
+        "R120": 151,
+        "R121": 156,
+        "R122": 151,
+        "R123": 135,
+        "R124": 136,
+        "R125": 131,
+        "R126": 115,
+        "R127": 168,
+        "R128": 163,
+        "R129": 147,
+        "R130": 152,
+        "R131": 147,
+        "R132": 131,
+        "R133": 132,
+        "R134": 127,
+        "R135": 111,
+        "R136": 158,
+        "R137": 153,
+        "R138": 137,
+        "R139": 142,
+        "R140": 137,
+        "R141": 121,
+        "R142": 122,
+        "R143": 117,
+        "R144": 101,
+        "R145": 171,
+        "R146": 166,
+        "R147": 150,
+        "R148": 155,
+        "R149": 150,
+        "R150": 134,
+        "R151": 135,
+        "R152": 130,
+        "R153": 114,
+        "R154": 169,
+        "R155": 164,
+        "R156": 148,
+        "R157": 153,
+        "R158": 148,
+        "R159": 132,
+        "R160": 133,
+        "R161": 128,
+        "R162": 112,
+        "R163": 164,
+        "R164": 159,
+        "R165": 143,
+        "R166": 148,
+        "R167": 143,
+        "R168": 127,
+        "R169": 128,
+        "R170": 123,
+        "R171": 107,
+        "R172": 155,
+        "R173": 150,
+        "R174": 134,
+        "R175": 139,
+        "R176": 134,
+        "R177": 118,
+        "R178": 119,
+        "R179": 114,
+        "R180": 98,
+        "R181": 167,
+        "R182": 162,
+        "R183": 146,
+        "R184": 151,
+        "R185": 146,
+        "R186": 130,
+        "R187": 131,
+        "R188": 126,
+        "R189": 110,
+        "R190": 164,
+        "R191": 159,
+        "R192": 143,
+        "R193": 148,
+        "R194": 143,
+        "R195": 127,
+        "R196": 128,
+        "R197": 123,
+        "R198": 107,
+        "R199": 160,
+        "R200": 155,
+        "R201": 139,
+        "R202": 144,
+        "R203": 139,
+        "R204": 123,
+        "R205": 124,
+        "R206": 119,
+        "R207": 103,
+        "R208": 150,
+        "R209": 145,
+        "R210": 129,
+        "R211": 134,
+        "R212": 129,
+        "R213": 113,
+        "R214": 114,
+        "R215": 109,
+        "R216": 93,
+        "R217": 158,
+        "R218": 153,
+        "R219": 137,
+        "R220": 142,
+        "R221": 137,
+        "R222": 121,
+        "R223": 122,
+        "R224": 117,
+        "R225": 101,
+        "R226": 155,
+        "R227": 150,
+        "R228": 134,
+        "R229": 139,
+        "R230": 134,
+        "R231": 118,
+        "R232": 119,
+        "R233": 114,
+        "R234": 98,
+        "R235": 151,
+        "R236": 146,
+        "R237": 130,
+        "R238": 135,
+        "R239": 130,
+        "R240": 114,
+        "R241": 115,
+        "R242": 110,
+        "R243": 94,
+        "R244": 141,
+        "R245": 136,
+        "R246": 120,
+        "R247": 125,
+        "R248": 120,
+        "R249": 104,
+        "R250": 105,
+        "R251": 100,
+        "R252": 84,
+        "R253": 146,
+        "R254": 141,
+        "R255": 125,
+        "R256": 130,
+        "R257": 125,
+        "R258": 109,
+        "R259": 110,
+        "R260": 105,
+        "R261": 89,
+        "R262": 143,
+        "R263": 138,
+        "R264": 122,
+        "R265": 127,
+        "R266": 122,
+        "R267": 106,
+        "R268": 107,
+        "R269": 102,
+        "R270": 86,
+        "R271": 139,
+        "R272": 134,
+        "R273": 118,
+        "R274": 123,
+        "R275": 118,
+        "R276": 102,
+        "R277": 103,
+        "R278": 98,
+        "R279": 82,
+        "R280": 129,
+        "R281": 124,
+        "R282": 108,
+        "R283": 113,
+        "R284": 108,
+        "R285": 92,
+        "R286": 93,
+        "R287": 88,
+        "R288": 72,
+        "R289": 125,
+        "R290": 120,
+        "R291": 104,
+        "R292": 109,
+        "R293": 104,
+        "R294": 88,
+        "R295": 89,
+        "R296": 84,
+        "R297": 68,
+        "R298": 122,
+        "R299": 117,
+        "R300": 101,
+        "R301": 106,
+        "R302": 101,
+        "R303": 85,
+        "R304": 86,
+        "R305": 81,
+        "R306": 65,
+        "R307": 118,
+        "R308": 113,
+        "R309": 97,
+        "R310": 102,
+        "R311": 97,
+        "R312": 81,
+        "R313": 82,
+        "R314": 77,
+        "R315": 61,
+        "R316": 108,
+        "R317": 103,
+        "R318": 87,
+        "R319": 92,
+        "R320": 87,
+        "R321": 71,
+        "R322": 72,
+        "R323": 67,
+        "R324": 51,
+        "R325": 91,
+        "R326": 86,
+        "R327": 70,
+        "R328": 75,
+        "R329": 70,
+        "R330": 54,
+        "R331": 55,
+        "R332": 50,
+        "R333": 34,
+        "R334": 88,
+        "R335": 83,
+        "R336": 67,
+        "R337": 72,
+        "R338": 67,
+        "R339": 51,
+        "R340": 52,
+        "R341": 47,
+        "R342": 31,
+        "R343": 84,
+        "R344": 79,
+        "R345": 63,
+        "R346": 68,
+        "R347": 63,
+        "R348": 47,
+        "R349": 48,
+        "R350": 43,
+        "R351": 27,
+        "R352": 74,
+        "R353": 69,
+        "R354": 53,
+        "R355": 58,
+        "R356": 53,
+        "R357": 37,
+        "R358": 38,
+        "R359": 33,
+        "R360": 17
+      }
+    },
+    "range_c_calibrated": {
+      "non_fill_target_counts": {
+        "Range A_222.22_x": {
+          "1": 1,
+          "2": 2,
+          "3": 2,
+          "5": 4,
+          "8": 7,
+          "13": 11,
+          "21": 18,
+          "34": 28,
+          "55": 46,
+          "89": 74
+        },
+        "Range B_100.00_x": {
+          "0.5": 1,
+          "2": 3,
+          "4": 6,
+          "8": 13
+        },
+        "Range C_555.56_x": {
+          "100": 25,
+          "140": 35,
+          "190": 48
+        },
+        "Range D_20.00_x": {
+          "0.1": 1,
+          "0.5": 6,
+          "2": 22
+        }
+      },
+      "water_by_reaction": {
+        "R1": 179,
+        "R2": 174,
+        "R3": 158,
+        "R4": 163,
+        "R5": 158,
+        "R6": 142,
+        "R7": 142,
+        "R8": 137,
+        "R9": 121,
+        "R10": 176,
+        "R11": 171,
+        "R12": 155,
+        "R13": 160,
+        "R14": 155,
+        "R15": 139,
+        "R16": 139,
+        "R17": 134,
+        "R18": 118,
+        "R19": 172,
+        "R20": 167,
+        "R21": 151,
+        "R22": 156,
+        "R23": 151,
+        "R24": 135,
+        "R25": 135,
+        "R26": 130,
+        "R27": 114,
+        "R28": 162,
+        "R29": 157,
+        "R30": 141,
+        "R31": 146,
+        "R32": 141,
+        "R33": 125,
+        "R34": 125,
+        "R35": 120,
+        "R36": 104,
+        "R37": 177,
+        "R38": 172,
+        "R39": 156,
+        "R40": 161,
+        "R41": 156,
+        "R42": 140,
+        "R43": 141,
+        "R44": 136,
+        "R45": 120,
+        "R46": 175,
+        "R47": 170,
+        "R48": 154,
+        "R49": 159,
+        "R50": 154,
+        "R51": 138,
+        "R52": 138,
+        "R53": 133,
+        "R54": 117,
+        "R55": 170,
+        "R56": 165,
+        "R57": 149,
+        "R58": 154,
+        "R59": 149,
+        "R60": 133,
+        "R61": 134,
+        "R62": 129,
+        "R63": 113,
+        "R64": 161,
+        "R65": 156,
+        "R66": 140,
+        "R67": 145,
+        "R68": 140,
+        "R69": 124,
+        "R70": 124,
+        "R71": 119,
+        "R72": 103,
+        "R73": 177,
+        "R74": 172,
+        "R75": 156,
+        "R76": 161,
+        "R77": 156,
+        "R78": 140,
+        "R79": 141,
+        "R80": 136,
+        "R81": 120,
+        "R82": 175,
+        "R83": 170,
+        "R84": 154,
+        "R85": 159,
+        "R86": 154,
+        "R87": 138,
+        "R88": 138,
+        "R89": 133,
+        "R90": 117,
+        "R91": 170,
+        "R92": 165,
+        "R93": 149,
+        "R94": 154,
+        "R95": 149,
+        "R96": 133,
+        "R97": 134,
+        "R98": 129,
+        "R99": 113,
+        "R100": 161,
+        "R101": 156,
+        "R102": 140,
+        "R103": 145,
+        "R104": 140,
+        "R105": 124,
+        "R106": 124,
+        "R107": 119,
+        "R108": 103,
+        "R109": 175,
+        "R110": 170,
+        "R111": 154,
+        "R112": 159,
+        "R113": 154,
+        "R114": 138,
+        "R115": 138,
+        "R116": 133,
+        "R117": 117,
+        "R118": 172,
+        "R119": 167,
+        "R120": 151,
+        "R121": 156,
+        "R122": 151,
+        "R123": 135,
+        "R124": 135,
+        "R125": 130,
+        "R126": 114,
+        "R127": 168,
+        "R128": 163,
+        "R129": 147,
+        "R130": 152,
+        "R131": 147,
+        "R132": 131,
+        "R133": 131,
+        "R134": 126,
+        "R135": 110,
+        "R136": 158,
+        "R137": 153,
+        "R138": 137,
+        "R139": 142,
+        "R140": 137,
+        "R141": 121,
+        "R142": 121,
+        "R143": 116,
+        "R144": 100,
+        "R145": 171,
+        "R146": 166,
+        "R147": 150,
+        "R148": 155,
+        "R149": 150,
+        "R150": 134,
+        "R151": 135,
+        "R152": 130,
+        "R153": 114,
+        "R154": 169,
+        "R155": 164,
+        "R156": 148,
+        "R157": 153,
+        "R158": 148,
+        "R159": 132,
+        "R160": 132,
+        "R161": 127,
+        "R162": 111,
+        "R163": 164,
+        "R164": 159,
+        "R165": 143,
+        "R166": 148,
+        "R167": 143,
+        "R168": 127,
+        "R169": 128,
+        "R170": 123,
+        "R171": 107,
+        "R172": 155,
+        "R173": 150,
+        "R174": 134,
+        "R175": 139,
+        "R176": 134,
+        "R177": 118,
+        "R178": 118,
+        "R179": 113,
+        "R180": 97,
+        "R181": 167,
+        "R182": 162,
+        "R183": 146,
+        "R184": 151,
+        "R185": 146,
+        "R186": 130,
+        "R187": 130,
+        "R188": 125,
+        "R189": 109,
+        "R190": 164,
+        "R191": 159,
+        "R192": 143,
+        "R193": 148,
+        "R194": 143,
+        "R195": 127,
+        "R196": 127,
+        "R197": 122,
+        "R198": 106,
+        "R199": 160,
+        "R200": 155,
+        "R201": 139,
+        "R202": 144,
+        "R203": 139,
+        "R204": 123,
+        "R205": 123,
+        "R206": 118,
+        "R207": 102,
+        "R208": 150,
+        "R209": 145,
+        "R210": 129,
+        "R211": 134,
+        "R212": 129,
+        "R213": 113,
+        "R214": 113,
+        "R215": 108,
+        "R216": 92,
+        "R217": 158,
+        "R218": 153,
+        "R219": 137,
+        "R220": 142,
+        "R221": 137,
+        "R222": 121,
+        "R223": 121,
+        "R224": 116,
+        "R225": 100,
+        "R226": 155,
+        "R227": 150,
+        "R228": 134,
+        "R229": 139,
+        "R230": 134,
+        "R231": 118,
+        "R232": 119,
+        "R233": 114,
+        "R234": 98,
+        "R235": 151,
+        "R236": 146,
+        "R237": 130,
+        "R238": 135,
+        "R239": 130,
+        "R240": 114,
+        "R241": 114,
+        "R242": 109,
+        "R243": 93,
+        "R244": 141,
+        "R245": 136,
+        "R246": 120,
+        "R247": 125,
+        "R248": 120,
+        "R249": 104,
+        "R250": 105,
+        "R251": 100,
+        "R252": 84,
+        "R253": 146,
+        "R254": 141,
+        "R255": 125,
+        "R256": 130,
+        "R257": 125,
+        "R258": 109,
+        "R259": 109,
+        "R260": 104,
+        "R261": 88,
+        "R262": 143,
+        "R263": 138,
+        "R264": 122,
+        "R265": 127,
+        "R266": 122,
+        "R267": 106,
+        "R268": 107,
+        "R269": 102,
+        "R270": 86,
+        "R271": 139,
+        "R272": 134,
+        "R273": 118,
+        "R274": 123,
+        "R275": 118,
+        "R276": 102,
+        "R277": 102,
+        "R278": 97,
+        "R279": 81,
+        "R280": 129,
+        "R281": 124,
+        "R282": 108,
+        "R283": 113,
+        "R284": 108,
+        "R285": 92,
+        "R286": 93,
+        "R287": 88,
+        "R288": 72,
+        "R289": 125,
+        "R290": 120,
+        "R291": 104,
+        "R292": 109,
+        "R293": 104,
+        "R294": 88,
+        "R295": 88,
+        "R296": 83,
+        "R297": 67,
+        "R298": 122,
+        "R299": 117,
+        "R300": 101,
+        "R301": 106,
+        "R302": 101,
+        "R303": 85,
+        "R304": 85,
+        "R305": 80,
+        "R306": 64,
+        "R307": 118,
+        "R308": 113,
+        "R309": 97,
+        "R310": 102,
+        "R311": 97,
+        "R312": 81,
+        "R313": 81,
+        "R314": 76,
+        "R315": 60,
+        "R316": 108,
+        "R317": 103,
+        "R318": 87,
+        "R319": 92,
+        "R320": 87,
+        "R321": 71,
+        "R322": 71,
+        "R323": 66,
+        "R324": 50,
+        "R325": 91,
+        "R326": 86,
+        "R327": 70,
+        "R328": 75,
+        "R329": 70,
+        "R330": 54,
+        "R331": 54,
+        "R332": 49,
+        "R333": 33,
+        "R334": 88,
+        "R335": 83,
+        "R336": 67,
+        "R337": 72,
+        "R338": 67,
+        "R339": 51,
+        "R340": 51,
+        "R341": 46,
+        "R342": 30,
+        "R343": 84,
+        "R344": 79,
+        "R345": 63,
+        "R346": 68,
+        "R347": 63,
+        "R348": 47,
+        "R349": 47,
+        "R350": 42,
+        "R351": 26,
+        "R352": 74,
+        "R353": 69,
+        "R354": 53,
+        "R355": 58,
+        "R356": 53,
+        "R357": 37,
+        "R358": 37,
+        "R359": 32,
+        "R360": 16
+      }
+    },
+    "range_d_calibrated": {
+      "non_fill_target_counts": {
+        "Range A_222.22_x": {
+          "1": 1,
+          "2": 2,
+          "3": 2,
+          "5": 4,
+          "8": 7,
+          "13": 11,
+          "21": 18,
+          "34": 28,
+          "55": 46,
+          "89": 74
+        },
+        "Range B_100.00_x": {
+          "0.5": 1,
+          "2": 3,
+          "4": 6,
+          "8": 13
+        },
+        "Range C_555.56_x": {
+          "100": 25,
+          "140": 35,
+          "190": 48
+        },
+        "Range D_20.00_x": {
+          "0.1": 1,
+          "0.5": 3,
+          "2": 12
+        }
+      },
+      "water_by_reaction": {
+        "R1": 178,
+        "R2": 174,
+        "R3": 158,
+        "R4": 162,
+        "R5": 158,
+        "R6": 142,
+        "R7": 141,
+        "R8": 137,
+        "R9": 121,
+        "R10": 175,
+        "R11": 171,
+        "R12": 155,
+        "R13": 159,
+        "R14": 155,
+        "R15": 139,
+        "R16": 138,
+        "R17": 135,
+        "R18": 118,
+        "R19": 171,
+        "R20": 167,
+        "R21": 151,
+        "R22": 155,
+        "R23": 151,
+        "R24": 135,
+        "R25": 134,
+        "R26": 130,
+        "R27": 114,
+        "R28": 161,
+        "R29": 157,
+        "R30": 141,
+        "R31": 145,
+        "R32": 141,
+        "R33": 125,
+        "R34": 124,
+        "R35": 121,
+        "R36": 104,
+        "R37": 177,
+        "R38": 173,
+        "R39": 157,
+        "R40": 161,
+        "R41": 157,
+        "R42": 141,
+        "R43": 140,
+        "R44": 136,
+        "R45": 120,
+        "R46": 174,
+        "R47": 170,
+        "R48": 154,
+        "R49": 158,
+        "R50": 154,
+        "R51": 138,
+        "R52": 137,
+        "R53": 133,
+        "R54": 117,
+        "R55": 170,
+        "R56": 166,
+        "R57": 150,
+        "R58": 154,
+        "R59": 150,
+        "R60": 134,
+        "R61": 133,
+        "R62": 129,
+        "R63": 113,
+        "R64": 160,
+        "R65": 156,
+        "R66": 140,
+        "R67": 144,
+        "R68": 140,
+        "R69": 124,
+        "R70": 123,
+        "R71": 119,
+        "R72": 103,
+        "R73": 177,
+        "R74": 173,
+        "R75": 157,
+        "R76": 161,
+        "R77": 157,
+        "R78": 141,
+        "R79": 140,
+        "R80": 136,
+        "R81": 120,
+        "R82": 174,
+        "R83": 170,
+        "R84": 154,
+        "R85": 158,
+        "R86": 154,
+        "R87": 138,
+        "R88": 137,
+        "R89": 133,
+        "R90": 117,
+        "R91": 170,
+        "R92": 166,
+        "R93": 150,
+        "R94": 154,
+        "R95": 150,
+        "R96": 134,
+        "R97": 133,
+        "R98": 129,
+        "R99": 113,
+        "R100": 160,
+        "R101": 156,
+        "R102": 140,
+        "R103": 144,
+        "R104": 140,
+        "R105": 124,
+        "R106": 123,
+        "R107": 119,
+        "R108": 103,
+        "R109": 174,
+        "R110": 171,
+        "R111": 154,
+        "R112": 158,
+        "R113": 155,
+        "R114": 138,
+        "R115": 137,
+        "R116": 134,
+        "R117": 118,
+        "R118": 171,
+        "R119": 168,
+        "R120": 152,
+        "R121": 155,
+        "R122": 152,
+        "R123": 136,
+        "R124": 135,
+        "R125": 131,
+        "R126": 115,
+        "R127": 167,
+        "R128": 164,
+        "R129": 147,
+        "R130": 151,
+        "R131": 148,
+        "R132": 131,
+        "R133": 130,
+        "R134": 127,
+        "R135": 111,
+        "R136": 157,
+        "R137": 154,
+        "R138": 138,
+        "R139": 141,
+        "R140": 138,
+        "R141": 122,
+        "R142": 121,
+        "R143": 117,
+        "R144": 101,
+        "R145": 171,
+        "R146": 167,
+        "R147": 151,
+        "R148": 155,
+        "R149": 151,
+        "R150": 135,
+        "R151": 134,
+        "R152": 130,
+        "R153": 114,
+        "R154": 168,
+        "R155": 164,
+        "R156": 148,
+        "R157": 152,
+        "R158": 148,
+        "R159": 132,
+        "R160": 131,
+        "R161": 127,
+        "R162": 111,
+        "R163": 164,
+        "R164": 160,
+        "R165": 144,
+        "R166": 148,
+        "R167": 144,
+        "R168": 128,
+        "R169": 127,
+        "R170": 123,
+        "R171": 107,
+        "R172": 154,
+        "R173": 150,
+        "R174": 134,
+        "R175": 138,
+        "R176": 134,
+        "R177": 118,
+        "R178": 117,
+        "R179": 113,
+        "R180": 97,
+        "R181": 166,
+        "R182": 162,
+        "R183": 146,
+        "R184": 150,
+        "R185": 146,
+        "R186": 130,
+        "R187": 129,
+        "R188": 125,
+        "R189": 109,
+        "R190": 163,
+        "R191": 159,
+        "R192": 143,
+        "R193": 147,
+        "R194": 143,
+        "R195": 127,
+        "R196": 126,
+        "R197": 123,
+        "R198": 106,
+        "R199": 159,
+        "R200": 155,
+        "R201": 139,
+        "R202": 143,
+        "R203": 139,
+        "R204": 123,
+        "R205": 122,
+        "R206": 118,
+        "R207": 102,
+        "R208": 149,
+        "R209": 145,
+        "R210": 129,
+        "R211": 133,
+        "R212": 129,
+        "R213": 113,
+        "R214": 112,
+        "R215": 109,
+        "R216": 92,
+        "R217": 157,
+        "R218": 154,
+        "R219": 138,
+        "R220": 141,
+        "R221": 138,
+        "R222": 122,
+        "R223": 121,
+        "R224": 117,
+        "R225": 101,
+        "R226": 155,
+        "R227": 151,
+        "R228": 135,
+        "R229": 139,
+        "R230": 135,
+        "R231": 119,
+        "R232": 118,
+        "R233": 114,
+        "R234": 98,
+        "R235": 150,
+        "R236": 147,
+        "R237": 131,
+        "R238": 134,
+        "R239": 131,
+        "R240": 115,
+        "R241": 114,
+        "R242": 110,
+        "R243": 94,
+        "R244": 141,
+        "R245": 137,
+        "R246": 121,
+        "R247": 125,
+        "R248": 121,
+        "R249": 105,
+        "R250": 104,
+        "R251": 100,
+        "R252": 84,
+        "R253": 145,
+        "R254": 142,
+        "R255": 126,
+        "R256": 129,
+        "R257": 126,
+        "R258": 110,
+        "R259": 109,
+        "R260": 105,
+        "R261": 89,
+        "R262": 143,
+        "R263": 139,
+        "R264": 123,
+        "R265": 127,
+        "R266": 123,
+        "R267": 107,
+        "R268": 106,
+        "R269": 102,
+        "R270": 86,
+        "R271": 138,
+        "R272": 135,
+        "R273": 119,
+        "R274": 122,
+        "R275": 119,
+        "R276": 103,
+        "R277": 102,
+        "R278": 98,
+        "R279": 82,
+        "R280": 129,
+        "R281": 125,
+        "R282": 109,
+        "R283": 113,
+        "R284": 109,
+        "R285": 93,
+        "R286": 92,
+        "R287": 88,
+        "R288": 72,
+        "R289": 124,
+        "R290": 120,
+        "R291": 104,
+        "R292": 108,
+        "R293": 104,
+        "R294": 88,
+        "R295": 87,
+        "R296": 83,
+        "R297": 67,
+        "R298": 121,
+        "R299": 117,
+        "R300": 101,
+        "R301": 105,
+        "R302": 101,
+        "R303": 85,
+        "R304": 84,
+        "R305": 81,
+        "R306": 64,
+        "R307": 117,
+        "R308": 113,
+        "R309": 97,
+        "R310": 101,
+        "R311": 97,
+        "R312": 81,
+        "R313": 80,
+        "R314": 76,
+        "R315": 60,
+        "R316": 107,
+        "R317": 103,
+        "R318": 87,
+        "R319": 91,
+        "R320": 87,
+        "R321": 71,
+        "R322": 70,
+        "R323": 67,
+        "R324": 50,
+        "R325": 90,
+        "R326": 87,
+        "R327": 70,
+        "R328": 74,
+        "R329": 71,
+        "R330": 54,
+        "R331": 53,
+        "R332": 50,
+        "R333": 34,
+        "R334": 87,
+        "R335": 84,
+        "R336": 68,
+        "R337": 71,
+        "R338": 68,
+        "R339": 52,
+        "R340": 51,
+        "R341": 47,
+        "R342": 31,
+        "R343": 83,
+        "R344": 80,
+        "R345": 63,
+        "R346": 67,
+        "R347": 64,
+        "R348": 47,
+        "R349": 46,
+        "R350": 43,
+        "R351": 27,
+        "R352": 73,
+        "R353": 70,
+        "R354": 54,
+        "R355": 57,
+        "R356": 54,
+        "R357": 38,
+        "R358": 37,
+        "R359": 33,
+        "R360": 17
+      }
+    },
+    "all_stocks_calibrated": {
+      "non_fill_target_counts": {
+        "Range A_222.22_x": {
+          "1": 1,
+          "2": 2,
+          "3": 2,
+          "5": 4,
+          "8": 7,
+          "13": 11,
+          "21": 18,
+          "34": 28,
+          "55": 46,
+          "89": 74
+        },
+        "Range B_100.00_x": {
+          "0.5": 1,
+          "2": 3,
+          "4": 6,
+          "8": 13
+        },
+        "Range C_555.56_x": {
+          "100": 25,
+          "140": 35,
+          "190": 48
+        },
+        "Range D_20.00_x": {
+          "0.1": 1,
+          "0.5": 3,
+          "2": 12
+        }
+      },
+      "water_by_reaction": {
+        "R1": 89,
+        "R2": 87,
+        "R3": 79,
+        "R4": 81,
+        "R5": 79,
+        "R6": 71,
+        "R7": 71,
+        "R8": 69,
+        "R9": 61,
+        "R10": 88,
+        "R11": 86,
+        "R12": 78,
+        "R13": 80,
+        "R14": 78,
+        "R15": 70,
+        "R16": 69,
+        "R17": 67,
+        "R18": 59,
+        "R19": 85,
+        "R20": 84,
+        "R21": 76,
+        "R22": 77,
+        "R23": 76,
+        "R24": 68,
+        "R25": 67,
+        "R26": 65,
+        "R27": 57,
+        "R28": 81,
+        "R29": 79,
+        "R30": 71,
+        "R31": 73,
+        "R32": 71,
+        "R33": 63,
+        "R34": 62,
+        "R35": 60,
+        "R36": 52,
+        "R37": 88,
+        "R38": 87,
+        "R39": 78,
+        "R40": 80,
+        "R41": 79,
+        "R42": 70,
+        "R43": 70,
+        "R44": 68,
+        "R45": 60,
+        "R46": 87,
+        "R47": 85,
+        "R48": 77,
+        "R49": 79,
+        "R50": 77,
+        "R51": 69,
+        "R52": 69,
+        "R53": 67,
+        "R54": 59,
+        "R55": 85,
+        "R56": 83,
+        "R57": 75,
+        "R58": 77,
+        "R59": 75,
+        "R60": 67,
+        "R61": 66,
+        "R62": 65,
+        "R63": 57,
+        "R64": 80,
+        "R65": 78,
+        "R66": 70,
+        "R67": 72,
+        "R68": 70,
+        "R69": 62,
+        "R70": 62,
+        "R71": 60,
+        "R72": 52,
+        "R73": 88,
+        "R74": 87,
+        "R75": 78,
+        "R76": 80,
+        "R77": 79,
+        "R78": 70,
+        "R79": 70,
+        "R80": 68,
+        "R81": 60,
+        "R82": 87,
+        "R83": 85,
+        "R84": 77,
+        "R85": 79,
+        "R86": 77,
+        "R87": 69,
+        "R88": 69,
+        "R89": 67,
+        "R90": 59,
+        "R91": 85,
+        "R92": 83,
+        "R93": 75,
+        "R94": 77,
+        "R95": 75,
+        "R96": 67,
+        "R97": 66,
+        "R98": 65,
+        "R99": 57,
+        "R100": 80,
+        "R101": 78,
+        "R102": 70,
+        "R103": 72,
+        "R104": 70,
+        "R105": 62,
+        "R106": 62,
+        "R107": 60,
+        "R108": 52,
+        "R109": 87,
+        "R110": 85,
+        "R111": 77,
+        "R112": 79,
+        "R113": 77,
+        "R114": 69,
+        "R115": 69,
+        "R116": 67,
+        "R117": 59,
+        "R118": 86,
+        "R119": 84,
+        "R120": 76,
+        "R121": 78,
+        "R122": 76,
+        "R123": 68,
+        "R124": 67,
+        "R125": 66,
+        "R126": 57,
+        "R127": 84,
+        "R128": 82,
+        "R129": 74,
+        "R130": 76,
+        "R131": 74,
+        "R132": 66,
+        "R133": 65,
+        "R134": 63,
+        "R135": 55,
+        "R136": 79,
+        "R137": 77,
+        "R138": 69,
+        "R139": 71,
+        "R140": 69,
+        "R141": 61,
+        "R142": 60,
+        "R143": 59,
+        "R144": 50,
+        "R145": 85,
+        "R146": 84,
+        "R147": 75,
+        "R148": 77,
+        "R149": 76,
+        "R150": 67,
+        "R151": 67,
+        "R152": 65,
+        "R153": 57,
+        "R154": 84,
+        "R155": 82,
+        "R156": 74,
+        "R157": 76,
+        "R158": 74,
+        "R159": 66,
+        "R160": 66,
+        "R161": 64,
+        "R162": 56,
+        "R163": 82,
+        "R164": 80,
+        "R165": 72,
+        "R166": 74,
+        "R167": 72,
+        "R168": 64,
+        "R169": 63,
+        "R170": 62,
+        "R171": 54,
+        "R172": 77,
+        "R173": 75,
+        "R174": 67,
+        "R175": 69,
+        "R176": 67,
+        "R177": 59,
+        "R178": 59,
+        "R179": 57,
+        "R180": 49,
+        "R181": 83,
+        "R182": 81,
+        "R183": 73,
+        "R184": 75,
+        "R185": 73,
+        "R186": 65,
+        "R187": 65,
+        "R188": 63,
+        "R189": 55,
+        "R190": 82,
+        "R191": 80,
+        "R192": 72,
+        "R193": 74,
+        "R194": 72,
+        "R195": 64,
+        "R196": 63,
+        "R197": 61,
+        "R198": 53,
+        "R199": 79,
+        "R200": 78,
+        "R201": 70,
+        "R202": 71,
+        "R203": 70,
+        "R204": 62,
+        "R205": 61,
+        "R206": 59,
+        "R207": 51,
+        "R208": 75,
+        "R209": 73,
+        "R210": 65,
+        "R211": 67,
+        "R212": 65,
+        "R213": 57,
+        "R214": 56,
+        "R215": 54,
+        "R216": 46,
+        "R217": 79,
+        "R218": 77,
+        "R219": 69,
+        "R220": 71,
+        "R221": 69,
+        "R222": 61,
+        "R223": 60,
+        "R224": 59,
+        "R225": 50,
+        "R226": 77,
+        "R227": 76,
+        "R228": 67,
+        "R229": 69,
+        "R230": 68,
+        "R231": 59,
+        "R232": 59,
+        "R233": 57,
+        "R234": 49,
+        "R235": 75,
+        "R236": 73,
+        "R237": 65,
+        "R238": 67,
+        "R239": 65,
+        "R240": 57,
+        "R241": 57,
+        "R242": 55,
+        "R243": 47,
+        "R244": 70,
+        "R245": 69,
+        "R246": 60,
+        "R247": 62,
+        "R248": 61,
+        "R249": 52,
+        "R250": 52,
+        "R251": 50,
+        "R252": 42,
+        "R253": 73,
+        "R254": 71,
+        "R255": 63,
+        "R256": 65,
+        "R257": 63,
+        "R258": 55,
+        "R259": 54,
+        "R260": 53,
+        "R261": 44,
+        "R262": 71,
+        "R263": 70,
+        "R264": 61,
+        "R265": 63,
+        "R266": 62,
+        "R267": 53,
+        "R268": 53,
+        "R269": 51,
+        "R270": 43,
+        "R271": 69,
+        "R272": 67,
+        "R273": 59,
+        "R274": 61,
+        "R275": 59,
+        "R276": 51,
+        "R277": 51,
+        "R278": 49,
+        "R279": 41,
+        "R280": 64,
+        "R281": 63,
+        "R282": 54,
+        "R283": 56,
+        "R284": 55,
+        "R285": 46,
+        "R286": 46,
+        "R287": 44,
+        "R288": 36,
+        "R289": 62,
+        "R290": 60,
+        "R291": 52,
+        "R292": 54,
+        "R293": 52,
+        "R294": 44,
+        "R295": 44,
+        "R296": 42,
+        "R297": 34,
+        "R298": 61,
+        "R299": 59,
+        "R300": 51,
+        "R301": 53,
+        "R302": 51,
+        "R303": 43,
+        "R304": 42,
+        "R305": 40,
+        "R306": 32,
+        "R307": 58,
+        "R308": 57,
+        "R309": 49,
+        "R310": 50,
+        "R311": 49,
+        "R312": 41,
+        "R313": 40,
+        "R314": 38,
+        "R315": 30,
+        "R316": 54,
+        "R317": 52,
+        "R318": 44,
+        "R319": 46,
+        "R320": 44,
+        "R321": 36,
+        "R322": 35,
+        "R323": 33,
+        "R324": 25,
+        "R325": 45,
+        "R326": 43,
+        "R327": 35,
+        "R328": 37,
+        "R329": 35,
+        "R330": 27,
+        "R331": 27,
+        "R332": 25,
+        "R333": 17,
+        "R334": 44,
+        "R335": 42,
+        "R336": 34,
+        "R337": 36,
+        "R338": 34,
+        "R339": 26,
+        "R340": 25,
+        "R341": 24,
+        "R342": 15,
+        "R343": 42,
+        "R344": 40,
+        "R345": 32,
+        "R346": 34,
+        "R347": 32,
+        "R348": 24,
+        "R349": 23,
+        "R350": 21,
+        "R351": 13,
+        "R352": 37,
+        "R353": 35,
+        "R354": 27,
+        "R355": 29,
+        "R356": 27,
+        "R357": 19,
+        "R358": 18,
+        "R359": 17,
+        "R360": 8
+      }
+    }
+  },
+  "aggregate_totals": {
+    "prepared": {
+      "Range A_222.22_x": 8316,
+      "Range B_100.00_x": 2880,
+      "Range C_555.56_x": 20640,
+      "Range D_20.00_x": 3480,
+      "Water_1.00_--": 44604,
+      "total_droplets": 79920
+    },
+    "range_a_calibrated": {
+      "Range A_222.22_x": 6948,
+      "Range B_100.00_x": 2880,
+      "Range C_555.56_x": 20640,
+      "Range D_20.00_x": 3480,
+      "Water_1.00_--": 44676,
+      "total_droplets": 78624
+    },
+    "range_b_calibrated": {
+      "Range A_222.22_x": 6948,
+      "Range B_100.00_x": 2070,
+      "Range C_555.56_x": 20640,
+      "Range D_20.00_x": 3480,
+      "Water_1.00_--": 44640,
+      "total_droplets": 77778
+    },
+    "range_c_calibrated": {
+      "Range A_222.22_x": 6948,
+      "Range B_100.00_x": 2070,
+      "Range C_555.56_x": 12960,
+      "Range D_20.00_x": 3480,
+      "Water_1.00_--": 44550,
+      "total_droplets": 70008
+    },
+    "range_d_calibrated": {
+      "Range A_222.22_x": 6948,
+      "Range B_100.00_x": 2070,
+      "Range C_555.56_x": 12960,
+      "Range D_20.00_x": 1920,
+      "Water_1.00_--": 44568,
+      "total_droplets": 68466
+    },
+    "all_stocks_calibrated": {
+      "Range A_222.22_x": 6948,
+      "Range B_100.00_x": 2070,
+      "Range C_555.56_x": 12960,
+      "Range D_20.00_x": 1920,
+      "Water_1.00_--": 22310,
+      "total_droplets": 46208
+    }
+  },
+  "execution_passes": [
+    {
+      "order": 1,
+      "stock_id": "Range A_222.22_x",
+      "expected_intents": 360,
+      "expected_droplets": 6948,
+      "cumulative_completion": 360,
+      "milestone": "range_a_pass_complete"
+    },
+    {
+      "order": 2,
+      "stock_id": "Range B_100.00_x",
+      "expected_intents": 360,
+      "expected_droplets": 2070,
+      "cumulative_completion": 720,
+      "milestone": "range_b_pass_complete"
+    },
+    {
+      "order": 3,
+      "stock_id": "Range C_555.56_x",
+      "expected_intents": 360,
+      "expected_droplets": 12960,
+      "cumulative_completion": 1080,
+      "milestone": "range_c_pass_complete"
+    },
+    {
+      "order": 4,
+      "stock_id": "Range D_20.00_x",
+      "expected_intents": 360,
+      "expected_droplets": 1920,
+      "cumulative_completion": 1440,
+      "milestone": "range_d_pass_complete"
+    },
+    {
+      "order": 5,
+      "stock_id": "Water_1.00_--",
+      "expected_intents": 360,
+      "expected_droplets": 22310,
+      "cumulative_completion": 1800,
+      "milestone": "water_pass_complete"
+    }
+  ],
+  "qualification": {
+    "cli_seed": 1,
+    "action_cap": 160,
+    "simulator_evidence_cap": 10000,
+    "offscreen_timeout_seconds": 600,
+    "visible_timeout_seconds": 900,
+    "visible_speed": 20,
+    "required_screenshots": [
+      "optimizer_stocks_generated",
+      "prepared_randomized",
+      "range_a_calibrated",
+      "fresh_loaded",
+      "fresh_activated",
+      "range_b_calibrated",
+      "range_c_calibrated",
+      "range_d_calibrated",
+      "all_stocks_calibrated",
+      "range_a_pass_complete",
+      "range_b_pass_complete",
+      "range_c_pass_complete",
+      "range_d_pass_complete",
+      "water_pass_complete",
+      "completed",
+      "terminal_reloaded"
+    ]
+  },
+  "terminal": {
+    "expected_intents": 1800,
+    "expected_droplets": 46208,
+    "expected_completed_wells": 1800,
+    "expected_completed_stocks": 5,
+    "application_sessions": 3,
+    "terminal_revision": 8
+  },
+  "optimizer_expectations": {
+    "approximate_targets": 7,
+    "unreachable_targets": 0,
+    "achieved_target_concentrations": {
+      "Range A": {
+        "1": "1",
+        "2": "2",
+        "3": "3",
+        "5": "5",
+        "8": "8",
+        "13": "13",
+        "21": "21",
+        "34": "34",
+        "55": "55",
+        "89": "89"
+      },
+      "Range B": {
+        "0.5": "0.45",
+        "2": "1.8",
+        "4": "4.05",
+        "8": "8.1"
+      },
+      "Range C": {
+        "100": "100",
+        "140": "140",
+        "190": "190"
+      },
+      "Range D": {
+        "0.1": "0.09",
+        "0.5": "0.54",
+        "2": "1.98"
+      }
+    }
+  }
+}

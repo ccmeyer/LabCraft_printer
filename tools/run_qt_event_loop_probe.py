@@ -99,20 +99,29 @@ def _run_probe_iteration(
                 "scheduled_offset_ms": offset_ms,
             }
         )
-        QTimer.singleShot(
-            offset_ms,
-            lambda phase_name=phase_name, duration_ms=duration_ms: (
-                block_event_loop(phase_name, duration_ms)
-            ),
-        )
         offset_ms += duration_ms + BETWEEN_STALLS_MS
-    total_duration_ms = offset_ms - BETWEEN_STALLS_MS + FINAL_IDLE_MS
-    QTimer.singleShot(total_duration_ms, loop.quit)
+
+    def schedule_stall(index: int, delay_ms: int) -> None:
+        if index >= len(injected):
+            QTimer.singleShot(FINAL_IDLE_MS, loop.quit)
+            return
+
+        expected = injected[index]
+
+        def run_stall() -> None:
+            block_event_loop(
+                expected["phase_name"],
+                expected["requested_duration_ms"],
+            )
+            schedule_stall(index + 1, BETWEEN_STALLS_MS)
+
+        QTimer.singleShot(delay_ms, run_stall)
 
     started_ns = time.perf_counter_ns()
-    probe.start(app)
     stop_error = None
     try:
+        probe.start(app)
+        schedule_stall(0, INITIAL_IDLE_MS)
         loop.exec()
     finally:
         try:

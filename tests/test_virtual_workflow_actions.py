@@ -9,7 +9,13 @@ from types import SimpleNamespace
 import pytest
 
 from tools.virtual_workflows.actions import (
+    ACTION_INTERACTION_SURFACES,
     ACTION_IDS,
+    COMPOSED_SMOKE_ACTION_IDS,
+    COMPOSED_MULTI_STOCK_ACTION_IDS,
+    COMPOSED_SOFT_STOP_ACTION_IDS,
+    COMPOSED_DISCONNECT_ACTION_IDS,
+    InteractionSurface,
     ScenarioActionError,
     ScenarioContext,
     capture_milestone,
@@ -19,7 +25,6 @@ from tools.virtual_workflows.actions import (
     drive_editor_prestart_rename_refinalize,
     execute_action,
     install_dialog_handler,
-    inspect_editor_lock_controls,
     observe_stopped_quiescence,
     request_soft_stop_via_ui,
     stage_virtual_head,
@@ -28,10 +33,52 @@ from tools.virtual_workflows.actions import (
     wait_for_completions,
     wait_until,
 )
+from tools.virtual_workflows.page_drivers import inspect_editor_lock_controls
 from tools.virtual_workflows.registry import load_capability_manifest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_composed_multi_stock_actions_report_truthful_surfaces():
+    assert COMPOSED_SMOKE_ACTION_IDS < COMPOSED_MULTI_STOCK_ACTION_IDS
+    assert ACTION_INTERACTION_SURFACES["head.bind_identity"] is (
+        InteractionSurface.MODEL
+    )
+
+
+def test_composed_soft_stop_actions_add_one_truthful_resume_contract():
+    assert COMPOSED_SMOKE_ACTION_IDS < COMPOSED_SOFT_STOP_ACTION_IDS
+    assert ACTION_INTERACTION_SURFACES["array.resume_via_ui"] is (
+        InteractionSurface.UI
+    )
+    assert ACTION_INTERACTION_SURFACES["array.observe_stopped_quiescence"] is (
+        InteractionSurface.HARNESS
+    )
+    assert ACTION_INTERACTION_SURFACES["head.return_via_ui"] is (
+        InteractionSurface.UI
+    )
+
+
+def test_composed_disconnect_actions_replace_terminal_wait_truthfully():
+    assert "array.wait_for_completions" not in COMPOSED_DISCONNECT_ACTION_IDS
+    assert "machine.disconnect_via_ui" in COMPOSED_DISCONNECT_ACTION_IDS
+    assert "array.observe_disconnected_quiescence" in COMPOSED_DISCONNECT_ACTION_IDS
+    assert ACTION_INTERACTION_SURFACES["machine.disconnect_via_ui"] is (
+        InteractionSurface.UI
+    )
+    assert ACTION_INTERACTION_SURFACES[
+        "array.observe_disconnected_quiescence"
+    ] is InteractionSurface.HARNESS
+
+
+def test_post_start_synthetic_setup_actions_report_model_surfaces():
+    assert ACTION_INTERACTION_SURFACES["experiment.activate_authoritative"] is (
+        InteractionSurface.MODEL
+    )
+    assert ACTION_INTERACTION_SURFACES["execution.lock_for_printing"] is (
+        InteractionSurface.MODEL
+    )
 
 
 class FakeClock:
@@ -76,8 +123,32 @@ def test_action_catalog_matches_the_tracked_manifest(tmp_path):
     assert {item["id"] for item in catalog} == ACTION_IDS
     assert {item["implementation_status"] for item in catalog} == {"reusable"}
     assert {item["source_path"] for item in catalog} == {
-        "tools/virtual_workflows/actions.py"
+        "tools/virtual_workflows/actions.py",
+        "tools/virtual_workflows/page_drivers.py",
     }
+    assert next(
+        item for item in catalog
+        if item["id"] == "manual_refuel.complete_check_via_ui"
+    )["interaction_surface"] == "ui"
+    declared = {
+        item["id"]: item["interaction_surface"]
+        for item in catalog
+        if "interaction_surface" in item
+    }
+    assert declared
+    assert all(
+        ACTION_INTERACTION_SURFACES[action_id].value == surface
+        for action_id, surface in declared.items()
+    )
+
+
+def test_composed_smoke_actions_have_explicit_truthful_surfaces():
+    assert COMPOSED_SMOKE_ACTION_IDS <= ACTION_IDS
+    assert {
+        ACTION_INTERACTION_SURFACES[action_id]
+        for action_id in COMPOSED_SMOKE_ACTION_IDS
+        if action_id.endswith("_via_ui")
+    } == {InteractionSurface.UI}
 
 
 def test_action_precondition_blocks_operation_and_records_one_failure(tmp_path):
@@ -180,6 +251,93 @@ def test_wait_action_uses_one_global_deadline_and_records_timeout(tmp_path):
     assert len(context.action_results) == 1
     assert context.action_results[0]["action_id"] == "array.wait_for_completions"
     assert context.action_results[0]["failure_stage"] == "timeout"
+
+
+def test_completion_wait_resets_rolling_no_progress_deadline(tmp_path):
+    context, clock, _ = _context(tmp_path, timeout_seconds=1.0)
+    completed = {"value": 0}
+
+    def advancing_sleep(seconds):
+        clock.sleep(seconds)
+        if clock.value >= 100.004:
+            completed["value"] = 1
+        if clock.value >= 100.008:
+            completed["value"] = 2
+
+    context.sleep = advancing_sleep
+    result = wait_for_completions(
+        context,
+        completed_count=lambda: completed["value"],
+        target_count=2,
+        timeout_seconds=1.0,
+        label="rolling progress",
+        no_progress_timeout_seconds=0.005,
+    )
+
+    assert result["status"] == "pass"
+    assert result["evidence"]["observed_count"] == 2
+
+
+def test_completion_wait_fails_closed_with_no_progress_evidence(tmp_path):
+    context, _, _ = _context(tmp_path, timeout_seconds=1.0)
+
+    with pytest.raises(ScenarioActionError, match="no progress") as caught:
+        wait_for_completions(
+            context,
+            completed_count=lambda: 7,
+            target_count=8,
+            timeout_seconds=1.0,
+            label="stalled completion",
+            no_progress_timeout_seconds=0.005,
+            no_progress_evidence=lambda observed, stalled: {
+                "observed": observed,
+                "stalled": stalled,
+            },
+        )
+
+    assert caught.value.stage == "no_progress"
+    assert caught.value.evidence["last_progress_count"] == 7
+    assert caught.value.evidence["stalled_seconds"] >= 0.005
+    assert caught.value.evidence["liveness"]["observed"] == 7
+    assert context.action_results[-1]["failure_stage"] == "no_progress"
+
+
+def test_completion_wait_preserves_stall_when_evidence_capture_fails(tmp_path):
+    context, _, _ = _context(tmp_path, timeout_seconds=1.0)
+
+    with pytest.raises(ScenarioActionError) as caught:
+        wait_for_completions(
+            context,
+            completed_count=lambda: 0,
+            target_count=1,
+            timeout_seconds=1.0,
+            label="stalled completion",
+            no_progress_timeout_seconds=0.003,
+            no_progress_evidence=lambda *_args: (_ for _ in ()).throw(
+                RuntimeError("snapshot unavailable")
+            ),
+        )
+
+    assert caught.value.stage == "no_progress"
+    assert caught.value.evidence["liveness"] == {
+        "capture_error": "RuntimeError: snapshot unavailable"
+    }
+
+
+def test_completion_wait_outer_deadline_precedes_long_progress_timeout(tmp_path):
+    context, _, _ = _context(tmp_path, timeout_seconds=0.004)
+
+    with pytest.raises(ScenarioActionError) as caught:
+        wait_for_completions(
+            context,
+            completed_count=lambda: 0,
+            target_count=1,
+            timeout_seconds=1.0,
+            label="outer deadline",
+            no_progress_timeout_seconds=10.0,
+        )
+
+    assert caught.value.stage == "timeout"
 
 
 def test_soft_stop_action_rejects_incorrect_array_state(tmp_path):
@@ -635,7 +793,7 @@ def test_post_start_lock_control_matrix_requires_every_mutating_surface(
         "add_reagent_btn": QtWidgets.QPushButton(),
         "run_btn": QtWidgets.QPushButton(),
         "save_btn": QtWidgets.QPushButton(),
-        "finish_btn": QtWidgets.QPushButton("Execution Loaded"),
+        "finish_btn": QtWidgets.QPushButton("Experiment Loaded"),
         "duplicate_btn": QtWidgets.QPushButton(),
         "status_lbl": QtWidgets.QLabel("Transient status"),
         "lifecycle_banner": QtWidgets.QLabel(
@@ -669,7 +827,7 @@ def test_post_start_lock_control_matrix_requires_every_mutating_surface(
     assert matrix["editable_copy_enabled"] is True
     assert matrix["actionable_lock_guidance"] is True
     assert matrix["banner_visible"] is True
-    assert matrix["action_label"] == "Execution Loaded"
+    assert matrix["action_label"] == "Experiment Loaded"
 
     dialog.exp_name_edit.setEnabled(True)
     matrix = inspect_editor_lock_controls(dialog)
@@ -1019,3 +1177,17 @@ if loaded:
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_prepared_revision_action_supports_legacy_and_harness_execution():
+    import inspect
+
+    from tools.virtual_workflows.actions import (
+        drive_editor_prestart_rename_refinalize,
+    )
+
+    parameter = inspect.signature(
+        drive_editor_prestart_rename_refinalize
+    ).parameters["action_runner"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is None

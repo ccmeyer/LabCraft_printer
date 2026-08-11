@@ -1,0 +1,109 @@
+{
+  "case_id": "randomized_calibration_reload_execution_v1",
+  "schema_version": 1,
+  "source": {
+    "matrix_id": "experiment_design_pairwise_v1",
+    "case_id": "multi_reagent_seed_4321",
+    "case_sha256": "5d2e7dff0ea9c2e0bcd1e3b218b39280aca57b745834024226fece850f110f51",
+    "catalog_sha256": "49ea5a8bc930035ab239098c3095437acfd8b63764e4b55caeade66f06ae1f9c",
+    "planned_catalog_sha256": "17c879cbe5963ea5ddcbcb8bf298f781784310534db5d91eebd9cb1e7b42d326",
+    "reaction_multiset_sha256": "b189fe1ed4b975953600c7d299fd320be366eda827ceb39f28cf3a3bbc22b696",
+    "assignment_sha256": "e264b345bddb83c2aeb12bf6421d83a81d21c8b9f31ff6698780164a1bee82ef",
+    "editor_fixture_sha256": "fc2bdf34fa5a7d8a9e851ace7a099aa8e05c61c2d0cd075b620d69937f8bfc45",
+    "requantization_catalog_sha256": "d826a9e54c2e6190acfd5afdb0b2475de2be62557647aafa378890ca826c55af",
+    "mixed_mode_catalog_sha256": "d2439c2e47cb9825ad5a5024e014fd4429ff6b28dcafa54809c92fa674cff884"
+  },
+  "editor": {
+    "experiment_name": "sil-design-multi-reagent-seed-4321",
+    "plate_name": "shallow-384_well_plate",
+    "replicates": 2,
+    "selected_well_ids": ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8"],
+    "printed_volume_nL": "100",
+    "final_volume_nL": "100",
+    "randomize_assignments": true,
+    "random_seed": 4321
+  },
+  "stocks": [
+    {"stock_id": "Design A_10.00_x", "reagent_name": "Design A", "role": "non_fill"},
+    {"stock_id": "Design B_10.00_x", "reagent_name": "Design B", "role": "non_fill"},
+    {"stock_id": "Water_1.00_--", "reagent_name": "Water", "role": "fill"}
+  ],
+  "assignments": [
+    {"well_id": "A1", "reaction_id": "R8"},
+    {"well_id": "A2", "reaction_id": "R6"},
+    {"well_id": "A3", "reaction_id": "R3"},
+    {"well_id": "A4", "reaction_id": "R2"},
+    {"well_id": "A5", "reaction_id": "R7"},
+    {"well_id": "A6", "reaction_id": "R4"},
+    {"well_id": "A7", "reaction_id": "R1"},
+    {"well_id": "A8", "reaction_id": "R5"}
+  ],
+  "calibrations": [
+    {"order": 1, "stock_id": "Design A_10.00_x", "reagent_name": "Design A", "printer_head_id": "virtual-head-m11-design-a-v1", "print_pulse_width_us": 1800, "droplet_volume_nL": "18", "input_revision": 2, "output_revision": 3},
+    {"order": 2, "stock_id": "Water_1.00_--", "reagent_name": "Water", "printer_head_id": "virtual-head-m11-water-v1", "print_pulse_width_us": 1300, "droplet_volume_nL": "9", "input_revision": 3, "output_revision": 4},
+    {"order": 3, "stock_id": "Design B_10.00_x", "reagent_name": "Design B", "printer_head_id": "virtual-head-m11-design-b-v1", "print_pulse_width_us": 1400, "droplet_volume_nL": "10.8", "input_revision": 4, "output_revision": 5}
+  ],
+  "checkpoints": [
+    {"checkpoint_id": "prepared", "session": 1, "phase": "prepared", "plan_revision": 1, "progress_reference_revision": 1, "resume_reference_revision": null, "eligibility": "calibration_required"},
+    {"checkpoint_id": "locked_for_design_a", "session": 1, "phase": "calibration_locked", "plan_revision": 2, "progress_reference_revision": 2, "resume_reference_revision": null, "eligibility": "calibration_required"},
+    {"checkpoint_id": "calibrated_zero_progress", "session": 1, "phase": "calibrated", "plan_revision": 3, "progress_reference_revision": 3, "resume_reference_revision": null, "eligibility": "ready_to_start"},
+    {"checkpoint_id": "fresh_loaded", "session": 2, "phase": "calibrated", "plan_revision": 3, "progress_reference_revision": 3, "resume_reference_revision": null, "eligibility": "ready_to_start"},
+    {"checkpoint_id": "fresh_activated", "session": 2, "phase": "calibrated", "plan_revision": 3, "progress_reference_revision": 3, "resume_reference_revision": 3, "eligibility": "active"},
+    {"checkpoint_id": "water_calibrated", "session": 2, "phase": "calibrated", "plan_revision": 4, "progress_reference_revision": 4, "resume_reference_revision": 4, "eligibility": "active"},
+    {"checkpoint_id": "all_stocks_calibrated", "session": 2, "phase": "calibrated", "plan_revision": 5, "progress_reference_revision": 5, "resume_reference_revision": 5, "eligibility": "active"},
+    {"checkpoint_id": "completed", "session": 2, "phase": "completed", "plan_revision": 6, "progress_reference_revision": 6, "resume_reference_revision": 6, "eligibility": "analysis_only"},
+    {"checkpoint_id": "terminal_reloaded", "session": 3, "phase": "completed", "plan_revision": 6, "progress_reference_revision": 6, "resume_reference_revision": 6, "eligibility": "analysis_only"}
+  ],
+  "count_oracles": {
+    "prepared": [
+      ["Design A_10.00_x", "A1", 2], ["Design B_10.00_x", "A1", 3], ["Water_1.00_--", "A1", 6],
+      ["Design A_10.00_x", "A2", 1], ["Design B_10.00_x", "A2", 3], ["Water_1.00_--", "A2", 7],
+      ["Design A_10.00_x", "A3", 2], ["Design B_10.00_x", "A3", 1], ["Water_1.00_--", "A3", 8],
+      ["Design A_10.00_x", "A4", 1], ["Design B_10.00_x", "A4", 3], ["Water_1.00_--", "A4", 7],
+      ["Design A_10.00_x", "A5", 2], ["Design B_10.00_x", "A5", 1], ["Water_1.00_--", "A5", 8],
+      ["Design A_10.00_x", "A6", 2], ["Design B_10.00_x", "A6", 3], ["Water_1.00_--", "A6", 6],
+      ["Design A_10.00_x", "A7", 1], ["Design B_10.00_x", "A7", 1], ["Water_1.00_--", "A7", 9],
+      ["Design A_10.00_x", "A8", 1], ["Design B_10.00_x", "A8", 1], ["Water_1.00_--", "A8", 9]
+    ],
+    "calibrated_zero_progress": [
+      ["Design A_10.00_x", "A1", 1], ["Design B_10.00_x", "A1", 3], ["Water_1.00_--", "A1", 6],
+      ["Design A_10.00_x", "A2", 1], ["Design B_10.00_x", "A2", 3], ["Water_1.00_--", "A2", 6],
+      ["Design A_10.00_x", "A3", 1], ["Design B_10.00_x", "A3", 1], ["Water_1.00_--", "A3", 8],
+      ["Design A_10.00_x", "A4", 1], ["Design B_10.00_x", "A4", 3], ["Water_1.00_--", "A4", 6],
+      ["Design A_10.00_x", "A5", 1], ["Design B_10.00_x", "A5", 1], ["Water_1.00_--", "A5", 8],
+      ["Design A_10.00_x", "A6", 1], ["Design B_10.00_x", "A6", 3], ["Water_1.00_--", "A6", 6],
+      ["Design A_10.00_x", "A7", 1], ["Design B_10.00_x", "A7", 1], ["Water_1.00_--", "A7", 8],
+      ["Design A_10.00_x", "A8", 1], ["Design B_10.00_x", "A8", 1], ["Water_1.00_--", "A8", 8]
+    ],
+    "all_stocks_calibrated": [
+      ["Design A_10.00_x", "A1", 1], ["Design B_10.00_x", "A1", 3], ["Water_1.00_--", "A1", 6],
+      ["Design A_10.00_x", "A2", 1], ["Design B_10.00_x", "A2", 3], ["Water_1.00_--", "A2", 6],
+      ["Design A_10.00_x", "A3", 1], ["Design B_10.00_x", "A3", 1], ["Water_1.00_--", "A3", 8],
+      ["Design A_10.00_x", "A4", 1], ["Design B_10.00_x", "A4", 3], ["Water_1.00_--", "A4", 6],
+      ["Design A_10.00_x", "A5", 1], ["Design B_10.00_x", "A5", 1], ["Water_1.00_--", "A5", 8],
+      ["Design A_10.00_x", "A6", 1], ["Design B_10.00_x", "A6", 3], ["Water_1.00_--", "A6", 6],
+      ["Design A_10.00_x", "A7", 1], ["Design B_10.00_x", "A7", 1], ["Water_1.00_--", "A7", 8],
+      ["Design A_10.00_x", "A8", 1], ["Design B_10.00_x", "A8", 1], ["Water_1.00_--", "A8", 8]
+    ]
+  },
+  "execution_passes": [
+    {"order": 1, "stock_id": "Design A_10.00_x", "expected_intents": 8, "expected_droplets": 8},
+    {"order": 2, "stock_id": "Design B_10.00_x", "expected_intents": 8, "expected_droplets": 16},
+    {"order": 3, "stock_id": "Water_1.00_--", "expected_intents": 8, "expected_droplets": 56}
+  ],
+  "qualification": {
+    "cli_seed": 1,
+    "action_cap": 96,
+    "offscreen_timeout_seconds": 180,
+    "visible_timeout_seconds": 240,
+    "visible_speed": 20,
+    "required_screenshots": ["design_generated", "prepared_randomized", "calibrated_zero_progress", "fresh_loaded", "fresh_activated", "remaining_stocks_calibrated", "design_a_pass_complete", "design_b_pass_complete", "water_pass_complete", "completed", "terminal_reloaded"]
+  },
+  "terminal": {
+    "expected_intents": 24,
+    "expected_droplets": 80,
+    "expected_completed_wells": 24,
+    "expected_completed_stocks": 3,
+    "application_sessions": 3
+  }
+}

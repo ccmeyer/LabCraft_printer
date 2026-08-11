@@ -21,7 +21,7 @@ def test_multi_stock_fixture_contract_is_exact():
         scenario_id=MULTI_STOCK_WORKLOAD_ID
     )
 
-    assert fixture["schema_version"] == 3
+    assert fixture["schema_version"] == 4
     assert fixture["fixture_id"] == MULTI_STOCK_WORKLOAD_ID
     assert fixture["plate"] == {
         "name": "shallow-384_well_plate",
@@ -68,7 +68,15 @@ def test_multi_stock_fixture_contract_is_exact():
             stock["printer_head"]["print_pressure_psi"],
         )
         for stock in fixture["stocks"]
-    ] == [(1300, 1.2), (1500, 1.5)]
+    ] == [(1300, 1.2), (1800, 1.5)]
+    assert [stock["concentration"] for stock in fixture["stocks"]] == [3.0, 1.5]
+    assert [
+        stock["prepared_droplet_volume_nL"] for stock in fixture["stocks"]
+    ] == [9.0, 18.0]
+    assert [stock["droplet_volume_nL"] for stock in fixture["stocks"]] == [
+        9.0,
+        18.0,
+    ]
 
 
 @pytest.mark.sil_lifecycle

@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import View
 from View import ExperimentDesignDialog, MainWindow
 
 
@@ -65,6 +66,42 @@ def test_complete_experiment_design_uses_transactional_prepared_commit(
     load_mock.assert_not_called()
 
 
+def test_view_completed_execution_requires_idle_queue_and_only_projects_display():
+    main_window = MainWindow.__new__(MainWindow)
+    project = Mock(return_value={"status": "analysis_only"})
+    main_window.model = SimpleNamespace(load_completed_execution_view=project)
+    main_window.controller = SimpleNamespace(
+        get_array_run_state=Mock(return_value="idle"),
+        check_if_all_completed=Mock(return_value=True),
+        _set_array_run_state=Mock(),
+    )
+
+    result = MainWindow.view_completed_execution(main_window)
+
+    assert result == {"status": "analysis_only"}
+    project.assert_called_once_with()
+    main_window.controller._set_array_run_state.assert_not_called()
+
+
+def test_view_completed_execution_rejects_nonidle_controller_without_projection():
+    main_window = MainWindow.__new__(MainWindow)
+    project = Mock()
+    main_window.model = SimpleNamespace(load_completed_execution_view=project)
+    main_window.controller = SimpleNamespace(
+        get_array_run_state=Mock(return_value="resume_ready"),
+        check_if_all_completed=Mock(return_value=True),
+    )
+
+    try:
+        MainWindow.view_completed_execution(main_window)
+    except RuntimeError as exc:
+        assert "array runner is idle" in str(exc)
+    else:
+        raise AssertionError("non-idle completed view was accepted")
+
+    project.assert_not_called()
+
+
 def _dialog_for_progress_policy(prompt_policy):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog.model = SimpleNamespace(
@@ -100,6 +137,69 @@ def _dialog_for_progress_policy(prompt_policy):
         )
     )
     return dialog
+
+
+def test_saved_progress_prompt_only_offers_read_only_copy_or_return(monkeypatch):
+    observed = {}
+
+    class _MessageBox:
+        Warning = object()
+        AcceptRole = object()
+        ActionRole = object()
+        RejectRole = object()
+
+        def __init__(self, _parent):
+            self.buttons = {}
+            observed["instance"] = self
+
+        def setWindowTitle(self, value):
+            observed["title"] = value
+
+        def setIcon(self, _value):
+            pass
+
+        def setText(self, value):
+            observed["text"] = value
+
+        def setInformativeText(self, value):
+            observed["informative_text"] = value
+
+        def addButton(self, label, role):
+            button = object()
+            self.buttons[label] = {"button": button, "role": role}
+            return button
+
+        def setDefaultButton(self, button):
+            observed["default_button"] = button
+
+        def exec(self):
+            self.clicked = self.buttons["Open Read-Only"]["button"]
+
+        def clickedButton(self):
+            return self.clicked
+
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog._progress_status_message = (
+        ExperimentDesignDialog._progress_status_message.__get__(
+            dialog, ExperimentDesignDialog
+        )
+    )
+    monkeypatch.setattr(View, "QMessageBox", _MessageBox)
+
+    policy = ExperimentDesignDialog._prompt_progress_policy(
+        dialog,
+        {"total_added_droplets": 3, "wells_with_progress": 2},
+        title="Saved Progress Found",
+    )
+
+    assert policy == ExperimentDesignDialog.PROGRESS_POLICY_RESUME
+    assert tuple(observed["instance"].buttons) == (
+        "Open Read-Only",
+        "Create Editable Copy",
+        "Return to Main Window",
+    )
+    assert "Continue Printing" not in observed["instance"].buttons
+    assert observed["title"] == "Saved Progress Found"
 
 
 def test_prepare_progress_policy_reset_clears_progress_and_allows_editing():

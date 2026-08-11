@@ -1,0 +1,87 @@
+{
+  "fixture_id": "legacy_experiment_read_only_v1",
+  "schema_version": 1,
+  "experiment_name": "sil-legacy-read-only-v1",
+  "plate_name": "96well-8x12",
+  "workload": {
+    "completion_count": 1
+  },
+  "experiment_design": {
+    "metadata": {
+      "name": "sil-legacy-read-only-v1",
+      "replicates": 1,
+      "target_reaction_volume_nL": 2500.0,
+      "printed_volume_tolerance_nL": 50.0,
+      "final_reaction_volume_nL": 2500.0,
+      "fill_reagent_name": "Water",
+      "fill_printing_mode": "droplet",
+      "fill_droplet_volume_nL": 10.0,
+      "plate_name": "96well-8x12",
+      "plate_rows": 8,
+      "plate_columns": 12
+    },
+    "factors": [
+      {
+        "name": "PURE MM",
+        "kind": "additive",
+        "options": [
+          {
+            "name": "PURE MM",
+            "targets": [1.0],
+            "units": "x",
+            "printing_mode": "stream",
+            "forced_stock_conc": 1.11,
+            "droplet_nL": 143.59278258103592,
+            "intended_droplet_nL": 60.0
+          }
+        ]
+      },
+      {
+        "name": "UTP",
+        "kind": "choice",
+        "options": [
+          {
+            "name": "UTP (dil)",
+            "targets": [10000.0],
+            "units": "nM",
+            "printing_mode": "droplet",
+            "forced_stock_conc": 95000.0,
+            "droplet_nL": 10.5
+          }
+        ]
+      }
+    ],
+    "applied_imaging_calibrations": {
+      "schema_version": 1,
+      "records": {}
+    }
+  },
+  "progress": {
+    "A1": {
+      "reaction_id": "legacy-r1",
+      "reagents": {
+        "PURE MM_1.11_x": {"target_droplets": 16, "added_droplets": 16},
+        "UTP (dil)_95000.00_nM": {"target_droplets": 25, "added_droplets": 25}
+      },
+      "completed": true
+    },
+    "A2": {
+      "reaction_id": "legacy-r2",
+      "reagents": {
+        "PURE MM_1.11_x": {"target_droplets": 16, "added_droplets": 8},
+        "UTP (dil)_95000.00_nM": {"target_droplets": 25, "added_droplets": 0}
+      },
+      "completed": false
+    },
+    "__plate__": {
+      "schema_version": 1,
+      "name": "96well-8x12",
+      "rows": 8,
+      "columns": 12
+    }
+  },
+  "key_csv": "Well ID,PURE MM_1.11_x_143.59278258103592nL,UTP (dil)_95000.00_nM_10.5nL\nA1,16,25\nA2,16,25\n",
+  "concentration_key_csv": "Well ID,PURE MM_x,UTP_nM\nA1,1.0,10000\nA2,1.0,10000\n",
+  "expected_completed_wells": ["A1"],
+  "expected_partial_wells": ["A2"]
+}

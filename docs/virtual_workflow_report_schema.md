@@ -722,6 +722,26 @@ absolute or parent-traversal paths, symlinks, unexpected entries, overwrites,
 and hash/size mismatches before validating the report set and raw-report
 references.
 
+Milestone 8 Slice 7 preserves those preflight, proof, report-set bundle, and
+report-v1 contracts. It generalizes `labcraft.virtual_workflow_aggregate` v1 so
+`run.platform` may be `windows_sil` or `pi_sil`. A Pi aggregate adds
+`run.pi_safety` with preflight, proof, trace, source-commit, source-tree, Qt,
+Pi-model, sandbox-method, and protection identity. Every child report must match
+that identity as well as its selected workload and seed. Windows aggregates do
+not contain `run.pi_safety` and remain byte-shape compatible with the Slice 3
+contract.
+
+Suite transport uses `labcraft.pi_sil_artifact_bundle` v2. Its entrypoint kind
+is `suite_aggregate`, and `aggregate_paths` contains one original aggregate or
+an original plus exact replay. The v2 archive contains both complete aggregate
+roots and their shared preflight/proof/trace/audit root. Creation and extraction
+validate each aggregate and child report, proof and trace linkage, source
+identity, member path, size, and hash. Version 1 remains the report-set format
+and is still readable. Suite replay is executed as an argument vector only
+after validating the interpreter, runner, named Pi suite, output/evidence path
+containment, numeric controls, Qt platform, and safety hashes; no shell evaluates
+replay text.
+
 The initial Pi baseline is separately generated at candidate maturity on a
 clean designated Pi. Its relative budgets are derived only from that compatible
 Pi. The absolute responsiveness rules remain policy-v1 values; they are not
@@ -764,10 +784,11 @@ Referenced raw reports must remain available locally for hash validation.
 Replacing that summary is never implicit: the CLI requires both
 `--accept-baseline` and `--replace-accepted-baseline`.
 
-Slice 7 retrieves Pi artifacts into the same ignored root. Remote scenario and
+Slice 7 retrieves Pi artifacts into the same ignored root. Legacy scenario and
 report-set directories may be deleted only after local bundle/hash/report
-validation and only through manifest-listed cleanup roots. Safety or retrieval
-failures retain remote evidence.
+validation and only through manifest-listed cleanup roots. Milestone 8 suite
+mode never invokes cleanup automatically: successful and failing remote suite
+evidence remains until a separately approved manifest-bounded cleanup command.
 
 ## Validation Interface
 

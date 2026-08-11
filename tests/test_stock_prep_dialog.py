@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QDialog, QDoubleSpinBox
 
@@ -462,6 +463,24 @@ def test_open_stock_prep_dialog_launches_dialog_without_touching_controller(monk
     assert opened[1] == ("exec",)
     assert widget.controller.mock_calls == []
     assert widget.model.runtime_state == runtime_state
+
+
+def test_completed_read_only_view_cannot_open_stock_prep_dialog(monkeypatch):
+    widget = WellPlateWidget.__new__(WellPlateWidget)
+    widget.model = SimpleNamespace(
+        experiment_model=object(),
+        is_completed_execution_view_active=lambda: True,
+    )
+    widget.main_window = SimpleNamespace()
+    monkeypatch.setattr(
+        View,
+        "StockPrepDialog",
+        lambda *_args, **_kwargs: pytest.fail(
+            "completed read-only view opened stock preparation"
+        ),
+    )
+
+    WellPlateWidget.open_stock_prep_dialog(widget)
 
 
 def test_stock_prep_dialog_uses_spinbox_widgets_for_editable_columns(qapp):

@@ -33,6 +33,7 @@ def _make_widget(
     dock_context=None,
     yes_no_responses=None,
     bypass_result=None,
+    completed_view=False,
 ):
     if preflight is None:
         preflight = {"ok": True, "code": "ok", "message": "", "record": None}
@@ -62,6 +63,7 @@ def _make_widget(
         ),
     )
     widget.model = SimpleNamespace(
+        is_completed_execution_view_active=lambda: bool(completed_view),
         rack_model=SimpleNamespace(
             gripper_printer_head=object() if has_head else None,
         )
@@ -120,6 +122,35 @@ def test_well_plate_widget_refreshes_array_runner_buttons():
     WellPlateWidget.update_start_print_array_button(widget)
     assert widget.start_print_array_button.text == "Resume Print"
     assert widget.start_print_array_button.enabled is True
+
+
+def test_completed_execution_view_disables_start_and_never_dispatches():
+    widget = _make_widget(
+        array_state="idle",
+        has_head=True,
+        completed_view=True,
+    )
+
+    WellPlateWidget.update_start_print_array_button(widget)
+    WellPlateWidget.start_print_array(widget)
+
+    assert widget.start_print_array_button.text == "Experiment Complete"
+    assert widget.start_print_array_button.enabled is False
+    widget.controller.print_array.assert_not_called()
+    widget.main_window.popup_yes_no.assert_not_called()
+
+
+def test_completed_execution_view_blocks_plate_calibration_dispatch():
+    widget = _make_widget(completed_view=True)
+    widget.model.machine_model = SimpleNamespace(
+        motors_are_enabled=Mock(return_value=True),
+        motors_are_homed=Mock(return_value=True),
+    )
+    widget.controller.move_to_location = Mock()
+
+    WellPlateWidget.open_calibration_dialog(widget)
+
+    widget.controller.move_to_location.assert_not_called()
 
 
 def test_well_plate_widget_resume_prompt_uses_resume_copy():

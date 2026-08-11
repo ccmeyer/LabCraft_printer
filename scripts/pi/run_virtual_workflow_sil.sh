@@ -11,7 +11,8 @@ usage() {
     "  $0 preflight [--output-root PATH] [--qt-platform offscreen|minimal] [--output PATH]" \
     "  $0 prove --preflight PATH [--output-root PATH] [--qt-platform PLATFORM] [--output PATH]" \
     "  $0 collect --preflight PATH --proof PATH [run_virtual_workflow options]" \
-    "  $0 bundle --report-set PATH --proof PATH --trace PATH --output PATH" \
+    "  $0 replay --aggregate PATH [--output-root PATH]" \
+    "  $0 bundle (--report-set PATH | --aggregate PATH [...]) --proof PATH --trace PATH --output PATH" \
     "  $0 cleanup --manifest PATH [--output-root PATH]" \
     "" \
     "All scenario execution is forced through a Bubblewrap private-device sandbox."
@@ -53,6 +54,7 @@ PREFLIGHT_PATH=""
 PROOF_PATH=""
 TRACE_PATH=""
 REPORT_SET_PATH=""
+AGGREGATE_PATHS=()
 OUTPUT_PATH=""
 MANIFEST_PATH=""
 RUNNER_ARGS=()
@@ -81,6 +83,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --report-set)
       REPORT_SET_PATH="$2"
+      shift 2
+      ;;
+    --aggregate)
+      AGGREGATE_PATHS+=("$2")
       shift 2
       ;;
     --output)
@@ -224,18 +230,42 @@ case "$MODE" in
       "${RUNNER_ARGS[@]}"
     ;;
 
-  bundle)
-    if [ -z "$REPORT_SET_PATH" ] || [ -z "$PROOF_PATH" ] ||
-       [ -z "$TRACE_PATH" ] || [ -z "$OUTPUT_PATH" ]; then
-      printf 'Pi SIL error: bundle requires --report-set, --proof, --trace, and --output.\n' >&2
+  replay)
+    if [ "${#AGGREGATE_PATHS[@]}" -ne 1 ]; then
+      printf 'Pi SIL error: replay requires exactly one --aggregate.\n' >&2
       exit 3
     fi
-    sandbox_exec "$PYTHON_BIN" -m tools.virtual_workflows.pi_sil bundle \
+    sandbox_exec "$PYTHON_BIN" -m tools.virtual_workflows.pi_sil replay-suite \
       --repo-root "$REPO_ROOT" \
-      --report-set "$REPORT_SET_PATH" \
-      --proof "$PROOF_PATH" \
-      --trace "$TRACE_PATH" \
+      --output-root "$OUTPUT_ROOT" \
+      --aggregate "${AGGREGATE_PATHS[0]}"
+    ;;
+
+  bundle)
+    if [ -z "$PROOF_PATH" ] || [ -z "$TRACE_PATH" ] || [ -z "$OUTPUT_PATH" ]; then
+      printf 'Pi SIL error: bundle requires proof, trace, and output.\n' >&2
+      exit 3
+    fi
+    if { [ -n "$REPORT_SET_PATH" ] && [ "${#AGGREGATE_PATHS[@]}" -ne 0 ]; } ||
+       { [ -z "$REPORT_SET_PATH" ] && [ "${#AGGREGATE_PATHS[@]}" -eq 0 ]; }; then
+      printf 'Pi SIL error: bundle requires exactly one entrypoint kind.\n' >&2
+      exit 3
+    fi
+    BUNDLE_ARGS=(
+      --repo-root "$REPO_ROOT"
+      --proof "$PROOF_PATH"
+      --trace "$TRACE_PATH"
       --output "$OUTPUT_PATH"
+    )
+    if [ -n "$REPORT_SET_PATH" ]; then
+      BUNDLE_ARGS+=(--report-set "$REPORT_SET_PATH")
+    else
+      for aggregate_path in "${AGGREGATE_PATHS[@]}"; do
+        BUNDLE_ARGS+=(--aggregate "$aggregate_path")
+      done
+    fi
+    sandbox_exec "$PYTHON_BIN" -m tools.virtual_workflows.pi_sil bundle \
+      "${BUNDLE_ARGS[@]}"
     ;;
 
   cleanup)

@@ -385,10 +385,25 @@ def advance_authoritative_execution_revision(
     )
 
 
-def build_execution_runtime_spec(bundle: AuthoritativeExecutionBundle) -> ExecutionRuntimeSpec:
-    if not bundle.valid or bundle.plan is None:
-        raise ValueError("A valid authoritative execution bundle is required.")
-    plan = bundle.plan
+def _runtime_added_count(value: Any, *, location: str) -> int:
+    if value in (None, ""):
+        return 0
+    if isinstance(value, bool):
+        raise ValueError(f"{location} must be a non-negative integer")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{location} must be a non-negative integer") from exc
+    if not number.is_integer() or number < 0:
+        raise ValueError(f"{location} must be a non-negative integer")
+    return int(number)
+
+
+def build_execution_runtime_spec_from_plan(
+    plan: ExecutionPlan,
+    progress_wells: Mapping[str, Any],
+) -> ExecutionRuntimeSpec:
+    """Build display/runtime data with the plan authoritative for all targets."""
     stocks = tuple(
         ExecutionRuntimeStockSpec(
             stock_id=stock.stock_id,
@@ -403,14 +418,32 @@ def build_execution_runtime_spec(bundle: AuthoritativeExecutionBundle) -> Execut
     )
     wells = []
     for well in plan.wells:
-        progress_reagents = bundle.progress_wells[well.well_id]["reagents"]
+        progress_well = progress_wells.get(well.well_id, {})
+        progress_reagents = (
+            progress_well.get("reagents", {})
+            if isinstance(progress_well, Mapping)
+            else {}
+        )
+        if not isinstance(progress_reagents, Mapping):
+            progress_reagents = {}
         wells.append(
             ExecutionRuntimeWellSpec(
                 well_id=well.well_id,
                 reaction_id=well.reaction_id,
                 targets={item.stock_id: item.target_dispenses for item in well.dispenses},
                 added={
-                    item.stock_id: int(progress_reagents[item.stock_id].get("added_droplets", 0) or 0)
+                    item.stock_id: _runtime_added_count(
+                        (
+                            progress_reagents.get(item.stock_id, {}).get(
+                                "added_droplets", 0
+                            )
+                            if isinstance(
+                                progress_reagents.get(item.stock_id, {}), Mapping
+                            )
+                            else 0
+                        ),
+                        location=f"progress {well.well_id}/{item.stock_id} added",
+                    )
                     for item in well.dispenses
                 },
             )
@@ -422,3 +455,9 @@ def build_execution_runtime_spec(bundle: AuthoritativeExecutionBundle) -> Execut
         stocks=stocks,
         wells=tuple(wells),
     )
+
+
+def build_execution_runtime_spec(bundle: AuthoritativeExecutionBundle) -> ExecutionRuntimeSpec:
+    if not bundle.valid or bundle.plan is None:
+        raise ValueError("A valid authoritative execution bundle is required.")
+    return build_execution_runtime_spec_from_plan(bundle.plan, bundle.progress_wells)

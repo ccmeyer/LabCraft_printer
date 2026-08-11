@@ -24,8 +24,8 @@
       "target_concentration": 1.0,
       "units": "x",
       "printing_mode": "droplet",
-      "prepared_droplet_volume_nL": 5.0,
-      "droplet_volume_nL": 10.0,
+      "prepared_droplet_volume_nL": 9.0,
+      "droplet_volume_nL": 9.0,
       "printer_head": {
         "printer_head_id": "virtual-head-24-v1",
         "initial_volume_uL": 1000.0,

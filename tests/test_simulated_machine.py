@@ -2,6 +2,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from pprint import pformat
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +27,53 @@ def _wait_until(qapp, predicate, *, timeout_ms=3000):
         QtTest.QTest.qWait(1)
     qapp.processEvents()
     assert predicate(), "condition did not become true before timeout"
+
+
+def _wait_while_progressing(
+    qapp,
+    predicate,
+    progress,
+    diagnostics,
+    *,
+    no_progress_timeout_ms=10000,
+    hard_timeout_ms=120000,
+):
+    started_at = time.monotonic()
+    last_progress_at = started_at
+    last_progress = progress()
+
+    while True:
+        qapp.processEvents()
+        if predicate():
+            return
+
+        now = time.monotonic()
+        current_progress = progress()
+        if current_progress != last_progress:
+            last_progress = current_progress
+            last_progress_at = now
+
+        elapsed_ms = (now - started_at) * 1000.0
+        idle_ms = (now - last_progress_at) * 1000.0
+        if idle_ms >= no_progress_timeout_ms or elapsed_ms >= hard_timeout_ms:
+            reason = (
+                "no forward progress"
+                if idle_ms >= no_progress_timeout_ms
+                else "absolute safety limit reached"
+            )
+            snapshot = {
+                "reason": reason,
+                "elapsed_ms": round(elapsed_ms, 3),
+                "idle_ms": round(idle_ms, 3),
+                "progress": current_progress,
+                **diagnostics(),
+            }
+            pytest.fail(
+                "condition did not become true while progress was monitored:\n"
+                + pformat(snapshot, sort_dicts=False)
+            )
+
+        QtTest.QTest.qWait(1)
 
 
 def _make_machine(qapp, test_profile, *, config=None):
@@ -274,6 +322,116 @@ def test_completion_handler_can_extend_queue_and_runs_once(qapp, test_profile):
     assert first._handler_called is True
     assert callbacks == ["first", "second"]
     assert drains == ["done"]
+
+
+@pytest.mark.parametrize(
+    ("speed_multiplier", "completion_delay_ms"),
+    ((100.0, 0.0), (1000.0, 0.0), (1000.0, 0.25)),
+)
+def test_two_well_lookahead_soak_never_loses_handler_driven_work(
+    qapp,
+    test_profile,
+    speed_multiplier,
+    completion_delay_ms,
+):
+    total = 4000
+    config = SimulationConfig(
+        timing=SimulationTimingPolicy(
+            speed_multiplier=speed_multiplier,
+            duration_overrides={"WAIT": 200},
+        ),
+        completed_history_limit=8,
+        event_history_limit=32,
+    )
+    machine = _make_machine(qapp, test_profile, config=config)
+    created = 0
+    completed = []
+    pending = {}
+    drains = []
+    machine.command_queue.commands_completed.connect(lambda: drains.append(len(completed)))
+
+    def queue_one():
+        nonlocal created
+        created += 1
+        intent_id = f"intent-{created}"
+
+        def finish():
+            if completion_delay_ms:
+                deadline = time.perf_counter() + completion_delay_ms / 1000.0
+                while time.perf_counter() < deadline:
+                    pass
+            completed.append(intent_id)
+            pending.pop(intent_id)
+            if created < total:
+                queue_one()
+
+        command = machine.wait_ms(1, handler=finish)
+        pending[intent_id] = command.command_number
+
+    queue_one()
+    queue_one()
+
+    def diagnostics():
+        active = machine._active_command
+        return {
+            "parameters": {
+                "speed_multiplier": speed_multiplier,
+                "completion_delay_ms": completion_delay_ms,
+                "total": total,
+            },
+            "created": created,
+            "completed_count": len(completed),
+            "pending_count": len(pending),
+            "pending": dict(pending),
+            "drains": list(drains),
+            "active_command": (
+                None
+                if active is None
+                else {
+                    "command_number": active.command_number,
+                    "command_type": active.command_type,
+                    "status": active.status,
+                }
+            ),
+            "command_timer": {
+                "active": machine._command_timer.isActive(),
+                "remaining_time_ms": machine._command_timer.remainingTime(),
+            },
+            "queue": [
+                {
+                    "command_number": command.command_number,
+                    "command_type": command.command_type,
+                    "status": command.status,
+                }
+                for command in machine.command_queue.queue
+            ],
+            "sequence": {
+                "last_accepted": machine.state.last_accepted,
+                "last_completed": machine.state.last_completed,
+                "last_retired": machine.state.last_retired,
+            },
+            "recent_lifecycle_events": list(machine.command_event_history),
+        }
+
+    _wait_while_progressing(
+        qapp,
+        lambda: len(completed) == total and machine.check_if_all_completed(),
+        lambda: (
+            len(completed),
+            machine.state.last_accepted,
+            machine.state.last_completed,
+            machine.state.last_retired,
+        ),
+        diagnostics,
+    )
+
+    assert created == total
+    assert completed == [f"intent-{index}" for index in range(1, total + 1)]
+    assert pending == {}
+    assert drains == [total]
+    assert machine.state.last_completed == total
+    assert machine.state.last_accepted == total
+    assert machine.state.last_retired == total
 
 
 def test_immediate_pause_finishes_active_then_resume_continues(qapp, test_profile):

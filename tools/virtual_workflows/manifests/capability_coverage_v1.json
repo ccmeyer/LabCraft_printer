@@ -9,7 +9,7 @@
       "owner_role": "verification maintainers",
       "status": "covered",
       "required_verification_layers": ["contract", "host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "randomized_calibration_reload_execution_v1", "optimizer_360_calibration_reload_execution_v1"],
       "required_assertion_ids": ["sil.host_hardware_disabled"],
       "related_source_areas": ["tools/virtual_workflows/scenarios.py", "FreeRTOS-interface/App.py"],
       "limitations": ["In-process isolation does not prove firmware or physical-device behavior."],
@@ -33,7 +33,7 @@
       "owner_role": "application verification maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "randomized_calibration_reload_execution_v1", "optimizer_360_calibration_reload_execution_v1"],
       "required_assertion_ids": ["ui.real_app_constructed"],
       "related_source_areas": ["FreeRTOS-interface/App.py", "FreeRTOS-interface/View.py"],
       "limitations": ["Offscreen Qt composition does not validate a native compositor."],
@@ -57,7 +57,7 @@
       "owner_role": "execution verification maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1"],
       "required_assertion_ids": ["execution.no_queue_starvation"],
       "related_source_areas": ["FreeRTOS-interface/Controller.py", "tools/virtual_workflows/scenarios.py"],
       "limitations": ["The in-process simulator does not reproduce serial or firmware queue timing."],
@@ -69,7 +69,7 @@
       "owner_role": "execution persistence maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1"],
       "required_assertion_ids": ["execution.intent_durability_exact"],
       "related_source_areas": ["FreeRTOS-interface/Model.py", "tools/virtual_workflows/persistence_io.py"],
       "limitations": ["Host filesystem durability evidence does not characterize power-loss hardware."],
@@ -211,13 +211,13 @@
       "id": "execution.disconnect_fail_closed",
       "risk": "Execution may continue advancing after simulated disconnection.",
       "owner_role": "execution lifecycle maintainers",
-      "status": "planned",
+      "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": [],
-      "required_assertion_ids": [],
-      "related_source_areas": ["FreeRTOS-interface/Controller.py", "tools/virtual_workflows/scenarios.py"],
+      "active_scenario_ids": ["print_array_disconnect_mid_array_24_v1"],
+      "required_assertion_ids": ["execution.disconnect_requested", "execution.disconnect_fail_closed", "execution.disconnected_boundary_quiescent", "execution.disconnect_recovery_ready"],
+      "related_source_areas": ["FreeRTOS-interface/Controller.py", "tools/virtual_workflows/journeys.py"],
       "limitations": ["Protocol and physical disconnect behavior are outside in-process SIL."],
-      "max_evidence_age_days": null
+      "max_evidence_age_days": 2
     },
     {
       "id": "execution.multi_stock_head_exchange",
@@ -227,8 +227,44 @@
       "required_verification_layers": ["host_sil"],
       "active_scenario_ids": ["print_array_multi_stock_24x2_v1"],
       "required_assertion_ids": ["execution.multi_stock_head_exchange", "execution.stock_pass_boundaries_valid", "execution.stock_head_settings_match", "execution.event_history_bounded"],
-      "related_source_areas": ["tools/virtual_workflows/scenarios.py", "tests/system/test_virtual_workflow_multi_stock_lifecycle.py"],
-      "limitations": ["Coverage uses the in-process simulator and virtual rack model; it does not validate physical head handling, pressure response, or droplet output."],
+      "related_source_areas": ["tools/virtual_workflows/journeys.py", "tests/system/test_virtual_workflow_multi_stock_composed.py"],
+      "limitations": ["Coverage uses normal Qt rack controls and the in-process simulator; it does not validate physical head handling, pressure response, or droplet output."],
+      "max_evidence_age_days": 2
+    },
+    {
+      "id": "execution.mixed_droplet_stream_lifecycle",
+      "risk": "A stream stock may print with mismatched calibration or without its required current manual-refuel check.",
+      "owner_role": "execution lifecycle maintainers",
+      "status": "covered",
+      "required_verification_layers": ["host_sil"],
+      "active_scenario_ids": ["print_array_mixed_mode_24x2_v1"],
+      "required_assertion_ids": ["execution.mixed_mode_calibrations_valid", "execution.stream_manual_refuel_passed", "execution.stock_pass_boundaries_valid", "execution.terminal_bundle_valid"],
+      "related_source_areas": ["tools/virtual_workflows/journey_phases.py", "tools/virtual_workflows/page_drivers.py", "tests/system/test_virtual_workflow_mixed_mode_composed.py"],
+      "limitations": ["Coverage drives the application-facing simulator and records synthetic operator judgment; it does not validate physical stream flow, refueling, pressure response, or droplet output."],
+      "max_evidence_age_days": 2
+    },
+    {
+      "id": "execution.randomized_calibration_reload_execution",
+      "risk": "Randomized well assignments, calibration identity, exact stock counts, or durable completion may drift across a clean application-session reload.",
+      "owner_role": "execution lifecycle maintainers",
+      "status": "covered",
+      "required_verification_layers": ["contract", "host_sil"],
+      "active_scenario_ids": ["randomized_calibration_reload_execution_v1"],
+      "required_assertion_ids": ["experiment.randomized_joined_design_exact", "execution.calibrated_zero_progress_exact", "execution.clean_session_rotation_exact", "execution.remaining_calibrations_exact", "execution.completed_terminal_reload_exact", "execution.randomized_calibration_terminal_exact"],
+      "related_source_areas": ["tools/virtual_workflows/joined_interaction_cases.py", "tools/virtual_workflows/journeys.py", "tools/virtual_workflows/assertions.py"],
+      "limitations": ["The scenario proves application-side simulated identities, persistence, and DISPENSE semantics; it does not prove firmware, protocol, or physical printing behavior."],
+      "max_evidence_age_days": 2
+    },
+    {
+      "id": "execution.optimizer_360_calibration_reload_execution",
+      "risk": "Optimizer-selected stocks, 360 randomized reactions, five calibration identities, exact counts, or durable completion could drift across clean application sessions.",
+      "owner_role": "execution lifecycle maintainers",
+      "status": "covered",
+      "required_verification_layers": ["contract", "host_sil"],
+      "active_scenario_ids": ["optimizer_360_calibration_reload_execution_v1"],
+      "required_assertion_ids": ["experiment.optimizer_360_design_exact", "execution.calibrated_zero_progress_exact", "execution.clean_session_rotation_exact", "execution.remaining_calibrations_exact", "execution.completed_terminal_reload_exact", "execution.randomized_calibration_terminal_exact"],
+      "related_source_areas": ["tools/virtual_workflows/optimizer_360_cases.py", "tools/virtual_workflows/journeys.py", "tools/virtual_workflows/assertions.py"],
+      "limitations": ["The scenario proves application-side optimizer, calibration, persistence, and DISPENSE semantics; it does not prove firmware, protocol, or physical printing behavior."],
       "max_evidence_age_days": 2
     },
     {
@@ -316,6 +352,18 @@
       "max_evidence_age_days": null
     },
     {
+      "id": "experiment.legacy_read_only_view",
+      "risk": "Older experiment data could fail to populate the application or accidentally enable hardware actions.",
+      "owner_role": "application verification maintainers",
+      "status": "covered",
+      "required_verification_layers": ["contract", "host_sil"],
+      "active_scenario_ids": ["legacy_experiment_read_only_v1"],
+      "required_assertion_ids": ["experiment.legacy_read_only_exact", "analysis.legacy_plate_reader_ready", "experiment.legacy_editable_copy_fresh", "experiment.legacy_source_unchanged"],
+      "related_source_areas": ["FreeRTOS-interface/Model.py", "FreeRTOS-interface/View.py", "tools/virtual_workflows/page_drivers.py"],
+      "limitations": ["The scenario validates reconstructed application state and analysis inputs with simulated hardware, not physical printing."],
+      "max_evidence_age_days": 30
+    },
+    {
       "id": "hardware.motion_pressure_droplet",
       "risk": "Software evidence could be misrepresented as physical print-quality evidence.",
       "owner_role": "hardware verification maintainers",
@@ -340,13 +388,13 @@
       "suite_ids": ["host_regression", "pi_primary"],
       "supported_platforms": ["windows_sil", "pi_sil"],
       "timeout_seconds": 180,
-      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.wait_for_completions", "array.wait_for_state", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "machine.configure_print_settings_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.wait_for_completions", "artifact.capture_milestone", "scenario.teardown"],
       "assertion_ids": ["sil.host_hardware_disabled", "sil.pi_evidence_valid", "ui.real_app_constructed", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "artifacts.required_present", "ui.injected_stall_detected", "ui.responsiveness_metrics_present"],
       "capability_ids": ["sil.hardware_isolation.host", "sil.hardware_isolation.pi", "ui.real_app_construction", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle", "ui.event_loop_stall_detection", "ui.sustained_responsiveness.windows", "ui.sustained_responsiveness.pi"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "screenshots", "scenario_root"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The scenario validates application-facing SIL behavior, not firmware or physical printing."],
-      "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_fixture_contract_is_exact_and_serpentine", "tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report", "tests/system/test_virtual_print_array_workflow.py::test_injected_ui_stall_is_detected_attributed_and_captures_stack", "tests/system/test_virtual_print_array_workflow.py::test_timeout_failure_retains_diagnostics_and_failure_screenshot", "tests/system/test_virtual_print_array_workflow.py::test_scenario_source_has_no_production_machine_or_device_construction"],
+      "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_fixture_contract_is_exact_and_serpentine", "tests/system/test_virtual_print_array_96_composed.py::test_composed_96_contract_uses_shared_one_stock_journey", "tests/system/test_virtual_print_array_96_composed.py::test_composed_96_success_and_legacy_parity", "tests/system/test_virtual_print_array_96_composed.py::test_composed_96_injected_stall_is_attributed", "tests/system/test_virtual_print_array_96_composed.py::test_composed_96_timeout_fails_closed_with_evidence", "tests/system/test_virtual_print_array_workflow.py::test_scenario_source_has_no_production_machine_or_device_construction"],
       "pi_safety_evidence": ["preflight", "hardware_proof"]
     },
     {
@@ -360,13 +408,13 @@
       "suite_ids": ["host_stress", "pi_stress"],
       "supported_platforms": ["windows_sil", "pi_sil"],
       "timeout_seconds": 1800,
-      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.wait_for_completions", "array.wait_for_state", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
-      "assertion_ids": ["sil.host_hardware_disabled", "sil.pi_evidence_valid", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "execution.multi_stock_head_exchange", "artifacts.required_present", "ui.responsiveness_metrics_present", "resources.metrics_present"],
-      "capability_ids": ["sil.hardware_isolation.host", "sil.hardware_isolation.pi", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle", "execution.multi_stock_head_exchange", "ui.sustained_responsiveness.windows", "ui.sustained_responsiveness.pi", "resources.sustained_growth.windows", "resources.sustained_growth.pi"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "screenshots", "scenario_root"],
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "machine.configure_print_settings_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "head.bind_identity", "head.set_volume_via_ui", "head.stage_via_ui", "head.return_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.wait_for_completions", "artifact.capture_milestone", "validation.stock_pass_boundary", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "sil.pi_evidence_valid", "ui.real_app_constructed", "execution.multi_stock_head_exchange", "execution.stock_pass_boundaries_valid", "execution.stock_head_settings_match", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.event_history_bounded", "execution.terminal_bundle_valid", "artifacts.required_present", "ui.injected_stall_detected", "ui.responsiveness_metrics_present", "ui.sustained_responsiveness_acceptable", "resources.metrics_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "sil.hardware_isolation.pi", "ui.real_app_construction", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle", "execution.multi_stock_head_exchange", "ui.event_loop_stall_detection", "ui.sustained_responsiveness.windows", "ui.sustained_responsiveness.pi", "resources.sustained_growth.windows", "resources.sustained_growth.pi"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "informational",
       "limitations": ["Stress findings are verification evidence and do not authorize production optimization."],
-      "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_tracked_384x10_fixture_is_exact_and_serpentine", "tests/system/test_virtual_print_array_384x10_workflow.py::test_cli_exposes_stress_scenario_and_single_report_set", "tests/system/test_virtual_print_array_384x10_workflow.py::test_stress_scenario_source_stays_hardware_isolated"],
+      "test_node_ids": ["tests/system/test_virtual_print_array_384x10_workflow.py::test_tracked_384x10_fixture_is_exact_and_serpentine", "tests/system/test_virtual_print_array_384x10_workflow.py::test_cli_exposes_stress_scenario_and_single_report_set", "tests/system/test_virtual_print_array_384x10_workflow.py::test_stress_scenario_source_stays_hardware_isolated", "tests/system/test_virtual_print_array_384x10_composed.py::test_composed_384x10_contract_uses_shared_multi_stock_journey", "tests/system/test_virtual_print_array_384x10_composed.py::test_composed_384x10_success_and_direct_parity"],
       "pi_safety_evidence": ["preflight", "hardware_proof"]
     },
     {
@@ -380,10 +428,10 @@
       "suite_ids": ["standard"],
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
-      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.wait_for_completions", "array.wait_for_state", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
-      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "artifacts.required_present"],
-      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "screenshots", "scenario_root"],
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "machine.configure_print_settings_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.wait_for_completions", "artifact.capture_milestone", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "machine.normal_ui_ready", "experiment.prepared_bundle_valid", "execution.rack_head_associated", "execution.applied_calibration_valid", "execution.terminal_bundle_valid", "artifacts.cleanup_complete"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.terminal_bundle"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The standard smoke proves application-facing SIL correctness, not sustained performance, firmware, or physical printing."],
       "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_smoke_fixture_contract_is_exact", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"],
@@ -400,13 +448,13 @@
       "suite_ids": ["lifecycle"],
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
-      "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "artifact.capture_milestone", "validation.prepared_bundle", "experiment.reload_authoritative", "scenario.teardown"],
+      "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "artifact.capture_milestone", "experiment.load_authoritative_via_ui", "scenario.teardown"],
       "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "experiment.editor_create_finalize", "experiment.prepared_bundle_valid", "experiment.prepared_reload_ready", "experiment.runtime_assignments_match", "experiment.key_files_consistent", "artifacts.required_present"],
       "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "experiment.editor_create_finalize", "experiment.prepared_reopen", "experiment.design_plan_consistency"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The lifecycle scenario creates and reloads a minimal prepared design without connecting or executing print commands."],
-      "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_create_finalize_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_create_finalize_lifecycle_report"],
+      "test_node_ids": ["tests/system/test_virtual_workflow_editor_composed.py::test_editor_create_finalize_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_composed.py::test_composed_editor_create_finalize_report"],
       "pi_safety_evidence": []
     },
     {
@@ -420,13 +468,13 @@
       "suite_ids": ["lifecycle"],
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
-      "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "editor.rename_prepared_via_ui", "editor.edit_prepared_design_via_ui", "editor.regenerate_prepared_design_via_ui", "editor.refinalize_prepared_via_ui", "artifact.capture_milestone", "validation.prepared_bundle", "validation.refinalized_bundle", "experiment.reload_authoritative", "scenario.teardown"],
+      "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "editor.rename_prepared_via_ui", "editor.edit_prepared_design_via_ui", "editor.regenerate_prepared_design_via_ui", "editor.refinalize_prepared_via_ui", "artifact.capture_milestone", "experiment.load_authoritative_via_ui", "scenario.teardown"],
       "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "experiment.prepared_rename_refinalize", "experiment.prepared_design_refinalize", "experiment.renamed_artifacts_unique", "experiment.refinalized_bundle_valid", "experiment.prepared_reload_ready", "experiment.runtime_assignments_match", "experiment.key_files_consistent", "artifacts.required_present"],
       "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "experiment.prepared_rename_refinalize", "experiment.prepared_design_refinalize", "experiment.prepared_reopen", "experiment.design_plan_consistency"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The lifecycle scenario covers material edits and rename while the prepared execution is untouched; post-start changes remain prohibited by Slice 4.3."],
-      "test_node_ids": ["tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_lifecycle.py::test_editor_prestart_rename_refinalize_lifecycle_report"],
+      "test_node_ids": ["tests/system/test_virtual_workflow_editor_refinalize_composed.py::test_composed_editor_prestart_rename_refinalize_report", "tests/system/test_virtual_workflow_editor_refinalize_composed.py::test_composed_and_legacy_editor_refinalize_stable_parity"],
       "pi_safety_evidence": []
     },
     {
@@ -440,13 +488,13 @@
       "suite_ids": ["lifecycle"],
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
-      "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "experiment.activate_authoritative", "execution.lock_for_printing", "editor.inspect_active_lock_via_ui", "editor.reject_in_place_edit_via_ui", "editor.create_editable_copy_via_ui", "editor.edit_copy_via_ui", "editor.finalize_copy_via_ui", "artifact.capture_milestone", "validation.prepared_bundle", "experiment.reload_authoritative", "scenario.teardown"],
+      "action_ids": ["app.launch_simulated", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "experiment.activate_authoritative", "execution.lock_for_printing", "editor.inspect_active_lock_via_ui", "editor.reject_in_place_edit_via_ui", "editor.create_editable_copy_via_ui", "editor.edit_copy_via_ui", "editor.finalize_copy_via_ui", "experiment.load_authoritative_via_ui", "artifact.capture_milestone", "scenario.teardown"],
       "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "experiment.active_edit_lock", "experiment.in_place_edit_rejected", "experiment.source_bundle_immutable", "experiment.editable_copy_created", "experiment.editable_copy_fresh_execution", "experiment.editable_copy_editable", "artifacts.required_present"],
       "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "experiment.prepared_rename_refinalize", "experiment.active_edit_lock", "experiment.editable_copy"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The scenario crosses the ACTIVE lock boundary without connecting a simulated machine or issuing a print command."],
-      "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"],
+      "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_fixture_contract_is_exact", "tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report", "tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_and_legacy_editor_post_start_stable_parity"],
       "pi_safety_evidence": []
     },
     {
@@ -460,13 +508,13 @@
       "suite_ids": ["lifecycle"],
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
-      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.request_soft_stop_via_ui", "array.wait_for_state", "validation.paused_bundle", "array.observe_stopped_quiescence", "array.wait_for_completions", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "machine.configure_print_settings_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.request_soft_stop_via_ui", "array.wait_for_state", "array.observe_stopped_quiescence", "array.resume_via_ui", "array.wait_for_completions", "artifact.capture_milestone", "scenario.teardown"],
       "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "execution.soft_stop_requested", "execution.soft_stop_boundary_valid", "execution.stopped_boundary_quiescent", "execution.resume_exactly_once", "execution.expected_completions", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "artifacts.required_present"],
       "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.intent_durability", "execution.terminal_bundle", "execution.soft_stop_resume"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The scenario proves application-facing pause and resume semantics with the in-process simulator, not firmware or physical dispensing."],
-      "test_node_ids": ["tests/system/test_virtual_workflow_lifecycle.py::test_soft_stop_resume_fixture_contract_is_exact", "tests/system/test_virtual_workflow_lifecycle.py::test_soft_stop_resume_lifecycle_report"],
+      "test_node_ids": ["tests/system/test_virtual_workflow_lifecycle.py::test_soft_stop_resume_fixture_contract_is_exact", "tests/system/test_virtual_workflow_soft_stop_composed.py::test_composed_soft_stop_resume_report", "tests/system/test_virtual_workflow_soft_stop_composed.py::test_soft_stop_composed_matches_legacy_oracle", "tests/system/test_virtual_workflow_soft_stop_composed.py::test_soft_stop_composed_controlled_failure_retains_evidence"],
       "pi_safety_evidence": []
     },
     {
@@ -480,13 +528,13 @@
       "suite_ids": ["lifecycle"],
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
-      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.request_soft_stop_via_ui", "array.wait_for_state", "validation.paused_bundle", "array.observe_stopped_quiescence", "app.close_simulated_session", "validation.reload_boundary", "experiment.load_authoritative_via_ui", "experiment.activate_authoritative_via_ui", "array.wait_for_completions", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "machine.configure_print_settings_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.request_soft_stop_via_ui", "array.wait_for_state", "array.observe_stopped_quiescence", "app.close_simulated_session", "experiment.load_authoritative_via_ui", "experiment.activate_authoritative_via_ui", "array.resume_via_ui", "array.wait_for_completions", "artifact.capture_milestone", "scenario.teardown"],
       "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "ui.fresh_application_session_constructed", "execution.first_session_paused", "execution.first_session_teardown_clean", "execution.authoritative_reload_valid", "execution.authoritative_runtime_rehydrated", "execution.reload_resume_exactly_once", "execution.expected_completions", "execution.intent_durability_exact", "execution.terminal_bundle_valid", "artifacts.required_present"],
       "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.intent_durability", "execution.terminal_bundle", "execution.authoritative_reload_resume"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The target is a fresh MVC/simulator composition in one QApplication process, not an operating-system process restart or physical hardware resume."],
-      "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_fixture_contract_is_exact", "tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"],
+      "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_fixture_contract_is_exact", "tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_direct_oracle_report_passes", "tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes", "tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_matches_direct_stable_oracle", "tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_fails_closed_on_first_teardown_mutation", "tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_fails_closed_on_disallowed_activation_write"],
       "pi_safety_evidence": []
     },
     {
@@ -500,13 +548,113 @@
       "suite_ids": ["lifecycle"],
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
-      "action_ids": ["fixture.prepare_authoritative", "app.launch_simulated", "machine.connect_ready", "head.stage_virtual", "pressure.enable_regulation", "array.start_via_ui", "array.wait_for_completions", "array.wait_for_state", "validation.stock_pass_boundary", "artifact.capture_milestone", "validation.terminal_bundle", "scenario.teardown"],
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "head.bind_identity", "machine.configure_print_settings_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "head.return_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.wait_for_completions", "validation.stock_pass_boundary", "artifact.capture_milestone", "scenario.teardown"],
       "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "execution.multi_stock_head_exchange", "execution.stock_pass_boundaries_valid", "execution.stock_head_settings_match", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.event_history_bounded", "execution.terminal_bundle_valid", "artifacts.required_present"],
       "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle", "execution.multi_stock_head_exchange"],
-      "required_artifacts": ["report_json", "summary_text", "event_trace", "stall_stacks", "application_stdout", "screenshots", "scenario_root"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The scenario validates virtual rack/head association and durable application behavior, not physical head handling, pressure response, or droplet output."],
-      "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_fixture_contract_is_exact", "tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"],
+      "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_fixture_contract_is_exact", "tests/system/test_virtual_workflow_multi_stock_composed.py::test_composed_multi_stock_lifecycle_report"],
+      "pi_safety_evidence": []
+    },
+    {
+      "id": "print_array_mixed_mode_24x2_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "print_array_mixed_mode_24x2_v1",
+      "workload_fixture_id": "print_array_mixed_mode_24x2_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/print_array_mixed_mode_24x2_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 90,
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "head.bind_identity", "machine.configure_print_settings_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "head.return_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "manual_refuel.complete_check_via_ui", "array.start_via_ui", "array.wait_for_completions", "validation.stock_pass_boundary", "artifact.capture_milestone", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "execution.multi_stock_head_exchange", "execution.stock_pass_boundaries_valid", "execution.stock_head_settings_match", "execution.expected_completions", "execution.no_queue_starvation", "execution.intent_durability_exact", "execution.event_history_bounded", "execution.terminal_bundle_valid", "execution.mixed_mode_calibrations_valid", "execution.stream_manual_refuel_passed", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.lookahead_no_starvation", "execution.intent_durability", "execution.terminal_bundle", "execution.multi_stock_head_exchange", "execution.mixed_droplet_stream_lifecycle"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The scenario validates normal Qt controls and synthetic application evidence, not physical stream flow, refueling, pressure response, firmware, or hardware."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_mixed_mode_composed.py::test_composed_mixed_mode_lifecycle_report"],
+      "pi_safety_evidence": []
+    },
+    {
+      "id": "print_array_disconnect_mid_array_24_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "print_array_disconnect_mid_array_24_v1",
+      "workload_fixture_id": "print_array_disconnect_mid_array_24_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/print_array_disconnect_mid_array_24_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 60,
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "machine.configure_print_settings_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "machine.disconnect_via_ui", "array.observe_disconnected_quiescence", "artifact.capture_milestone", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "execution.disconnect_requested", "execution.disconnect_fail_closed", "execution.disconnected_boundary_quiescent", "execution.disconnect_recovery_ready", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.intent_durability", "execution.disconnect_fail_closed"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The scenario validates expected fail-closed behavior at the in-process simulated machine boundary, not serial framing, MCU reset, firmware recovery, or physical hardware."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_disconnect_composed.py::test_disconnect_fixture_contract_is_exact", "tests/system/test_virtual_workflow_disconnect_composed.py::test_composed_disconnect_fail_closed_report", "tests/system/test_virtual_workflow_disconnect_composed.py::test_disconnect_controlled_assertion_failure_retains_evidence"],
+      "pi_safety_evidence": []
+    },
+    {
+      "id": "randomized_calibration_reload_execution_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "randomized_calibration_reload_execution_v1",
+      "workload_fixture_id": "randomized_calibration_reload_execution_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/randomized_calibration_reload_execution_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 180,
+      "action_ids": ["app.launch_simulated", "app.close_simulated_session", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "experiment.load_authoritative_via_ui", "experiment.activate_authoritative_via_ui", "experiment.inspect_completed_via_ui", "head.bind_identity", "machine.configure_print_settings_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "head.return_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.wait_for_completions", "validation.stock_pass_boundary", "artifact.capture_milestone", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "experiment.editor_create_finalize", "experiment.randomized_joined_design_exact", "execution.calibrated_zero_progress_exact", "ui.fresh_application_session_constructed", "execution.first_session_teardown_clean", "execution.authoritative_reload_valid", "execution.authoritative_runtime_rehydrated", "execution.clean_session_rotation_exact", "execution.remaining_calibrations_exact", "execution.completed_terminal_reload_exact", "execution.randomized_calibration_terminal_exact", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.randomized_calibration_reload_execution"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The scenario uses three fresh application compositions in one process-wide QApplication and an in-process simulator; it does not validate firmware, protocol framing, physical calibration, motion, pressure, cameras, balance, or droplet quality."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_randomized_calibration_lifecycle.py::test_registered_randomized_calibration_reload_execution_report"],
+      "pi_safety_evidence": []
+    },
+    {
+      "id": "optimizer_360_calibration_reload_execution_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "optimizer_360_calibration_reload_execution_v1",
+      "workload_fixture_id": "optimizer_360_calibration_reload_execution_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/optimizer_360_calibration_reload_execution_v1.json",
+      "tier": "stress",
+      "suite_ids": ["host_stress"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 600,
+      "action_ids": ["app.launch_simulated", "app.close_simulated_session", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "experiment.load_authoritative_via_ui", "experiment.activate_authoritative_via_ui", "experiment.inspect_completed_via_ui", "head.bind_identity", "machine.configure_print_settings_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "head.return_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.wait_for_completions", "validation.stock_pass_boundary", "artifact.capture_milestone", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "experiment.editor_create_finalize", "experiment.optimizer_360_design_exact", "execution.calibrated_zero_progress_exact", "ui.fresh_application_session_constructed", "execution.first_session_teardown_clean", "execution.authoritative_reload_valid", "execution.authoritative_runtime_rehydrated", "execution.clean_session_rotation_exact", "execution.remaining_calibrations_exact", "execution.completed_terminal_reload_exact", "execution.randomized_calibration_terminal_exact", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.optimizer_360_calibration_reload_execution"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The scenario uses three fresh application compositions in one process-wide QApplication and an in-process simulator; it does not validate firmware, protocol framing, physical calibration, motion, pressure, cameras, balance, or droplet quality."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_optimizer_360_calibration_lifecycle.py::test_registered_optimizer_360_calibration_reload_execution_report"],
+      "pi_safety_evidence": []
+    },
+    {
+      "id": "legacy_experiment_read_only_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "legacy_experiment_read_only_v1",
+      "workload_fixture_id": "legacy_experiment_read_only_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/legacy_experiment_read_only_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 60,
+      "action_ids": ["app.launch_simulated", "experiment.inspect_legacy_via_ui", "analysis.open_plate_reader_via_ui", "editor.create_editable_copy_via_ui", "artifact.capture_milestone", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "experiment.legacy_read_only_exact", "analysis.legacy_plate_reader_ready", "experiment.legacy_editable_copy_fresh", "experiment.legacy_source_unchanged", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "experiment.legacy_read_only_view"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The scenario uses an in-process simulator and does not validate firmware, physical motion, pressure, or droplet quality."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_legacy_read_only.py::test_legacy_read_only_fixture_contract_is_exact", "tests/system/test_virtual_workflow_legacy_read_only.py::test_registered_legacy_read_only_report"],
       "pi_safety_evidence": []
     }
   ],
@@ -524,7 +672,7 @@
       "status": "active",
       "kind": "lifecycle",
       "platform": "windows_sil",
-      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1"],
+      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "legacy_experiment_read_only_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1", "print_array_mixed_mode_24x2_v1", "print_array_disconnect_mid_array_24_v1", "randomized_calibration_reload_execution_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -540,7 +688,7 @@
       "status": "active",
       "kind": "stress",
       "platform": "windows_sil",
-      "scenario_ids": ["print_array_stress_384x10_v1"],
+      "scenario_ids": ["print_array_stress_384x10_v1", "optimizer_360_calibration_reload_execution_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -562,51 +710,51 @@
   ],
   "schedules": [
     {
-      "id": "standard_every_change",
+      "id": "standard_on_demand",
       "suite_id": "standard",
-      "cadence": "every_change",
+      "cadence": "on_demand",
       "owner_role": "verification maintainers",
-      "automation_status": "not_configured",
+      "automation_status": "manual",
       "max_evidence_age_days": 1
     },
     {
-      "id": "lifecycle_nightly",
+      "id": "lifecycle_on_demand",
       "suite_id": "lifecycle",
-      "cadence": "nightly",
+      "cadence": "on_demand",
       "owner_role": "verification maintainers",
-      "automation_status": "not_configured",
+      "automation_status": "manual",
       "max_evidence_age_days": 2
     },
     {
-      "id": "host_regression_nightly",
+      "id": "host_regression_on_demand",
       "suite_id": "host_regression",
-      "cadence": "nightly",
+      "cadence": "on_demand",
       "owner_role": "verification maintainers",
-      "automation_status": "not_configured",
+      "automation_status": "manual",
       "max_evidence_age_days": 7
     },
     {
-      "id": "host_stress_weekly",
+      "id": "host_stress_on_demand",
       "suite_id": "host_stress",
-      "cadence": "weekly",
+      "cadence": "on_demand",
       "owner_role": "verification maintainers",
-      "automation_status": "not_configured",
+      "automation_status": "manual",
       "max_evidence_age_days": 14
     },
     {
-      "id": "pi_primary_weekly",
+      "id": "pi_primary_on_demand",
       "suite_id": "pi_primary",
-      "cadence": "weekly",
+      "cadence": "on_demand",
       "owner_role": "verification maintainers",
-      "automation_status": "not_configured",
+      "automation_status": "manual",
       "max_evidence_age_days": 14
     },
     {
-      "id": "pi_stress_monthly",
+      "id": "pi_stress_on_demand",
       "suite_id": "pi_stress",
-      "cadence": "monthly",
+      "cadence": "on_demand",
       "owner_role": "verification maintainers",
-      "automation_status": "not_configured",
+      "automation_status": "manual",
       "max_evidence_age_days": 35
     }
   ],
@@ -616,197 +764,466 @@
     "pi_required_evidence": ["preflight", "hardware_proof"],
     "path_policy": "repository_relative_posix",
     "generated_evidence_updates_manifest": false,
-    "coverage_join_status": "deferred_to_slice_6",
+    "coverage_join_status": "implemented_milestone_8_slice_4",
+    "safeguard_matrix_coverage_join_status": "implemented_milestone_12_slice_5",
+    "safeguard_matrix_catalog": [
+      {
+        "id": "editor_safeguards_v1",
+        "case_count": 8,
+        "case_ids": ["impossible_fixed_target_finalize_rejected", "printed_exceeds_final_finalize_rejected", "one_stock_infeasible_finalize_rejected", "two_stock_infeasible_finalize_rejected", "capacity_plus_one_finalize_rejected", "invalid_uploaded_well_rejected", "excluded_uploaded_well_rejected", "dirty_invalid_finalize_rejected"],
+        "catalog_sha256": "18b02f4fbdec0f01ca950ad3b572a7bd99962a6dffcaeca9a9c8c4ddbf37e670",
+        "required_assertion_ids": ["safeguard_rejection_no_mutation_no_dispatch"],
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_safeguards.py::test_editor_safeguard_real_operator_action_is_exact_and_quiescent"]
+      },
+      {
+        "id": "execution_preflight_safeguards_v1",
+        "case_count": 17,
+        "case_ids": ["calibration_head_mode_cancelled", "calibration_pulse_profile_cancelled", "start_missing_applied_calibration_cancelled", "start_stale_design_volume_cancelled", "start_pulse_width_mismatch_cancelled", "start_pressure_mismatch_cancelled", "wrong_stock_calibration_binding_rejected", "wrong_printer_head_calibration_binding_rejected", "reordered_stock_rows_keyed_valid", "regenerated_design_stale_calibration_rejected", "inspected_not_activated_start_rejected", "invalid_activation_rejected", "active_execution_edit_rejected", "progressed_stock_recalibration_rejected", "start_while_active_rejected", "resume_at_invalid_boundary_rejected", "head_exchange_at_invalid_boundary_rejected"],
+        "catalog_sha256": "40402ed3ac390b4c642e2328c1ff41d5b9352ad4f602220cb6c95271b767fa75",
+        "required_assertion_ids": ["safeguard_rejection_no_mutation_no_dispatch"],
+        "test_node_ids": ["tests/system/test_virtual_workflow_execution_preflight_safeguards.py::test_execution_preflight_real_operator_surface_is_exact_and_quiescent"]
+      },
+      {
+        "id": "authoritative_persistence_safeguards_v1",
+        "case_count": 9,
+        "case_ids": ["unreflected_pending_intent_blocked", "positive_progress_without_checkpoint_blocked", "checkpoint_plan_revision_conflict_blocked", "checkpoint_progress_fingerprint_conflict_blocked", "progress_plan_revision_conflict_invalid", "latest_plan_history_conflict_invalid", "progressed_calibration_link_missing_invalid", "design_plan_hash_conflict_invalid", "incomplete_authoritative_bundle_invalid"],
+        "catalog_sha256": "8ce5cad77540dfaba3e1448a9bf35e9ffaf3340010c0c636cee2c7af361f5f13",
+        "required_assertion_ids": ["safeguard_rejection_no_mutation_no_dispatch"],
+        "test_node_ids": ["tests/system/test_virtual_workflow_persistence_safeguards.py::test_persistence_fault_real_load_is_exact_inactive_and_nonmutating"]
+      }
+    ],
     "action_catalog": [
       {
         "id": "fixture.prepare_authoritative",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "app.launch_simulated",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
+      },
+      {
+        "id": "machine.connect_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "machine.enable_motors_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "machine.home_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "machine.configure_print_settings_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "head.set_volume_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "head.stage_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "head.return_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "head.bind_identity",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "model"
+      },
+      {
+        "id": "pressure.enable_regulation_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "calibration.open_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "calibration.generate_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "calibration.select_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "calibration.apply_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "manual_refuel.complete_check_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "machine.connect_ready",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "simulator"
       },
       {
         "id": "head.stage_virtual",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "model"
       },
       {
         "id": "pressure.enable_regulation",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "controller"
       },
       {
         "id": "array.start_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "array.wait_for_completions",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "array.wait_for_state",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "editor.open_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.new_experiment_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.configure_design_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "editor.upload_design_apply_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "calibration.preflight_cancel_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "array.start_preflight_cancel_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "array.start_identity_preflight_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "experiment.inspect_reordered_execution_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "array.start_inactive_execution_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "experiment.activate_invalid_execution_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "editor.finalize_active_execution_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "calibration.apply_progressed_stock_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "array.start_while_active_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "array.resume_invalid_boundary_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "head.exchange_invalid_boundary_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "experiment.load_rejected_authoritative_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "experiment.attempt_locked_activation_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.optimize_generate_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.finish_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.rename_prepared_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.edit_prepared_design_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.regenerate_prepared_design_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.refinalize_prepared_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "experiment.activate_authoritative",
+        "interaction_surface": "model",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py"
       },
       {
         "id": "execution.lock_for_printing",
+        "interaction_surface": "model",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py"
       },
       {
         "id": "editor.inspect_active_lock_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.reject_in_place_edit_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.create_editable_copy_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.edit_copy_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "editor.finalize_copy_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "artifact.capture_milestone",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "validation.prepared_bundle",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "validation.refinalized_bundle",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "experiment.reload_authoritative",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "validation.terminal_bundle",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "array.request_soft_stop_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "array.observe_stopped_quiescence",
         "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
+      },
+      {
+        "id": "machine.disconnect_via_ui",
+        "interaction_surface": "ui",
+        "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py"
+      },
+      {
+        "id": "array.observe_disconnected_quiescence",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
+      },
+      {
+        "id": "array.resume_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "validation.paused_bundle",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "app.close_simulated_session",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "experiment.load_authoritative_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "experiment.inspect_completed_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "experiment.inspect_legacy_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "analysis.open_plate_reader_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "experiment.activate_authoritative_via_ui",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
       },
       {
         "id": "validation.reload_boundary",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "validation.stock_pass_boundary",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       },
       {
         "id": "scenario.teardown",
         "implementation_status": "reusable",
-        "source_path": "tools/virtual_workflows/actions.py"
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
       }
     ],
     "assertion_catalog": [
@@ -815,6 +1232,30 @@
         "evidence_kind": "report_path",
         "evidence_path": "safety.hardware_interfaces",
         "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_scenario_source_has_no_production_machine_or_device_construction", "tests/system/test_virtual_print_array_384x10_workflow.py::test_stress_scenario_source_stays_hardware_isolated", "tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
+      },
+      {
+        "id": "machine.normal_ui_ready",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
+      },
+      {
+        "id": "execution.rack_head_associated",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
+      },
+      {
+        "id": "execution.applied_calibration_valid",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
+      },
+      {
+        "id": "artifacts.cleanup_complete",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {
         "id": "sil.pi_evidence_valid",
@@ -856,25 +1297,37 @@
         "id": "execution.multi_stock_head_exchange",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.multi_stock_head_exchange",
-        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_composed.py::test_composed_multi_stock_lifecycle_report"]
       },
       {
         "id": "execution.stock_pass_boundaries_valid",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.multi_stock_head_exchange.pass_boundaries",
-        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_composed.py::test_composed_multi_stock_lifecycle_report"]
       },
       {
         "id": "execution.stock_head_settings_match",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.multi_stock_head_exchange.pass_settings",
-        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_composed.py::test_composed_multi_stock_lifecycle_report"]
       },
       {
         "id": "execution.event_history_bounded",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.multi_stock_head_exchange.event_history",
-        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_lifecycle.py::test_multi_stock_head_exchange_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_multi_stock_composed.py::test_composed_multi_stock_lifecycle_report"]
+      },
+      {
+        "id": "execution.mixed_mode_calibrations_valid",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.mixed_mode_lifecycle.calibrations",
+        "test_node_ids": ["tests/system/test_virtual_workflow_mixed_mode_composed.py::test_composed_mixed_mode_lifecycle_report"]
+      },
+      {
+        "id": "execution.stream_manual_refuel_passed",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.mixed_mode_lifecycle.manual_refuel",
+        "test_node_ids": ["tests/system/test_virtual_workflow_mixed_mode_composed.py::test_composed_mixed_mode_lifecycle_report"]
       },
       {
         "id": "artifacts.required_present",
@@ -893,6 +1346,12 @@
         "evidence_kind": "report_path",
         "evidence_path": "metrics.responsiveness",
         "test_node_ids": ["tests/system/test_virtual_print_array_workflow.py::test_real_ui_print_array_completes_and_writes_inspectable_report"]
+      },
+      {
+        "id": "ui.sustained_responsiveness_acceptable",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_print_array_384x10_composed.py::test_composed_384x10_success_and_direct_parity"]
       },
       {
         "id": "resources.metrics_present",
@@ -958,97 +1417,187 @@
         "id": "experiment.active_edit_lock",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.post_start_edit_boundary.source_locked",
-        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report"]
       },
       {
         "id": "experiment.in_place_edit_rejected",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.assertion_results",
-        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report"]
       },
       {
         "id": "experiment.source_bundle_immutable",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.post_start_edit_boundary.source_after_copy",
-        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report"]
       },
       {
         "id": "experiment.editable_copy_created",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.post_start_edit_boundary.editable_copy_before_finalize",
-        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report"]
       },
       {
         "id": "experiment.editable_copy_fresh_execution",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.post_start_edit_boundary.editable_copy_after_finalize",
-        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report"]
       },
       {
         "id": "experiment.editable_copy_editable",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.assertion_results",
-        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_lifecycle.py::test_editor_post_start_lock_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_editor_post_start_composed.py::test_composed_editor_post_start_lock_report"]
       },
       {
         "id": "execution.soft_stop_requested",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.soft_stop_resume.request",
-        "test_node_ids": ["tests/system/test_virtual_workflow_lifecycle.py::test_soft_stop_resume_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_soft_stop_composed.py::test_composed_soft_stop_resume_report"]
       },
       {
         "id": "execution.soft_stop_boundary_valid",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.soft_stop_resume.stopped_checkpoint",
-        "test_node_ids": ["tests/system/test_virtual_workflow_lifecycle.py::test_soft_stop_resume_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_soft_stop_composed.py::test_composed_soft_stop_resume_report"]
       },
       {
         "id": "execution.stopped_boundary_quiescent",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.soft_stop_resume.quiescence",
-        "test_node_ids": ["tests/system/test_virtual_workflow_lifecycle.py::test_soft_stop_resume_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_soft_stop_composed.py::test_composed_soft_stop_resume_report"]
       },
       {
         "id": "execution.resume_exactly_once",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.soft_stop_resume.intent_reconciliation",
-        "test_node_ids": ["tests/system/test_virtual_workflow_lifecycle.py::test_soft_stop_resume_lifecycle_report"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_soft_stop_composed.py::test_composed_soft_stop_resume_report"]
       },
       {
         "id": "ui.fresh_application_session_constructed",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.action_results",
-        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes"]
       },
       {
         "id": "execution.first_session_paused",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.authoritative_reload_resume.session_1_paused",
-        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes"]
       },
       {
         "id": "execution.first_session_teardown_clean",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.cleanup_results",
-        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes"]
       },
       {
         "id": "execution.authoritative_reload_valid",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.assertion_results",
-        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes"]
       },
       {
         "id": "execution.authoritative_runtime_rehydrated",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.authoritative_reload_resume.session_2_activation",
-        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes"]
       },
       {
         "id": "execution.reload_resume_exactly_once",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.authoritative_reload_resume.resume_reconciliation",
-        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_lifecycle.py::test_authoritative_reload_resume_composed_report_passes"]
+        "test_node_ids": ["tests/system/test_virtual_workflow_authoritative_reload_composed.py::test_authoritative_reload_composed_report_passes"]
+      },
+      {
+        "id": "execution.disconnect_requested",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.disconnect_fail_closed.request",
+        "test_node_ids": ["tests/system/test_virtual_workflow_disconnect_composed.py::test_composed_disconnect_fail_closed_report"]
+      },
+      {
+        "id": "execution.disconnect_fail_closed",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.disconnect_fail_closed.intent_reconciliation",
+        "test_node_ids": ["tests/system/test_virtual_workflow_disconnect_composed.py::test_composed_disconnect_fail_closed_report"]
+      },
+      {
+        "id": "execution.disconnected_boundary_quiescent",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.disconnect_fail_closed.quiescence",
+        "test_node_ids": ["tests/system/test_virtual_workflow_disconnect_composed.py::test_composed_disconnect_fail_closed_report"]
+      },
+      {
+        "id": "execution.disconnect_recovery_ready",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.disconnect_fail_closed.recovery",
+        "test_node_ids": ["tests/system/test_virtual_workflow_disconnect_composed.py::test_composed_disconnect_fail_closed_report"]
+      },
+      {
+        "id": "experiment.randomized_joined_design_exact",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.randomized_calibration_lifecycle.prepared",
+        "test_node_ids": ["tests/system/test_virtual_workflow_randomized_calibration_lifecycle.py::test_registered_randomized_calibration_reload_execution_report"]
+      },
+      {
+        "id": "experiment.optimizer_360_design_exact",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.optimizer_360_calibration_lifecycle.prepared",
+        "test_node_ids": ["tests/system/test_virtual_workflow_optimizer_360_calibration_lifecycle.py::test_registered_optimizer_360_calibration_reload_execution_report"]
+      },
+      {
+        "id": "execution.calibrated_zero_progress_exact",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.randomized_calibration_lifecycle.calibrated_zero_progress",
+        "test_node_ids": ["tests/system/test_virtual_workflow_randomized_calibration_lifecycle.py::test_registered_randomized_calibration_reload_execution_report"]
+      },
+      {
+        "id": "execution.clean_session_rotation_exact",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.randomized_calibration_lifecycle.clean_session_rotation",
+        "test_node_ids": ["tests/system/test_virtual_workflow_randomized_calibration_lifecycle.py::test_registered_randomized_calibration_reload_execution_report"]
+      },
+      {
+        "id": "execution.remaining_calibrations_exact",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.randomized_calibration_lifecycle.remaining_calibrations",
+        "test_node_ids": ["tests/system/test_virtual_workflow_randomized_calibration_lifecycle.py::test_registered_randomized_calibration_reload_execution_report"]
+      },
+      {
+        "id": "execution.completed_terminal_reload_exact",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.randomized_calibration_lifecycle.terminal",
+        "test_node_ids": ["tests/system/test_virtual_workflow_randomized_calibration_lifecycle.py::test_registered_randomized_calibration_reload_execution_report"]
+      },
+      {
+        "id": "execution.randomized_calibration_terminal_exact",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.randomized_calibration_lifecycle.terminal",
+        "test_node_ids": ["tests/system/test_virtual_workflow_randomized_calibration_lifecycle.py::test_registered_randomized_calibration_reload_execution_report"]
+      },
+      {
+        "id": "experiment.legacy_read_only_exact",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.loader",
+        "test_node_ids": ["tests/system/test_virtual_workflow_legacy_read_only.py::test_registered_legacy_read_only_report"]
+      },
+      {
+        "id": "analysis.legacy_plate_reader_ready",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.analysis",
+        "test_node_ids": ["tests/system/test_virtual_workflow_legacy_read_only.py::test_registered_legacy_read_only_report"]
+      },
+      {
+        "id": "experiment.legacy_editable_copy_fresh",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.editable_copy",
+        "test_node_ids": ["tests/system/test_virtual_workflow_legacy_read_only.py::test_registered_legacy_read_only_report"]
+      },
+      {
+        "id": "experiment.legacy_source_unchanged",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values",
+        "test_node_ids": ["tests/system/test_virtual_workflow_legacy_read_only.py::test_registered_legacy_read_only_report"]
       }
     ]
   }

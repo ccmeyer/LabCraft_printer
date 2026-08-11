@@ -1,30 +1,49 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = "Scenario")]
 param(
   [Parameter(Mandatory = $true)]
   [string]$PiHost,
 
   [string]$PiUser = "labcraft",
   [string]$RemoteRepo = "/home/labcraft/LabCraft_printer",
+  [Parameter(ParameterSetName = "Scenario")]
   [string]$HostLabel = "pi5-sil-primary-v1",
 
+  [Parameter(ParameterSetName = "Scenario")]
   [ValidateSet("virtual_print_array_96_v1", "virtual_print_array_384x10_v1")]
   [string]$Scenario = "virtual_print_array_96_v1",
+
+  [Parameter(Mandatory = $true, ParameterSetName = "Suite")]
+  [ValidateSet("pi_primary", "pi_stress")]
+  [string]$Suite,
+
+  [Parameter(ParameterSetName = "Suite")]
+  [ValidateRange(0, [int]::MaxValue)]
+  [int]$Seed = 1,
+
+  [Parameter(ParameterSetName = "Suite")]
+  [switch]$ReplaySuite,
 
   [ValidateSet("offscreen", "minimal")]
   [string]$QtPlatform = "offscreen",
 
+  [Parameter(ParameterSetName = "Scenario")]
   [int]$WarmupRuns = 1,
+  [Parameter(ParameterSetName = "Scenario")]
   [int]$MeasuredRuns = 5,
   [double]$SpeedMultiplier = 1,
   [double]$TimeoutSeconds = 600,
 
   [switch]$PreflightOnly,
   [switch]$SafetyProofOnly,
+  [Parameter(ParameterSetName = "Scenario")]
   [switch]$CreateCandidateBaseline,
+  [Parameter(ParameterSetName = "Scenario")]
   [string]$BaselineDestination = "",
+  [Parameter(ParameterSetName = "Scenario")]
   [string]$CompareBaseline = "",
 
   [string]$LocalArchiveRoot = "verification_reports/virtual_workflows/pi-pulls",
+  [Parameter(ParameterSetName = "Scenario")]
   [switch]$KeepRemoteArtifacts,
   [switch]$DryRun
 )
@@ -48,7 +67,11 @@ function ConvertTo-ShellLiteral([string]$Value) {
   return "'" + $Value.Replace("'", "'\''") + "'"
 }
 
-function Invoke-SshCapture([string]$Target, [string]$Command) {
+function Invoke-SshCapture(
+  [string]$Target,
+  [string]$Command,
+  [int[]]$AllowedExitCodes = @(0)
+) {
   $remoteCommand = "bash -lc " + (ConvertTo-ShellLiteral $Command)
   if ($DryRun.IsPresent) {
     Write-Host "DRY RUN ssh $Target $remoteCommand"
@@ -56,11 +79,12 @@ function Invoke-SshCapture([string]$Target, [string]$Command) {
   }
   $output = & ssh @script:SshCommonArguments $Target $remoteCommand 2>&1
   $exitCode = $LASTEXITCODE
+  $script:LastSshExitCode = $exitCode
   $lines = @($output | ForEach-Object { $_.ToString() })
   foreach ($line in $lines) {
     Write-Host $line
   }
-  if ($exitCode -ne 0) {
+  if ($exitCode -notin $AllowedExitCodes) {
     $text = ($lines -join [Environment]::NewLine).Trim()
     throw "ssh failed ($exitCode): $text"
   }
@@ -125,7 +149,8 @@ function New-RemoteCommand(
   return $changeDirectory + " && " + $launcher + " " + $argumentText
 }
 
-if ($WarmupRuns -lt 0 -or $MeasuredRuns -lt 1) {
+if ($PSCmdlet.ParameterSetName -eq "Scenario" -and
+    ($WarmupRuns -lt 0 -or $MeasuredRuns -lt 1)) {
   throw "WarmupRuns must be >= 0 and MeasuredRuns must be >= 1."
 }
 if ($SpeedMultiplier -le 0 -or $TimeoutSeconds -le 0) {
@@ -161,7 +186,12 @@ Write-Host "Pi SIL target: $target"
 Write-Host "Remote repository: $RemoteRepo"
 Write-Host "Collection id: $collectionId"
 Write-Host "Qt platform: $QtPlatform"
-Write-Host "Scenario: $Scenario"
+if ($PSCmdlet.ParameterSetName -eq "Suite") {
+  Write-Host "Suite: $Suite"
+  Write-Host "Seed: $Seed"
+} else {
+  Write-Host "Scenario: $Scenario"
+}
 
 $preflightArgs = @(
   "preflight",
@@ -189,6 +219,139 @@ $proofArgs = @(
 ))
 if ($SafetyProofOnly.IsPresent) {
   Write-Host "Pi SIL safety proof completed: $remoteProof"
+  exit 0
+}
+
+if ($PSCmdlet.ParameterSetName -eq "Suite") {
+  $suiteCollectArgs = @(
+    "collect",
+    "--output-root", $remoteOutputRoot,
+    "--qt-platform", $QtPlatform,
+    "--preflight", $remotePreflight,
+    "--proof", $remoteProof,
+    "--",
+    "--suite", $Suite,
+    "--seed", $Seed.ToString([Globalization.CultureInfo]::InvariantCulture),
+    "--speed-multiplier", $SpeedMultiplier.ToString([Globalization.CultureInfo]::InvariantCulture)
+  )
+  if ($PSBoundParameters.ContainsKey("TimeoutSeconds")) {
+    $suiteCollectArgs += @(
+      "--timeout-seconds",
+      $TimeoutSeconds.ToString([Globalization.CultureInfo]::InvariantCulture)
+    )
+  }
+  $suiteLines = Invoke-SshCapture -Target $target -Command (
+    New-RemoteCommand -RemoteRepoPath $RemoteRepo -Arguments $suiteCollectArgs
+  ) -AllowedExitCodes @(0, 2)
+
+  if ($DryRun.IsPresent) {
+    $remoteAggregates = @(
+      "$remoteOutputRoot/$Suite/<run>/aggregate.json"
+    )
+    if ($ReplaySuite.IsPresent) {
+      $replayArgs = @(
+        "replay",
+        "--output-root", $remoteOutputRoot,
+        "--aggregate", $remoteAggregates[0]
+      )
+      [void](Invoke-SshCapture -Target $target -Command (
+        New-RemoteCommand -RemoteRepoPath $RemoteRepo -Arguments $replayArgs
+      ) -AllowedExitCodes @(0, 2))
+      $remoteAggregates += "$remoteOutputRoot/$Suite/<replay>/aggregate.json"
+    }
+    $dryBundle = "$remoteOutputRoot/bundles/pi-suite-$collectionId.zip"
+    $dryBundleArgs = @(
+      "bundle",
+      "--output-root", $remoteOutputRoot,
+      "--proof", $remoteProof,
+      "--trace", $remoteTrace,
+      "--output", $dryBundle
+    )
+    foreach ($aggregatePath in $remoteAggregates) {
+      $dryBundleArgs += @("--aggregate", $aggregatePath)
+    }
+    [void](Invoke-SshCapture -Target $target -Command (
+      New-RemoteCommand -RemoteRepoPath $RemoteRepo -Arguments $dryBundleArgs
+    ))
+    Invoke-Scp -Arguments @("${target}:$dryBundle", $LocalArchiveRoot)
+    Write-Host "Dry run complete; no remote operation, artifact, or cleanup occurred."
+    exit 0
+  }
+
+  $suiteExit = $script:LastSshExitCode
+  $remoteAggregates = @(
+    (Find-OutputPath -Lines $suiteLines -Prefix "Aggregate:")
+  )
+  if ($ReplaySuite.IsPresent) {
+    $replayArgs = @(
+      "replay",
+      "--output-root", $remoteOutputRoot,
+      "--aggregate", $remoteAggregates[0]
+    )
+    $replayLines = Invoke-SshCapture -Target $target -Command (
+      New-RemoteCommand -RemoteRepoPath $RemoteRepo -Arguments $replayArgs
+    ) -AllowedExitCodes @(0, 2)
+    $replayExit = $script:LastSshExitCode
+    $remoteAggregates += Find-OutputPath -Lines $replayLines -Prefix "Aggregate:"
+    if ($replayExit -eq 2) {
+      $suiteExit = 2
+    }
+  }
+
+  $remoteBundle = "$remoteOutputRoot/bundles/pi-suite-$collectionId.zip"
+  $bundleArgs = @(
+    "bundle",
+    "--output-root", $remoteOutputRoot,
+    "--proof", $remoteProof,
+    "--trace", $remoteTrace,
+    "--output", $remoteBundle
+  )
+  foreach ($aggregatePath in $remoteAggregates) {
+    $bundleArgs += @("--aggregate", $aggregatePath)
+  }
+  [void](Invoke-SshCapture -Target $target -Command (
+    New-RemoteCommand -RemoteRepoPath $RemoteRepo -Arguments $bundleArgs
+  ))
+
+  $localArchiveRootAbs = Resolve-RepoPath -Value $LocalArchiveRoot -RepoRoot $repoRoot
+  New-Item -ItemType Directory -Force -Path $localArchiveRootAbs | Out-Null
+  $localArchive = Join-Path $localArchiveRootAbs ([IO.Path]::GetFileName($remoteBundle))
+  $localManifest = "$localArchive.manifest.json"
+  $localHash = "$localArchive.sha256.json"
+  foreach ($path in @($localArchive, $localManifest, $localHash)) {
+    if (Test-Path -LiteralPath $path) {
+      throw "Refusing to overwrite local Pi SIL suite artifact: $path"
+    }
+  }
+  Invoke-Scp -Arguments @("${target}:$remoteBundle", $localArchive)
+  Invoke-Scp -Arguments @("${target}:$remoteBundle.manifest.json", $localManifest)
+  Invoke-Scp -Arguments @("${target}:$remoteBundle.sha256.json", $localHash)
+  $expectedHash = [string]((Get-Content -LiteralPath $localHash -Raw | ConvertFrom-Json).sha256)
+  $actualHash = (Get-FileHash -LiteralPath $localArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actualHash -ne $expectedHash.ToLowerInvariant()) {
+    throw "Retrieved Pi SIL suite archive SHA-256 does not match the remote sidecar."
+  }
+  & $python -m tools.virtual_workflows.pi_sil extract `
+    --archive $localArchive `
+    --manifest $localManifest `
+    --destination $repoRoot
+  if ($LASTEXITCODE -ne 0) {
+    throw "Local Pi SIL suite artifact extraction/validation failed ($LASTEXITCODE)."
+  }
+  $manifest = Get-Content -LiteralPath $localManifest -Raw | ConvertFrom-Json
+  foreach ($relative in @($manifest.aggregate_paths)) {
+    $localAggregate = Join-Path $repoRoot ([string]$relative)
+    $aggregateHash = (Get-FileHash -LiteralPath $localAggregate -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-Host "Retrieved aggregate: $localAggregate"
+    Write-Host "Retrieved aggregate SHA-256: $aggregateHash"
+  }
+  Write-Host "Retrieved suite bundle: $localArchive"
+  Write-Host "Retrieved suite bundle SHA-256: $actualHash"
+  Write-Host "Remote suite evidence retained: $remoteOutputRoot"
+  if ($suiteExit -eq 2) {
+    exit 2
+  }
+  Write-Host "Pi SIL suite collection, replay, and artifact validation completed."
   exit 0
 }
 

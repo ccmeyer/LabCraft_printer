@@ -486,7 +486,45 @@ def test_two_stock_toggle_can_unlock_volume_budget_limited_design():
     with_two = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=True)
     assert with_two["best"]
     assert ("AddA", None) in with_two["two_stock_keys"]
-    assert em.plans_per_option[("AddA", None)]["n_stocks"] == 2
+    plan = em.plans_per_option[("AddA", None)]
+    assert plan["n_stocks"] == 2
+    assert tuple(sorted(stock["stock_concentration"] for stock in plan["stocks"])) == pytest.approx((5.0, 10.0))
+
+    preview = em.get_target_preview_map()[("AddA", None)]
+    assert [row["achieved_final"] for row in preview] == pytest.approx([0.1, 0.2])
+    assert [row["abs_error"] for row in preview] == pytest.approx([0.0, 0.0], abs=1e-12)
+
+
+def test_two_stock_enumeration_retains_exact_accuracy_winner_within_bounds():
+    em = _make_model(target_volume_nl=10.0, final_volume_nl=500.0)
+
+    candidates, pair_limit_hit = em._enumerate_two_stock_candidates_with_meta(
+        [0.1, 0.2],
+        10.0,
+        "mM",
+        final_volume_nL=500.0,
+        volume_budget_nL=10.0,
+        quantum=0.1,
+        max_refine=20,
+        max_pairs=12000,
+        max_stock_conc=10.0,
+    )
+
+    assert pair_limit_hit is False
+    assert len(candidates) <= 12000
+    assert all(max(candidate.stock_concs) <= 10.0 + 1e-12 for candidate in candidates)
+    assert any(
+        tuple(sorted(candidate.stock_concs)) == pytest.approx((5.0, 10.0))
+        and _two_plan_error_key(
+            em,
+            [0.1, 0.2],
+            candidate,
+            droplet_nl=10.0,
+            final_volume_nl=500.0,
+        )[:2]
+        == pytest.approx((0.0, 0.0), abs=1e-12)
+        for candidate in candidates
+    )
 
 
 def test_fixed_stock_above_max_stock_is_rejected():

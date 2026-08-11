@@ -59,7 +59,7 @@ def test_authoritative_reload_resume_fixture_contract_is_exact():
 
 
 @pytest.mark.sil_lifecycle
-def test_authoritative_reload_resume_composed_report_passes(
+def test_authoritative_reload_resume_direct_oracle_report_passes(
     qapp,
     tmp_path,
 ):
@@ -111,7 +111,7 @@ def test_authoritative_reload_resume_composed_report_passes(
     assert evidence["checks"]["read_only_guidance"]
     assert evidence["checks"]["action_is_load_execution"]
     assert evidence["checks"]["visible_lock_banner"]
-    assert evidence["action_label"] == "Load Execution"
+    assert evidence["action_label"] == "Load Experiment"
     assert "without starting or resuming printing" in evidence["banner_text"]
     identity = evidence["design_identity"]
     assert identity["disk_design_sha256"] == identity["plan_design_sha256"]
@@ -121,7 +121,7 @@ def test_authoritative_reload_resume_composed_report_passes(
         if item["action_id"] == "experiment.activate_authoritative_via_ui"
     )
     assert activation["status"] == "pass"
-    assert activation["evidence"]["action_label"] == "Load Execution"
+    assert activation["evidence"]["action_label"] == "Load Experiment"
 
     assertions = {
         item["assertion_id"]: item["decision"]

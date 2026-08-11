@@ -162,8 +162,17 @@ class _CalibrationManagerStub:
 
 class _MachineModelStub:
     def __init__(self, *, print_pulse_width=1400, print_pressure=0.80):
+        self.machine_connected = True
+        self.machine_state_updated = SignalStub()
+        self.pressure_updated = SignalStub()
+        self.printing_parameters_updated = SignalStub()
         self.print_pulse_width = int(print_pulse_width)
+        self.refuel_pulse_width = 3000
         self.print_pressure = float(print_pressure)
+        self.refuel_pressure = 0.30
+
+    def is_connected(self):
+        return bool(self.machine_connected)
 
     def get_print_pressure_bounds(self):
         return (0.10, 5.00)
@@ -171,8 +180,20 @@ class _MachineModelStub:
     def get_print_pulse_width(self):
         return int(self.print_pulse_width)
 
+    def get_refuel_pulse_width(self):
+        return int(self.refuel_pulse_width)
+
     def get_current_print_pressure(self):
         return float(self.print_pressure)
+
+    def get_current_refuel_pressure(self):
+        return float(self.refuel_pressure)
+
+    def get_target_print_pressure(self):
+        return float(self.print_pressure)
+
+    def get_target_refuel_pressure(self):
+        return float(self.refuel_pressure)
 
 
 class _ControllerStub:
@@ -604,7 +625,8 @@ def test_stream_preflight_review_settings_does_not_start(monkeypatch, qapp):
 
     assert controller.start_online_stream_calls == 0
     assert controller.apply_print_profile_calls == []
-    assert dialog.acquisition_controls_toggle.isChecked() is True
+    assert dialog.acquisition_controls_toggle.isChecked() is False
+    assert dialog.printing_controls_toggle.isChecked() is True
     assert dialog.calibrate_online_stream_button.text() == "Calibrate Stream Volume"
 
     dialog.deleteLater()

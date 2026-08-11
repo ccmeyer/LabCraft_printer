@@ -1,0 +1,2139 @@
+"""Typed, deterministic parameter matrices for composed host SIL journeys."""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+from dataclasses import dataclass
+from fractions import Fraction
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Callable, Mapping, Protocol
+
+from tools.sil.ejection_response import PulseAwareSyntheticEjectionModelV1
+from tools.virtual_workflows.experiment_design_cases import (
+    EXPERIMENT_DESIGN_BASE_SCENARIO_ID,
+    EXPERIMENT_DESIGN_JOURNEY_FAMILY,
+    EXPERIMENT_DESIGN_MATRIX_ID,
+    audit_pairwise_coverage,
+    build_experiment_design_fixture,
+    executable_experiment_design_cases,
+    planned_catalog_sha256,
+)
+from tools.virtual_workflows.editor_safeguards import (
+    EDITOR_SAFEGUARD_BASE_SCENARIO_ID,
+    EDITOR_SAFEGUARD_JOURNEY_FAMILY,
+    EDITOR_SAFEGUARD_MATRIX_ID,
+    build_editor_safeguard_fixture,
+    editor_safeguard_cases,
+    editor_safeguard_catalog,
+)
+from tools.virtual_workflows.execution_preflight_safeguards import (
+    EXECUTION_PREFLIGHT_BASE_SCENARIO_ID,
+    EXECUTION_PREFLIGHT_JOURNEY_FAMILY,
+    EXECUTION_PREFLIGHT_MATRIX_ID,
+    build_execution_preflight_fixture,
+    execution_preflight_cases,
+    execution_preflight_catalog,
+)
+from tools.virtual_workflows.persistence_safeguards import (
+    PERSISTENCE_SAFEGUARD_BASE_SCENARIO_ID,
+    PERSISTENCE_SAFEGUARD_JOURNEY_FAMILY,
+    PERSISTENCE_SAFEGUARD_MATRIX_ID,
+    build_persistence_safeguard_fixture,
+    persistence_safeguard_cases,
+    persistence_safeguard_catalog,
+)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MIXED_MODE_MATRIX_ID = "mixed_mode_calibration_v1"
+CALIBRATION_REQUANTIZATION_MATRIX_ID = "calibration_requantization_v1"
+MATRIX_PLAN_SCHEMA_NAME = "labcraft.virtual_workflow_matrix_plan"
+MATRIX_SCHEMA_VERSION = 1
+BASE_FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "print_array_mixed_mode_24x2_v1.json"
+)
+BASE_SCENARIO_ID = "print_array_mixed_mode_24x2_v1"
+REQUANTIZATION_BASE_FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "print_array_multi_stock_24x2_v1.json"
+)
+REQUANTIZATION_BASE_SCENARIO_ID = "print_array_multi_stock_24x2_v1"
+REQUANTIZATION_PROFILE_ID = "droplet_1300_9nl_v1"
+REQUANTIZATION_STOCK_ID = "Virtual Requantization Stock_10.00_mM"
+REQUANTIZATION_FILL_STOCK_ID = "Water_1.00_--"
+TWO_REAGENT_STOCK_IDS = (
+    "Virtual Multi Stock 01_3.00_x",
+    "Virtual Multi Stock 02_1.50_x",
+)
+REQUANTIZATION_WELL_IDS = tuple(f"A{column}" for column in range(1, 25))
+REQUANTIZATION_GROUP_STOCK_IDS = frozenset(
+    {
+        REQUANTIZATION_STOCK_ID,
+        REQUANTIZATION_FILL_STOCK_ID,
+        *TWO_REAGENT_STOCK_IDS,
+    }
+)
+
+
+class MatrixValidationError(ValueError):
+    """Raised when a matrix definition or requested case is invalid."""
+
+
+class MatrixCaseContract(Protocol):
+    """Minimum immutable case surface required by the generic registry."""
+
+    case_id: str
+
+    def normalized(self) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class CalibrationProfile:
+    profile_id: str
+    droplet_pulse_width_us: int
+    stream_pulse_width_us: int
+    print_pressure_psi: float
+    refuel_pulse_width_us: int
+    refuel_pressure_psi: float
+    trial_count: int
+    trial_droplet_count: int
+
+    def __post_init__(self) -> None:
+        response = PulseAwareSyntheticEjectionModelV1()
+        if not self.profile_id.strip():
+            raise MatrixValidationError("profile ID must be non-empty")
+        if not response.supports("droplet", self.droplet_pulse_width_us):
+            raise MatrixValidationError("profile droplet pulse width is unsupported")
+        if not response.supports("stream", self.stream_pulse_width_us):
+            raise MatrixValidationError("profile stream pulse width is unsupported")
+        if self.print_pressure_psi <= 0 or self.refuel_pressure_psi <= 0:
+            raise MatrixValidationError("profile pressures must be positive")
+        if self.refuel_pulse_width_us <= 0:
+            raise MatrixValidationError("profile refuel pulse width must be positive")
+        if self.trial_count <= 0 or self.trial_droplet_count <= 0:
+            raise MatrixValidationError("profile trial counts must be positive")
+
+    def normalized(self) -> dict[str, Any]:
+        response = PulseAwareSyntheticEjectionModelV1()
+        return {
+            "profile_id": self.profile_id,
+            "droplet": {
+                "pulse_width_us": self.droplet_pulse_width_us,
+                "volume_nL": response.predict_volume_nl(
+                    "droplet", self.droplet_pulse_width_us
+                ),
+            },
+            "stream": {
+                "pulse_width_us": self.stream_pulse_width_us,
+                "volume_nL": response.predict_volume_nl(
+                    "stream", self.stream_pulse_width_us
+                ),
+                "refuel_pulse_width_us": self.refuel_pulse_width_us,
+                "refuel_pressure_psi": self.refuel_pressure_psi,
+            },
+            "print_pressure_psi": self.print_pressure_psi,
+            "manual_refuel": {
+                "trial_count": self.trial_count,
+                "trial_droplet_count": self.trial_droplet_count,
+            },
+        }
+
+
+@dataclass(frozen=True)
+class RefuelOutcome:
+    stock_key: str
+    status: str
+    operator_judgment: str
+
+    def __post_init__(self) -> None:
+        valid = {
+            ("passed", "stable"),
+            ("failed", "level_rose"),
+            ("failed", "level_fell"),
+            ("unclear", "unclear"),
+        }
+        if self.stock_key not in {"A", "B"}:
+            raise MatrixValidationError("refuel stock key must be A or B")
+        if (self.status, self.operator_judgment) not in valid:
+            raise MatrixValidationError("unsupported manual-refuel outcome")
+
+    def normalized(self) -> dict[str, str]:
+        return {
+            "stock_key": self.stock_key,
+            "status": self.status,
+            "operator_judgment": self.operator_judgment,
+        }
+
+
+@dataclass(frozen=True)
+class MatrixCase:
+    case_id: str
+    mode_a: str
+    mode_b: str
+    stock_order: tuple[str, str]
+    profile_id: str
+    refuel_outcomes: tuple[RefuelOutcome, ...]
+    expected_terminal: str
+    expected_completion_count: int
+
+    def __post_init__(self) -> None:
+        if not self.case_id.strip():
+            raise MatrixValidationError("case ID must be non-empty")
+        if self.mode_a not in {"droplet", "stream"} or self.mode_b not in {
+            "droplet",
+            "stream",
+        }:
+            raise MatrixValidationError("case modes must be droplet or stream")
+        if self.stock_order not in {("A", "B"), ("B", "A")}:
+            raise MatrixValidationError("case stock order is unsupported")
+        if self.profile_id not in PROFILES:
+            raise MatrixValidationError("case calibration profile is unsupported")
+        if self.expected_terminal not in {"completed", "manual_refuel_cancelled"}:
+            raise MatrixValidationError("case terminal outcome is unsupported")
+        modes = {"A": self.mode_a, "B": self.mode_b}
+        outcomes = {item.stock_key: item for item in self.refuel_outcomes}
+        stream_keys = {key for key, mode in modes.items() if mode == "stream"}
+        if len(outcomes) != len(self.refuel_outcomes) or set(outcomes) != stream_keys:
+            raise MatrixValidationError(
+                "each stream stock requires exactly one manual-refuel outcome"
+            )
+        first_nonpass = next(
+            (
+                index
+                for index, key in enumerate(self.stock_order)
+                if key in outcomes and outcomes[key].status != "passed"
+            ),
+            None,
+        )
+        expected_count = 48 if first_nonpass is None else first_nonpass * 24
+        expected_terminal = (
+            "completed" if first_nonpass is None else "manual_refuel_cancelled"
+        )
+        if self.expected_completion_count != expected_count:
+            raise MatrixValidationError("case expected completion count drifted")
+        if self.expected_terminal != expected_terminal:
+            raise MatrixValidationError("case expected terminal outcome drifted")
+
+    @property
+    def mode_family(self) -> str:
+        if self.mode_a == self.mode_b:
+            return f"{self.mode_a}_pair"
+        return "mixed"
+
+    def normalized(self) -> dict[str, Any]:
+        return {
+            "case_id": self.case_id,
+            "stock_modes": {"A": self.mode_a, "B": self.mode_b},
+            "mode_family": self.mode_family,
+            "stock_order": list(self.stock_order),
+            "profile_id": self.profile_id,
+            "refuel_outcomes": [item.normalized() for item in self.refuel_outcomes],
+            "expected_terminal": self.expected_terminal,
+            "expected_completion_count": self.expected_completion_count,
+        }
+
+
+PROFILES: Mapping[str, CalibrationProfile] = {
+    "baseline": CalibrationProfile(
+        "baseline", 1300, 2500, 1.2, 6000, 0.4, 2, 5
+    ),
+    "alternate": CalibrationProfile(
+        "alternate", 1550, 4000, 1.6, 8000, 0.6, 3, 10
+    ),
+}
+
+
+def _outcome(stock: str, status: str, judgment: str) -> RefuelOutcome:
+    return RefuelOutcome(stock, status, judgment)
+
+
+MATRIX_CASES: tuple[MatrixCase, ...] = (
+    MatrixCase(
+        "mixed_ab_baseline_pass", "droplet", "stream", ("A", "B"),
+        "baseline", (_outcome("B", "passed", "stable"),), "completed", 48,
+    ),
+    MatrixCase(
+        "mixed_ba_alternate_pass", "droplet", "stream", ("B", "A"),
+        "alternate", (_outcome("B", "passed", "stable"),), "completed", 48,
+    ),
+    MatrixCase(
+        "droplet_pair_ab_alternate", "droplet", "droplet", ("A", "B"),
+        "alternate", (), "completed", 48,
+    ),
+    MatrixCase(
+        "droplet_pair_ba_baseline", "droplet", "droplet", ("B", "A"),
+        "baseline", (), "completed", 48,
+    ),
+    MatrixCase(
+        "stream_pair_ab_baseline_pass", "stream", "stream", ("A", "B"),
+        "baseline", (
+            _outcome("A", "passed", "stable"),
+            _outcome("B", "passed", "stable"),
+        ), "completed", 48,
+    ),
+    MatrixCase(
+        "stream_pair_ba_alternate_second_rise", "stream", "stream", ("B", "A"),
+        "alternate", (
+            _outcome("A", "failed", "level_rose"),
+            _outcome("B", "passed", "stable"),
+        ), "manual_refuel_cancelled", 24,
+    ),
+    MatrixCase(
+        "mixed_ab_alternate_fell", "droplet", "stream", ("A", "B"),
+        "alternate", (_outcome("B", "failed", "level_fell"),),
+        "manual_refuel_cancelled", 24,
+    ),
+    MatrixCase(
+        "mixed_ba_baseline_unclear", "droplet", "stream", ("B", "A"),
+        "baseline", (_outcome("B", "unclear", "unclear"),),
+        "manual_refuel_cancelled", 0,
+    ),
+)
+
+
+def _fraction(value: int | float, label: str) -> Fraction:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise MatrixValidationError(f"{label} must be numeric")
+    try:
+        return Fraction(str(value))
+    except (ValueError, ZeroDivisionError) as exc:
+        raise MatrixValidationError(f"{label} must be finite") from exc
+
+
+@dataclass(frozen=True)
+class RequantizationCase:
+    """One independently frozen nearest-integer calibration boundary case."""
+
+    case_id: str
+    transition: str
+    prepared_volume_nL: float
+    calibrated_volume_nL: float
+    design_printed_volume_nL: float
+    expected_prepared_droplets: int
+    expected_requantized_droplets: int
+    margin_numerator: int
+    margin_denominator: int
+    profile_id: str = REQUANTIZATION_PROFILE_ID
+    expected_terminal: str = "completed"
+    expected_completion_count: int = 24
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.case_id, str) or not self.case_id.strip():
+            raise MatrixValidationError("requantization case ID must be non-empty")
+        transitions = {
+            "idempotent": 0,
+            "volume_increase": -1,
+            "volume_decrease": 1,
+        }
+        if self.transition not in transitions:
+            raise MatrixValidationError("requantization transition is unsupported")
+        if self.profile_id != REQUANTIZATION_PROFILE_ID:
+            raise MatrixValidationError("requantization profile is unsupported")
+        if self.expected_terminal != "completed":
+            raise MatrixValidationError("requantization cases must complete")
+        if self.expected_completion_count != len(REQUANTIZATION_WELL_IDS):
+            raise MatrixValidationError("requantization completion count drifted")
+        for label, count in (
+            ("prepared count", self.expected_prepared_droplets),
+            ("requantized count", self.expected_requantized_droplets),
+        ):
+            if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+                raise MatrixValidationError(f"requantization {label} must be positive")
+        prepared = _fraction(self.prepared_volume_nL, "prepared volume")
+        calibrated = _fraction(self.calibrated_volume_nL, "calibrated volume")
+        printed = _fraction(self.design_printed_volume_nL, "printed volume")
+        if min(prepared, calibrated, printed) <= 0:
+            raise MatrixValidationError("requantization volumes must be positive")
+        response = PulseAwareSyntheticEjectionModelV1()
+        if calibrated != Fraction(str(response.predict_volume_nl("droplet", 1300))):
+            raise MatrixValidationError(
+                "requantization calibrated volume must match the frozen response"
+            )
+        expected_delta = transitions[self.transition]
+        observed_delta = (
+            self.expected_requantized_droplets
+            - self.expected_prepared_droplets
+        )
+        if observed_delta != expected_delta:
+            raise MatrixValidationError("requantization count direction drifted")
+        if (
+            self.transition == "idempotent" and prepared != calibrated
+        ) or (
+            self.transition == "volume_increase" and prepared >= calibrated
+        ) or (
+            self.transition == "volume_decrease" and prepared <= calibrated
+        ):
+            raise MatrixValidationError("requantization volume direction drifted")
+
+        quotients = (
+            (printed / prepared, self.expected_prepared_droplets),
+            (printed / calibrated, self.expected_requantized_droplets),
+        )
+        margins: list[Fraction] = []
+        for quotient, expected in quotients:
+            distance = abs(quotient - expected)
+            if distance >= Fraction(1, 2):
+                raise MatrixValidationError(
+                    "requantization expected count is outside its rounding interval"
+                )
+            margins.append(Fraction(1, 2) - distance)
+        if (
+            isinstance(self.margin_numerator, bool)
+            or isinstance(self.margin_denominator, bool)
+            or not isinstance(self.margin_numerator, int)
+            or not isinstance(self.margin_denominator, int)
+            or self.margin_numerator <= 0
+            or self.margin_denominator <= 0
+        ):
+            raise MatrixValidationError("requantization boundary margin is invalid")
+        margin = Fraction(self.margin_numerator, self.margin_denominator)
+        if margin != min(margins):
+            raise MatrixValidationError("requantization boundary margin drifted")
+        if margin < Fraction(1, 3):
+            raise MatrixValidationError("requantization boundary margin is too small")
+
+    def normalized(self) -> dict[str, Any]:
+        return {
+            "case_id": self.case_id,
+            "transition": self.transition,
+            "printing_mode": "droplet",
+            "profile_id": self.profile_id,
+            "prepared_volume_nL": self.prepared_volume_nL,
+            "calibrated_volume_nL": self.calibrated_volume_nL,
+            "design_printed_volume_nL": self.design_printed_volume_nL,
+            "expected_prepared_droplets": self.expected_prepared_droplets,
+            "expected_requantized_droplets": self.expected_requantized_droplets,
+            "expected_count_delta": (
+                self.expected_requantized_droplets
+                - self.expected_prepared_droplets
+            ),
+            "rounding_boundary_margin": {
+                "numerator": self.margin_numerator,
+                "denominator": self.margin_denominator,
+            },
+            "expected_terminal": self.expected_terminal,
+            "expected_completion_count": self.expected_completion_count,
+        }
+
+
+BASE_REQUANTIZATION_CASES: tuple[RequantizationCase, ...] = (
+    RequantizationCase(
+        "droplet_idempotent_10_to_10",
+        "idempotent",
+        9.0,
+        9.0,
+        90.0,
+        10,
+        10,
+        1,
+        2,
+    ),
+    RequantizationCase(
+        "droplet_volume_increase_10_to_9",
+        "volume_increase",
+        8.0,
+        9.0,
+        80.0,
+        10,
+        9,
+        7,
+        18,
+    ),
+    RequantizationCase(
+        "droplet_volume_decrease_10_to_11",
+        "volume_decrease",
+        10.0,
+        9.0,
+        100.0,
+        10,
+        11,
+        7,
+        18,
+    ),
+)
+
+
+@dataclass(frozen=True)
+class RequantizationCountGroup:
+    """One catalog-owned count shared by an explicit stock/well group."""
+
+    stock_id: str
+    well_ids: tuple[str, ...]
+    prepared_droplets: int
+    requantized_droplets: int
+    rounding_rule: str
+    margin_numerator: int | None
+    margin_denominator: int | None
+    preview_row: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.stock_id not in REQUANTIZATION_GROUP_STOCK_IDS:
+            raise MatrixValidationError("requantization count-group stock is invalid")
+        if (
+            not self.well_ids
+            or len(set(self.well_ids)) != len(self.well_ids)
+            or any(well_id not in REQUANTIZATION_WELL_IDS for well_id in self.well_ids)
+        ):
+            raise MatrixValidationError("requantization count-group wells are invalid")
+        for label, value in (
+            ("prepared", self.prepared_droplets),
+            ("requantized", self.requantized_droplets),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise MatrixValidationError(
+                    f"requantization {label} grouped count is invalid"
+                )
+        if self.rounding_rule == "nearest_integer":
+            if (
+                isinstance(self.margin_numerator, bool)
+                or isinstance(self.margin_denominator, bool)
+                or not isinstance(self.margin_numerator, int)
+                or not isinstance(self.margin_denominator, int)
+                or self.margin_numerator <= 0
+                or self.margin_denominator <= 0
+            ):
+                raise MatrixValidationError("grouped rounding margin is invalid")
+            if Fraction(self.margin_numerator, self.margin_denominator) < Fraction(1, 3):
+                raise MatrixValidationError("grouped rounding margin is too small")
+        elif self.rounding_rule == "nonnegative_clamp":
+            if (
+                self.prepared_droplets != 0
+                or self.requantized_droplets != 0
+                or self.margin_numerator is not None
+                or self.margin_denominator is not None
+            ):
+                raise MatrixValidationError("clamped count groups must remain exact zero")
+        else:
+            raise MatrixValidationError("requantization grouped rounding rule is invalid")
+        if self.preview_row is not None and (
+            isinstance(self.preview_row, bool)
+            or not isinstance(self.preview_row, int)
+            or self.preview_row < 0
+        ):
+            raise MatrixValidationError("requantization preview row is invalid")
+
+    def normalized(self) -> dict[str, Any]:
+        payload = {
+            "stock_id": self.stock_id,
+            "well_ids": list(self.well_ids),
+            "prepared_droplets": self.prepared_droplets,
+            "requantized_droplets": self.requantized_droplets,
+            "rounding_rule": self.rounding_rule,
+            "preview_row": self.preview_row,
+        }
+        if self.rounding_rule == "nearest_integer":
+            payload["rounding_boundary_margin"] = {
+                "numerator": self.margin_numerator,
+                "denominator": self.margin_denominator,
+            }
+        return payload
+
+
+@dataclass(frozen=True)
+class RequantizationCalibrationStep:
+    """One ordered real-UI calibration used by a composite case."""
+
+    stock_id: str
+    target_mode: str
+    pulse_width_us: int
+    applied_volume_nL: float
+    synthetic_profile_id: str
+    preview_kind: str
+    primary: bool
+
+    def __post_init__(self) -> None:
+        if self.stock_id not in REQUANTIZATION_GROUP_STOCK_IDS:
+            raise MatrixValidationError("requantization calibration stock is invalid")
+        if self.target_mode not in {"droplet", "stream"}:
+            raise MatrixValidationError("requantization calibration mode is invalid")
+        if self.preview_kind not in {"target_rows", "fill_total"}:
+            raise MatrixValidationError("requantization preview kind is invalid")
+        if (self.stock_id == REQUANTIZATION_FILL_STOCK_ID) != (
+            self.preview_kind == "fill_total"
+        ):
+            raise MatrixValidationError("requantization preview kind and stock differ")
+        response = PulseAwareSyntheticEjectionModelV1()
+        if not response.supports(self.target_mode, self.pulse_width_us):
+            raise MatrixValidationError("requantization calibration pulse is unsupported")
+        predicted = Fraction(str(response.predict_volume_nl(
+            self.target_mode, self.pulse_width_us
+        )))
+        if predicted != _fraction(self.applied_volume_nL, "applied volume"):
+            raise MatrixValidationError("requantization applied volume drifted")
+        expected_profile = (
+            "stream_to_droplet"
+            if self.synthetic_profile_id == "stream_to_droplet"
+            else f"nominal_{self.target_mode}"
+        )
+        if self.synthetic_profile_id != expected_profile:
+            raise MatrixValidationError("requantization synthetic profile is invalid")
+
+    def normalized(self) -> dict[str, Any]:
+        return {
+            "stock_id": self.stock_id,
+            "target_mode": self.target_mode,
+            "pulse_width_us": self.pulse_width_us,
+            "applied_volume_nL": self.applied_volume_nL,
+            "synthetic_profile_id": self.synthetic_profile_id,
+            "preview_kind": self.preview_kind,
+            "primary": self.primary,
+        }
+
+
+def _nearest_integer(quotient: Fraction) -> tuple[int, Fraction]:
+    lower = quotient.numerator // quotient.denominator
+    remainder = quotient - lower
+    if remainder == Fraction(1, 2):
+        raise MatrixValidationError("requantization cases may not use half ties")
+    expected = lower + (1 if remainder > Fraction(1, 2) else 0)
+    return expected, Fraction(1, 2) - abs(quotient - expected)
+
+
+@dataclass(frozen=True)
+class CompositeRequantizationCase:
+    """A multi-stock/multi-target requantization case with exact grouped truth."""
+
+    case_id: str
+    design_printed_volume_nL: float
+    final_volume_nL: float
+    replicates: int
+    target_concentrations: tuple[float, ...]
+    nonfill_prepared_mode: str
+    nonfill_prepared_volume_nL: float
+    fill_prepared_volume_nL: float
+    calibration_steps: tuple[RequantizationCalibrationStep, ...]
+    count_groups: tuple[RequantizationCountGroup, ...]
+    require_terminal_reload: bool
+    expected_terminal: str = "completed"
+    expected_completion_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.case_id.strip():
+            raise MatrixValidationError("composite requantization case ID is empty")
+        if self.expected_terminal != "completed":
+            raise MatrixValidationError("composite requantization cases must complete")
+        if self.nonfill_prepared_mode not in {"droplet", "stream"}:
+            raise MatrixValidationError("composite prepared mode is invalid")
+        printed = _fraction(self.design_printed_volume_nL, "printed volume")
+        final = _fraction(self.final_volume_nL, "final volume")
+        nonfill_prepared = _fraction(
+            self.nonfill_prepared_volume_nL, "non-fill prepared volume"
+        )
+        fill_prepared = _fraction(
+            self.fill_prepared_volume_nL, "fill prepared volume"
+        )
+        if min(printed, final, nonfill_prepared, fill_prepared) <= 0:
+            raise MatrixValidationError("composite requantization volumes must be positive")
+        if (
+            isinstance(self.replicates, bool)
+            or not isinstance(self.replicates, int)
+            or self.replicates <= 0
+            or not self.target_concentrations
+            or self.replicates * len(self.target_concentrations)
+            != len(REQUANTIZATION_WELL_IDS)
+        ):
+            raise MatrixValidationError("composite reaction cardinality drifted")
+        if tuple(sorted(self.target_concentrations)) != self.target_concentrations:
+            raise MatrixValidationError("composite targets must be deterministically ordered")
+        if len(self.calibration_steps) != 2:
+            raise MatrixValidationError("composite cases require two calibration steps")
+        if [step.stock_id for step in self.calibration_steps] != [
+            REQUANTIZATION_STOCK_ID,
+            REQUANTIZATION_FILL_STOCK_ID,
+        ]:
+            raise MatrixValidationError("composite calibration order drifted")
+        if sum(step.primary for step in self.calibration_steps) != 1:
+            raise MatrixValidationError("composite cases require one primary calibration")
+
+        grouped: dict[tuple[str, str], RequantizationCountGroup] = {}
+        for group in self.count_groups:
+            for well_id in group.well_ids:
+                key = (group.stock_id, well_id)
+                if key in grouped:
+                    raise MatrixValidationError("composite count groups overlap")
+                grouped[key] = group
+        expected_membership = {
+            (stock_id, well_id)
+            for stock_id in (REQUANTIZATION_STOCK_ID, REQUANTIZATION_FILL_STOCK_ID)
+            for well_id in REQUANTIZATION_WELL_IDS
+        }
+        if set(grouped) != expected_membership:
+            raise MatrixValidationError("composite count groups are incomplete")
+        nonfill_groups = [
+            group for group in self.count_groups
+            if group.stock_id == REQUANTIZATION_STOCK_ID
+        ]
+        fill_groups = [
+            group for group in self.count_groups
+            if group.stock_id == REQUANTIZATION_FILL_STOCK_ID
+        ]
+        preview_rows = [group.preview_row for group in nonfill_groups]
+        if (
+            any(row is None for row in preview_rows)
+            or sorted(int(row) for row in preview_rows if row is not None)
+            != list(range(len(nonfill_groups)))
+            or any(group.preview_row is not None for group in fill_groups)
+        ):
+            raise MatrixValidationError(
+                "composite preview projection is malformed"
+            )
+
+        nonfill_step = self.calibration_steps[0]
+        fill_step = self.calibration_steps[1]
+        nonfill_final = _fraction(nonfill_step.applied_volume_nL, "non-fill final volume")
+        fill_final = _fraction(fill_step.applied_volume_nL, "fill final volume")
+        computed: dict[tuple[str, str], tuple[int, int, str, Fraction | None]] = {}
+        for index, well_id in enumerate(REQUANTIZATION_WELL_IDS):
+            target = _fraction(
+                self.target_concentrations[index % len(self.target_concentrations)],
+                "target concentration",
+            )
+            requested = target * final / Fraction(10)
+            prepared_nonfill, prepared_nonfill_margin = _nearest_integer(
+                requested / nonfill_prepared
+            )
+            final_nonfill, final_nonfill_margin = _nearest_integer(
+                requested / nonfill_final
+            )
+            computed[(REQUANTIZATION_STOCK_ID, well_id)] = (
+                prepared_nonfill,
+                final_nonfill,
+                "nearest_integer",
+                min(prepared_nonfill_margin, final_nonfill_margin),
+            )
+            prepared_remaining = max(
+                Fraction(0), printed - prepared_nonfill * nonfill_prepared
+            )
+            final_remaining = max(
+                Fraction(0), printed - final_nonfill * nonfill_final
+            )
+            if prepared_remaining == 0 and final_remaining == 0:
+                computed[(REQUANTIZATION_FILL_STOCK_ID, well_id)] = (
+                    0, 0, "nonnegative_clamp", None
+                )
+            else:
+                prepared_fill, prepared_fill_margin = _nearest_integer(
+                    prepared_remaining / fill_prepared
+                )
+                final_fill, final_fill_margin = _nearest_integer(
+                    final_remaining / fill_final
+                )
+                computed[(REQUANTIZATION_FILL_STOCK_ID, well_id)] = (
+                    prepared_fill,
+                    final_fill,
+                    "nearest_integer",
+                    min(prepared_fill_margin, final_fill_margin),
+                )
+        for key, group in grouped.items():
+            expected = computed[key]
+            margin = (
+                Fraction(group.margin_numerator, group.margin_denominator)
+                if group.rounding_rule == "nearest_integer" else None
+            )
+            if (
+                group.prepared_droplets,
+                group.requantized_droplets,
+                group.rounding_rule,
+                margin,
+            ) != expected:
+                raise MatrixValidationError(
+                    f"composite count oracle drifted for {key!r}"
+                )
+        changed_by_stock = {
+            stock_id: any(
+                group.prepared_droplets != group.requantized_droplets
+                for group in self.count_groups
+                if group.stock_id == stock_id
+            )
+            for stock_id in (
+                REQUANTIZATION_STOCK_ID,
+                REQUANTIZATION_FILL_STOCK_ID,
+            )
+        }
+        if any(
+            bool(step.primary) != changed_by_stock[step.stock_id]
+            for step in self.calibration_steps
+        ):
+            raise MatrixValidationError(
+                "composite primary transition direction drifted"
+            )
+        positive = sum(
+            1 for value in computed.values() if value[1] > 0
+        )
+        if self.expected_completion_count != positive:
+            raise MatrixValidationError("composite completion count drifted")
+
+    def normalized(self) -> dict[str, Any]:
+        return {
+            "case_id": self.case_id,
+            "case_kind": "composite_requantization",
+            "design": {
+                "printed_volume_nL": self.design_printed_volume_nL,
+                "final_volume_nL": self.final_volume_nL,
+                "replicates": self.replicates,
+                "target_concentrations": list(self.target_concentrations),
+            },
+            "prepared": {
+                "nonfill_mode": self.nonfill_prepared_mode,
+                "nonfill_volume_nL": self.nonfill_prepared_volume_nL,
+                "fill_volume_nL": self.fill_prepared_volume_nL,
+            },
+            "calibration_steps": [step.normalized() for step in self.calibration_steps],
+            "count_groups": [group.normalized() for group in self.count_groups],
+            "require_terminal_reload": self.require_terminal_reload,
+            "expected_terminal": self.expected_terminal,
+            "expected_completion_count": self.expected_completion_count,
+        }
+
+
+def _group(
+    stock_id: str,
+    wells: tuple[str, ...],
+    prepared: int,
+    final: int,
+    margin: tuple[int, int] | None,
+    *,
+    preview_row: int | None = None,
+) -> RequantizationCountGroup:
+    return RequantizationCountGroup(
+        stock_id,
+        wells,
+        prepared,
+        final,
+        "nearest_integer" if margin is not None else "nonnegative_clamp",
+        margin[0] if margin is not None else None,
+        margin[1] if margin is not None else None,
+        preview_row,
+    )
+
+
+ODD_REQUANTIZATION_WELLS = REQUANTIZATION_WELL_IDS[0::2]
+EVEN_REQUANTIZATION_WELLS = REQUANTIZATION_WELL_IDS[1::2]
+
+COMPOSITE_REQUANTIZATION_CASES: tuple[CompositeRequantizationCase, ...] = (
+    CompositeRequantizationCase(
+        "droplet_multi_target_10_to_9_and_1_to_1",
+        80.0,
+        80.0,
+        12,
+        (1.0625, 10.0),
+        "droplet",
+        8.0,
+        9.0,
+        (
+            RequantizationCalibrationStep(
+                REQUANTIZATION_STOCK_ID, "droplet", 1300, 9.0,
+                "nominal_droplet", "target_rows", True,
+            ),
+            RequantizationCalibrationStep(
+                REQUANTIZATION_FILL_STOCK_ID, "droplet", 1300, 9.0,
+                "nominal_droplet", "fill_total", False,
+            ),
+        ),
+        (
+            _group(REQUANTIZATION_STOCK_ID, ODD_REQUANTIZATION_WELLS, 1, 1, (7, 16), preview_row=0),
+            _group(REQUANTIZATION_STOCK_ID, EVEN_REQUANTIZATION_WELLS, 10, 9, (7, 18), preview_row=1),
+            _group(REQUANTIZATION_FILL_STOCK_ID, ODD_REQUANTIZATION_WELLS, 8, 8, (7, 18)),
+            _group(REQUANTIZATION_FILL_STOCK_ID, EVEN_REQUANTIZATION_WELLS, 0, 0, None),
+        ),
+        False,
+        expected_completion_count=36,
+    ),
+    CompositeRequantizationCase(
+        "stream_to_droplet_40_to_10_8",
+        1250.0,
+        1250.0,
+        24,
+        (1.296,),
+        "stream",
+        40.0,
+        9.0,
+        (
+            RequantizationCalibrationStep(
+                REQUANTIZATION_STOCK_ID, "droplet", 1400, 10.8,
+                "stream_to_droplet", "target_rows", True,
+            ),
+            RequantizationCalibrationStep(
+                REQUANTIZATION_FILL_STOCK_ID, "droplet", 1300, 9.0,
+                "nominal_droplet", "fill_total", False,
+            ),
+        ),
+        (
+            _group(REQUANTIZATION_STOCK_ID, REQUANTIZATION_WELL_IDS, 4, 15, (9, 20), preview_row=0),
+            _group(REQUANTIZATION_FILL_STOCK_ID, REQUANTIZATION_WELL_IDS, 121, 121, (7, 18)),
+        ),
+        True,
+        expected_completion_count=48,
+    ),
+    CompositeRequantizationCase(
+        "fill_volume_decrease_4_to_5",
+        100.0,
+        100.0,
+        24,
+        (5.4,),
+        "droplet",
+        9.0,
+        12.0,
+        (
+            RequantizationCalibrationStep(
+                REQUANTIZATION_STOCK_ID, "droplet", 1300, 9.0,
+                "nominal_droplet", "target_rows", False,
+            ),
+            RequantizationCalibrationStep(
+                REQUANTIZATION_FILL_STOCK_ID, "droplet", 1300, 9.0,
+                "nominal_droplet", "fill_total", True,
+            ),
+        ),
+        (
+            _group(REQUANTIZATION_STOCK_ID, REQUANTIZATION_WELL_IDS, 6, 6, (1, 2), preview_row=0),
+            _group(REQUANTIZATION_FILL_STOCK_ID, REQUANTIZATION_WELL_IDS, 4, 5, (1, 3)),
+        ),
+        False,
+        expected_completion_count=48,
+    ),
+)
+
+
+@dataclass(frozen=True)
+class MissingFillRequantizationCase:
+    """A real calibration Apply that must reject an absent required fill."""
+
+    case_id: str
+    prepared_volume_nL: float
+    design_printed_volume_nL: float
+    accepted_mode: str
+    accepted_pulse_width_us: int
+    accepted_volume_nL: float
+    accepted_profile_id: str
+    rejected_mode: str
+    rejected_pulse_width_us: int
+    rejected_volume_nL: float
+    rejected_profile_id: str
+    expected_prepared_droplets: int
+    expected_hypothetical_reagent_droplets: int
+    expected_missing_fill_droplets: int
+    reagent_margin_numerator: int
+    reagent_margin_denominator: int
+    fill_margin_numerator: int
+    fill_margin_denominator: int
+    expected_warning_fragment: str
+    expected_terminal: str = "calibration_apply_rejected"
+    expected_completion_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.case_id.strip():
+            raise MatrixValidationError("missing-fill case ID is empty")
+        if self.expected_terminal != "calibration_apply_rejected":
+            raise MatrixValidationError("missing-fill terminal outcome drifted")
+        if self.expected_completion_count != 0:
+            raise MatrixValidationError("missing-fill completion count must be zero")
+        if (self.accepted_mode, self.rejected_mode) != ("droplet", "stream"):
+            raise MatrixValidationError("missing-fill mode transition drifted")
+        if (
+            self.accepted_profile_id != "nominal_droplet"
+            or self.rejected_profile_id != "droplet_to_stream"
+        ):
+            raise MatrixValidationError("missing-fill calibration profiles drifted")
+        response = PulseAwareSyntheticEjectionModelV1()
+        accepted = _fraction(self.accepted_volume_nL, "accepted volume")
+        rejected = _fraction(self.rejected_volume_nL, "rejected volume")
+        prepared = _fraction(self.prepared_volume_nL, "prepared volume")
+        printed = _fraction(self.design_printed_volume_nL, "printed volume")
+        if accepted != Fraction(str(response.predict_volume_nl(
+            self.accepted_mode, self.accepted_pulse_width_us
+        ))):
+            raise MatrixValidationError("missing-fill accepted response drifted")
+        if rejected != Fraction(str(response.predict_volume_nl(
+            self.rejected_mode, self.rejected_pulse_width_us
+        ))):
+            raise MatrixValidationError("missing-fill rejected response drifted")
+        if prepared != accepted or printed != prepared:
+            raise MatrixValidationError("missing-fill prepared design drifted")
+        prepared_count, prepared_margin = _nearest_integer(printed / prepared)
+        rejected_count, rejected_margin = _nearest_integer(printed / rejected)
+        remaining = max(Fraction(0), printed - rejected_count * rejected)
+        fill_count, fill_margin = _nearest_integer(remaining / accepted)
+        observed = (
+            self.expected_prepared_droplets,
+            self.expected_hypothetical_reagent_droplets,
+            self.expected_missing_fill_droplets,
+        )
+        if observed != (prepared_count, rejected_count, fill_count):
+            raise MatrixValidationError("missing-fill count oracle drifted")
+        if rejected_count >= prepared_count or fill_count <= 0:
+            raise MatrixValidationError("missing-fill transition direction drifted")
+        if Fraction(
+            self.reagent_margin_numerator, self.reagent_margin_denominator
+        ) != rejected_margin:
+            raise MatrixValidationError("missing-fill reagent margin drifted")
+        if Fraction(
+            self.fill_margin_numerator, self.fill_margin_denominator
+        ) != fill_margin:
+            raise MatrixValidationError("missing-fill fill margin drifted")
+        if min(prepared_margin, rejected_margin, fill_margin) < Fraction(1, 3):
+            raise MatrixValidationError("missing-fill rounding margin is too small")
+        if "would require a fill stock that is absent" not in self.expected_warning_fragment:
+            raise MatrixValidationError("missing-fill warning contract drifted")
+
+    def normalized(self) -> dict[str, Any]:
+        return {
+            "case_id": self.case_id,
+            "case_kind": "missing_fill_requantization",
+            "design": {
+                "printed_volume_nL": self.design_printed_volume_nL,
+                "final_volume_nL": self.design_printed_volume_nL,
+                "well_count": len(REQUANTIZATION_WELL_IDS),
+            },
+            "accepted_calibration": {
+                "target_mode": self.accepted_mode,
+                "pulse_width_us": self.accepted_pulse_width_us,
+                "applied_volume_nL": self.accepted_volume_nL,
+                "synthetic_profile_id": self.accepted_profile_id,
+            },
+            "rejected_calibration": {
+                "target_mode": self.rejected_mode,
+                "pulse_width_us": self.rejected_pulse_width_us,
+                "applied_volume_nL": self.rejected_volume_nL,
+                "synthetic_profile_id": self.rejected_profile_id,
+            },
+            "count_oracle": {
+                "prepared_reagent_droplets": self.expected_prepared_droplets,
+                "hypothetical_reagent_droplets": (
+                    self.expected_hypothetical_reagent_droplets
+                ),
+                "hypothetical_missing_fill_droplets": (
+                    self.expected_missing_fill_droplets
+                ),
+                "reagent_rounding_boundary_margin": {
+                    "numerator": self.reagent_margin_numerator,
+                    "denominator": self.reagent_margin_denominator,
+                },
+                "fill_rounding_boundary_margin": {
+                    "numerator": self.fill_margin_numerator,
+                    "denominator": self.fill_margin_denominator,
+                },
+            },
+            "expected_warning_fragment": self.expected_warning_fragment,
+            "expected_terminal": self.expected_terminal,
+            "expected_completion_count": self.expected_completion_count,
+        }
+
+
+@dataclass(frozen=True)
+class TwoReagentIsolationCase:
+    """Recalibrate reagent two after reagent one has completed exactly once."""
+
+    case_id: str
+    stock_ids: tuple[str, str]
+    calibration_steps: tuple[RequantizationCalibrationStep, ...]
+    count_groups: tuple[RequantizationCountGroup, ...]
+    primary_stock_id: str
+    first_pass_completion_count: int
+    expected_total_droplets: int
+    expected_terminal: str = "completed"
+    expected_completion_count: int = 48
+
+    def __post_init__(self) -> None:
+        if not self.case_id.strip():
+            raise MatrixValidationError("two-reagent case ID is empty")
+        if self.stock_ids != TWO_REAGENT_STOCK_IDS:
+            raise MatrixValidationError("two-reagent stock identities drifted")
+        if self.primary_stock_id != self.stock_ids[1]:
+            raise MatrixValidationError("two-reagent primary stock drifted")
+        if self.expected_terminal != "completed":
+            raise MatrixValidationError("two-reagent case must complete")
+        if (
+            self.first_pass_completion_count != len(REQUANTIZATION_WELL_IDS)
+            or self.expected_completion_count != 2 * len(REQUANTIZATION_WELL_IDS)
+        ):
+            raise MatrixValidationError("two-reagent completion cardinality drifted")
+        if len(self.calibration_steps) != 2:
+            raise MatrixValidationError("two-reagent calibration steps drifted")
+        if tuple(step.stock_id for step in self.calibration_steps) != self.stock_ids:
+            raise MatrixValidationError("two-reagent calibration order drifted")
+        if tuple(bool(step.primary) for step in self.calibration_steps) != (False, True):
+            raise MatrixValidationError("two-reagent primary transition drifted")
+        membership: dict[tuple[str, str], RequantizationCountGroup] = {}
+        for group in self.count_groups:
+            if group.stock_id not in self.stock_ids:
+                raise MatrixValidationError("two-reagent count stock is invalid")
+            if group.preview_row != 0:
+                raise MatrixValidationError("two-reagent preview projection drifted")
+            for well_id in group.well_ids:
+                key = (group.stock_id, well_id)
+                if key in membership:
+                    raise MatrixValidationError("two-reagent count groups overlap")
+                membership[key] = group
+        expected_membership = {
+            (stock_id, well_id)
+            for stock_id in self.stock_ids
+            for well_id in REQUANTIZATION_WELL_IDS
+        }
+        if set(membership) != expected_membership:
+            raise MatrixValidationError("two-reagent count groups are incomplete")
+        expected_counts = {
+            self.stock_ids[0]: (1, 1),
+            self.stock_ids[1]: (1, 2),
+        }
+        for stock_id in self.stock_ids:
+            rows = [group for group in self.count_groups if group.stock_id == stock_id]
+            if len(rows) != 1:
+                raise MatrixValidationError("two-reagent grouped cardinality drifted")
+            group = rows[0]
+            if (
+                group.prepared_droplets,
+                group.requantized_droplets,
+                group.rounding_rule,
+                Fraction(group.margin_numerator, group.margin_denominator),
+            ) != (*expected_counts[stock_id], "nearest_integer", Fraction(1, 2)):
+                raise MatrixValidationError("two-reagent count oracle drifted")
+        total = sum(
+            group.requantized_droplets * len(group.well_ids)
+            for group in self.count_groups
+        )
+        if total != self.expected_total_droplets or total != 72:
+            raise MatrixValidationError("two-reagent total droplet count drifted")
+
+    def normalized(self) -> dict[str, Any]:
+        return {
+            "case_id": self.case_id,
+            "case_kind": "two_reagent_isolation",
+            "stock_ids": list(self.stock_ids),
+            "primary_stock_id": self.primary_stock_id,
+            "calibration_steps": [step.normalized() for step in self.calibration_steps],
+            "count_groups": [group.normalized() for group in self.count_groups],
+            "first_pass_completion_count": self.first_pass_completion_count,
+            "expected_total_droplets": self.expected_total_droplets,
+            "expected_terminal": self.expected_terminal,
+            "expected_completion_count": self.expected_completion_count,
+        }
+
+
+MISSING_FILL_REQUANTIZATION_CASE = MissingFillRequantizationCase(
+    "zero_fill_missing_fill_rejected",
+    9.0,
+    9.0,
+    "droplet",
+    1300,
+    9.0,
+    "nominal_droplet",
+    "stream",
+    2500,
+    60.0,
+    "droplet_to_stream",
+    1,
+    0,
+    1,
+    7,
+    20,
+    1,
+    2,
+    "would require a fill stock that is absent from the finalized execution plan.",
+)
+
+TWO_REAGENT_ISOLATION_CASE = TwoReagentIsolationCase(
+    "two_reagent_second_1_to_2_isolated",
+    TWO_REAGENT_STOCK_IDS,
+    (
+        RequantizationCalibrationStep(
+            TWO_REAGENT_STOCK_IDS[0], "droplet", 1300, 9.0,
+            "nominal_droplet", "target_rows", False,
+        ),
+        RequantizationCalibrationStep(
+            TWO_REAGENT_STOCK_IDS[1], "droplet", 1300, 9.0,
+            "nominal_droplet", "target_rows", True,
+        ),
+    ),
+    (
+        _group(TWO_REAGENT_STOCK_IDS[0], REQUANTIZATION_WELL_IDS, 1, 1, (1, 2), preview_row=0),
+        _group(TWO_REAGENT_STOCK_IDS[1], REQUANTIZATION_WELL_IDS, 1, 2, (1, 2), preview_row=0),
+    ),
+    TWO_REAGENT_STOCK_IDS[1],
+    24,
+    72,
+)
+
+REQUANTIZATION_CASES: tuple[MatrixCaseContract, ...] = (
+    *BASE_REQUANTIZATION_CASES,
+    *COMPOSITE_REQUANTIZATION_CASES,
+    MISSING_FILL_REQUANTIZATION_CASE,
+    TWO_REAGENT_ISOLATION_CASE,
+)
+
+
+def _canonical_json(value: Mapping[str, Any] | list[Any]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _sha256_json(value: Mapping[str, Any] | list[Any]) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class MatrixDefinition:
+    """One typed matrix catalog and its fixture/journey dispatch contract."""
+
+    matrix_id: str
+    base_scenario_id: str
+    journey_family: str
+    platform: str
+    execution: str
+    cases: tuple[MatrixCaseContract, ...]
+    catalog_metadata: Mapping[str, Any]
+    fixture_builder: Callable[[MatrixCaseContract], tuple[dict[str, Any], Path]]
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("matrix ID", self.matrix_id),
+            ("base scenario ID", self.base_scenario_id),
+            ("journey family", self.journey_family),
+            ("platform", self.platform),
+            ("execution policy", self.execution),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise MatrixValidationError(f"{label} must be non-empty")
+        if not callable(self.fixture_builder):
+            raise MatrixValidationError("matrix fixture builder must be callable")
+        if not isinstance(self.catalog_metadata, Mapping):
+            raise MatrixValidationError("matrix catalog metadata must be an object")
+        reserved = {"matrix_id", "base_scenario_id", "cases"}
+        overlap = reserved.intersection(self.catalog_metadata)
+        if overlap:
+            raise MatrixValidationError(
+                "matrix catalog metadata uses reserved keys: "
+                + ", ".join(sorted(overlap))
+            )
+        try:
+            normalized_metadata = json.loads(
+                _canonical_json(dict(self.catalog_metadata))
+            )
+        except (TypeError, ValueError) as exc:
+            raise MatrixValidationError(
+                "matrix catalog metadata must be deterministic JSON"
+            ) from exc
+        object.__setattr__(
+            self, "catalog_metadata", MappingProxyType(normalized_metadata)
+        )
+        try:
+            normalized_cases = tuple(self.cases)
+        except TypeError as exc:
+            raise MatrixValidationError("matrix cases must be an iterable") from exc
+        object.__setattr__(self, "cases", normalized_cases)
+        if not self.cases:
+            raise MatrixValidationError("matrix definition must contain at least one case")
+        case_ids: list[str] = []
+        for case in self.cases:
+            case_id = getattr(case, "case_id", None)
+            normalizer = getattr(case, "normalized", None)
+            if not isinstance(case_id, str) or not case_id.strip():
+                raise MatrixValidationError("matrix case ID must be non-empty")
+            if not callable(normalizer):
+                raise MatrixValidationError(
+                    f"matrix case {case_id!r} has no normalized contract"
+                )
+            normalized = normalizer()
+            if not isinstance(normalized, Mapping):
+                raise MatrixValidationError(
+                    f"matrix case {case_id!r} normalized payload must be an object"
+                )
+            if normalized.get("case_id") != case_id:
+                raise MatrixValidationError(
+                    f"matrix case {case_id!r} normalized identity drifted"
+                )
+            try:
+                canonical = _canonical_json(dict(normalized))
+                repeated = normalizer()
+                repeated_canonical = _canonical_json(dict(repeated))
+            except (TypeError, ValueError) as exc:
+                raise MatrixValidationError(
+                    f"matrix case {case_id!r} must be deterministic JSON"
+                ) from exc
+            if canonical != repeated_canonical:
+                raise MatrixValidationError(
+                    f"matrix case {case_id!r} normalized payload is not deterministic"
+                )
+            case_ids.append(case_id)
+        if len(set(case_ids)) != len(case_ids):
+            raise MatrixValidationError("matrix definition contains duplicate case IDs")
+
+    def case_ids(self) -> tuple[str, ...]:
+        return tuple(case.case_id for case in self.cases)
+
+    def get_case(self, case_id: str) -> MatrixCaseContract:
+        matches = [case for case in self.cases if case.case_id == str(case_id)]
+        if len(matches) != 1:
+            raise MatrixValidationError(f"unsupported matrix case: {case_id!r}")
+        return matches[0]
+
+    def normalized_catalog(self) -> dict[str, Any]:
+        return {
+            "matrix_id": self.matrix_id,
+            "base_scenario_id": self.base_scenario_id,
+            **copy.deepcopy(dict(self.catalog_metadata)),
+            "cases": [dict(case.normalized()) for case in self.cases],
+        }
+
+    def catalog_sha256(self) -> str:
+        return _sha256_json(self.normalized_catalog())
+
+    def build_case_fixture(
+        self, case_id: str
+    ) -> tuple[dict[str, Any], Path]:
+        result = self.fixture_builder(self.get_case(case_id))
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise MatrixValidationError("matrix fixture builder returned an invalid bundle")
+        fixture, source = result
+        if not isinstance(fixture, dict):
+            raise MatrixValidationError("matrix fixture payload must be an object")
+        try:
+            source_path = Path(source)
+        except TypeError as exc:
+            raise MatrixValidationError(
+                "matrix reference fixture path is invalid"
+            ) from exc
+        if not source_path.is_file():
+            raise MatrixValidationError("matrix reference fixture does not exist")
+        return fixture, source_path
+
+    def catalog_entry(self) -> dict[str, Any]:
+        return {
+            "id": self.matrix_id,
+            "case_ids": list(self.case_ids()),
+            "case_count": len(self.cases),
+            "catalog_sha256": self.catalog_sha256(),
+            "platform": self.platform,
+            "execution": self.execution,
+        }
+
+
+class MatrixRegistry:
+    """Immutable, deterministic registry for typed matrix definitions."""
+
+    def __init__(self, definitions: tuple[MatrixDefinition, ...]) -> None:
+        definitions = tuple(definitions)
+        if not definitions:
+            raise MatrixValidationError("matrix registry must not be empty")
+        if any(
+            not isinstance(definition, MatrixDefinition)
+            for definition in definitions
+        ):
+            raise MatrixValidationError(
+                "matrix registry accepts only MatrixDefinition entries"
+            )
+        ids = [definition.matrix_id for definition in definitions]
+        if len(set(ids)) != len(ids):
+            raise MatrixValidationError("matrix registry contains duplicate matrix IDs")
+        ordered = sorted(definitions, key=lambda definition: definition.matrix_id)
+        self._definitions = MappingProxyType(
+            {definition.matrix_id: definition for definition in ordered}
+        )
+
+    def registered_ids(self) -> tuple[str, ...]:
+        return tuple(self._definitions)
+
+    def get_definition(self, matrix_id: str) -> MatrixDefinition:
+        try:
+            return self._definitions[str(matrix_id)]
+        except KeyError as exc:
+            raise MatrixValidationError(f"unsupported matrix: {matrix_id!r}") from exc
+
+    def matrix_case_ids(self, matrix_id: str) -> tuple[str, ...]:
+        return self.get_definition(matrix_id).case_ids()
+
+    def get_case(self, matrix_id: str, case_id: str) -> MatrixCaseContract:
+        return self.get_definition(matrix_id).get_case(case_id)
+
+    def normalized_catalog(self, matrix_id: str) -> dict[str, Any]:
+        return self.get_definition(matrix_id).normalized_catalog()
+
+    def catalog_sha256(self, matrix_id: str) -> str:
+        return self.get_definition(matrix_id).catalog_sha256()
+
+    def build_case_fixture(
+        self, matrix_id: str, case_id: str
+    ) -> tuple[dict[str, Any], Path]:
+        return self.get_definition(matrix_id).build_case_fixture(case_id)
+
+    def resolve_plan(
+        self,
+        matrix_id: str,
+        *,
+        case_id: str | None = None,
+        seed: int = 1,
+        timeout_seconds: float = 90.0,
+        execution_authorized: bool = True,
+    ) -> dict[str, Any]:
+        definition = self.get_definition(matrix_id)
+        selected = (
+            (definition.get_case(case_id),)
+            if case_id is not None
+            else definition.cases
+        )
+        return {
+            "schema_name": MATRIX_PLAN_SCHEMA_NAME,
+            "schema_version": MATRIX_SCHEMA_VERSION,
+            "matrix": {
+                "id": definition.matrix_id,
+                "catalog_sha256": definition.catalog_sha256(),
+                "base_scenario_id": definition.base_scenario_id,
+            },
+            "platform": definition.platform,
+            "seed": int(seed),
+            "timeout_seconds": float(timeout_seconds),
+            "case_count": len(selected),
+            "cases": [
+                self._plan_case(index, case)
+                for index, case in enumerate(selected, 1)
+            ],
+            "execution_authorized": bool(execution_authorized),
+        }
+
+    @staticmethod
+    def _plan_case(index: int, case: MatrixCaseContract) -> dict[str, Any]:
+        normalized = dict(case.normalized())
+        return {
+            "order": index,
+            "case": normalized,
+            "case_sha256": _sha256_json(normalized),
+        }
+
+    def operator_catalog(self) -> dict[str, Any]:
+        return {
+            "schema_name": "labcraft.virtual_workflow_matrix_catalog",
+            "schema_version": MATRIX_SCHEMA_VERSION,
+            "matrices": [
+                definition.catalog_entry()
+                for definition in self._definitions.values()
+            ],
+        }
+
+
+def _validate_catalog() -> None:
+    ids = [case.case_id for case in MATRIX_CASES]
+    if len(ids) != 8 or len(set(ids)) != len(ids):
+        raise MatrixValidationError("matrix must contain eight uniquely named cases")
+    required_mode_order = {
+        (family, order)
+        for family in {"mixed", "droplet_pair", "stream_pair"}
+        for order in {("A", "B"), ("B", "A")}
+    }
+    required_mode_profile = {
+        (family, profile)
+        for family in {"mixed", "droplet_pair", "stream_pair"}
+        for profile in PROFILES
+    }
+    required_order_profile = {
+        (order, profile)
+        for order in {("A", "B"), ("B", "A")}
+        for profile in PROFILES
+    }
+    if {(case.mode_family, case.stock_order) for case in MATRIX_CASES} != required_mode_order:
+        raise MatrixValidationError("matrix mode/order pairwise coverage drifted")
+    if {(case.mode_family, case.profile_id) for case in MATRIX_CASES} != required_mode_profile:
+        raise MatrixValidationError("matrix mode/profile pairwise coverage drifted")
+    if {(case.stock_order, case.profile_id) for case in MATRIX_CASES} != required_order_profile:
+        raise MatrixValidationError("matrix order/profile pairwise coverage drifted")
+    judgments = {
+        item.operator_judgment for case in MATRIX_CASES for item in case.refuel_outcomes
+    }
+    if judgments != {"stable", "level_rose", "level_fell", "unclear"}:
+        raise MatrixValidationError("matrix manual-refuel judgment coverage drifted")
+
+
+_validate_catalog()
+
+
+def _build_mixed_mode_case_fixture(
+    case: MatrixCaseContract,
+) -> tuple[dict[str, Any], Path]:
+    """Build one validated in-memory case from the single tracked reference fixture."""
+
+    if not isinstance(case, MatrixCase):
+        raise MatrixValidationError("mixed-mode matrix received an invalid case type")
+    profile = PROFILES[case.profile_id]
+    payload = json.loads(BASE_FIXTURE_PATH.read_text(encoding="utf-8"))
+    fixture = copy.deepcopy(payload)
+    modes = {"A": case.mode_a, "B": case.mode_b}
+    outcomes = {item.stock_key: item for item in case.refuel_outcomes}
+    response = PulseAwareSyntheticEjectionModelV1()
+    stocks: dict[str, dict[str, Any]] = {}
+    volumes: dict[str, float] = {}
+    for key in ("A", "B"):
+        mode = modes[key]
+        pulse = (
+            profile.droplet_pulse_width_us
+            if mode == "droplet"
+            else profile.stream_pulse_width_us
+        )
+        volume = response.predict_volume_nl(mode, pulse)
+        volumes[key] = volume
+        head = {
+            "printer_head_id": f"virtual-head-matrix-{key.lower()}-v1",
+            "initial_volume_uL": 1000.0,
+            "print_pulse_width_us": pulse,
+            "print_pressure_psi": profile.print_pressure_psi,
+        }
+        if mode == "stream":
+            head.update(
+                refuel_pulse_width_us=profile.refuel_pulse_width_us,
+                refuel_pressure_psi=profile.refuel_pressure_psi,
+            )
+        stocks[key] = {
+            "matrix_stock_key": key,
+            "factor_name": f"Virtual Matrix {key}",
+            "concentration": 23.0,
+            "target_concentration": 0.0,
+            "units": "mM",
+            "printing_mode": mode,
+            "prepared_droplet_volume_nL": volume,
+            "droplet_volume_nL": volume,
+            "printer_head": head,
+        }
+    total = sum(volumes.values())
+    for key in stocks:
+        stocks[key]["target_concentration"] = 23.0 * volumes[key] / total
+    fixture["stocks"] = [stocks[key] for key in case.stock_order]
+    fixture["fixture_id"] = f"{MIXED_MODE_MATRIX_ID}__{case.case_id}"
+    fixture["lifecycle"] = {
+        "kind": "parameterized_calibration_matrix_case",
+        "matrix_id": MIXED_MODE_MATRIX_ID,
+        "catalog_sha256": catalog_sha256(MIXED_MODE_MATRIX_ID),
+        "case": case.normalized(),
+        "case_sha256": _sha256_json(case.normalized()),
+        "profile": profile.normalized(),
+        "manual_refuel_checks": {
+            key: {
+                **outcomes[key].normalized(),
+                "trial_count": profile.trial_count,
+                "trial_droplet_count": profile.trial_droplet_count,
+            }
+            for key in outcomes
+        },
+    }
+    if len(fixture["stocks"]) != 2 or fixture["workload"]["completion_count"] != 48:
+        raise MatrixValidationError("built matrix fixture cardinality drifted")
+    return fixture, BASE_FIXTURE_PATH
+
+
+def _requantization_profile() -> dict[str, Any]:
+    return {
+        "profile_id": REQUANTIZATION_PROFILE_ID,
+        "droplet": {
+            "pulse_width_us": 1300,
+            "volume_nL": 9.0,
+        },
+        "print_pressure_psi": 1.2,
+    }
+
+
+def _stock_id_from_fixture(stock: Mapping[str, Any]) -> str:
+    return (
+        f"{stock['factor_name']}_{float(stock['concentration']):.2f}_"
+        f"{stock['units']}"
+    )
+
+
+def _build_requantization_case_fixture(
+    case: MatrixCaseContract,
+) -> tuple[dict[str, Any], Path]:
+    """Build one catalog-owned boundary case from the tracked reference."""
+
+    if not isinstance(
+        case,
+        (
+            RequantizationCase,
+            CompositeRequantizationCase,
+            MissingFillRequantizationCase,
+            TwoReagentIsolationCase,
+        ),
+    ):
+        raise MatrixValidationError(
+            "requantization matrix received an invalid case type"
+        )
+    payload = json.loads(
+        REQUANTIZATION_BASE_FIXTURE_PATH.read_text(encoding="utf-8")
+    )
+    fixture = copy.deepcopy(payload)
+    if isinstance(case, RequantizationCase):
+        stock = {
+            "factor_name": "Virtual Requantization Stock",
+            "concentration": 10.0,
+            "target_concentration": 10.0,
+            "units": "mM",
+            "printing_mode": "droplet",
+            "prepared_droplet_volume_nL": case.prepared_volume_nL,
+            "droplet_volume_nL": case.calibrated_volume_nL,
+            "printer_head": {
+                "printer_head_id": "virtual-head-requantization-v1",
+                "initial_volume_uL": 1000.0,
+                "print_pulse_width_us": 1300,
+                "print_pressure_psi": 1.2,
+            },
+        }
+        fixture["fixture_id"] = (
+            f"{CALIBRATION_REQUANTIZATION_MATRIX_ID}__{case.case_id}"
+        )
+        fixture["stocks"] = [stock]
+        fixture["workload"] = {
+            "target_dispenses_per_stock_per_well": (
+                case.expected_requantized_droplets
+            ),
+            "well_count": len(REQUANTIZATION_WELL_IDS),
+            "stock_count": 1,
+            "array_passes": 1,
+            "completion_count": case.expected_completion_count,
+        }
+        fixture["lifecycle"] = {
+            "kind": "parameterized_calibration_matrix_case",
+            "matrix_id": CALIBRATION_REQUANTIZATION_MATRIX_ID,
+            "catalog_sha256": catalog_sha256(
+                CALIBRATION_REQUANTIZATION_MATRIX_ID
+            ),
+            "case": case.normalized(),
+            "case_sha256": _sha256_json(case.normalized()),
+            "profile": _requantization_profile(),
+            "manual_refuel_checks": {},
+            "design": {
+                "printed_volume_nL": case.design_printed_volume_nL,
+                "final_volume_nL": case.design_printed_volume_nL,
+            },
+            "dispense_count_oracle": {
+                "schema_version": 1,
+                "source": "calibration_requantization_v1_catalog",
+                "stock_id": REQUANTIZATION_STOCK_ID,
+                "well_ids": list(REQUANTIZATION_WELL_IDS),
+                "prepared_droplets_per_well": (
+                    case.expected_prepared_droplets
+                ),
+                "requantized_droplets_per_well": (
+                    case.expected_requantized_droplets
+                ),
+                "expected_count_delta": (
+                    case.expected_requantized_droplets
+                    - case.expected_prepared_droplets
+                ),
+                "transition": case.transition,
+                "rounding_boundary_margin": {
+                    "numerator": case.margin_numerator,
+                    "denominator": case.margin_denominator,
+                },
+            },
+        }
+        return fixture, REQUANTIZATION_BASE_FIXTURE_PATH
+
+    if isinstance(case, MissingFillRequantizationCase):
+        stock = {
+            "factor_name": "Virtual Requantization Stock",
+            "concentration": 10.0,
+            "target_concentration": 10.0,
+            "units": "mM",
+            "printing_mode": case.accepted_mode,
+            "calibration_mode": case.accepted_mode,
+            "synthetic_profile_id": case.accepted_profile_id,
+            "prepared_droplet_volume_nL": case.prepared_volume_nL,
+            "droplet_volume_nL": case.accepted_volume_nL,
+            "printer_head": {
+                "printer_head_id": "virtual-head-requantization-v1",
+                "initial_volume_uL": 1000.0,
+                "print_pulse_width_us": case.accepted_pulse_width_us,
+                "print_pressure_psi": 1.2,
+            },
+            "rejected_calibration": {
+                "target_mode": case.rejected_mode,
+                "pulse_width_us": case.rejected_pulse_width_us,
+                "applied_volume_nL": case.rejected_volume_nL,
+                "synthetic_profile_id": case.rejected_profile_id,
+                "expected_title": "Apply failed",
+                "expected_message_fragment": case.expected_warning_fragment,
+            },
+        }
+        fixture["fixture_id"] = (
+            f"{CALIBRATION_REQUANTIZATION_MATRIX_ID}__{case.case_id}"
+        )
+        fixture["stocks"] = [stock]
+        fixture["workload"] = {
+            "target_dispenses_per_stock_per_well": 1,
+            "well_count": len(REQUANTIZATION_WELL_IDS),
+            "stock_count": 1,
+            "array_passes": 0,
+            "completion_count": 0,
+        }
+        rejection = case.normalized()
+        fixture["lifecycle"] = {
+            "kind": "parameterized_calibration_matrix_case",
+            "matrix_id": CALIBRATION_REQUANTIZATION_MATRIX_ID,
+            "catalog_sha256": catalog_sha256(
+                CALIBRATION_REQUANTIZATION_MATRIX_ID
+            ),
+            "case": rejection,
+            "case_sha256": _sha256_json(rejection),
+            "profile": {
+                "profile_id": "missing_fill_rejection_v1",
+                "accepted_calibration": rejection["accepted_calibration"],
+                "rejected_calibration": rejection["rejected_calibration"],
+            },
+            "manual_refuel_checks": {},
+            "design": {
+                "printed_volume_nL": case.design_printed_volume_nL,
+                "final_volume_nL": case.design_printed_volume_nL,
+            },
+            "calibration_rejection_oracle": {
+                "schema_version": 1,
+                "source": "calibration_requantization_v1_catalog",
+                "stock_id": REQUANTIZATION_STOCK_ID,
+                "well_ids": list(REQUANTIZATION_WELL_IDS),
+                "accepted_calibration": rejection["accepted_calibration"],
+                "rejected_calibration": rejection["rejected_calibration"],
+                "count_oracle": rejection["count_oracle"],
+                "expected_plan_state": "active",
+                "expected_title": "Apply failed",
+                "expected_message_fragment": case.expected_warning_fragment,
+                "expected_calibration_record_count": 1,
+                "expected_intent_count": 0,
+                "expected_simulator_dispense_count": 0,
+                "expected_pass_boundary_count": 0,
+                "expected_completion_count": 0,
+            },
+        }
+        return fixture, REQUANTIZATION_BASE_FIXTURE_PATH
+
+    if isinstance(case, TwoReagentIsolationCase):
+        fixture["fixture_id"] = (
+            f"{CALIBRATION_REQUANTIZATION_MATRIX_ID}__{case.case_id}"
+        )
+        fixture["stocks"] = copy.deepcopy(payload["stocks"])
+        for index, (stock, step) in enumerate(
+            zip(fixture["stocks"], case.calibration_steps)
+        ):
+            stock.update(
+                calibration_mode=step.target_mode,
+                synthetic_profile_id=step.synthetic_profile_id,
+                primary_calibration=step.primary,
+                isolation_calibration=step.primary,
+                droplet_volume_nL=step.applied_volume_nL,
+            )
+            stock["printer_head"] = dict(stock["printer_head"])
+            stock["printer_head"]["print_pulse_width_us"] = step.pulse_width_us
+            if _stock_id_from_fixture(stock) != case.stock_ids[index]:
+                raise MatrixValidationError("built two-reagent stock identity drifted")
+        fixture["workload"] = {
+            "target_dispenses_per_stock_per_well": 1,
+            "well_count": len(REQUANTIZATION_WELL_IDS),
+            "stock_count": 2,
+            "array_passes": 2,
+            "completion_count": case.expected_completion_count,
+        }
+        normalized = case.normalized()
+        fixture["lifecycle"] = {
+            "kind": "parameterized_calibration_matrix_case",
+            "matrix_id": CALIBRATION_REQUANTIZATION_MATRIX_ID,
+            "catalog_sha256": catalog_sha256(
+                CALIBRATION_REQUANTIZATION_MATRIX_ID
+            ),
+            "case": normalized,
+            "case_sha256": _sha256_json(normalized),
+            "profile": {
+                "profile_id": "two_reagent_isolation_v1",
+                "calibration_steps": normalized["calibration_steps"],
+                "print_pressure_psi": 1.2,
+            },
+            "manual_refuel_checks": {},
+            "design": {
+                "printed_volume_nL": 27.0,
+                "final_volume_nL": 27.0,
+                "replicates": len(REQUANTIZATION_WELL_IDS),
+                "expected_reaction_count": len(REQUANTIZATION_WELL_IDS),
+            },
+            "dispense_count_oracle": {
+                "schema_version": 2,
+                "source": "calibration_requantization_v1_catalog",
+                "primary_stock_id": case.primary_stock_id,
+                "well_ids": list(REQUANTIZATION_WELL_IDS),
+                "count_groups": normalized["count_groups"],
+                "calibration_steps": normalized["calibration_steps"],
+                "require_terminal_reload": False,
+            },
+            "two_reagent_isolation_oracle": {
+                "schema_version": 1,
+                "source": "calibration_requantization_v1_catalog",
+                "stock_ids": list(case.stock_ids),
+                "primary_stock_id": case.primary_stock_id,
+                "well_ids": list(REQUANTIZATION_WELL_IDS),
+                "first_pass_completion_count": case.first_pass_completion_count,
+                "expected_total_droplets": case.expected_total_droplets,
+            },
+        }
+        return fixture, REQUANTIZATION_BASE_FIXTURE_PATH
+
+    nonfill_step, fill_step = case.calibration_steps
+    stock = {
+        "factor_name": "Virtual Requantization Stock",
+        "concentration": 10.0,
+        "target_concentration": case.target_concentrations[0],
+        "target_concentrations": list(case.target_concentrations),
+        "units": "mM",
+        "printing_mode": case.nonfill_prepared_mode,
+        "calibration_mode": nonfill_step.target_mode,
+        "synthetic_profile_id": nonfill_step.synthetic_profile_id,
+        "primary_calibration": nonfill_step.primary,
+        "prepared_droplet_volume_nL": case.nonfill_prepared_volume_nL,
+        "droplet_volume_nL": nonfill_step.applied_volume_nL,
+        "printer_head": {
+            "printer_head_id": "virtual-head-requantization-v1",
+            "initial_volume_uL": 1000.0,
+            "print_pulse_width_us": nonfill_step.pulse_width_us,
+            "print_pressure_psi": 1.2,
+        },
+    }
+    if case.nonfill_prepared_mode == "stream":
+        stock["staging_print_pulse_width_us"] = 2500
+        stock["calibration_print_profile"] = {
+            "id": "sil_stream_to_droplet_1400",
+            "name": "SIL stream to droplet 1400",
+            "mode": "droplet",
+            "material": "sil",
+            "print_pressure": 1.2,
+            "refuel_pressure": 0.4,
+            "print_pulse_width": nonfill_step.pulse_width_us,
+            "refuel_pulse_width": 6000,
+        }
+        stock["printer_head"].update(
+            refuel_pulse_width_us=6000,
+            refuel_pressure_psi=0.4,
+        )
+    fill_stock = {
+        "stock_role": "fill",
+        "factor_name": "Water",
+        "concentration": 1.0,
+        "target_concentration": 0.0,
+        "units": "--",
+        "printing_mode": "droplet",
+        "calibration_mode": fill_step.target_mode,
+        "synthetic_profile_id": fill_step.synthetic_profile_id,
+        "primary_calibration": fill_step.primary,
+        "prepared_droplet_volume_nL": case.fill_prepared_volume_nL,
+        "droplet_volume_nL": fill_step.applied_volume_nL,
+        "printer_head": {
+            "printer_head_id": "virtual-head-fill-requantization-v1",
+            "initial_volume_uL": 1000.0,
+            "print_pulse_width_us": fill_step.pulse_width_us,
+            "print_pressure_psi": 1.2,
+        },
+    }
+    fixture["fixture_id"] = (
+        f"{CALIBRATION_REQUANTIZATION_MATRIX_ID}__{case.case_id}"
+    )
+    fixture["stocks"] = [stock, fill_stock]
+    fixture["workload"] = {
+        "target_dispenses_per_stock_per_well": 0,
+        "well_count": len(REQUANTIZATION_WELL_IDS),
+        "stock_count": 2,
+        "array_passes": 2,
+        "completion_count": case.expected_completion_count,
+    }
+    fixture["lifecycle"] = {
+        "kind": "parameterized_calibration_matrix_case",
+        "matrix_id": CALIBRATION_REQUANTIZATION_MATRIX_ID,
+        "catalog_sha256": catalog_sha256(
+            CALIBRATION_REQUANTIZATION_MATRIX_ID
+        ),
+        "case": case.normalized(),
+        "case_sha256": _sha256_json(case.normalized()),
+        "profile": {
+            "profile_id": "composite_requantization_v1",
+            "calibration_steps": [
+                step.normalized() for step in case.calibration_steps
+            ],
+            "print_pressure_psi": 1.2,
+        },
+        "manual_refuel_checks": {},
+        "design": {
+            "printed_volume_nL": case.design_printed_volume_nL,
+            "final_volume_nL": case.final_volume_nL,
+            "replicates": case.replicates,
+            "expected_reaction_count": len(REQUANTIZATION_WELL_IDS),
+            "fill_printing_mode": "droplet",
+            "fill_droplet_volume_nL": case.fill_prepared_volume_nL,
+        },
+        "dispense_count_oracle": {
+            "schema_version": 2,
+            "source": "calibration_requantization_v1_catalog",
+            "primary_stock_id": next(
+                step.stock_id for step in case.calibration_steps if step.primary
+            ),
+            "well_ids": list(REQUANTIZATION_WELL_IDS),
+            "count_groups": [group.normalized() for group in case.count_groups],
+            "calibration_steps": [
+                step.normalized() for step in case.calibration_steps
+            ],
+            "require_terminal_reload": case.require_terminal_reload,
+        },
+    }
+    built_stock_id = (
+        f"{stock['factor_name']}_{float(stock['concentration']):.2f}_"
+        f"{stock['units']}"
+    )
+    if (
+        built_stock_id != REQUANTIZATION_STOCK_ID
+        or (
+            f"{fill_stock['factor_name']}_"
+            f"{float(fill_stock['concentration']):.2f}_{fill_stock['units']}"
+        ) != REQUANTIZATION_FILL_STOCK_ID
+        or len(fixture["stocks"]) != 2
+        or fixture["workload"]["completion_count"]
+        != case.expected_completion_count
+    ):
+        raise MatrixValidationError("built requantization fixture cardinality drifted")
+    return fixture, REQUANTIZATION_BASE_FIXTURE_PATH
+
+
+MIXED_MODE_DEFINITION = MatrixDefinition(
+    matrix_id=MIXED_MODE_MATRIX_ID,
+    base_scenario_id=BASE_SCENARIO_ID,
+    journey_family="mixed_mode_calibration",
+    platform="windows_sil",
+    execution="manual_on_demand",
+    cases=MATRIX_CASES,
+    catalog_metadata={
+        "profiles": [PROFILES[key].normalized() for key in sorted(PROFILES)]
+    },
+    fixture_builder=_build_mixed_mode_case_fixture,
+)
+
+CALIBRATION_REQUANTIZATION_DEFINITION = MatrixDefinition(
+    matrix_id=CALIBRATION_REQUANTIZATION_MATRIX_ID,
+    base_scenario_id=REQUANTIZATION_BASE_SCENARIO_ID,
+    journey_family="calibration_requantization",
+    platform="windows_sil",
+    execution="manual_on_demand",
+    cases=REQUANTIZATION_CASES,
+    catalog_metadata={
+        "profile": _requantization_profile(),
+        "stock_id": REQUANTIZATION_STOCK_ID,
+        "well_ids": list(REQUANTIZATION_WELL_IDS),
+        "oracle": {
+            "method": "exact_rational_nearest_integer",
+            "half_ties": "rejected",
+            "minimum_boundary_margin": {
+                "numerator": 1,
+                "denominator": 3,
+            },
+        },
+    },
+    fixture_builder=_build_requantization_case_fixture,
+)
+
+
+def _build_experiment_design_case_fixture(
+    case: MatrixCaseContract,
+) -> tuple[dict[str, Any], Path]:
+    fixture, source = build_experiment_design_fixture(case)
+    fixture["lifecycle"]["catalog_sha256"] = (
+        EXPERIMENT_DESIGN_DEFINITION.catalog_sha256()
+    )
+    return fixture, source
+
+EXPERIMENT_DESIGN_DEFINITION = MatrixDefinition(
+    matrix_id=EXPERIMENT_DESIGN_MATRIX_ID,
+    base_scenario_id=EXPERIMENT_DESIGN_BASE_SCENARIO_ID,
+    journey_family=EXPERIMENT_DESIGN_JOURNEY_FAMILY,
+    platform="windows_sil",
+    execution="manual_on_demand",
+    cases=executable_experiment_design_cases(),
+    catalog_metadata={
+        "planned_catalog_sha256": planned_catalog_sha256(),
+        "planned_pairwise_audit": audit_pairwise_coverage(),
+    },
+    fixture_builder=_build_experiment_design_case_fixture,
+)
+
+
+def _build_editor_safeguard_case_fixture(
+    case: MatrixCaseContract,
+) -> tuple[dict[str, Any], Path]:
+    fixture, source = build_editor_safeguard_fixture(case)
+    fixture["lifecycle"]["catalog_sha256"] = (
+        EDITOR_SAFEGUARD_DEFINITION.catalog_sha256()
+    )
+    return fixture, source
+
+
+EDITOR_SAFEGUARD_DEFINITION = MatrixDefinition(
+    matrix_id=EDITOR_SAFEGUARD_MATRIX_ID,
+    base_scenario_id=EDITOR_SAFEGUARD_BASE_SCENARIO_ID,
+    journey_family=EDITOR_SAFEGUARD_JOURNEY_FAMILY,
+    platform="windows_sil",
+    execution="manual_on_demand",
+    cases=editor_safeguard_cases(),
+    catalog_metadata={
+        "safeguard_schema_version": 1,
+        "source_catalog_sha256": editor_safeguard_catalog().contract_sha256,
+    },
+    fixture_builder=_build_editor_safeguard_case_fixture,
+)
+
+
+def _build_execution_preflight_case_fixture(
+    case: MatrixCaseContract,
+) -> tuple[dict[str, Any], Path]:
+    fixture, source = build_execution_preflight_fixture(case)
+    fixture["lifecycle"]["catalog_sha256"] = (
+        EXECUTION_PREFLIGHT_DEFINITION.catalog_sha256()
+    )
+    return fixture, source
+
+
+EXECUTION_PREFLIGHT_DEFINITION = MatrixDefinition(
+    matrix_id=EXECUTION_PREFLIGHT_MATRIX_ID,
+    base_scenario_id=EXECUTION_PREFLIGHT_BASE_SCENARIO_ID,
+    journey_family=EXECUTION_PREFLIGHT_JOURNEY_FAMILY,
+    platform="windows_sil",
+    execution="manual_on_demand",
+    cases=execution_preflight_cases(),
+    catalog_metadata={
+        "safeguard_schema_version": 1,
+        "source_catalog_sha256": execution_preflight_catalog().contract_sha256,
+        "identity_join": "durable_ids_not_serialized_row_position",
+    },
+    fixture_builder=_build_execution_preflight_case_fixture,
+)
+
+
+def _build_persistence_safeguard_case_fixture(
+    case: MatrixCaseContract,
+) -> tuple[dict[str, Any], Path]:
+    fixture, source = build_persistence_safeguard_fixture(case)
+    fixture["lifecycle"]["catalog_sha256"] = (
+        PERSISTENCE_SAFEGUARD_DEFINITION.catalog_sha256()
+    )
+    return fixture, source
+
+
+PERSISTENCE_SAFEGUARD_DEFINITION = MatrixDefinition(
+    matrix_id=PERSISTENCE_SAFEGUARD_MATRIX_ID,
+    base_scenario_id=PERSISTENCE_SAFEGUARD_BASE_SCENARIO_ID,
+    journey_family=PERSISTENCE_SAFEGUARD_JOURNEY_FAMILY,
+    platform="windows_sil",
+    execution="manual_on_demand",
+    cases=persistence_safeguard_cases(),
+    catalog_metadata={
+        "safeguard_schema_version": 1,
+        "source_catalog_sha256": persistence_safeguard_catalog().contract_sha256,
+        "fault_phase": "prelaunch",
+        "fixture_root_kind": "scenario_case_copy",
+    },
+    fixture_builder=_build_persistence_safeguard_case_fixture,
+)
+
+MATRIX_REGISTRY = MatrixRegistry(
+    (
+        MIXED_MODE_DEFINITION,
+        CALIBRATION_REQUANTIZATION_DEFINITION,
+        EXPERIMENT_DESIGN_DEFINITION,
+        EDITOR_SAFEGUARD_DEFINITION,
+        EXECUTION_PREFLIGHT_DEFINITION,
+        PERSISTENCE_SAFEGUARD_DEFINITION,
+    )
+)
+
+
+def registered_matrix_ids() -> tuple[str, ...]:
+    return MATRIX_REGISTRY.registered_ids()
+
+
+def get_matrix_definition(matrix_id: str) -> MatrixDefinition:
+    return MATRIX_REGISTRY.get_definition(matrix_id)
+
+
+def matrix_case_ids(matrix_id: str = MIXED_MODE_MATRIX_ID) -> tuple[str, ...]:
+    return MATRIX_REGISTRY.matrix_case_ids(matrix_id)
+
+
+def get_matrix_case(matrix_id: str, case_id: str) -> MatrixCaseContract:
+    return MATRIX_REGISTRY.get_case(matrix_id, case_id)
+
+
+def normalized_catalog(
+    matrix_id: str = MIXED_MODE_MATRIX_ID,
+) -> dict[str, Any]:
+    return MATRIX_REGISTRY.normalized_catalog(matrix_id)
+
+
+def catalog_sha256(matrix_id: str = MIXED_MODE_MATRIX_ID) -> str:
+    return MATRIX_REGISTRY.catalog_sha256(matrix_id)
+
+
+def resolve_matrix_plan(
+    matrix_id: str,
+    *,
+    case_id: str | None = None,
+    seed: int = 1,
+    timeout_seconds: float = 90.0,
+    execution_authorized: bool = True,
+) -> dict[str, Any]:
+    return MATRIX_REGISTRY.resolve_plan(
+        matrix_id,
+        case_id=case_id,
+        seed=seed,
+        timeout_seconds=timeout_seconds,
+        execution_authorized=execution_authorized,
+    )
+
+
+def build_case_fixture(
+    matrix_id: str, case_id: str
+) -> tuple[dict[str, Any], Path]:
+    return MATRIX_REGISTRY.build_case_fixture(matrix_id, case_id)
+
+
+def matrix_catalog() -> dict[str, Any]:
+    return MATRIX_REGISTRY.operator_catalog()
+
+
+__all__ = [
+    "BASE_FIXTURE_PATH",
+    "BASE_SCENARIO_ID",
+    "CALIBRATION_REQUANTIZATION_DEFINITION",
+    "CALIBRATION_REQUANTIZATION_MATRIX_ID",
+    "EXPERIMENT_DESIGN_DEFINITION",
+    "EXPERIMENT_DESIGN_MATRIX_ID",
+    "EDITOR_SAFEGUARD_DEFINITION",
+    "EDITOR_SAFEGUARD_MATRIX_ID",
+    "EXECUTION_PREFLIGHT_DEFINITION",
+    "EXECUTION_PREFLIGHT_MATRIX_ID",
+    "PERSISTENCE_SAFEGUARD_DEFINITION",
+    "PERSISTENCE_SAFEGUARD_MATRIX_ID",
+    "MATRIX_CASES",
+    "MATRIX_PLAN_SCHEMA_NAME",
+    "MATRIX_REGISTRY",
+    "MATRIX_SCHEMA_VERSION",
+    "MIXED_MODE_MATRIX_ID",
+    "MIXED_MODE_DEFINITION",
+    "MatrixCase",
+    "MatrixCaseContract",
+    "MatrixDefinition",
+    "MatrixRegistry",
+    "MatrixValidationError",
+    "REQUANTIZATION_BASE_FIXTURE_PATH",
+    "REQUANTIZATION_BASE_SCENARIO_ID",
+    "REQUANTIZATION_CASES",
+    "REQUANTIZATION_PROFILE_ID",
+    "REQUANTIZATION_STOCK_ID",
+    "REQUANTIZATION_WELL_IDS",
+    "RequantizationCase",
+    "build_case_fixture",
+    "catalog_sha256",
+    "get_matrix_definition",
+    "get_matrix_case",
+    "matrix_case_ids",
+    "matrix_catalog",
+    "normalized_catalog",
+    "registered_matrix_ids",
+    "resolve_matrix_plan",
+]

@@ -218,6 +218,41 @@ def qapp():
     return app
 
 
+@pytest.fixture(autouse=True)
+def _isolate_qt_top_level_widgets(request):
+    """Prevent one Qt test's windows from becoming another test's input."""
+    yield
+    if "qapp" not in request.fixturenames:
+        return
+
+    from PySide6 import QtCore, QtWidgets
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return
+    for widget in list(app.topLevelWidgets()):
+        signal_sources = [widget]
+        try:
+            signal_sources.extend(widget.findChildren(QtCore.QObject))
+        except RuntimeError:
+            pass
+        for source in signal_sources:
+            try:
+                source.blockSignals(True)
+            except RuntimeError:
+                pass
+        try:
+            widget.hide()
+            widget.deleteLater()
+        except RuntimeError:
+            pass
+    try:
+        app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+        app.processEvents()
+    except RuntimeError:
+        pass
+
+
 @pytest.fixture
 def test_profile():
     return SimpleNamespace(

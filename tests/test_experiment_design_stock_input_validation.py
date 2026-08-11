@@ -98,7 +98,7 @@ def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None
     dialog.final_v_spin.setValue(2000.0)
     dialog.auto_update_chk = QCheckBox()
     dialog.auto_update_chk.setChecked(True)
-    dialog.run_btn = QPushButton("Optimize and Generate")
+    dialog.run_btn = QPushButton("Update Reactions and Stock Solutions")
     dialog._run_btn_default_stylesheet = dialog.run_btn.styleSheet()
     dialog.reagent_table = QTableWidget(ExperimentDesignDialog.COL_DELETE + 1, 1)
 
@@ -143,7 +143,7 @@ def test_invalid_fixed_stock_text_is_styled_and_skips_optimize(qapp):
     assert "background-color" not in fixed_edit.styleSheet()
     assert "must be a positive number" in fixed_edit.toolTip()
     assert dialog.stock_table.rowCount() == 1
-    assert "last valid stock plan" in dialog.stock_table_status_lbl.text()
+    assert "last valid stock solutions" in dialog.stock_table_status_lbl.text()
     assert dialog.stock_table.styleSheet() == "QTableWidget { border:1px solid #8a0303; }"
     assert result["issues_by_key"][("AddA", None)][0]["code"] == "invalid_number"
 
@@ -307,7 +307,7 @@ def test_experiment_design_busy_state_restores_after_optimizer_exception(qapp):
             "add_reagent_btn",
         )
     )
-    assert dialog.status_lbl.text() == "Optimization failed."
+    assert dialog.status_lbl.text() == "Reactions and stock solutions could not be updated."
 
 
 def test_auto_update_on_preserves_debounced_schedule(qapp):
@@ -333,7 +333,7 @@ def test_auto_update_off_marks_dirty_without_starting_timer(qapp):
     assert dialog._auto_timer.starts == 0
     assert "background-color: #1b3a57" in dialog.run_btn.styleSheet()
     assert "color: white" in dialog.run_btn.styleSheet()
-    assert "Press Optimize and Generate" in dialog.status_lbl.text()
+    assert "Press Update Reactions and Stock Solutions" in dialog.status_lbl.text()
 
 
 def test_auto_update_toggle_back_on_schedules_dirty_design(qapp):
@@ -412,7 +412,7 @@ def test_failure_dialog_shows_detailed_issue_summary(qapp, monkeypatch):
     )
 
     assert ok is False
-    assert captured["title"] == "Optimization failed"
+    assert captured["title"] == "Could not update reactions and stock solutions"
     assert captured["text"].startswith("Could not optimize:\n")
     assert "Uploaded row A1 needs 1600 nL" in captured["text"]
     assert "Generic optimizer failure" not in captured["text"]
@@ -589,7 +589,10 @@ def test_recompute_silent_suppresses_modal_busy_dialog(qapp):
         {
             "show_failure_dialog": False,
             "show_capacity_dialog": False,
-            "busy_message": "Updating experiment design... this may take a moment on Raspberry Pi.",
+            "busy_message": (
+                "Updating reactions and stock solutions... this may take a moment on "
+                "Raspberry Pi."
+            ),
             "show_busy_dialog": False,
         }
     ]
@@ -1417,7 +1420,7 @@ def test_invalid_max_stock_keeps_table_stale_until_fixed(qapp):
     assert ok is False
     assert max_edit.styleSheet() == "border:1px solid #8a0303;"
     assert dialog.stock_table.rowCount() == 1
-    assert "last valid stock plan" in dialog.stock_table_status_lbl.text()
+    assert "last valid stock solutions" in dialog.stock_table_status_lbl.text()
     assert dialog.stock_table.styleSheet() == "QTableWidget { border:1px solid #8a0303; }"
 
     max_edit.setText("5")

@@ -41,13 +41,12 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime
 from pathlib import Path
 import cv2
-from utilities import ShortcutManager
+from utilities import ShortcutManager, apply_pressure_plot_style
 from ExperimentAuditReader import ExperimentAuditReader, build_audit_markdown
 import CalibrationClasses
 import importlib
 from typing import Mapping, Sequence, Optional, Any, List, Dict, Tuple, Set
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
-from LegacyExecutionMigration import migrate_legacy_execution_copy as migrate_legacy_execution_directory
 from ApplicationComposition import PRODUCTION_RUNTIME_CONTEXT, SIMULATION_RUNTIME_CONTEXT
 
 MassCalibrationDialog = None
@@ -72,45 +71,28 @@ _VOLUME_INPUT_ERROR_STYLE = "border:1px solid #8a0303;"
 _VOLUME_INPUT_ISSUE_KEY = ("__metadata__", "volumes")
 
 
-class LegacyExecutionMigrationWorker(QThread):
-    succeeded = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, source_dir: str, destination: str | None = None, parent=None):
-        super().__init__(parent)
-        self.source_dir = str(source_dir)
-        self.destination = destination
-        self._cancel_requested = False
-
-    def cancel(self):
-        self._cancel_requested = True
-
-    def run(self):
-        try:
-            result = migrate_legacy_execution_directory(
-                self.source_dir,
-                self.destination,
-                cancel_check=lambda: self._cancel_requested,
-            )
-        except Exception as exc:
-            self.failed.emit(str(exc))
-            return
-        self.succeeded.emit(result)
-
-
 class EditableCopyNameDialog(QInputDialog):
     MINIMUM_DIALOG_WIDTH = 640
     MINIMUM_NAME_FIELD_WIDTH = 480
 
-    def _enforce_minimum_widths(self):
+    def _enforce_minimum_width_constraints(self):
         self.setMinimumWidth(self.MINIMUM_DIALOG_WIDTH)
         name_field = self.findChild(QLineEdit)
         if name_field is not None:
             name_field.setMinimumWidth(self.MINIMUM_NAME_FIELD_WIDTH)
+
+    def _enforce_minimum_widths(self):
+        self._enforce_minimum_width_constraints()
         self.resize(
             max(self.MINIMUM_DIALOG_WIDTH, self.width(), self.sizeHint().width()),
             max(self.height(), self.sizeHint().height()),
         )
+
+    def event(self, event):
+        handled = super().event(event)
+        if event.type() == QtCore.QEvent.Type.LayoutRequest:
+            self._enforce_minimum_width_constraints()
+        return handled
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -124,6 +106,26 @@ def is_release_candidate_version(version):
 
 def _format_volume_nl(value: float) -> str:
     return f"{float(value):.6g}"
+
+
+def _user_facing_stock_solution_text(value: Any) -> str:
+    """Translate optimizer terminology at the UI boundary."""
+
+    text = str(value or "")
+    replacements = (
+        ("Stock plan impossible", "Stock solutions unavailable"),
+        ("stock plans", "sets of stock solutions"),
+        ("Stock plans", "Sets of stock solutions"),
+        ("two-stock plan", "two stock solutions"),
+        ("Two-stock plan", "Two stock solutions"),
+        ("single-stock plan", "single stock solution"),
+        ("Single-stock plan", "Single stock solution"),
+        ("stock plan", "set of stock solutions"),
+        ("Stock plan", "Set of stock solutions"),
+    )
+    for technical, familiar in replacements:
+        text = text.replace(technical, familiar)
+    return text
 
 
 def _printed_final_volume_issue(
@@ -1567,9 +1569,9 @@ class MainWindow(QMainWindow):
         can_reset = getattr(experiment_model, "can_reset_array_progress", None)
         if callable(can_reset) and not can_reset():
             self.popup_message(
-                "Cannot reset recorded execution",
+                "Cannot reset recorded experiment",
                 "Recorded dispense counts represent physical history and cannot be reset in place. "
-                "Use Create Editable Copy to start a new execution.",
+                "Use Create Editable Copy to make a new editable experiment.",
             )
             return
         active_printer_head = self.model.rack_model.get_gripper_printer_head()
@@ -1587,9 +1589,9 @@ class MainWindow(QMainWindow):
         can_reset = getattr(experiment_model, "can_reset_array_progress", None)
         if callable(can_reset) and not can_reset():
             self.popup_message(
-                "Cannot reset recorded execution",
+                "Cannot reset recorded experiment",
                 "Recorded dispense counts represent physical history and cannot be reset in place. "
-                "Use Create Editable Copy to start a new execution.",
+                "Use Create Editable Copy to make a new editable experiment.",
             )
             return
         response = self.popup_yes_no('Reset All Arrays','Are you sure you want to reset all arrays?')
@@ -1599,9 +1601,9 @@ class MainWindow(QMainWindow):
     def pause_machine(self):
         """Pause the machine."""
         self.controller.pause_commands()
-        response = self.popup_yes_no('Pause','Execution paused. Do you want to resume?')
+        response = self.popup_yes_no('Pause','Printing paused. Do you want to resume?')
         if self._is_yes_response(response):
-            print('Resuming execution')
+            print('Resuming printing')
             self.controller.resume_commands()
             return
         else:
@@ -1683,6 +1685,32 @@ class MainWindow(QMainWindow):
         else:
             self.controller._set_array_run_state("idle")
         return eligibility
+
+    def view_completed_execution(self):
+        """Populate a completed execution for inspection without activating it."""
+        state_getter = getattr(self.controller, "get_array_run_state", None)
+        array_state = state_getter() if callable(state_getter) else "idle"
+        queue_checker = getattr(self.controller, "check_if_all_completed", None)
+        queue_empty = bool(queue_checker()) if callable(queue_checker) else True
+        if array_state != "idle" or not queue_empty:
+            raise RuntimeError(
+                "A completed experiment can be viewed only while the array runner "
+                "is idle and the command queue is empty."
+            )
+        return self.model.load_completed_execution_view()
+
+    def view_read_only_experiment(self):
+        """Populate a validated older experiment without activating hardware."""
+        state_getter = getattr(self.controller, "get_array_run_state", None)
+        array_state = state_getter() if callable(state_getter) else "idle"
+        queue_checker = getattr(self.controller, "check_if_all_completed", None)
+        queue_empty = bool(queue_checker()) if callable(queue_checker) else True
+        if array_state != "idle" or not queue_empty:
+            raise RuntimeError(
+                "A read-only experiment can be viewed only while the array runner "
+                "is idle and the command queue is empty."
+            )
+        return self.model.load_read_only_experiment_view()
     
     def closeEvent(self, event):
         """Handle the window close event."""
@@ -2986,6 +3014,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._pressure_render_timer.setSingleShot(True)
         self._pressure_render_timer.setInterval(self.PRESSURE_RENDER_INTERVAL_MS)
         self._pressure_render_timer.timeout.connect(lambda: self.update_pressure())
+        self._pressure_render_suspended = False
 
         prof = getattr(self.main_window, "profile", None)
         self.legacy_mode = prof.name == "legacy" if prof else True
@@ -3323,21 +3352,17 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.chart_view = QtCharts.QChartView(self.chart)
         
         self.print_series = QtCharts.QLineSeries()
-        self.print_series.setColor(QtCore.Qt.white)
         self.chart.addSeries(self.print_series)
 
         if not self.legacy_mode:
             self.refuel_series = QtCharts.QLineSeries()
-            self.refuel_series.setColor(QtCore.Qt.white)
             self.chart.addSeries(self.refuel_series)
 
         self.target_print_pressure_series = QtCharts.QLineSeries()  # Create a new line series for the target pressure
-        self.target_print_pressure_series.setColor(QtCore.Qt.red)  # Set the line color to red
         self.chart.addSeries(self.target_print_pressure_series)
 
         if not self.legacy_mode:
                 self.target_refuel_pressure_series = QtCharts.QLineSeries()  # Create a new line series for the target pressure
-                self.target_refuel_pressure_series.setColor(QtCore.Qt.red)
                 self.chart.addSeries(self.target_refuel_pressure_series)
 
         self.axisX = QtCharts.QValueAxis()
@@ -3363,7 +3388,17 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.target_refuel_pressure_series.attachAxis(self.axisX)
             self.target_refuel_pressure_series.attachAxis(self.axisY)
 
-        self.chart.legend().hide()  # Hide the legend
+        self.pressure_plot_style = apply_pressure_plot_style(
+            self.chart,
+            (self.axisX, self.axisY),
+            colors=self.color_dict,
+            print_series=self.print_series,
+            refuel_series=(self.refuel_series if not self.legacy_mode else None),
+            target_print_series=self.target_print_pressure_series,
+            target_refuel_series=(
+                self.target_refuel_pressure_series if not self.legacy_mode else None
+            ),
+        )
         self.chart_view.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
         self.layout.addWidget(self.chart_view, row_offset + 3, 0,1,4)
@@ -3480,8 +3515,21 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def _request_pressure_render(self):
         """Coalesce frequent pressure updates into a bounded trailing render."""
+        if self._pressure_render_suspended:
+            return
         if not self._pressure_render_timer.isActive():
             self._pressure_render_timer.start()
+
+    def set_pressure_render_suspended(self, suspended: bool):
+        """Transfer pressure-chart rendering without interrupting model sampling."""
+        suspended = bool(suspended)
+        if suspended == self._pressure_render_suspended:
+            return
+        self._pressure_render_suspended = suspended
+        if suspended:
+            self._pressure_render_timer.stop()
+            return
+        self.update_pressure()
 
     def update_pressure(self):
         """Immediately render the latest pressure values and labels."""
@@ -3519,8 +3567,22 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             ]
         )
 
-        min_pressure = min([*comp_log,target_print_pressure]) - 0.5
-        max_pressure = max([*comp_log,target_print_pressure]) + 0.5
+        target_pressures = [target_print_pressure]
+        if not self.legacy_mode:
+            target_refuel_pressure = self.model.machine_model.get_target_refuel_pressure()
+            self.target_refuel_pressure_series.replace(
+                [
+                    QtCore.QPointF(0, float(target_refuel_pressure)),
+                    QtCore.QPointF(
+                        max(0, len(refuel_log) - 1),
+                        float(target_refuel_pressure),
+                    ),
+                ]
+            )
+            target_pressures.append(target_refuel_pressure)
+
+        min_pressure = min([*comp_log, *target_pressures]) - 0.5
+        max_pressure = max([*comp_log, *target_pressures]) + 0.5
         self.axisY.setRange(min_pressure, max_pressure)
 
         self.current_print_pressure_value.setText(f"{print_log[-1]:.3f}")
@@ -3634,9 +3696,18 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._refresh_droplet_imager_button_state()
 
     def _clear_droplet_imager_launch_state(self, dialog=None):
-        if dialog is None or getattr(self, "_droplet_imager_dialog", None) is dialog:
+        active_dialog = getattr(self, "_droplet_imager_dialog", None)
+        cleared_active_dialog = dialog is None or active_dialog is dialog
+        if cleared_active_dialog:
             self._droplet_imager_dialog = None
+            self.set_pressure_render_suspended(False)
         self._droplet_imager_launch_pending = False
+        self._refresh_droplet_imager_button_state()
+
+    def _set_active_droplet_imager_dialog(self, dialog):
+        """Make one constructed imager dialog the active pressure renderer."""
+        self._droplet_imager_dialog = dialog
+        self.set_pressure_render_suspended(dialog is not None)
         self._refresh_droplet_imager_button_state()
 
     def _focus_active_droplet_imager_dialog(self):
@@ -3791,8 +3862,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 open_refuel_camera_callback=self.refuel_camera,
                 post_apply_manual_refuel_check_callback=self.request_manual_refuel_check_after_imager_close,
             )
-            self._droplet_imager_dialog = droplet_imaging_dialog
-            self._refresh_droplet_imager_button_state()
+            self._set_active_droplet_imager_dialog(droplet_imaging_dialog)
             finished_signal = getattr(droplet_imaging_dialog, "finished", None)
             if finished_signal is not None:
                 try:
@@ -3834,7 +3904,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                     self._simulation_manual_refuel_deferred_callback
                 ),
             )
-            self._droplet_imager_dialog = dialog
+            self._set_active_droplet_imager_dialog(dialog)
             self._droplet_imager_launch_pending = False
             finished_signal = getattr(dialog, "finished", None)
             if finished_signal is not None:
@@ -3878,7 +3948,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 result_presentation_only=True,
                 transient_candidate_id=str(candidate_id),
             )
-            self._droplet_imager_dialog = dialog
+            self._set_active_droplet_imager_dialog(dialog)
             self._droplet_imager_launch_pending = False
             finished_signal = getattr(dialog, "finished", None)
             if finished_signal is not None:
@@ -3893,6 +3963,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def _launch_manual_optics_calibration_dialog(self):
         """Open the droplet imager directly to the manual optics-calibration tab."""
+        if self._droplet_imager_launch_is_active():
+            self._reject_duplicate_droplet_imager_launch()
+            return self._droplet_imager_dialog
         try:
             self.controller.disconnect_droplet_camera_signals()
         except Exception:
@@ -3915,7 +3988,19 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             initial_tab="optics",
             open_refuel_camera_callback=self.refuel_camera,
         )
-        droplet_imaging_dialog.exec()
+        self._set_active_droplet_imager_dialog(droplet_imaging_dialog)
+        finished_signal = getattr(droplet_imaging_dialog, "finished", None)
+        if finished_signal is not None:
+            try:
+                finished_signal.connect(
+                    lambda _result=None, dialog=droplet_imaging_dialog: self._clear_droplet_imager_launch_state(dialog)
+                )
+            except Exception:
+                pass
+        try:
+            return droplet_imaging_dialog.exec()
+        finally:
+            self._clear_droplet_imager_launch_state(droplet_imaging_dialog)
 
     def _guided_optics_location_pair(self):
         try:
@@ -4480,11 +4565,13 @@ class StockPrepDialog(QDialog):
     DEFAULT_DEAD_VOLUME_UL = 20.0
     DEFAULT_CALIBRATION_EXTRA_UL = 10.0
     INFO_TEXT = (
-        "One row per experiment stock. Fill reagent is excluded. Two-stock plans appear "
-        "as separate rows. Calculations assume a compatible diluent, typically water."
+        "One row per experiment stock solution. Fill reagent is excluded. Reagents "
+        "that need two stock solutions appear as separate rows. Calculations assume "
+        "a compatible diluent, typically water."
     )
     EMPTY_TEXT = (
-        "No calculated stock plan is available. Generate an experiment in Experiment Editor first."
+        "No calculated stock solutions are available. Update the experiment in "
+        "Experiment Editor first."
     )
 
     def __init__(self, experiment_model: ExperimentModel, main_window):
@@ -4932,6 +5019,28 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         button.setStyleSheet(f"background-color: {color}; color: white;")
 
     def update_start_print_array_button(self, *_args):
+        read_only_view_getter = getattr(
+            self.model, "is_read_only_experiment_view_active", None
+        )
+        if not callable(read_only_view_getter):
+            read_only_view_getter = getattr(
+                self.model, "is_completed_execution_view_active", None
+            )
+        if callable(read_only_view_getter) and read_only_view_getter():
+            completed_getter = getattr(
+                self.model, "is_completed_execution_view_active", None
+            )
+            completed = bool(callable(completed_getter) and completed_getter())
+            self.start_print_array_button.setText(
+                "Experiment Complete" if completed else "Experiment Read-Only"
+            )
+            self._set_array_button_state(
+                self.start_print_array_button,
+                False,
+                'dark_blue',
+            )
+            return
+
         has_head = self.model.rack_model.gripper_printer_head is not None
         state_getter = getattr(self.controller, "get_array_run_state", None)
         array_state = state_getter() if callable(state_getter) else "idle"
@@ -4955,6 +5064,16 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self._set_array_button_state(self.start_print_array_button, has_head, 'dark_blue')
 
     def start_print_array(self):
+        read_only_view_getter = getattr(
+            self.model, "is_read_only_experiment_view_active", None
+        )
+        if not callable(read_only_view_getter):
+            read_only_view_getter = getattr(
+                self.model, "is_completed_execution_view_active", None
+            )
+        if callable(read_only_view_getter) and read_only_view_getter():
+            return
+
         state_getter = getattr(self.controller, "get_array_run_state", None)
         array_state = state_getter() if callable(state_getter) else "idle"
 
@@ -5242,7 +5361,36 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                     idx = self.reagent_selection.findText(stock_formatted)
                 self.reagent_selection.setCurrentIndex(idx)
             max_concentration = self.model.reaction_collection.get_max_droplets(stock_id)
-            printer_head = self.model.printer_head_manager.get_printer_head_by_id(stock_id)
+            printer_head = None
+            read_only_view_getter = getattr(
+                self.model, "is_read_only_experiment_view_active", None
+            )
+            if not callable(read_only_view_getter):
+                read_only_view_getter = getattr(
+                    self.model, "is_completed_execution_view_active", None
+                )
+            if callable(read_only_view_getter) and read_only_view_getter():
+                display_heads_getter = getattr(
+                    self.model, "get_read_only_experiment_display_heads", None
+                )
+                if not callable(display_heads_getter):
+                    display_heads_getter = getattr(
+                        self.model, "get_completed_execution_display_heads", None
+                    )
+                display_heads = (
+                    display_heads_getter()
+                    if callable(display_heads_getter)
+                    else ()
+                )
+                printer_head = next(
+                    (
+                        head for head in display_heads
+                        if head.get_stock_id() == stock_id
+                    ),
+                    None,
+                )
+            if printer_head is None:
+                printer_head = self.model.printer_head_manager.get_printer_head_by_id(stock_id)
             color = printer_head.get_color()
         else:
             max_concentration = 0
@@ -5362,6 +5510,22 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.reagent_selection.setCurrentIndex(0)
 
         self.update_well_colors()  # Update with a default reagent on load
+        read_only_view_getter = getattr(
+            self.model, "is_read_only_experiment_view_active", None
+        )
+        if not callable(read_only_view_getter):
+            read_only_view_getter = getattr(
+                self.model, "is_completed_execution_view_active", None
+            )
+        read_only_view = bool(
+            callable(read_only_view_getter) and read_only_view_getter()
+        )
+        for button_name in ("stock_prep_button", "calibration_button"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(not read_only_view)
+        if getattr(self, "start_print_array_button", None) is not None:
+            self.update_start_print_array_button()
         print('Completed experiment load')
 
     def open_calibration_dialog(self):
@@ -5370,6 +5534,15 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         This function will be triggered when the calibration button is pressed.
         """
         # Create an instance of the CalibrationDialog
+        read_only_view_getter = getattr(
+            self.model, "is_read_only_experiment_view_active", None
+        )
+        if not callable(read_only_view_getter):
+            read_only_view_getter = getattr(
+                self.model, "is_completed_execution_view_active", None
+            )
+        if callable(read_only_view_getter) and read_only_view_getter():
+            return
         if not self.model.machine_model.motors_are_enabled() or not self.model.machine_model.motors_are_homed():
             self.main_window.popup_message("Motors Not Enabled or Homed","Please enable and home the motors before calibrating the well plate.")
             return
@@ -5407,6 +5580,15 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             print("Experiment file generated and loaded.")
 
     def open_stock_prep_dialog(self):
+        read_only_view_getter = getattr(
+            self.model, "is_read_only_experiment_view_active", None
+        )
+        if not callable(read_only_view_getter):
+            read_only_view_getter = getattr(
+                self.model, "is_completed_execution_view_active", None
+            )
+        if callable(read_only_view_getter) and read_only_view_getter():
+            return
         dialog = StockPrepDialog(self.model.experiment_model, self.main_window)
         dialog.exec()
 
@@ -8454,6 +8636,16 @@ class ExperimentTaskListWidget(QGroupBox):
 
         return any(self._well_assigned_reaction(well) is not None for well in self._all_wells())
 
+    def _read_only_experiment_view_active(self):
+        getter = getattr(self.model, "is_read_only_experiment_view_active", None)
+        if not callable(getter):
+            getter = getattr(self.model, "is_completed_execution_view_active", None)
+        return bool(callable(getter) and getter())
+
+    def _completed_execution_view_active(self):
+        getter = getattr(self.model, "is_completed_execution_view_active", None)
+        return bool(callable(getter) and getter())
+
     def _queue_idle(self):
         checker = getattr(self.controller, "check_if_all_completed", None)
         if callable(checker):
@@ -8464,6 +8656,25 @@ class ExperimentTaskListWidget(QGroupBox):
         return True
 
     def _global_tasks(self):
+        if self._read_only_experiment_view_active():
+            completed = self._completed_execution_view_active()
+            return [
+                {
+                    "key": "experiment",
+                    "label": (
+                        "Completed experiment loaded read-only"
+                        if completed
+                        else "Older experiment loaded read-only"
+                    ),
+                    "done": self._experiment_ready(),
+                    "next": (
+                        "Load the completed experiment"
+                        if completed
+                        else "Load the older experiment"
+                    ),
+                    "blocking": "The saved experiment could not be displayed.",
+                }
+            ]
         machine_model = getattr(self.model, "machine_model", None)
         well_plate = getattr(self.model, "well_plate", None)
         return [
@@ -8518,6 +8729,8 @@ class ExperimentTaskListWidget(QGroupBox):
         return None
 
     def _active_head(self):
+        if self._read_only_experiment_view_active():
+            return None
         rack = getattr(self.model, "rack_model", None)
         getter = getattr(rack, "get_gripper_printer_head", None)
         if callable(getter):
@@ -8545,6 +8758,18 @@ class ExperimentTaskListWidget(QGroupBox):
         return self._call_bool(head, "is_calibration_chip", False)
 
     def _discover_heads(self):
+        if self._read_only_experiment_view_active():
+            getter = getattr(
+                self.model, "get_read_only_experiment_display_heads", None
+            )
+            if not callable(getter):
+                getter = getattr(
+                    self.model, "get_completed_execution_display_heads", None
+                )
+            if not self._completed_execution_view_active():
+                return []
+            return list(getter() or ()) if callable(getter) else []
+
         heads = []
         manager = getattr(self.model, "printer_head_manager", None)
         heads.extend(list(getattr(manager, "printer_heads", []) or []))
@@ -8831,8 +9056,9 @@ class ExperimentTaskListWidget(QGroupBox):
         is_active = active is head or (
             active is not None and self._head_key(active) == self._head_key(head)
         )
-        applied = self._applied_calibration_record(head) is not None
-        calibrated = self._head_calibrated(head)
+        completed_view = self._completed_execution_view_active()
+        applied = completed_view or self._applied_calibration_record(head) is not None
+        calibrated = completed_view or self._head_calibrated(head)
         progress = self._head_print_progress(head)
         has_work = progress["total_wells"] > 0
         printed = has_work and progress["remaining_droplets"] <= 0
@@ -8855,7 +9081,11 @@ class ExperimentTaskListWidget(QGroupBox):
             "done": applied,
             "blocking": "" if calibrated else "Complete or select a calibration result first.",
         }
-        manual_refuel_task = self._manual_refuel_task_for_head(head, is_active=is_active)
+        manual_refuel_task = (
+            None
+            if completed_view
+            else self._manual_refuel_task_for_head(head, is_active=is_active)
+        )
         print_task = {
             "key": "print",
             "label": "Print array",
@@ -8867,7 +9097,7 @@ class ExperimentTaskListWidget(QGroupBox):
             "label": "Bookend recheck",
             "done": False,
             "optional": True,
-            "blocking": "Optional until this workflow has persisted recheck tracking.",
+            "blocking": "Optional until this workflow saves recheck results.",
         }
         dropoff_task = {
             "key": "dropoff",
@@ -8959,6 +9189,13 @@ class ExperimentTaskListWidget(QGroupBox):
         global_task = self._first_incomplete_global_task()
         if global_task is not None:
             return f"Next: {global_task['next']}", global_task.get("blocking", "")
+
+        if self._read_only_experiment_view_active():
+            return (
+                ("Next: Experiment complete", "")
+                if self._completed_execution_view_active()
+                else ("Next: Read-only experiment", "")
+            )
 
         for context in head_contexts:
             if context["is_active"] and context["current_task"] is not None:
@@ -9755,7 +9992,7 @@ class ExperimentImportWizard(QDialog):
         buttons.addWidget(self.apply_btn)
         left.addLayout(buttons)
 
-        right.addWidget(QLabel("Unique Compositions"))
+        right.addWidget(QLabel("Imported Formulations"))
         self.composition_table = QTableWidget(0, 0, self)
         self.composition_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.composition_table.setWordWrap(True)
@@ -9818,6 +10055,14 @@ class ExperimentImportWizard(QDialog):
     def _fmt_printing_mode(value) -> str:
         mode = normalize_printing_mode(value, fallback=PRINTING_MODE_DROPLET)
         return "Stream" if mode == PRINTING_MODE_STREAM else "Droplet"
+
+    @staticmethod
+    def _display_feasibility_status(value) -> str:
+        return _user_facing_stock_solution_text(value)
+
+    @staticmethod
+    def _display_stock_solution_text(value) -> str:
+        return _user_facing_stock_solution_text(value)
 
     @staticmethod
     def _wrap_header_label(value, max_line_chars: int = 14) -> str:
@@ -10093,7 +10338,7 @@ class ExperimentImportWizard(QDialog):
                 return
 
             specs = report.get("reagent_specs", [])
-            headers = ["Composition", "Wells", "Count"]
+            headers = ["Formulation", "Wells", "Count"]
             headers.extend(self._wrap_header_label(spec.get("name", "")) for spec in specs)
             headers.extend(["Total @ Max (nL)", "Remaining (nL)", "Status"])
 
@@ -10121,7 +10366,7 @@ class ExperimentImportWizard(QDialog):
                 values.extend([
                     self._fmt_whole_nl(row.get("total_required_volume_nL")),
                     self._fmt_whole_nl(row.get("remaining_printed_volume_nL")),
-                    row.get("status", ""),
+                    self._display_feasibility_status(row.get("status", "")),
                 ])
 
                 for col_idx, value in enumerate(values):
@@ -10181,7 +10426,10 @@ class ExperimentImportWizard(QDialog):
                     self._fmt_value(row.get("smallest_nonzero_target")),
                     self._fmt_value(row.get("worst_max_stock_volume_nL")),
                     self._fmt_value(row.get("smallest_useful_target_step")),
-                    f"{row.get('status', '')}: {row.get('recommendation', '')}",
+                    (
+                        f"{self._display_feasibility_status(row.get('status', ''))}: "
+                        f"{self._display_stock_solution_text(row.get('recommendation', ''))}"
+                    ),
                 ]
                 for col_idx, value in enumerate(values):
                     item = QTableWidgetItem(str(value))
@@ -10227,7 +10475,7 @@ class ExperimentImportWizard(QDialog):
         stock_rows = report.get("stock_rows", [])
         status_counts = report.get("status_counts", {})
         parts = [
-            f"{len(rows)} unique composition(s)",
+            f"{len(rows)} imported formulation(s)",
             f"{len(stock_rows)} reagent(s)",
         ]
         if status_counts:
@@ -10274,7 +10522,7 @@ class AdditionalConditionsDialog(QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Unique Conditions")
+        self.setWindowTitle("Additional Conditions")
         self.setMinimumSize(900, 480)
         self.column_specs = [self._normalize_column_spec(spec) for spec in (column_specs or [])]
         self._accepted_conditions: List[AdditionalConditionSpec] | None = None
@@ -10284,7 +10532,7 @@ class AdditionalConditionsDialog(QDialog):
         controls = QVBoxLayout()
         root.addLayout(controls, stretch=0)
 
-        self.add_btn = QPushButton("Add Composition")
+        self.add_btn = QPushButton("Add Condition")
         self.add_btn.clicked.connect(self._add_empty_row)
         controls.addWidget(self.add_btn)
 
@@ -10453,7 +10701,7 @@ class AdditionalConditionsDialog(QDialog):
                     if show_errors:
                         QMessageBox.warning(
                             self,
-                            "Invalid Unique Condition",
+                            "Invalid Additional Condition",
                             f"Row {row + 1}, {column_label}: target {reason}.",
                         )
                     return False, []
@@ -10540,8 +10788,8 @@ class ReactionPreviewDialog(QDialog):
     def _status_text(self) -> str:
         if self.preview_df is None or self.preview_df.empty:
             return (
-                "Total rows: 0 | Base rows: 0 | Unique-condition rows: 0 | "
-                "Expanded unique-condition replicates: 0"
+                "Total rows: 0 | Base rows: 0 | Additional-condition rows: 0 | "
+                "Additional reactions after replicates: 0"
             )
         source = self.preview_df.get("design_source", pd.Series([], dtype=object))
         base_rows = int((source == "base").sum())
@@ -10549,8 +10797,8 @@ class ReactionPreviewDialog(QDialog):
         return (
             f"Total rows: {len(self.preview_df.index)} | "
             f"Base rows: {base_rows} | "
-            f"Unique-condition rows: {unique_rows} | "
-            f"Expanded unique-condition replicates: {unique_rows}"
+            f"Additional-condition rows: {unique_rows} | "
+            f"Additional reactions after replicates: {unique_rows}"
         )
 
     def _populate_table(self):
@@ -10895,16 +11143,18 @@ class ExperimentDesignDialog(QDialog):
     PROGRESS_POLICY_COPY = "copy"
     PROGRESS_POLICY_CANCEL = "cancel"
 
-    ACTION_FINALIZE_DESIGN = "Finalize Design"
-    ACTION_LOAD_EXECUTION = "Load Execution"
-    ACTION_EXECUTION_LOADED = "Execution Loaded"
-    ACTION_EXECUTION_LOCKED = "Execution Locked"
+    ACTION_FINALIZE_DESIGN = "Finalize Experiment"
+    ACTION_LOAD_EXECUTION = "Load Experiment"
+    ACTION_VIEW_COMPLETED_EXECUTION = "View Completed Experiment"
+    ACTION_VIEW_OLDER_EXPERIMENT = "View Older Experiment"
+    ACTION_EXECUTION_LOADED = "Experiment Loaded"
+    ACTION_EXECUTION_LOCKED = "Experiment Locked"
 
     ACTIVE_EXECUTION_BANNER = (
-        "This execution has started. The experiment design is locked and read-only. "
-        "Create an editable copy to change the design. Calibration may still update "
-        "the dispensing mode and effective ejection volume for a reagent that has "
-        "not yet dispensed."
+        "This experiment has started. Its settings are locked and read-only. Select "
+        "Create Editable Copy to make changes. Printer-head calibration can still "
+        "update the printing mode and measured ejection volume for a reagent that "
+        "has not yet been dispensed."
     )
 
     def __init__(self, model: ExperimentModel, main_window):
@@ -11184,7 +11434,7 @@ class ExperimentDesignDialog(QDialog):
         self.reset_upload_btn.clicked.connect(self._on_reset_uploaded_design)
         controls_col.addWidget(self.reset_upload_btn)
 
-        self.unique_conditions_btn = QPushButton("Unique Conditions...")
+        self.unique_conditions_btn = QPushButton("Additional Conditions...")
         self.unique_conditions_btn.clicked.connect(self._on_unique_conditions)
         controls_col.addWidget(self.unique_conditions_btn)
 
@@ -11199,13 +11449,14 @@ class ExperimentDesignDialog(QDialog):
         self.auto_update_chk = QCheckBox("Auto update design")
         self.auto_update_chk.setChecked(True)
         self.auto_update_chk.setToolTip(
-            "When enabled, design edits automatically re-optimize after a short delay. "
-            "Turn this off to make several edits before pressing Optimize and Generate."
+            "When enabled, design edits automatically update reactions and stock "
+            "solutions after a short delay. Turn this off to make several edits before "
+            "pressing Update Reactions and Stock Solutions."
         )
         self.auto_update_chk.toggled.connect(self._on_auto_update_toggled)
         controls_col.addWidget(self.auto_update_chk)
 
-        self.run_btn = new_btn = QPushButton("Optimize and Generate")
+        self.run_btn = new_btn = QPushButton("Update Reactions and Stock Solutions")
         self._run_btn_default_stylesheet = self.run_btn.styleSheet()
         self.run_btn.clicked.connect(self._on_optimize_and_generate)
         controls_col.addWidget(self.run_btn)
@@ -11218,11 +11469,6 @@ class ExperimentDesignDialog(QDialog):
         self.duplicate_btn = QPushButton("Create Editable Copy...")
         self.duplicate_btn.clicked.connect(self._on_duplicate_design)
         controls_col.addWidget(self.duplicate_btn)
-
-        self.migrate_legacy_btn = QPushButton("Migrate Legacy Copy...")
-        self.migrate_legacy_btn.clicked.connect(self._on_migrate_legacy_copy)
-        self.migrate_legacy_btn.setEnabled(False)
-        controls_col.addWidget(self.migrate_legacy_btn)
 
         self.save_btn = QPushButton("Save Design…")
         self.save_btn.clicked.connect(self._on_save_design)
@@ -12033,7 +12279,10 @@ class ExperimentDesignDialog(QDialog):
             if timer is not None:
                 timer.stop()
             if getattr(self, "_design_optimization_dirty", False):
-                self._set_status("Design edits pending. Press Optimize and Generate to update.")
+                self._set_status(
+                    "Experiment changes are pending. Press Update Reactions and Stock "
+                    "Solutions to apply them."
+                )
             self._update_run_button_dirty_state()
             return
 
@@ -12100,7 +12349,10 @@ class ExperimentDesignDialog(QDialog):
             if timer is not None:
                 timer.stop()
             if getattr(self, "_design_optimization_dirty", False):
-                self._set_status("Design edits pending. Press Optimize and Generate to update.")
+                self._set_status(
+                    "Experiment changes are pending. Press Update Reactions and Stock "
+                    "Solutions to apply them."
+                )
             self._update_run_button_dirty_state()
             return
 
@@ -12120,7 +12372,10 @@ class ExperimentDesignDialog(QDialog):
         self._run_design_optimization_flow(
             show_failure_dialog=False,
             show_capacity_dialog=False,
-            busy_message="Updating experiment design... this may take a moment on Raspberry Pi.",
+            busy_message=(
+                "Updating reactions and stock solutions... this may take a moment on "
+                "Raspberry Pi."
+            ),
             show_busy_dialog=False,
         )
 
@@ -12146,6 +12401,60 @@ class ExperimentDesignDialog(QDialog):
         plan = getter() if callable(getter) else None
         state = getattr(plan, "state", None)
         return str(getattr(state, "value", state) or "").strip().casefold()
+
+    @staticmethod
+    def _user_facing_eligibility_reason(
+        eligibility: Mapping[str, Any] | None,
+        *,
+        plan_state: str = "",
+    ) -> str:
+        eligibility = dict(eligibility or {})
+        status = str(eligibility.get("status") or "").strip().casefold()
+        state = str(plan_state or "").strip().casefold()
+        if status == "ready_to_start":
+            return "This experiment has not started and is ready to load."
+        if status == "ready_to_resume":
+            return "This experiment is ready to continue printing from its saved progress."
+        if status == "repairable_checkpoint":
+            return "The saved progress can be recovered when this experiment is loaded."
+        if status == "blocked_missing_checkpoint":
+            return (
+                "Saved progress is incomplete, so this experiment cannot be resumed "
+                "safely."
+            )
+        if status == "blocked_checkpoint_reference":
+            return (
+                "The saved progress does not match this version of the experiment. "
+                "Printing is unavailable."
+            )
+        if status == "blocked_ambiguous_intent":
+            return (
+                "The app cannot determine whether some droplets were printed. Printing "
+                "is unavailable to prevent duplicate dispensing."
+            )
+        if status == "blocked_checkpoint_progress":
+            return (
+                "The saved progress does not match the experiment data. Printing is "
+                "unavailable."
+            )
+        if status == "complete" or state == "completed":
+            return "This experiment is complete and can be viewed."
+        if state == "aborted":
+            return "This experiment was stopped and cannot be resumed."
+        if status == "analysis_only":
+            reason = str(eligibility.get("reason") or "").casefold()
+            if "migrated" in reason or "legacy" in reason:
+                return (
+                    "This older experiment can be viewed, but it cannot be used for "
+                    "printing."
+                )
+            return "This experiment can be viewed, but it cannot be used for printing."
+        if status.startswith("blocked") or status == "blocked":
+            return (
+                "The saved experiment data could not be validated. Printing is "
+                "unavailable."
+            )
+        return "This experiment cannot currently be loaded for printing."
 
     def _classify_editor_lifecycle(self) -> dict[str, Any]:
         locked = self._model_execution_is_read_only(self.model)
@@ -12181,35 +12490,99 @@ class ExperimentDesignDialog(QDialog):
                 "eligibility": dict(eligibility),
             }
 
+        can_view_legacy_getter = getattr(
+            self.model, "can_view_legacy_execution", None
+        )
+        can_view_legacy = bool(
+            callable(can_view_legacy_getter) and can_view_legacy_getter()
+        )
+        if can_view_legacy:
+            completed = plan_state == "completed"
+            return {
+                "state": (
+                    "completed_view_available"
+                    if completed
+                    else "legacy_view_available"
+                ),
+                "action_text": (
+                    self.ACTION_VIEW_COMPLETED_EXECUTION
+                    if completed
+                    else self.ACTION_VIEW_OLDER_EXPERIMENT
+                ),
+                "action_enabled": True,
+                "banner_text": (
+                    "This completed experiment is locked and read-only. Select View "
+                    "Completed Experiment to display the saved plate, stock solutions, "
+                    "wells, and final progress. Printing cannot be started or resumed. "
+                    "Select Create Editable Copy to change the experiment settings."
+                    if completed
+                    else (
+                        "This older experiment is locked and read-only. Select View "
+                        "Older Experiment to display the saved plate, stock solutions, "
+                        "wells, and recorded progress. Printing cannot be started or "
+                        "resumed. Select Create Editable Copy to change the experiment "
+                        "settings."
+                    )
+                ),
+                "plan_state": plan_state,
+                "eligibility": dict(eligibility),
+            }
+
+        can_view_completed_getter = getattr(
+            self.model, "can_view_completed_execution", None
+        )
+        can_view_completed = bool(
+            plan_state == "completed"
+            and callable(can_view_completed_getter)
+            and can_view_completed_getter()
+            and eligibility.get("status") == "analysis_only"
+            and not eligibility.get("can_activate_runtime")
+            and not eligibility.get("can_start_hardware")
+            and not eligibility.get("can_resume_hardware")
+        )
+        if can_view_completed:
+            return {
+                "state": "completed_view_available",
+                "action_text": self.ACTION_VIEW_COMPLETED_EXECUTION,
+                "action_enabled": True,
+                "banner_text": (
+                    "This completed experiment is locked and read-only. Select View "
+                    "Completed Experiment to display the saved plate, reagents, wells, "
+                    "and final progress. Printing cannot be started or resumed. Select "
+                    "Create Editable Copy to change the experiment settings."
+                ),
+                "plan_state": plan_state,
+                "eligibility": dict(eligibility),
+            }
+
         can_activate = bool(eligibility.get("can_activate_runtime"))
-        reason = str(eligibility.get("reason") or "").strip()
         if can_activate:
             return {
                 "state": "saved_execution",
                 "action_text": self.ACTION_LOAD_EXECUTION,
                 "action_enabled": True,
                 "banner_text": (
-                    "This saved execution is locked and read-only. Select Load "
-                    "Execution to reconstruct the saved runtime without starting or "
-                    "resuming printing. Create an editable copy to change the design."
+                    "This saved experiment is locked and read-only. Select Load "
+                    "Experiment to restore its saved setup and progress. Printing will "
+                    "not start or resume automatically. Select Create Editable Copy to "
+                    "change the experiment settings."
                 ),
                 "plan_state": plan_state,
                 "eligibility": dict(eligibility),
             }
 
-        state_description = (
-            f"The execution is {plan_state}." if plan_state else
-            "The saved execution cannot be activated."
+        unavailable_reason = self._user_facing_eligibility_reason(
+            eligibility,
+            plan_state=plan_state,
         )
-        unavailable_reason = reason or state_description
         return {
             "state": "locked_execution",
             "action_text": self.ACTION_EXECUTION_LOCKED,
             "action_enabled": False,
             "banner_text": (
-                "This saved execution is locked and read-only. Hardware loading is "
-                f"unavailable: {unavailable_reason} Create an editable copy to change "
-                "the design."
+                "This saved experiment is locked and read-only. "
+                f"{unavailable_reason} Select Create Editable Copy to change the "
+                "experiment settings."
             ),
             "plan_state": plan_state,
             "eligibility": dict(eligibility),
@@ -12221,13 +12594,23 @@ class ExperimentDesignDialog(QDialog):
         if finish_btn is not None:
             finish_btn.setText(lifecycle["action_text"])
             finish_btn.setEnabled(bool(lifecycle["action_enabled"]))
-            if lifecycle["state"] == "saved_execution":
+            if lifecycle["state"] == "completed_view_available":
                 finish_btn.setToolTip(
-                    "Reconstruct the saved runtime. This does not start or resume printing."
+                    "Display the completed experiment and its final progress read-only."
+                )
+            elif lifecycle["state"] == "legacy_view_available":
+                finish_btn.setToolTip(
+                    "Display the older experiment and its recorded progress read-only."
+                )
+            elif lifecycle["state"] == "saved_execution":
+                finish_btn.setToolTip(
+                    "Restore the saved experiment setup and progress. Printing will not "
+                    "start or resume automatically."
                 )
             elif lifecycle["state"] == "editable":
                 finish_btn.setToolTip(
-                    "Finalize and load the current experiment design."
+                    "Save this experiment and load it into the main window. Printing "
+                    "will not start automatically."
                 )
             else:
                 finish_btn.setToolTip(lifecycle["banner_text"])
@@ -12248,39 +12631,39 @@ class ExperimentDesignDialog(QDialog):
             return (
                 None,
                 None,
-                "Create or load a persisted experiment design before making an editable copy.",
+                "Create or load an experiment before making an editable copy.",
             )
         try:
             source_file = Path(source_file_raw).resolve()
             source_dir = Path(source_dir_raw).resolve()
         except (OSError, TypeError, ValueError) as exc:
-            return None, None, f"The current experiment paths are invalid: {exc}"
+            return None, None, f"The current experiment location is invalid: {exc}"
 
         expected_file = (source_dir / "experiment_design.json").resolve()
         if source_file != expected_file:
             return (
                 None,
                 None,
-                "The current experiment file and directory do not identify the same design.",
+                "The current experiment file and folder do not identify the same experiment.",
             )
         if not source_dir.is_dir() or not source_file.is_file():
             return (
                 None,
                 None,
-                "The current experiment_design.json is not available on disk.",
+                "The current experiment file is not available.",
             )
         try:
             with source_file.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
         except Exception as exc:
-            return None, None, f"The current experiment design cannot be read: {exc}"
+            return None, None, f"The current experiment cannot be read: {exc}"
         if not isinstance(payload, dict) or not isinstance(
             payload.get("metadata"), dict
         ):
             return (
                 None,
                 None,
-                "The current experiment_design.json is not a valid experiment design.",
+                "The current experiment file is not valid.",
             )
         return source_file, source_dir, None
 
@@ -12294,7 +12677,7 @@ class ExperimentDesignDialog(QDialog):
         available = error is None
         button.setEnabled(available)
         button.setToolTip(
-            "Create a fresh editable sibling of the currently loaded design."
+            "Create a new editable experiment from the currently loaded experiment."
             if available
             else str(error)
         )
@@ -12437,13 +12820,16 @@ class ExperimentDesignDialog(QDialog):
             return
         count, expanded = self._additional_conditions_counts()
         if count:
-            button.setText(f"Unique Conditions ({count})...")
+            button.setText(f"Additional Conditions ({count})...")
             button.setToolTip(
-                f"{count} unique condition row(s), {expanded} extra reaction(s) including condition replicates."
+                f"{count} additional condition(s), producing {expanded} additional "
+                "reaction(s) after replicates."
             )
         else:
-            button.setText("Unique Conditions...")
-            button.setToolTip("Add supplemental unique compositions to append after the base design.")
+            button.setText("Additional Conditions...")
+            button.setToolTip(
+                "Add conditions that produce extra reactions beyond the main design."
+            )
 
     def _on_unique_conditions(self):
         if getattr(self, "_editing_locked_by_gripper", False):
@@ -12453,7 +12839,10 @@ class ExperimentDesignDialog(QDialog):
             self._set_status(getattr(self, "_progress_lock_status_message", "Design is view-only."))
             return
         if self._manual_assignments_active():
-            self._set_status("Unique conditions are disabled when explicit well assignments are active.")
+            self._set_status(
+                "Additional conditions are unavailable when imported well assignments "
+                "control the layout."
+            )
             return
 
         self._rebuild_model_from_table()
@@ -12485,9 +12874,12 @@ class ExperimentDesignDialog(QDialog):
 
         ok, _res = self._run_design_optimization_flow(
             show_failure_dialog=True,
-            failure_title="Optimization failed",
+            failure_title="Could not update reactions and stock solutions",
             show_capacity_dialog=False,
-            busy_message="Optimizing before reaction preview/export... this may take a moment on Raspberry Pi.",
+            busy_message=(
+                "Updating reactions and stock solutions before preview or export... this "
+                "may take a moment on Raspberry Pi."
+            ),
         )
         if ok:
             return True
@@ -12738,11 +13130,14 @@ class ExperimentDesignDialog(QDialog):
         # Immediately optimize & generate using the uploaded design
         self._run_design_optimization_flow(
             show_failure_dialog=True,
-            failure_title="Optimization failed",
-            failure_prefix="Could not find feasible stock solutions for the uploaded design:\n",
+            failure_title="Could not update reactions and stock solutions",
+            failure_prefix="Could not calculate stock solutions for the imported formulations:\n",
             show_capacity_dialog=False,
             refresh_lock_states=True,
-            busy_message="Applying uploaded design and optimizing stock solutions... this may take a moment on Raspberry Pi.",
+            busy_message=(
+                "Applying imported formulations and updating reactions and stock "
+                "solutions... this may take a moment on Raspberry Pi."
+            ),
         )
 
     def _validate_uploaded_design_well_assignments(self, df) -> bool:
@@ -12998,13 +13393,6 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_editor_lifecycle_state()
         self._refresh_editable_copy_availability()
         self._apply_gripper_edit_lock_state()
-        migrate_button = getattr(self, "migrate_legacy_btn", None)
-        if migrate_button is not None:
-            legacy_getter = getattr(self.model, "is_read_only_legacy_execution", None)
-            migrate_button.setEnabled(
-                bool(callable(legacy_getter) and legacy_getter())
-                and not getattr(self, "_editing_locked_by_gripper", False)
-            )
 
     def _apply_uploaded_design_mode_to_ui(self, active: bool):
         self._uploaded_design_active = bool(active)
@@ -13196,9 +13584,9 @@ class ExperimentDesignDialog(QDialog):
         wells = int(status.get("wells_with_progress", 0) or 0)
         droplets = int(status.get("total_added_droplets", 0) or 0)
         return (
-            "This experiment has saved print progress "
+            "This experiment has saved printing progress "
             f"({droplets} droplet(s) recorded across {wells} well(s)). "
-            "The design is view-only; create an editable copy to make changes."
+            "The experiment is view-only. Select Create Editable Copy to make changes."
         )
 
     def _set_progress_protection(self, protected: bool, status: Mapping[str, Any] | None = None):
@@ -13217,12 +13605,13 @@ class ExperimentDesignDialog(QDialog):
         msg.setIcon(QMessageBox.Warning)
         msg.setText(message)
         msg.setInformativeText(
-            "Keep Progress / Resume will preserve the saved run state and keep the design read-only. "
-            "Create Editable Copy starts a separate design without changing this physical history."
+            "Open Read-Only lets you review the experiment without changing its saved "
+            "progress. Create Editable Copy starts a new editable experiment without "
+            "changing the recorded droplets."
         )
-        keep_btn = msg.addButton("Keep Progress / Resume", QMessageBox.AcceptRole)
+        keep_btn = msg.addButton("Open Read-Only", QMessageBox.AcceptRole)
         copy_btn = msg.addButton("Create Editable Copy", QMessageBox.ActionRole)
-        cancel_btn = msg.addButton(QMessageBox.Cancel)
+        cancel_btn = msg.addButton("Return to Main Window", QMessageBox.RejectRole)
         msg.setDefaultButton(keep_btn)
         msg.exec()
 
@@ -13244,7 +13633,7 @@ class ExperimentDesignDialog(QDialog):
 
         policy = self._prompt_progress_policy(
             status,
-            title="Experiment progress exists",
+            title="Saved Progress Found",
         )
         if policy == self.PROGRESS_POLICY_CANCEL:
             return False
@@ -13420,21 +13809,29 @@ class ExperimentDesignDialog(QDialog):
         seen: set[str] = set()
         for rows in (issue_map or {}).values():
             for issue in rows:
-                msg = str(issue.get("message") or "").strip()
+                msg = _user_facing_stock_solution_text(
+                    issue.get("message") or ""
+                ).strip()
                 if msg and msg not in seen:
                     messages.append(msg)
                     seen.add(msg)
         if not messages and fallback_reason:
-            messages.append(str(fallback_reason))
+            messages.append(_user_facing_stock_solution_text(fallback_reason))
         if not messages and stale:
-            messages.append(stale_message or "Showing last valid stock plan; current stock inputs are invalid.")
+            messages.append(
+                stale_message
+                or "Showing the last valid stock solutions; current stock inputs are invalid."
+            )
         if not messages:
             return ""
         summary = messages[0]
         if len(messages) > 1:
             summary += f" (+{len(messages) - 1} more issue(s))"
-        if stale and "Showing last valid stock plan" not in summary:
-            prefix = stale_message or "Showing last valid stock plan; current stock inputs are invalid."
+        if stale and "Showing the last valid stock solutions" not in summary:
+            prefix = (
+                stale_message
+                or "Showing the last valid stock solutions; current stock inputs are invalid."
+            )
             summary = f"{prefix} {summary}"
         return summary
 
@@ -13513,7 +13910,9 @@ class ExperimentDesignDialog(QDialog):
 
         self._mark_design_optimization_dirty()
         self._clear_target_color_state()
-        stale_msg = "Showing last valid stock plan; current volume settings are invalid."
+        stale_msg = (
+            "Showing the last valid stock solutions; current volume settings are invalid."
+        )
         self._set_stock_table_stale(True, stale_msg)
         summary = self._summarize_issue_map(volume_issues, stale=True, stale_message=stale_msg)
         self._set_status(summary)
@@ -13680,7 +14079,14 @@ class ExperimentDesignDialog(QDialog):
         if not res:
             return
         if not res.get("best"):
-            self._set_status(str(res.get("reason", "Optimization failed")))
+            self._set_status(
+                _user_facing_stock_solution_text(
+                    res.get(
+                        "reason",
+                        "Reactions and stock solutions could not be updated.",
+                    )
+                )
+            )
             return
 
         preview = {}
@@ -13716,7 +14122,7 @@ class ExperimentDesignDialog(QDialog):
             )
         if two_stock:
             parts.append(
-                "Two-stock plans are required for: "
+                "Two stock solutions are required for: "
                 + ", ".join(two_stock[:4])
                 + ("..." if len(two_stock) > 4 else "")
                 + "."
@@ -13731,14 +14137,14 @@ class ExperimentDesignDialog(QDialog):
         if approximate or preview:
             parts.append("Hover a Targets field to inspect the actual achieved concentrations.")
         if not parts:
-            parts.append("Optimization complete.")
+            parts.append("Reactions and stock solutions updated.")
         self._set_status(" ".join(parts))
 
     def _run_design_optimization_flow(
         self,
         *,
         show_failure_dialog: bool = False,
-        failure_title: str = "Optimization failed",
+        failure_title: str = "Could not update reactions and stock solutions",
         failure_prefix: str = "",
         show_capacity_dialog: bool = False,
         refresh_lock_states: bool = False,
@@ -13746,7 +14152,10 @@ class ExperimentDesignDialog(QDialog):
         show_busy_dialog: bool = True,
     ) -> tuple[bool, dict | None]:
         if self._model_execution_is_read_only(self.model):
-            message = "The execution design is locked; optimization is disabled."
+            message = (
+                "This experiment is locked. Reactions and stock solutions cannot be "
+                "changed."
+            )
             self._set_status(message)
             return False, {
                 "best": None,
@@ -13767,11 +14176,20 @@ class ExperimentDesignDialog(QDialog):
             self._apply_stock_input_issue_state(raw_issues)
             self._clear_target_color_state()
             if volume_issues and raw_issues:
-                stale_msg = "Showing last valid stock plan; current design inputs are invalid."
+                stale_msg = (
+                    "Showing the last valid stock solutions; current experiment settings "
+                    "are invalid."
+                )
             elif volume_issues:
-                stale_msg = "Showing last valid stock plan; current volume settings are invalid."
+                stale_msg = (
+                    "Showing the last valid stock solutions; current volume settings are "
+                    "invalid."
+                )
             else:
-                stale_msg = "Showing last valid stock plan; current stock inputs are invalid."
+                stale_msg = (
+                    "Showing the last valid stock solutions; current stock inputs are "
+                    "invalid."
+                )
             self._set_stock_table_stale(True, stale_msg)
             summary = self._summarize_issue_map(input_issues, stale=True, stale_message=stale_msg)
             self._set_status(summary)
@@ -13787,10 +14205,11 @@ class ExperimentDesignDialog(QDialog):
 
         with _BusyUiContext(
             self,
-            busy_message or "Optimizing stock solutions and generating experiment... this may take a moment on Raspberry Pi.",
+            busy_message
+            or "Updating reactions and stock solutions... this may take a moment on Raspberry Pi.",
             widgets=self._design_busy_widgets(),
             status_setter=self._set_status,
-            failure_message="Optimization failed.",
+            failure_message="Reactions and stock solutions could not be updated.",
             show_dialog=show_busy_dialog,
         ):
             res = self.model.optimize_stock_solutions(
@@ -13807,7 +14226,10 @@ class ExperimentDesignDialog(QDialog):
         if not res.get("best"):
             self._mark_design_optimization_dirty()
             self._clear_target_color_state()
-            stale_msg = "Showing last valid stock plan; current stock inputs are not feasible."
+            stale_msg = (
+                "Showing the last valid stock solutions; current stock inputs cannot "
+                "produce the requested reactions."
+            )
             self._set_stock_table_stale(True, stale_msg)
             summary = self._summarize_issue_map(
                 merged_issues,
@@ -13858,9 +14280,10 @@ class ExperimentDesignDialog(QDialog):
     ):
         ok, _res = self._run_design_optimization_flow(
             show_failure_dialog=True,
-            failure_title="Optimization failed",
+            failure_title="Could not update reactions and stock solutions",
             show_capacity_dialog=show_capacity_dialog,
-            busy_message=busy_message or "Optimizing stock solutions and generating experiment... this may take a moment on Raspberry Pi.",
+            busy_message=busy_message
+            or "Updating reactions and stock solutions... this may take a moment on Raspberry Pi.",
         )
         return ok
 
@@ -14506,13 +14929,16 @@ class ExperimentDesignDialog(QDialog):
         If needed, optimize/generate so stock table is fresh in the preview.
         """
         if self._model_execution_is_read_only(self.model):
-            self._set_status("The execution design is locked; saving is disabled.")
+            self._set_status("This experiment is locked and cannot be saved as changes.")
             return
         ok, res = self._run_design_optimization_flow(
             show_failure_dialog=True,
-            failure_title="Optimization failed",
+            failure_title="Could not update reactions and stock solutions",
             show_capacity_dialog=False,
-            busy_message="Optimizing before saving design... this may take a moment on Raspberry Pi.",
+            busy_message=(
+                "Updating reactions and stock solutions before saving... this may take "
+                "a moment on Raspberry Pi."
+            ),
         )
         if not ok:
             return
@@ -14528,23 +14954,23 @@ class ExperimentDesignDialog(QDialog):
                     self.main_window, "complete_experiment_design"
                 ):
                     raise RuntimeError(
-                        "The prepared execution commit path is unavailable."
+                        "The experiment could not be saved in its finalized state."
                     )
                 result = self.main_window.complete_experiment_design(
                     load_progress=False,
                     requested_name=self.exp_name_edit.text().strip() or "Untitled",
                 )
                 self._apply_requested = True
-                status = str((result or {}).get("status") or "saved")
                 self._set_status(
-                    f"Prepared design {status}: {self.model.experiment_file_path}"
+                    f"Experiment saved: {self.model.experiment_file_path}"
                 )
             except Exception as exc:
-                message = str(exc) or "Could not save the prepared experiment."
+                message = "The experiment could not be saved. See the application logs for details."
                 self._set_status(message)
+                print(f"[ExperimentDesignDialog] finalize-save error: {exc}")
                 QMessageBox.warning(
                     self,
-                    "Could not save prepared experiment",
+                    "Could not save experiment",
                     message,
                 )
             return
@@ -14586,10 +15012,10 @@ class ExperimentDesignDialog(QDialog):
 
         default_name = self.model.default_duplicate_experiment_name(source_name)
         name_dialog = EditableCopyNameDialog(self)
-        name_dialog.setWindowTitle("Duplicate Experiment Design")
+        name_dialog.setWindowTitle("Create Editable Copy")
         name_dialog.setInputMode(QInputDialog.TextInput)
         name_dialog.setLabelText(
-            f"Current source: {source_name}\nNew experiment name:"
+            f"Current experiment: {source_name}\nNew experiment name:"
         )
         name_dialog.setTextValue(default_name)
         name_dialog.setOkButtonText("Create Copy")
@@ -14599,18 +15025,18 @@ class ExperimentDesignDialog(QDialog):
             name_field.selectAll()
         name_dialog._enforce_minimum_widths()
         if name_dialog.exec() != QDialog.Accepted:
-            self._set_status("Duplicate canceled; current design was left unchanged.")
+            self._set_status("Copy canceled; the current experiment was left unchanged.")
             return
 
         requested_name = name_dialog.textValue().strip()
         if not requested_name:
-            self._set_status("Duplicate canceled; no experiment name was provided.")
+            self._set_status("Copy canceled; no experiment name was provided.")
             return
         new_name = self.model.sanitize_experiment_name(
             requested_name, fallback=""
         )
         if not new_name:
-            self._set_status("Duplicate canceled; no experiment name was provided.")
+            self._set_status("Copy canceled; no experiment name was provided.")
             return
 
         destination_parent = source_dir.parent
@@ -14620,8 +15046,8 @@ class ExperimentDesignDialog(QDialog):
             message = (
                 f"The source parent folder is not writable: {destination_parent}"
             )
-            QMessageBox.warning(self, "Duplicate failed", message)
-            self._set_status(f"Duplicate failed: {message}")
+            QMessageBox.warning(self, "Could not create editable copy", message)
+            self._set_status(f"Could not create editable copy: {message}")
             return
 
         new_experiment_path = (destination_parent / new_name).resolve()
@@ -14633,11 +15059,11 @@ class ExperimentDesignDialog(QDialog):
             )
             QMessageBox.warning(
                 self,
-                "Duplicate failed",
+                "Could not create editable copy",
                 f"A folder named '{new_name}' already exists{collision_detail}.",
             )
             self._set_status(
-                f"Duplicate failed; folder already exists: {new_experiment_path}"
+                f"Could not create editable copy; folder already exists: {new_experiment_path}"
             )
             return
 
@@ -14648,9 +15074,9 @@ class ExperimentDesignDialog(QDialog):
                 str(new_experiment_path),
             )
         except Exception as e:
-            message = str(e) or "Unknown duplicate error."
-            QMessageBox.warning(self, "Duplicate failed", message)
-            self._set_status(f"Duplicate failed: {message}")
+            message = str(e) or "The editable copy could not be created."
+            QMessageBox.warning(self, "Could not create editable copy", message)
+            self._set_status(f"Could not create editable copy: {message}")
             return
 
         self._progress_reset_confirmed = False
@@ -14670,76 +15096,9 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_all_lock_states()
 
         self._set_status(
-            f"Duplicated current design from: {source_dir}. "
+            f"Editable copy created from: {source_dir}. "
             f"New experiment: {new_experiment_path}"
         )
-
-    def _on_migrate_legacy_copy(self):
-        source = getattr(self.model, "experiment_dir_path", None)
-        if not source or not self.model.is_read_only_legacy_execution():
-            self._set_status("Load a recorded legacy execution before migrating it.")
-            return
-        response = QMessageBox.question(
-            self,
-            "Migrate Legacy Execution",
-            "Create a full sibling copy with authoritative analysis files? "
-            "The copy will remain permanently hardware-disabled.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if response != QMessageBox.Yes:
-            return
-        progress = QtWidgets.QProgressDialog(
-            "Copying and validating the legacy execution...",
-            "Cancel",
-            0,
-            0,
-            self,
-        )
-        progress.setWindowTitle("Migrate Legacy Execution")
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setMinimumDuration(0)
-        worker = LegacyExecutionMigrationWorker(source, parent=self)
-        self._legacy_migration_worker = worker
-        self._legacy_migration_progress = progress
-
-        def _cleanup_worker():
-            progress.close()
-            worker.deleteLater()
-            self._legacy_migration_worker = None
-            self._legacy_migration_progress = None
-
-        def _migration_failed(message):
-            if "canceled" in str(message).lower():
-                self._set_status("Legacy migration canceled; the source was unchanged.")
-            else:
-                QMessageBox.warning(self, "Migration failed", str(message))
-                self._set_status(f"Migration failed: {message}")
-
-        def _migration_succeeded(result):
-            try:
-                self.model.open_migrated_legacy_execution_copy(result, source)
-                self._progress_reset_confirmed = False
-                self._set_progress_protection(True)
-                self._uploaded_design_active = self.model.has_uploaded_design()
-                self._load_factors_into_table()
-                self._sync_controls_from_model()
-                self._refresh_stock_table()
-                self._update_summary_labels()
-                self._refresh_all_lock_states()
-                self._set_status(
-                    f"Migrated analysis-only execution opened from: {result.destination}"
-                )
-            except Exception as exc:
-                QMessageBox.warning(self, "Migration open failed", str(exc))
-                self._set_status(f"Migration was published but could not be opened: {exc}")
-
-        progress.canceled.connect(worker.cancel)
-        worker.failed.connect(_migration_failed)
-        worker.succeeded.connect(_migration_succeeded)
-        worker.finished.connect(_cleanup_worker)
-        worker.start()
-        progress.show()
 
     def _on_load_design(self):
         # Default directory = Experiments
@@ -14789,38 +15148,65 @@ class ExperimentDesignDialog(QDialog):
                 if issue.get("severity") in {"warning", "fatal"}
             ]
             fatal = any(issue.get("severity") == "fatal" for issue in issues)
+            completed = self._execution_plan_state_text(self.model) == "completed"
             base_message = (
-                "Recorded legacy execution loaded read-only, but its execution plan could not be reconstructed. "
-                "The saved design remains available for inspection and was not re-optimized."
+                "This older experiment was opened view-only. Some saved data could not "
+                "be validated, so printing is unavailable."
                 if fatal
-                else "Recorded legacy execution loaded read-only."
+                else (
+                    "Experiment complete. Press View Completed Experiment to display "
+                    "the saved experiment and its final progress read-only."
+                    if completed
+                    else (
+                        "Older experiment loaded read-only. Press View Older Experiment "
+                        "to display its saved plate, wells, and recorded progress."
+                    )
+                )
             )
-            detail = "\n".join(message for message in warning_messages if message)
+            if warning_messages:
+                print(
+                    "[ExperimentDesignDialog] older experiment validation details: "
+                    + " | ".join(message for message in warning_messages if message)
+                )
             self._progress_reset_confirmed = False
             self._set_progress_protection(True, progress_status)
-            self._progress_lock_status_message = (
-                f"{base_message}\n{detail}" if detail else base_message
-            )
+            self._progress_lock_status_message = base_message
         elif execution_locked:
             self._progress_reset_confirmed = False
             self._set_progress_protection(True, progress_status)
-            sync_error_getter = getattr(
-                self.model, "get_execution_plan_sync_error", None
-            )
-            sync_error = sync_error_getter() if callable(sync_error_getter) else None
             eligibility_getter = getattr(
                 self.model, "get_execution_resume_eligibility", None
             )
             eligibility = eligibility_getter() if callable(eligibility_getter) else None
-            reason = str((eligibility or {}).get("reason") or "")
             status = str((eligibility or {}).get("status") or "")
-            base_message = (
-                "Execution plan validated. Press Load Execution to reconstruct the exact saved runtime."
-                if status in {"ready_to_start", "ready_to_resume", "repairable_checkpoint"}
-                else "Execution plan loaded read-only for analysis; hardware activation is blocked."
+            completed_view_getter = getattr(
+                self.model, "can_view_completed_execution", None
             )
-            self._progress_lock_status_message = (
-                "\n".join(item for item in (base_message, reason, sync_error) if item)
+            can_view_completed = bool(
+                callable(completed_view_getter) and completed_view_getter()
+            )
+            base_message = (
+                "Experiment complete. Press View Completed Experiment to display the "
+                "saved experiment and its final progress read-only."
+                if can_view_completed
+                else (
+                    "This experiment is ready to load. Press Load Experiment to restore "
+                    "its saved setup and progress. Printing will not start automatically."
+                    if status in {"ready_to_start", "ready_to_resume", "repairable_checkpoint"}
+                    else "This experiment can be viewed, but it cannot be used for printing."
+                )
+            )
+            friendly_reason = self._user_facing_eligibility_reason(
+                eligibility,
+                plan_state=self._execution_plan_state_text(self.model),
+            )
+            self._progress_lock_status_message = "\n".join(
+                item
+                for item in (
+                    base_message,
+                    friendly_reason if friendly_reason not in base_message else "",
+                )
+                if item
             )
         elif progress_policy == self.PROGRESS_POLICY_RESUME:
             self._progress_reset_confirmed = False
@@ -14865,32 +15251,124 @@ class ExperimentDesignDialog(QDialog):
             and self._model_authoritative_runtime_is_active(self.model)
         ):
             self._set_status(
-                "This execution has started. Its design is locked and read-only; "
-                "create an editable copy to make changes."
+                "This experiment has started. Its settings are locked and read-only. "
+                "Select Create Editable Copy to make changes."
             )
+            return
+        can_view_legacy_getter = getattr(
+            self.model, "can_view_legacy_execution", None
+        )
+        can_view_legacy = bool(
+            callable(can_view_legacy_getter) and can_view_legacy_getter()
+        )
+        if can_view_legacy:
+            completed = self._execution_plan_state_text(self.model) == "completed"
+            try:
+                if self.main_window is None or not hasattr(
+                    self.main_window, "view_read_only_experiment"
+                ):
+                    raise RuntimeError(
+                        "The older experiment cannot currently be displayed."
+                    )
+                self.main_window.view_read_only_experiment()
+                self._apply_requested = True
+                self._set_status(
+                    "Completed experiment displayed read-only."
+                    if completed
+                    else "Older experiment displayed read-only."
+                )
+                self.accept()
+            except Exception as exc:
+                print(f"[ExperimentDesignDialog] older experiment view error: {exc}")
+                message = (
+                    "The older experiment could not be displayed. See the application "
+                    "logs for details."
+                )
+                self._set_status(message)
+                QMessageBox.warning(
+                    self,
+                    "Could not view older experiment",
+                    message,
+                )
             return
         bundle_getter = getattr(self.model, "get_authoritative_execution_bundle", None)
         bundle = bundle_getter() if callable(bundle_getter) else None
         if bundle is not None and self._model_execution_is_read_only(self.model):
+            eligibility_getter = getattr(
+                self.model, "get_execution_resume_eligibility", None
+            )
+            eligibility = (
+                eligibility_getter() if callable(eligibility_getter) else None
+            ) or {}
+            completed_view_getter = getattr(
+                self.model, "can_view_completed_execution", None
+            )
+            can_view_completed = bool(
+                callable(completed_view_getter)
+                and completed_view_getter()
+                and self._execution_plan_state_text(self.model) == "completed"
+                and eligibility.get("status") == "analysis_only"
+                and not eligibility.get("can_activate_runtime")
+                and not eligibility.get("can_start_hardware")
+                and not eligibility.get("can_resume_hardware")
+            )
             try:
-                if self.main_window is None or not hasattr(
-                    self.main_window, "activate_authoritative_execution"
-                ):
-                    raise RuntimeError("The execution activation path is unavailable.")
-                eligibility = self.main_window.activate_authoritative_execution()
+                if can_view_completed:
+                    if self.main_window is None or not hasattr(
+                        self.main_window, "view_completed_execution"
+                    ):
+                        raise RuntimeError(
+                            "The completed experiment cannot currently be displayed."
+                        )
+                    eligibility = self.main_window.view_completed_execution()
+                elif eligibility.get("can_activate_runtime"):
+                    if self.main_window is None or not hasattr(
+                        self.main_window, "activate_authoritative_execution"
+                    ):
+                        raise RuntimeError("The experiment cannot currently be loaded.")
+                    eligibility = self.main_window.activate_authoritative_execution()
+                else:
+                    self._set_status(
+                        self._user_facing_eligibility_reason(
+                            eligibility,
+                            plan_state=self._execution_plan_state_text(self.model),
+                        )
+                    )
+                    return
                 self._apply_requested = True
                 self._set_status(
-                    str((eligibility or {}).get("reason") or "Execution activated.")
+                    (
+                        "Completed experiment displayed read-only."
+                        if can_view_completed
+                        else "Experiment loaded."
+                    )
                 )
                 self.accept()
             except Exception as exc:
-                message = str(exc) or "Could not activate the saved execution."
+                print(f"[ExperimentDesignDialog] experiment load error: {exc}")
+                message = (
+                    "The completed experiment could not be displayed. See the application "
+                    "logs for details."
+                    if can_view_completed
+                    else (
+                        "The saved experiment could not be loaded. See the application "
+                        "logs for details."
+                    )
+                )
                 self._set_status(message)
-                QMessageBox.warning(self, "Could not activate execution", message)
+                QMessageBox.warning(
+                    self,
+                    (
+                        "Could not view completed experiment"
+                        if can_view_completed
+                        else "Could not load experiment"
+                    ),
+                    message,
+                )
             return
         if self._model_execution_is_read_only(self.model):
             self._set_status(
-                "The execution design is locked; it cannot be changed or finalized again."
+                "This experiment is locked and cannot be changed or finalized again."
             )
             return
         if self._editing_locked_by_gripper:
@@ -14920,10 +15398,13 @@ class ExperimentDesignDialog(QDialog):
             self._update_summary_labels()
             self._apply_target_color_state()
         else:
-            # Reuse the same logic as Optimize & Generate
+            # Reuse the same logic as Update Reactions and Stock Solutions.
             if not self._on_optimize_and_generate(
                 show_capacity_dialog=True,
-                busy_message="Optimizing stock solutions and generating experiment... this may take a moment on Raspberry Pi.",
+                busy_message=(
+                    "Updating reactions and stock solutions... this may take a moment on "
+                    "Raspberry Pi."
+                ),
             ):
                 return
 

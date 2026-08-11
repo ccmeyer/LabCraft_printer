@@ -46,10 +46,18 @@ _PLATFORMS = {"windows_sil", "pi_sil"}
 _EXPECTED_OUTCOMES = {"pass", "informational"}
 _SUITE_STATUSES = {"active", "planned"}
 _SUITE_KINDS = {"standard", "lifecycle", "regression", "stress"}
-_CADENCES = {"every_change", "nightly", "weekly", "monthly", "pre_release"}
+_CADENCES = {
+    "on_demand",
+    "every_change",
+    "nightly",
+    "weekly",
+    "monthly",
+    "pre_release",
+}
 _AUTOMATION_STATUSES = {"not_configured", "manual", "automated"}
 _ACTION_IMPLEMENTATION_STATUSES = {"embedded", "reusable"}
 _ASSERTION_EVIDENCE_KINDS = {"report_path", "pytest"}
+_INTERACTION_SURFACES = {"ui", "controller", "model", "simulator", "harness"}
 _PI_REQUIRED_EVIDENCE = ("preflight", "hardware_proof")
 
 
@@ -84,18 +92,24 @@ _SCENARIO_DEFINITIONS = {
         workload_id="virtual_print_array_96_v1",
         fixture_path=_FIXTURE_ROOT / "virtual_print_array_96_v1.json",
         expected_completion_count=96,
+        runner_family="composed_journey",
     ),
     "virtual_print_array_384x10_v1": ScenarioDefinition(
         registry_id="virtual_print_array_384x10_v1",
         workload_id="virtual_print_array_384x10_v1",
         fixture_path=_FIXTURE_ROOT / "virtual_print_array_384x10_v1.json",
         expected_completion_count=3840,
+        runner_family="composed_journey",
     ),
     "virtual_print_array_24_v1": ScenarioDefinition(
         registry_id="virtual_print_array_24_v1",
         workload_id="virtual_print_array_24_v1",
         fixture_path=_FIXTURE_ROOT / "virtual_print_array_24_v1.json",
         expected_completion_count=24,
+        runner_family="composed_journey",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
     ),
     "experiment_editor_create_finalize_v1": ScenarioDefinition(
         registry_id="experiment_editor_create_finalize_v1",
@@ -105,7 +119,7 @@ _SCENARIO_DEFINITIONS = {
         ),
         expected_completion_count=1,
         scenario_name="experiment_editor_create_finalize",
-        runner_family="experiment_editor",
+        runner_family="composed_journey",
         supports_pi_evidence=False,
         supports_injected_stall=False,
         supports_report_sets=False,
@@ -119,7 +133,7 @@ _SCENARIO_DEFINITIONS = {
         ),
         expected_completion_count=2,
         scenario_name="experiment_editor_prestart_rename_refinalize",
-        runner_family="experiment_editor",
+        runner_family="composed_journey",
         supports_pi_evidence=False,
         supports_injected_stall=False,
         supports_report_sets=False,
@@ -132,7 +146,7 @@ _SCENARIO_DEFINITIONS = {
         ),
         expected_completion_count=2,
         scenario_name="experiment_editor_post_start_lock",
-        runner_family="experiment_editor",
+        runner_family="composed_journey",
         supports_pi_evidence=False,
         supports_injected_stall=False,
         supports_report_sets=False,
@@ -145,6 +159,7 @@ _SCENARIO_DEFINITIONS = {
         ),
         expected_completion_count=24,
         scenario_name="print_array_soft_stop_resume",
+        runner_family="composed_journey",
         supports_pi_evidence=False,
         supports_injected_stall=False,
         supports_report_sets=False,
@@ -157,6 +172,7 @@ _SCENARIO_DEFINITIONS = {
         ),
         expected_completion_count=24,
         scenario_name="authoritative_reload_resume",
+        runner_family="composed_journey",
         supports_pi_evidence=False,
         supports_injected_stall=False,
         supports_report_sets=False,
@@ -169,6 +185,72 @@ _SCENARIO_DEFINITIONS = {
         ),
         expected_completion_count=48,
         scenario_name="print_array_multi_stock_head_exchange",
+        runner_family="composed_journey",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
+    "legacy_experiment_read_only_v1": ScenarioDefinition(
+        registry_id="legacy_experiment_read_only_v1",
+        workload_id="legacy_experiment_read_only_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "legacy_experiment_read_only_v1.json"
+        ),
+        expected_completion_count=1,
+        scenario_name="legacy_experiment_read_only",
+        runner_family="composed_journey",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
+    "print_array_mixed_mode_24x2_v1": ScenarioDefinition(
+        registry_id="print_array_mixed_mode_24x2_v1",
+        workload_id="print_array_mixed_mode_24x2_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "print_array_mixed_mode_24x2_v1.json"
+        ),
+        expected_completion_count=48,
+        scenario_name="print_array_mixed_droplet_stream",
+        runner_family="composed_journey",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
+    "print_array_disconnect_mid_array_24_v1": ScenarioDefinition(
+        registry_id="print_array_disconnect_mid_array_24_v1",
+        workload_id="print_array_disconnect_mid_array_24_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "print_array_disconnect_mid_array_24_v1.json"
+        ),
+        expected_completion_count=24,
+        scenario_name="print_array_disconnect_fail_closed",
+        runner_family="composed_journey",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
+    "randomized_calibration_reload_execution_v1": ScenarioDefinition(
+        registry_id="randomized_calibration_reload_execution_v1",
+        workload_id="randomized_calibration_reload_execution_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "randomized_calibration_reload_execution_v1.json"
+        ),
+        expected_completion_count=24,
+        scenario_name="randomized_calibration_reload_execution",
+        runner_family="composed_journey",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
+    "optimizer_360_calibration_reload_execution_v1": ScenarioDefinition(
+        registry_id="optimizer_360_calibration_reload_execution_v1",
+        workload_id="optimizer_360_calibration_reload_execution_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "optimizer_360_calibration_reload_execution_v1.json"
+        ),
+        expected_completion_count=1800,
+        scenario_name="optimizer_360_calibration_reload_execution",
+        runner_family="composed_journey",
         supports_pi_evidence=False,
         supports_injected_stall=False,
         supports_report_sets=False,
@@ -210,7 +292,41 @@ def run_registered_scenario(
         )
 
     # Keep CLI help and registry inspection independent of Qt/application imports.
+    if definition.runner_family == "composed_journey":
+        injected_ms = int(config_values.get("inject_ui_stall_ms", 0))
+        injected_after = int(config_values.get("inject_after_completion", 48))
+        pi_preflight = config_values.get("pi_preflight_path")
+        pi_proof = config_values.get("pi_hardware_proof_path")
+        if not definition.supports_injected_stall and (
+            injected_ms != 0 or injected_after != 48
+        ):
+            raise RegistryError(
+                "composed journeys do not support fault injection"
+            )
+        if not definition.supports_pi_evidence and (
+            pi_preflight is not None or pi_proof is not None
+        ):
+            raise RegistryError(
+                "composed journeys do not support Pi evidence"
+            )
+        if not definition.supports_injected_stall:
+            config_values.pop("inject_ui_stall_ms", None)
+            config_values.pop("inject_after_completion", None)
+        if not definition.supports_pi_evidence:
+            config_values.pop("pi_preflight_path", None)
+            config_values.pop("pi_hardware_proof_path", None)
+        from tools.virtual_workflows.journeys import (
+            JourneyRunConfig,
+            run_composed_journey,
+        )
+
+        config = JourneyRunConfig(
+            scenario_id=definition.workload_id,
+            **config_values,
+        )
+        return run_composed_journey(config)
     if definition.runner_family == "virtual_print_array":
+        config_values.pop("seed", None)
         if not definition.supports_injected_stall:
             injected_ms = config_values.get("inject_ui_stall_ms", 0)
             injected_after = config_values.get("inject_after_completion", 48)
@@ -252,18 +368,14 @@ def run_registered_scenario(
         from tools.virtual_workflows.editor_scenarios import (
             EditorLifecycleScenarioConfig,
             POST_START_LOCK_WORKLOAD_ID,
-            RENAME_WORKLOAD_ID,
             run_editor_create_finalize_scenario,
             run_editor_post_start_lock_scenario,
-            run_editor_prestart_rename_refinalize_scenario,
         )
 
         config = EditorLifecycleScenarioConfig(
             scenario_id=definition.workload_id,
             **config_values,
         )
-        if definition.workload_id == RENAME_WORKLOAD_ID:
-            return run_editor_prestart_rename_refinalize_scenario(config)
         if definition.workload_id == POST_START_LOCK_WORKLOAD_ID:
             return run_editor_post_start_lock_scenario(config)
         return run_editor_create_finalize_scenario(config)
@@ -400,13 +512,21 @@ def _fixture_identity(path: Path, label: str) -> tuple[str, int]:
     except (OSError, json.JSONDecodeError) as exc:
         raise ManifestValidationError(f"{label} is not valid JSON: {exc}") from exc
     fixture = _require_mapping(payload, label)
-    workload = _require_mapping(fixture.get("workload"), f"{label}.workload")
-    completion_count = workload.get("completion_count")
+    fixture_id = str(fixture.get("fixture_id") or fixture.get("case_id") or "")
+    workload = fixture.get("workload")
+    if workload is not None:
+        completion_count = _require_mapping(
+            workload, f"{label}.workload"
+        ).get("completion_count")
+    else:
+        completion_count = _require_mapping(
+            fixture.get("terminal"), f"{label}.terminal"
+        ).get("expected_completed_wells")
     if not isinstance(completion_count, int) or completion_count <= 0:
         raise ManifestValidationError(
-            f"{label}.workload.completion_count must be positive"
+            f"{label} completion count must be positive"
         )
-    return str(fixture.get("fixture_id") or ""), completion_count
+    return fixture_id, completion_count
 
 
 def load_capability_manifest(path: str | Path = MANIFEST_PATH) -> dict[str, Any]:
@@ -460,6 +580,8 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
             "path_policy",
             "generated_evidence_updates_manifest",
             "coverage_join_status",
+            "safeguard_matrix_coverage_join_status",
+            "safeguard_matrix_catalog",
             "action_catalog",
             "assertion_catalog",
         },
@@ -472,9 +594,16 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
         raise ManifestValidationError(
             "generated evidence must not update the tracked manifest"
         )
-    if policy["coverage_join_status"] != "deferred_to_slice_6":
+    if policy["coverage_join_status"] != "implemented_milestone_8_slice_4":
         raise ManifestValidationError(
             "manifest.policy.coverage_join_status is unsupported"
+        )
+    if (
+        policy["safeguard_matrix_coverage_join_status"]
+        != "implemented_milestone_12_slice_5"
+    ):
+        raise ManifestValidationError(
+            "manifest.policy.safeguard_matrix_coverage_join_status is unsupported"
         )
     forbidden_tiers = set(
         _require_string_list(
@@ -493,15 +622,82 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
     if pi_required != _PI_REQUIRED_EVIDENCE:
         raise ManifestValidationError("Pi suites require preflight and hardware proof")
 
+    matrix_rows = _require_unique_ids(
+        _require_list(
+            policy["safeguard_matrix_catalog"],
+            "manifest.policy.safeguard_matrix_catalog",
+        ),
+        "manifest.policy.safeguard_matrix_catalog",
+    )
+    from tools.virtual_workflows.matrices import get_matrix_definition
+
+    for matrix_id, row in matrix_rows.items():
+        _require_keys(
+            row,
+            label=f"safeguard matrix {matrix_id}",
+            expected={
+                "id",
+                "case_count",
+                "case_ids",
+                "catalog_sha256",
+                "required_assertion_ids",
+                "test_node_ids",
+            },
+        )
+        try:
+            definition = get_matrix_definition(matrix_id)
+        except Exception as exc:
+            raise ManifestValidationError(
+                f"safeguard matrix {matrix_id!r} is not registered"
+            ) from exc
+        case_ids = _require_string_list(
+            row["case_ids"], f"safeguard matrix {matrix_id}.case_ids"
+        )
+        if case_ids != list(definition.case_ids()):
+            raise ManifestValidationError(
+                f"safeguard matrix {matrix_id}.case_ids drifted"
+            )
+        if row["case_count"] != len(case_ids):
+            raise ManifestValidationError(
+                f"safeguard matrix {matrix_id}.case_count drifted"
+            )
+        if row["catalog_sha256"] != definition.catalog_sha256():
+            raise ManifestValidationError(
+                f"safeguard matrix {matrix_id}.catalog_sha256 drifted"
+            )
+        assertion_ids = _require_string_list(
+            row["required_assertion_ids"],
+            f"safeguard matrix {matrix_id}.required_assertion_ids",
+        )
+        if assertion_ids != ["safeguard_rejection_no_mutation_no_dispatch"]:
+            raise ManifestValidationError(
+                f"safeguard matrix {matrix_id} has unsupported assertions"
+            )
+        test_nodes = _require_string_list(
+            row["test_node_ids"], f"safeguard matrix {matrix_id}.test_node_ids"
+        )
+        if not test_nodes:
+            raise ManifestValidationError(
+                f"safeguard matrix {matrix_id} requires a current system test"
+            )
+        for index, node in enumerate(test_nodes):
+            _validate_test_node(
+                node,
+                f"safeguard matrix {matrix_id}.test_node_ids[{index}]",
+            )
+
     action_rows = _require_unique_ids(
         _require_list(policy["action_catalog"], "manifest.policy.action_catalog"),
         "manifest.policy.action_catalog",
     )
     for action_id, action in action_rows.items():
+        expected_action_fields = {"id", "implementation_status", "source_path"}
+        if "interaction_surface" in action:
+            expected_action_fields.add("interaction_surface")
         _require_keys(
             action,
             label=f"action {action_id}",
-            expected={"id", "implementation_status", "source_path"},
+            expected=expected_action_fields,
         )
         _require_enum(
             action["implementation_status"],
@@ -513,6 +709,12 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
             f"action {action_id}.source_path",
             must_exist=True,
         )
+        if "interaction_surface" in action:
+            _require_enum(
+                action["interaction_surface"],
+                f"action {action_id}.interaction_surface",
+                _INTERACTION_SURFACES,
+            )
 
     assertion_rows = _require_unique_ids(
         _require_list(
@@ -727,7 +929,11 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
         for scenario in scenario_rows.values()
         for assertion_id in scenario["assertion_ids"]
     }
-    unused_actions = sorted(set(action_rows) - referenced_actions)
+    unused_actions = sorted(
+        action_id
+        for action_id in set(action_rows) - referenced_actions
+        if action_rows[action_id]["implementation_status"] != "reusable"
+    )
     unused_assertions = sorted(set(assertion_rows) - referenced_assertions)
     if unused_actions:
         raise ManifestValidationError(
@@ -938,6 +1144,19 @@ def validate_capability_manifest(payload: Mapping[str, Any]) -> None:
             raise ManifestValidationError(
                 f"scenario {scenario_id} suite membership drifted"
             )
+
+    standard = suite_rows.get("standard")
+    if standard is None or standard["scenario_ids"] != [
+        "print_array_smoke_24_v1"
+    ]:
+        raise ManifestValidationError(
+            "standard suite scenario/order contract drifted"
+        )
+    standard_scenario = scenario_rows["print_array_smoke_24_v1"]
+    if float(standard_scenario["timeout_seconds"]) != 60.0:
+        raise ManifestValidationError(
+            "standard suite timeout contract drifted"
+        )
 
     schedule_rows = _require_unique_ids(
         _require_list(manifest["schedules"], "manifest.schedules"),

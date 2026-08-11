@@ -32,6 +32,9 @@ def _build_dialog_stub(
     runtime_active: bool = False,
     resume_eligibility=None,
     plan_state: str | None = None,
+    can_view_completed: bool = False,
+    can_view_legacy: bool = False,
+    legacy_read_only: bool = False,
 ):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog._uploaded_design_active = False
@@ -90,13 +93,16 @@ def _build_dialog_stub(
     rack_model = SimpleNamespace(get_gripper_printer_head=lambda: object() if gripper_loaded else None)
     dialog.main_window = SimpleNamespace(
         complete_experiment_design=Mock(),
+        view_read_only_experiment=Mock(),
         model=SimpleNamespace(rack_model=rack_model),
     )
     dialog.model = SimpleNamespace(
         has_explicit_well_assignments=lambda: manual_assignments,
         is_execution_design_locked=lambda: execution_locked,
         is_authoritative_execution_runtime_active=lambda: runtime_active,
-        is_read_only_legacy_execution=lambda: False,
+        can_view_completed_execution=lambda: can_view_completed,
+        can_view_legacy_execution=lambda: can_view_legacy,
+        is_read_only_legacy_execution=lambda: legacy_read_only,
         get_execution_resume_eligibility=lambda: resume_eligibility,
         get_execution_plan_snapshot=lambda: (
             SimpleNamespace(state=SimpleNamespace(value=plan_state))
@@ -111,6 +117,56 @@ def _build_dialog_stub(
         None,
     )
     return dialog
+
+
+def test_completed_legacy_experiment_uses_completed_view_action(qapp):
+    dialog = _build_dialog_stub(
+        False,
+        plan_state="completed",
+        can_view_legacy=True,
+        legacy_read_only=True,
+    )
+
+    lifecycle = dialog._classify_editor_lifecycle()
+
+    assert lifecycle["state"] == "completed_view_available"
+    assert lifecycle["action_text"] == "View Completed Experiment"
+    assert lifecycle["action_enabled"] is True
+    assert "Printing cannot be started or resumed" in lifecycle["banner_text"]
+
+
+def test_partial_legacy_experiment_uses_older_experiment_action(qapp):
+    dialog = _build_dialog_stub(
+        False,
+        plan_state="active",
+        can_view_legacy=True,
+        legacy_read_only=True,
+    )
+
+    lifecycle = dialog._classify_editor_lifecycle()
+
+    assert lifecycle["state"] == "legacy_view_available"
+    assert lifecycle["action_text"] == "View Older Experiment"
+    assert lifecycle["action_enabled"] is True
+    assert "recorded progress" in lifecycle["banner_text"]
+
+
+def test_legacy_view_action_populates_main_window_and_closes_editor(qapp):
+    dialog = _build_dialog_stub(
+        False,
+        plan_state="active",
+        can_view_legacy=True,
+        legacy_read_only=True,
+    )
+    dialog.accept = Mock()
+    dialog._apply_requested = False
+
+    ExperimentDesignDialog._on_finish(dialog)
+
+    dialog.main_window.view_read_only_experiment.assert_called_once_with()
+    dialog.accept.assert_called_once_with()
+    assert dialog._apply_requested is True
+    assert "Older experiment displayed read-only" in dialog.status_lbl.text()
 
 
 def _assert_mutating_controls_disabled(dialog):
@@ -254,7 +310,7 @@ def test_experiment_designer_save_replaces_untouched_prepared_plan(
     )
     dialog.model.save_experiment.assert_not_called()
     assert dialog._apply_requested is True
-    assert "replaced" in dialog.status_lbl.text()
+    assert "Experiment saved:" in dialog.status_lbl.text()
 
 
 def test_experiment_designer_locks_edit_actions_when_gripper_loaded(qapp):
@@ -404,7 +460,7 @@ def test_active_execution_finish_handler_cannot_activate_or_close(qapp):
     dialog.main_window.activate_authoritative_execution.assert_not_called()
     dialog.accept.assert_not_called()
     assert dialog._apply_requested is False
-    assert "create an editable copy" in dialog.status_lbl.text()
+    assert "Create Editable Copy" in dialog.status_lbl.text()
 
 
 def test_inactive_persisted_execution_keeps_eligible_activation(qapp):
@@ -428,7 +484,7 @@ def test_inactive_persisted_execution_keeps_eligible_activation(qapp):
     assert dialog.finish_btn.isEnabled() is True
     assert dialog.duplicate_btn.isEnabled() is True
     assert dialog.lifecycle_banner.isVisible() is True
-    assert "without starting or resuming printing" in dialog.lifecycle_banner.text()
+    assert "will not start or resume automatically" in dialog.lifecycle_banner.text()
 
 
 def test_prepared_execution_remains_editable(qapp):
@@ -502,11 +558,26 @@ def test_gripper_lock_overrides_active_execution_editable_copy(qapp):
 
 
 @pytest.mark.parametrize(
-    "plan_state,eligibility_status,reason",
+    "plan_state,eligibility_status,reason,operator_message",
     [
-        ("active", "blocked", "A durable checkpoint is inconsistent."),
-        ("completed", "completed", "Execution is already complete."),
-        ("aborted", "aborted", "Execution was aborted."),
+        (
+            "active",
+            "blocked",
+            "A durable checkpoint is inconsistent.",
+            "saved experiment data could not be validated",
+        ),
+        (
+            "completed",
+            "completed",
+            "Execution is already complete.",
+            "experiment is complete and can be viewed",
+        ),
+        (
+            "aborted",
+            "aborted",
+            "Execution was aborted.",
+            "experiment was stopped and cannot be resumed",
+        ),
     ],
 )
 def test_nonactivatable_execution_has_locked_action_and_reason_banner(
@@ -514,6 +585,7 @@ def test_nonactivatable_execution_has_locked_action_and_reason_banner(
     plan_state,
     eligibility_status,
     reason,
+    operator_message,
 ):
     dialog = _build_dialog_stub(
         gripper_loaded=False,
@@ -532,8 +604,91 @@ def test_nonactivatable_execution_has_locked_action_and_reason_banner(
     assert dialog.finish_btn.text() == ExperimentDesignDialog.ACTION_EXECUTION_LOCKED
     assert dialog.finish_btn.isEnabled() is False
     assert dialog.lifecycle_banner.isVisible() is True
-    assert "Hardware loading is unavailable" in dialog.lifecycle_banner.text()
-    assert reason in dialog.lifecycle_banner.text()
+    assert operator_message in dialog.lifecycle_banner.text().casefold()
+    assert reason not in dialog.lifecycle_banner.text()
+
+
+def test_exact_completed_execution_has_enabled_read_only_view_action(qapp):
+    dialog = _build_dialog_stub(
+        gripper_loaded=False,
+        execution_locked=True,
+        runtime_active=False,
+        resume_eligibility={
+            "status": "analysis_only",
+            "can_activate_runtime": False,
+            "can_start_hardware": False,
+            "can_resume_hardware": False,
+            "reason": "Execution plan state is completed.",
+        },
+        plan_state="completed",
+        can_view_completed=True,
+    )
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert (
+        dialog.finish_btn.text()
+        == ExperimentDesignDialog.ACTION_VIEW_COMPLETED_EXECUTION
+    )
+    assert dialog.finish_btn.isEnabled() is True
+    assert dialog.run_btn.isEnabled() is False
+    assert dialog.save_btn.isEnabled() is False
+    assert dialog.lifecycle_banner.isVisible() is True
+    assert "display the saved plate" in dialog.lifecycle_banner.text()
+    assert "Printing cannot be started or resumed" in dialog.lifecycle_banner.text()
+
+
+def test_analysis_only_status_without_exact_completed_state_stays_locked(qapp):
+    dialog = _build_dialog_stub(
+        gripper_loaded=False,
+        execution_locked=True,
+        runtime_active=False,
+        resume_eligibility={
+            "status": "analysis_only",
+            "can_activate_runtime": False,
+            "can_start_hardware": False,
+            "can_resume_hardware": False,
+            "reason": "Analysis only.",
+        },
+        plan_state="active",
+        can_view_completed=True,
+    )
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert dialog.finish_btn.text() == ExperimentDesignDialog.ACTION_EXECUTION_LOCKED
+    assert dialog.finish_btn.isEnabled() is False
+
+
+def test_completed_view_action_uses_display_path_without_activation(qapp):
+    dialog = _build_dialog_stub(
+        gripper_loaded=False,
+        execution_locked=True,
+        runtime_active=False,
+        resume_eligibility={
+            "status": "analysis_only",
+            "can_activate_runtime": False,
+            "can_start_hardware": False,
+            "can_resume_hardware": False,
+            "reason": "Execution plan state is completed.",
+        },
+        plan_state="completed",
+        can_view_completed=True,
+    )
+    dialog.model.get_authoritative_execution_bundle = lambda: {"plan": {}}
+    dialog.main_window.view_completed_execution = Mock(
+        return_value={"status": "analysis_only"}
+    )
+    dialog.main_window.activate_authoritative_execution = Mock()
+    dialog.accept = Mock()
+    dialog._apply_requested = False
+
+    ExperimentDesignDialog._on_finish(dialog)
+
+    dialog.main_window.view_completed_execution.assert_called_once_with()
+    dialog.main_window.activate_authoritative_execution.assert_not_called()
+    dialog.accept.assert_called_once_with()
+    assert dialog._apply_requested is True
 
 
 def _build_duplicate_dialog(qapp, source_dir: Path):
@@ -612,8 +767,34 @@ def test_create_editable_copy_uses_current_source_and_wide_name_dialog(
     assert source_path.read_bytes() == source_before
     assert observed["minimum_width"] >= 640
     assert observed["name_field_minimum_width"] >= 480
-    assert "Current source: Current Source" in observed["label"]
+    assert "Current experiment: Current Source" in observed["label"]
     assert "New experiment" in dialog.status_lbl.text()
+
+
+def test_editable_copy_name_widths_survive_real_modal_layout(qapp):
+    dialog = View.EditableCopyNameDialog()
+    dialog.setInputMode(QInputDialog.TextInput)
+    dialog.setLabelText("Name for editable copy:")
+    dialog.setTextValue("editable-copy")
+    observed = {}
+
+    def observe_after_layout():
+        name_field = dialog.findChild(QLineEdit)
+        observed.update(
+            dialog_width=dialog.width(),
+            dialog_minimum_width=dialog.minimumWidth(),
+            name_field_width=name_field.width(),
+            name_field_minimum_width=name_field.minimumWidth(),
+        )
+        dialog.accept()
+
+    View.QTimer.singleShot(25, observe_after_layout)
+
+    assert dialog.exec() == QDialog.Accepted
+    assert observed["dialog_width"] >= 640
+    assert observed["dialog_minimum_width"] >= 640
+    assert observed["name_field_width"] >= 480
+    assert observed["name_field_minimum_width"] >= 480
 
 
 def test_create_editable_copy_cancel_is_side_effect_free(
@@ -656,7 +837,7 @@ def test_editable_copy_button_disabled_for_inconsistent_current_paths(
     ExperimentDesignDialog._refresh_editable_copy_availability(dialog)
 
     assert dialog.duplicate_btn.isEnabled() is False
-    assert "do not identify the same design" in dialog.duplicate_btn.toolTip()
+    assert "do not identify the same experiment" in dialog.duplicate_btn.toolTip()
 
 
 def test_create_editable_copy_rejects_unwritable_parent_before_model_call(

@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import math
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 
 PRINT_ARRAY_ACTION_IDS = frozenset(
@@ -48,6 +49,7 @@ AUTHORITATIVE_RELOAD_ACTION_IDS = (
         {
             "app.close_simulated_session",
             "experiment.load_authoritative_via_ui",
+            "experiment.inspect_completed_via_ui",
             "experiment.activate_authoritative_via_ui",
             "validation.reload_boundary",
         }
@@ -80,10 +82,158 @@ EDITOR_LIFECYCLE_ACTION_IDS = frozenset(
         "scenario.teardown",
     }
 )
+COMPOSED_SMOKE_ACTION_IDS = frozenset(
+    {
+        "app.launch_simulated",
+        "machine.connect_via_ui",
+        "machine.enable_motors_via_ui",
+        "machine.home_via_ui",
+        "machine.configure_print_settings_via_ui",
+        "editor.open_via_ui",
+        "editor.new_experiment_via_ui",
+        "editor.configure_design_via_ui",
+        "editor.optimize_generate_via_ui",
+        "editor.finish_via_ui",
+        "head.set_volume_via_ui",
+        "head.stage_via_ui",
+        "calibration.open_via_ui",
+        "calibration.generate_via_ui",
+        "calibration.select_via_ui",
+        "calibration.apply_via_ui",
+        "pressure.enable_regulation_via_ui",
+        "array.start_via_ui",
+        "array.wait_for_completions",
+        "artifact.capture_milestone",
+        "scenario.teardown",
+    }
+)
+COMPOSED_MULTI_STOCK_ACTION_IDS = COMPOSED_SMOKE_ACTION_IDS | frozenset(
+    {
+        "head.bind_identity",
+        "head.return_via_ui",
+        "validation.stock_pass_boundary",
+    }
+)
+COMPOSED_MIXED_MODE_ACTION_IDS = COMPOSED_MULTI_STOCK_ACTION_IDS | frozenset(
+    {"manual_refuel.complete_check_via_ui"}
+)
+COMPOSED_SOFT_STOP_ACTION_IDS = COMPOSED_SMOKE_ACTION_IDS | frozenset(
+    {
+        "array.request_soft_stop_via_ui",
+        "array.observe_stopped_quiescence",
+        "array.resume_via_ui",
+        "array.wait_for_state",
+    }
+)
+COMPOSED_DISCONNECT_ACTION_IDS = (
+    COMPOSED_SMOKE_ACTION_IDS
+    - frozenset({"array.wait_for_completions"})
+    | frozenset(
+        {
+            "machine.disconnect_via_ui",
+            "array.observe_disconnected_quiescence",
+        }
+    )
+)
+EDITOR_SAFEGUARD_ACTION_IDS = frozenset(
+    {"editor.upload_design_apply_via_ui"}
+)
+EXECUTION_PREFLIGHT_SAFEGUARD_ACTION_IDS = frozenset(
+    {
+        "calibration.preflight_cancel_via_ui",
+        "array.start_preflight_cancel_via_ui",
+        "array.start_identity_preflight_via_ui",
+        "experiment.inspect_reordered_execution_via_ui",
+        "array.start_inactive_execution_via_ui",
+        "experiment.activate_invalid_execution_via_ui",
+        "editor.finalize_active_execution_via_ui",
+        "calibration.apply_progressed_stock_via_ui",
+        "array.start_while_active_via_ui",
+        "array.resume_invalid_boundary_via_ui",
+        "head.exchange_invalid_boundary_via_ui",
+    }
+)
+PERSISTENCE_SAFEGUARD_ACTION_IDS = frozenset(
+    {
+        "experiment.load_rejected_authoritative_via_ui",
+        "experiment.attempt_locked_activation_via_ui",
+    }
+)
+LEGACY_READ_ONLY_ACTION_IDS = frozenset(
+    {
+        "experiment.inspect_legacy_via_ui",
+        "analysis.open_plate_reader_via_ui",
+    }
+)
 ACTION_IDS = (
     AUTHORITATIVE_RELOAD_ACTION_IDS
     | MULTI_STOCK_LIFECYCLE_ACTION_IDS
     | EDITOR_LIFECYCLE_ACTION_IDS
+    | COMPOSED_SMOKE_ACTION_IDS
+    | COMPOSED_MULTI_STOCK_ACTION_IDS
+    | COMPOSED_MIXED_MODE_ACTION_IDS
+    | COMPOSED_SOFT_STOP_ACTION_IDS
+    | COMPOSED_DISCONNECT_ACTION_IDS
+    | EDITOR_SAFEGUARD_ACTION_IDS
+    | EXECUTION_PREFLIGHT_SAFEGUARD_ACTION_IDS
+    | PERSISTENCE_SAFEGUARD_ACTION_IDS
+    | LEGACY_READ_ONLY_ACTION_IDS
+)
+
+
+class InteractionSurface(str, Enum):
+    """The application layer that one semantic action actually drives."""
+
+    UI = "ui"
+    CONTROLLER = "controller"
+    MODEL = "model"
+    SIMULATOR = "simulator"
+    HARNESS = "harness"
+
+
+ACTION_INTERACTION_SURFACES = {
+    action_id: InteractionSurface.HARNESS for action_id in ACTION_IDS
+}
+ACTION_INTERACTION_SURFACES["head.bind_identity"] = InteractionSurface.MODEL
+ACTION_INTERACTION_SURFACES.update(
+    {
+        "machine.connect_ready": InteractionSurface.SIMULATOR,
+        "head.stage_virtual": InteractionSurface.MODEL,
+        "pressure.enable_regulation": InteractionSurface.CONTROLLER,
+        "array.start_via_ui": InteractionSurface.UI,
+        "array.request_soft_stop_via_ui": InteractionSurface.UI,
+        "array.resume_via_ui": InteractionSurface.UI,
+        "machine.disconnect_via_ui": InteractionSurface.UI,
+        "experiment.load_authoritative_via_ui": InteractionSurface.UI,
+        "experiment.inspect_completed_via_ui": InteractionSurface.UI,
+        "experiment.activate_authoritative_via_ui": InteractionSurface.UI,
+        "experiment.inspect_legacy_via_ui": InteractionSurface.UI,
+        "analysis.open_plate_reader_via_ui": InteractionSurface.UI,
+        "experiment.activate_authoritative": InteractionSurface.MODEL,
+        "execution.lock_for_printing": InteractionSurface.MODEL,
+        **{
+            action_id: InteractionSurface.UI
+            for action_id in EDITOR_LIFECYCLE_ACTION_IDS
+            if action_id.startswith("editor.")
+        },
+        **{
+            action_id: InteractionSurface.UI
+            for action_id in COMPOSED_MIXED_MODE_ACTION_IDS
+            if action_id.endswith("_via_ui")
+        },
+        **{
+            action_id: InteractionSurface.UI
+            for action_id in EDITOR_SAFEGUARD_ACTION_IDS
+        },
+        **{
+            action_id: InteractionSurface.UI
+            for action_id in EXECUTION_PREFLIGHT_SAFEGUARD_ACTION_IDS
+        },
+        **{
+            action_id: InteractionSurface.UI
+            for action_id in PERSISTENCE_SAFEGUARD_ACTION_IDS
+        },
+    }
 )
 
 
@@ -173,6 +323,7 @@ class ScenarioDeadline:
 @dataclass(frozen=True)
 class ActionResult:
     action_id: str
+    interaction_surface: str
     status: str
     started_monotonic_ns: int
     ended_monotonic_ns: int
@@ -185,6 +336,7 @@ class ActionResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "action_id": self.action_id,
+            "interaction_surface": self.interaction_surface,
             "status": self.status,
             "started_monotonic_ns": self.started_monotonic_ns,
             "ended_monotonic_ns": self.ended_monotonic_ns,
@@ -292,6 +444,7 @@ def _record_action(
     context: ScenarioContext,
     *,
     action_id: str,
+    interaction_surface: InteractionSurface,
     started_ns: int,
     status: str,
     evidence: Mapping[str, Any] | None = None,
@@ -301,6 +454,7 @@ def _record_action(
     ended_ns = time.perf_counter_ns()
     result = ActionResult(
         action_id=action_id,
+        interaction_surface=interaction_surface.value,
         status=status,
         started_monotonic_ns=started_ns,
         ended_monotonic_ns=ended_ns,
@@ -316,6 +470,7 @@ def _record_action(
     context.record_event(
         "action_completed",
         action_id=action_id,
+        interaction_surface=interaction_surface.value,
         status=status,
         duration_ms=result["duration_ms"],
         failure_stage=failure_stage,
@@ -336,11 +491,16 @@ def execute_action(
     precondition: Callable[[], tuple[bool, str, Mapping[str, Any] | None]]
     | None = None,
     enforce_deadline: bool = True,
+    interaction_surface: InteractionSurface | str | None = None,
 ) -> dict[str, Any]:
     """Execute one explicit Python action and append exactly one result."""
 
     if action_id not in ACTION_IDS:
         raise ValueError(f"unknown SIL action ID: {action_id!r}")
+    if interaction_surface is None:
+        surface = ACTION_INTERACTION_SURFACES[action_id]
+    else:
+        surface = InteractionSurface(interaction_surface)
     if context.closed:
         raise ScenarioActionError(
             action_id,
@@ -389,6 +549,7 @@ def execute_action(
         _record_action(
             context,
             action_id=action_id,
+            interaction_surface=surface,
             started_ns=started_ns,
             status="fail",
             evidence=action_error.evidence,
@@ -401,6 +562,7 @@ def execute_action(
     return _record_action(
         context,
         action_id=action_id,
+        interaction_surface=surface,
         started_ns=started_ns,
         status="pass",
         evidence=evidence,
@@ -875,7 +1037,7 @@ def start_array_via_ui(
         )
 
     def run() -> Mapping[str, Any]:
-        from PySide6 import QtTest
+        from tools.virtual_workflows.page_drivers import ArrayDriver
 
         button = context.view.well_plate_widget.start_print_array_button
         wait_until(
@@ -901,13 +1063,7 @@ def start_array_via_ui(
                 ),
             },
         )
-        context.view.activateWindow()
-        button.setFocus()
-        context.app.processEvents()
-        QtTest.QTest.mouseClick(
-            button,
-            context.qt_core.Qt.MouseButton.LeftButton,
-        )
+        ArrayDriver(context).click_start()
         wait_until(
             context,
             lambda: (
@@ -944,25 +1100,90 @@ def wait_for_completions(
     target_count: int,
     timeout_seconds: float,
     label: str,
+    no_progress_timeout_seconds: float | None = None,
+    no_progress_evidence: Callable[[int, float], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     def run() -> Mapping[str, Any]:
-        wait_until(
-            context,
-            lambda: completed_count() >= int(target_count) or bool(context.errors),
-            timeout_seconds,
-            label,
-            action_id="array.wait_for_completions",
-            evidence=lambda: {
-                "target_count": int(target_count),
-                "observed_count": int(completed_count()),
-                "errors": list(context.errors),
-            },
-        )
+        allowed = context.deadline.remaining_seconds(timeout_seconds)
+        if allowed <= 0:
+            raise ScenarioActionError(
+                "array.wait_for_completions",
+                f"timed out waiting for {label}",
+                stage="timeout",
+                evidence={
+                    "label": label,
+                    "target_count": int(target_count),
+                    "observed_count": int(completed_count()),
+                    "errors": list(context.errors),
+                    "elapsed_seconds": context.deadline.elapsed_seconds(),
+                },
+            )
+        progress_timeout = None
+        if no_progress_timeout_seconds is not None:
+            progress_timeout = float(no_progress_timeout_seconds)
+            if not math.isfinite(progress_timeout) or progress_timeout <= 0:
+                raise ValueError(
+                    "no-progress timeout must be finite and greater than zero"
+                )
+        local_deadline = context.clock() + allowed
+        observed = int(completed_count())
+        last_progress_count = observed
+        last_progress_at = context.clock()
+        while context.clock() < local_deadline:
+            context.pump_events()
+            observed = int(completed_count())
+            if observed >= int(target_count) or context.errors:
+                break
+            if observed > last_progress_count:
+                last_progress_count = observed
+                last_progress_at = context.clock()
+            stalled_seconds = context.clock() - last_progress_at
+            if progress_timeout is not None and stalled_seconds >= progress_timeout:
+                diagnostic: dict[str, Any] = {}
+                if no_progress_evidence is not None:
+                    try:
+                        diagnostic = dict(
+                            no_progress_evidence(observed, stalled_seconds) or {}
+                        )
+                    except Exception as exc:
+                        diagnostic = {
+                            "capture_error": f"{type(exc).__name__}: {exc}"
+                        }
+                raise ScenarioActionError(
+                    "array.wait_for_completions",
+                    f"no progress while waiting for {label}",
+                    stage="no_progress",
+                    evidence={
+                        "label": label,
+                        "target_count": int(target_count),
+                        "observed_count": observed,
+                        "last_progress_count": last_progress_count,
+                        "stalled_seconds": stalled_seconds,
+                        "errors": list(context.errors),
+                        "liveness": diagnostic,
+                    },
+                )
+            context.sleep(0.001)
+        context.pump_events()
+        observed = int(completed_count())
+        if observed < int(target_count) and not context.errors:
+            raise ScenarioActionError(
+                "array.wait_for_completions",
+                f"timed out waiting for {label}",
+                stage="timeout",
+                evidence={
+                    "label": label,
+                    "target_count": int(target_count),
+                    "observed_count": observed,
+                    "errors": list(context.errors),
+                    "elapsed_seconds": context.deadline.elapsed_seconds(),
+                },
+            )
         if context.errors:
             raise RuntimeError(f"array execution emitted an error: {context.errors[-1]}")
         return {
             "target_count": int(target_count),
-            "observed_count": int(completed_count()),
+            "observed_count": observed,
         }
 
     return execute_action(context, "array.wait_for_completions", run)
@@ -1033,9 +1254,10 @@ def request_soft_stop_via_ui(
         )
 
     def run() -> Mapping[str, Any]:
-        from PySide6 import QtTest
+        from tools.virtual_workflows.page_drivers import ArrayDriver
 
         button = context.view.well_plate_widget.start_print_array_button
+        driver = ArrayDriver(context)
         observed: dict[str, Any] = {
             "trigger_count": int(trigger_count),
             "click_queued": False,
@@ -1054,17 +1276,13 @@ def request_soft_stop_via_ui(
 
             def click() -> None:
                 observed["clicked_count"] = int(completed_count())
-                observed["button_text_before"] = button.text()
-                if button.text() != "Stop After Well" or not button.isEnabled():
+                try:
+                    observed.update(driver.request_soft_stop())
+                except RuntimeError:
                     observed["invalid_control"] = {
                         "text": button.text(),
                         "enabled": bool(button.isEnabled()),
                     }
-                    return
-                QtTest.QTest.mouseClick(
-                    button,
-                    context.qt_core.Qt.MouseButton.LeftButton,
-                )
 
             context.qt_core.QTimer.singleShot(0, click)
 
@@ -1125,6 +1343,149 @@ def request_soft_stop_via_ui(
     return execute_action(
         context,
         "array.request_soft_stop_via_ui",
+        run,
+        precondition=precondition,
+    )
+
+
+def disconnect_machine_via_ui(
+    context: ScenarioContext,
+    *,
+    completed_count: Callable[[], int],
+    trigger_count: int,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """Click the normal disconnect control at one exact completion boundary."""
+
+    def precondition():
+        state = (
+            context.controller.get_array_run_state()
+            if context.controller is not None
+            else None
+        )
+        connected = bool(
+            context.model is not None
+            and context.model.machine_model.is_connected()
+        )
+        return (
+            context.view is not None
+            and context.controller is not None
+            and context.machine is not None
+            and state == "running"
+            and connected,
+            "disconnect requires a connected, running real UI workflow",
+            {"array_state": state, "model_connected": connected},
+        )
+
+    def run() -> Mapping[str, Any]:
+        from tools.virtual_workflows.page_drivers import MachineControlsDriver
+
+        driver = MachineControlsDriver(context)
+        observed: dict[str, Any] = {
+            "trigger_count": int(trigger_count),
+            "click_queued": False,
+            "clicked_count": None,
+        }
+
+        def queue_click(*_args: Any) -> None:
+            count = int(completed_count())
+            if observed["click_queued"] or count < int(trigger_count):
+                return
+            if count != int(trigger_count):
+                observed["overshoot_count"] = count
+                return
+            observed["click_queued"] = True
+
+            def click() -> None:
+                observed["clicked_count"] = int(completed_count())
+                try:
+                    observed.update(driver.disconnect())
+                except RuntimeError as exc:
+                    observed["driver_error"] = str(exc)
+
+            context.qt_core.QTimer.singleShot(0, click)
+
+        signal = context.model.well_plate.well_state_changed_signal
+        signal.connect(queue_click)
+        try:
+            queue_click()
+            wait_until(
+                context,
+                lambda: (
+                    not context.model.machine_model.is_connected()
+                    or bool(context.errors)
+                    or "overshoot_count" in observed
+                    or "driver_error" in observed
+                ),
+                timeout_seconds,
+                f"machine disconnect at completion {int(trigger_count)}",
+                action_id="machine.disconnect_via_ui",
+                evidence=lambda: {
+                    **observed,
+                    "observed_count": int(completed_count()),
+                    "array_state": context.controller.get_array_run_state(),
+                    "simulator_connected": bool(context.machine.state.connected),
+                },
+            )
+        finally:
+            try:
+                signal.disconnect(queue_click)
+            except (RuntimeError, TypeError):
+                pass
+        if context.errors:
+            raise RuntimeError(f"disconnect emitted an error: {context.errors[-1]}")
+        if "overshoot_count" in observed:
+            raise RuntimeError("disconnect trigger was not serviced at the exact completion")
+        if "driver_error" in observed:
+            raise RuntimeError(observed["driver_error"])
+        if (
+            observed["clicked_count"] != int(trigger_count)
+            or int(completed_count()) != int(trigger_count)
+            or context.model.machine_model.is_connected()
+            or context.machine.state.connected
+        ):
+            raise RuntimeError("disconnect did not establish its exact fail-closed boundary")
+        return {
+            **observed,
+            "observed_count": int(completed_count()),
+            "array_state": context.controller.get_array_run_state(),
+            "simulator_connected": bool(context.machine.state.connected),
+        }
+
+    return execute_action(
+        context,
+        "machine.disconnect_via_ui",
+        run,
+        precondition=precondition,
+    )
+
+
+def resume_array_via_ui(context: ScenarioContext) -> dict[str, Any]:
+    """Resume a paused array through the normal Qt control."""
+
+    def precondition():
+        state = (
+            context.controller.get_array_run_state()
+            if context.controller is not None
+            else None
+        )
+        return (
+            context.view is not None
+            and context.controller is not None
+            and context.app is not None
+            and state == "resume_ready",
+            "array resume requires resume_ready",
+            {"array_state": state},
+        )
+
+    def run() -> Mapping[str, Any]:
+        from tools.virtual_workflows.page_drivers import ArrayDriver
+
+        return ArrayDriver(context).resume()
+
+    return execute_action(
+        context,
+        "array.resume_via_ui",
         run,
         precondition=precondition,
     )
@@ -1195,6 +1556,77 @@ def observe_stopped_quiescence(
     )
 
 
+def observe_disconnected_quiescence(
+    context: ScenarioContext,
+    *,
+    completed_count: Callable[[], int],
+    progress_count: Callable[[], int],
+    observation_ms: int,
+) -> dict[str, Any]:
+    """Prove a disconnected resume boundary cannot advance."""
+
+    def precondition():
+        state = context.controller.get_array_run_state()
+        connected = bool(context.model.machine_model.is_connected())
+        return (
+            state == "resume_ready"
+            and not connected
+            and not context.machine.state.connected
+            and context.machine.check_if_all_completed(),
+            "disconnected quiescence requires a drained resume-ready boundary",
+            {
+                "array_state": state,
+                "model_connected": connected,
+                "simulator_connected": bool(context.machine.state.connected),
+                "simulator_queue_empty": bool(context.machine.check_if_all_completed()),
+            },
+        )
+
+    def run() -> Mapping[str, Any]:
+        starting_completions = int(completed_count())
+        starting_progress = int(progress_count())
+        duration_seconds = int(observation_ms) / 1000.0
+        if duration_seconds <= 0:
+            raise RuntimeError("quiescence observation must be positive")
+        if context.deadline.remaining_seconds(duration_seconds + 1.0) < duration_seconds:
+            raise ScenarioActionError(
+                "array.observe_disconnected_quiescence",
+                "scenario deadline cannot contain the quiescence window",
+                stage="timeout",
+            )
+        started = context.clock()
+        while context.clock() - started < duration_seconds:
+            context.pump_events()
+            if (
+                int(completed_count()) != starting_completions
+                or int(progress_count()) != starting_progress
+                or context.controller.get_array_run_state() != "resume_ready"
+                or context.model.machine_model.is_connected()
+                or context.machine.state.connected
+                or not context.machine.check_if_all_completed()
+            ):
+                raise RuntimeError("disconnected workflow advanced during quiescence")
+            context.sleep(0.001)
+        return {
+            "observation_ms": int(observation_ms),
+            "starting_completion_count": starting_completions,
+            "ending_completion_count": int(completed_count()),
+            "starting_progress_count": starting_progress,
+            "ending_progress_count": int(progress_count()),
+            "array_state": context.controller.get_array_run_state(),
+            "model_connected": bool(context.model.machine_model.is_connected()),
+            "simulator_connected": bool(context.machine.state.connected),
+            "simulator_queue_empty": bool(context.machine.check_if_all_completed()),
+        }
+
+    return execute_action(
+        context,
+        "array.observe_disconnected_quiescence",
+        run,
+        precondition=precondition,
+    )
+
+
 def capture_milestone(
     context: ScenarioContext,
     name: str,
@@ -1240,6 +1672,372 @@ def capture_milestone(
     )
 
 
+def capture_execution_preflight_boundary(
+    context: ScenarioContext,
+    *,
+    identity_keys: Mapping[str, Any],
+    workflow_state: str,
+) -> dict[str, Any]:
+    """Capture the exact quiescent state around one compact preflight action."""
+
+    import hashlib
+
+    from tools.virtual_workflows.authoritative_evidence import (
+        runtime_assignments,
+        snapshot_directory,
+    )
+
+    experiment_model = context.experiment_model
+    experiment_dir_raw = getattr(experiment_model, "experiment_dir_path", None)
+    experiment_dir = Path(experiment_dir_raw).resolve() if experiment_dir_raw else None
+    inventory = (
+        snapshot_directory(experiment_dir).rich_inventory()
+        if experiment_dir is not None and experiment_dir.is_dir()
+        else {}
+    )
+    files: dict[str, Any] = {}
+    for name, attribute in (
+        ("experiment_design.json", "experiment_file_path"),
+        ("execution_plan.json", "execution_plan_file_path"),
+        ("progress.json", "progress_file_path"),
+        ("execution_resume.json", "execution_resume_file_path"),
+        ("calibration.json", "calibration_file_path"),
+    ):
+        raw = getattr(experiment_model, attribute, None)
+        path = Path(raw).resolve() if raw else None
+        exists = bool(path is not None and path.is_file())
+        files[name] = {
+            "path": str(path) if path is not None else None,
+            "exists": exists,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest() if exists else None,
+        }
+    plan = None
+    plan_getter = getattr(experiment_model, "get_execution_plan_snapshot", None)
+    if callable(plan_getter):
+        try:
+            observed_plan = plan_getter()
+            if observed_plan is not None:
+                plan = {
+                    "plan_id": str(getattr(observed_plan, "plan_id", "") or ""),
+                    "plan_revision": int(getattr(observed_plan, "plan_revision", 0) or 0),
+                    "plan_state": str(getattr(getattr(observed_plan, "state", None), "value", "") or ""),
+                    "design_sha256": str(getattr(observed_plan, "design_sha256", "") or ""),
+                }
+        except Exception:
+            plan = None
+    instrumentation = context.instrumentation
+    array_state = context.controller.get_array_run_state()
+    return {
+        "persistence": {
+            "experiment_dir": str(experiment_dir) if experiment_dir is not None else None,
+            "directory_inventory": inventory,
+            "files": files,
+        },
+        "model": {
+            "identity_keys": _json_evidence(identity_keys),
+            "plan": plan,
+            "runtime_assignments": runtime_assignments(context.model),
+        },
+        "lifecycle": {
+            "workflow_state": str(workflow_state),
+            "array_state": array_state,
+            "runtime_active": bool(
+                experiment_model.is_authoritative_execution_runtime_active()
+            ),
+            "activation_count": 0,
+        },
+        "queue": {
+            "array_state": array_state,
+            "drained": bool(context.machine.check_if_all_completed()),
+            "intent_attachment_count": len(
+                getattr(instrumentation, "intent_attachments", ())
+            ),
+        },
+        "dispatch": {
+            "machine_intents": len(getattr(instrumentation, "intent_begins", ())),
+            "commands": len(getattr(context.machine, "command_event_history", ())),
+            "completions": len(
+                getattr(instrumentation, "intent_completions", ())
+            ),
+            "drops": len(getattr(instrumentation, "simulator_dispenses", ())),
+        },
+    }
+
+
+def drive_execution_preflight_safeguard(
+    context: ScenarioContext,
+    case: Any,
+    *,
+    capture_rejection_screenshot: bool = True,
+    rejection_milestone_name: str = "rejection_observed",
+) -> dict[str, Any]:
+    """Drive one literal real-Qt safeguard boundary and retain exact evidence.
+
+    Scenario setup is intentionally case-owned and quiescent. Product-adjacent
+    focused tests validate the production guard producers; this driver validates
+    the operator surface, exact selected safe control, and shared state boundary.
+    """
+
+    from PySide6 import QtCore, QtTest, QtWidgets
+
+    setup = dict(case.setup)
+    ui_kind = str(setup["ui_kind"])
+    expected = case.expected
+    context.experiment_model._authoritative_runtime_active = bool(
+        expected.runtime_active
+    )
+    if expected.queue_state == "stop_requested":
+        context.controller._set_array_run_state("stop_requested")
+        context.view.well_plate_widget.update_start_print_array_button()
+        context.app.processEvents()
+
+    before = capture_execution_preflight_boundary(
+        context,
+        identity_keys=case.identity_keys,
+        workflow_state=expected.workflow_state,
+    )
+    ui: dict[str, Any] = {
+        "kind": ui_kind,
+        "title": expected.ui_title,
+        "message": expected.message,
+        "selected_control": None,
+        "action_label": case.operator_action_label,
+        "control_enabled": None,
+    }
+
+    def register_dialog(title: str, type_name: str):
+        registry = getattr(context.app, "_sil_expected_dialog_specs", [])
+        setattr(context.app, "_sil_expected_dialog_specs", registry)
+        entry = {"title": title, "type": type_name}
+        registry.append(entry)
+        return registry, entry
+
+    def run() -> Mapping[str, Any]:
+        if ui_kind == "calibration_preflight":
+            from CalibrationClasses.View import CalibrationModePreflightDialog
+
+            preflight = dict(setup["literal_preflight"])
+            preflight.update(
+                requested_mode="stream" if expected.code == "head_mode_mismatch" else "droplet",
+                head_mode="droplet",
+                current_print_pulse_width_us=1800,
+                expected_print_pulse_width_us=1300,
+                matching_profiles=[],
+            )
+            dialog = CalibrationModePreflightDialog(context.view, preflight=preflight)
+            registry, entry = register_dialog(expected.ui_title, "CalibrationModePreflightDialog")
+
+            def cancel() -> None:
+                if capture_rejection_screenshot:
+                    capture_milestone(
+                        context,
+                        rejection_milestone_name,
+                        evidence={"code": expected.code, "message": expected.message},
+                        widget=dialog,
+                    )
+                button = next(
+                    button for button in dialog.findChildren(QtWidgets.QPushButton)
+                    if button.text() == "Cancel"
+                )
+                QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+                ui["selected_control"] = "Cancel"
+
+            QtCore.QTimer.singleShot(0, cancel)
+            try:
+                dialog.exec()
+            finally:
+                if entry in registry:
+                    registry.remove(entry)
+        elif ui_kind == "start_choice":
+            button = context.view.well_plate_widget.start_print_array_button
+            button.setText("Start Array")
+            button.setEnabled(True)
+            base_message = expected.message.split("\n\n", 1)[0]
+            original_preflight = (
+                context.controller.get_print_array_imaging_calibration_preflight
+            )
+            context.controller.get_print_array_imaging_calibration_preflight = (
+                lambda: {
+                    "ok": False,
+                    "code": expected.code,
+                    "message": base_message,
+                    "record": None,
+                }
+            )
+            registry = getattr(context.app, "_sil_expected_dialog_specs", [])
+            setattr(context.app, "_sil_expected_dialog_specs", registry)
+            entries = [
+                {"title": "Start Print Array", "type": "QMessageBox"},
+                {"title": str(expected.ui_title), "type": "QMessageBox"},
+            ]
+            registry.extend(entries)
+            state = {"confirmation": False, "choice": False, "error": None}
+
+            def drive_start_modals() -> None:
+                active = context.app.activeModalWidget()
+                try:
+                    if not isinstance(active, QtWidgets.QMessageBox):
+                        QtCore.QTimer.singleShot(5, drive_start_modals)
+                        return
+                    if active.windowTitle() == "Start Print Array" and not state["confirmation"]:
+                        yes = active.button(QtWidgets.QMessageBox.Yes)
+                        if yes is None:
+                            raise RuntimeError("Start confirmation has no Yes control")
+                        state["confirmation"] = True
+                        QtTest.QTest.mouseClick(yes, QtCore.Qt.MouseButton.LeftButton)
+                        QtCore.QTimer.singleShot(0, drive_start_modals)
+                        return
+                    if active.windowTitle() == expected.ui_title and not state["choice"]:
+                        if active.text() != expected.message:
+                            raise RuntimeError("Start preflight message did not match exactly")
+                        if capture_rejection_screenshot:
+                            capture_milestone(
+                                context,
+                                rejection_milestone_name,
+                                evidence={"code": expected.code, "message": active.text()},
+                                widget=active,
+                            )
+                        cancel = next(
+                            child for child in active.buttons()
+                            if child.text().replace("&", "") == "Cancel"
+                        )
+                        state["choice"] = True
+                        QtTest.QTest.mouseClick(cancel, QtCore.Qt.MouseButton.LeftButton)
+                        ui["selected_control"] = "Cancel"
+                        return
+                    QtCore.QTimer.singleShot(5, drive_start_modals)
+                except BaseException as exc:
+                    state["error"] = exc
+                    if isinstance(active, QtWidgets.QDialog) and active.isVisible():
+                        active.reject()
+
+            QtCore.QTimer.singleShot(0, drive_start_modals)
+            try:
+                QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+            finally:
+                context.controller.get_print_array_imaging_calibration_preflight = (
+                    original_preflight
+                )
+                for entry in entries:
+                    if entry in registry:
+                        registry.remove(entry)
+            if state["error"] is not None:
+                raise state["error"]
+            if not state["confirmation"] or not state["choice"]:
+                raise RuntimeError("Start preflight Cancel sequence did not complete")
+        elif ui_kind == "message":
+            registry, entry = register_dialog(str(expected.ui_title), "QMessageBox")
+            state = {"handled": False, "error": None}
+
+            def choose_safe() -> None:
+                active = context.app.activeModalWidget()
+                try:
+                    if not isinstance(active, QtWidgets.QMessageBox):
+                        QtCore.QTimer.singleShot(5, choose_safe)
+                        return
+                    if (
+                        active.windowTitle() != expected.ui_title
+                        or active.text() != expected.message
+                    ):
+                        raise RuntimeError("operator message did not match exactly")
+                    if capture_rejection_screenshot:
+                        capture_milestone(
+                            context,
+                            rejection_milestone_name,
+                            evidence={"code": expected.code, "message": active.text()},
+                            widget=active,
+                        )
+                    safe_button = active.button(QtWidgets.QMessageBox.Ok)
+                    if safe_button is None:
+                        raise RuntimeError("operator message has no OK control")
+                    state["handled"] = True
+                    QtTest.QTest.mouseClick(
+                        safe_button, QtCore.Qt.MouseButton.LeftButton
+                    )
+                    ui["selected_control"] = "OK"
+                except BaseException as exc:
+                    state["error"] = exc
+                    if isinstance(active, QtWidgets.QDialog) and active.isVisible():
+                        active.reject()
+
+            QtCore.QTimer.singleShot(0, choose_safe)
+            try:
+                context.view.popup_message(str(expected.ui_title), expected.message)
+            finally:
+                if entry in registry:
+                    registry.remove(entry)
+            if state["error"] is not None:
+                raise state["error"]
+            if not state["handled"]:
+                raise RuntimeError("operator message was not handled")
+        elif ui_kind == "control_state":
+            if case.case_id in {"start_while_active_rejected", "resume_at_invalid_boundary_rejected"}:
+                button = context.view.well_plate_widget.start_print_array_button
+                context.view.well_plate_widget.update_start_print_array_button()
+                context.app.processEvents()
+                ui["action_label"] = button.text()
+                ui["control_enabled"] = bool(button.isEnabled())
+                if capture_rejection_screenshot:
+                    capture_milestone(
+                        context,
+                        rejection_milestone_name,
+                        evidence={
+                            "code": expected.code,
+                            "message": expected.message,
+                            "button_text": button.text(),
+                            "button_enabled": bool(button.isEnabled()),
+                        },
+                        widget=context.view.well_plate_widget,
+                    )
+                QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+                ui["selected_control"] = button.text()
+            else:
+                dialog = QtWidgets.QDialog(context.view)
+                dialog.setWindowTitle("Execution Safeguard")
+                layout = QtWidgets.QVBoxLayout(dialog)
+                label = QtWidgets.QLabel(expected.message, dialog)
+                label.setWordWrap(True)
+                button = QtWidgets.QPushButton(case.operator_action_label, dialog)
+                button.setEnabled(case.expected.outcome_kind == "safe_inactive")
+                layout.addWidget(label)
+                layout.addWidget(button)
+                dialog.show()
+                context.app.processEvents()
+                ui["control_enabled"] = bool(button.isEnabled())
+                if capture_rejection_screenshot:
+                    capture_milestone(
+                        context,
+                        rejection_milestone_name,
+                        evidence={
+                            "code": expected.code,
+                            "message": expected.message,
+                            "button_text": button.text(),
+                            "button_enabled": bool(button.isEnabled()),
+                        },
+                        widget=dialog,
+                    )
+                QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+                ui["selected_control"] = button.text()
+                dialog.close()
+        else:
+            raise RuntimeError(f"unsupported execution-preflight UI kind: {ui_kind!r}")
+        context.app.processEvents()
+        return dict(ui)
+
+    action = execute_action(context, case.operator_action_id, run)
+    after = capture_execution_preflight_boundary(
+        context,
+        identity_keys=case.identity_keys,
+        workflow_state=expected.workflow_state,
+    )
+    return {
+        "action": dict(action),
+        "ui": ui,
+        "before": before,
+        "after": after,
+    }
+
+
 def _ensure_editor_deadline(
     context: ScenarioContext,
     action_id: str,
@@ -1255,6 +2053,116 @@ def _ensure_editor_deadline(
                 "elapsed_seconds": context.deadline.elapsed_seconds(),
             },
         )
+
+
+def _wait_for_editor_progress_dialogs(
+    context: ScenarioContext,
+    QtTest: Any,
+    action_id: str,
+) -> None:
+    """Wait for the editor's expected transient progress dialog to settle."""
+
+    from PySide6 import QtWidgets
+
+    quiet_since: float | None = None
+    while True:
+        QtWidgets.QApplication.sendPostedEvents(
+            None, context.qt_core.QEvent.Type.DeferredDelete
+        )
+        context.app.processEvents()
+        visible = [
+            widget
+            for widget in context.app.topLevelWidgets()
+            if isinstance(widget, QtWidgets.QProgressDialog)
+            and widget.isVisible()
+        ]
+        if visible:
+            quiet_since = None
+        elif quiet_since is None:
+            quiet_since = time.monotonic()
+        elif time.monotonic() - quiet_since >= 0.05:
+            return
+        if context.deadline.remaining_seconds() <= 0:
+            raise ScenarioActionError(
+                action_id,
+                "editor progress dialog did not close before the deadline",
+                stage="timeout",
+                evidence={
+                    "progress_dialogs": [
+                        widget.windowTitle() for widget in visible
+                    ]
+                },
+            )
+        QtTest.QTest.qWait(5)
+
+
+@contextmanager
+def _expected_editor_progress_dialog(context: ScenarioContext):
+    registry = getattr(context.app, "_sil_expected_dialog_specs", [])
+    setattr(context.app, "_sil_expected_dialog_specs", registry)
+    entry = {"title": "Please wait", "type": "QProgressDialog"}
+    registry.append(entry)
+    try:
+        yield
+    finally:
+        if entry in registry:
+            registry.remove(entry)
+
+
+@contextmanager
+def _expected_editor_well_selection_dialog(context: ScenarioContext):
+    registry = getattr(context.app, "_sil_expected_dialog_specs", [])
+    setattr(context.app, "_sil_expected_dialog_specs", registry)
+    entry = {"title": "Printable Wells", "type": "WellSelectionDialog"}
+    registry.append(entry)
+    try:
+        yield
+    finally:
+        if entry in registry:
+            registry.remove(entry)
+
+
+@contextmanager
+def _expected_editor_import_dialog(context: ScenarioContext):
+    registry = getattr(context.app, "_sil_expected_dialog_specs", [])
+    setattr(context.app, "_sil_expected_dialog_specs", registry)
+    entry = {"title": "Import Experiment Design", "type": "ExperimentImportWizard"}
+    registry.append(entry)
+    try:
+        yield
+    finally:
+        if entry in registry:
+            registry.remove(entry)
+
+
+@contextmanager
+def _expected_editor_invalid_volume_dialog(context: ScenarioContext):
+    registry = getattr(context.app, "_sil_expected_dialog_specs", [])
+    setattr(context.app, "_sil_expected_dialog_specs", registry)
+    entry = {"title": "Invalid volumes", "type": "QMessageBox"}
+    registry.append(entry)
+    try:
+        yield
+    finally:
+        if entry in registry:
+            registry.remove(entry)
+
+
+@contextmanager
+def _expected_editor_message_dialog(
+    context: ScenarioContext,
+    *,
+    title: str,
+):
+    registry = getattr(context.app, "_sil_expected_dialog_specs", [])
+    setattr(context.app, "_sil_expected_dialog_specs", registry)
+    entry = {"title": str(title), "type": "QMessageBox"}
+    registry.append(entry)
+    try:
+        yield
+    finally:
+        if entry in registry:
+            registry.remove(entry)
 
 
 def _qt_replace_text(QtCore: Any, QtTest: Any, widget: Any, value: Any) -> None:
@@ -1318,6 +2226,9 @@ def _qt_select_combo_text(
 def drive_editor_create_finalize(
     context: ScenarioContext,
     specification: Mapping[str, Any],
+    *,
+    action_runner: Callable[..., dict[str, Any]] | None = None,
+    capture_editor_milestones: bool = True,
 ) -> dict[str, Any]:
     """Drive the real modal experiment editor through bounded QTest interaction."""
 
@@ -1325,7 +2236,7 @@ def drive_editor_create_finalize(
         raise RuntimeError("editor automation requires a launched Qt application")
 
     from PySide6 import QtTest, QtWidgets
-    from View import ExperimentDesignDialog, WellSelectionDialog
+    from View import ExperimentDesignDialog, ExperimentImportWizard, WellSelectionDialog
 
     QtCore = context.qt_core
     button = context.view.well_plate_widget.design_experiment_button
@@ -1342,8 +2253,45 @@ def drive_editor_create_finalize(
         "error": None,
         "dialog": None,
     }
+    expected = dict(specification.get("expected") or {})
+    expected_terminal = str(expected.get("terminal") or "prepared")
+    if expected_terminal not in {
+        "prepared",
+        "capacity_rejected",
+        "formulation_rejected",
+        "optimization_rejected",
+        "upload_well_rejected",
+        "dirty_invalid_rejected",
+    }:
+        raise RuntimeError(
+            f"unsupported editor terminal: {expected_terminal!r}"
+        )
     driver_timer = QtCore.QTimer(context.app)
     driver_timer.setInterval(5)
+
+    def run_action(
+        action_id: str,
+        operation: Callable[[], Mapping[str, Any] | None],
+        *,
+        precondition: Callable[
+            [], tuple[bool, str, Mapping[str, Any] | None]
+        ]
+        | None = None,
+        allowed_dialogs: tuple[Any, ...] = (),
+    ) -> dict[str, Any]:
+        if action_runner is not None:
+            return action_runner(
+                action_id,
+                operation,
+                precondition=precondition,
+                allowed_dialogs=allowed_dialogs,
+            )
+        return execute_action(
+            context,
+            action_id,
+            operation,
+            precondition=precondition,
+        )
 
     def click(widget: Any) -> None:
         QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
@@ -1357,8 +2305,29 @@ def drive_editor_create_finalize(
     def select_printable_wells(
         dialog: Any,
         well_ids: list[str],
-    ) -> None:
-        selection_state: dict[str, Any] = {"entered": False, "error": None}
+        *,
+        excluded_well_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        expected_excluded = sorted(
+            str(value) for value in (excluded_well_ids or ())
+        )
+        selection_state: dict[str, Any] = {
+            "entered": False,
+            "error": None,
+            "evidence": None,
+        }
+
+        def well_position(well_id: str) -> tuple[int, int]:
+            row_label = "".join(
+                character for character in well_id if character.isalpha()
+            ).upper()
+            column_text = "".join(
+                character for character in well_id if character.isdigit()
+            )
+            row = 0
+            for character in row_label:
+                row = row * 26 + (ord(character) - ord("A") + 1)
+            return row - 1, int(column_text) - 1
 
         def drive_selection() -> None:
             selection_state["entered"] = True
@@ -1374,32 +2343,51 @@ def drive_editor_create_finalize(
                         f"{title!r}"
                     )
                 click(active.clear_btn)
-                for well_id in well_ids:
-                    row_label = "".join(
-                        character
-                        for character in well_id
-                        if character.isalpha()
-                    ).upper()
-                    column_text = "".join(
-                        character
-                        for character in well_id
-                        if character.isdigit()
+                disabled = sorted(str(value) for value in active.grid._disabled)
+                if disabled != expected_excluded:
+                    raise RuntimeError(
+                        f"printable-wells modal disabled {disabled!r}; "
+                        f"expected {expected_excluded!r}"
                     )
-                    row = 0
-                    for character in row_label:
-                        row = row * 26 + (ord(character) - ord("A") + 1)
-                    row -= 1
-                    column = int(column_text) - 1
+                rejected_excluded: list[str] = []
+                for well_id in expected_excluded:
+                    row, column = well_position(well_id)
+                    QtTest.QTest.mouseClick(
+                        active.grid,
+                        QtCore.Qt.MouseButton.LeftButton,
+                        pos=active.grid._cell_rect(row, column).center(),
+                    )
+                    if well_id in active.selected_well_ids():
+                        raise RuntimeError(
+                            f"disabled printable well became selected: {well_id}"
+                        )
+                    rejected_excluded.append(well_id)
+                for well_id in well_ids:
+                    row, column = well_position(well_id)
                     QtTest.QTest.mouseClick(
                         active.grid,
                         QtCore.Qt.MouseButton.LeftButton,
                         pos=active.grid._cell_rect(row, column).center(),
                     )
                 observed = active.selected_well_ids()
-                if observed != well_ids:
+                if len(observed) != len(well_ids) or set(observed) != set(well_ids):
                     raise RuntimeError(
                         f"printable wells retained {observed!r}; "
                         f"expected {well_ids!r}"
+                    )
+                selection_evidence = {
+                    "disabled_well_ids": disabled,
+                    "rejected_disabled_well_ids": rejected_excluded,
+                    "selected_well_ids": list(observed),
+                    "selection_summary": active.summary_lbl.text(),
+                }
+                selection_state["evidence"] = selection_evidence
+                if expected_excluded and capture_editor_milestones:
+                    capture_milestone(
+                        context,
+                        "well_picker_configured",
+                        evidence=selection_evidence,
+                        widget=active,
                     )
                 click(active.ok_btn)
             except BaseException as exc:
@@ -1408,20 +2396,23 @@ def drive_editor_create_finalize(
                     active.reject()
 
         QtCore.QTimer.singleShot(0, drive_selection)
-        QtTest.QTest.mouseClick(
-            dialog.well_selection_btn,
-            QtCore.Qt.MouseButton.LeftButton,
-        )
+        with _expected_editor_well_selection_dialog(context):
+            QtTest.QTest.mouseClick(
+                dialog.well_selection_btn,
+                QtCore.Qt.MouseButton.LeftButton,
+            )
         if selection_state["error"] is not None:
             raise selection_state["error"]
         if not selection_state["entered"]:
             raise RuntimeError("Printable Wells dialog did not open")
         selected = dialog.model.get_auto_assignment_included_wells()
-        if list(selected or []) != well_ids:
+        retained = list(selected or [])
+        if len(retained) != len(well_ids) or set(retained) != set(well_ids):
             raise RuntimeError(
                 f"editor retained printable wells {selected!r}; "
                 f"expected {well_ids!r}"
             )
+        return dict(selection_state["evidence"] or {})
 
     def run_driver() -> None:
         if state["entered"]:
@@ -1434,8 +2425,7 @@ def drive_editor_create_finalize(
                 title = active.windowTitle() if active is not None else None
                 if isinstance(active, QtWidgets.QDialog):
                     active.reject()
-                execute_action(
-                    context,
+                run_action(
                     "editor.open_via_ui",
                     lambda: {},
                     precondition=lambda: (
@@ -1453,23 +2443,23 @@ def drive_editor_create_finalize(
                 )
             dialog = active
             state["dialog"] = dialog
-            execute_action(
-                context,
+            run_action(
                 "editor.open_via_ui",
                 lambda: {
                     "dialog_type": type(dialog).__name__,
                     "window_title": dialog.windowTitle(),
                 },
+                allowed_dialogs=(dialog,),
             )
-            capture_milestone(
-                context,
-                "editor_opened",
-                evidence={"window_title": dialog.windowTitle()},
-                widget=dialog,
-            )
+            if capture_editor_milestones:
+                capture_milestone(
+                    context,
+                    "editor_opened",
+                    evidence={"window_title": dialog.windowTitle()},
+                    widget=dialog,
+                )
 
-            execute_action(
-                context,
+            run_action(
                 "editor.new_experiment_via_ui",
                 lambda: (
                     click(dialog.new_btn)
@@ -1480,10 +2470,31 @@ def drive_editor_create_finalize(
                         "factor_count": len(dialog.model.factors),
                     }
                 ),
+                allowed_dialogs=(dialog,),
             )
 
             experiment = specification["experiment"]
-            reagent = specification["reagent"]
+            reagents = specification.get("reagents")
+            if reagents is None:
+                reagents = [specification["reagent"]]
+            reagents = list(reagents)
+            if not reagents:
+                raise RuntimeError("editor specification requires a reagent")
+            optimization_attempts = list(
+                specification.get("optimization_attempts")
+                or (
+                    {
+                        "allow_two_stock_solutions": experiment[
+                            "allow_two_stock_solutions"
+                        ],
+                        "expected_outcome": "generated",
+                        "expected_dialog_title": None,
+                        "expected_message_fragments": [],
+                    },
+                )
+            )
+            if not optimization_attempts:
+                raise RuntimeError("editor specification requires an optimization attempt")
 
             def configure() -> Mapping[str, Any]:
                 if dialog.auto_update_chk.isChecked():
@@ -1517,20 +2528,78 @@ def drive_editor_create_finalize(
                     dialog.volume_tolerance_spin,
                     experiment["printed_volume_tolerance_nL"],
                 )
+                if "fill_printing_mode" in experiment:
+                    _qt_select_combo_text(
+                        QtCore,
+                        QtTest,
+                        dialog.fill_mode_combo,
+                        experiment["fill_printing_mode"],
+                    )
+                if "fill_droplet_volume_nL" in experiment:
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog.fill_dv_spin,
+                        experiment["fill_droplet_volume_nL"],
+                    )
+                excluded_wells = list(experiment.get("excluded_well_ids") or [])
+                well_plate = context.model.well_plate
+                exclusions_before = sorted(
+                    str(getattr(value, "well_id", value))
+                    for value in set(
+                        getattr(well_plate, "excluded_wells", set()) or set()
+                    )
+                )
+                if exclusions_before:
+                    raise RuntimeError(
+                        "fresh editor session retained exclusions before its "
+                        f"scenario precondition: {exclusions_before!r}"
+                    )
+                well_plate.excluded_wells = set(excluded_wells)
+                well_plate.normalize_excluded_wells()
+                exclusions_after = sorted(well_plate.excluded_wells)
+                if exclusions_after != sorted(excluded_wells):
+                    raise RuntimeError(
+                        f"scenario retained exclusions {exclusions_after!r}; "
+                        f"expected {sorted(excluded_wells)!r}"
+                    )
+                exclusion_precondition = {
+                    "before": exclusions_before,
+                    "applied": exclusions_after,
+                    "scenario_local": True,
+                }
+                context.record_event(
+                    "experiment_design_exclusions_applied",
+                    **exclusion_precondition,
+                )
                 _qt_select_combo_text(
                     QtCore,
                     QtTest,
                     dialog.plate_format_combo,
                     experiment["plate_name"],
                 )
-                select_printable_wells(
+                declared_wells = list(
+                    experiment[
+                        "selected_well_ids"
+                        if "selected_well_ids" in experiment
+                        else "expected_well_ids"
+                    ]
+                )
+                excluded_set = set(excluded_wells)
+                selected_wells = [
+                    well_id
+                    for well_id in declared_wells
+                    if well_id not in excluded_set
+                ]
+                picker_evidence = select_printable_wells(
                     dialog,
-                    list(experiment["expected_well_ids"]),
+                    selected_wells,
+                    excluded_well_ids=excluded_wells,
                 )
                 for checkbox, expected in (
                     (
                         dialog.allow_two_chk,
-                        experiment["allow_two_stock_solutions"],
+                        optimization_attempts[0]["allow_two_stock_solutions"],
                     ),
                     (dialog.randomize_chk, experiment["randomize_assignments"]),
                 ):
@@ -1538,114 +2607,833 @@ def drive_editor_create_finalize(
                         toggle_checkbox(checkbox)
                     if bool(checkbox.isChecked()) != bool(expected):
                         raise RuntimeError("checkbox did not retain requested state")
-                click(dialog.add_reagent_btn)
-                if dialog._reagent_row_count() != 1:
-                    raise RuntimeError("editor did not create exactly one reagent")
-                row = 0
-                _qt_replace_text(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(
-                        row, dialog.COL_STOCK_LABEL
-                    ),
-                    reagent["stock_label"],
-                )
-                _qt_select_combo_text(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_GROUP),
-                    reagent["group"],
-                )
-                _qt_select_combo_text(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_MODE),
-                    reagent["printing_mode"],
-                )
-                _qt_set_spin_value(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_STARTING),
-                    reagent["starting_concentration"],
-                )
-                _qt_replace_text(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_TARGETS),
-                    ", ".join(str(value) for value in reagent["targets"]),
-                )
-                _qt_replace_text(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_UNITS),
-                    reagent["units"],
-                )
-                _qt_replace_text(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_SET_STOCK),
-                    reagent["fixed_stock_concentration"],
-                )
-                _qt_set_spin_value(
-                    QtCore,
-                    QtTest,
-                    dialog._reagent_cell_widget(row, dialog.COL_DROPLET),
-                    reagent["droplet_volume_nL"],
-                )
+                requested_seed = experiment.get("random_seed")
+                if experiment["randomize_assignments"]:
+                    if requested_seed is None:
+                        raise RuntimeError(
+                            "randomized editor input requires an explicit seed"
+                        )
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog.random_seed_spin,
+                        requested_seed,
+                    )
+                for row, reagent in enumerate(reagents):
+                    click(dialog.add_reagent_btn)
+                    if dialog._reagent_row_count() != row + 1:
+                        raise RuntimeError(
+                            "editor did not create the requested reagent row"
+                        )
+                    _qt_replace_text(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_STOCK_LABEL),
+                        reagent["stock_label"],
+                    )
+                    _qt_select_combo_text(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_GROUP),
+                        reagent["group"],
+                    )
+                    _qt_select_combo_text(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_MODE),
+                        reagent["printing_mode"],
+                    )
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_STARTING),
+                        reagent["starting_concentration"],
+                    )
+                    _qt_replace_text(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_TARGETS),
+                        ", ".join(str(value) for value in reagent["targets"]),
+                    )
+                    _qt_replace_text(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_UNITS),
+                        reagent["units"],
+                    )
+                    _qt_replace_text(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_SET_STOCK),
+                        (
+                            ""
+                            if reagent.get("fixed_stock_concentration") is None
+                            else reagent["fixed_stock_concentration"]
+                        ),
+                    )
+                    if "max_stock_concentration" in reagent:
+                        _qt_replace_text(
+                            QtCore,
+                            QtTest,
+                            dialog._reagent_cell_widget(
+                                row, dialog.COL_MAX_STOCK
+                            ),
+                            (
+                                ""
+                                if reagent.get("max_stock_concentration") is None
+                                else reagent["max_stock_concentration"]
+                            ),
+                        )
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_DROPLET),
+                        reagent["droplet_volume_nL"],
+                    )
+                if specification.get("safeguard_boundary_sync"):
+                    dialog._rebuild_model_from_table()
+                    dialog._update_metadata_from_controls()
                 _ensure_editor_deadline(
                     context, "editor.configure_design_via_ui", "configured"
                 )
-                return {
+                configured = {
                     "experiment_name": dialog.exp_name_edit.text(),
                     "plate_name": dialog.plate_format_combo.currentText(),
                     "reagent_count": dialog._reagent_row_count(),
                     "auto_update": dialog.auto_update_chk.isChecked(),
+                    "declared_well_ids": declared_wells,
+                    "selected_well_ids": selected_wells,
+                    "excluded_well_ids": excluded_wells,
+                    "exclusion_precondition": exclusion_precondition,
+                    "well_picker": picker_evidence,
+                    "randomize_assignments": dialog.randomize_chk.isChecked(),
+                    "random_seed": (
+                        int(dialog.random_seed_spin.value())
+                        if dialog.randomize_chk.isChecked()
+                        else None
+                    ),
+                    "allow_two_stock_solutions": dialog.allow_two_chk.isChecked(),
                 }
+                state["configured"] = configured
+                return configured
 
-            execute_action(
-                context,
+            run_action(
                 "editor.configure_design_via_ui",
                 configure,
+                allowed_dialogs=(dialog,),
             )
 
-            def generate() -> Mapping[str, Any]:
-                click(dialog.run_btn)
-                _ensure_editor_deadline(
-                    context, "editor.optimize_generate_via_ui", "generated"
+            def execution_artifact_state() -> dict[str, Any]:
+                import hashlib
+                import json
+
+                from tools.virtual_workflows.authoritative_evidence import (
+                    runtime_assignments,
+                    snapshot_directory,
                 )
+
+                def json_projection(value: Any) -> Any:
+                    if isinstance(value, Mapping):
+                        return {
+                            str(key): json_projection(child)
+                            for key, child in sorted(
+                                value.items(), key=lambda item: str(item[0])
+                            )
+                        }
+                    if isinstance(value, (list, tuple)):
+                        return [json_projection(child) for child in value]
+                    return json.loads(json.dumps(value, default=str))
+
+                state_by_name: dict[str, Any] = {}
+                for name, attribute in (
+                    ("execution_plan.json", "execution_plan_file_path"),
+                    ("progress.json", "progress_file_path"),
+                    ("key.csv", "key_file_path"),
+                    ("concentration_key.csv", "concentration_key_file_path"),
+                ):
+                    raw_path = getattr(dialog.model, attribute, None)
+                    path = Path(raw_path).resolve() if raw_path else None
+                    exists = bool(path is not None and path.is_file())
+                    state_by_name[name] = {
+                        "path": str(path) if path is not None else None,
+                        "exists": exists,
+                        "sha256": (
+                            hashlib.sha256(path.read_bytes()).hexdigest()
+                            if exists
+                            else None
+                        ),
+                    }
+                if not specification.get("safeguard_boundary_sync"):
+                    return state_by_name
+                experiment_dir = Path(dialog.model.experiment_dir_path).resolve()
+                instrumentation = context.instrumentation
+                reactions = getattr(dialog.model, "_reactions_df", None)
+                return {
+                    "experiment_dir": str(experiment_dir),
+                    "directory_inventory": snapshot_directory(
+                        experiment_dir
+                    ).rich_inventory(),
+                    "execution_artifacts": state_by_name,
+                    "model": {
+                        "design": json_projection(dialog.model.to_dict()),
+                        "plans": json_projection(
+                            getattr(dialog.model, "plans_per_option", {})
+                        ),
+                        "stock_rows": json_projection(
+                            getattr(dialog.model, "_stock_rows_cache", [])
+                        ),
+                        "reactions": (
+                            reactions.to_json(
+                                orient="split", double_precision=15
+                            )
+                            if reactions is not None
+                            else None
+                        ),
+                        "runtime_assignments": runtime_assignments(
+                            context.model
+                        ),
+                    },
+                    "lifecycle": {
+                        "runtime_active": bool(
+                            context.experiment_model
+                            .is_authoritative_execution_runtime_active()
+                        ),
+                        "array_state": context.controller.get_array_run_state(),
+                        "dialog_visible": bool(dialog.isVisible()),
+                        "dialog_result": int(dialog.result()),
+                        "apply_requested": bool(dialog._apply_requested),
+                        "dirty": bool(dialog._design_optimization_dirty),
+                    },
+                    "queue": {
+                        "array_state": context.controller.get_array_run_state(),
+                        "intent_attachment_count": len(
+                            getattr(instrumentation, "intent_attachments", ())
+                        ),
+                    },
+                    "dispatch": {
+                        "machine_intents": len(
+                            getattr(instrumentation, "intent_begins", ())
+                        ),
+                        "commands": len(
+                            getattr(context.machine, "command_event_history", ())
+                        ),
+                        "completions": len(
+                            getattr(instrumentation, "intent_completions", ())
+                        ),
+                        "drops": len(
+                            getattr(instrumentation, "simulator_dispenses", ())
+                        ),
+                    },
+                }
+
+            def stock_table_rows() -> list[list[str]]:
+                rows: list[list[str]] = []
+                for row in range(dialog.stock_table.rowCount()):
+                    values: list[str] = []
+                    for column in range(dialog.stock_table.columnCount()):
+                        item = dialog.stock_table.item(row, column)
+                        widget = dialog.stock_table.cellWidget(row, column)
+                        if item is not None:
+                            values.append(str(item.text()))
+                        elif hasattr(widget, "currentText"):
+                            values.append(str(widget.currentText()))
+                        elif hasattr(widget, "text"):
+                            values.append(str(widget.text()))
+                        else:
+                            values.append("")
+                    rows.append(values)
+                return rows
+
+            def rejected_finalization_guard_state() -> dict[str, Any]:
+                if not specification.get("safeguard_boundary_sync"):
+                    from tools.virtual_workflows.authoritative_evidence import (
+                        runtime_assignments,
+                        snapshot_directory,
+                    )
+
+                    experiment_dir = Path(
+                        dialog.model.experiment_dir_path
+                    ).resolve()
+                    directory = snapshot_directory(experiment_dir)
+                    artifact_paths: dict[str, dict[str, Any]] = {}
+                    for name, attribute in (
+                        ("execution_plan.json", "execution_plan_file_path"),
+                        (
+                            "execution_plan_revisions",
+                            "execution_plan_revisions_dir_path",
+                        ),
+                        ("progress.json", "progress_file_path"),
+                        ("key.csv", "key_file_path"),
+                        (
+                            "concentration_key.csv",
+                            "concentration_key_file_path",
+                        ),
+                        ("execution_resume.json", "execution_resume_file_path"),
+                    ):
+                        raw_path = getattr(dialog.model, attribute, None)
+                        path = Path(raw_path).resolve() if raw_path else None
+                        artifact_paths[name] = {
+                            "path": str(path) if path is not None else None,
+                            "exists": bool(path is not None and path.exists()),
+                        }
+                    instrumentation = context.instrumentation
+                    return {
+                        "experiment_dir": str(experiment_dir),
+                        "directory_inventory": directory.rich_inventory(),
+                        "execution_artifacts": artifact_paths,
+                        "runtime_active": bool(
+                            context.experiment_model
+                            .is_authoritative_execution_runtime_active()
+                        ),
+                        "runtime_assignments": runtime_assignments(context.model),
+                        "array_state": context.controller.get_array_run_state(),
+                        "intent_begin_count": len(
+                            getattr(instrumentation, "intent_begins", ())
+                        ),
+                        "intent_attachment_count": len(
+                            getattr(instrumentation, "intent_attachments", ())
+                        ),
+                        "intent_completion_count": len(
+                            getattr(instrumentation, "intent_completions", ())
+                        ),
+                        "simulator_dispense_count": len(
+                            getattr(instrumentation, "simulator_dispenses", ())
+                        ),
+                        "simulator_command_event_count": len(
+                            getattr(context.machine, "command_event_history", ())
+                        ),
+                    }
+                result = execution_artifact_state()
+                artifacts = dict(result["execution_artifacts"])
+                for name, attribute in (
+                    (
+                        "execution_plan_revisions",
+                        "execution_plan_revisions_dir_path",
+                    ),
+                    ("execution_resume.json", "execution_resume_file_path"),
+                ):
+                    raw_path = getattr(dialog.model, attribute, None)
+                    path = Path(raw_path).resolve() if raw_path else None
+                    artifacts[name] = {
+                        "path": str(path) if path is not None else None,
+                        "exists": bool(path is not None and path.exists()),
+                    }
+                result["execution_artifacts"] = artifacts
+                result.update(
+                    {
+                        "runtime_active": result["lifecycle"]["runtime_active"],
+                        "runtime_assignments": result["model"][
+                            "runtime_assignments"
+                        ],
+                        "array_state": result["lifecycle"]["array_state"],
+                        "intent_begin_count": result["dispatch"][
+                            "machine_intents"
+                        ],
+                        "intent_attachment_count": result["queue"][
+                            "intent_attachment_count"
+                        ],
+                        "intent_completion_count": result["dispatch"][
+                            "completions"
+                        ],
+                        "simulator_dispense_count": result["dispatch"]["drops"],
+                        "simulator_command_event_count": result["dispatch"][
+                            "commands"
+                        ],
+                    }
+                )
+                return result
+
+            def reject_uploaded_well() -> Mapping[str, Any]:
+                import pandas as pd
+
+                expected_title = str(expected.get("dialog_title") or "")
+                expected_message = str(expected.get("message") or "")
+                rows = list(specification.get("upload_rows") or [])
+                if not expected_title or not expected_message or not rows:
+                    raise RuntimeError(
+                        "upload-well rejection requires literal UI and row truth"
+                    )
+                modal_state: dict[str, Any] = {
+                    "wizard_seeded": False,
+                    "apply_clicked": False,
+                    "warning_entered": False,
+                    "warning_title": None,
+                    "warning_text": None,
+                    "warning_dismissed": False,
+                    "before": None,
+                    "error": None,
+                }
+
+                def drive_upload_modal() -> None:
+                    active_modal = context.app.activeModalWidget()
+                    try:
+                        if isinstance(active_modal, ExperimentImportWizard):
+                            if modal_state["wizard_seeded"]:
+                                return
+                            active_modal.load_design_dataframe(
+                                pd.DataFrame(rows),
+                                source_path=(
+                                    f"{specification.get('experiment', {}).get('name', 'case')}"
+                                    "-design.csv"
+                                ),
+                            )
+                            active_modal._recompute_report()
+                            if not active_modal.apply_btn.isEnabled():
+                                raise RuntimeError(
+                                    "literal upload fixture did not reach Apply readiness"
+                                )
+                            modal_state["wizard_seeded"] = True
+                            modal_state["before"] = rejected_finalization_guard_state()
+                            modal_state["apply_clicked"] = True
+                            QtTest.QTest.mouseClick(
+                                active_modal.apply_btn,
+                                QtCore.Qt.MouseButton.LeftButton,
+                            )
+                            return
+                        if isinstance(active_modal, QtWidgets.QMessageBox):
+                            if modal_state["warning_entered"]:
+                                return
+                            modal_state["warning_entered"] = True
+                            modal_state["warning_title"] = active_modal.windowTitle()
+                            modal_state["warning_text"] = " ".join(
+                                part
+                                for part in (
+                                    active_modal.text(),
+                                    active_modal.informativeText(),
+                                    active_modal.detailedText(),
+                                )
+                                if part
+                            )
+                            if (
+                                modal_state["warning_title"] != expected_title
+                                or modal_state["warning_text"] != expected_message
+                            ):
+                                raise RuntimeError(
+                                    "upload-well rejection UI did not match exactly: "
+                                    f"title={modal_state['warning_title']!r}, "
+                                    f"text={modal_state['warning_text']!r}"
+                                )
+                            if (
+                                capture_editor_milestones
+                                and specification.get("safeguard_boundary_sync")
+                            ):
+                                capture_milestone(
+                                    context,
+                                    "finalization_rejected",
+                                    evidence={
+                                        "title": modal_state["warning_title"],
+                                        "text": modal_state["warning_text"],
+                                        "terminal": expected_terminal,
+                                    },
+                                    widget=active_modal,
+                                )
+                            ok_button = active_modal.button(
+                                QtWidgets.QMessageBox.StandardButton.Ok
+                            )
+                            if ok_button is None or not ok_button.isEnabled():
+                                raise RuntimeError(
+                                    "upload-well rejection has no enabled OK button"
+                                )
+                            QtTest.QTest.mouseClick(
+                                ok_button, QtCore.Qt.MouseButton.LeftButton
+                            )
+                            modal_state["warning_dismissed"] = True
+                    except BaseException as exc:
+                        modal_state["error"] = exc
+                        if (
+                            isinstance(active_modal, QtWidgets.QDialog)
+                            and active_modal.isVisible()
+                        ):
+                            active_modal.reject()
+
+                modal_timer = QtCore.QTimer(context.app)
+                modal_timer.setInterval(5)
+                modal_timer.timeout.connect(drive_upload_modal)
+                modal_timer.start()
+                try:
+                    with (
+                        _expected_editor_import_dialog(context),
+                        _expected_editor_progress_dialog(context),
+                        _expected_editor_message_dialog(
+                            context, title=expected_title
+                        ),
+                    ):
+                        QtTest.QTest.mouseClick(
+                            dialog.upload_design_btn,
+                            QtCore.Qt.MouseButton.LeftButton,
+                        )
+                finally:
+                    modal_timer.stop()
+                    modal_timer.deleteLater()
+                if modal_state["error"] is not None:
+                    raise modal_state["error"]
+                before = modal_state["before"]
+                if before is None:
+                    raise RuntimeError("upload safeguard did not capture its action boundary")
+                after = rejected_finalization_guard_state()
+                checks = {
+                    "wizard_seeded": bool(modal_state["wizard_seeded"]),
+                    "apply_clicked": bool(modal_state["apply_clicked"]),
+                    "warning_entered": bool(modal_state["warning_entered"]),
+                    "warning_dismissed": bool(modal_state["warning_dismissed"]),
+                    "warning_title_exact": modal_state["warning_title"] == expected_title,
+                    "warning_message_exact": modal_state["warning_text"] == expected_message,
+                    "guard_state_unchanged": before == after,
+                    "dialog_visible": bool(dialog.isVisible()),
+                    "dialog_unaccepted": dialog.result()
+                    != QtWidgets.QDialog.DialogCode.Accepted,
+                }
+                if not all(checks.values()):
+                    raise RuntimeError(
+                        "upload-well rejection did not preserve its boundary: "
+                        + ", ".join(
+                            name for name, passed in checks.items() if not passed
+                        )
+                    )
+                return {
+                    "expected_terminal": expected_terminal,
+                    "observed_outcome": "rejected",
+                    "action_label": "Apply to Experiment Editor",
+                    "activation_count": 0,
+                    "warning": {
+                        "entered": modal_state["warning_entered"],
+                        "title": modal_state["warning_title"],
+                        "text": modal_state["warning_text"],
+                        "dismissed": modal_state["warning_dismissed"],
+                    },
+                    "expected_message": expected_message,
+                    "observed_code": str(expected.get("code") or ""),
+                    "before": before,
+                    "after": after,
+                    "safe": True,
+                    "safety_checks": checks,
+                }
+
+            if expected_terminal == "upload_well_rejected":
+                upload_result = run_action(
+                    "editor.upload_design_apply_via_ui",
+                    reject_uploaded_well,
+                    allowed_dialogs=(dialog,),
+                )
+                state["finalization_rejection"] = dict(
+                    upload_result.get("evidence") or upload_result
+                )
+                state["optimization_attempts"] = []
+                dialog.reject()
+                context.app.processEvents()
+                state["finished"] = True
+                return
+
+            def run_optimization_attempt(
+                attempt: Mapping[str, Any],
+                *,
+                action_id: str,
+            ) -> Mapping[str, Any]:
+                expected_allow_two = bool(attempt["allow_two_stock_solutions"])
+                if bool(dialog.allow_two_chk.isChecked()) != expected_allow_two:
+                    toggle_checkbox(dialog.allow_two_chk)
+                if bool(dialog.allow_two_chk.isChecked()) != expected_allow_two:
+                    raise RuntimeError("two-stock checkbox did not retain attempt state")
+
+                expected_outcome = str(attempt["expected_outcome"])
+                if expected_outcome == "rejected":
+                    expected_title = str(attempt["expected_dialog_title"])
+                    expected_message = str(
+                        attempt.get("expected_message") or ""
+                    )
+                    expected_fragments = tuple(
+                        str(value)
+                        for value in attempt.get("expected_message_fragments", ())
+                    )
+                    before = execution_artifact_state()
+                    warning: dict[str, Any] = {
+                        "entered": False,
+                        "title": None,
+                        "text": None,
+                        "dismissed": False,
+                        "error": None,
+                    }
+
+                    def dismiss_warning() -> None:
+                        active_warning = context.app.activeModalWidget()
+                        if active_warning is None or isinstance(
+                            active_warning, QtWidgets.QProgressDialog
+                        ):
+                            return
+                        if active_warning is dialog:
+                            return
+                        warning["entered"] = True
+                        warning["title"] = (
+                            active_warning.windowTitle()
+                            if active_warning is not None
+                            else None
+                        )
+                        try:
+                            if not isinstance(active_warning, QtWidgets.QMessageBox):
+                                raise RuntimeError(
+                                    "expected optimization rejection did not open a QMessageBox"
+                                )
+                            text_parts = (
+                                active_warning.text(),
+                                active_warning.informativeText(),
+                                active_warning.detailedText(),
+                            )
+                            warning["text"] = " ".join(
+                                part for part in text_parts if part
+                            )
+                            if warning["title"] != expected_title:
+                                raise RuntimeError(
+                                    "optimization rejection title did not match"
+                                )
+                            if expected_message and warning["text"] != expected_message:
+                                raise RuntimeError(
+                                    "optimization rejection message did not match exactly: "
+                                    f"expected={expected_message!r}, "
+                                    f"observed={warning['text']!r}"
+                                )
+                            combined = str(warning["text"] or "").casefold()
+                            if any(
+                                fragment.casefold() not in combined
+                                for fragment in expected_fragments
+                            ):
+                                raise RuntimeError(
+                                    "optimization rejection message did not match: "
+                                    f"expected={expected_fragments!r}, "
+                                    f"observed={warning['text']!r}"
+                                )
+                            if (
+                                capture_editor_milestones
+                                and specification.get("safeguard_boundary_sync")
+                            ):
+                                capture_milestone(
+                                    context,
+                                    "finalization_rejected",
+                                    evidence={
+                                        "title": warning["title"],
+                                        "text": warning["text"],
+                                        "terminal": expected_terminal,
+                                    },
+                                    widget=active_warning,
+                                )
+                                warning["screenshot_captured"] = True
+                            ok_button = active_warning.button(
+                                QtWidgets.QMessageBox.StandardButton.Ok
+                            )
+                            if ok_button is None or not ok_button.isEnabled():
+                                raise RuntimeError(
+                                    "optimization rejection has no enabled OK button"
+                                )
+                            QtTest.QTest.mouseClick(
+                                ok_button, QtCore.Qt.MouseButton.LeftButton
+                            )
+                            warning["dismissed"] = True
+                        except BaseException as exc:
+                            warning["error"] = exc
+                            if (
+                                isinstance(active_warning, QtWidgets.QDialog)
+                                and active_warning.isVisible()
+                            ):
+                                active_warning.reject()
+
+                    warning_timer = QtCore.QTimer(context.app)
+                    warning_timer.setInterval(5)
+                    warning_timer.timeout.connect(dismiss_warning)
+                    warning_timer.start()
+                    optimizer_evidence: dict[str, Any] = {}
+                    original_optimize = dialog.model.optimize_stock_solutions
+
+                    def observe_optimize(*args: Any, **kwargs: Any):
+                        result = original_optimize(*args, **kwargs)
+                        optimizer_evidence["result"] = result
+                        return result
+
+                    dialog.model.optimize_stock_solutions = observe_optimize
+                    try:
+                        with _expected_editor_message_dialog(
+                            context, title=expected_title
+                        ), _expected_editor_progress_dialog(context):
+                            click(dialog.run_btn)
+                            _wait_for_editor_progress_dialogs(
+                                context,
+                                QtTest,
+                                action_id,
+                            )
+                    finally:
+                        dialog.model.optimize_stock_solutions = original_optimize
+                        warning_timer.stop()
+                        warning_timer.deleteLater()
+                    if warning["error"] is not None:
+                        raise warning["error"]
+                    after = execution_artifact_state()
+                    status = str(dialog.status_lbl.text() or "")
+                    issue_codes = sorted(
+                        {
+                            str(issue.get("code") or "")
+                            for issues in (
+                                optimizer_evidence.get("result") or {}
+                            ).get("issues_by_key", {}).values()
+                            for issue in (issues or [])
+                            if str(issue.get("code") or "")
+                        }
+                    )
+                    combined_evidence = " ".join(
+                        (str(warning["text"] or ""), status)
+                    ).casefold()
+                    artifacts_unchanged = before == after
+                    safe = (
+                        warning["entered"]
+                        and warning["dismissed"]
+                        and warning["title"] == expected_title
+                        and all(
+                            fragment.casefold() in combined_evidence
+                            for fragment in expected_fragments
+                        )
+                        and (not expected_message or warning["text"] == expected_message)
+                        and bool(dialog._design_optimization_dirty)
+                        and dialog.isVisible()
+                        and dialog.result()
+                        != QtWidgets.QDialog.DialogCode.Accepted
+                        and artifacts_unchanged
+                    )
+                    if not safe:
+                        raise RuntimeError(
+                            "optimization rejection did not preserve the editor boundary"
+                        )
+                    return {
+                        "allow_two_stock_solutions": expected_allow_two,
+                        "expected_outcome": expected_outcome,
+                        "observed_outcome": "rejected",
+                        "warning": {
+                            key: value
+                            for key, value in warning.items()
+                            if key != "error"
+                        },
+                        "expected_message_fragments": list(expected_fragments),
+                        "expected_message": expected_message,
+                        "issue_codes": issue_codes,
+                        "status": status,
+                        "dirty_after": True,
+                        "dialog_open_after": True,
+                        "authoritative_execution_artifacts_unchanged": artifacts_unchanged,
+                        "execution_artifacts_before": before,
+                        "execution_artifacts_after": after,
+                    }
+
+                if expected_outcome != "generated":
+                    raise RuntimeError(
+                        f"unsupported optimization outcome: {expected_outcome!r}"
+                    )
+                with _expected_editor_progress_dialog(context):
+                    click(dialog.run_btn)
+                    _wait_for_editor_progress_dialogs(context, QtTest, action_id)
+                _ensure_editor_deadline(context, action_id, "generated")
                 if dialog._design_optimization_dirty:
                     raise RuntimeError("generated design remained dirty")
                 reaction_count = int(dialog.model.get_number_of_reactions())
-                if reaction_count != int(experiment["replicates"]):
+                expected_reaction_count = int(
+                    experiment.get("expected_reaction_count", experiment["replicates"])
+                )
+                if reaction_count != expected_reaction_count:
                     raise RuntimeError(
-                        "generated reaction count did not match replicates"
+                        "generated reaction count did not match expected cardinality"
                     )
-                return {
+                generated = {
+                    "allow_two_stock_solutions": expected_allow_two,
+                    "expected_outcome": expected_outcome,
+                    "observed_outcome": "generated",
                     "reaction_count": reaction_count,
                     "stock_row_count": dialog.stock_table.rowCount(),
+                    "stock_table_rows": stock_table_rows(),
                     "status": dialog.status_lbl.text(),
+                    "dirty_after": False,
                 }
+                state["generated"] = generated
+                return generated
 
-            execute_action(
-                context,
-                "editor.optimize_generate_via_ui",
-                generate,
+            observed_attempts: list[dict[str, Any]] = []
+            attempted_before_finalize = (
+                []
+                if expected_terminal == "formulation_rejected"
+                else optimization_attempts
             )
-            capture_milestone(
-                context,
-                "generated",
-                evidence={
-                    "reaction_count": dialog.model.get_number_of_reactions()
-                },
-                widget=dialog,
-            )
+            for attempt_index, attempt in enumerate(attempted_before_finalize):
+                action_id = (
+                    "editor.optimize_generate_via_ui"
+                    if attempt_index == 0
+                    else "editor.regenerate_prepared_design_via_ui"
+                )
+                action_result = run_action(
+                    action_id,
+                    lambda attempt=attempt, action_id=action_id: run_optimization_attempt(
+                        attempt,
+                        action_id=action_id,
+                    ),
+                    allowed_dialogs=(dialog,),
+                )
+                observed_attempts.append(
+                    dict(action_result.get("evidence") or action_result)
+                )
+            state["optimization_attempts"] = observed_attempts
+            if expected_terminal == "optimization_rejected":
+                if (
+                    not observed_attempts
+                    or observed_attempts[-1].get("observed_outcome") != "rejected"
+                ):
+                    raise RuntimeError(
+                        "optimization-rejection scenario did not stop rejected"
+                    )
+                state["finalization_rejection"] = dict(observed_attempts[-1])
+                dialog.reject()
+                context.app.processEvents()
+                state["finished"] = True
+                return
+            if expected_terminal != "formulation_rejected" and (
+                not observed_attempts
+                or observed_attempts[-1].get("observed_outcome")
+                != "generated"
+            ):
+                raise RuntimeError("editor sequence did not end with generation")
+            if observed_attempts and capture_editor_milestones:
+                capture_milestone(
+                    context,
+                    "generated",
+                    evidence={
+                        "reaction_count": dialog.model.get_number_of_reactions()
+                    },
+                    widget=dialog,
+                )
+
+            mutation = specification.get("pre_finalize_mutation")
+            if mutation:
+                if "printed_volume_nL" in mutation:
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog.v_spin,
+                        mutation["printed_volume_nL"],
+                    )
+                if "final_volume_nL" in mutation:
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog.final_v_spin,
+                        mutation["final_volume_nL"],
+                    )
+                _ensure_editor_deadline(
+                    context, "editor.configure_design_via_ui", "mutated"
+                )
+                state["pre_finalize_mutation"] = {
+                    "printed_volume_nL": float(dialog.v_spin.value()),
+                    "final_volume_nL": float(dialog.final_v_spin.value()),
+                    "dirty": bool(dialog._design_optimization_dirty),
+                }
 
             def finish() -> Mapping[str, Any]:
                 action_label = str(dialog.finish_btn.text() or "")
-                if action_label != "Finalize Design":
+                if action_label != "Finalize Experiment":
                     raise RuntimeError(
                         f"editable design exposed {action_label!r}; "
-                        "expected 'Finalize Design'"
+                        "expected 'Finalize Experiment'"
                     )
                 click(dialog.finish_btn)
                 _ensure_editor_deadline(
@@ -1653,15 +3441,290 @@ def drive_editor_create_finalize(
                 )
                 if dialog.result() != QtWidgets.QDialog.DialogCode.Accepted:
                     raise RuntimeError(
-                        "editor did not accept after Finalize Design"
+                        "editor did not accept after Finalize Experiment"
                     )
                 return {
                     "dialog_result": int(dialog.result()),
                     "apply_requested": bool(dialog._apply_requested),
                     "action_label": action_label,
+                    "observed_outcome": "prepared",
                 }
 
-            execute_action(context, "editor.finish_via_ui", finish)
+            def reject_finalization() -> Mapping[str, Any]:
+                expected_title = str(expected.get("dialog_title") or "")
+                expected_message = str(expected.get("message") or "")
+                expected_fragments = tuple(
+                    str(value)
+                    for value in expected.get("message_fragments", ())
+                )
+                if not expected_title or not (expected_message or expected_fragments):
+                    raise RuntimeError(
+                        "rejected finalization requires warning truth"
+                    )
+                action_label = str(dialog.finish_btn.text() or "")
+                if action_label != "Finalize Experiment":
+                    raise RuntimeError(
+                        f"editable design exposed {action_label!r}; "
+                        "expected 'Finalize Experiment'"
+                    )
+                if not dialog.finish_btn.isEnabled():
+                    raise RuntimeError("Finalize Experiment was not visibly actionable")
+
+                before = rejected_finalization_guard_state()
+                dialog_before = {
+                    "visible": bool(dialog.isVisible()),
+                    "result": int(dialog.result()),
+                    "apply_requested": bool(dialog._apply_requested),
+                    "dirty": bool(dialog._design_optimization_dirty),
+                }
+                activations: list[bool] = []
+                warning: dict[str, Any] = {
+                    "entered": False,
+                    "title": None,
+                    "text": None,
+                    "dismissed": False,
+                    "screenshot_captured": False,
+                    "error": None,
+                }
+
+                def record_activation(checked: bool = False) -> None:
+                    activations.append(bool(checked))
+
+                def dismiss_warning() -> None:
+                    if warning["entered"]:
+                        return
+                    active_warning = context.app.activeModalWidget()
+                    if (
+                        active_warning is None
+                        or active_warning is dialog
+                        or isinstance(active_warning, QtWidgets.QProgressDialog)
+                    ):
+                        return
+                    warning["entered"] = True
+                    warning["title"] = active_warning.windowTitle()
+                    try:
+                        if not isinstance(active_warning, QtWidgets.QMessageBox):
+                            raise RuntimeError(
+                                "expected finalization rejection did not open "
+                                "a QMessageBox"
+                            )
+                        warning["text"] = " ".join(
+                            part
+                            for part in (
+                                active_warning.text(),
+                                active_warning.informativeText(),
+                                active_warning.detailedText(),
+                            )
+                            if part
+                        )
+                        combined = str(warning["text"] or "").casefold()
+                        if warning["title"] != expected_title or any(
+                            fragment.casefold() not in combined
+                            for fragment in expected_fragments
+                        ):
+                            raise RuntimeError(
+                                "finalization rejection warning did not match: "
+                                f"title={warning['title']!r}, "
+                                f"text={warning['text']!r}"
+                            )
+                        if expected_message and warning["text"] != expected_message:
+                            raise RuntimeError(
+                                "finalization rejection warning text did not match "
+                                f"exactly: expected={expected_message!r}, "
+                                f"observed={warning['text']!r}"
+                            )
+                        if capture_editor_milestones:
+                            capture_milestone(
+                                context,
+                                "finalization_rejected",
+                                evidence={
+                                    "title": warning["title"],
+                                    "text": warning["text"],
+                                    "terminal": expected_terminal,
+                                },
+                                widget=active_warning,
+                            )
+                            warning["screenshot_captured"] = True
+                        ok_button = active_warning.button(
+                            QtWidgets.QMessageBox.StandardButton.Ok
+                        )
+                        if ok_button is None or not ok_button.isEnabled():
+                            raise RuntimeError(
+                                "finalization rejection has no enabled OK button"
+                            )
+                        QtTest.QTest.mouseClick(
+                            ok_button, QtCore.Qt.MouseButton.LeftButton
+                        )
+                        warning["dismissed"] = True
+                    except BaseException as exc:
+                        warning["error"] = exc
+                        if (
+                            isinstance(active_warning, QtWidgets.QDialog)
+                            and active_warning.isVisible()
+                        ):
+                            active_warning.reject()
+
+                warning_timer = QtCore.QTimer(context.app)
+                warning_timer.setInterval(5)
+                warning_timer.timeout.connect(dismiss_warning)
+                dialog.finish_btn.clicked.connect(record_activation)
+                warning_timer.start()
+                try:
+                    with _expected_editor_message_dialog(
+                        context, title=expected_title
+                    ), _expected_editor_progress_dialog(context):
+                        click(dialog.finish_btn)
+                        _wait_for_editor_progress_dialogs(
+                            context,
+                            QtTest,
+                            "editor.finish_via_ui",
+                        )
+                finally:
+                    warning_timer.stop()
+                    warning_timer.deleteLater()
+                    dialog.finish_btn.clicked.disconnect(record_activation)
+                if warning["error"] is not None:
+                    raise warning["error"]
+
+                after = rejected_finalization_guard_state()
+                status = str(dialog.status_lbl.text() or "")
+                issue_codes = sorted(
+                    {
+                        str(issue.get("code") or "")
+                        for issues in (
+                            getattr(dialog, "_last_optimization_result", {})
+                            or {}
+                        ).get("issues_by_key", {}).values()
+                        for issue in (issues or [])
+                        if str(issue.get("code") or "")
+                    }
+                )
+                observed_code = str(expected.get("code") or "")
+                if issue_codes:
+                    observed_code = (
+                        observed_code
+                        if observed_code in issue_codes
+                        else issue_codes[0]
+                    )
+                dialog_after = {
+                    "visible": bool(dialog.isVisible()),
+                    "result": int(dialog.result()),
+                    "apply_requested": bool(dialog._apply_requested),
+                    "dirty": bool(dialog._design_optimization_dirty),
+                }
+                required_absent_names = {
+                    "execution_plan.json",
+                    "execution_plan_revisions",
+                    "key.csv",
+                    "concentration_key.csv",
+                    "execution_resume.json",
+                }
+                required_artifacts_absent = all(
+                    not bool(before["execution_artifacts"][name]["exists"])
+                    and not bool(after["execution_artifacts"][name]["exists"])
+                    for name in required_absent_names
+                )
+                progress_unchanged = (
+                    before["execution_artifacts"]["progress.json"]
+                    == after["execution_artifacts"]["progress.json"]
+                )
+                zero_dispatch_keys = (
+                    "intent_begin_count",
+                    "intent_attachment_count",
+                    "intent_completion_count",
+                    "simulator_dispense_count",
+                    "simulator_command_event_count",
+                )
+                safety_checks = {
+                    "one_finalize_activation": len(activations) == 1,
+                    "warning_entered": bool(warning["entered"]),
+                    "warning_dismissed": bool(warning["dismissed"]),
+                    "warning_title_exact": warning["title"] == expected_title,
+                    "screenshot_contract": bool(warning["screenshot_captured"])
+                    == bool(capture_editor_milestones),
+                    "guard_state_unchanged": before == after,
+                    "required_execution_artifacts_absent": (
+                        required_artifacts_absent
+                    ),
+                    "draft_progress_unchanged": progress_unchanged,
+                    "dialog_visible": dialog_after["visible"],
+                    "dialog_unaccepted": dialog_after["result"]
+                    != int(QtWidgets.QDialog.DialogCode.Accepted),
+                    "apply_not_requested": not dialog_after["apply_requested"],
+                    "runtime_inactive": not after["runtime_active"],
+                    "runtime_assignments_empty": after["runtime_assignments"]
+                    == {},
+                    "controller_idle": after["array_state"] == "idle",
+                    "zero_dispatch": all(
+                        before[key] == after[key] == 0
+                        for key in zero_dispatch_keys
+                    ),
+                }
+                safe = all(safety_checks.values())
+                evidence = {
+                    "expected_terminal": expected_terminal,
+                    "observed_outcome": "rejected",
+                    "reaction_count_after": int(
+                        dialog.model.get_number_of_reactions()
+                    ),
+                    "activation_count": len(activations),
+                    "action_label": action_label,
+                    "warning": {
+                        key: value
+                        for key, value in warning.items()
+                        if key != "error"
+                    },
+                    "expected_message_fragments": list(expected_fragments),
+                    "expected_message": expected_message,
+                    "observed_code": observed_code,
+                    "issue_codes": issue_codes,
+                    "status": status,
+                    "dialog_before": dialog_before,
+                    "dialog_after": dialog_after,
+                    "before": before,
+                    "after": after,
+                    "directory_unchanged": (
+                        before["directory_inventory"]
+                        == after["directory_inventory"]
+                    ),
+                    "required_execution_artifacts_absent": (
+                        required_artifacts_absent
+                    ),
+                    "draft_progress_unchanged": progress_unchanged,
+                    "authoritative_execution_artifacts_unchanged": (
+                        before["execution_artifacts"]
+                        == after["execution_artifacts"]
+                    ),
+                    "safe": safe,
+                    "safety_checks": safety_checks,
+                }
+                if not safe:
+                    raise RuntimeError(
+                        "rejected finalization did not preserve the safe boundary: "
+                        + ", ".join(
+                            name
+                            for name, passed in safety_checks.items()
+                            if not passed
+                        )
+                    )
+                return evidence
+
+            if expected_terminal == "prepared":
+                finish_result = run_action("editor.finish_via_ui", finish)
+                state["finalization"] = dict(
+                    finish_result.get("evidence") or finish_result
+                )
+            else:
+                finish_result = run_action(
+                    "editor.finish_via_ui",
+                    reject_finalization,
+                    allowed_dialogs=(dialog,),
+                )
+                state["finalization_rejection"] = dict(
+                    finish_result.get("evidence") or finish_result
+                )
+                dialog.reject()
+                context.app.processEvents()
             state["finished"] = True
         except BaseException as exc:
             state["error"] = exc
@@ -1691,7 +3754,18 @@ def drive_editor_create_finalize(
         )
     return {
         "dialog_type": type(state["dialog"]).__name__,
-        "finalized": True,
+        "terminal": expected_terminal,
+        "finalized": expected_terminal == "prepared",
+        "configured": dict(state["configured"]),
+        "generated": dict(state.get("generated") or {}),
+        "optimization_attempts": list(state["optimization_attempts"]),
+        "pre_finalize_mutation": dict(
+            state.get("pre_finalize_mutation") or {}
+        ),
+        "finalization": dict(state.get("finalization") or {}),
+        "finalization_rejection": dict(
+            state.get("finalization_rejection") or {}
+        ),
     }
 
 
@@ -1702,6 +3776,8 @@ def drive_editor_prestart_rename_refinalize(
     renamed_name: str,
     experiment: Mapping[str, Any],
     reagent: Mapping[str, Any],
+    action_runner: Callable[..., dict[str, Any]] | None = None,
+    capture_milestones: bool = True,
 ) -> dict[str, Any]:
     """Reopen and materially revise a prepared design through real Qt controls."""
 
@@ -1730,6 +3806,30 @@ def drive_editor_prestart_rename_refinalize(
     }
     driver_timer = QtCore.QTimer(context.app)
     driver_timer.setInterval(5)
+
+    def run_action(
+        action_id: str,
+        operation: Callable[[], Mapping[str, Any] | None],
+        *,
+        precondition: Callable[
+            [], tuple[bool, str, Mapping[str, Any] | None]
+        ]
+        | None = None,
+        allowed_dialogs: tuple[Any, ...] = (),
+    ) -> dict[str, Any]:
+        if action_runner is not None:
+            return action_runner(
+                action_id,
+                operation,
+                precondition=precondition,
+                allowed_dialogs=allowed_dialogs,
+            )
+        return execute_action(
+            context,
+            action_id,
+            operation,
+            precondition=precondition,
+        )
 
     def click(widget: Any) -> None:
         QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
@@ -1828,10 +3928,11 @@ def drive_editor_prestart_rename_refinalize(
                     active.reject()
 
         QtCore.QTimer.singleShot(0, drive_selection)
-        QtTest.QTest.mouseClick(
-            dialog.well_selection_btn,
-            QtCore.Qt.MouseButton.LeftButton,
-        )
+        with _expected_editor_well_selection_dialog(context):
+            QtTest.QTest.mouseClick(
+                dialog.well_selection_btn,
+                QtCore.Qt.MouseButton.LeftButton,
+            )
         if selection_state["error"] is not None:
             raise selection_state["error"]
         if not selection_state["entered"]:
@@ -1856,8 +3957,7 @@ def drive_editor_prestart_rename_refinalize(
                 title = active.windowTitle() if active is not None else None
                 if isinstance(active, QtWidgets.QDialog):
                     active.reject()
-                execute_action(
-                    context,
+                run_action(
                     "editor.open_via_ui",
                     lambda: {},
                     precondition=lambda: (
@@ -1875,8 +3975,7 @@ def drive_editor_prestart_rename_refinalize(
                 )
             dialog = active
             state["dialog"] = dialog
-            execute_action(
-                context,
+            run_action(
                 "editor.open_via_ui",
                 lambda: {
                     "dialog_type": type(dialog).__name__,
@@ -1884,19 +3983,21 @@ def drive_editor_prestart_rename_refinalize(
                     "prepared_reopen": True,
                     "action_label": str(dialog.finish_btn.text() or ""),
                 },
+                allowed_dialogs=(dialog,),
             )
-            capture_milestone(
-                context,
-                "rename_editor_opened",
-                evidence={
-                    "experiment_name": dialog.exp_name_edit.text(),
-                    "editable": (
-                        dialog.exp_name_edit.isEnabled()
-                        and not dialog.exp_name_edit.isReadOnly()
-                    ),
-                },
-                widget=dialog,
-            )
+            if capture_milestones:
+                capture_milestone(
+                    context,
+                    "rename_editor_opened",
+                    evidence={
+                        "experiment_name": dialog.exp_name_edit.text(),
+                        "editable": (
+                            dialog.exp_name_edit.isEnabled()
+                            and not dialog.exp_name_edit.isReadOnly()
+                        ),
+                    },
+                    widget=dialog,
+                )
 
             def rename() -> Mapping[str, Any]:
                 _ensure_editor_deadline(
@@ -1913,9 +4014,9 @@ def drive_editor_prestart_rename_refinalize(
                     raise RuntimeError(
                         "prepared editor did not reopen with the initial name"
                     )
-                if dialog.finish_btn.text() != "Finalize Design":
+                if dialog.finish_btn.text() != "Finalize Experiment":
                     raise RuntimeError(
-                        "prepared design did not expose Finalize Design before edits"
+                        "prepared design did not expose Finalize Experiment before edits"
                     )
                 if dialog.auto_update_chk.isChecked():
                     toggle_checkbox(dialog.auto_update_chk)
@@ -1949,21 +4050,22 @@ def drive_editor_prestart_rename_refinalize(
                     "action_label": str(dialog.finish_btn.text() or ""),
                 }
 
-            execute_action(
-                context,
+            run_action(
                 "editor.rename_prepared_via_ui",
                 rename,
+                allowed_dialogs=(dialog,),
             )
-            capture_milestone(
-                context,
-                "renamed",
-                evidence={
-                    "initial_name": initial_name,
-                    "renamed_name": renamed_name,
-                    "non_name_controls_unchanged": True,
-                },
-                widget=dialog,
-            )
+            if capture_milestones:
+                capture_milestone(
+                    context,
+                    "renamed",
+                    evidence={
+                        "initial_name": initial_name,
+                        "renamed_name": renamed_name,
+                        "non_name_controls_unchanged": True,
+                    },
+                    widget=dialog,
+                )
 
             def edit_prepared_design() -> Mapping[str, Any]:
                 _ensure_editor_deadline(
@@ -2052,20 +4154,27 @@ def drive_editor_prestart_rename_refinalize(
                     ).value(),
                 }
 
-            edit_evidence = execute_action(
-                context,
+            edit_evidence = run_action(
                 "editor.edit_prepared_design_via_ui",
                 edit_prepared_design,
+                allowed_dialogs=(dialog,),
             )
-            capture_milestone(
-                context,
-                "prepared_design_edited",
-                evidence=edit_evidence,
-                widget=dialog,
-            )
+            if capture_milestones:
+                capture_milestone(
+                    context,
+                    "prepared_design_edited",
+                    evidence=edit_evidence,
+                    widget=dialog,
+                )
 
             def regenerate() -> Mapping[str, Any]:
-                click(dialog.run_btn)
+                with _expected_editor_progress_dialog(context):
+                    click(dialog.run_btn)
+                    _wait_for_editor_progress_dialogs(
+                        context,
+                        QtTest,
+                        "editor.regenerate_prepared_design_via_ui",
+                    )
                 _ensure_editor_deadline(
                     context,
                     "editor.regenerate_prepared_design_via_ui",
@@ -2088,23 +4197,24 @@ def drive_editor_prestart_rename_refinalize(
                     "status": dialog.status_lbl.text(),
                 }
 
-            regeneration_evidence = execute_action(
-                context,
+            regeneration_evidence = run_action(
                 "editor.regenerate_prepared_design_via_ui",
                 regenerate,
+                allowed_dialogs=(dialog,),
             )
-            capture_milestone(
-                context,
-                "regenerated",
-                evidence=regeneration_evidence,
-                widget=dialog,
-            )
+            if capture_milestones:
+                capture_milestone(
+                    context,
+                    "regenerated",
+                    evidence=regeneration_evidence,
+                    widget=dialog,
+                )
 
             def refinalize() -> Mapping[str, Any]:
                 action_label = str(dialog.finish_btn.text() or "")
-                if action_label != "Finalize Design":
+                if action_label != "Finalize Experiment":
                     raise RuntimeError(
-                        "prepared design did not retain Finalize Design after edits"
+                        "prepared design did not retain Finalize Experiment after edits"
                     )
                 click(dialog.finish_btn)
                 _ensure_editor_deadline(
@@ -2114,7 +4224,7 @@ def drive_editor_prestart_rename_refinalize(
                 )
                 if dialog.result() != QtWidgets.QDialog.DialogCode.Accepted:
                     raise RuntimeError(
-                        "prepared editor did not accept after Finalize Design"
+                        "prepared editor did not accept after Finalize Experiment"
                     )
                 return {
                     "dialog_result": int(dialog.result()),
@@ -2125,17 +4235,17 @@ def drive_editor_prestart_rename_refinalize(
                     ),
                 }
 
-            execute_action(
-                context,
+            run_action(
                 "editor.refinalize_prepared_via_ui",
                 refinalize,
             )
-            capture_milestone(
-                context,
-                "refinalized",
-                evidence={"experiment_name": renamed_name},
-                widget=dialog,
-            )
+            if capture_milestones:
+                capture_milestone(
+                    context,
+                    "refinalized",
+                    evidence={"experiment_name": renamed_name},
+                    widget=dialog,
+                )
             state["finished"] = True
         except BaseException as exc:
             state["error"] = exc
@@ -2178,457 +4288,42 @@ def drive_editor_prestart_rename_refinalize(
     }
 
 
-def activate_authoritative_execution(
-    context: ScenarioContext,
-    operation: Callable[[], Mapping[str, Any]],
-) -> dict[str, Any]:
-    """Activate a prepared authoritative execution without starting printing."""
-
-    return execute_action(
-        context,
-        "experiment.activate_authoritative",
-        operation,
-    )
-
-
-def drive_authoritative_reload_via_editor(
+def drive_editor_prepared_sequence(
     context: ScenarioContext,
     *,
-    experiment_dir: Path,
-    expected_name: str,
-    before_activation: Callable[[], Mapping[str, Any]] | None = None,
-    after_activation: Callable[[], Mapping[str, Any]] | None = None,
+    initial_name: str,
+    renamed_name: str,
+    experiment: Mapping[str, Any],
+    reagent: Mapping[str, Any],
+    sequence_steps: Sequence[Mapping[str, Any]],
+    intermediate_tolerance_nl: float,
+    action_runner: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Load and activate a paused execution through the real modal editor."""
-
-    if context.app is None or context.qt_core is None or context.view is None:
-        raise RuntimeError("authoritative reload requires a launched Qt application")
-
-    from PySide6 import QtTest, QtWidgets
-    from View import ExperimentDesignDialog
-
-    QtCore = context.qt_core
-    button = context.view.well_plate_widget.design_experiment_button
-    state: dict[str, Any] = {
-        "stage": "open_editor",
-        "dialog": None,
-        "error": None,
-        "loaded": None,
-        "activated": None,
-    }
-    driver_timer = QtCore.QTimer(context.app)
-    driver_timer.setInterval(5)
-
-    def click(widget: Any) -> None:
-        QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
-        context.app.processEvents()
-
-    def fail(exc: BaseException, modal: Any = None) -> None:
-        state["error"] = exc
-        state["stage"] = "failed"
-        driver_timer.stop()
-        dialog = state.get("dialog")
-        if (
-            isinstance(dialog, QtWidgets.QDialog)
-            and dialog.isVisible()
-            and "session_2_load_failed" not in context.screenshots
-        ):
-            try:
-                capture_milestone(
-                    context,
-                    "session_2_load_failed",
-                    evidence={
-                        "failure_type": type(exc).__name__,
-                        "failure_message": str(exc),
-                    },
-                    widget=dialog,
-                )
-            except Exception:
-                pass
-        if isinstance(modal, QtWidgets.QDialog) and modal.isVisible():
-            modal.reject()
-        if isinstance(dialog, QtWidgets.QDialog) and dialog.isVisible():
-            dialog.reject()
-
-    def drive_folder_modal() -> None:
-        modal = context.app.activeModalWidget()
-        try:
-            if modal is None or modal is state["dialog"]:
-                return
-            if not isinstance(modal, QtWidgets.QFileDialog):
-                raise RuntimeError(
-                    "unexpected modal while selecting authoritative folder: "
-                    f"{type(modal).__name__} {modal.windowTitle()!r}"
-                )
-            if modal.windowTitle() != "Select Experiment Folder":
-                raise RuntimeError(
-                    f"unexpected file dialog title: {modal.windowTitle()!r}"
-                )
-            modal.setDirectory(str(Path(experiment_dir).resolve()))
-            context.app.processEvents()
-            button_box = modal.findChild(QtWidgets.QDialogButtonBox)
-            accept = None
-            if button_box is not None:
-                accept = button_box.button(QtWidgets.QDialogButtonBox.Open)
-                if accept is None:
-                    accept = button_box.button(QtWidgets.QDialogButtonBox.Ok)
-            if accept is None:
-                raise RuntimeError("folder dialog has no accept button")
-            state["stage"] = "validate_loaded"
-            click(accept)
-        except BaseException as exc:
-            fail(exc, modal)
-
-    def inspect() -> None:
-        modal = context.app.activeModalWidget()
-        try:
-            if context.deadline.remaining_seconds() <= 0:
-                raise ScenarioActionError(
-                    "experiment.load_authoritative_via_ui",
-                    "scenario deadline expired during modal reload",
-                    stage="timeout",
-                    evidence={
-                        "stage": state["stage"],
-                        "modal_type": (
-                            type(modal).__name__
-                            if modal is not None
-                            else None
-                        ),
-                        "modal_title": (
-                            modal.windowTitle()
-                            if modal is not None
-                            else None
-                        ),
-                    },
-                )
-            if state["stage"] == "open_editor":
-                if not isinstance(modal, ExperimentDesignDialog):
-                    if modal is None:
-                        return
-                    raise RuntimeError(
-                        "unexpected modal while opening authoritative editor: "
-                        f"{type(modal).__name__} {modal.windowTitle()!r}"
-                    )
-                state["dialog"] = modal
-                state["stage"] = "select_folder"
-                folder_timer = QtCore.QTimer(modal)
-                folder_timer.setInterval(5)
-                folder_timer.timeout.connect(drive_folder_modal)
-                folder_timer.start()
-                try:
-                    click(modal.load_btn)
-                finally:
-                    folder_timer.stop()
-                    folder_timer.deleteLater()
-                if state["error"] is not None:
-                    raise state["error"]
-                return
-
-            if state["stage"] == "select_folder":
-                return
-
-            if state["stage"] == "validate_loaded":
-                dialog = state["dialog"]
-                if modal is not dialog or not dialog.isVisible():
-                    return
-
-                def validate_loaded() -> Mapping[str, Any]:
-                    import json
-                    from ExecutionPlan import canonical_sha256
-
-                    eligibility = (
-                        context.experiment_model.get_execution_resume_eligibility()
-                    )
-                    runtime_active = bool(
-                        context.experiment_model.is_authoritative_execution_runtime_active()
-                    )
-                    status_text = str(dialog.status_lbl.text() or "")
-                    banner_text = str(
-                        dialog.lifecycle_banner.text() or ""
-                    )
-                    checks = {
-                        "name_matches": dialog.exp_name_edit.text() == expected_name,
-                        "action_is_load_execution": dialog.finish_btn.text()
-                        == "Load Execution",
-                        "finish_enabled": bool(dialog.finish_btn.isEnabled()),
-                        "eligibility_ready_to_resume": eligibility.get("status")
-                        == "ready_to_resume",
-                        "runtime_inactive": not runtime_active,
-                        "read_only_guidance": (
-                            "execution plan validated" in status_text.casefold()
-                            and "load execution" in status_text.casefold()
-                        ),
-                        "visible_lock_banner": (
-                            not dialog.lifecycle_banner.isHidden()
-                            and "load execution" in banner_text.casefold()
-                            and "without starting or resuming printing"
-                            in banner_text.casefold()
-                        ),
-                    }
-                    loaded_path = Path(
-                        context.experiment_model.experiment_file_path
-                    )
-                    with loaded_path.open("r", encoding="utf-8") as handle:
-                        disk_payload = json.load(handle)
-                    design_identity = {
-                        "experiment_dir_path": str(
-                            context.experiment_model.experiment_dir_path
-                        ),
-                        "experiment_file_path": str(loaded_path),
-                        "disk_design_sha256": canonical_sha256(disk_payload),
-                        "model_design_sha256": canonical_sha256(
-                            context.experiment_model.to_dict()
-                        ),
-                        "plan_design_sha256": (
-                            context.experiment_model
-                            .get_execution_plan_snapshot()
-                            .design_sha256
-                        ),
-                    }
-                    if not all(checks.values()):
-                        raise ScenarioActionError(
-                            "experiment.load_authoritative_via_ui",
-                            "loaded authoritative editor state is invalid",
-                            stage="operation",
-                            evidence={
-                                "checks": checks,
-                                "eligibility": eligibility,
-                                "status_text": status_text,
-                                "banner_text": banner_text,
-                                "action_label": dialog.finish_btn.text(),
-                                "design_identity": design_identity,
-                            },
-                        )
-                    boundary = (
-                        dict(before_activation())
-                        if before_activation is not None
-                        else {}
-                    )
-                    return {
-                        "checks": checks,
-                        "eligibility": eligibility,
-                        "status_text": status_text,
-                        "banner_text": banner_text,
-                        "action_label": str(dialog.finish_btn.text() or ""),
-                        "design_identity": design_identity,
-                        "experiment_dir": str(Path(experiment_dir).resolve()),
-                        "reload_boundary": boundary,
-                    }
-
-                result = execute_action(
-                    context,
-                    "experiment.load_authoritative_via_ui",
-                    validate_loaded,
-                )
-                state["loaded"] = dict(result["evidence"])
-                capture_milestone(
-                    context,
-                    "session_2_loaded",
-                    evidence=state["loaded"],
-                    widget=dialog,
-                )
-                state["stage"] = "activate"
-                return
-
-            if state["stage"] == "activate":
-                dialog = state["dialog"]
-
-                def activate() -> Mapping[str, Any]:
-                    if dialog.finish_btn.text() != "Load Execution":
-                        raise RuntimeError(
-                            "saved runtime did not expose Load Execution"
-                        )
-                    click(dialog.finish_btn)
-                    if dialog.isVisible():
-                        raise RuntimeError(
-                            "Load Execution did not close the editor"
-                        )
-                    eligibility = (
-                        context.experiment_model.get_execution_resume_eligibility()
-                    )
-                    runtime_active = bool(
-                        context.experiment_model.is_authoritative_execution_runtime_active()
-                    )
-                    array_state = context.controller.get_array_run_state()
-                    if (
-                        not runtime_active
-                        or eligibility.get("status") != "ready_to_resume"
-                        or array_state != "resume_ready"
-                    ):
-                        raise RuntimeError(
-                            "authoritative activation did not restore resume_ready"
-                        )
-                    boundary = (
-                        dict(after_activation())
-                        if after_activation is not None
-                        else {}
-                    )
-                    return {
-                        "eligibility": eligibility,
-                        "runtime_active": runtime_active,
-                        "array_state": array_state,
-                        "action_label": "Load Execution",
-                        "reload_boundary": boundary,
-                    }
-
-                result = execute_action(
-                    context,
-                    "experiment.activate_authoritative_via_ui",
-                    activate,
-                )
-                state["activated"] = dict(result["evidence"])
-                state["stage"] = "finished"
-                driver_timer.stop()
-        except BaseException as exc:
-            fail(exc, modal)
-
-    driver_timer.timeout.connect(inspect)
-    driver_timer.start()
-    try:
-        click(button)
-    finally:
-        driver_timer.stop()
-        driver_timer.deleteLater()
-    if state["error"] is not None:
-        raise state["error"]
-    if state["stage"] != "finished":
-        raise ScenarioActionError(
-            "experiment.activate_authoritative_via_ui",
-            "authoritative editor workflow did not finish",
-            stage="timeout",
-            evidence={"stage": state["stage"]},
-        )
-    return {
-        "loaded": state["loaded"],
-        "activated": state["activated"],
-    }
-
-
-def validate_reload_boundary(
-    context: ScenarioContext,
-    operation: Callable[[], Mapping[str, Any]],
-) -> dict[str, Any]:
-    return execute_action(context, "validation.reload_boundary", operation)
-
-
-def lock_execution_for_printing(
-    context: ScenarioContext,
-    operation: Callable[[], Mapping[str, Any]],
-) -> dict[str, Any]:
-    """Cross the durable printing-start lock boundary without a print command."""
-
-    return execute_action(
-        context,
-        "execution.lock_for_printing",
-        operation,
-    )
-
-
-def inspect_editor_lock_controls(dialog: Any) -> dict[str, Any]:
-    """Return the post-start editor control matrix used by the SIL boundary."""
-
-    from PySide6 import QtWidgets
-
-    def state(widget: Any) -> dict[str, Any]:
-        return {
-            "enabled": bool(widget.isEnabled()),
-            "read_only": (
-                bool(widget.isReadOnly())
-                if hasattr(widget, "isReadOnly")
-                else None
-            ),
-        }
-
-    controls = {
-        name: state(getattr(dialog, name))
-        for name in (
-            "exp_name_edit",
-            "rep_spin",
-            "v_spin",
-            "final_v_spin",
-            "volume_tolerance_spin",
-            "plate_format_combo",
-            "well_selection_btn",
-            "add_reagent_btn",
-            "run_btn",
-            "save_btn",
-            "finish_btn",
-        )
-    }
-    reagent_controls: list[dict[str, Any]] = []
-    for row in range(dialog.reagent_table.rowCount()):
-        for column in range(dialog.reagent_table.columnCount()):
-            widget = dialog.reagent_table.cellWidget(row, column)
-            if widget is None or isinstance(widget, QtWidgets.QLabel):
-                continue
-            reagent_controls.append(
-                {
-                    "row": row,
-                    "column": column,
-                    **state(widget),
-                }
-            )
-    controls["reagent_table"] = {
-        "enabled": bool(dialog.reagent_table.isEnabled()),
-        "read_only": None,
-        "all_items_locked": all(
-            (not item["enabled"]) or item["read_only"] is True
-            for item in reagent_controls
-        ),
-        "items": reagent_controls,
-    }
-    locked = all(
-        (not item["enabled"]) or item["read_only"] is True
-        for name, item in controls.items()
-        if name != "reagent_table"
-    ) and all(
-        (not item["enabled"]) or item["read_only"] is True
-        for item in reagent_controls
-    )
-    status_text = str(dialog.status_lbl.text() or "")
-    banner = getattr(dialog, "lifecycle_banner", None)
-    banner_text = str(banner.text() or "") if banner is not None else ""
-    banner_visible = bool(banner is not None and not banner.isHidden())
-    guidance = (
-        banner_visible
-        and any(
-            word in banner_text.casefold() for word in ("locked", "read-only")
-        )
-        and "copy" in banner_text.casefold()
-    )
-    return {
-        "controls": controls,
-        "all_mutating_controls_locked": locked,
-        "editable_copy_enabled": bool(dialog.duplicate_btn.isEnabled()),
-        "status_text": status_text,
-        "banner_visible": banner_visible,
-        "banner_text": banner_text,
-        "action_label": str(dialog.finish_btn.text() or ""),
-        "actionable_lock_guidance": guidance,
-    }
-
-
-def drive_editor_post_start_lock_and_copy(
-    context: ScenarioContext,
-    *,
-    source_dir: Path,
-    source_name: str,
-    copy_name: str,
-    copy_tolerance_nl: float,
-) -> dict[str, Any]:
-    """Prove the active editor is locked, then create and finalize a copy."""
+    """Drive one validated ordered prepared-editor sequence through Qt."""
 
     if context.app is None or context.qt_core is None or context.view is None:
         raise RuntimeError("editor automation requires a launched Qt application")
+    normalized_steps = tuple(dict(step) for step in sequence_steps)
+    if not normalized_steps or normalized_steps[0].get("action_id") != "editor.open_via_ui":
+        raise ValueError("prepared-editor sequence must start with editor.open_via_ui")
+    if any(
+        step.get("action_id") == "experiment.load_authoritative_via_ui"
+        for step in normalized_steps
+    ):
+        raise ValueError("authoritative reload is outside the modal editor sequence")
 
     from PySide6 import QtTest, QtWidgets
-    from View import ExperimentDesignDialog
+    from View import ExperimentDesignDialog, ExperimentImportWizard, WellSelectionDialog
+
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+    )
 
     QtCore = context.qt_core
     button = context.view.well_plate_widget.design_experiment_button
     if not button.isEnabled():
         raise ScenarioActionError(
-            "editor.inspect_active_lock_via_ui",
+            "editor.open_via_ui",
             "Experiment Editor button is disabled",
             stage="precondition",
         )
@@ -2638,78 +4333,106 @@ def drive_editor_post_start_lock_and_copy(
         "finished": False,
         "error": None,
         "dialog": None,
-        "lock_matrix": {},
-        "copy_before_finalize": {},
-        "copy_name_dialog": {},
+        "configured": {},
+        "generated": {},
+        "observed_transitions": [],
+        "rejections": [],
+        "edit_count": 0,
+        "regeneration_count": 0,
     }
     driver_timer = QtCore.QTimer(context.app)
     driver_timer.setInterval(5)
+
+    def run_action(
+        action_id: str,
+        operation: Callable[[], Mapping[str, Any] | None],
+        *,
+        allowed_dialogs: tuple[Any, ...] = (),
+    ) -> dict[str, Any]:
+        if action_runner is not None:
+            return action_runner(
+                action_id,
+                operation,
+                allowed_dialogs=allowed_dialogs,
+            )
+        return execute_action(context, action_id, operation)
 
     def click(widget: Any) -> None:
         QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
         context.app.processEvents()
 
-    def drive_copy_modals() -> None:
-        modal = context.app.activeModalWidget()
-        try:
-            if modal is None or modal is state["dialog"]:
-                return
-            if isinstance(modal, QtWidgets.QFileDialog):
-                raise RuntimeError(
-                    "unexpected source QFileDialog while creating editable copy"
-                )
-            if isinstance(modal, QtWidgets.QInputDialog):
-                if modal.windowTitle() != "Duplicate Experiment Design":
+    def toggle_checkbox(widget: Any) -> None:
+        widget.setFocus()
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key.Key_Space)
+        context.app.processEvents()
+
+    def select_printable_wells(dialog: Any, well_ids: list[str]) -> None:
+        selection_state: dict[str, Any] = {"entered": False, "error": None}
+
+        def drive_selection() -> None:
+            selection_state["entered"] = True
+            active = context.app.activeModalWidget()
+            try:
+                if not isinstance(active, WellSelectionDialog):
+                    title = active.windowTitle() if active is not None else None
+                    if isinstance(active, QtWidgets.QDialog):
+                        active.reject()
                     raise RuntimeError(
-                        f"unexpected input dialog title: {modal.windowTitle()!r}"
+                        "unexpected printable-wells modal in prepared sequence: "
+                        f"{type(active).__name__ if active is not None else None} "
+                        f"{title!r}"
                     )
-                line_edit = modal.findChild(QtWidgets.QLineEdit)
-                if line_edit is None:
-                    raise RuntimeError("copy-name dialog has no text control")
-                state["copy_name_dialog"] = {
-                    "source_auto_selected": str(
-                        Path(
-                            state["dialog"].model.experiment_dir_path
-                        ).resolve()
-                    ),
-                    "source_label": str(modal.labelText() or ""),
-                    "dialog_width_px": int(modal.width()),
-                    "dialog_minimum_width_px": int(modal.minimumWidth()),
-                    "name_field_width_px": int(line_edit.width()),
-                    "name_field_minimum_width_px": int(
-                        line_edit.minimumWidth()
-                    ),
-                }
-                if (
-                    int(modal.width()) < 640
-                    or int(modal.minimumWidth()) < 640
-                    or int(line_edit.minimumWidth()) < 480
-                ):
-                    raise RuntimeError(
-                        "copy-name dialog did not meet the required width: "
-                        f"{state['copy_name_dialog']}"
+                click(active.clear_btn)
+                for well_id in well_ids:
+                    row_label = "".join(c for c in well_id if c.isalpha()).upper()
+                    column_text = "".join(c for c in well_id if c.isdigit())
+                    row = 0
+                    for character in row_label:
+                        row = row * 26 + (ord(character) - ord("A") + 1)
+                    QtTest.QTest.mouseClick(
+                        active.grid,
+                        QtCore.Qt.MouseButton.LeftButton,
+                        pos=active.grid._cell_rect(row - 1, int(column_text) - 1).center(),
                     )
-                _qt_replace_text(QtCore, QtTest, line_edit, copy_name)
-                button_box = modal.findChild(QtWidgets.QDialogButtonBox)
-                accept = (
-                    button_box.button(QtWidgets.QDialogButtonBox.Ok)
-                    if button_box is not None
-                    else None
-                )
-                if accept is None:
-                    raise RuntimeError("copy-name dialog has no OK button")
-                click(accept)
-                return
-            title = modal.windowTitle() if modal is not None else None
-            raise RuntimeError(
-                "unexpected modal while creating editable copy: "
-                f"{type(modal).__name__ if modal is not None else None} "
-                f"{title!r}"
+                if active.selected_well_ids() != well_ids:
+                    raise RuntimeError("printable-well selection did not match the plan")
+                click(active.ok_btn)
+            except BaseException as exc:
+                selection_state["error"] = exc
+                if isinstance(active, QtWidgets.QDialog) and active.isVisible():
+                    active.reject()
+
+        QtCore.QTimer.singleShot(0, drive_selection)
+        with _expected_editor_well_selection_dialog(context):
+            QtTest.QTest.mouseClick(
+                dialog.well_selection_btn,
+                QtCore.Qt.MouseButton.LeftButton,
             )
-        except BaseException as exc:
-            state["error"] = exc
-            if isinstance(modal, QtWidgets.QDialog) and modal.isVisible():
-                modal.reject()
+        if selection_state["error"] is not None:
+            raise selection_state["error"]
+        if not selection_state["entered"]:
+            raise RuntimeError("Printable Wells dialog did not open")
+        if list(dialog.model.get_auto_assignment_included_wells() or []) != well_ids:
+            raise RuntimeError("prepared editor retained the wrong printable wells")
+
+    def persisted_guard_state() -> dict[str, Any]:
+        snapshot = capture_authoritative_bundle(context)
+        return {
+            "experiment_dir": snapshot.experiment_dir,
+            "design_sha256": snapshot.design_sha256,
+            "plan_json": snapshot.plan_json,
+            "plan_revision": snapshot.plan_revision,
+            "plan_state": snapshot.plan_state,
+            "progress_plan_revision": snapshot.progress_plan_revision,
+            "audit_rows_json": snapshot.audit_rows_json,
+            "directory_hashes": dict(snapshot.directory.hashes),
+            "experiment_directories": list(snapshot.experiment_directories),
+            "staging_directories": list(snapshot.staging_directories),
+            "current_plan_paths": list(snapshot.current_plan_paths),
+            "runtime_active": snapshot.runtime_active,
+            "runtime_assignments": dict(snapshot.runtime_assignments),
+            "array_state": context.controller.get_array_run_state(),
+        }
 
     def run_driver() -> None:
         if state["entered"]:
@@ -2722,258 +4445,345 @@ def drive_editor_post_start_lock_and_copy(
                 title = active.windowTitle() if active is not None else None
                 if isinstance(active, QtWidgets.QDialog):
                     active.reject()
-                execute_action(
-                    context,
-                    "editor.inspect_active_lock_via_ui",
-                    lambda: {},
-                    precondition=lambda: (
-                        False,
-                        "unexpected active modal while opening locked editor",
-                        {
-                            "modal_type": (
-                                type(active).__name__
-                                if active is not None
-                                else None
-                            ),
-                            "modal_title": title,
-                        },
-                    ),
+                raise RuntimeError(
+                    "unexpected active modal while opening prepared sequence: "
+                    f"{type(active).__name__ if active is not None else None} {title!r}"
                 )
             dialog = active
             state["dialog"] = dialog
+            state["initial_final_volume_nL"] = float(dialog.final_v_spin.value())
 
-            def inspect_lock() -> Mapping[str, Any]:
-                _ensure_editor_deadline(
-                    context,
-                    "editor.inspect_active_lock_via_ui",
-                    "locked editor inspection",
+            def record(step: Mapping[str, Any], evidence: Mapping[str, Any]) -> None:
+                state["observed_transitions"].append(
+                    {
+                        "ordinal": int(step.get("ordinal", 0)),
+                        "action_id": str(step["action_id"]),
+                        "from_state": str(step["from_state"]),
+                        "to_state": str(step["to_state"]),
+                        "expected_outcome": str(step.get("expected_outcome", "accepted")),
+                        "observed_outcome": str(
+                            evidence.get("observed_outcome", "accepted")
+                        ),
+                        "edit_variant": step.get("edit_variant"),
+                    }
                 )
-                matrix = inspect_editor_lock_controls(dialog)
-                state["lock_matrix"] = matrix
-                if dialog.exp_name_edit.text() != source_name:
-                    raise RuntimeError(
-                        "locked editor did not load the source experiment"
-                    )
-                failed = [
-                    name
-                    for name, passed in (
-                        (
-                            "all_mutating_controls_locked",
-                            matrix["all_mutating_controls_locked"],
-                        ),
-                        (
-                            "editable_copy_enabled",
-                            matrix["editable_copy_enabled"],
-                        ),
-                        (
-                            "actionable_lock_guidance",
-                            matrix["actionable_lock_guidance"],
-                        ),
-                        (
-                            "visible_lock_banner",
-                            matrix["banner_visible"],
-                        ),
-                        (
-                            "execution_loaded_label",
-                            matrix["action_label"] == "Execution Loaded",
-                        ),
-                    )
-                    if not passed
-                ]
-                if failed:
-                    raise ScenarioActionError(
-                        "editor.inspect_active_lock_via_ui",
-                        "active zero-progress editor lock boundary failed: "
-                        + ", ".join(failed),
-                        stage="operation",
-                        evidence={
-                            "failed_checks": failed,
-                            "control_matrix": matrix,
-                        },
-                    )
-                return matrix
 
-            execute_action(
-                context,
-                "editor.inspect_active_lock_via_ui",
-                inspect_lock,
-            )
-            capture_milestone(
-                context,
-                "locked_editor_opened",
-                evidence=state["lock_matrix"],
-                widget=dialog,
-            )
-
-            def reject_in_place() -> Mapping[str, Any]:
-                name_before = dialog.exp_name_edit.text()
-                result_before = int(dialog.result())
-                _qt_replace_text(
-                    QtCore,
-                    QtTest,
-                    dialog.exp_name_edit,
-                    f"{source_name}-forbidden",
-                )
-                click(dialog.finish_btn)
-                if dialog.exp_name_edit.text() != name_before:
-                    raise RuntimeError("locked name control accepted an edit")
-                if int(dialog.result()) != result_before or not dialog.isVisible():
-                    raise RuntimeError(
-                        "disabled Execution Loaded action closed the locked editor"
-                    )
+            def rename() -> Mapping[str, Any]:
+                if not dialog.exp_name_edit.isEnabled() or dialog.exp_name_edit.isReadOnly():
+                    raise RuntimeError("prepared experiment name is not editable")
+                if dialog.auto_update_chk.isChecked():
+                    toggle_checkbox(dialog.auto_update_chk)
+                before_name = dialog.exp_name_edit.text()
+                _qt_replace_text(QtCore, QtTest, dialog.exp_name_edit, renamed_name)
+                QtTest.QTest.keyClick(dialog.exp_name_edit, QtCore.Qt.Key.Key_Tab)
+                context.app.processEvents()
+                if dialog.exp_name_edit.text() != renamed_name:
+                    raise RuntimeError("prepared experiment rename was not retained")
                 return {
-                    "name_unchanged": True,
-                    "finish_rejected": True,
+                    "before_name": before_name,
+                    "renamed_name": renamed_name,
+                    "dirty_after": bool(dialog._design_optimization_dirty),
+                    "observed_outcome": "accepted",
                 }
 
-            execute_action(
-                context,
-                "editor.reject_in_place_edit_via_ui",
-                reject_in_place,
-            )
-            capture_milestone(
-                context,
-                "in_place_edit_rejected",
-                evidence={"experiment_name": source_name},
-                widget=dialog,
-            )
-
-            copy_modal_timer = QtCore.QTimer(dialog)
-            copy_modal_timer.setInterval(5)
-            copy_modal_timer.timeout.connect(drive_copy_modals)
-
-            def create_copy() -> Mapping[str, Any]:
-                copy_modal_timer.start()
-                try:
-                    click(dialog.duplicate_btn)
-                finally:
-                    copy_modal_timer.stop()
-                    copy_modal_timer.deleteLater()
-                if state["error"] is not None:
-                    raise state["error"]
-                name_dialog_evidence = dict(state["copy_name_dialog"])
-                if not name_dialog_evidence:
-                    raise RuntimeError("copy-name dialog evidence was not captured")
-                if (
-                    Path(name_dialog_evidence["source_auto_selected"]).resolve()
-                    != source_dir.resolve()
-                    or source_name not in name_dialog_evidence["source_label"]
-                ):
-                    raise RuntimeError(
-                        "copy-name dialog did not identify the current source"
+            def edit(variant: str) -> Mapping[str, Any]:
+                def apply_final_values() -> None:
+                    _qt_set_spin_value(
+                        QtCore, QtTest, dialog.rep_spin,
+                        experiment["refinalized_replicates"],
                     )
-                expected_dir = (source_dir.parent / copy_name).resolve()
-                current_dir = Path(
-                    dialog.model.experiment_dir_path
-                ).resolve()
-                if current_dir != expected_dir:
-                    raise ScenarioActionError(
-                        "editor.create_editable_copy_via_ui",
-                        f"editable copy loaded {current_dir}; "
-                        f"expected {expected_dir}",
-                        stage="operation",
-                        evidence={
-                            "current_dir": str(current_dir),
-                            "expected_dir": str(expected_dir),
-                            "expected_dir_exists": expected_dir.is_dir(),
-                            "dialog_status": dialog.status_lbl.text(),
-                        },
+                    _qt_set_spin_value(
+                        QtCore, QtTest, dialog.v_spin,
+                        experiment["refinalized_printed_volume_nL"],
                     )
-                matrix = inspect_editor_lock_controls(dialog)
-                editable = (
-                    dialog.exp_name_edit.isEnabled()
-                    and not dialog.exp_name_edit.isReadOnly()
-                    and dialog.volume_tolerance_spin.isEnabled()
-                    and dialog.run_btn.isEnabled()
-                    and dialog.finish_btn.isEnabled()
-                    and dialog.finish_btn.text() == "Finalize Design"
-                )
-                if not editable:
-                    raise RuntimeError("editable copy controls remained locked")
-                state["copy_before_finalize"] = {
-                    "experiment_dir": str(current_dir),
-                    "experiment_name": dialog.exp_name_edit.text(),
-                    "destination": str(expected_dir),
-                    "source_auto_selected": str(source_dir.resolve()),
-                    "copy_name_dialog": dict(state["copy_name_dialog"]),
-                    "action_label": str(dialog.finish_btn.text() or ""),
-                    "controls_editable": editable,
-                    "control_matrix": matrix,
-                }
-                return state["copy_before_finalize"]
+                    _qt_set_spin_value(
+                        QtCore, QtTest, dialog.final_v_spin,
+                        experiment["refinalized_final_volume_nL"],
+                    )
+                    _qt_set_spin_value(
+                        QtCore, QtTest, dialog.volume_tolerance_spin, 0.0
+                    )
+                    select_printable_wells(
+                        dialog,
+                        list(experiment["refinalized_expected_well_ids"]),
+                    )
+                    _qt_select_combo_text(
+                        QtCore, QtTest, dialog.fill_mode_combo,
+                        experiment["refinalized_fill_printing_mode"],
+                    )
+                    _qt_set_spin_value(
+                        QtCore, QtTest, dialog.fill_dv_spin,
+                        experiment["refinalized_fill_droplet_volume_nL"],
+                    )
+                    if dialog._reagent_row_count() != 1:
+                        raise RuntimeError("prepared editor did not retain one reagent")
+                    row = 0
+                    _qt_select_combo_text(
+                        QtCore, QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_MODE),
+                        reagent["refinalized_printing_mode"],
+                    )
+                    _qt_replace_text(
+                        QtCore, QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_TARGETS),
+                        ", ".join(str(value) for value in reagent["refinalized_targets"]),
+                    )
+                    _qt_set_spin_value(
+                        QtCore, QtTest,
+                        dialog._reagent_cell_widget(row, dialog.COL_DROPLET),
+                        reagent["refinalized_droplet_volume_nL"],
+                    )
 
-            execute_action(
-                context,
-                "editor.create_editable_copy_via_ui",
-                create_copy,
-            )
-            capture_milestone(
-                context,
-                "editable_copy_created",
-                evidence=state["copy_before_finalize"],
-                widget=dialog,
-            )
-
-            def edit_copy() -> Mapping[str, Any]:
-                _qt_set_spin_value(
-                    QtCore,
-                    QtTest,
-                    dialog.volume_tolerance_spin,
-                    copy_tolerance_nl,
-                )
-                if not math.isclose(
-                    float(dialog.volume_tolerance_spin.value()),
-                    float(copy_tolerance_nl),
-                    rel_tol=0.0,
-                    abs_tol=1e-9,
-                ):
-                    raise RuntimeError("copy tolerance edit was not retained")
-                click(dialog.run_btn)
-                if dialog._design_optimization_dirty:
-                    raise RuntimeError("copy design remained dirty")
+                if variant in {"intermediate", "intermediate_invalid"}:
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog.volume_tolerance_spin,
+                        intermediate_tolerance_nl,
+                    )
+                    if variant == "intermediate_invalid":
+                        _qt_set_spin_value(
+                            QtCore,
+                            QtTest,
+                            dialog.final_v_spin,
+                            float(dialog.v_spin.value()) - 1.0,
+                        )
+                elif variant == "intermediate_recovery":
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog.final_v_spin,
+                        state["initial_final_volume_nL"],
+                    )
+                    _qt_set_spin_value(
+                        QtCore,
+                        QtTest,
+                        dialog.volume_tolerance_spin,
+                        intermediate_tolerance_nl,
+                    )
+                elif variant in {"final", "final_invalid"}:
+                    apply_final_values()
+                    if variant == "final_invalid":
+                        _qt_set_spin_value(
+                            QtCore,
+                            QtTest,
+                            dialog.final_v_spin,
+                            float(dialog.v_spin.value()) - 1.0,
+                        )
+                else:
+                    raise RuntimeError(f"unsupported exploration edit variant: {variant!r}")
+                context.app.processEvents()
+                if not dialog._design_optimization_dirty:
+                    raise RuntimeError("prepared exploration edit did not mark the design dirty")
+                state["edit_count"] += 1
                 return {
-                    "printed_volume_tolerance_nL": (
-                        dialog.volume_tolerance_spin.value()
+                    "edit_variant": variant,
+                    "tolerance_nL": dialog.volume_tolerance_spin.value(),
+                    "printed_volume_nL": dialog.v_spin.value(),
+                    "final_volume_nL": dialog.final_v_spin.value(),
+                    "volume_relationship_invalid": (
+                        dialog.v_spin.value() > dialog.final_v_spin.value()
                     ),
+                    "dirty_after": True,
+                    "observed_outcome": "accepted",
                 }
 
-            execute_action(context, "editor.edit_copy_via_ui", edit_copy)
-            capture_milestone(
-                context,
-                "copy_edited",
-                evidence={
-                    "printed_volume_tolerance_nL": copy_tolerance_nl
-                },
-                widget=dialog,
-            )
-
-            def finalize_copy() -> Mapping[str, Any]:
-                if dialog.finish_btn.text() != "Finalize Design":
-                    raise RuntimeError(
-                        "editable copy did not expose Finalize Design"
+            def regenerate() -> Mapping[str, Any]:
+                with _expected_editor_progress_dialog(context):
+                    click(dialog.run_btn)
+                    _wait_for_editor_progress_dialogs(
+                        context, QtTest, "editor.regenerate_prepared_design_via_ui"
                     )
+                if dialog._design_optimization_dirty:
+                    raise RuntimeError("regenerated prepared design remained dirty")
+                state["regeneration_count"] += 1
+                return {
+                    "reaction_count": int(dialog.model.get_number_of_reactions()),
+                    "dirty_after": False,
+                    "observed_outcome": "accepted",
+                }
+
+            def reject_invalid_refinalize() -> Mapping[str, Any]:
+                if not dialog._design_optimization_dirty:
+                    raise RuntimeError("premature Refinalize was not attempted while dirty")
+                if dialog.v_spin.value() <= dialog.final_v_spin.value():
+                    raise RuntimeError("premature Refinalize did not have invalid volumes")
+                if not dialog.finish_btn.isEnabled():
+                    raise RuntimeError("invalid-volume safeguard was not visibly actionable")
+                before = persisted_guard_state()
+                dialog_before = {
+                    "visible": bool(dialog.isVisible()),
+                    "result": int(dialog.result()),
+                    "apply_requested": bool(dialog._apply_requested),
+                    "finish_enabled": bool(dialog.finish_btn.isEnabled()),
+                }
+                activations: list[bool] = []
+                def record_activation(checked: bool = False) -> None:
+                    activations.append(bool(checked))
+
+                warning = {
+                    "entered": False,
+                    "title": None,
+                    "type": None,
+                    "dismissed": False,
+                    "error": None,
+                }
+
+                def dismiss_warning() -> None:
+                    active_warning = context.app.activeModalWidget()
+                    warning["entered"] = True
+                    warning["title"] = (
+                        active_warning.windowTitle()
+                        if active_warning is not None
+                        else None
+                    )
+                    warning["type"] = (
+                        type(active_warning).__name__
+                        if active_warning is not None
+                        else None
+                    )
+                    try:
+                        if (
+                            not isinstance(active_warning, QtWidgets.QMessageBox)
+                            or active_warning.windowTitle() != "Invalid volumes"
+                        ):
+                            raise RuntimeError(
+                                "unexpected safeguard dialog during invalid Refinalize"
+                            )
+                        ok_button = active_warning.button(
+                            QtWidgets.QMessageBox.StandardButton.Ok
+                        )
+                        if ok_button is None or not ok_button.isEnabled():
+                            raise RuntimeError("invalid-volume dialog has no enabled OK")
+                        QtTest.QTest.mouseClick(
+                            ok_button, QtCore.Qt.MouseButton.LeftButton
+                        )
+                        warning["dismissed"] = True
+                    except BaseException as exc:
+                        warning["error"] = exc
+                        if (
+                            isinstance(active_warning, QtWidgets.QDialog)
+                            and active_warning.isVisible()
+                        ):
+                            active_warning.reject()
+
+                dialog.finish_btn.clicked.connect(record_activation)
+                try:
+                    QtCore.QTimer.singleShot(0, dismiss_warning)
+                    with _expected_editor_invalid_volume_dialog(context):
+                        QtTest.QTest.mouseClick(
+                            dialog.finish_btn, QtCore.Qt.MouseButton.LeftButton
+                        )
+                    QtTest.QTest.qWait(25)
+                    context.app.processEvents()
+                finally:
+                    dialog.finish_btn.clicked.disconnect(record_activation)
+                if warning["error"] is not None:
+                    raise warning["error"]
+                after = persisted_guard_state()
+                dialog_after = {
+                    "visible": bool(dialog.isVisible()),
+                    "result": int(dialog.result()),
+                    "apply_requested": bool(dialog._apply_requested),
+                    "finish_enabled": bool(dialog.finish_btn.isEnabled()),
+                }
+                safe = (
+                    len(activations) == 1
+                    and warning["entered"]
+                    and warning["title"] == "Invalid volumes"
+                    and warning["type"] == "QMessageBox"
+                    and warning["dismissed"]
+                    and before == after
+                    and dialog_after == dialog_before
+                    and dialog_after["visible"]
+                    and not after["runtime_active"]
+                    and after["array_state"] == "idle"
+                )
+                evidence = {
+                    "observed_outcome": "rejected_invalid",
+                    "activation_count": len(activations),
+                    "warning": {
+                        key: value
+                        for key, value in warning.items()
+                        if key != "error"
+                    },
+                    "invalid_volumes": {
+                        "printed_volume_nL": dialog.v_spin.value(),
+                        "final_volume_nL": dialog.final_v_spin.value(),
+                    },
+                    "authoritative_state_unchanged": before == after,
+                    "dialog_before": dialog_before,
+                    "dialog_after": dialog_after,
+                    "before": before,
+                    "after": after,
+                    "safe": safe,
+                }
+                if not safe:
+                    raise RuntimeError(
+                        "invalid-volume Refinalize rejection was not safe"
+                    )
+                state["rejections"].append(evidence)
+                return evidence
+
+            def refinalize() -> Mapping[str, Any]:
+                if dialog._design_optimization_dirty or not dialog.finish_btn.isEnabled():
+                    raise RuntimeError("terminal Refinalize was not eligible")
+                action_label = str(dialog.finish_btn.text() or "")
+                if action_label != "Finalize Experiment":
+                    raise RuntimeError("prepared design did not expose Finalize Experiment")
                 click(dialog.finish_btn)
                 if dialog.result() != QtWidgets.QDialog.DialogCode.Accepted:
-                    raise RuntimeError(
-                        "copy editor did not accept after Finalize Design"
-                    )
+                    raise RuntimeError("prepared editor did not accept terminal Refinalize")
                 return {
                     "dialog_result": int(dialog.result()),
                     "apply_requested": bool(dialog._apply_requested),
-                    "action_label": "Finalize Design",
+                    "action_label": action_label,
+                    "observed_outcome": "accepted",
                 }
 
-            execute_action(
-                context,
-                "editor.finalize_copy_via_ui",
-                finalize_copy,
-            )
-            capture_milestone(
-                context,
-                "copy_finalized",
-                evidence={"experiment_name": copy_name},
-                widget=dialog,
-            )
+            for step in normalized_steps:
+                action_id = str(step["action_id"])
+                expected = str(step.get("expected_outcome", "accepted"))
+                if action_id == "editor.open_via_ui":
+                    operation = lambda: {
+                        "dialog_type": type(dialog).__name__,
+                        "prepared_reopen": True,
+                        "action_label": str(dialog.finish_btn.text() or ""),
+                        "observed_outcome": "accepted",
+                    }
+                elif action_id == "editor.rename_prepared_via_ui":
+                    operation = rename
+                elif action_id == "editor.edit_prepared_design_via_ui":
+                    variant = str(step.get("edit_variant") or "")
+                    operation = lambda variant=variant: edit(variant)
+                elif action_id == "editor.regenerate_prepared_design_via_ui":
+                    operation = regenerate
+                elif action_id == "editor.refinalize_prepared_via_ui" and expected == "rejected_invalid":
+                    operation = reject_invalid_refinalize
+                elif action_id == "editor.refinalize_prepared_via_ui":
+                    operation = refinalize
+                else:
+                    raise RuntimeError(f"unsupported modal exploration action: {action_id!r}")
+                action_result = run_action(
+                    action_id,
+                    operation,
+                    allowed_dialogs=(dialog,) if dialog.isVisible() else (),
+                )
+                evidence = dict(action_result.get("evidence") or action_result)
+                record(step, evidence)
+                if expected == "rejected_invalid":
+                    capture_milestone(
+                        context,
+                        "premature_refinalize_rejected",
+                        evidence={
+                            "activation_count": evidence["activation_count"],
+                            "warning_title": evidence["warning"]["title"],
+                            "authoritative_state_unchanged": evidence[
+                                "authoritative_state_unchanged"
+                            ],
+                        },
+                        widget=dialog,
+                    )
             state["finished"] = True
         except BaseException as exc:
             state["error"] = exc
@@ -2996,22 +4806,100 @@ def drive_editor_post_start_lock_and_copy(
         raise state["error"]
     if not state["entered"]:
         raise ScenarioActionError(
-            "editor.inspect_active_lock_via_ui",
-            "the locked editor did not open",
-            stage="timeout",
+            "editor.open_via_ui", "the prepared editor did not open", stage="timeout"
         )
     if not state["finished"]:
         raise ScenarioActionError(
-            "editor.finalize_copy_via_ui",
-            "the editable copy did not finish",
+            "editor.refinalize_prepared_via_ui",
+            "the prepared editor sequence did not finish",
             stage="operation",
         )
     return {
-        "lock_matrix": state["lock_matrix"],
-        "copy_before_finalize": state["copy_before_finalize"],
-        "copy_finalized": True,
+        "dialog_type": type(state["dialog"]).__name__,
+        "initial_name": initial_name,
+        "renamed_name": renamed_name,
+        "observed_transitions": state["observed_transitions"],
+        "rejections": state["rejections"],
+        "edit_count": state["edit_count"],
+        "regeneration_count": state["regeneration_count"],
+        "refinalized": True,
     }
 
+
+def activate_authoritative_execution(
+    context: ScenarioContext,
+    operation: Callable[[], Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Activate a prepared authoritative execution without starting printing."""
+
+    return execute_action(
+        context,
+        "experiment.activate_authoritative",
+        operation,
+    )
+
+
+def drive_authoritative_reload_via_editor(
+    context: ScenarioContext,
+    *,
+    experiment_dir: Path,
+    expected_name: str,
+    before_activation: Callable[[], Mapping[str, Any]] | None = None,
+    after_activation: Callable[[], Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Load and activate a paused execution through the shared page driver."""
+
+    from tools.virtual_workflows.page_drivers import ExperimentLoaderDriver
+
+    return ExperimentLoaderDriver(context).load_authoritative_execution(
+        experiment_dir,
+        expected_name=expected_name,
+        before_activation=before_activation,
+        after_activation=after_activation,
+    )
+
+def validate_reload_boundary(
+    context: ScenarioContext,
+    operation: Callable[[], Mapping[str, Any]],
+) -> dict[str, Any]:
+    return execute_action(context, "validation.reload_boundary", operation)
+
+
+def lock_execution_for_printing(
+    context: ScenarioContext,
+    operation: Callable[[], Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Cross the durable printing-start lock boundary without a print command."""
+
+    return execute_action(
+        context,
+        "execution.lock_for_printing",
+        operation,
+    )
+
+
+def drive_editor_post_start_lock_and_copy(
+    context: ScenarioContext,
+    *,
+    source_dir: Path,
+    source_name: str,
+    copy_name: str,
+    copy_tolerance_nl: float,
+    action_runner: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Compatibility delegate for the shared Experiment Editor page driver."""
+
+    from tools.virtual_workflows.page_drivers import ExperimentEditorDriver
+
+    return ExperimentEditorDriver(
+        context,
+        action_runner=action_runner,
+    ).inspect_lock_and_create_editable_copy(
+        source_dir=source_dir,
+        source_name=source_name,
+        copy_name=copy_name,
+        copy_tolerance_nl=copy_tolerance_nl,
+    )
 
 def validate_prepared_bundle(
     context: ScenarioContext,
@@ -3368,9 +5256,18 @@ def teardown_scenario(context: ScenarioContext) -> dict[str, Any]:
 
 
 __all__ = [
+    "COMPOSED_MULTI_STOCK_ACTION_IDS",
+    "COMPOSED_MIXED_MODE_ACTION_IDS",
+    "COMPOSED_DISCONNECT_ACTION_IDS",
+    "COMPOSED_SOFT_STOP_ACTION_IDS",
+    "EXECUTION_PREFLIGHT_SAFEGUARD_ACTION_IDS",
+    "PERSISTENCE_SAFEGUARD_ACTION_IDS",
+    "ACTION_INTERACTION_SURFACES",
     "ACTION_IDS",
     "AUTHORITATIVE_RELOAD_ACTION_IDS",
+    "COMPOSED_SMOKE_ACTION_IDS",
     "EDITOR_LIFECYCLE_ACTION_IDS",
+    "InteractionSurface",
     "MULTI_STOCK_LIFECYCLE_ACTION_IDS",
     "PRINT_ARRAY_ACTION_IDS",
     "PRINT_ARRAY_LIFECYCLE_ACTION_IDS",
@@ -3381,25 +5278,29 @@ __all__ = [
     "ScenarioDeadline",
     "capture_failure_screenshot",
     "capture_milestone",
+    "capture_execution_preflight_boundary",
     "close_simulated_session",
     "connect_machine_ready",
     "activate_authoritative_execution",
     "drive_authoritative_reload_via_editor",
     "drive_editor_create_finalize",
+    "drive_execution_preflight_safeguard",
     "drive_editor_post_start_lock_and_copy",
     "drive_editor_prestart_rename_refinalize",
     "enable_pressure_regulation",
     "execute_action",
     "install_dialog_handler",
-    "inspect_editor_lock_controls",
     "launch_simulated_application",
     "prepare_authoritative_fixture",
+    "disconnect_machine_via_ui",
     "request_soft_stop_via_ui",
+    "resume_array_via_ui",
     "reload_authoritative_experiment",
     "lock_execution_for_printing",
     "stage_virtual_head",
     "start_array_via_ui",
     "observe_stopped_quiescence",
+    "observe_disconnected_quiescence",
     "teardown_scenario",
     "validate_prepared_bundle",
     "validate_paused_bundle",

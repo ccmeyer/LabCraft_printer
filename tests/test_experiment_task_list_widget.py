@@ -133,6 +133,7 @@ def _make_widget(
     calibration_summary_rows=None,
     printing_modes=None,
     manual_refuel_by_stock=None,
+    completed_view=False,
 ):
     if progress_by_stock is None:
         progress_by_stock = {"stock-a": [1, 1], "stock-b": [1]}
@@ -164,6 +165,8 @@ def _make_widget(
                 wells.append(WellStub(stock_id, target=1, remaining=remaining))
 
     model = SimpleNamespace()
+    model.is_completed_execution_view_active = lambda: bool(completed_view)
+    model.get_completed_execution_display_heads = lambda: tuple(heads.values())
     model.experiment_model = ExperimentModelStub(
         applied_stock_ids,
         manual_refuel_by_stock=manual_refuel_by_stock,
@@ -902,6 +905,31 @@ def test_all_printed_and_dropped_off_heads_show_experiment_complete_even_if_queu
 
     assert widget.next_label.text() == "Next: Experiment complete"
     assert widget.blocking_label.text() == ""
+
+
+def test_completed_read_only_projection_reports_complete_without_machine_readiness(qapp):
+    widget, _model, controller, heads = _make_widget(
+        qapp,
+        connected=False,
+        enabled=False,
+        homed=False,
+        pressure=False,
+        plate_calibrated=False,
+        queue_idle=False,
+        active_stock="stock-a",
+        progress_by_stock={"stock-a": [0, 0], "stock-b": [0]},
+        completed_view=True,
+    )
+
+    contexts = [widget._head_context(head) for head in heads.values()]
+
+    assert widget.next_label.text() == "Next: Experiment complete"
+    assert widget.blocking_label.text() == ""
+    assert all(context["current_task"] is None for context in contexts)
+    assert all(context["done_count"] == context["total_count"] for context in contexts)
+    controller.print_array.assert_not_called()
+    controller.pick_up_printer_head.assert_not_called()
+    controller.drop_off_printer_head.assert_not_called()
 
 
 def test_refresh_does_not_trigger_hardware_actions(qapp):

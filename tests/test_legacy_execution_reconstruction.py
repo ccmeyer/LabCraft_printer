@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -11,7 +12,7 @@ from LegacyExecutionPlan import (
     inspect_legacy_execution,
     reconstruct_legacy_execution,
 )
-from Model import CURRENT_PROFILE, ExperimentModel
+from Model import CURRENT_PROFILE, ExperimentModel, ReactionComposition
 
 
 PURE_VOLUME_NL = 143.59278258103592
@@ -164,6 +165,21 @@ def _issue_codes(result):
     return {issue.code for issue in result.issues}
 
 
+def _legacy_display_model(experiment_model_factory):
+    return experiment_model_factory(
+        plate_data_override=[
+            {
+                "name": "test-plate",
+                "rows": 8,
+                "columns": 12,
+                "spacing": 10,
+                "default": True,
+                "calibrations": {},
+            }
+        ]
+    )
+
+
 def test_recorded_execution_reconstructs_without_optimizer_or_writes(tmp_path, monkeypatch):
     directory = tmp_path / "recorded"
     progress = _progress()
@@ -196,6 +212,150 @@ def test_recorded_execution_reconstructs_without_optimizer_or_writes(tmp_path, m
     assert model.concentration_key_file_path == str(directory / "concentration_key.csv")
     assert _directory_snapshot(directory) == before
     assert not (directory / "execution_plan.json").exists()
+
+
+def test_completed_legacy_execution_populates_read_only_main_view(
+    tmp_path,
+    experiment_model_factory,
+):
+    directory = tmp_path / "completed-display"
+    progress = _progress()
+    progress["A2"] = copy.deepcopy(progress["A1"])
+    progress["A2"]["reaction_id"] = "R2"
+    _write_folder(directory, progress=progress)
+    before = _directory_snapshot(directory)
+    app_model = _legacy_display_model(experiment_model_factory)
+    experiment = app_model.experiment_model
+
+    experiment.load_experiment(
+        str(directory / "experiment_design.json"),
+        str(directory),
+    )
+    eligibility = app_model.load_read_only_experiment_view()
+
+    assert experiment.can_view_legacy_execution()
+    assert app_model.is_read_only_experiment_view_active()
+    assert app_model.is_completed_execution_view_active()
+    assert eligibility["status"] == "analysis_only"
+    assert not eligibility["can_start_hardware"]
+    reaction = app_model.well_plate.get_well("A1").get_assigned_reaction()
+    assert reaction.unique_id == "R1"
+    assert reaction.get_all_target_droplets() == {
+        "PURE MM_1.11_x": 16,
+        "UTP (dil)_95000.00_nM": 25,
+    }
+    assert {
+        stock_id: reagent.added_droplets
+        for stock_id, reagent in reaction.get_all_reagents().items()
+    } == {
+        "PURE MM_1.11_x": 16,
+        "UTP (dil)_95000.00_nM": 25,
+    }
+    assert reaction.check_all_complete()
+    second_reaction = app_model.well_plate.get_well("A2").get_assigned_reaction()
+    assert second_reaction.unique_id == "R2"
+    assert second_reaction.check_all_complete()
+    assert _directory_snapshot(directory) == before
+    assert not (directory / "execution_plan.json").exists()
+
+
+def test_partial_legacy_execution_populates_exact_recorded_progress(
+    tmp_path,
+    experiment_model_factory,
+):
+    directory = tmp_path / "partial-display"
+    progress = _progress()
+    progress["A2"] = copy.deepcopy(progress["A1"])
+    progress["A2"]["reaction_id"] = "R2"
+    progress["A2"]["reagents"]["PURE MM_1.11_x"]["added_droplets"] = 8
+    progress["A2"]["reagents"]["UTP (dil)_95000.00_nM"]["added_droplets"] = 0
+    progress["A2"]["completed"] = False
+    _write_folder(directory, progress=progress)
+    before = _directory_snapshot(directory)
+    app_model = _legacy_display_model(experiment_model_factory)
+    experiment = app_model.experiment_model
+
+    experiment.load_experiment(
+        str(directory / "experiment_design.json"),
+        str(directory),
+    )
+    app_model.load_read_only_experiment_view()
+
+    assert experiment.get_execution_plan_snapshot().state is ExecutionPlanState.ACTIVE
+    assert app_model.is_read_only_experiment_view_active()
+    assert not app_model.is_completed_execution_view_active()
+    a1 = app_model.well_plate.get_well("A1").get_assigned_reaction()
+    a2 = app_model.well_plate.get_well("A2").get_assigned_reaction()
+    assert a1.check_all_complete()
+    assert not a2.check_all_complete()
+    assert {
+        stock_id: reagent.added_droplets
+        for stock_id, reagent in a2.get_all_reagents().items()
+    } == {
+        "PURE MM_1.11_x": 8,
+        "UTP (dil)_95000.00_nM": 0,
+    }
+    assert _directory_snapshot(directory) == before
+
+
+def test_key_reconstructed_legacy_view_defaults_missing_added_counts_to_zero(
+    tmp_path,
+    experiment_model_factory,
+):
+    directory = tmp_path / "calibration-only-display"
+    _write_folder(directory, progress=None)
+    app_model = _legacy_display_model(experiment_model_factory)
+    experiment = app_model.experiment_model
+
+    experiment.load_experiment(
+        str(directory / "experiment_design.json"),
+        str(directory),
+    )
+    app_model.load_read_only_experiment_view()
+
+    reaction = app_model.well_plate.get_well("A1").get_assigned_reaction()
+    assert all(
+        reagent.added_droplets == 0
+        for reagent in reaction.get_all_reagents().values()
+    )
+    assert not reaction.check_all_complete()
+
+
+def test_legacy_plate_mismatch_leaves_existing_main_display_untouched(
+    tmp_path,
+    experiment_model_factory,
+    monkeypatch,
+):
+    directory = tmp_path / "plate-mismatch-display"
+    _write_folder(directory, progress=_progress())
+    app_model = _legacy_display_model(experiment_model_factory)
+    previous_reaction = ReactionComposition("previous-main-reaction")
+    app_model.well_plate.get_well("A1").assign_reaction(previous_reaction)
+    previous_stocks = app_model.stock_solutions
+    previous_collection = app_model.reaction_collection
+    previous_plate = app_model.well_plate.get_current_plate_name()
+
+    app_model.experiment_model.load_experiment(
+        str(directory / "experiment_design.json"),
+        str(directory),
+    )
+    monkeypatch.setattr(
+        app_model.well_plate,
+        "get_plate_data_by_name",
+        lambda _name: {"name": "test-plate", "rows": 4, "columns": 6},
+    )
+
+    with pytest.raises(RuntimeError, match="plate catalog differs"):
+        app_model.load_read_only_experiment_view()
+
+    assert app_model.well_plate.get_current_plate_name() == previous_plate
+    assert (
+        app_model.well_plate.get_well("A1").get_assigned_reaction()
+        is previous_reaction
+    )
+    assert app_model.stock_solutions is previous_stocks
+    assert app_model.reaction_collection is previous_collection
+    assert not app_model.is_read_only_experiment_view_active()
 
 
 def test_progress_targets_win_over_key_with_visible_warning(tmp_path):
@@ -339,6 +499,7 @@ def test_fatal_recorded_reconstruction_stays_read_only_and_never_optimizes(
     assert result.plan is None
     assert result.has_fatal_issues
     assert model.is_read_only_legacy_execution() is True
+    assert model.can_view_legacy_execution() is False
     assert model.get_stock_table_rows() == []
     assert optimize.call_count == 0
 
@@ -361,6 +522,7 @@ def test_unreadable_progress_is_fatal_and_cannot_fall_back_to_optimization(
     assert result.plan is None
     assert "progress_unreadable" in _issue_codes(result)
     assert model.is_read_only_legacy_execution() is True
+    assert model.can_view_legacy_execution() is False
     optimize.assert_not_called()
 
 

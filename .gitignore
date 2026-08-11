@@ -69,3 +69,4 @@ firmware/.metadata/
 **/*.axf
 
 tmp/
+.tmp/

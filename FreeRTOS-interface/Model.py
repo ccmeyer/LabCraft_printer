@@ -76,6 +76,7 @@ from ExecutionPlanRevision import (
 from AuthoritativeExecutionLoad import (
     advance_authoritative_execution_revision,
     build_execution_runtime_spec,
+    build_execution_runtime_spec_from_plan,
     inspect_authoritative_execution,
     reconcile_authoritative_execution_runtime,
 )
@@ -149,6 +150,16 @@ class _AuthoritativePrintPreflight:
     revision_names: tuple[str, ...]
     stock_id: str
     printer_head_id: str
+
+
+@dataclass(frozen=True)
+class _AuthoritativeRuntimeProjection:
+    spec: Any
+    stock_manager: Any
+    reaction_collection: Any
+    reactions: tuple[Any, ...]
+    well_ids: tuple[str, ...]
+    stock_specs: dict[str, Any]
 
 
 def _format_stock_display_sig_figs(value, sig_figs: int = 3) -> str:
@@ -534,6 +545,7 @@ class ExperimentModel(QObject):
         self._active_authoritative_execution_session = None
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
+        self._last_authoritative_calibration_transition = None
         self._last_authoritative_terminal_transition = None
         self._progress_execution_reference: ProgressExecutionReference | None = None
         self._prepared_execution_replacement_context: dict[str, Any] | None = None
@@ -1179,6 +1191,35 @@ class ExperimentModel(QObject):
             max_volume_nL=float(plan.max_volume_nL),
         )
 
+    def _score_two_stock_targets(
+        self,
+        plan: TwoStockPlan,
+        *,
+        target_values: List[float],
+        starting_conc: float,
+        final_volume_nL: float,
+        units: str,
+    ) -> _PlanAccuracyScore:
+        rows = [
+            self._evaluate_two_stock_target(
+                t_final=float(t_final),
+                starting_conc=float(starting_conc),
+                stock_concentrations=(
+                    float(plan.stock_concs[0]),
+                    float(plan.stock_concs[1]),
+                ),
+                droplet_nL=float(plan.droplet_nL),
+                final_volume_nL=float(final_volume_nL),
+                units=str(units),
+            )
+            for t_final in target_values
+        ]
+        return self._summarize_plan_accuracy_rows(
+            rows,
+            concentration_burden=float(plan.conc_sum),
+            max_volume_nL=float(plan.max_volume_nL),
+        )
+
     def _score_two_stock_plan(
         self,
         opt: OptionSpec,
@@ -1188,24 +1229,12 @@ class ExperimentModel(QObject):
         targets_final: Optional[List[float]] = None,
     ) -> _PlanAccuracyScore:
         target_values = targets_final if targets_final is not None else getattr(opt, "targets", []) or []
-        rows = [
-            self._evaluate_two_stock_target(
-                t_final=float(t_final),
-                starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
-                stock_concentrations=(
-                    float(plan.stock_concs[0]),
-                    float(plan.stock_concs[1]),
-                ),
-                droplet_nL=float(plan.droplet_nL),
-                final_volume_nL=float(final_volume_nL),
-                units=str(plan.units or getattr(opt, "units", "")),
-            )
-            for t_final in target_values
-        ]
-        return self._summarize_plan_accuracy_rows(
-            rows,
-            concentration_burden=float(plan.conc_sum),
-            max_volume_nL=float(plan.max_volume_nL),
+        return self._score_two_stock_targets(
+            plan,
+            target_values=[float(value) for value in target_values],
+            starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
+            final_volume_nL=float(final_volume_nL),
+            units=str(plan.units or getattr(opt, "units", "")),
         )
 
     def _candidate_single_stock_deltas(
@@ -1758,7 +1787,10 @@ class ExperimentModel(QObject):
         if not pairs:
             return [], pair_limit_hit
 
-        # Pareto-prune by (conc_sum, max_volume_nL)
+        # Preserve the historical concentration/volume frontier, plus the
+        # most accurate candidate at every feasible printed-volume tier. The
+        # latter is required because the final selection refines accuracy only
+        # after this bounded enumeration step.
         pairs.sort(key=lambda p: (p.conc_sum, p.max_volume_nL))
         pruned: List[TwoStockPlan] = []
         best_vol = float("inf")
@@ -1766,6 +1798,26 @@ class ExperimentModel(QObject):
             if p.max_volume_nL + 1e-12 < best_vol:
                 pruned.append(p)
                 best_vol = p.max_volume_nL
+
+        accuracy_by_volume: Dict[float, Tuple[TwoStockPlan, _PlanAccuracyScore]] = {}
+        for p in pairs:
+            volume_key = round(float(p.max_volume_nL), 12)
+            score = self._score_two_stock_targets(
+                p,
+                target_values=xs,
+                starting_conc=0.0,
+                final_volume_nL=float(final_volume_nL),
+                units=str(units),
+            )
+            incumbent = accuracy_by_volume.get(volume_key)
+            if incumbent is None or self._plan_accuracy_score_is_better(score, incumbent[1]):
+                accuracy_by_volume[volume_key] = (p, score)
+
+        for p, _score in accuracy_by_volume.values():
+            if p not in pruned:
+                pruned.append(p)
+
+        pruned.sort(key=lambda p: (p.conc_sum, p.max_volume_nL))
 
         return pruned[:max_pairs], pair_limit_hit
 
@@ -1810,7 +1862,10 @@ class ExperimentModel(QObject):
         if self.is_execution_design_locked():
             return {
                 "best": None,
-                "reason": "The execution design is locked and cannot be re-optimized.",
+                "reason": (
+                    "This experiment is locked. Reactions and stock solutions cannot "
+                    "be changed."
+                ),
                 "issues_by_key": {},
                 "read_only": True,
             }
@@ -7229,6 +7284,7 @@ class ExperimentModel(QObject):
         self._active_authoritative_execution_session = None
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
+        self._last_authoritative_calibration_transition = None
         self._last_authoritative_terminal_transition = None
         self._progress_execution_reference = None
         self._prepared_execution_replacement_context = None
@@ -7322,6 +7378,7 @@ class ExperimentModel(QObject):
         self._active_authoritative_execution_session = None
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
+        self._last_authoritative_calibration_transition = None
         self._last_authoritative_terminal_transition = None
         self._progress_execution_reference = None
         self._prepared_execution_replacement_context = None
@@ -7381,6 +7438,32 @@ class ExperimentModel(QObject):
             "repairable_intent_ids": list(eligibility.repairable_intent_ids),
             "ambiguous_intent_ids": list(eligibility.ambiguous_intent_ids),
         }
+
+    def can_view_completed_execution(self) -> bool:
+        """Return whether the loaded bundle is a valid display-only completion."""
+        bundle = self.get_authoritative_execution_bundle()
+        if bundle is None or not bundle.valid or bundle.plan is None:
+            return False
+        eligibility = bundle.eligibility
+        return bool(
+            bundle.plan.state is ExecutionPlanState.COMPLETED
+            and eligibility.status == "analysis_only"
+            and not eligibility.can_activate_runtime
+            and not eligibility.can_start_hardware
+            and not eligibility.can_resume_hardware
+        )
+
+    def can_view_legacy_execution(self) -> bool:
+        """Return whether a recorded older experiment can be displayed safely."""
+        reconstruction = getattr(self, "_legacy_execution_reconstruction", None)
+        return bool(
+            self.is_read_only_legacy_execution()
+            and reconstruction is not None
+            and reconstruction.classification
+            is LegacyExecutionClassification.RECORDED_EXECUTION
+            and reconstruction.plan is not None
+            and not reconstruction.has_fatal_issues
+        )
 
     def is_authoritative_execution_runtime_active(self) -> bool:
         return bool(getattr(self, "_authoritative_runtime_active", False))
@@ -7938,6 +8021,208 @@ class ExperimentModel(QObject):
         self._start_authoritative_runtime_session(bundle)
         return True
 
+    @staticmethod
+    def _advance_authoritative_calibration_bundle(
+        bundle,
+        *,
+        calibration_document,
+        candidate_plan,
+        progress_payload,
+        resume,
+    ):
+        return advance_authoritative_execution_revision(
+            replace(bundle, calibrations=calibration_document),
+            candidate_plan=candidate_plan,
+            progress_payload=progress_payload,
+            resume=resume,
+        )
+
+    def _guard_authoritative_calibration_files(
+        self,
+        *,
+        expected_identities: dict[str, _AuthoritativeFileIdentity],
+        expected_revision_names: tuple[str, ...],
+        detail: str,
+    ) -> tuple[
+        dict[str, _AuthoritativeFileIdentity],
+        tuple[str, ...],
+    ]:
+        return self._guard_authoritative_transition_files(
+            expected_identities=expected_identities,
+            expected_revision_names=expected_revision_names,
+            detail=detail,
+        )
+
+    def _accept_authoritative_calibration_writes(
+        self,
+        *,
+        expected_identities: dict[str, _AuthoritativeFileIdentity],
+        expected_revision_names: tuple[str, ...],
+        changed_names: set[str],
+        resulting_revision_names: tuple[str, ...],
+    ) -> tuple[
+        dict[str, _AuthoritativeFileIdentity],
+        tuple[str, ...],
+    ]:
+        return self._accept_authoritative_transition_writes(
+            expected_identities=expected_identities,
+            expected_revision_names=expected_revision_names,
+            changed_names=changed_names,
+            resulting_revision_names=resulting_revision_names,
+            detail="calibration revision persistence",
+        )
+
+    def _write_authoritative_calibration_document(
+        self,
+        document: ExecutionCalibrationDocument,
+    ) -> None:
+        save_execution_calibrations(
+            self.execution_calibrations_file_path,
+            document,
+        )
+
+    def _persist_authoritative_calibration_immutable_revision(
+        self,
+        candidate_plan,
+    ) -> None:
+        self._persist_authoritative_transition_immutable_revision(candidate_plan)
+
+    def _write_authoritative_calibration_current_plan(self, candidate_plan) -> None:
+        self._write_authoritative_transition_current_plan(candidate_plan)
+
+    def _write_authoritative_calibration_progress(self, progress_payload) -> None:
+        self._write_authoritative_transition_progress(progress_payload)
+
+    def _write_authoritative_calibration_resume(self, resume) -> None:
+        self._write_authoritative_transition_resume(resume)
+
+    def _install_authoritative_calibration_bundle(
+        self,
+        bundle,
+        *,
+        identities: dict[str, _AuthoritativeFileIdentity],
+        revision_names: tuple[str, ...],
+    ) -> None:
+        if not bundle.valid or bundle.plan is None or bundle.resume is None:
+            raise RuntimeError(
+                "The post-calibration authoritative bundle is incomplete."
+            )
+        self._active_authoritative_execution_session = (
+            _ActiveAuthoritativeExecutionSession(
+                bundle=bundle,
+                resume=bundle.resume,
+                progress_payload=dict(bundle.progress_payload),
+                file_identities=identities,
+                revision_names=revision_names,
+            )
+        )
+        self._authoritative_execution_bundle = bundle
+        self._execution_plan_snapshot = bundle.plan
+        self.progress_data = dict(bundle.progress_wells)
+        self._progress_execution_reference = ProgressExecutionReference(
+            plan_id=bundle.plan.plan_id,
+            plan_revision=bundle.plan.plan_revision,
+        )
+        self._authoritative_runtime_active = True
+
+    def _commit_authoritative_calibration_revision(
+        self,
+        previous_plan,
+        candidate_plan,
+        *,
+        calibration_document: ExecutionCalibrationDocument,
+        design_payload: dict,
+    ) -> str:
+        """Append one guarded calibration successor without rereading its prefix."""
+        self._last_authoritative_calibration_transition = None
+        write_started = False
+        try:
+            session = self._guard_authoritative_runtime_session()
+            bundle = session.bundle
+            if bundle.plan != previous_plan:
+                raise self._authoritative_runtime_conflict(
+                    "cached execution plan differs from the calibration predecessor"
+                )
+            if calibration_document.plan_id != previous_plan.plan_id:
+                raise self._authoritative_runtime_conflict(
+                    "execution_calibrations.json references a different plan"
+                )
+
+            progress_payload = self._progress_payload_for_plan(
+                candidate_plan,
+                existing_payload=session.progress_payload,
+                existing_plan=previous_plan,
+            )
+            progress = decode_execution_progress(candidate_plan, progress_payload)
+            updated_resume = synchronize_checkpoint(
+                session.resume,
+                plan_revision=candidate_plan.plan_revision,
+                progress_wells=progress.progress_wells,
+            )
+            advanced = self._advance_authoritative_calibration_bundle(
+                bundle,
+                calibration_document=calibration_document,
+                candidate_plan=candidate_plan,
+                progress_payload=progress.payload,
+                resume=updated_resume,
+            )
+
+            expected_identities = dict(session.file_identities)
+            expected_revision_names = tuple(session.revision_names)
+            expected_identities, expected_revision_names = (
+                self._guard_authoritative_calibration_files(
+                    expected_identities=expected_identities,
+                    expected_revision_names=expected_revision_names,
+                    detail=f"calibration revision {candidate_plan.plan_revision} persistence",
+                )
+            )
+            revision_name = revision_file_name(candidate_plan.plan_revision)
+            if revision_name in expected_revision_names:
+                raise self._authoritative_runtime_conflict(
+                    f"{revision_name} unexpectedly already exists"
+                )
+
+            changed_names = {
+                "execution_calibrations.json",
+                f"{REVISION_DIRECTORY_NAME}/{revision_name}",
+                "execution_plan.json",
+                "progress.json",
+                "execution_resume.json",
+            }
+            write_started = True
+            self._write_authoritative_calibration_document(calibration_document)
+            self._persist_authoritative_calibration_immutable_revision(candidate_plan)
+            self._write_authoritative_calibration_current_plan(candidate_plan)
+            self._write_authoritative_calibration_progress(progress.payload)
+            self._write_authoritative_calibration_resume(updated_resume)
+            self._write_execution_plan_exports(candidate_plan, design_payload)
+
+            resulting_revision_names = (*expected_revision_names, revision_name)
+            identities, revision_names = self._accept_authoritative_calibration_writes(
+                expected_identities=expected_identities,
+                expected_revision_names=expected_revision_names,
+                changed_names=changed_names,
+                resulting_revision_names=resulting_revision_names,
+            )
+            self._install_authoritative_calibration_bundle(
+                advanced,
+                identities=identities,
+                revision_names=revision_names,
+            )
+            self._last_authoritative_calibration_transition = {
+                "cache_path": "cached_revision",
+                "starting_plan_revision": previous_plan.plan_revision,
+                "final_plan_revision": candidate_plan.plan_revision,
+                "created_revision": revision_name,
+                "full_validation_count": 0,
+                "prior_revision_body_read_count": 0,
+            }
+            return "created"
+        except Exception:
+            if write_started:
+                self._invalidate_authoritative_runtime_session()
+            raise
+
     def _refresh_authoritative_execution_bundle(self):
         if not self.experiment_dir_path or not self.experiment_file_path:
             raise RuntimeError("The authoritative execution paths are unavailable.")
@@ -8224,7 +8509,7 @@ class ExperimentModel(QObject):
                 )
                 self._audit_execution_plan_event(
                     "execution_plan_locked",
-                    "Execution plan locked",
+                    "Experiment finalized",
                     {
                         "plan_id": candidate.plan_id,
                         "previous_revision": plan.plan_revision,
@@ -8262,7 +8547,7 @@ class ExperimentModel(QObject):
                 self._write_execution_plan_exports(candidate, {})
                 self._audit_execution_plan_event(
                     "execution_plan_printer_head_bound",
-                    "Execution printer head bound",
+                    "Printer head linked to experiment",
                     {
                         "plan_id": candidate.plan_id,
                         "previous_revision": plan.plan_revision,
@@ -8518,7 +8803,7 @@ class ExperimentModel(QObject):
                 status = "replaced"
                 self._audit_execution_plan_event(
                     "prepared_execution_replaced",
-                    "Untouched prepared execution replaced after editor changes",
+                    "Finalized experiment updated after editor changes",
                     details={
                         "previous_plan_id": existing.plan_id,
                         "replacement_plan_id": candidate.plan_id,
@@ -8684,9 +8969,19 @@ class ExperimentModel(QObject):
                 )
         decode_execution_progress(reference_plan, payload)
 
-    def _progress_payload_for_plan(self, plan) -> dict:
+    def _progress_payload_for_plan(
+        self,
+        plan,
+        *,
+        existing_payload: dict | None = None,
+        existing_plan=None,
+    ) -> dict:
         existing = {}
-        if self.progress_file_path and os.path.isfile(self.progress_file_path):
+        if existing_payload is not None:
+            if not isinstance(existing_payload, dict):
+                raise RuntimeError("progress.json must contain an object.")
+            existing = dict(existing_payload)
+        elif self.progress_file_path and os.path.isfile(self.progress_file_path):
             with open(self.progress_file_path, "r", encoding="utf-8") as handle:
                 loaded = json.load(handle)
             if not isinstance(loaded, dict):
@@ -8700,17 +8995,27 @@ class ExperimentModel(QObject):
                 )
             reference_plan = plan
             if reference.plan_revision != plan.plan_revision:
-                history = validate_revision_history(
-                    self.execution_plan_revisions_dir_path
-                )
-                reference_plan = next(
-                    (
-                        item
-                        for item in history
-                        if item.plan_revision == reference.plan_revision
-                    ),
-                    None,
-                )
+                if existing_plan is not None:
+                    reference_plan = existing_plan
+                    if (
+                        reference_plan.plan_id != reference.plan_id
+                        or reference_plan.plan_revision != reference.plan_revision
+                    ):
+                        raise RuntimeError(
+                            "Cached progress does not reference its supplied execution plan."
+                        )
+                else:
+                    history = validate_revision_history(
+                        self.execution_plan_revisions_dir_path
+                    )
+                    reference_plan = next(
+                        (
+                            item
+                            for item in history
+                            if item.plan_revision == reference.plan_revision
+                        ),
+                        None,
+                    )
                 if reference_plan is None:
                     raise RuntimeError(
                         "progress.json references an unavailable execution-plan revision."
@@ -8924,6 +9229,24 @@ class ExperimentModel(QObject):
                 "The persisted execution is analysis only until it is explicitly activated "
                 "before calibration or printing."
             )
+        session = getattr(self, "_active_authoritative_execution_session", None)
+        if (
+            session is not None
+            and plan.state is ExecutionPlanState.ACTIVE
+            and not self.get_execution_plan_sync_error()
+        ):
+            try:
+                cached_plan = self._guard_authoritative_runtime_session().bundle.plan
+                if cached_plan != plan:
+                    raise self._authoritative_runtime_conflict(
+                        "cached execution plan differs from the active snapshot"
+                    )
+            except Exception as exc:
+                self.set_execution_plan_sync_error(exc)
+                raise RuntimeError(
+                    f"Could not durably lock the execution plan: {exc}"
+                ) from exc
+            return cached_plan
         try:
             self._validate_plan_design_link(plan)
             repairing_partial_commit = bool(self.get_execution_plan_sync_error())
@@ -8954,7 +9277,7 @@ class ExperimentModel(QObject):
         self.set_execution_plan_sync_error(None)
         self._audit_execution_plan_event(
             "execution_plan_locked",
-            "Execution plan locked",
+            "Experiment finalized",
             {
                 "plan_id": candidate.plan_id,
                 "previous_revision": plan.plan_revision,
@@ -9147,7 +9470,7 @@ class ExperimentModel(QObject):
             self._install_validated_authoritative_terminal_bundle(validated)
             self._audit_execution_plan_event(
                 "execution_plan_completed",
-                "Execution completed",
+                "Experiment completed",
                 {
                     "plan_id": candidate.plan_id,
                     "plan_revision": candidate.plan_revision,
@@ -9298,7 +9621,9 @@ class ExperimentModel(QObject):
             self.set_execution_plan_sync_error(None)
             self._audit_execution_plan_event(
                 "execution_plan_completed" if terminal is ExecutionPlanState.COMPLETED else "execution_plan_abandoned",
-                "Execution completed" if terminal is ExecutionPlanState.COMPLETED else "Execution abandoned",
+                "Experiment completed"
+                if terminal is ExecutionPlanState.COMPLETED
+                else "Experiment stopped",
                 {
                     "plan_id": candidate.plan_id,
                     "plan_revision": candidate.plan_revision,
@@ -9396,7 +9721,7 @@ class ExperimentModel(QObject):
         self.set_execution_plan_sync_error(None)
         self._audit_execution_plan_event(
             "execution_plan_printer_head_bound",
-            "Execution printer head bound",
+            "Printer head linked to experiment",
             {
                 "plan_id": candidate.plan_id,
                 "previous_revision": plan.plan_revision,
@@ -9586,6 +9911,7 @@ class ExperimentModel(QObject):
         timestamp_utc: str | None = None,
     ) -> dict:
         printing_mode = normalize_printing_mode(printing_mode)
+        self._last_authoritative_calibration_transition = None
         if (
             self.get_execution_plan_snapshot() is not None
             and self._added_droplets_for_stock(stock_id) > 0
@@ -9720,6 +10046,13 @@ class ExperimentModel(QObject):
             self._project_reconstructed_execution_plan(plan)
             self._apply_plan_targets_to_runtime(plan)
             self._restore_authoritative_session_after_full_revision()
+            self._last_authoritative_calibration_transition = {
+                "cache_path": "reused_full_sync",
+                "starting_plan_revision": plan.plan_revision,
+                "final_plan_revision": plan.plan_revision,
+                "created_revision": None,
+                "full_validation_count": 1,
+            }
             self.set_execution_plan_sync_error(None)
             return {"plan": plan, "record": record.to_dict(), "status": "reused"}
 
@@ -9734,16 +10067,29 @@ class ExperimentModel(QObject):
             target_counts_by_well=target_counts,
             timestamp_utc=record.recorded_at_utc,
         )
+        cached_commit = bool(
+            getattr(self, "_active_authoritative_execution_session", None)
+            is not None
+            and not self.get_execution_plan_sync_error()
+        )
         try:
             existing_record = document.records.get(record_id)
             if existing_record is not None and existing_record != record:
                 raise RuntimeError("Calibration record ID collides with different content.")
             document.records[record_id] = record
-            save_execution_calibrations(self.execution_calibrations_file_path, document)
-            self._commit_plan_revision(plan, candidate)
-            self._write_progress_for_execution_plan(candidate)
-            self.synchronize_execution_resume_revision(candidate)
-            self._write_execution_plan_exports(candidate, design_payload)
+            if cached_commit:
+                status = self._commit_authoritative_calibration_revision(
+                    plan,
+                    candidate,
+                    calibration_document=document,
+                    design_payload=design_payload,
+                )
+            else:
+                save_execution_calibrations(self.execution_calibrations_file_path, document)
+                status = self._commit_plan_revision(plan, candidate)
+                self._write_progress_for_execution_plan(candidate)
+                self.synchronize_execution_resume_revision(candidate)
+                self._write_execution_plan_exports(candidate, design_payload)
         except Exception as exc:
             self.set_execution_plan_sync_error(exc)
             raise RuntimeError(f"Could not commit calibrated execution-plan revision: {exc}") from exc
@@ -9768,12 +10114,20 @@ class ExperimentModel(QObject):
             raise RuntimeError(
                 f"The calibration revision was committed, but its refuel-check state could not be synchronized: {exc}"
             ) from exc
-        self._restore_authoritative_session_after_full_revision()
+        if not cached_commit:
+            restored = self._restore_authoritative_session_after_full_revision()
+            self._last_authoritative_calibration_transition = {
+                "cache_path": "full_revision",
+                "starting_plan_revision": plan.plan_revision,
+                "final_plan_revision": candidate.plan_revision,
+                "created_revision": revision_file_name(candidate.plan_revision),
+                "full_validation_count": 1 if restored else 0,
+            }
         self.set_execution_plan_sync_error(None)
         self.applied_imaging_calibration_changed.emit(record.to_dict())
         self._audit_execution_plan_event(
             "execution_plan_calibration_revised",
-            "Execution plan calibrated",
+            "Experiment calibration updated",
             {
                 "plan_id": candidate.plan_id,
                 "previous_revision": plan.plan_revision,
@@ -9784,7 +10138,7 @@ class ExperimentModel(QObject):
                 "new_effective_volume_nL": float(new_effective_volume_nL),
             },
         )
-        return {"plan": candidate, "record": record.to_dict(), "status": "created"}
+        return {"plan": candidate, "record": record.to_dict(), "status": status}
 
     def _project_reconstructed_execution_plan(self, plan):
         fill_name = str(self.metadata.get("fill_reagent_name", "Water"))
@@ -11606,7 +11960,7 @@ class ExperimentModel(QObject):
                     audit_path=Path(self.experiment_audit_file_path)
                 ).record(
                     "prepared_execution_replaced",
-                    "Untouched prepared execution replaced after experiment rename",
+                    "Finalized experiment updated after experiment rename",
                     details={
                         "previous_plan_id": original_plan.plan_id,
                         "replacement_plan_id": candidate.plan_id,
@@ -11737,7 +12091,7 @@ class ExperimentModel(QObject):
             audit_path=result.destination / ExperimentAuditLog.FILE_NAME
         ).record(
             "legacy_execution_migrated",
-            "Recorded legacy execution migrated as an analysis-only copy",
+            "Older experiment converted to a view-only copy",
             details={
                 "plan_id": result.plan.plan_id,
                 "source_folder": Path(source_dir).name,
@@ -11817,6 +12171,7 @@ class ExperimentModel(QObject):
         self._active_authoritative_execution_session = None
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
+        self._last_authoritative_calibration_transition = None
         self._progress_execution_reference = None
         self._prepared_execution_replacement_context = None
 
@@ -15815,7 +16170,7 @@ class Model(QObject):
         )
         self.record_experiment_audit_event(
             "experiment_loaded",
-            "Experiment loaded into runtime",
+            "Experiment loaded",
             details={
                 "load_progress": bool(load_progress),
                 "plate_name": self.well_plate.get_current_plate_name(),
@@ -15958,6 +16313,10 @@ class Model(QObject):
 
     def _clear_runtime_experiment_without_signal(self):
         """Clear runtime execution state without announcing a successful load."""
+        self._read_only_experiment_view_active = False
+        self._read_only_experiment_display_heads = ()
+        self._completed_execution_view_active = False
+        self._completed_execution_display_heads = ()
         if self.stock_solutions is not None:
             self.stock_solutions.clear_all_stock_solutions()
         if self.reaction_collection is not None:
@@ -16007,8 +16366,70 @@ class Model(QObject):
         eligibility = bundle.eligibility
         if not eligibility.can_activate_runtime or eligibility.status.startswith("blocked_"):
             raise RuntimeError(eligibility.reason)
-        spec = build_execution_runtime_spec(bundle)
+        projection = self._build_authoritative_runtime_projection(bundle)
 
+        # The checkpoint write is an explicit activation side effect. It occurs only
+        # after every saved runtime identity has been validated and built in memory.
+        self.experiment_model.ensure_execution_resume_checkpoint()
+
+        self._clear_runtime_experiment_without_signal()
+        self.well_plate.set_plate_format(projection.spec.plate_name)
+        self.stock_solutions = projection.stock_manager
+        self.reaction_collection = projection.reaction_collection
+        self.well_plate.assign_reactions_to_specific_wells(
+            list(projection.reactions),
+            list(projection.well_ids),
+        )
+        self.well_plate.apply_calibration_data()
+        self.assign_printer_heads()
+
+        self._apply_saved_printer_head_projection(
+            list(getattr(getattr(self, "printer_head_manager", None), "printer_heads", []) or []),
+            projection.stock_specs,
+        )
+
+        self.experiment_model.set_runtime_context(
+            self.well_plate,
+            self.reaction_collection,
+        )
+        self.experiment_model._authoritative_runtime_active = True
+        self.experiment_model._write_execution_plan_exports(
+            bundle.plan,
+            self.experiment_model.to_dict(),
+        )
+        self.record_experiment_audit_event(
+            "authoritative_execution_activated",
+            "Experiment loaded",
+            details={
+                "plan_id": bundle.plan.plan_id,
+                "plan_revision": bundle.plan.plan_revision,
+                "resume_status": eligibility.status,
+                "reaction_count": len(projection.reactions),
+            },
+        )
+        self.experiment_loaded.emit()
+        return self.experiment_model.get_execution_resume_eligibility()
+
+    def _build_authoritative_runtime_projection(self, bundle):
+        """Build and validate saved runtime state without mutating the live model."""
+        spec = build_execution_runtime_spec(bundle)
+        return self._build_execution_runtime_projection(spec)
+
+    def _build_legacy_runtime_projection(self):
+        """Build a validated display projection from an in-memory legacy snapshot."""
+        if not self.experiment_model.can_view_legacy_execution():
+            raise RuntimeError(
+                "This older experiment does not contain enough validated data to display."
+            )
+        plan = self.experiment_model.get_reconstructed_execution_plan()
+        spec = build_execution_runtime_spec_from_plan(
+            plan,
+            self.experiment_model.progress_data,
+        )
+        return self._build_execution_runtime_projection(spec)
+
+    def _build_execution_runtime_projection(self, spec):
+        """Build and validate a plan/progress projection without mutating live state."""
         try:
             plate_data = self.well_plate.get_plate_data_by_name(spec.plate_name)
         except Exception as exc:
@@ -16020,9 +16441,10 @@ class Model(QObject):
             or int(plate_data.get("columns", -1)) != spec.plate_columns
         ):
             raise RuntimeError("The current plate catalog differs from the saved execution plate.")
-        well_ids = [well.well_id for well in spec.wells]
+
+        well_ids = tuple(well.well_id for well in spec.wells)
         self.well_plate.validate_explicit_well_ids(
-            well_ids,
+            list(well_ids),
             plate_name=spec.plate_name,
             excluded_wells=set(),
         )
@@ -16059,22 +16481,18 @@ class Model(QObject):
             reaction_collection.add_reaction(reaction)
             reactions.append(reaction)
 
-        # The checkpoint write is an explicit activation side effect. It occurs only
-        # after every saved runtime identity has been validated and built in memory.
-        self.experiment_model.ensure_execution_resume_checkpoint()
+        return _AuthoritativeRuntimeProjection(
+            spec=spec,
+            stock_manager=stock_manager,
+            reaction_collection=reaction_collection,
+            reactions=tuple(reactions),
+            well_ids=well_ids,
+            stock_specs=stock_specs,
+        )
 
-        self._clear_runtime_experiment_without_signal()
-        self.well_plate.set_plate_format(spec.plate_name)
-        self.stock_solutions = stock_manager
-        self.reaction_collection = reaction_collection
-        self.well_plate.assign_reactions_to_specific_wells(reactions, well_ids)
-        self.well_plate.apply_calibration_data()
-        self.assign_printer_heads()
-
-        printer_head_manager = getattr(self, "printer_head_manager", None)
-        for printer_head in list(
-            getattr(printer_head_manager, "printer_heads", []) or []
-        ):
+    @staticmethod
+    def _apply_saved_printer_head_projection(printer_heads, stock_specs):
+        for printer_head in printer_heads:
             if getattr(printer_head, "calibration_chip", False):
                 continue
             saved = stock_specs.get(printer_head.get_stock_id())
@@ -16084,27 +16502,95 @@ class Model(QObject):
                 printer_head.printer_head_id = saved.printer_head_id
             printer_head.target_droplet_volume = saved.effective_volume_nL
 
+    def _build_read_only_experiment_display_heads(self, projection):
+        colors = list(getattr(self, "printer_head_colors", {}).values())
+        if not colors:
+            colors = ["#808080"]
+        heads = []
+        for index, stock in enumerate(projection.stock_manager.get_all_stock_solutions()):
+            head = PrinterHead(stock, color=colors[(index + 1) % len(colors)])
+            heads.append(head)
+        self._apply_saved_printer_head_projection(heads, projection.stock_specs)
+        return tuple(heads)
+
+    def _apply_read_only_experiment_projection(self, projection):
+        display_heads = self._build_read_only_experiment_display_heads(projection)
+
+        self.well_plate.clear_all_wells()
+        self.well_plate.set_plate_format(projection.spec.plate_name)
+        self.stock_solutions = projection.stock_manager
+        self.reaction_collection = projection.reaction_collection
+        self.well_plate.assign_reactions_to_specific_wells(
+            list(projection.reactions),
+            list(projection.well_ids),
+        )
+        self.well_plate.apply_calibration_data()
+        self._read_only_experiment_display_heads = display_heads
+        self._read_only_experiment_view_active = True
+        self._completed_execution_display_heads = display_heads
+        plan = self.experiment_model.get_execution_plan_snapshot()
+        self._completed_execution_view_active = bool(
+            plan is not None and plan.state is ExecutionPlanState.COMPLETED
+        )
         self.experiment_model.set_runtime_context(
             self.well_plate,
             self.reaction_collection,
         )
-        self.experiment_model._authoritative_runtime_active = True
-        self.experiment_model._write_execution_plan_exports(
-            bundle.plan,
-            self.experiment_model.to_dict(),
-        )
-        self.record_experiment_audit_event(
-            "authoritative_execution_activated",
-            "Authoritative execution activated in runtime",
-            details={
-                "plan_id": bundle.plan.plan_id,
-                "plan_revision": bundle.plan.plan_revision,
-                "resume_status": eligibility.status,
-                "reaction_count": len(reactions),
-            },
-        )
+        self.experiment_model._authoritative_runtime_active = False
+        self.experiment_model._active_authoritative_execution_session = None
         self.experiment_loaded.emit()
+
+    def load_read_only_experiment_view(self):
+        """Display a completed or safely reconstructed older experiment read-only."""
+        if self.experiment_model.can_view_legacy_execution():
+            projection = self._build_legacy_runtime_projection()
+            self._apply_read_only_experiment_projection(projection)
+            return {
+                "status": "analysis_only",
+                "can_activate_runtime": False,
+                "can_start_hardware": False,
+                "can_resume_hardware": False,
+                "reason": "This older experiment is permanently view-only.",
+                "repairable_intent_ids": [],
+                "ambiguous_intent_ids": [],
+            }
+
+        bundle = self.experiment_model._refresh_authoritative_execution_bundle()
+        if not self.experiment_model.can_view_completed_execution():
+            raise RuntimeError(
+                "Only a valid completed experiment or validated older experiment can "
+                "be opened in the read-only view. " + str(bundle.eligibility.reason)
+            )
+        projection = self._build_authoritative_runtime_projection(bundle)
+        self._apply_read_only_experiment_projection(projection)
         return self.experiment_model.get_execution_resume_eligibility()
+
+    def load_completed_execution_view(self):
+        """Compatibility wrapper for the general read-only experiment view."""
+        bundle = self.experiment_model._refresh_authoritative_execution_bundle()
+        if not self.experiment_model.can_view_completed_execution():
+            raise RuntimeError(
+                "Only a valid completed execution can be opened in the read-only view. "
+                + str(bundle.eligibility.reason)
+            )
+        projection = self._build_authoritative_runtime_projection(bundle)
+        self._apply_read_only_experiment_projection(projection)
+        return self.experiment_model.get_execution_resume_eligibility()
+
+    def is_read_only_experiment_view_active(self):
+        return bool(getattr(self, "_read_only_experiment_view_active", False))
+
+    def get_read_only_experiment_display_heads(self):
+        return tuple(getattr(self, "_read_only_experiment_display_heads", ()) or ())
+
+    def is_completed_execution_view_active(self):
+        return bool(
+            self.is_read_only_experiment_view_active()
+            and getattr(self, "_completed_execution_view_active", False)
+        )
+
+    def get_completed_execution_display_heads(self):
+        return self.get_read_only_experiment_display_heads()
 
     def assign_printer_heads(self):
         """Assign printer heads to the slots in the rack."""

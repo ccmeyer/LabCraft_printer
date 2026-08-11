@@ -23,6 +23,29 @@ from tools.sil.session import (
     SimulationSession,
     SimulationSessionConfigV1,
 )
+from tools.virtual_workflows.page_drivers import CalibrationDialogDriver
+
+
+_PRINT_PROFILES = [
+    {
+        "id": "water_droplet",
+        "name": "Water - droplet",
+        "mode": "droplet",
+        "print_pressure": 0.6,
+        "refuel_pressure": 0.3,
+        "print_pulse_width": 1300,
+        "refuel_pulse_width": 3000,
+    },
+    {
+        "id": "water_stream",
+        "name": "Water - stream",
+        "mode": "stream",
+        "print_pressure": 0.8,
+        "refuel_pressure": 0.8,
+        "print_pulse_width": 2500,
+        "refuel_pulse_width": 6000,
+    },
+]
 
 
 def _camera_free_model():
@@ -43,6 +66,7 @@ def _camera_free_model():
         machine_state_updated=SignalStub(),
         rack_model=SimpleNamespace(get_gripper_printer_head=lambda: head),
         experiment_model=experiment,
+        print_profiles=[dict(profile) for profile in _PRINT_PROFILES],
     )
     manager = CalibrationManager(model)
     manager.ensure_loaded = lambda: None
@@ -57,10 +81,30 @@ def _camera_free_model():
         flash_signal=SignalStub(),
     )
     model.refuel_camera_model = None
+    settings = {
+        "current_print": 1.2,
+        "current_refuel": 0.3,
+        "target_print": 1.2,
+        "target_refuel": 0.3,
+        "print_pw": 1400,
+        "refuel_pw": 3000,
+    }
     model.machine_model = SimpleNamespace(
+        machine_connected=True,
+        machine_state_updated=SignalStub(),
+        pressure_updated=SignalStub(),
+        printing_parameters_updated=SignalStub(),
+        is_connected=lambda: True,
         get_print_pressure_bounds=lambda: (0.1, 5.0),
-        get_print_pulse_width=lambda: 1400,
-        get_current_print_pressure=lambda: 1.2,
+        get_print_pulse_width=lambda: settings["print_pw"],
+        get_refuel_pulse_width=lambda: settings["refuel_pw"],
+        get_current_print_pressure=lambda: settings["current_print"],
+        get_current_refuel_pressure=lambda: settings["current_refuel"],
+        get_target_print_pressure=lambda: settings["target_print"],
+        get_target_refuel_pressure=lambda: settings["target_refuel"],
+        get_print_pressure_readings=lambda: [1.0, 1.1, settings["current_print"]],
+        get_refuel_pressure_readings=lambda: [0.2, 0.25, settings["current_refuel"]],
+        _settings=settings,
     )
     return model, context, head
 
@@ -116,6 +160,41 @@ def test_full_layout_simulation_calibration_uses_real_tabs_but_no_camera(
         get_array_run_state=lambda: "idle",
         machine=SimpleNamespace(check_if_all_completed=lambda: True),
     )
+    settings = model.machine_model._settings
+    printing_setting_calls = []
+
+    def set_setting(key, value, name, **kwargs):
+        settings[key] = value
+        printing_setting_calls.append((name, value, dict(kwargs)))
+        model.machine_model.printing_parameters_updated.emit()
+        return True
+
+    controller.set_absolute_print_pressure = lambda value, **kwargs: set_setting(
+        "target_print", float(value), "print_pressure", **kwargs
+    )
+    controller.set_absolute_refuel_pressure = lambda value, **kwargs: set_setting(
+        "target_refuel", float(value), "refuel_pressure", **kwargs
+    )
+    controller.set_print_pulse_width = lambda value, **kwargs: set_setting(
+        "print_pw", int(value), "print_pw", **kwargs
+    )
+    controller.set_refuel_pulse_width = lambda value, **kwargs: set_setting(
+        "refuel_pw", int(value), "refuel_pw", **kwargs
+    )
+
+    def apply_profile(profile, callback=None):
+        settings.update(
+            target_print=float(profile["print_pressure"]),
+            target_refuel=float(profile["refuel_pressure"]),
+            print_pw=int(profile["print_pulse_width"]),
+            refuel_pw=int(profile["refuel_pulse_width"]),
+        )
+        model.machine_model.printing_parameters_updated.emit()
+        if callable(callback):
+            callback()
+        return True
+
+    controller.apply_print_profile = apply_profile
     main_window = QtWidgets.QWidget()
     main_window.color_dict = {}
     main_window.runtime_context = SIMULATION_RUNTIME_CONTEXT
@@ -173,9 +252,47 @@ def test_full_layout_simulation_calibration_uses_real_tabs_but_no_camera(
     assert not dialog.calibrate_pressure_scan_button.isEnabled()
     assert dialog.calibrate_all_button.isEnabled()
     assert dialog.calibrate_all_stream_button.isEnabled()
+    assert dialog.printing_controls_section.isVisible()
+    assert dialog.printing_controls_toggle.isChecked()
+    assert dialog.live_pressure_section.isVisible()
+    assert dialog.live_pressure_toggle.isChecked()
+    dialog._render_live_pressure_plot()
+    assert dialog.live_print_pressure_series.count() == 3
+    assert dialog.live_refuel_pressure_series.count() == 3
+    assert dialog.live_target_print_pressure_series.count() == 2
+    assert dialog.live_target_refuel_pressure_series.count() == 2
+    assert dialog.target_print_pressure_spinbox.isEnabled()
+    assert [
+        dialog.print_profile_combo.itemData(index)["id"]
+        for index in range(dialog.print_profile_combo.count())
+    ] == ["water_droplet"]
+
+    dialog.target_print_pressure_spinbox.setValue(0.7)
+    dialog.target_refuel_pressure_spinbox.setValue(0.4)
+    dialog.print_pulse_width_spinbox.setValue(1350)
+    dialog.refuel_pulse_width_spinbox.setValue(3200)
+    qapp.processEvents()
+    assert settings == {
+        "current_print": 1.2,
+        "current_refuel": 0.3,
+        "target_print": 0.7,
+        "target_refuel": 0.4,
+        "print_pw": 1350,
+        "refuel_pw": 3200,
+    }
+    assert [call[0] for call in printing_setting_calls] == [
+        "print_pressure",
+        "refuel_pressure",
+        "print_pw",
+        "refuel_pw",
+    ]
 
     dialog.calibration_tabs.setCurrentWidget(dialog.stream_tab)
     qapp.processEvents()
+    assert [
+        dialog.print_profile_combo.itemData(index)["id"]
+        for index in range(dialog.print_profile_combo.count())
+    ] == ["water_stream"]
     assert "Droplet \u2192 Stream" in dialog.synthetic_calibration_mode_label.text()
     assert "9.000 nL Droplet -> 40.000 nL Stream" in (
         dialog.synthetic_calibration_mode_label.text()
@@ -351,6 +468,158 @@ def test_normal_calibrate_button_routes_to_simulation_workflow(qapp, tmp_path):
 
         assert launches == ["simulation_calibration"]
     finally:
+        assert session.close()
+
+
+def test_imager_printing_controls_round_trip_through_virtual_machine(qapp, tmp_path):
+    session = SimulationSession.create(
+        SimulationSessionConfigV1(
+            visible=False,
+            qt_ownership="borrowed",
+            root_policy=SessionRootPolicy.RETAINED,
+            session_root=(tmp_path / "imager-printing-controls").resolve(),
+            artifact_retention=ArtifactRetentionPolicy.RETAIN,
+            seed=1,
+            speed_multiplier=1000.0,
+            source_identity="pytest-imager-printing-controls",
+        )
+    )
+    dialog = None
+    try:
+        view = session.launch()
+        box = view.pressure_box
+        box._simulation_calibration_generate_callback = lambda profile_id: {
+            "ok": True,
+            "profile_id": profile_id,
+            "result_fingerprint": "1" * 64,
+        }
+        box._simulation_calibration_availability_callback = lambda _profile_id: {
+            "ok": True,
+            "message": "ready",
+        }
+        assert session.connect_simulator() is not False
+        for _ in range(500):
+            qapp.processEvents()
+            if session.components.model.machine_model.is_connected():
+                break
+            QtTest.QTest.qWait(2)
+        assert session.components.model.machine_model.is_connected()
+
+        dialog = box._launch_simulation_calibration_dialog()
+        assert box._pressure_render_suspended is True
+        assert not box._pressure_render_timer.isActive()
+        main_print_before = [
+            box.print_series.at(index).y()
+            for index in range(box.print_series.count())
+        ]
+        driver = CalibrationDialogDriver(qapp, dialog, timeout_seconds=10.0)
+        direct = driver.set_printing_controls(
+            "droplet",
+            print_pressure_psi=0.72,
+            refuel_pressure_psi=0.42,
+            print_pulse_width_us=1450,
+            refuel_pulse_width_us=3250,
+        )
+        assert direct["target_print_pressure_psi"] == 0.72
+        assert direct["target_refuel_pressure_psi"] == 0.42
+        assert direct["print_pulse_width_us"] == 1450
+        assert direct["refuel_pulse_width_us"] == 3250
+        driver.wait_until(
+            lambda: (
+                driver.inspect_live_pressure_plot()["series"]["print"]["count"] > 0
+                and abs(
+                    driver.inspect_live_pressure_plot()["target_print_pressure_psi"]
+                    - 0.72
+                ) <= 0.005
+                and abs(
+                    driver.inspect_live_pressure_plot()["target_refuel_pressure_psi"]
+                    - 0.42
+                ) <= 0.005
+            ),
+            "live pressure samples and direct targets",
+        )
+        live_direct = driver.inspect_live_pressure_plot()
+        assert abs(live_direct["target_print_pressure_psi"] - 0.72) <= 0.005
+        assert abs(live_direct["target_refuel_pressure_psi"] - 0.42) <= 0.005
+        assert live_direct["legend_entries"] == ["Print", "Refuel"]
+        assert live_direct["animation"] == "none"
+        assert live_direct["series"]["print"]["color"] == (
+            box.print_series.pen().color().name()
+        )
+        assert live_direct["series"]["refuel"]["color"] == (
+            box.refuel_series.pen().color().name()
+        )
+        assert live_direct["series"]["target_print"]["color"] == (
+            box.target_print_pressure_series.pen().color().name()
+        )
+        assert live_direct["series"]["target_refuel"]["color"] == (
+            box.target_refuel_pressure_series.pen().color().name()
+        )
+        assert live_direct["series"]["print"]["line_width"] == 1.25
+        assert live_direct["series"]["target_print"]["line_style"] == "dash"
+        assert [
+            box.print_series.at(index).y()
+            for index in range(box.print_series.count())
+        ] == main_print_before
+
+        droplet = driver.apply_print_profile_from_panel(
+            "droplet",
+            "water_droplet",
+        )
+        assert droplet["profile_ids"] == ["water_droplet"]
+        assert droplet["profile_button_text"] == "Loaded"
+        assert droplet["target_print_pressure_psi"] == 0.6
+        assert droplet["target_refuel_pressure_psi"] == 0.3
+        assert droplet["print_pulse_width_us"] == 1300
+        assert droplet["refuel_pulse_width_us"] == 3000
+
+        stream = driver.apply_print_profile_from_panel("stream", "water_stream")
+        assert "water_droplet" not in stream["profile_ids"]
+        assert "water_stream" in stream["profile_ids"]
+        assert stream["profile_button_text"] == "Loaded"
+        assert stream["target_print_pressure_psi"] == 0.8
+        assert stream["target_refuel_pressure_psi"] == 0.8
+        assert stream["print_pulse_width_us"] == 2500
+        assert stream["refuel_pulse_width_us"] == 6000
+        driver.wait_until(
+            lambda: abs(
+                driver.inspect_live_pressure_plot()["target_print_pressure_psi"]
+                - 0.8
+            ) <= 0.005,
+            "stream target line",
+        )
+        live_stream = driver.inspect_live_pressure_plot()
+        assert abs(live_stream["target_print_pressure_psi"] - 0.8) <= 0.005
+        assert abs(live_stream["target_refuel_pressure_psi"] - 0.8) <= 0.005
+
+        post_profile_override = driver.set_printing_controls(
+            "stream",
+            print_pressure_psi=0.9,
+            refuel_pressure_psi=0.7,
+            print_pulse_width_us=2650,
+            refuel_pulse_width_us=6250,
+        )
+        assert post_profile_override["controls_enabled"] is True
+        assert post_profile_override["profile_button_text"] == "Apply"
+        assert post_profile_override["target_print_pressure_psi"] == 0.9
+        assert post_profile_override["target_refuel_pressure_psi"] == 0.7
+        assert post_profile_override["print_pulse_width_us"] == 2650
+        assert post_profile_override["refuel_pulse_width_us"] == 6250
+
+        dialog.close()
+        qapp.processEvents()
+        dialog = None
+        assert box._pressure_render_suspended is False
+        print_readings = (
+            session.components.model.machine_model.get_print_pressure_readings()
+        )
+        assert box.print_series.at(box.print_series.count() - 1).y() == float(
+            print_readings[-1]
+        )
+    finally:
+        if dialog is not None:
+            dialog.close()
+            qapp.processEvents()
         assert session.close()
 
 

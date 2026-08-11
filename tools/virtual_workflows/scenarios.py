@@ -51,6 +51,16 @@ MULTI_STOCK_FIXTURE_PATH = (
     / "fixtures"
     / "print_array_multi_stock_24x2_v1.json"
 )
+MIXED_MODE_FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "print_array_mixed_mode_24x2_v1.json"
+)
+DISCONNECT_FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "print_array_disconnect_mid_array_24_v1.json"
+)
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "verification_reports" / "virtual_workflows"
 WORKLOAD_ID = "virtual_print_array_96_v1"
 SMOKE_WORKLOAD_ID = "virtual_print_array_24_v1"
@@ -58,6 +68,8 @@ STRESS_WORKLOAD_ID = "virtual_print_array_384x10_v1"
 SOFT_STOP_RESUME_WORKLOAD_ID = "print_array_soft_stop_resume_24_v1"
 AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID = "authoritative_reload_resume_24_v1"
 MULTI_STOCK_WORKLOAD_ID = "print_array_multi_stock_24x2_v1"
+MIXED_MODE_WORKLOAD_ID = "print_array_mixed_mode_24x2_v1"
+DISCONNECT_WORKLOAD_ID = "print_array_disconnect_mid_array_24_v1"
 SCENARIO_FIXTURES = {
     WORKLOAD_ID: FIXTURE_PATH,
     STRESS_WORKLOAD_ID: STRESS_FIXTURE_PATH,
@@ -65,6 +77,8 @@ SCENARIO_FIXTURES = {
     SOFT_STOP_RESUME_WORKLOAD_ID: SOFT_STOP_RESUME_FIXTURE_PATH,
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: AUTHORITATIVE_RELOAD_RESUME_FIXTURE_PATH,
     MULTI_STOCK_WORKLOAD_ID: MULTI_STOCK_FIXTURE_PATH,
+    MIXED_MODE_WORKLOAD_ID: MIXED_MODE_FIXTURE_PATH,
+    DISCONNECT_WORKLOAD_ID: DISCONNECT_FIXTURE_PATH,
 }
 SCENARIO_COMPLETION_COUNTS = {
     WORKLOAD_ID: 96,
@@ -73,6 +87,8 @@ SCENARIO_COMPLETION_COUNTS = {
     SOFT_STOP_RESUME_WORKLOAD_ID: 24,
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: 24,
     MULTI_STOCK_WORKLOAD_ID: 48,
+    MIXED_MODE_WORKLOAD_ID: 48,
+    DISCONNECT_WORKLOAD_ID: 24,
 }
 SCENARIO_WORKFLOW_STRATEGIES = {
     WORKLOAD_ID: "uninterrupted",
@@ -81,6 +97,7 @@ SCENARIO_WORKFLOW_STRATEGIES = {
     SOFT_STOP_RESUME_WORKLOAD_ID: "soft_stop_resume",
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: "authoritative_reload_resume",
     MULTI_STOCK_WORKLOAD_ID: "multi_stock_head_exchange",
+    MIXED_MODE_WORKLOAD_ID: "mixed_droplet_stream",
 }
 SCENARIO_NAME = "virtual_print_array"
 SCENARIO_VERSION = "1"
@@ -128,6 +145,14 @@ from tools.virtual_workflows.actions import (  # noqa: E402
     wait_for_completions,
     wait_until,
 )
+from tools.virtual_workflows.authoritative_evidence import (  # noqa: E402
+    authoritative_activation_boundary,
+    authoritative_loaded_boundary,
+    capture_authoritative_bundle,
+    completed_stock_well_pairs,
+    read_model_audit_rows as _read_audit_rows,
+    rich_file_inventory as _file_inventory,
+)
 from tools.virtual_workflows.persistence_io import PersistenceIoObserver  # noqa: E402
 from tools.virtual_workflows.progress_snapshot import (  # noqa: E402
     ProgressSnapshotObserver,
@@ -160,42 +185,14 @@ def _resolved_beneath(path: str | Path, root: str | Path) -> bool:
     return candidate == parent or parent in candidate.parents
 
 
-def _file_inventory(root: str | Path) -> dict[str, dict[str, Any]]:
-    directory = Path(root).resolve()
-    return {
-        path.relative_to(directory).as_posix(): {
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            "size_bytes": path.stat().st_size,
-        }
-        for path in sorted(directory.rglob("*"))
-        if path.is_file()
-    }
-
-
 def _merge_session_lifecycles(
     sessions: tuple[tuple[str, dict[str, Any]], ...],
 ) -> dict[str, list[Any]]:
-    keys = {
-        key
-        for _session_id, snapshot in sessions
-        for key in snapshot
-    }
-    merged: dict[str, list[Any]] = {}
-    for key in sorted(keys):
-        values: list[Any] = []
-        for session_id, snapshot in sessions:
-            for item in snapshot.get(key, ()):
-                if isinstance(item, dict):
-                    attributed = dict(item)
-                    attributed.setdefault(
-                        "application_session_id",
-                        session_id,
-                    )
-                    values.append(attributed)
-                else:
-                    values.append(item)
-        merged[key] = values
-    return merged
+    from tools.virtual_workflows.authoritative_evidence import (
+        merge_session_lifecycles,
+    )
+
+    return merge_session_lifecycles(sessions)
 
 
 def _merge_progress_snapshots(
@@ -459,10 +456,10 @@ def load_virtual_print_array_fixture(
             "stocks",
             "fill_stock",
             "simulation",
-            *({"lifecycle"} if schema_version == 3 else set()),
+            *({"lifecycle"} if schema_version in {3, 4} else set()),
         }
     )
-    if set(payload) != expected_top or schema_version not in {1, 2, 3}:
+    if set(payload) != expected_top or schema_version not in {1, 2, 3, 4}:
         raise VirtualWorkflowScenarioError(
             "virtual print-array fixture has an invalid top-level contract"
         )
@@ -521,16 +518,51 @@ def load_virtual_print_array_fixture(
         head = stock["printer_head"]
         stock_id = _stock_id(stock)
         head_id = str(head.get("printer_head_id") or "")
+        is_multi_fixture = scenario_id in {
+            MULTI_STOCK_WORKLOAD_ID,
+            MIXED_MODE_WORKLOAD_ID,
+        }
+        expected_prepared_volume = (
+            float(stock.get("droplet_volume_nL", -1))
+            if is_multi_fixture
+            else 9.0 if scenario_id == SMOKE_WORKLOAD_ID else 5.0
+        )
+        expected_calibrated_volume = (
+            float(stock.get("prepared_droplet_volume_nL", -1))
+            if is_multi_fixture
+            else 9.0 if scenario_id == SMOKE_WORKLOAD_ID else 10.0
+        )
+        expected_modes = ("droplet", "stream")
+        expected_mode = (
+            expected_modes[len(stock_ids)]
+            if scenario_id == MIXED_MODE_WORKLOAD_ID
+            and len(stock_ids) < len(expected_modes)
+            else "droplet"
+        )
+        mixed_head_valid = True
+        if scenario_id == MIXED_MODE_WORKLOAD_ID:
+            if expected_mode == "stream":
+                mixed_head_valid = (
+                    int(head.get("refuel_pulse_width_us", 0)) == 6000
+                    and float(head.get("refuel_pressure_psi", -1)) == 0.4
+                )
+            else:
+                mixed_head_valid = not {
+                    "refuel_pulse_width_us", "refuel_pressure_psi"
+                }.intersection(head)
         if (
-            stock.get("printing_mode") != "droplet"
-            or float(stock.get("prepared_droplet_volume_nL", -1)) != 5.0
-            or float(stock.get("droplet_volume_nL", -1)) != 10.0
+            stock.get("printing_mode") != expected_mode
+            or float(stock.get("prepared_droplet_volume_nL", -1))
+            != expected_prepared_volume
+            or float(stock.get("droplet_volume_nL", -1))
+            != expected_calibrated_volume
             or not head_id
             or int(head.get("print_pulse_width_us", 0)) <= 0
             or float(head.get("print_pressure_psi", -1)) <= 0
             or float(head.get("initial_volume_uL", -1)) <= 0
             or stock_id in stock_ids
             or head_id in head_ids
+            or not mixed_head_valid
         ):
             raise VirtualWorkflowScenarioError("fixture stock/head contract is invalid")
         stock_ids.add(stock_id)
@@ -539,9 +571,31 @@ def load_virtual_print_array_fixture(
         workload.get("stock_count", 1)
     ):
         raise VirtualWorkflowScenarioError("fixture stock count is invalid")
-    if schema_version in {2, 3} and int(simulation.get("staging_slot", -1)) != 0:
+    if scenario_id == MIXED_MODE_WORKLOAD_ID:
+        expected_mixed = (
+            ("Virtual Mixed Droplet", 23.0, 3.0, "mM", "droplet", 9.0, 1300, 1.2),
+            ("Virtual Mixed Stream", 23.0, 20.0, "mM", "stream", 60.0, 2500, 1.2),
+        )
+        observed_mixed = tuple(
+            (
+                stock.get("factor_name"),
+                float(stock.get("concentration", -1)),
+                float(stock.get("target_concentration", -1)),
+                stock.get("units"),
+                stock.get("printing_mode"),
+                float(stock.get("droplet_volume_nL", -1)),
+                int(stock.get("printer_head", {}).get("print_pulse_width_us", 0)),
+                float(stock.get("printer_head", {}).get("print_pressure_psi", -1)),
+            )
+            for stock in stock_specs
+        )
+        if observed_mixed != expected_mixed:
+            raise VirtualWorkflowScenarioError(
+                "mixed-mode fixture stock contract is invalid"
+            )
+    if schema_version in {2, 3, 4} and int(simulation.get("staging_slot", -1)) != 0:
         raise VirtualWorkflowScenarioError("fixture staging-slot contract is invalid")
-    if schema_version == 3:
+    if schema_version in {3, 4}:
         lifecycle = payload.get("lifecycle")
         expected_lifecycle = {
             SOFT_STOP_RESUME_WORKLOAD_ID: {
@@ -562,6 +616,24 @@ def load_virtual_print_array_fixture(
                 "expected_stock_pass_count": 2,
                 "expected_head_stage_count": 2,
                 "expected_between_pass_exchange_count": 1,
+            },
+            MIXED_MODE_WORKLOAD_ID: {
+                "kind": "mixed_droplet_stream",
+                "expected_stock_pass_count": 2,
+                "expected_head_stage_count": 2,
+                "expected_between_pass_exchange_count": 1,
+                "manual_refuel_check": {
+                    "status": "passed",
+                    "operator_judgment": "stable",
+                    "trial_count": 2,
+                    "trial_droplet_count": 5,
+                },
+            },
+            DISCONNECT_WORKLOAD_ID: {
+                "kind": "disconnect_fail_closed",
+                "disconnect_after_completion_count": 6,
+                "expected_canceled_intent_count": 2,
+                "quiescence_observation_ms": 250,
             },
         }.get(str(payload.get("fixture_id")))
         if expected_lifecycle is None or lifecycle != expected_lifecycle:
@@ -786,6 +858,8 @@ def _create_prepared_fixture(
 
 
 class _InstanceInstrumentation:
+    _MAX_SIMULATOR_DISPENSES = 10_000
+
     def __init__(
         self,
         phases: NamedPhaseRecorder,
@@ -807,6 +881,8 @@ class _InstanceInstrumentation:
         self.intent_attachments: list[dict[str, Any]] = []
         self.intent_completions: list[str] = []
         self.intent_discard_batches: list[dict[str, Any]] = []
+        self.simulator_dispenses: list[tuple[Any, bool]] = []
+        self.simulator_dispense_overflow_count = 0
         self.soft_stop_events: list[dict[str, Any]] = []
         self.checkpoint_observations: list[dict[str, Any]] = []
         self.pass_starts: list[dict[str, Any]] = []
@@ -887,6 +963,14 @@ class _InstanceInstrumentation:
                             getattr(
                                 experiment_model,
                                 "_last_authoritative_pass_preparation",
+                                None,
+                            )
+                            or {}
+                        ),
+                        "calibration": dict(
+                            getattr(
+                                experiment_model,
+                                "_last_authoritative_calibration_transition",
                                 None,
                             )
                             or {}
@@ -1031,6 +1115,24 @@ class _InstanceInstrumentation:
         self._originals.append((obj, method_name, original))
         setattr(obj, method_name, measured)
 
+    def observe_method(
+        self,
+        obj: Any,
+        method_name: str,
+        observe: Callable[[tuple[Any, ...], dict[str, Any], Any], None],
+    ) -> None:
+        """Observe one instance method without adding a timing phase."""
+
+        original = getattr(obj, method_name)
+
+        def observed(*args, **kwargs):
+            result = original(*args, **kwargs)
+            observe(args, kwargs, result)
+            return result
+
+        self._originals.append((obj, method_name, original))
+        setattr(obj, method_name, observed)
+
     @contextmanager
     def suppress_phases(self, *phase_names: str):
         added = {
@@ -1061,6 +1163,26 @@ class _InstanceInstrumentation:
             "attachments": list(self.intent_attachments),
             "completions": list(self.intent_completions),
             "discard_batches": list(self.intent_discard_batches),
+            "simulator_dispenses": [
+                {
+                    "command_seq32": int(
+                        getattr(command, "command_number", 0) or 0
+                    ),
+                    "command_type": str(
+                        getattr(command, "command_type", "") or ""
+                    ),
+                    "commanded_droplets": int(
+                        getattr(command, "param1", 0) or 0
+                    ),
+                    "manual": bool(manual),
+                    "status": str(getattr(command, "status", "") or ""),
+                }
+                for command, manual in self.simulator_dispenses
+            ],
+            "simulator_dispense_limit": self._MAX_SIMULATOR_DISPENSES,
+            "simulator_dispense_overflow_count": (
+                self.simulator_dispense_overflow_count
+            ),
             "soft_stop_events": list(self.soft_stop_events),
             "checkpoint_observations": list(self.checkpoint_observations),
             "pass_starts": list(self.pass_starts),
@@ -1144,6 +1266,7 @@ def _install_instrumentation(
     *,
     experiment_model: Any,
     controller: Any,
+    machine: Any,
     well_plate_widget: Any,
     pressure_plot_widget: Any,
     experiment_task_list: Any,
@@ -1176,6 +1299,9 @@ def _install_instrumentation(
                 "intent_id": result,
                 "well_id": argument(args, kwargs, "well_id", 0),
                 "stock_id": argument(args, kwargs, "stock_id", 1),
+                "commanded_droplets": int(
+                    argument(args, kwargs, "commanded_droplets", 2)
+                ),
             }
         )
         instrumentation.capture_checkpoint(experiment_model, "after_begin")
@@ -1215,6 +1341,19 @@ def _install_instrumentation(
         )
         instrumentation.capture_checkpoint(experiment_model, "after_discard")
 
+    def observe_dispense(args, kwargs, result) -> None:
+        if not result or str(getattr(result, "command_type", "")) != "DISPENSE":
+            return
+        manual = bool(
+            kwargs.get("manual", args[3] if len(args) > 3 else False)
+        )
+        if len(instrumentation.simulator_dispenses) >= (
+            instrumentation._MAX_SIMULATOR_DISPENSES
+        ):
+            instrumentation.simulator_dispense_overflow_count += 1
+            return
+        instrumentation.simulator_dispenses.append((result, manual))
+
     instrumentation.wrap(
         experiment_model,
         "begin_execution_print_intent",
@@ -1244,6 +1383,11 @@ def _install_instrumentation(
         "persistence.discard_intents",
         observe=observe_discard,
     )
+    instrumentation.observe_method(
+        machine,
+        "print_droplets",
+        observe_dispense,
+    )
     for method, phase in (
         ("_save_active_execution_resume", "persistence.save_resume"),
         ("_reconcile_authoritative_runtime_session", "persistence.reconcile_cache"),
@@ -1266,6 +1410,46 @@ def _install_instrumentation(
         ("_write_authoritative_pass_progress", "pass_start.progress_write"),
         ("_write_authoritative_pass_resume", "pass_start.resume_write"),
         ("_create_authoritative_pass_checkpoint", "pass_start.checkpoint_create"),
+        (
+            "_commit_authoritative_calibration_revision",
+            "pass_start.calibration_cached_commit",
+        ),
+        (
+            "_advance_authoritative_calibration_bundle",
+            "pass_start.calibration_successor_validation",
+        ),
+        (
+            "_guard_authoritative_calibration_files",
+            "pass_start.calibration_prewrite_guard",
+        ),
+        (
+            "_write_authoritative_calibration_document",
+            "pass_start.calibration_document_write",
+        ),
+        (
+            "_persist_authoritative_calibration_immutable_revision",
+            "pass_start.calibration_immutable_revision_write",
+        ),
+        (
+            "_write_authoritative_calibration_current_plan",
+            "pass_start.calibration_current_plan_write",
+        ),
+        (
+            "_write_authoritative_calibration_progress",
+            "pass_start.calibration_progress_write",
+        ),
+        (
+            "_write_authoritative_calibration_resume",
+            "pass_start.calibration_resume_write",
+        ),
+        (
+            "_accept_authoritative_calibration_writes",
+            "pass_start.calibration_post_write_acceptance",
+        ),
+        (
+            "_install_authoritative_calibration_bundle",
+            "pass_start.calibration_cache_install",
+        ),
         (
             "_complete_authoritative_execution_cached",
             "terminal_transition.cached_commit",
@@ -1856,18 +2040,6 @@ def _progress_added_count(experiment_model: Any) -> int:
         for reagent in (entry.get("reagents") or {}).values():
             total += int(reagent.get("added_droplets", 0))
     return total
-
-
-def _read_audit_rows(experiment_model: Any) -> list[dict[str, Any]]:
-    path_value = getattr(experiment_model, "experiment_audit_file_path", None)
-    path = Path(path_value) if path_value else None
-    if path is None or not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            rows.append(json.loads(line))
-    return rows
 
 
 def _contains_ordered_subsequence(
@@ -2787,6 +2959,7 @@ def run_virtual_print_array_scenario(
             phases,
             experiment_model=experiment_model,
             controller=controller,
+            machine=machine,
             well_plate_widget=view.well_plate_widget,
             pressure_plot_widget=view.pressure_box,
             experiment_task_list=view.experiment_task_list,
@@ -2995,27 +3168,17 @@ def run_virtual_print_array_scenario(
                 )
                 quiescence_evidence = dict(quiescence_result["evidence"])
                 if is_authoritative_reload_resume:
-                    paused_inventory = _file_inventory(
-                        fixture_info["experiment_dir"]
+                    session_1_authoritative = capture_authoritative_bundle(context)
+                    paused_inventory = (
+                        session_1_authoritative.directory.rich_inventory()
                     )
                     session_1_lifecycle = instrumentation.lifecycle_snapshot()
                     first_instrumentation = instrumentation
                     first_progress_observer = progress_observer
                     first_io_observer = io_observer
-                    session_1_audit_rows = _read_audit_rows(experiment_model)
-                    session_1_plan_id = str(fixture_info["plan_id"])
-                    session_1_completed_intent_ids = set(
-                        session_1_lifecycle.get("completions", ())
+                    session_1_completed_pairs = completed_stock_well_pairs(
+                        session_1_lifecycle
                     )
-                    session_1_completed_pairs = {
-                        (
-                            str(item["stock_id"]),
-                            str(item["well_id"]),
-                        )
-                        for item in session_1_lifecycle.get("begins", ())
-                        if item.get("intent_id")
-                        in session_1_completed_intent_ids
-                    }
                     session_1_cleanup_result = close_simulated_session(
                         context,
                         session_id="session_1",
@@ -3125,6 +3288,7 @@ def run_virtual_print_array_scenario(
                         phases,
                         experiment_model=experiment_model,
                         controller=controller,
+                        machine=machine,
                         well_plate_widget=view.well_plate_widget,
                         pressure_plot_widget=view.pressure_box,
                         experiment_task_list=view.experiment_task_list,
@@ -3157,106 +3321,29 @@ def run_virtual_print_array_scenario(
                     activated_boundary: dict[str, Any] = {}
 
                     def validate_loaded_boundary() -> Mapping[str, Any]:
-                        current = _file_inventory(
-                            fixture_info["experiment_dir"]
+                        loaded_snapshot = capture_authoritative_bundle(context)
+                        loaded_boundary.update(
+                            authoritative_loaded_boundary(
+                                session_1_authoritative, loaded_snapshot
+                            )
                         )
-                        eligibility = (
-                            experiment_model
-                            .get_execution_resume_eligibility()
-                        )
-                        checks = {
-                            "authoritative_files_byte_identical": (
-                                current == paused_inventory
-                            ),
-                            "runtime_inactive": not (
-                                experiment_model
-                                .is_authoritative_execution_runtime_active()
-                            ),
-                            "eligibility_ready_to_resume": (
-                                eligibility.get("status")
-                                == "ready_to_resume"
-                            ),
-                        }
-                        if not all(checks.values()):
+                        if loaded_boundary["failed_checks"]:
                             raise RuntimeError(
                                 "authoritative reload boundary is invalid"
                             )
-                        loaded_boundary.update(
-                            {
-                                "checks": checks,
-                                "inventory": current,
-                                "eligibility": eligibility,
-                            }
-                        )
                         return loaded_boundary
 
                     def validate_activated_boundary() -> Mapping[str, Any]:
-                        current = _file_inventory(
-                            fixture_info["experiment_dir"]
+                        evidence = authoritative_activation_boundary(
+                            session_1_authoritative,
+                            capture_authoritative_bundle(context),
+                            completed_pair_count=len(session_1_completed_pairs),
                         )
-                        all_paths = set(paused_inventory) | set(current)
-                        changed = sorted(
-                            path
-                            for path in all_paths
-                            if paused_inventory.get(path)
-                            != current.get(path)
-                        )
-                        allowed = {
-                            "execution_resume.json",
-                            "execution_plan.json",
-                            "key.csv",
-                            "concentration_key.csv",
-                            "experiment_audit.jsonl",
-                        }
-                        disallowed = sorted(set(changed) - allowed)
-                        audit_rows = _read_audit_rows(experiment_model)
-                        activation_rows = [
-                            row
-                            for row in audit_rows[
-                                len(session_1_audit_rows):
-                            ]
-                            if row.get("event_type")
-                            == "authoritative_execution_activated"
-                        ]
-                        snapshot = (
-                            experiment_model.get_execution_plan_snapshot()
-                        )
-                        eligibility = (
-                            experiment_model
-                            .get_execution_resume_eligibility()
-                        )
-                        checks = {
-                            "only_allowlisted_files_changed": not disallowed,
-                            "plan_identity_unchanged": (
-                                str(snapshot.plan_id)
-                                == session_1_plan_id
-                            ),
-                            "eligibility_ready_to_resume": (
-                                eligibility.get("status")
-                                == "ready_to_resume"
-                            ),
-                            "one_activation_audit_event": (
-                                len(activation_rows) == 1
-                            ),
-                            "partial_progress_rehydrated": (
-                                _progress_added_count(experiment_model)
-                                == len(session_1_completed_pairs)
-                            ),
-                        }
-                        if not all(checks.values()):
+                        if evidence["failed_checks"]:
                             raise RuntimeError(
                                 "authoritative activation boundary is invalid"
                             )
-                        activated_boundary.update(
-                            {
-                                "checks": checks,
-                                "changed_paths": changed,
-                                "disallowed_changed_paths": disallowed,
-                                "inventory": current,
-                                "eligibility": eligibility,
-                                "activation_audit_rows": activation_rows,
-                            }
-                        )
+                        activated_boundary.update(evidence)
                         return activated_boundary
 
                     validate_reload_boundary(
@@ -4675,6 +4762,10 @@ def run_virtual_print_array_scenario(
         "workload": {
             "workload_id": workload_id,
             "fixture_schema_version": fixture["schema_version"],
+            "fixture_path": config.fixture_path.relative_to(REPO_ROOT).as_posix(),
+            "fixture_sha256": hashlib.sha256(
+                config.fixture_path.read_bytes()
+            ).hexdigest(),
             "plate_name": fixture["plate"]["name"],
             "plate_rows": fixture["plate"]["rows"],
             "plate_columns": fixture["plate"]["columns"],
@@ -4919,6 +5010,7 @@ def run_virtual_print_array_scenario(
 __all__ = [
     "AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID",
     "MULTI_STOCK_WORKLOAD_ID",
+    "MIXED_MODE_WORKLOAD_ID",
     "SCENARIO_NAME",
     "SCENARIO_VERSION",
     "SCENARIO_FIXTURES",

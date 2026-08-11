@@ -145,7 +145,7 @@ def test_on_unique_conditions_applies_conditions_marks_dirty_and_updates_button(
 
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog.model = model
-    dialog.unique_conditions_btn = QPushButton("Unique Conditions...")
+    dialog.unique_conditions_btn = QPushButton("Additional Conditions...")
     dialog.status_lbl = QLabel("")
     dialog._editing_locked_by_gripper = False
     dialog._progress_protected = False
@@ -170,8 +170,8 @@ def test_on_unique_conditions_applies_conditions_marks_dirty_and_updates_button(
     assert stored[0].replicates == 2
     assert dialog._schedule_calls == 1
     assert dialog._design_optimization_dirty is True
-    assert dialog.unique_conditions_btn.text() == "Unique Conditions (1)..."
-    assert "2 extra reaction" in dialog.unique_conditions_btn.toolTip()
+    assert dialog.unique_conditions_btn.text() == "Additional Conditions (1)..."
+    assert "2 additional reaction" in dialog.unique_conditions_btn.toolTip()
 
 
 def test_unique_conditions_button_count_refreshes_after_new_experiment(qapp):
@@ -188,7 +188,7 @@ def test_unique_conditions_button_count_refreshes_after_new_experiment(qapp):
 
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog.model = model
-    dialog.unique_conditions_btn = QPushButton("Unique Conditions...")
+    dialog.unique_conditions_btn = QPushButton("Additional Conditions...")
     dialog.exp_name_edit = QLineEdit("Old")
     dialog.rep_spin = QSpinBox()
     dialog.v_spin = QDoubleSpinBox()
@@ -217,18 +217,18 @@ def test_unique_conditions_button_count_refreshes_after_new_experiment(qapp):
     dialog._set_status = lambda message: setattr(dialog, "_last_status", message)
 
     ExperimentDesignDialog._update_unique_conditions_button_label(dialog)
-    assert dialog.unique_conditions_btn.text() == "Unique Conditions (1)..."
+    assert dialog.unique_conditions_btn.text() == "Additional Conditions (1)..."
 
     ExperimentDesignDialog._on_new_experiment(dialog)
 
     assert model.get_additional_conditions() == []
-    assert dialog.unique_conditions_btn.text() == "Unique Conditions..."
+    assert dialog.unique_conditions_btn.text() == "Additional Conditions..."
 
 
 def test_unique_conditions_button_lock_states(qapp):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog.model = SimpleNamespace(_uploaded_well_ids=["A1"])
-    dialog.unique_conditions_btn = QPushButton("Unique Conditions...")
+    dialog.unique_conditions_btn = QPushButton("Additional Conditions...")
     dialog.rep_spin = QSpinBox()
     dialog.randomize_chk = QCheckBox()
     dialog.random_seed_spin = QSpinBox()

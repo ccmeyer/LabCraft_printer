@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 import cv2
-from utilities import ShortcutManager
+from utilities import ShortcutManager, apply_pressure_plot_style
 from CalibrationRecordExport import CalibrationRecordExportError, export_calibration_records
 from .Model import NozzlePositionChecklistStore
 from hardware.null_devices import NullCamera
@@ -2498,6 +2498,8 @@ class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
 
 
 class DropletImagingDialog(QtWidgets.QDialog):
+    PRINT_PROFILE_PRESSURE_TOLERANCE = 0.005
+    LIVE_PRESSURE_RENDER_INTERVAL_MS = 100
     REFUEL_LEVEL_CHART_WINDOW_SAMPLES = 100
     REFUEL_LEVEL_CHART_FALLBACK_HEIGHT_PX = 100.0
     IMAGER_CLOSE_STOP_TIMEOUT_S = 10.0
@@ -2513,6 +2515,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
     )
 
     _quick_controls_expanded_default = False
+    _printing_controls_expanded_default = True
+    _live_pressure_expanded_default = True
     _info_panel_section_default_states = {
         "summary": True,
         "bridge": True,
@@ -2625,6 +2629,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.shortcut_manager = ShortcutManager(self)
         self.manual_flash_shortcut = None
+        self._pressure_shortcuts = []
+        self._print_profile_apply_pending = False
+        self._selected_print_profile_ids_by_mode = {}
+        self._displayed_print_profile_mode = None
+        self._live_pressure_closing = False
         if not self.camera_free_mode:
             self.setup_shortcuts()
 
@@ -2805,6 +2814,39 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.acquisition_controls_toggle.toggled.connect(self._set_acquisition_controls_expanded)
         self._set_acquisition_controls_expanded(quick_controls_expanded)
 
+        printing_controls_expanded = self._get_saved_printing_controls_expanded()
+        (
+            self.printing_controls_section,
+            self.printing_controls_toggle,
+            self.printing_controls_content,
+            printing_grid,
+        ) = self._create_collapsible_section(
+            "Printing Controls",
+            expanded=printing_controls_expanded,
+        )
+        self.printing_controls_section.setObjectName("printingControlsSection")
+        self.printing_controls_toggle.setObjectName("printingControlsToggle")
+        self.printing_controls_toggle.toggled.connect(
+            self._set_printing_controls_expanded
+        )
+        self._set_printing_controls_expanded(printing_controls_expanded)
+
+        live_pressure_expanded = self._get_saved_live_pressure_expanded()
+        (
+            self.live_pressure_section,
+            self.live_pressure_toggle,
+            self.live_pressure_content,
+            live_pressure_grid,
+        ) = self._create_collapsible_section(
+            "Live Pressure",
+            expanded=live_pressure_expanded,
+        )
+        self.live_pressure_section.setObjectName("livePressureSection")
+        self.live_pressure_toggle.setObjectName("livePressureToggle")
+        self._build_live_pressure_chart(live_pressure_grid)
+        self.live_pressure_toggle.toggled.connect(self._set_live_pressure_expanded)
+        self._set_live_pressure_expanded(live_pressure_expanded)
+
         self.calibration_tabs = QtWidgets.QTabWidget()
         self.droplet_tab = QtWidgets.QWidget()
         self.stream_tab = QtWidgets.QWidget()
@@ -2822,6 +2864,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibration_tabs.addTab(self.debug_tab, "Debug / Specialty")
         self.calibration_tabs.addTab(self.optics_tab, "Optics")
         self.calibration_tabs.currentChanged.connect(self._refresh_calibration_tab_lock_state)
+        self.calibration_tabs.currentChanged.connect(
+            self._on_printing_controls_tab_changed
+        )
         self.calibration_tabs.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
 
         # --- Debug tab: Manual Controls ---
@@ -2907,13 +2952,97 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         acquisition_grid.addWidget(self.flash_delay_label, 0, 0)
         acquisition_grid.addWidget(self.flash_delay_spinbox, 0, 1)
-        acquisition_grid.addWidget(self.print_pulse_width_label, 1, 0)
-        acquisition_grid.addWidget(self.print_pulse_width_spinbox, 1, 1)
-        acquisition_grid.addWidget(self.flash_button, 2, 0, 1, 2)
+        acquisition_grid.addWidget(self.flash_button, 1, 0, 1, 2)
+
+        self.printing_mode_status_label = QtWidgets.QLabel()
+        self.printing_mode_status_label.setObjectName("printingModeStatusLabel")
+        self.printing_mode_status_label.setWordWrap(True)
+        printing_grid.addWidget(self.printing_mode_status_label, 0, 0, 1, 4)
+
+        self.print_profile_label = QtWidgets.QLabel("Print Profile:")
+        self.print_profile_combo = QtWidgets.QComboBox()
+        self.print_profile_combo.setObjectName("printingProfileCombo")
+        self.print_profile_combo.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.print_profile_combo.currentIndexChanged.connect(
+            self._handle_print_profile_selection_change
+        )
+        self.print_profile_apply_button = QtWidgets.QPushButton("Apply")
+        self.print_profile_apply_button.setObjectName("printingProfileApplyButton")
+        self.print_profile_apply_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.print_profile_apply_button.clicked.connect(self._handle_print_profile_apply)
+        printing_grid.addWidget(self.print_profile_label, 1, 0)
+        printing_grid.addWidget(self.print_profile_combo, 1, 1, 1, 2)
+        printing_grid.addWidget(self.print_profile_apply_button, 1, 3)
+
+        channel_header = QtWidgets.QLabel("Channel")
+        current_header = QtWidgets.QLabel("Current")
+        target_header = QtWidgets.QLabel("Target")
+        for header in (channel_header, current_header, target_header):
+            header.setStyleSheet("font-weight: 600;")
+        printing_grid.addWidget(channel_header, 2, 0)
+        printing_grid.addWidget(current_header, 2, 1)
+        printing_grid.addWidget(target_header, 2, 2, 1, 2)
+
+        self.current_print_pressure_value = QtWidgets.QLabel("-- psi")
+        self.current_print_pressure_value.setObjectName("currentPrintPressureValue")
+        self.target_print_pressure_spinbox = QtWidgets.QDoubleSpinBox()
+        self.target_print_pressure_spinbox.setObjectName("targetPrintPressureSpinbox")
+        self.target_print_pressure_spinbox.setDecimals(2)
+        self.target_print_pressure_spinbox.setSingleStep(0.1)
+        self.target_print_pressure_spinbox.setRange(self.hw_lo, self.hw_hi)
+        self.target_print_pressure_spinbox.setSuffix(" psi")
+        self.target_print_pressure_spinbox.setValue(
+            self._printing_machine_value("get_target_print_pressure", self.hw_lo)
+        )
+        self._register_manual_spinbox(
+            self.target_print_pressure_spinbox,
+            self.handle_target_print_pressure_change,
+        )
+        printing_grid.addWidget(QtWidgets.QLabel("Print pressure"), 3, 0)
+        printing_grid.addWidget(self.current_print_pressure_value, 3, 1)
+        printing_grid.addWidget(self.target_print_pressure_spinbox, 3, 2, 1, 2)
+
+        self.current_refuel_pressure_value = QtWidgets.QLabel("-- psi")
+        self.current_refuel_pressure_value.setObjectName("currentRefuelPressureValue")
+        self.target_refuel_pressure_spinbox = QtWidgets.QDoubleSpinBox()
+        self.target_refuel_pressure_spinbox.setObjectName("targetRefuelPressureSpinbox")
+        self.target_refuel_pressure_spinbox.setDecimals(2)
+        self.target_refuel_pressure_spinbox.setSingleStep(0.1)
+        self.target_refuel_pressure_spinbox.setRange(self.hw_lo, self.hw_hi)
+        self.target_refuel_pressure_spinbox.setSuffix(" psi")
+        self.target_refuel_pressure_spinbox.setValue(
+            self._printing_machine_value("get_target_refuel_pressure", self.hw_lo)
+        )
+        self._register_manual_spinbox(
+            self.target_refuel_pressure_spinbox,
+            self.handle_target_refuel_pressure_change,
+        )
+        printing_grid.addWidget(QtWidgets.QLabel("Refuel pressure"), 4, 0)
+        printing_grid.addWidget(self.current_refuel_pressure_value, 4, 1)
+        printing_grid.addWidget(self.target_refuel_pressure_spinbox, 4, 2, 1, 2)
+
+        self.print_pulse_width_label.setText("Print pulse width (\u00b5s):")
+        self.print_pulse_width_spinbox.setObjectName("printPulseWidthSpinbox")
+        printing_grid.addWidget(self.print_pulse_width_label, 5, 0, 1, 2)
+        printing_grid.addWidget(self.print_pulse_width_spinbox, 5, 2, 1, 2)
+
+        self.refuel_pulse_width_label = QtWidgets.QLabel("Refuel pulse width (\u00b5s):")
+        self.refuel_pulse_width_spinbox = QtWidgets.QSpinBox()
+        self.refuel_pulse_width_spinbox.setObjectName("refuelPulseWidthSpinbox")
+        self.refuel_pulse_width_spinbox.setRange(0, 10000)
+        self.refuel_pulse_width_spinbox.setSingleStep(50)
+        self.refuel_pulse_width_spinbox.setValue(
+            int(self._printing_machine_value("get_refuel_pulse_width", 0))
+        )
+        self._register_manual_spinbox(
+            self.refuel_pulse_width_spinbox,
+            self.handle_refuel_pulse_width_change,
+        )
+        printing_grid.addWidget(self.refuel_pulse_width_label, 6, 0, 1, 2)
+        printing_grid.addWidget(self.refuel_pulse_width_spinbox, 6, 2, 1, 2)
 
         self._quick_manual_lock_widgets = (
             self.flash_delay_spinbox,
-            self.print_pulse_width_spinbox,
             self.flash_button,
         )
         self._debug_manual_lock_widgets = (
@@ -2923,6 +3052,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.benchmark_profile_button,
         )
         self._manual_lock_widgets = self._quick_manual_lock_widgets + self._debug_manual_lock_widgets
+        self._printing_control_edit_widgets = (
+            self.target_print_pressure_spinbox,
+            self.target_refuel_pressure_spinbox,
+            self.print_pulse_width_spinbox,
+            self.refuel_pulse_width_spinbox,
+            self.print_profile_combo,
+        )
 
         # --- Droplet tab: standard droplet workflow ---
         self.calib_group = QtWidgets.QGroupBox("Droplet Calibration")
@@ -3373,6 +3509,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         control_panel_v.addWidget(self.reagent_title_widget)
         control_panel_v.addWidget(self.acquisition_controls_section)
         control_panel_v.addWidget(self.calibration_tabs, 1)
+        control_panel_v.addWidget(self.printing_controls_section)
+        control_panel_v.addWidget(self.live_pressure_section)
         control_panel_v.addWidget(self.run_options_group)
         control_panel_v.addWidget(self.refuel_level_group)
 
@@ -3814,6 +3952,25 @@ class DropletImagingDialog(QtWidgets.QDialog):
             except Exception:
                 pass
 
+        machine_model = getattr(self.model, "machine_model", None)
+        pressure_signal = getattr(machine_model, "pressure_updated", None)
+        if pressure_signal is not None:
+            pressure_signal.connect(self._refresh_current_pressure_values)
+            pressure_signal.connect(self._request_live_pressure_render)
+        printing_parameters_signal = getattr(
+            machine_model,
+            "printing_parameters_updated",
+            None,
+        )
+        if printing_parameters_signal is not None:
+            printing_parameters_signal.connect(self._sync_printing_controls_from_model)
+        machine_state_signal = getattr(machine_model, "machine_state_updated", None)
+        if machine_state_signal is not None:
+            machine_state_signal.connect(self._refresh_manual_control_lock_state)
+        transport_fault_signal = getattr(self.controller, "transport_fault_ui_signal", None)
+        if transport_fault_signal is not None:
+            transport_fault_signal.connect(self._handle_printing_controls_transport_fault)
+
         self.start_pressure_spin.valueChanged.connect(self.set_start_pressure)
         self.num_pressure_tests_spin.valueChanged.connect(self.set_num_pressure_tests)
         self.online_stream_tail_start_spinbox.valueChanged.connect(
@@ -3884,6 +4041,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.model.calibration_manager.readinessChanged.connect(self.on_readiness_changed)
         self.model.calibration_manager._emit_readiness()
 
+        self._sync_printing_controls_from_model(force=True)
+        self._on_printing_controls_tab_changed()
+
         if not self.camera_free_mode:
             self.set_exposure_time(self.droplet_camera_model.exposure_time)
             self.set_flash_delay(self.droplet_camera_model.flash_delay)
@@ -3939,6 +4099,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 f"Synthetic mode: {mode_text}. No physical stream or droplet evidence was captured."
             )
         self.resize(760, 900)
+        self.live_pressure_section.hide()
         self.control_panel_scroll.hide()
         self.analysis_panel.hide()
         self.info_panel_scroll.setMinimumWidth(700)
@@ -5754,15 +5915,26 @@ class DropletImagingDialog(QtWidgets.QDialog):
         
         self.manual_flash_shortcut = self.shortcut_manager.add_shortcut('Space', "Toggle flash", self.toggle_flash)
 
-        self.shortcut_manager.add_shortcut('1','Large refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.1,manual=True))
-        self.shortcut_manager.add_shortcut('2','Small refuel pressure decrease', lambda: self.controller.set_relative_refuel_pressure(-0.01,manual=True))
-        self.shortcut_manager.add_shortcut('3','Small refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(0.01,manual=True))
-        self.shortcut_manager.add_shortcut('4','Large refuel pressure increase', lambda: self.controller.set_relative_refuel_pressure(0.1,manual=True))
-        
-        self.shortcut_manager.add_shortcut('6','Large print pressure decrease', lambda: self.controller.set_relative_print_pressure(-0.1,manual=True))
-        self.shortcut_manager.add_shortcut('7','Small print pressure decrease', lambda: self.controller.set_relative_print_pressure(-0.01,manual=True))
-        self.shortcut_manager.add_shortcut('8','Small print pressure increase', lambda: self.controller.set_relative_print_pressure(0.01,manual=True))
-        self.shortcut_manager.add_shortcut('9','Large print pressure increase', lambda: self.controller.set_relative_print_pressure(0.1,manual=True))
+        pressure_shortcut_specs = (
+            ('1', 'Large refuel pressure decrease', 'refuel', -0.1),
+            ('2', 'Small refuel pressure decrease', 'refuel', -0.01),
+            ('3', 'Small refuel pressure increase', 'refuel', 0.01),
+            ('4', 'Large refuel pressure increase', 'refuel', 0.1),
+            ('6', 'Large print pressure decrease', 'print', -0.1),
+            ('7', 'Small print pressure decrease', 'print', -0.01),
+            ('8', 'Small print pressure increase', 'print', 0.01),
+            ('9', 'Large print pressure increase', 'print', 0.1),
+        )
+        for key, description, channel, delta in pressure_shortcut_specs:
+            shortcut = self.shortcut_manager.add_shortcut(
+                key,
+                description,
+                lambda ch=channel, amount=delta: self._handle_relative_pressure_shortcut(
+                    ch,
+                    amount,
+                ),
+            )
+            self._pressure_shortcuts.append(shortcut)
   
         self.shortcut_manager.add_shortcut('z','Refuel only 20', lambda: self.controller.refuel_only(20))  
         self.shortcut_manager.add_shortcut('x','Refuel only 5', lambda: self.controller.refuel_only(5))  
@@ -5773,6 +5945,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.shortcut_manager.add_shortcut('Shift+7','Home Regulators', lambda: self.controller.home_regulators())
 
         self.shortcut_manager.add_shortcut('Esc', 'Pause Action', lambda: self.main_window.pause_machine())
+
+    def _handle_relative_pressure_shortcut(self, channel, delta):
+        if not self._printing_controls_base_available() or self._print_profile_apply_pending:
+            return False
+        setter_name = (
+            "set_relative_refuel_pressure"
+            if str(channel) == "refuel"
+            else "set_relative_print_pressure"
+        )
+        setter = getattr(self.controller, setter_name, None)
+        if not callable(setter):
+            return False
+        result = setter(float(delta), manual=True)
+        return result is not False
 
     @staticmethod
     def _manual_spinbox_line_edit(spinbox):
@@ -7297,9 +7483,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._refresh_manual_control_lock_state()
 
     def _refresh_manual_control_lock_state(self, *_args):
-        if bool(getattr(self, "simulation_workflow_mode", False)):
-            self._refresh_synthetic_workflow_controls()
-            return
         busy = DropletImagingDialog._is_calibration_busy(self)
         was_locked = getattr(self, "_manual_controls_locked", False)
         flash_fault_latched = self._is_flash_fault_latched()
@@ -7318,12 +7501,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
             and (not dirty_shutdown)
         )
 
+        manual_enabled = enabled and not bool(
+            getattr(self, "simulation_workflow_mode", False)
+        )
         for widget in getattr(self, "_manual_lock_widgets", ()):
             if widget is not None:
-                widget.setEnabled(enabled)
+                widget.setEnabled(manual_enabled)
 
         if getattr(self, "manual_flash_shortcut", None) is not None:
-            self.manual_flash_shortcut.setEnabled(enabled)
+            self.manual_flash_shortcut.setEnabled(manual_enabled)
+
+        self._refresh_printing_controls_enabled_state()
+        if bool(getattr(self, "simulation_workflow_mode", False)):
+            self._refresh_synthetic_workflow_controls()
+            return
 
         if hasattr(self, "memory_recommendation_apply_btn"):
             if busy:
@@ -7510,6 +7701,542 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 setattr(self.main_window, "_droplet_imaging_quick_controls_expanded", expanded)
         except Exception:
             pass
+
+    def _get_saved_printing_controls_expanded(self):
+        try:
+            if hasattr(self, "main_window"):
+                return bool(
+                    getattr(
+                        self.main_window,
+                        "_droplet_imaging_printing_controls_expanded",
+                        type(self)._printing_controls_expanded_default,
+                    )
+                )
+        except Exception:
+            pass
+        return bool(type(self)._printing_controls_expanded_default)
+
+    def _set_printing_controls_expanded(self, expanded):
+        expanded = bool(expanded)
+        if hasattr(self, "printing_controls_content"):
+            self.printing_controls_content.setVisible(expanded)
+        if hasattr(self, "printing_controls_toggle"):
+            self.printing_controls_toggle.setArrowType(
+                QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow
+            )
+        type(self)._printing_controls_expanded_default = expanded
+        try:
+            if hasattr(self, "main_window"):
+                setattr(
+                    self.main_window,
+                    "_droplet_imaging_printing_controls_expanded",
+                    expanded,
+                )
+        except Exception:
+            pass
+
+    def _get_saved_live_pressure_expanded(self):
+        try:
+            if hasattr(self, "main_window"):
+                return bool(
+                    getattr(
+                        self.main_window,
+                        "_droplet_imaging_live_pressure_expanded",
+                        type(self)._live_pressure_expanded_default,
+                    )
+                )
+        except Exception:
+            pass
+        return bool(type(self)._live_pressure_expanded_default)
+
+    def _set_live_pressure_expanded(self, expanded):
+        expanded = bool(expanded)
+        if hasattr(self, "live_pressure_content"):
+            self.live_pressure_content.setVisible(expanded)
+        if hasattr(self, "live_pressure_toggle"):
+            self.live_pressure_toggle.setArrowType(
+                QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow
+            )
+        type(self)._live_pressure_expanded_default = expanded
+        try:
+            if hasattr(self, "main_window"):
+                setattr(
+                    self.main_window,
+                    "_droplet_imaging_live_pressure_expanded",
+                    expanded,
+                )
+        except Exception:
+            pass
+
+        timer = getattr(self, "live_pressure_render_timer", None)
+        if not expanded:
+            if timer is not None:
+                timer.stop()
+            return
+        if timer is not None and self.isVisible():
+            self._render_live_pressure_plot()
+
+    def _build_live_pressure_chart(self, layout):
+        self.live_pressure_chart = QtCharts.QChart()
+        self.live_pressure_chart.setTheme(QtCharts.QChart.ChartThemeDark)
+        self.live_pressure_chart.setBackgroundBrush(
+            QBrush(self._chart_color("darker_gray", "#242424"))
+        )
+        self.live_pressure_chart.setMargins(QtCore.QMargins(2, 2, 2, 2))
+
+        self.live_print_pressure_series = QtCharts.QLineSeries()
+        self.live_refuel_pressure_series = QtCharts.QLineSeries()
+        self.live_target_print_pressure_series = QtCharts.QLineSeries()
+        self.live_target_refuel_pressure_series = QtCharts.QLineSeries()
+
+        self.live_pressure_axis_x = QtCharts.QValueAxis()
+        self.live_pressure_axis_x.setTitleText("Recent samples")
+        self.live_pressure_axis_x.setLabelFormat("%.0f")
+        self.live_pressure_axis_x.setRange(0.0, 99.0)
+        self.live_pressure_axis_y = QtCharts.QValueAxis()
+        self.live_pressure_axis_y.setTitleText("Pressure (psi)")
+        self.live_pressure_axis_y.setLabelFormat("%.2f")
+        self.live_pressure_axis_y.setRange(0.0, max(1.0, float(self.hw_hi)))
+        self.live_pressure_chart.addAxis(self.live_pressure_axis_x, Qt.AlignBottom)
+        self.live_pressure_chart.addAxis(self.live_pressure_axis_y, Qt.AlignLeft)
+        for series in (
+            self.live_print_pressure_series,
+            self.live_refuel_pressure_series,
+            self.live_target_print_pressure_series,
+            self.live_target_refuel_pressure_series,
+        ):
+            self.live_pressure_chart.addSeries(series)
+            series.attachAxis(self.live_pressure_axis_x)
+            series.attachAxis(self.live_pressure_axis_y)
+
+        self.live_pressure_plot_style = apply_pressure_plot_style(
+            self.live_pressure_chart,
+            (self.live_pressure_axis_x, self.live_pressure_axis_y),
+            colors=self.color_dict,
+            print_series=self.live_print_pressure_series,
+            refuel_series=self.live_refuel_pressure_series,
+            target_print_series=self.live_target_print_pressure_series,
+            target_refuel_series=self.live_target_refuel_pressure_series,
+        )
+
+        self.live_pressure_chart_view = QtCharts.QChartView(self.live_pressure_chart)
+        self.live_pressure_chart_view.setObjectName("livePressureChartView")
+        self.live_pressure_chart_view.setRenderHint(QPainter.Antialiasing)
+        self.live_pressure_chart_view.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.live_pressure_chart_view.setMinimumHeight(210)
+        self.live_pressure_chart_view.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Fixed,
+        )
+        layout.addWidget(self.live_pressure_chart_view, 0, 0, 1, 2)
+
+        self.live_pressure_render_timer = QTimer(self)
+        self.live_pressure_render_timer.setSingleShot(True)
+        self.live_pressure_render_timer.setInterval(
+            self.LIVE_PRESSURE_RENDER_INTERVAL_MS
+        )
+        self.live_pressure_render_timer.timeout.connect(
+            self._render_live_pressure_plot
+        )
+
+    @staticmethod
+    def _finite_pressure_values(values):
+        finite_values = []
+        try:
+            candidates = list(values)
+        except Exception:
+            candidates = []
+        for value in candidates[-100:]:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(numeric):
+                finite_values.append(numeric)
+        return finite_values
+
+    def _pressure_history(self, getter_name):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        getter = getattr(machine_model, getter_name, None)
+        if not callable(getter):
+            return []
+        try:
+            return self._finite_pressure_values(getter())
+        except Exception:
+            return []
+
+    def _live_pressure_render_allowed(self):
+        section = getattr(self, "live_pressure_section", None)
+        return bool(
+            not self._live_pressure_closing
+            and getattr(self, "live_pressure_toggle", None) is not None
+            and self.live_pressure_toggle.isChecked()
+            and section is not None
+            and not section.isHidden()
+        )
+
+    def _request_live_pressure_render(self, *_args):
+        if not self._live_pressure_render_allowed():
+            return
+        if not self.live_pressure_render_timer.isActive():
+            self.live_pressure_render_timer.start()
+
+    def _render_live_pressure_plot(self):
+        if not self._live_pressure_render_allowed():
+            return
+
+        print_values = self._pressure_history("get_print_pressure_readings")
+        refuel_values = self._pressure_history("get_refuel_pressure_readings")
+        target_print = float(
+            self._printing_machine_value("get_target_print_pressure", self.hw_lo)
+        )
+        target_refuel = float(
+            self._printing_machine_value("get_target_refuel_pressure", self.hw_lo)
+        )
+        max_count = max(len(print_values), len(refuel_values), 1)
+        last_x = float(max(0, max_count - 1))
+
+        self.live_print_pressure_series.replace(
+            [QtCore.QPointF(index, value) for index, value in enumerate(print_values)]
+        )
+        self.live_refuel_pressure_series.replace(
+            [QtCore.QPointF(index, value) for index, value in enumerate(refuel_values)]
+        )
+        self.live_target_print_pressure_series.replace(
+            [QtCore.QPointF(0.0, target_print), QtCore.QPointF(last_x, target_print)]
+        )
+        self.live_target_refuel_pressure_series.replace(
+            [QtCore.QPointF(0.0, target_refuel), QtCore.QPointF(last_x, target_refuel)]
+        )
+        self.live_pressure_axis_x.setRange(0.0, max(1.0, last_x))
+
+        range_values = [*print_values, *refuel_values]
+        if np.isfinite(target_print):
+            range_values.append(target_print)
+        if np.isfinite(target_refuel):
+            range_values.append(target_refuel)
+        if not range_values:
+            self.live_pressure_axis_y.setRange(0.0, max(1.0, float(self.hw_hi)))
+            return
+        low = min(range_values)
+        high = max(range_values)
+        span = high - low
+        padding = max(0.10, span * 0.10, abs(high) * 0.02)
+        lower = max(0.0, low - padding)
+        upper = high + padding
+        if upper <= lower:
+            upper = lower + 0.10
+        self.live_pressure_axis_y.setRange(lower, upper)
+
+    def _stop_live_pressure_rendering(self):
+        self._live_pressure_closing = True
+        timer = getattr(self, "live_pressure_render_timer", None)
+        if timer is not None:
+            timer.stop()
+
+    def _printing_machine_value(self, getter_name, fallback=0):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        getter = getattr(machine_model, str(getter_name), None)
+        if callable(getter):
+            try:
+                return getter()
+            except Exception:
+                pass
+        return fallback
+
+    def _active_printing_controls_mode(self):
+        tabs = getattr(self, "calibration_tabs", None)
+        if tabs is None:
+            return None
+        current = tabs.currentWidget()
+        if current is getattr(self, "droplet_tab", None):
+            return "droplet"
+        if current is getattr(self, "stream_tab", None):
+            return "stream"
+        return None
+
+    @staticmethod
+    def _format_print_profile_tooltip(profile):
+        try:
+            return (
+                f"Print pressure: {float(profile['print_pressure']):.2f} psi\n"
+                f"Refuel pressure: {float(profile['refuel_pressure']):.2f} psi\n"
+                f"Print PW: {int(profile['print_pulse_width'])} us\n"
+                f"Refuel PW: {int(profile['refuel_pulse_width'])} us"
+            )
+        except (KeyError, TypeError, ValueError):
+            return "Invalid print profile"
+
+    def _refresh_print_profile_options(self):
+        combo = getattr(self, "print_profile_combo", None)
+        mode = self._active_printing_controls_mode()
+        if combo is None or mode is None:
+            return
+        current = combo.currentData()
+        previous_mode = getattr(self, "_displayed_print_profile_mode", None)
+        if previous_mode and isinstance(current, dict) and current.get("id"):
+            self._selected_print_profile_ids_by_mode[previous_mode] = str(
+                current["id"]
+            )
+        selected_id = self._selected_print_profile_ids_by_mode.get(mode)
+        profiles = []
+        for raw_profile in list(getattr(self.model, "print_profiles", []) or []):
+            if not isinstance(raw_profile, dict):
+                continue
+            profile = dict(raw_profile)
+            profile_mode = str(profile.get("mode") or "").strip().lower()
+            if profile_mode not in {"droplet", "stream"} or profile_mode != mode:
+                continue
+            profiles.append(profile)
+
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            selected_index = -1
+            for profile in profiles:
+                combo.addItem(
+                    str(profile.get("name") or profile.get("id") or "Profile"),
+                    profile,
+                )
+                index = combo.count() - 1
+                combo.setItemData(
+                    index,
+                    self._format_print_profile_tooltip(profile),
+                    QtCore.Qt.ToolTipRole,
+                )
+                if selected_id and str(profile.get("id") or "") == selected_id:
+                    selected_index = index
+            if combo.count() and selected_index < 0:
+                selected_index = 0
+            if selected_index >= 0:
+                combo.setCurrentIndex(selected_index)
+        finally:
+            combo.blockSignals(False)
+        self._displayed_print_profile_mode = mode
+        self._handle_print_profile_selection_change()
+
+    def _selected_print_profile(self):
+        combo = getattr(self, "print_profile_combo", None)
+        if combo is None or combo.count() <= 0:
+            return None
+        profile = combo.currentData()
+        return dict(profile) if isinstance(profile, dict) else None
+
+    def _current_authoritative_print_settings(self):
+        return {
+            "print_pressure": float(
+                self._printing_machine_value("get_target_print_pressure", 0.0)
+            ),
+            "refuel_pressure": float(
+                self._printing_machine_value("get_target_refuel_pressure", 0.0)
+            ),
+            "print_pulse_width": int(
+                self._printing_machine_value("get_print_pulse_width", 0)
+            ),
+            "refuel_pulse_width": int(
+                self._printing_machine_value("get_refuel_pulse_width", 0)
+            ),
+        }
+
+    def _selected_print_profile_is_loaded(self, profile):
+        if not isinstance(profile, dict):
+            return False
+        try:
+            current = self._current_authoritative_print_settings()
+            return (
+                abs(current["print_pressure"] - float(profile["print_pressure"]))
+                <= self.PRINT_PROFILE_PRESSURE_TOLERANCE
+                and abs(
+                    current["refuel_pressure"] - float(profile["refuel_pressure"])
+                )
+                <= self.PRINT_PROFILE_PRESSURE_TOLERANCE
+                and current["print_pulse_width"] == int(profile["print_pulse_width"])
+                and current["refuel_pulse_width"] == int(profile["refuel_pulse_width"])
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _machine_is_connected_for_printing_controls(self):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        getter = getattr(machine_model, "is_connected", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        return bool(getattr(machine_model, "machine_connected", False))
+
+    def _printing_controls_base_available(self):
+        return bool(
+            not self.result_presentation_only
+            and self._active_printing_controls_mode() is not None
+            and self._machine_is_connected_for_printing_controls()
+            and not self._is_calibration_busy()
+            and not self._is_flash_fault_latched()
+            and not self._capture_pending_for_ui()
+            and not self._imager_dirty_shutdown_active()
+        )
+
+    def _set_print_profile_button_state(self, text, *, enabled, color):
+        button = getattr(self, "print_profile_apply_button", None)
+        if button is None:
+            return
+        button.setText(str(text))
+        button.setEnabled(bool(enabled))
+        button.setProperty("profile_state", str(text).lower())
+        button.setStyleSheet(f"background-color: {color}; color: white;")
+
+    def _update_print_profile_button_state(self):
+        button = getattr(self, "print_profile_apply_button", None)
+        if button is None:
+            return
+        profile = self._selected_print_profile()
+        muted = "#777777"
+        accent = self.color_dict.get("light_blue", "#3b82f6")
+        if profile is None:
+            self._set_print_profile_button_state(
+                "No Profiles", enabled=False, color=muted
+            )
+        elif self._print_profile_apply_pending:
+            self._set_print_profile_button_state(
+                "Applying...", enabled=False, color=accent
+            )
+        elif self._selected_print_profile_is_loaded(profile):
+            self._set_print_profile_button_state("Loaded", enabled=False, color=muted)
+        elif not self._printing_controls_base_available():
+            self._set_print_profile_button_state("Apply", enabled=False, color=muted)
+        else:
+            self._set_print_profile_button_state("Apply", enabled=True, color=accent)
+
+    def _refresh_printing_controls_enabled_state(self):
+        available = self._printing_controls_base_available()
+        editable = available and not self._print_profile_apply_pending
+        for widget in getattr(self, "_printing_control_edit_widgets", ()):
+            if widget is not None:
+                widget.setEnabled(editable)
+        self._update_print_profile_button_state()
+        for shortcut in getattr(self, "_pressure_shortcuts", ()):
+            try:
+                shortcut.setEnabled(editable)
+            except Exception:
+                pass
+
+    def _handle_print_profile_selection_change(self, _index=None):
+        profile = self._selected_print_profile()
+        mode = self._active_printing_controls_mode()
+        if mode and profile and profile.get("id"):
+            self._selected_print_profile_ids_by_mode[mode] = str(profile["id"])
+        combo = getattr(self, "print_profile_combo", None)
+        if combo is not None and combo.count() > 0:
+            tooltip = combo.itemData(combo.currentIndex(), QtCore.Qt.ToolTipRole)
+            combo.setToolTip(str(tooltip or ""))
+        self._print_profile_apply_pending = False
+        self._refresh_printing_controls_enabled_state()
+
+    def _handle_print_profile_apply(self):
+        profile = self._selected_print_profile()
+        if profile is None or not self._printing_controls_base_available():
+            self._refresh_printing_controls_enabled_state()
+            return
+        applier = getattr(self.controller, "apply_print_profile", None)
+        if not callable(applier):
+            self._refresh_printing_controls_enabled_state()
+            return
+        self._print_profile_apply_pending = True
+        self._refresh_printing_controls_enabled_state()
+        try:
+            result = applier(
+                profile,
+                callback=self._handle_print_profile_apply_complete,
+            )
+        except Exception:
+            self._print_profile_apply_pending = False
+            self._refresh_printing_controls_enabled_state()
+            raise
+        if result is False:
+            self._print_profile_apply_pending = False
+            self._refresh_printing_controls_enabled_state()
+
+    def _handle_print_profile_apply_complete(self, *_args, **_kwargs):
+        QTimer.singleShot(0, self._finish_print_profile_apply)
+
+    def _finish_print_profile_apply(self):
+        self._print_profile_apply_pending = False
+        self._sync_printing_controls_from_model()
+        self._refresh_printing_controls_enabled_state()
+
+    def _handle_printing_controls_transport_fault(self, _report=None):
+        self._print_profile_apply_pending = False
+        self._sync_printing_controls_from_model(force=True)
+        self._refresh_printing_controls_enabled_state()
+
+    def _refresh_current_pressure_values(self, *_args):
+        print_value = self._printing_machine_value("get_current_print_pressure", None)
+        refuel_value = self._printing_machine_value("get_current_refuel_pressure", None)
+        if hasattr(self, "current_print_pressure_value"):
+            self.current_print_pressure_value.setText(
+                "-- psi" if print_value is None else f"{float(print_value):.2f} psi"
+            )
+        if hasattr(self, "current_refuel_pressure_value"):
+            self.current_refuel_pressure_value.setText(
+                "-- psi" if refuel_value is None else f"{float(refuel_value):.2f} psi"
+            )
+
+    def _sync_printing_controls_from_model(self, *_args, force=False):
+        self._refresh_current_pressure_values()
+        values = (
+            (
+                getattr(self, "target_print_pressure_spinbox", None),
+                self._printing_machine_value("get_target_print_pressure", self.hw_lo),
+            ),
+            (
+                getattr(self, "target_refuel_pressure_spinbox", None),
+                self._printing_machine_value("get_target_refuel_pressure", self.hw_lo),
+            ),
+            (
+                getattr(self, "print_pulse_width_spinbox", None),
+                self._printing_machine_value("get_print_pulse_width", 0),
+            ),
+            (
+                getattr(self, "refuel_pulse_width_spinbox", None),
+                self._printing_machine_value("get_refuel_pulse_width", 0),
+            ),
+        )
+        for spinbox, value in values:
+            if spinbox is not None:
+                self._sync_manual_spinbox_value(spinbox, value, force=force)
+        self._update_print_profile_button_state()
+        self._request_live_pressure_render()
+
+    def _refresh_printing_mode_status(self):
+        label = getattr(self, "printing_mode_status_label", None)
+        mode = self._active_printing_controls_mode()
+        if label is None or mode is None:
+            return
+        head_mode = self._resolve_active_printer_head_printing_mode()
+        label.setText(
+            f"Workflow: {mode.title()} | Loaded head mode: {head_mode.title()}"
+        )
+        if mode != head_mode:
+            label.setStyleSheet("color: #f59e0b; font-weight: 600;")
+            label.setToolTip(
+                "The selected calibration workflow differs from the saved printer-head mode. "
+                "Applying a profile changes settings only."
+            )
+        else:
+            label.setStyleSheet("")
+            label.setToolTip("")
+
+    def _on_printing_controls_tab_changed(self, *_args):
+        section = getattr(self, "printing_controls_section", None)
+        mode = self._active_printing_controls_mode()
+        if section is not None:
+            section.setVisible(mode is not None and not self.result_presentation_only)
+        if mode is not None:
+            self._refresh_print_profile_options()
+            self._refresh_printing_mode_status()
+            self._sync_printing_controls_from_model()
+        self._refresh_printing_controls_enabled_state()
 
     def _get_saved_info_panel_section_states(self):
         states = dict(type(self)._info_panel_section_default_states)
@@ -8795,8 +9522,44 @@ class DropletImagingDialog(QtWidgets.QDialog):
         """
         Handles changes to the print pulse width.
         """
-        self.controller.set_print_pulse_width(value, manual=True)
+        if not self._dispatch_printing_setting(
+            "set_print_pulse_width",
+            int(value),
+        ):
+            return
         self.refresh_calibration_memory_recommendation()
+
+    def handle_refuel_pulse_width_change(self, value):
+        self._dispatch_printing_setting("set_refuel_pulse_width", int(value))
+
+    def handle_target_print_pressure_change(self, value):
+        if not self._dispatch_printing_setting(
+            "set_absolute_print_pressure",
+            float(value),
+        ):
+            return
+        self.refresh_calibration_memory_recommendation()
+
+    def handle_target_refuel_pressure_change(self, value):
+        self._dispatch_printing_setting(
+            "set_absolute_refuel_pressure",
+            float(value),
+        )
+
+    def _dispatch_printing_setting(self, setter_name, value):
+        if not self._printing_controls_base_available() or self._print_profile_apply_pending:
+            self._sync_printing_controls_from_model(force=True)
+            return False
+        setter = getattr(self.controller, str(setter_name), None)
+        if not callable(setter):
+            self._sync_printing_controls_from_model(force=True)
+            return False
+        result = setter(value, manual=True)
+        if result is False:
+            self._sync_printing_controls_from_model(force=True)
+            return False
+        self._update_print_profile_button_state()
+        return True
 
     def set_exposure_time(self, exposure_time):
         """
@@ -9933,14 +10696,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 pass
 
     def _review_calibration_mode_settings(self):
-        toggle = getattr(self, "acquisition_controls_toggle", None)
+        toggle = getattr(self, "printing_controls_toggle", None)
         if toggle is not None:
             try:
                 toggle.setChecked(True)
             except Exception:
-                self._set_acquisition_controls_expanded(True)
+                self._set_printing_controls_expanded(True)
         else:
-            self._set_acquisition_controls_expanded(True)
+            self._set_printing_controls_expanded(True)
         spinbox = getattr(self, "print_pulse_width_spinbox", None)
         if spinbox is not None:
             try:
@@ -10993,6 +11756,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.refresh_calibration_memory_recommendation(force_log=True)
         self._set_equal_panel_widths()
         self._refresh_manual_control_lock_state()
+        self._request_live_pressure_render()
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
@@ -12922,9 +13686,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 self._capture_request_pending = False
         self._schedule_imager_close_retry(100)
 
+    def done(self, result):
+        self._stop_live_pressure_rendering()
+        super().done(result)
+
     def closeEvent(self, event):
         """Handle the closing of the dialog."""
         if bool(getattr(self, "_imager_force_close_requested", False)):
+            self._stop_live_pressure_rendering()
             self._remove_droplet_capture_raw_attempt_filter()
             self._imager_force_close_requested = False
             self._imager_close_after_stop_requested = False
@@ -12987,6 +13756,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 return
 
         if bool(getattr(self, "camera_free_mode", False)):
+            self._stop_live_pressure_rendering()
             for timer_name in ("camera_timer", "refuel_monitor_timer", "refuel_panel_refresh_timer"):
                 timer = getattr(self, timer_name, None)
                 if timer is not None:
@@ -13028,6 +13798,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._set_stream_capture_read_camera_enabled(False)
         self.controller.disable_print_profile()
         self._remove_droplet_capture_raw_attempt_filter()
+        self._stop_live_pressure_rendering()
         event.accept()
 
 
