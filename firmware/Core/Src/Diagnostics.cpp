@@ -12,6 +12,8 @@
 #include "Printer.h"
 #include "PressureRegulator.h"
 #include "MotionQualificationMath.h"
+#include "NormalizedCosineProfile.h"
+#include "StepperProfileMath.h"
 #include "StepperInstrumentationReport.h"
 #include "PressureRegulatorMath.h"
 #include "PressureQualificationMath.h"
@@ -91,6 +93,7 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2023u, "motion_timing_equal_xy", "motion", "FULL", "explicit_selection"},
     {2024u, "motion_timing_camera_ratio", "motion", "FULL", "explicit_selection"},
     {2025u, "motion_timing_short_tri", "motion", "FULL", "explicit_selection"},
+    {2030u, "profile_lut_cycle_benchmark_safe", "performance", "SAFE", "explicit_selection"},
     {2003u, "pressure_regulator_step_response_full", "pressure", "FULL", "safe_gate_or_full"},
     {2201u, "pressure_hold_leak_factory", "pressure", "FULL", "safe_gate_or_full"},
     {2202u, "pressure_target_cycle_repeatability_factory", "pressure", "FULL", "safe_gate_or_full"},
@@ -207,6 +210,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runXyMotionSuite = (selectedDiagnosticId == 2009u);
     const bool runMotionEnvelopeSuite = (selectedDiagnosticId == 2019u);
     const bool runMotionTimingSuite = (selectedDiagnosticId == 2029u);
+    const bool runProfileLutBenchmark = (selectedDiagnosticId == 2039u);
     const bool runPressureRegulatorSuite = (selectedDiagnosticId == 2299u);
     const bool runRefuelVacuumSuite = (selectedDiagnosticId == 2298u);
     const bool runValveCharacterizationSuite = (selectedDiagnosticId == 2499u);
@@ -221,7 +225,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runSinglePressureTraceSelection =
         (selectedPressureTraceTest >= 2101u) && (selectedPressureTraceTest <= 2104u);
                   auto shouldRunPressureTraceCase = [&](uint16_t testId) {
-                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runGripperSealStressSuite || runXyMotionSuite || runMotionEnvelopeSuite || runMotionTimingSuite || runPressureRegulatorSuite || runRefuelVacuumSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
+                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runGripperSealStressSuite || runXyMotionSuite || runMotionEnvelopeSuite || runMotionTimingSuite || runProfileLutBenchmark || runPressureRegulatorSuite || runRefuelVacuumSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
                       return false;
                     }
                     if (runSinglePressureTraceSelection) {
@@ -2378,6 +2382,188 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         }
 
                         closePressurePath();
+                        return finishSelfTestNow();
+                      }
+
+                      if (runProfileLutBenchmark) {
+                        static constexpr uint32_t kRequiredCoreClockHz = 180000000u;
+                        static constexpr uint32_t kLutCycleBudget = 225u;
+                        static constexpr uint32_t kPrepareCycleBudget = 1800u;
+                        static constexpr uint32_t kRequiredSpeedupX100 = 400u;
+                        static constexpr uint32_t kMaximumArrError = 2u;
+                        static constexpr size_t kMetricsFrameLimit = 198u;
+
+                        struct BenchmarkVector {
+                          uint32_t startArr;
+                          uint32_t targetArr;
+                          uint32_t intervals;
+                        };
+                        static constexpr BenchmarkVector kVectors[] = {
+                            {37495u, 7499u, 258u},
+                            {19010u, 3802u, 1000u},
+                            {5620u, 1124u, 11430u},
+                        };
+
+                        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+                        if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0u) {
+                          DWT->CYCCNT = 0u;
+                          DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+                        }
+
+                        bool irqRestoreOk = true;
+                        volatile uint32_t checksum = 0u;
+                        auto measureCycles = [&](auto&& operation) -> uint32_t {
+                          const uint32_t primaskBefore = __get_PRIMASK();
+                          __disable_irq();
+                          const uint32_t start = DWT->CYCCNT;
+                          operation();
+                          const uint32_t elapsed = DWT->CYCCNT - start;
+                          __set_PRIMASK(primaskBefore);
+                          if (__get_PRIMASK() != primaskBefore) {
+                            irqRestoreOk = false;
+                          }
+                          return elapsed;
+                        };
+
+                        uint32_t emptyHarnessMax = 0u;
+                        uint64_t emptyHarnessTotal = 0u;
+                        for (uint32_t i = 0u; i < 16u; ++i) {
+                          const uint32_t cycles = measureCycles([&]() {
+                            checksum ^= 0x9E3779B9u;
+                          });
+                          if (cycles > emptyHarnessMax) emptyHarnessMax = cycles;
+                          emptyHarnessTotal += cycles;
+                        }
+
+                        auto measurePrepareMax = [&](uint32_t intervals) -> uint32_t {
+                          uint32_t maximum = 0u;
+                          for (uint32_t repeat = 0u; repeat < 16u; ++repeat) {
+                            NormalizedCosineProfile::RampCursor prepared{};
+                            const uint32_t cycles = measureCycles([&]() {
+                              const auto status = NormalizedCosineProfile::prepare(
+                                  {5620u, 1124u, 179u, 0xFFFFFFFFu, intervals}, prepared);
+                              checksum ^= prepared.phaseIncrementQ32 ^
+                                          static_cast<uint32_t>(status);
+                            });
+                            if (cycles > maximum) maximum = cycles;
+                          }
+                          return maximum;
+                        };
+
+                        const uint32_t prepareShortMax = measurePrepareMax(1000u);
+                        const uint32_t prepareLongMax = measurePrepareMax(11430u);
+                        uint32_t lutMax = 0u;
+                        uint32_t legacyMax = 0u;
+                        uint32_t errorMax = 0u;
+                        uint64_t lutTotal = 0u;
+                        uint64_t legacyTotal = 0u;
+                        uint32_t samples = 0u;
+
+                        Watchdog_CheckIn(CRASH_TASK_ORCH);
+                        for (const BenchmarkVector& vector : kVectors) {
+                          for (uint32_t direction = 0u; direction < 2u; ++direction) {
+                            const uint32_t fromArr =
+                                (direction == 0u) ? vector.startArr : vector.targetArr;
+                            const uint32_t toArr =
+                                (direction == 0u) ? vector.targetArr : vector.startArr;
+                            NormalizedCosineProfile::RampCursor cursor{};
+                            const auto prepareStatus = NormalizedCosineProfile::prepare(
+                                {fromArr, toArr, 179u, 0xFFFFFFFFu, vector.intervals}, cursor);
+                            if (prepareStatus != NormalizedCosineProfile::PrepareStatus::Ready) {
+                              irqRestoreOk = false;
+                              continue;
+                            }
+
+                            for (uint32_t k = 0u; k < vector.intervals; ++k) {
+                              uint32_t lutArr = 0u;
+                              const uint32_t lutCycles = measureCycles([&]()
+                                  __attribute__((optimize("O2"))) {
+                                lutArr = NormalizedCosineProfile::currentArr(cursor);
+                                (void)NormalizedCosineProfile::advance(cursor);
+                                checksum = (checksum << 5u) ^ (checksum >> 2u) ^ lutArr;
+                              });
+
+                              uint32_t legacyArr = 0u;
+                              const uint32_t legacyCycles = measureCycles([&]() {
+                                const float t = static_cast<float>(k) /
+                                                static_cast<float>(vector.intervals);
+                                const float ease = StepperProfileMath::ease01(
+                                    StepperProfileMath::Profile::SCurveCosine, t);
+                                const int32_t offset = static_cast<int32_t>(
+                                    (static_cast<float>(toArr) - static_cast<float>(fromArr)) * ease);
+                                legacyArr = static_cast<uint32_t>(
+                                    static_cast<int64_t>(fromArr) + offset);
+                                checksum = (checksum << 5u) ^ (checksum >> 2u) ^ legacyArr;
+                              });
+
+                              const uint32_t error = (lutArr >= legacyArr)
+                                  ? (lutArr - legacyArr)
+                                  : (legacyArr - lutArr);
+                              if (error > errorMax) errorMax = error;
+                              if (lutCycles > lutMax) lutMax = lutCycles;
+                              if (legacyCycles > legacyMax) legacyMax = legacyCycles;
+                              lutTotal += lutCycles;
+                              legacyTotal += legacyCycles;
+                              ++samples;
+                            }
+                          }
+                          Watchdog_CheckIn(CRASH_TASK_ORCH);
+                        }
+
+                        const uint32_t lutMean = (samples == 0u)
+                            ? 0u
+                            : static_cast<uint32_t>(lutTotal / samples);
+                        const uint32_t legacyMean = (samples == 0u)
+                            ? 0u
+                            : static_cast<uint32_t>(legacyTotal / samples);
+                        const uint32_t emptyHarnessMean =
+                            static_cast<uint32_t>(emptyHarnessTotal / 16u);
+                        const uint32_t adjustedLutMean =
+                            (lutMean > emptyHarnessMean) ? (lutMean - emptyHarnessMean) : 1u;
+                        const uint32_t adjustedLegacyMean =
+                            (legacyMean > emptyHarnessMean) ? (legacyMean - emptyHarnessMean) : 0u;
+                        const uint32_t speedupX100 = (adjustedLutMean == 0u)
+                            ? 0u
+                            : static_cast<uint32_t>(
+                                  (static_cast<uint64_t>(adjustedLegacyMean) * 100u) /
+                                  adjustedLutMean);
+
+                        char metrics[224] = {0};
+                        const int metricsLength = snprintf(
+                            metrics,
+                            sizeof(metrics),
+                            "clk=%lu;samples=%lu;lut_max=%lu;lut_mean=%lu;legacy_max=%lu;legacy_mean=%lu;speedup_x100=%lu;prep_short=%lu;prep_long=%lu;err_max=%lu;irq_restore=%u;checksum=%lu",
+                            static_cast<unsigned long>(SystemCoreClock),
+                            static_cast<unsigned long>(samples),
+                            static_cast<unsigned long>(lutMax),
+                            static_cast<unsigned long>(lutMean),
+                            static_cast<unsigned long>(legacyMax),
+                            static_cast<unsigned long>(legacyMean),
+                            static_cast<unsigned long>(speedupX100),
+                            static_cast<unsigned long>(prepareShortMax),
+                            static_cast<unsigned long>(prepareLongMax),
+                            static_cast<unsigned long>(errorMax),
+                            static_cast<unsigned>(irqRestoreOk ? 1u : 0u),
+                            static_cast<unsigned long>(checksum));
+                        const bool metricsFit = metricsLength > 0 &&
+                            static_cast<size_t>(metricsLength) < sizeof(metrics) &&
+                            static_cast<size_t>(metricsLength) <= kMetricsFrameLimit;
+                        const bool pass = metricsFit &&
+                            SystemCoreClock == kRequiredCoreClockHz &&
+                            samples == 25376u &&
+                            lutMax <= kLutCycleBudget &&
+                            speedupX100 >= kRequiredSpeedupX100 &&
+                            prepareShortMax <= kPrepareCycleBudget &&
+                            prepareLongMax <= kPrepareCycleBudget &&
+                            errorMax <= kMaximumArrError &&
+                            irqRestoreOk &&
+                            emptyHarnessMax <= lutMax;
+
+                        (void)runOne(2030u,
+                                     "profile_lut_cycle_benchmark_safe",
+                                     pass,
+                                     metricsFit ? metrics : "gate=metrics_overflow");
+                        Watchdog_CheckIn(CRASH_TASK_ORCH);
                         return finishSelfTestNow();
                       }
 

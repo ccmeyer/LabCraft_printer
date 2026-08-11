@@ -1198,11 +1198,12 @@ def run(args: argparse.Namespace) -> int:
         xy_motion_suite = bool(getattr(args, "xy_motion_suite", False))
         motion_timing_suite = bool(getattr(args, "motion_timing_suite", False))
         motion_envelope_suite = bool(getattr(args, "motion_envelope_suite", False))
+        profile_lut_benchmark = bool(getattr(args, "profile_lut_benchmark", False))
         pressure_regulator_suite = bool(getattr(args, "pressure_regulator_suite", False))
         refuel_vacuum_suite = bool(getattr(args, "refuel_vacuum_suite", False))
         valve_characterization_suite = bool(getattr(args, "valve_characterization_suite", False))
         valve_gap_sweep_suite = bool(getattr(args, "valve_gap_sweep_suite", False))
-        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
+        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
             pressure_sweep_suite if pressure_sweep_suite is not None else (
                 CUSTOM_PRESSURE_TRACE_TEST_ID if custom_trace_config is not None else pressure_trace_test
             )
@@ -1809,6 +1810,7 @@ def main() -> int:
     selector_group.add_argument("--xy-motion-suite", action="store_true")
     selector_group.add_argument("--motion-timing-suite", action="store_true")
     selector_group.add_argument("--motion-envelope-suite", action="store_true")
+    selector_group.add_argument("--profile-lut-benchmark", action="store_true")
     selector_group.add_argument("--gripper-seal-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-stress-suite", action="store_true")
     selector_group.add_argument("--valve-characterization-suite", action="store_true")

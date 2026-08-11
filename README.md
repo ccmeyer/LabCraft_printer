@@ -2635,6 +2635,22 @@ probe, and then executes the five 40 kHz measurement vectors:
 python tools/run_qualification.py --manifest motion_timing_v1 --operator-prompts --fixture motion_clear_envelope_v1 --port /dev/ttyAMA0
 ```
 
+Run the Milestone 2 normalized-cosine benchmark independently of motion with:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile SAFE --profile-lut-benchmark --out hil_reports/profile_lut_benchmark.json
+python3 tools/run_qualification.py --manifest profile_lut_benchmark_v1 --machine-id LC-001 --raw-report hil_reports/profile_lut_benchmark.json
+```
+
+`--profile-lut-benchmark` explicitly selects P3 value `2039` and returns only
+SAFE performance result `2030 profile_lut_cycle_benchmark_safe`. It is not
+part of ordinary SAFE. The diagnostic performs no Stepper, Gantry, GPIO,
+pressure, valve, or homing operation. It reports LUT and legacy cycle maxima
+and means, speedup, short/long preparation cost, ARR error, interrupt-state
+restoration, and a deterministic checksum. The manifest enforces the 180 MHz,
+225-cycle maximum, 4x speedup, 1,800-cycle preparation, two-tick error, and
+interrupt-restoration gates.
+
 Outputs:
 
 - Suite reports: `hil_reports/qualification/<machine_id>/<timestamp>/`

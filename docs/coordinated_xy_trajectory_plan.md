@@ -145,9 +145,9 @@ provides:
 - fixed-point phase increment.
 
 The executor maps LUT output into that move's timer-period range using bounded
-integer arithmetic. Milestone 2 will select LUT resolution and fixed-point
-format from measured approximation error; the plan does not assume that 256,
-512, or 1024 entries is correct in advance.
+integer arithmetic. Milestone 2 selected 256 intervals (257 points) in Q20
+after comparing 64-, 128-, and 256-interval Q15/Q16/Q20 candidates against
+the legacy ARR sequence.
 
 ### Pulse edges
 
@@ -220,7 +220,7 @@ Every milestone that touches motion must preserve these invariants:
 | --- | --- | --- | --- |
 | 0. Baseline and decisions | `verified` | Reproducible legacy source/build, reset, motion, and straightness evidence recorded | Baseline source/build/HIL artifacts complete |
 | 1. Behavior-preserving instrumentation | `verified` | Legacy timing, pending-interrupt, reset, pulse, status, and straightness evidence recorded | Milestone 1 evidence complete |
-| 2. Fixed-point normalized LUT | `planned` | Pure LUT/profile math proven against legacy cosine | Error and cycle budgets accepted |
+| 2. Fixed-point normalized LUT | `verified` | Unrouted 257-point Q20 profile and explicit non-motion target benchmark pass | Error and cycle budgets accepted |
 | 3. Pure coordinated XY planner | `not_started` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `not_started` | Timer/pulse integration exists without normal routing | Build, low-rate bench, cancel, and limit gates pass |
 | 5. Route normal Gantry XY motion | `not_started` | `ABSOLUTE_XY` uses coordinated executor | Status, completion, and unchanged-path regressions pass |
@@ -229,22 +229,12 @@ Every milestone that touches motion must preserve these invariants:
 
 ## Next Planned Action
 
-Commit the complete Milestone 1 source, documentation, and matching tracked
-firmware binary as one milestone commit. Then begin Milestone 2 with a pure,
-unused profile module:
-
-1. Add a compile-time normalized cosine LUT and fixed-point interpolation
-   helper with no HAL, FreeRTOS, Stepper routing, or ISR integration.
-2. Sweep candidate table sizes and fixed-point formats against the current
-   `StepperProfileMath::ease01` ARR behavior, reporting maximum and RMS error
-   across short, long, triangular, boundary, and representative moves.
-3. Define exact endpoint, rounding, saturation, and reverse-deceleration rules,
-   then select and record the smallest representation that meets the reviewed
-   error budget.
-4. Add a bounded non-motion target benchmark so DWT evidence can compare the
-   selected lookup cost with the Milestone 1 cruise and ramp baselines.
-5. Run host tests and the full firmware build. Do not route any normal motion
-   through the new module until Milestone 2's error and cycle gates pass.
+Milestone 2 is verified in
+`docs/coordinated_xy_milestone2_lut.md`. Commit its source, documentation, and
+matching tracked binary as one milestone commit. Then prepare the smallest
+host-only Milestone 3 slice: define the pure coordinated X/Y plan and DDA event
+trace, prove exact endpoint/pulse behavior exhaustively, and keep all timers,
+GPIO, normal routing, homing, Z, and pressure motion unchanged.
 
 ## Milestone 0: Baseline And Decisions
 
@@ -382,7 +372,9 @@ sequence or motion profile.
 
 ## Milestone 2: Fixed-Point Normalized LUT
 
-Status: `planned`
+Status: `verified`
+
+Evidence record: `docs/coordinated_xy_milestone2_lut.md`
 
 ### Goal
 
@@ -403,15 +395,14 @@ point, or division in the ISR.
   behavior; any change to velocity-domain shaping requires a separate decision.
 - Reuse the acceleration ramp in reverse for normal deceleration.
 
-### Likely files
+### Implemented files
 
-- new `firmware/Core/Inc/CoordinatedXyMath.h` or equivalent
-- new `firmware/Core/Src/CoordinatedXyMath.cpp` or equivalent
-- new `firmware/tests_host/tests/test_coordinated_xy_math.cpp`
+- `firmware/Core/Inc/NormalizedCosineProfile.h`
+- `firmware/Core/Src/NormalizedCosineProfile.cpp`
+- `firmware/tests_host/tests/test_normalized_cosine_profile.cpp`
 - `firmware/tests_host/CMakeLists.txt`
-
-Names are provisional; module boundaries are more important than the exact
-filenames.
+- explicit SAFE result `2030`, selector `2039`, host selector, catalog,
+  manifest, analyzer, and discovery coverage
 
 ### Automated tests
 
@@ -433,7 +424,9 @@ filenames.
 
 ### Rollback
 
-- Remove the unused pure module and its tests.
+- Revert the Milestone 2 commit and restore the Milestone 1 tracked binary with
+  SHA-256
+  `E850806BA3743C59C75A9A70C321C58D89760EAF7D0438C302DA5F429A3BF7A6`.
 
 ## Milestone 3: Pure Coordinated XY Planner
 

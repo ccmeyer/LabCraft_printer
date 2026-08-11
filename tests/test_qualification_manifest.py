@@ -150,6 +150,27 @@ def test_load_motion_timing_manifest_freezes_rates_vectors_and_instrumentation_m
     assert manifest.analysis_rules["2025"]["metrics"]["am"]["maturity"] == "informational"
 
 
+def test_load_profile_lut_benchmark_manifest_freezes_non_motion_cycle_gates():
+    manifest = load_manifest("profile_lut_benchmark_v1")
+
+    assert manifest.manifest_id == "profile_lut_benchmark_v1"
+    assert manifest.profile == "SAFE"
+    assert manifest.expected_test_ids == (2030,)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is False
+    assert manifest.selftest_args == ("--profile-lut-benchmark",)
+    assert manifest.fixtures == ()
+    metrics = manifest.analysis_rules["2030"]["metrics"]
+    assert metrics["clk"]["equals"] == 180000000
+    assert metrics["samples"]["equals"] == 25376
+    assert metrics["lut_max"]["max"] == 225
+    assert metrics["speedup_x100"]["min"] == 400
+    assert metrics["prep_short"]["max"] == 1800
+    assert metrics["prep_long"]["max"] == 1800
+    assert metrics["err_max"]["max"] == 2
+    assert metrics["irq_restore"]["equals"] == 1
+
+
 def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture():
     manifest = load_manifest("motion_envelope_v1")
 

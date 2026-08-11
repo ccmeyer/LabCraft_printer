@@ -1,5 +1,5 @@
 from tools.qualification.analyzers import analyze_report
-from tools.qualification.manifest import parse_manifest
+from tools.qualification.manifest import load_manifest, parse_manifest
 from tools.qualification.report import _manifest_checks
 
 
@@ -88,6 +88,52 @@ def test_acceptance_threshold_violation_fails():
 
     assert analysis["verdict"]["status"] == "fail"
     assert analysis["metric_evaluations"][0]["status"] == "fail"
+
+
+def test_profile_lut_benchmark_manifest_accepts_limits_and_blocks_cycle_regression():
+    manifest = load_manifest("profile_lut_benchmark_v1")
+    metrics = {
+        "clk": 180000000,
+        "samples": 25376,
+        "lut_max": 225,
+        "lut_mean": 100,
+        "legacy_max": 1000,
+        "legacy_mean": 500,
+        "speedup_x100": 500,
+        "prep_short": 400,
+        "prep_long": 400,
+        "err_max": 2,
+        "irq_restore": 1,
+        "checksum": 1234,
+    }
+    raw = {
+        "run_id": 2030,
+        "profile": "SAFE",
+        "started_at": "2026-08-11T00:00:00Z",
+        "finished_at": "2026-08-11T00:00:01Z",
+        "aborted": False,
+        "summary": {"total": 1, "passed": 1, "failed": 0},
+        "results": [
+            {
+                "test_id": 2030,
+                "name": "profile_lut_cycle_benchmark_safe",
+                "pass": True,
+                "metrics": metrics,
+            }
+        ],
+        "host_checks": [],
+    }
+
+    accepted = _analyze(raw, manifest)
+    assert accepted["verdict"]["status"] == "pass"
+
+    raw["results"][0]["metrics"] = {**metrics, "lut_max": 226}
+    regressed = _analyze(raw, manifest)
+    assert regressed["verdict"]["status"] == "fail"
+    failures = [
+        item for item in regressed["metric_evaluations"] if item["status"] == "fail"
+    ]
+    assert [item["metric_name"] for item in failures] == ["lut_max"]
 
 
 def test_missing_metric_follows_threshold_maturity():

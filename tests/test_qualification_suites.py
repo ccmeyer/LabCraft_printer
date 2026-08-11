@@ -20,6 +20,7 @@ def test_discover_suite_entries_lists_current_manifests():
         "gripper_seal_stress_v1",
         "xy_motion_v1",
         "motion_timing_v1",
+        "profile_lut_benchmark_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "refuel_vacuum_v1",
@@ -126,6 +127,22 @@ def test_motion_timing_suite_exposes_safety_gate_vectors_and_cycle_metrics():
     assert all("cm" in row.metrics for row in rows.values())
     assert all("dm" in row.metrics for row in rows.values())
     assert "incident camera-to-home" in rows[2024].evaluates
+
+
+def test_profile_lut_benchmark_suite_is_safe_non_motion_and_exposes_cycle_gates():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    benchmark = entries["profile_lut_benchmark_v1"].manifest
+
+    assert benchmark.profile == "SAFE"
+    assert benchmark.requires_operator_prompts is False
+    assert required_fixture_ids(benchmark) == ()
+    rows = build_test_plan_rows(benchmark)
+    assert [row.test_id for row in rows] == [2030]
+    assert rows[0].name == "Normalized cosine LUT timing"
+    assert rows[0].subsystem == "System"
+    assert "lut_max" in rows[0].metrics
+    assert "speedup_x100" in rows[0].metrics
+    assert "Non-motion" in rows[0].evaluates
 
 
 def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():

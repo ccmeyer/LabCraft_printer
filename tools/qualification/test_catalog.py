@@ -52,6 +52,7 @@ TEST_CATALOG: dict[int, TestCatalogEntry] = {
     2023: TestCatalogEntry(2023, "Legacy equal-XY max-rate timing", "Simultaneous 40 kHz X/Y legacy ISR load during an equal diagonal."),
     2024: TestCatalogEntry(2024, "Legacy camera/home-ratio timing", "Simultaneous legacy ISR load for a safe-envelope move matching the incident camera-to-home X:Y distance ratio."),
     2025: TestCatalogEntry(2025, "Legacy short-triangular timing", "Short 1000-step X move whose profile cannot reach a sustained cruise phase."),
+    2030: TestCatalogEntry(2030, "Normalized cosine LUT timing", "Non-motion target benchmark of fixed-point profile preparation, evaluation, legacy speedup, and ARR compatibility."),
     2201: TestCatalogEntry(2201, "Pressure hold leak", "Closed-loop pressure decay and correction effort."),
     2202: TestCatalogEntry(2202, "Pressure target cycling", "Repeated low/high target settling and pressure span."),
     2203: TestCatalogEntry(2203, "Pressure hysteresis", "Regulator motor repeatability and hysteresis span."),

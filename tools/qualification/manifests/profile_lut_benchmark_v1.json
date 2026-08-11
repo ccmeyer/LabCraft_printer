@@ -1,0 +1,32 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "profile_lut_benchmark_v1",
+  "name": "Normalized Cosine LUT Benchmark v1",
+  "profile": "SAFE",
+  "description": "Explicit non-motion target benchmark for the Q20 normalized cosine LUT and phase accumulator. No motor, pressure, valve, or homing operation is performed.",
+  "expected_test_ids": [2030],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": false,
+  "selftest_args": ["--profile-lut-benchmark"],
+  "fixtures": [],
+  "analysis_rules": {
+    "2030": {
+      "category": "performance",
+      "failure_domain": "firmware_performance",
+      "metrics": {
+        "clk": {"maturity": "acceptance", "equals": 180000000},
+        "samples": {"maturity": "acceptance", "equals": 25376},
+        "lut_max": {"maturity": "acceptance", "max": 225},
+        "lut_mean": {"maturity": "informational"},
+        "legacy_max": {"maturity": "informational"},
+        "legacy_mean": {"maturity": "informational"},
+        "speedup_x100": {"maturity": "acceptance", "min": 400},
+        "prep_short": {"maturity": "acceptance", "max": 1800},
+        "prep_long": {"maturity": "acceptance", "max": 1800},
+        "err_max": {"maturity": "acceptance", "max": 2},
+        "irq_restore": {"maturity": "acceptance", "equals": 1},
+        "checksum": {"maturity": "informational"}
+      }
+    }
+  }
+}
