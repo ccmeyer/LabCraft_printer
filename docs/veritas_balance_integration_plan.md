@@ -2,9 +2,9 @@
 
 ## Status
 
-- Date: 2026-08-07
+- Date: 2026-08-10
 - Branch: `feature/balance_integration`
-- Status: Slices 0-6 hardware exercised; pre-start loading and ejection-aware baseline reuse implemented awaiting HIL
+- Status: Slices 0-6 hardware exercised; unified GPIO/serial ejection accounting correction implemented awaiting HIL
 - Scope: implementation plan and slice verification record
 - Target hardware: Veritas/BEL HPB balance connected to the Raspberry Pi through a proper RS-232-to-USB adapter
 - Target workflow: stream gravimetric data collection only
@@ -1187,9 +1187,10 @@ Implementation findings:
 - Any qualifying ejection attempt, reset, reconnect, disconnect, transport
   fault, discard, manual starting fallback, or manual ending fallback
   invalidates reuse. No baseline is loaded after restart.
-- For balance-backed runs, CSV `Num Prints` uses the completed-droplet ledger
-  delta. The camera-derived count remains in sidecar provenance; a mismatch is
-  an operator-visible warning, while uncertain command completion blocks save.
+- For balance-backed runs, CSV `Num Prints` uses unified serial and
+  camera-trigger accounting. The camera artifact count remains an independent
+  cross-check and is the selected fallback when GPIO-ledger coverage is
+  incomplete; uncertainty still blocks save.
 - Closing the imager cancels an active reading but causes no automatic motion
   and preserves the staged physical-position workflow for reopening.
 - CSV headers, movement coordinates, pressure behavior, balance stability
@@ -1222,6 +1223,63 @@ Rollback:
 - Remove the ledger and new starting states, restore direct starting-balance
   staging, and disable carry-forward. The prior confirmed starting/ending
   balance workflow and manual entry remain available.
+
+## Unified GPIO And Serial Ejection Accounting Correction
+
+Status: `implemented_awaiting_hil`
+
+Root cause:
+
+- Timecourse droplets are ejected by the camera GPIO trigger after a confirmed
+  `SET_IMAGE_DROPLETS` setting, not by serial `DISPENSE` commands. The first
+  ledger implementation observed only serial command lifecycle events and then
+  replaced a valid artifact-derived count with a zero serial delta.
+
+Correction:
+
+- The camera emits immutable `TRIGGERED`, `ACKNOWLEDGED`, and `UNCERTAIN`
+  imaging-ejection events for every internal attempt. Event identity includes
+  transport epoch, capture generation, request ID, and retry index.
+- The configured droplet count becomes authoritative only when
+  `SET_IMAGE_DROPLETS` completes. A zero-count background trigger changes no
+  ledger counters. Unknown positive coverage, missing acknowledgement, and a
+  related firmware flash fault mark accounting uncertain.
+- The unified ledger retains separate serial and GPIO source counters while
+  preserving combined attempt, completed-droplet, and uncertainty generations
+  used by baseline reuse.
+- Balance-backed count selection is
+  `serial_delta + max(imaging_acknowledged_delta, capture_derived_count)`.
+  Equal imaging/capture totals are clean; acknowledged retries are retained
+  with a warning; missing GPIO coverage uses the artifact count with a
+  provenance warning. Manual and feature-disabled capture counting is
+  unchanged.
+- The sidecar records source selection, source deltas, start/end snapshots, and
+  coverage warning without raw GPIO, serial, or image data. CSV headers and
+  formatting remain unchanged.
+
+Focused validation covers a 140-droplet artifact-only regression, clean GPIO
+coverage, acknowledged retries, background triggers, missing acknowledgements,
+flash faults, duplicate events, serial/GPIO combination, baseline invalidation,
+and unchanged manual behavior. The full repository suite remains deferred to
+the final all-slices validation.
+
+Pi acceptance:
+
+1. Run a balance-backed timecourse and verify the background and printed counts
+   match the recorded schedule.
+2. Confirm CSV `Num Prints` and mass-per-print use the nonzero unified count.
+3. Confirm the sidecar includes capture, GPIO-acknowledged, GPIO-attempt, and
+   serial deltas with a clean or explained warning status.
+4. Verify MCU logs, flash acknowledgement, camera capture, and balance readings
+   continue simultaneously.
+5. Perform one controlled extra camera capture and verify it invalidates the
+   reusable baseline. Do not deliberately induce a flash hardware fault.
+
+Rollback:
+
+- Restore capture-derived counting as the sole authority and disable
+  carry-forward whenever unified coverage is unavailable. No firmware or
+  hardware rollback is required.
 
 ## Slice 7: Optional Session Auto-Save
 

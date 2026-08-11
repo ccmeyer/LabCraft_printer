@@ -53,6 +53,7 @@ from GravimetricLedger import (
     EjectionCommandEvent,
     EjectionLedgerSnapshot,
     GravimetricEjectionLedger,
+    ImagingEjectionEvent,
     ReusableMassBaseline,
 )
 
@@ -4923,6 +4924,13 @@ class CalibrationManager(QObject):
             "ejection_completed_total_start": None,
             "ejection_completed_total_end": None,
             "ejection_uncertainty_generation_start": None,
+            "ejection_count_source": "capture_artifacts",
+            "ejection_serial_completed_delta": 0,
+            "ejection_imaging_acknowledged_delta": 0,
+            "ejection_imaging_attempt_delta": 0,
+            "ejection_coverage_warning": "",
+            "ejection_ledger_snapshot_start": None,
+            "ejection_ledger_snapshot_end": None,
             "ejection_integrity_status": "inactive",
             "ejection_integrity_message": "",
             "reusable_baseline_available": False,
@@ -4955,6 +4963,14 @@ class CalibrationManager(QObject):
             "attempt_generation": int(snapshot.attempt_generation),
             "completed_droplet_total": int(snapshot.completed_droplet_total),
             "uncertainty_generation": int(snapshot.uncertainty_generation),
+            "command_attempt_generation": int(snapshot.command_attempt_generation),
+            "imaging_attempt_generation": int(snapshot.imaging_attempt_generation),
+            "serial_completed_droplet_total": int(
+                snapshot.serial_completed_droplet_total
+            ),
+            "imaging_acknowledged_droplet_total": int(
+                snapshot.imaging_acknowledged_droplet_total
+            ),
         }
 
     def _sync_stream_gravimetric_baseline_summary(self):
@@ -4988,7 +5004,7 @@ class CalibrationManager(QObject):
         )
 
     def record_stream_gravimetric_ejection_event(self, event):
-        if not isinstance(event, EjectionCommandEvent):
+        if not isinstance(event, (EjectionCommandEvent, ImagingEjectionEvent)):
             return False
         before = self._stream_gravimetric_ejection_ledger.snapshot()
         after = self._stream_gravimetric_ejection_ledger.record(event)
@@ -5007,7 +5023,7 @@ class CalibrationManager(QObject):
         ):
             self._stream_capture_state["ejection_integrity_status"] = "uncertain"
             self._stream_capture_state["ejection_integrity_message"] = (
-                "An accepted ejection command had uncertain completion."
+                "A physical ejection attempt had uncertain completion."
             )
         self._sync_stream_gravimetric_baseline_summary()
         return True
@@ -5523,31 +5539,106 @@ class CalibrationManager(QObject):
             and ledger_start is not None
         ):
             snapshot = self._stream_gravimetric_ejection_ledger.snapshot()
-            command_count = max(0, int(snapshot.completed_droplet_total) - int(ledger_start))
+            start_snapshot = self._stream_capture_state.get(
+                "ejection_ledger_snapshot_start"
+            )
+            if isinstance(start_snapshot, dict):
+                serial_start = int(
+                    start_snapshot.get("serial_completed_droplet_total") or 0
+                )
+                imaging_start = int(
+                    start_snapshot.get("imaging_acknowledged_droplet_total") or 0
+                )
+                imaging_attempt_start = int(
+                    start_snapshot.get("imaging_attempt_generation") or 0
+                )
+            else:
+                # Compatibility for an already-staged in-memory session created
+                # before source-aware snapshots existed.
+                serial_start = int(ledger_start)
+                imaging_start = 0
+                imaging_attempt_start = 0
+
+            serial_delta = max(
+                0,
+                int(snapshot.serial_completed_droplet_total) - serial_start,
+            )
+            imaging_delta = max(
+                0,
+                int(snapshot.imaging_acknowledged_droplet_total) - imaging_start,
+            )
+            imaging_attempt_delta = max(
+                0,
+                int(snapshot.imaging_attempt_generation) - imaging_attempt_start,
+            )
+            selected_imaging_count = max(imaging_delta, capture_count)
+            selected_count = serial_delta + selected_imaging_count
             self._stream_capture_state["ejection_completed_total_end"] = int(
                 snapshot.completed_droplet_total
             )
-            self._stream_capture_state["printed_capture_count"] = command_count
+            self._stream_capture_state["ejection_ledger_snapshot_end"] = (
+                self._stream_ejection_snapshot_dict(snapshot)
+            )
+            self._stream_capture_state["ejection_serial_completed_delta"] = int(
+                serial_delta
+            )
+            self._stream_capture_state["ejection_imaging_acknowledged_delta"] = int(
+                imaging_delta
+            )
+            self._stream_capture_state["ejection_imaging_attempt_delta"] = int(
+                imaging_attempt_delta
+            )
+            self._stream_capture_state["printed_capture_count"] = int(selected_count)
             if self._stream_capture_state.get("ejection_integrity_status") != "uncertain":
-                if command_count != capture_count:
+                if imaging_delta > capture_count:
                     message = (
-                        "Command-derived ejection count "
-                        f"({command_count}) differs from capture-derived count ({capture_count}); "
-                        "the command-derived count will be saved."
+                        "The GPIO ledger recorded more acknowledged imaging droplets "
+                        f"({imaging_delta}) than successful capture artifacts ({capture_count}), "
+                        "consistent with retries or additional camera triggers; the unified "
+                        f"count ({selected_count}, including {serial_delta} serial droplets) "
+                        "will be saved."
+                    )
+                    self._stream_capture_state["ejection_count_source"] = (
+                        "serial_plus_imaging_ledger_with_retries"
                     )
                     self._stream_capture_state["ejection_integrity_status"] = "warning"
-                    self._stream_capture_state["ejection_integrity_message"] = message
+                elif imaging_delta < capture_count:
+                    message = (
+                        "GPIO ejection-ledger coverage was incomplete: it recorded "
+                        f"{imaging_delta} acknowledged imaging droplets while capture "
+                        f"artifacts recorded {capture_count}. The artifact count was used "
+                        f"with {serial_delta} completed serial droplets for a total of "
+                        f"{selected_count}."
+                    )
+                    self._stream_capture_state["ejection_count_source"] = (
+                        "serial_plus_capture_fallback"
+                    )
+                    self._stream_capture_state["ejection_integrity_status"] = "warning"
+                else:
+                    message = ""
+                    self._stream_capture_state["ejection_count_source"] = (
+                        "serial_plus_imaging_ledger"
+                    )
+                    self._stream_capture_state["ejection_integrity_status"] = "clean"
+                self._stream_capture_state["ejection_integrity_message"] = message
+                self._stream_capture_state["ejection_coverage_warning"] = message
+                if message:
                     warnings = self._stream_capture_warning_list(
                         self._stream_capture_state.get("analysis_warnings")
                     )
                     if message not in warnings:
                         warnings.append(message)
                     self._stream_capture_state["analysis_warnings"] = warnings
-                else:
-                    self._stream_capture_state["ejection_integrity_status"] = "clean"
-                    self._stream_capture_state["ejection_integrity_message"] = ""
+            else:
+                self._stream_capture_state["ejection_count_source"] = (
+                    "unified_ejection_accounting_uncertain"
+                )
+                self._stream_capture_state["ejection_coverage_warning"] = str(
+                    self._stream_capture_state.get("ejection_integrity_message") or ""
+                )
         else:
             self._stream_capture_state["printed_capture_count"] = capture_count
+            self._stream_capture_state["ejection_count_source"] = "capture_artifacts"
         return counts
 
     def _write_stream_capture_log(self, *, outcome: str, error_message: str = "", csv_row: dict | None = None):
@@ -6614,6 +6705,13 @@ class CalibrationManager(QObject):
             "ejection_completed_total_start": None,
             "ejection_completed_total_end": None,
             "ejection_uncertainty_generation_start": None,
+            "ejection_count_source": "capture_artifacts",
+            "ejection_serial_completed_delta": 0,
+            "ejection_imaging_acknowledged_delta": 0,
+            "ejection_imaging_attempt_delta": 0,
+            "ejection_coverage_warning": "",
+            "ejection_ledger_snapshot_start": None,
+            "ejection_ledger_snapshot_end": None,
             "ejection_integrity_status": "inactive",
             "ejection_integrity_message": "",
             "reusable_baseline_available": False,
@@ -6696,6 +6794,9 @@ class CalibrationManager(QObject):
         )
         self._stream_capture_state["ejection_uncertainty_generation_start"] = int(
             ledger_snapshot.uncertainty_generation
+        )
+        self._stream_capture_state["ejection_ledger_snapshot_start"] = (
+            self._stream_ejection_snapshot_dict(ledger_snapshot)
         )
         self._stream_capture_state["ejection_integrity_status"] = (
             "clean" if mass_source == "veritas_balance" else "inactive"

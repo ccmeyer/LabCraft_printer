@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import Machine_FreeRTOS as mfr
+from GravimetricLedger import ImagingEjectionEvent, ImagingEjectionLifecycle
 
 
 def _make_incident_gap_window(test_profile, *, black_box_log_dir=None):
@@ -148,6 +149,89 @@ def test_machine_dispense_commands_use_configured_frequency(qapp, test_profile):
     assert print_only.param2 == 10
     assert refuel_only.command_type == "DISPENSE_REFUEL"
     assert refuel_only.param2 == 10
+
+
+def test_imaging_droplet_count_is_confirmed_before_completion_callback(
+    qapp,
+    test_profile,
+):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    callback_values = []
+
+    command = machine.set_imaging_droplets(
+        3,
+        handler=lambda: callback_values.append(
+            machine._confirmed_imaging_droplet_count
+        ),
+    )
+
+    assert machine._confirmed_imaging_droplet_count is None
+    command.execute_handler()
+    assert machine._confirmed_imaging_droplet_count == 3
+    assert callback_values == [3]
+
+
+def test_firmware_flash_fault_marks_latest_acknowledged_imaging_attempt_uncertain(
+    qapp,
+    test_profile,
+):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    events = []
+    machine.imaging_ejection_event.connect(events.append)
+    acknowledged = ImagingEjectionEvent(
+        transport_epoch=1,
+        capture_generation=2,
+        request_id="capture-fault",
+        attempt_index=1,
+        requested_droplet_count=1,
+        lifecycle=ImagingEjectionLifecycle.ACKNOWLEDGED,
+        monotonic_ns=10,
+    )
+    machine._on_camera_imaging_ejection_event(acknowledged)
+
+    machine.on_flash_state_changed(
+        {
+            "flash_session_armed": False,
+            "flash_fault_latched": True,
+            "flash_fault_reason": "print completion timeout",
+        }
+    )
+
+    assert [event.lifecycle for event in events] == [
+        ImagingEjectionLifecycle.ACKNOWLEDGED,
+        ImagingEjectionLifecycle.UNCERTAIN,
+    ]
+    assert events[-1].requested_droplet_count == 1
+    assert "print completion timeout" in events[-1].detail
+
+
+def test_acknowledgement_observes_flash_fault_delivered_first(qapp, test_profile):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    machine._flash_state = {
+        "flash_session_armed": False,
+        "flash_fault_latched": True,
+        "flash_fault_reason": "flash cycle fault",
+    }
+    events = []
+    machine.imaging_ejection_event.connect(events.append)
+
+    machine._on_camera_imaging_ejection_event(
+        ImagingEjectionEvent(
+            transport_epoch=1,
+            capture_generation=3,
+            request_id="capture-cross-thread-order",
+            attempt_index=1,
+            requested_droplet_count=2,
+            lifecycle=ImagingEjectionLifecycle.ACKNOWLEDGED,
+            monotonic_ns=20,
+        )
+    )
+
+    assert [event.lifecycle for event in events] == [
+        ImagingEjectionLifecycle.ACKNOWLEDGED,
+        ImagingEjectionLifecycle.UNCERTAIN,
+    ]
+    assert "flash cycle fault" in events[-1].detail
 
 
 def test_machine_emits_typed_ejection_lifecycle_without_refuel(qapp, test_profile):

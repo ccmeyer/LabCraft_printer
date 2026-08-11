@@ -22,7 +22,12 @@ from CalibrationClasses.View import (
     StreamCaptureMassEntryDialog,
 )
 from Controller import Controller, ExperimentalBalancePort
-from GravimetricLedger import EjectionCommandEvent, EjectionCommandLifecycle
+from GravimetricLedger import (
+    EjectionCommandEvent,
+    EjectionCommandLifecycle,
+    ImagingEjectionEvent,
+    ImagingEjectionLifecycle,
+)
 from tests.test_stream_gravimetric_capture import (
     SignalStub,
     _make_manager,
@@ -208,6 +213,30 @@ def _prepare_completed_balance_run(manager, *, starting_mass="10.00"):
     )
     manager._stream_capture_state = state
     return state
+
+
+def _record_imaging_attempt(
+    manager,
+    attempt_index,
+    *,
+    count=1,
+    request_id="timecourse-capture",
+):
+    for lifecycle in (
+        ImagingEjectionLifecycle.TRIGGERED,
+        ImagingEjectionLifecycle.ACKNOWLEDGED,
+    ):
+        assert manager.record_stream_gravimetric_ejection_event(
+            ImagingEjectionEvent(
+                transport_epoch=1,
+                capture_generation=1,
+                request_id=request_id,
+                attempt_index=attempt_index,
+                requested_droplet_count=count,
+                lifecycle=lifecycle,
+                monotonic_ns=1000 + attempt_index,
+            )
+        )
 
 
 def _complete_balance_ending_and_return(manager, controller, service, mass="12.50"):
@@ -800,6 +829,26 @@ def test_ejection_attempt_invalidates_reusable_ending_mass(tmp_path):
     assert service.requests[-1].phase is StableMassPhase.ENDING
 
 
+def test_gpio_ejection_attempt_invalidates_reusable_ending_mass(tmp_path):
+    _model, manager = _make_manager(tmp_path)
+    _prepare_completed_balance_run(manager)
+    service = _StableMassService()
+    controller = _controller_with_manager(manager, service=service)
+    controller._experimental_balance_stream_opt_in = True
+    _complete_balance_ending_and_return(manager, controller, service, mass="12.50")
+
+    _record_imaging_attempt(
+        manager,
+        1,
+        count=1,
+        request_id="outside-gravimetric-workflow",
+    )
+
+    invalidated = manager.get_stream_gravimetric_capture_state()
+    assert invalidated["reusable_baseline_available"] is False
+    assert "ejection" in invalidated["reusable_baseline_invalid_reason"].lower()
+
+
 def test_command_derived_count_warns_on_camera_mismatch_and_uncertainty_blocks_save(
     monkeypatch,
     tmp_path,
@@ -836,10 +885,13 @@ def test_command_derived_count_warns_on_camera_mismatch_and_uncertainty_blocks_s
     manager._update_stream_capture_counts()
     counted = manager.get_stream_gravimetric_capture_state()
     assert counted["capture_derived_printed_count"] == 5
-    assert counted["printed_capture_count"] == 7
+    assert counted["printed_capture_count"] == 12
     assert counted["ejection_completed_total_end"] == 7
+    assert counted["ejection_serial_completed_delta"] == 7
+    assert counted["ejection_imaging_acknowledged_delta"] == 0
+    assert counted["ejection_count_source"] == "serial_plus_capture_fallback"
     assert counted["ejection_integrity_status"] == "warning"
-    assert "command-derived" in counted["ejection_integrity_message"].lower()
+    assert "coverage was incomplete" in counted["ejection_integrity_message"].lower()
 
     for lifecycle in (
         EjectionCommandLifecycle.QUEUED,
@@ -865,6 +917,162 @@ def test_command_derived_count_warns_on_camera_mismatch_and_uncertainty_blocks_s
             rep_value=1,
             notes="must not save",
         )
+
+
+def test_balance_timecourse_falls_back_to_140_capture_droplets_when_gpio_coverage_is_missing(
+    monkeypatch,
+    tmp_path,
+):
+    model, manager = _make_manager(tmp_path)
+    state = _prepare_completed_balance_run(manager)
+    state["ejection_completed_total_start"] = 0
+    state["ejection_uncertainty_generation_start"] = 0
+    state["ejection_integrity_status"] = "clean"
+    monkeypatch.setattr(
+        manager,
+        "_derive_stream_capture_counts",
+        lambda: {
+            "background_capture_count": 10,
+            "printed_capture_count": 140,
+            "printed_capture_event_count": 140,
+        },
+    )
+
+    manager._update_stream_capture_counts()
+    counted = manager.get_stream_gravimetric_capture_state()
+
+    assert counted["background_capture_count"] == 10
+    assert counted["capture_derived_printed_count"] == 140
+    assert counted["printed_capture_count"] == 140
+    assert counted["ejection_count_source"] == "serial_plus_capture_fallback"
+    assert counted["ejection_integrity_status"] == "warning"
+    assert counted["ejection_ledger_snapshot_end"][
+        "imaging_acknowledged_droplet_total"
+    ] == 0
+    manager._write_stream_capture_log(outcome="count_reconciliation_test")
+    sidecar_path = (
+        Path(model.experiment_model.experiment_dir_path)
+        / "stream_capture_log.jsonl"
+    )
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8").splitlines()[0])
+    assert sidecar["ejection_count_source"] == "serial_plus_capture_fallback"
+    assert sidecar["ejection_serial_completed_delta"] == 0
+    assert sidecar["ejection_imaging_acknowledged_delta"] == 0
+    assert sidecar["capture_derived_printed_count"] == 140
+    assert sidecar["ejection_ledger_snapshot_end"][
+        "serial_completed_droplet_total"
+    ] == 0
+    assert "raw serial" not in json.dumps(sidecar).lower()
+    assert "raw gpio" not in json.dumps(sidecar).lower()
+
+
+def test_balance_timecourse_uses_clean_acknowledged_gpio_count(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    state = _prepare_completed_balance_run(manager)
+    start = manager._stream_gravimetric_ejection_ledger.snapshot()
+    state["ejection_completed_total_start"] = start.completed_droplet_total
+    state["ejection_uncertainty_generation_start"] = start.uncertainty_generation
+    state["ejection_ledger_snapshot_start"] = manager._stream_ejection_snapshot_dict(start)
+    state["ejection_integrity_status"] = "clean"
+    for attempt_index in range(1, 141):
+        _record_imaging_attempt(manager, attempt_index)
+    monkeypatch.setattr(
+        manager,
+        "_derive_stream_capture_counts",
+        lambda: {
+            "background_capture_count": 10,
+            "printed_capture_count": 140,
+            "printed_capture_event_count": 140,
+        },
+    )
+
+    manager._update_stream_capture_counts()
+    counted = manager.get_stream_gravimetric_capture_state()
+
+    assert counted["printed_capture_count"] == 140
+    assert counted["ejection_imaging_acknowledged_delta"] == 140
+    assert counted["ejection_imaging_attempt_delta"] == 140
+    assert counted["ejection_count_source"] == "serial_plus_imaging_ledger"
+    assert counted["ejection_integrity_status"] == "clean"
+    assert counted["ejection_coverage_warning"] == ""
+
+
+def test_acknowledged_gpio_retry_is_counted_and_warned(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    state = _prepare_completed_balance_run(manager)
+    start = manager._stream_gravimetric_ejection_ledger.snapshot()
+    state["ejection_completed_total_start"] = start.completed_droplet_total
+    state["ejection_uncertainty_generation_start"] = start.uncertainty_generation
+    state["ejection_ledger_snapshot_start"] = manager._stream_ejection_snapshot_dict(start)
+    state["ejection_integrity_status"] = "clean"
+    for attempt_index in range(1, 7):
+        _record_imaging_attempt(manager, attempt_index)
+    monkeypatch.setattr(
+        manager,
+        "_derive_stream_capture_counts",
+        lambda: {
+            "background_capture_count": 1,
+            "printed_capture_count": 5,
+            "printed_capture_event_count": 5,
+        },
+    )
+
+    manager._update_stream_capture_counts()
+    counted = manager.get_stream_gravimetric_capture_state()
+
+    assert counted["printed_capture_count"] == 6
+    assert counted["ejection_count_source"] == (
+        "serial_plus_imaging_ledger_with_retries"
+    )
+    assert counted["ejection_integrity_status"] == "warning"
+    assert "retries" in counted["ejection_coverage_warning"].lower()
+
+
+def test_serial_and_gpio_deltas_are_combined_without_cross_source_collision(
+    tmp_path,
+    monkeypatch,
+):
+    _model, manager = _make_manager(tmp_path)
+    state = _prepare_completed_balance_run(manager)
+    start = manager._stream_gravimetric_ejection_ledger.snapshot()
+    state["ejection_completed_total_start"] = start.completed_droplet_total
+    state["ejection_uncertainty_generation_start"] = start.uncertainty_generation
+    state["ejection_ledger_snapshot_start"] = manager._stream_ejection_snapshot_dict(start)
+    state["ejection_integrity_status"] = "clean"
+    for lifecycle in (
+        EjectionCommandLifecycle.QUEUED,
+        EjectionCommandLifecycle.COMPLETED,
+    ):
+        manager.record_stream_gravimetric_ejection_event(
+            EjectionCommandEvent(
+                transport_epoch=1,
+                command_number=1,
+                command_type="DISPENSE",
+                requested_droplet_count=7,
+                lifecycle=lifecycle,
+                monotonic_ns=10,
+            )
+        )
+    for attempt_index in range(1, 6):
+        _record_imaging_attempt(manager, attempt_index)
+    monkeypatch.setattr(
+        manager,
+        "_derive_stream_capture_counts",
+        lambda: {
+            "background_capture_count": 1,
+            "printed_capture_count": 5,
+            "printed_capture_event_count": 5,
+        },
+    )
+
+    manager._update_stream_capture_counts()
+    counted = manager.get_stream_gravimetric_capture_state()
+
+    assert counted["ejection_serial_completed_delta"] == 7
+    assert counted["ejection_imaging_acknowledged_delta"] == 5
+    assert counted["printed_capture_count"] == 12
+    assert counted["ejection_count_source"] == "serial_plus_imaging_ledger"
+    assert counted["ejection_integrity_status"] == "clean"
 
 
 def test_manual_and_balance_sources_build_identical_csv_rows(tmp_path):

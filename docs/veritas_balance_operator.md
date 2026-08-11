@@ -175,9 +175,22 @@ balance-backed runs and check all of the following:
    value as the new starting mass.
 8. After a later ending save, issue a manual droplet ejection. The next Begin
    must not offer reuse and must require another loading measurement.
-9. Verify CSV `Num Prints` uses the command-derived completed-ejection count.
-   The sidecar contains command and camera-derived counts, carry provenance,
-   and no raw serial frame history.
+9. Verify CSV `Num Prints` uses the unified completed-ejection count. For a
+   normal camera timecourse, the capture-artifact and GPIO-acknowledged totals
+   should agree. Completed serial `DISPENSE`/`DISPENSE_PRINT` droplets, if any,
+   are added separately.
+10. Check `stream_capture_log.jsonl` for `ejection_count_source`, the serial
+   delta, GPIO acknowledged/attempt deltas, capture-derived count, and the
+   starting/ending ledger snapshots. No raw serial, GPIO, or image data is
+   stored in these fields.
+
+If `ejection_count_source` is `serial_plus_capture_fallback`, the application
+detected incomplete GPIO-ledger coverage and preserved the nonzero artifact
+count rather than replacing it with zero. This is saveable with a provenance
+warning when there is no uncertainty. A trigger without a flash
+acknowledgement, an unknown configured imaging count, or a related firmware
+flash fault marks accounting uncertain and blocks confirmed save; do not
+override that condition with a manual count.
 
 ## Disable And Restore
 

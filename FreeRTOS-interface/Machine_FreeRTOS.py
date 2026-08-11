@@ -37,6 +37,8 @@ from GravimetricLedger import (
     EJECTION_COMMAND_TYPES,
     EjectionCommandEvent,
     EjectionCommandLifecycle,
+    ImagingEjectionEvent,
+    ImagingEjectionLifecycle,
 )
 
 logger = logging.getLogger(__name__)
@@ -445,6 +447,7 @@ class DropletCamera(QObject):
     capture_completed_signal = Signal(object)
     capture_failed_signal = Signal(str)  # emits error message on failure
     capture_phase_signal = Signal(object)
+    imaging_ejection_event = Signal(object)
     DEFAULT_TRIGGER_PULSE_S = 0.005
     MIN_TRIGGER_PULSE_S = 0.001
     MAX_TRIGGER_PULSE_S = 0.100
@@ -1575,6 +1578,39 @@ class DropletCamera(QObject):
     def get_latest_frame(self):
         return self.latest_frame
 
+    def _emit_imaging_ejection_event(
+        self,
+        lifecycle,
+        *,
+        transport_epoch,
+        generation,
+        request_id,
+        attempt_index,
+        requested_droplet_count,
+        detail="",
+    ):
+        try:
+            self.imaging_ejection_event.emit(
+                ImagingEjectionEvent(
+                    transport_epoch=int(transport_epoch),
+                    capture_generation=int(generation or 0),
+                    request_id=request_id,
+                    attempt_index=int(attempt_index),
+                    requested_droplet_count=(
+                        None
+                        if requested_droplet_count is None
+                        else int(requested_droplet_count)
+                    ),
+                    lifecycle=lifecycle,
+                    monotonic_ns=int(time.monotonic_ns()),
+                    detail=str(detail or ""),
+                )
+            )
+        except Exception:
+            # Accounting instrumentation must never interfere with GPIO cleanup
+            # or the established capture result path.
+            logger.exception("Failed to emit imaging ejection lifecycle event")
+
     def capture_non_blocking(
         self,
         max_new_frames=6,
@@ -1585,6 +1621,9 @@ class DropletCamera(QObject):
         generation=None,
         backend=None,
         backend_id=None,
+        attempt_index=1,
+        requested_droplet_count=None,
+        transport_epoch=0,
     ):
         """
         Arms a single attempt. The grabber will complete it and either emit
@@ -1690,6 +1729,9 @@ class DropletCamera(QObject):
         )
 
         trigger_asserted = False
+        ejection_triggered = False
+        ejection_acknowledged = False
+        ejection_failure_detail = "trigger was not acknowledged"
         try:
             self._raise_if_worker_context_stale(backend=backend, generation=generation, action="trigger_high")
             # Pulse the MCU trigger, then wait for the flash-fired ACK with the
@@ -1697,6 +1739,15 @@ class DropletCamera(QObject):
             trigger_pulse_s = self._trigger_pulse_duration_s()
             backend.trigger_high()
             trigger_asserted = True
+            ejection_triggered = True
+            self._emit_imaging_ejection_event(
+                ImagingEjectionLifecycle.TRIGGERED,
+                transport_epoch=transport_epoch,
+                generation=generation,
+                request_id=request_id,
+                attempt_index=attempt_index,
+                requested_droplet_count=requested_droplet_count,
+            )
             self._log_capture_phase(
                 "trigger_high",
                 request_id=request_id,
@@ -1752,6 +1803,7 @@ class DropletCamera(QObject):
             except StaleCaptureBackend:
                 raise
             except Exception as e:
+                ejection_failure_detail = f"flash acknowledgement wait failed: {type(e).__name__}"
                 print(f"Error while waiting for flash-fired edge: {e}")
                 self._log_capture_phase(
                     "backend_error",
@@ -1773,6 +1825,7 @@ class DropletCamera(QObject):
                 return
 
             if not fired:
+                ejection_failure_detail = "flash acknowledgement timed out"
                 print("Timed out waiting for flash-fired edge.")
                 self._set_capture_failure_result(
                     "edge_timeout",
@@ -1788,6 +1841,15 @@ class DropletCamera(QObject):
                 self._cap_ack_frame_index = getattr(self, "_grabber_frame_index", None)
                 self._cap_ack_frame_done_ns = getattr(self, "_last_grabber_frame_done_ns", None)
             backend.event_consume()
+            ejection_acknowledged = True
+            self._emit_imaging_ejection_event(
+                ImagingEjectionLifecycle.ACKNOWLEDGED,
+                transport_epoch=transport_epoch,
+                generation=generation,
+                request_id=request_id,
+                attempt_index=attempt_index,
+                requested_droplet_count=requested_droplet_count,
+            )
             self._log_capture_phase(
                 "edge_consume_done",
                 request_id=request_id,
@@ -1797,11 +1859,23 @@ class DropletCamera(QObject):
                 drained_edges=drain_count,
             )
         finally:
-            if trigger_asserted:
-                # Always deassert the Pi trigger, even if edge consumption or
-                # GPIO waiting raises. Leaving it high can latch firmware flash
-                # safety and block later captures until restart.
-                backend.trigger_low()
+            try:
+                if trigger_asserted:
+                    # Always deassert the Pi trigger, even if edge consumption or
+                    # GPIO waiting raises. Leaving it high can latch firmware flash
+                    # safety and block later captures until restart.
+                    backend.trigger_low()
+            finally:
+                if ejection_triggered and not ejection_acknowledged:
+                    self._emit_imaging_ejection_event(
+                        ImagingEjectionLifecycle.UNCERTAIN,
+                        transport_epoch=transport_epoch,
+                        generation=generation,
+                        request_id=request_id,
+                        attempt_index=attempt_index,
+                        requested_droplet_count=requested_droplet_count,
+                        detail=ejection_failure_detail,
+                    )
 
         self._raise_if_worker_context_stale(backend=backend, generation=generation, action="arm_start")
         arm_ns = time.monotonic_ns()
@@ -1854,6 +1928,8 @@ class DropletCamera(QObject):
         generation=None,
         backend=None,
         backend_id=None,
+        requested_droplet_count=None,
+        transport_epoch=0,
     ) -> dict:
         """
         Block until we get a 'threshold' capture or exhaust attempts.
@@ -1897,7 +1973,10 @@ class DropletCamera(QObject):
                                         request_id=request_id,
                                         generation=generation,
                                         backend=backend,
-                                        backend_id=backend_id)
+                                        backend_id=backend_id,
+                                        attempt_index=attempt_index,
+                                        requested_droplet_count=requested_droplet_count,
+                                        transport_epoch=transport_epoch)
             except StaleCaptureBackend as exc:
                 self._log_capture_phase(
                     "stale_worker_exit",
@@ -2098,6 +2177,8 @@ class DropletCamera(QObject):
         success_reasons=("threshold",),
         request_id=None,
         capture_context=None,
+        requested_droplet_count=None,
+        transport_epoch=0,
     ):
         """
         Start a capture with internal retries. On success, emits capture_completed_signal once.
@@ -2145,6 +2226,8 @@ class DropletCamera(QObject):
                     generation=generation,
                     backend=backend,
                     backend_id=backend_id,
+                    requested_droplet_count=requested_droplet_count,
+                    transport_epoch=transport_epoch,
                 )
             except StaleCaptureBackend as e:
                 capture_info = self.get_last_capture_result() or {}
@@ -4084,6 +4167,7 @@ class Machine(QObject):
     log_message_received = Signal(str)  # Signal to emit when a log message is received
     flash_state_updated = Signal(object)
     ejection_command_event = Signal(object)
+    imaging_ejection_event = Signal(object)
 
     def __init__(
         self,
@@ -4110,6 +4194,8 @@ class Machine(QObject):
         self._serial_identity_resolver = serial_identity_resolver
         self._last_log_start_error = ""
         self._transport_epoch = 0
+        self._confirmed_imaging_droplet_count = None
+        self._last_acknowledged_imaging_ejection = None
 
         self.balance_droplets = []   # <-- for legacy Balance simulation queue
 
@@ -4210,6 +4296,10 @@ class Machine(QObject):
                 self.droplet_camera = NullCamera()
         else:
             self.droplet_camera = NullCamera()
+
+        imaging_signal = getattr(self.droplet_camera, "imaging_ejection_event", None)
+        if imaging_signal is not None:
+            imaging_signal.connect(self._on_camera_imaging_ejection_event)
 
         self.log_reader = None
 
@@ -4779,6 +4869,8 @@ class Machine(QObject):
                 return
             self.port = port
             self._transport_epoch += 1
+            self._confirmed_imaging_droplet_count = None
+            self._last_acknowledged_imaging_ejection = None
             self.ser = self._serial_factory(self.port, self.baud, timeout=0.1)
             if not self.ser.is_open:
                 raise IOError("Port not open")
@@ -4892,6 +4984,8 @@ class Machine(QObject):
         self.command_queue.clear_queue(reset_counter=True)
         self._transport_capabilities = 0
         self._transport_ready = False
+        self._confirmed_imaging_droplet_count = None
+        self._last_acknowledged_imaging_ejection = None
         self._next_ctl_seq32 = self._control_seq_base
         # Stop TX timer
         if getattr(self, 'execution_timer', None):
@@ -5009,6 +5103,8 @@ class Machine(QObject):
         self._cancel_pending_pause_after_requests()
         self._transport_capabilities = 0
         self._transport_ready = False
+        self._confirmed_imaging_droplet_count = None
+        self._last_acknowledged_imaging_ejection = None
         self._command_queue_blocked_reason = "board_reset_recovery"
         self._next_ctl_seq32 = self._control_seq_base
         self._tx_paused = True
@@ -5062,6 +5158,8 @@ class Machine(QObject):
         finally:
             self.ser = None
             self.port = None
+            self._confirmed_imaging_droplet_count = None
+            self._last_acknowledged_imaging_ejection = None
 
         self.disconnect_complete_signal.emit()
 
@@ -5145,6 +5243,8 @@ class Machine(QObject):
 
         self.ser = None
         self.sent_command = None
+        self._confirmed_imaging_droplet_count = None
+        self._last_acknowledged_imaging_ejection = None
         self._clear_transport_fault_latch(str(reason or "external_owner"))
         self._clear_queue_gap_repair(str(reason or "external_owner"))
         self._transport_ready = False
@@ -5478,6 +5578,12 @@ class Machine(QObject):
         self.log_message_received.emit(message)
 
     def on_flash_state_changed(self, state: dict):
+        previous_fault = bool(
+            (getattr(self, "_flash_state", None) or {}).get(
+                "flash_fault_latched",
+                False,
+            )
+        )
         next_state = default_flash_safety_state()
         if isinstance(state, dict):
             next_state.update(
@@ -5488,7 +5594,66 @@ class Machine(QObject):
                 }
             )
         self._flash_state = next_state
+        if bool(next_state.get("flash_fault_latched")) and not previous_fault:
+            last_event = self._last_acknowledged_imaging_ejection
+            if isinstance(last_event, ImagingEjectionEvent):
+                self.imaging_ejection_event.emit(
+                    ImagingEjectionEvent(
+                        transport_epoch=last_event.transport_epoch,
+                        capture_generation=last_event.capture_generation,
+                        request_id=last_event.request_id,
+                        attempt_index=last_event.attempt_index,
+                        requested_droplet_count=last_event.requested_droplet_count,
+                        lifecycle=ImagingEjectionLifecycle.UNCERTAIN,
+                        monotonic_ns=int(time.monotonic_ns()),
+                        detail=(
+                            "Firmware flash fault after acknowledgement: "
+                            + str(next_state.get("flash_fault_reason") or "unknown")
+                        ),
+                    )
+                )
         self.flash_state_updated.emit(dict(self._flash_state))
+
+    def _on_camera_imaging_ejection_event(self, event):
+        if not isinstance(event, ImagingEjectionEvent):
+            return
+        acknowledged_nonzero = (
+            event.lifecycle is ImagingEjectionLifecycle.ACKNOWLEDGED
+            and event.requested_droplet_count not in (None, 0)
+        )
+        if acknowledged_nonzero:
+            self._last_acknowledged_imaging_ejection = event
+        self.imaging_ejection_event.emit(event)
+        # Camera and log-reader notifications originate on different worker
+        # threads. If the firmware fault reached the GUI thread first, attach it
+        # when the corresponding acknowledgement arrives rather than losing
+        # the uncertainty marker to cross-thread delivery order.
+        if acknowledged_nonzero and bool(
+            (getattr(self, "_flash_state", None) or {}).get(
+                "flash_fault_latched",
+                False,
+            )
+        ):
+            self.imaging_ejection_event.emit(
+                ImagingEjectionEvent(
+                    transport_epoch=event.transport_epoch,
+                    capture_generation=event.capture_generation,
+                    request_id=event.request_id,
+                    attempt_index=event.attempt_index,
+                    requested_droplet_count=event.requested_droplet_count,
+                    lifecycle=ImagingEjectionLifecycle.UNCERTAIN,
+                    monotonic_ns=int(time.monotonic_ns()),
+                    detail=(
+                        "Firmware flash fault after acknowledgement: "
+                        + str(
+                            (getattr(self, "_flash_state", None) or {}).get(
+                                "flash_fault_reason"
+                            )
+                            or "unknown"
+                        )
+                    ),
+                )
+            )
 
     def _disconnect_log_reader_signals(self, reader):
         for signal_obj, slot in (
@@ -7427,6 +7592,12 @@ class Machine(QObject):
             success_reasons=success_reasons,
             request_id=capture_request_id,
             capture_context=capture_context,
+            requested_droplet_count=getattr(
+                self,
+                "_confirmed_imaging_droplet_count",
+                None,
+            ),
+            transport_epoch=int(getattr(self, "_transport_epoch", 0)),
         )
 
     def recover_droplet_capture(self, reason=""):
@@ -7533,12 +7704,19 @@ class Machine(QObject):
             )
 
     def set_imaging_droplets(self,droplets,handler=None,kwargs=None,manual=False,trace_metadata=None):
+        confirmed_count = int(droplets)
+
+        def _confirm_then_continue(**completed_kwargs):
+            self._confirmed_imaging_droplet_count = confirmed_count
+            if handler is not None:
+                handler(**completed_kwargs)
+
         return self.add_command_to_queue(
             'SET_IMAGE_DROPLETS',
-            int(droplets),
+            confirmed_count,
             0,
             0,
-            handler=handler,
+            handler=_confirm_then_continue,
             kwargs=kwargs,
             manual=manual,
             trace_metadata=trace_metadata,

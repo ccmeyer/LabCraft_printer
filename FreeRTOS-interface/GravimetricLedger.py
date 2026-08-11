@@ -19,6 +19,12 @@ class EjectionCommandLifecycle(Enum):
     CANCELLED = "cancelled"
 
 
+class ImagingEjectionLifecycle(Enum):
+    TRIGGERED = "triggered"
+    ACKNOWLEDGED = "acknowledged"
+    UNCERTAIN = "uncertain"
+
+
 @dataclass(frozen=True)
 class EjectionCommandEvent:
     transport_epoch: int
@@ -44,18 +50,68 @@ class EjectionCommandEvent:
 
 
 @dataclass(frozen=True)
+class ImagingEjectionEvent:
+    transport_epoch: int
+    capture_generation: int
+    request_id: str | None
+    attempt_index: int
+    requested_droplet_count: int | None
+    lifecycle: ImagingEjectionLifecycle
+    monotonic_ns: int
+    detail: str = ""
+
+    def __post_init__(self):
+        if self.transport_epoch < 0 or self.capture_generation < 0:
+            raise ValueError("imaging ejection identifiers must be nonnegative")
+        if self.attempt_index < 1:
+            raise ValueError("imaging attempt index must be positive")
+        if (
+            self.requested_droplet_count is not None
+            and self.requested_droplet_count < 0
+        ):
+            raise ValueError("imaging droplet count must be nonnegative or unknown")
+        if self.monotonic_ns < 0:
+            raise ValueError("monotonic timestamp must be nonnegative")
+        if not isinstance(self.lifecycle, ImagingEjectionLifecycle):
+            raise TypeError("lifecycle must be ImagingEjectionLifecycle")
+        object.__setattr__(
+            self,
+            "request_id",
+            None if self.request_id is None else str(self.request_id),
+        )
+        object.__setattr__(self, "detail", str(self.detail or ""))
+
+
+@dataclass(frozen=True)
 class EjectionLedgerSnapshot:
     attempt_generation: int
     completed_droplet_total: int
     uncertainty_generation: int
+    command_attempt_generation: int = 0
+    imaging_attempt_generation: int = 0
+    serial_completed_droplet_total: int = 0
+    imaging_acknowledged_droplet_total: int = 0
 
     def __post_init__(self):
         if min(
             self.attempt_generation,
             self.completed_droplet_total,
             self.uncertainty_generation,
+            self.command_attempt_generation,
+            self.imaging_attempt_generation,
+            self.serial_completed_droplet_total,
+            self.imaging_acknowledged_droplet_total,
         ) < 0:
             raise ValueError("ledger counters must be nonnegative")
+        if self.completed_droplet_total != (
+            self.serial_completed_droplet_total
+            + self.imaging_acknowledged_droplet_total
+        ):
+            raise ValueError("combined completed total must equal its source totals")
+        if self.attempt_generation != (
+            self.command_attempt_generation + self.imaging_attempt_generation
+        ):
+            raise ValueError("combined attempt generation must equal its source totals")
 
 
 @dataclass(frozen=True)
@@ -92,24 +148,45 @@ class ReusableMassBaseline:
 
 
 class GravimetricEjectionLedger:
-    """Deduplicates machine command lifecycle events and tracks uncertainty."""
+    """Deduplicates serial/GPIO ejection lifecycles and tracks uncertainty."""
 
     def __init__(self):
         self._attempt_generation = 0
-        self._completed_droplet_total = 0
+        self._command_attempt_generation = 0
+        self._imaging_attempt_generation = 0
+        self._serial_completed_droplet_total = 0
+        self._imaging_acknowledged_droplet_total = 0
         self._uncertainty_generation = 0
         self._commands: dict[tuple[int, int], dict[str, object]] = {}
+        self._imaging_attempts: dict[tuple[int, int, str, int], dict[str, object]] = {}
 
     def snapshot(self) -> EjectionLedgerSnapshot:
         return EjectionLedgerSnapshot(
             attempt_generation=self._attempt_generation,
-            completed_droplet_total=self._completed_droplet_total,
+            completed_droplet_total=(
+                self._serial_completed_droplet_total
+                + self._imaging_acknowledged_droplet_total
+            ),
             uncertainty_generation=self._uncertainty_generation,
+            command_attempt_generation=self._command_attempt_generation,
+            imaging_attempt_generation=self._imaging_attempt_generation,
+            serial_completed_droplet_total=self._serial_completed_droplet_total,
+            imaging_acknowledged_droplet_total=(
+                self._imaging_acknowledged_droplet_total
+            ),
         )
 
-    def record(self, event: EjectionCommandEvent) -> EjectionLedgerSnapshot:
-        if not isinstance(event, EjectionCommandEvent):
-            raise TypeError("event must be EjectionCommandEvent")
+    def record(
+        self,
+        event: EjectionCommandEvent | ImagingEjectionEvent,
+    ) -> EjectionLedgerSnapshot:
+        if isinstance(event, EjectionCommandEvent):
+            return self._record_command(event)
+        if isinstance(event, ImagingEjectionEvent):
+            return self._record_imaging(event)
+        raise TypeError("event must be an ejection event")
+
+    def _record_command(self, event: EjectionCommandEvent) -> EjectionLedgerSnapshot:
         key = (event.transport_epoch, event.command_number)
         state = self._commands.get(key)
         if state is None:
@@ -130,6 +207,7 @@ class GravimetricEjectionLedger:
         if lifecycle is EjectionCommandLifecycle.QUEUED and not state["queued"]:
             state["queued"] = True
             self._attempt_generation += 1
+            self._command_attempt_generation += 1
         elif lifecycle is EjectionCommandLifecycle.ACCEPTED:
             state["accepted"] = True
         elif lifecycle is EjectionCommandLifecycle.EXECUTING:
@@ -139,13 +217,70 @@ class GravimetricEjectionLedger:
             if not state["queued"]:
                 state["queued"] = True
                 self._attempt_generation += 1
+                self._command_attempt_generation += 1
             state["accepted"] = True
             state["executing"] = True
             state["completed"] = True
-            self._completed_droplet_total += int(state["count"])
+            self._serial_completed_droplet_total += int(state["count"])
         elif lifecycle is EjectionCommandLifecycle.CANCELLED and not state["cancelled"]:
             state["cancelled"] = True
             if (state["accepted"] or state["executing"]) and not state["completed"]:
+                self._uncertainty_generation += 1
+        return self.snapshot()
+
+    def _record_imaging(self, event: ImagingEjectionEvent) -> EjectionLedgerSnapshot:
+        key = (
+            event.transport_epoch,
+            event.capture_generation,
+            str(event.request_id or ""),
+            event.attempt_index,
+        )
+        state = self._imaging_attempts.get(key)
+        if state is None:
+            state = {
+                "count": event.requested_droplet_count,
+                "triggered": False,
+                "acknowledged": False,
+                "uncertain": False,
+            }
+            self._imaging_attempts[key] = state
+        elif state["count"] != event.requested_droplet_count:
+            if not state["uncertain"]:
+                state["uncertain"] = True
+                self._uncertainty_generation += 1
+            return self.snapshot()
+
+        count = state["count"]
+        if count == 0:
+            return self.snapshot()
+
+        lifecycle = event.lifecycle
+        if lifecycle is ImagingEjectionLifecycle.TRIGGERED and not state["triggered"]:
+            state["triggered"] = True
+            self._attempt_generation += 1
+            self._imaging_attempt_generation += 1
+            if count is None and not state["uncertain"]:
+                state["uncertain"] = True
+                self._uncertainty_generation += 1
+        elif lifecycle is ImagingEjectionLifecycle.ACKNOWLEDGED:
+            if not state["triggered"]:
+                state["triggered"] = True
+                self._attempt_generation += 1
+                self._imaging_attempt_generation += 1
+            if count is None:
+                if not state["uncertain"]:
+                    state["uncertain"] = True
+                    self._uncertainty_generation += 1
+            elif not state["acknowledged"]:
+                state["acknowledged"] = True
+                self._imaging_acknowledged_droplet_total += int(count)
+        elif lifecycle is ImagingEjectionLifecycle.UNCERTAIN:
+            if not state["triggered"]:
+                state["triggered"] = True
+                self._attempt_generation += 1
+                self._imaging_attempt_generation += 1
+            if not state["uncertain"]:
+                state["uncertain"] = True
                 self._uncertainty_generation += 1
         return self.snapshot()
 
@@ -154,11 +289,15 @@ class GravimetricEjectionLedger:
         return self.snapshot()
 
     def begin_transport_epoch(self, _reason: str = "") -> EjectionLedgerSnapshot:
-        unresolved = any(
+        unresolved_commands = any(
             (state["accepted"] or state["executing"]) and not state["completed"]
             for state in self._commands.values()
         )
-        if unresolved:
+        unresolved_imaging = any(
+            state["triggered"] and not state["acknowledged"] and state["count"] != 0
+            for state in self._imaging_attempts.values()
+        )
+        if unresolved_commands or unresolved_imaging:
             self._uncertainty_generation += 1
         return self.snapshot()
 
@@ -171,4 +310,3 @@ class GravimetricEjectionLedger:
             current.attempt_generation == baseline.attempt_generation
             and current.uncertainty_generation == baseline.uncertainty_generation
         )
-

@@ -979,6 +979,13 @@ class Controller(QObject):
         ejection_signal = getattr(self.machine, "ejection_command_event", None)
         if ejection_signal is not None:
             ejection_signal.connect(self._on_machine_ejection_command_event)
+        imaging_ejection_signal = getattr(
+            self.machine,
+            "imaging_ejection_event",
+            None,
+        )
+        if imaging_ejection_signal is not None:
+            imaging_ejection_signal.connect(self._on_machine_ejection_command_event)
         self.model.machine_model.command_numbers_updated.connect(self.update_command_numbers)
         self.machine.command_queue.commands_completed.connect(self.update_expected_with_current)
 

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 import Machine_FreeRTOS as machine_mod
+from GravimetricLedger import ImagingEjectionLifecycle
 from Machine_FreeRTOS import DropletCamera, StaleCaptureBackend
 
 
@@ -492,14 +493,25 @@ def test_capture_non_blocking_drops_trigger_when_edge_consume_raises():
     camera._cap_active = False
     camera._cap_id = 7
     camera._edge_in = _EdgeRaisesOnConsume()
+    camera.imaging_ejection_event = _Signal()
+    ejection_events = []
+    camera.imaging_ejection_event.connect(ejection_events.append)
     trigger_events = []
     camera._trigger_high = lambda: trigger_events.append("high")
     camera._trigger_low = lambda: trigger_events.append("low")
 
     with pytest.raises(RuntimeError, match="consume failed"):
-        DropletCamera.capture_non_blocking(camera, timeout_s=0.01)
+        DropletCamera.capture_non_blocking(
+            camera,
+            timeout_s=0.01,
+            requested_droplet_count=1,
+        )
 
     assert trigger_events == ["high", "low"]
+    assert [event.lifecycle for event in ejection_events] == [
+        ImagingEjectionLifecycle.TRIGGERED,
+        ImagingEjectionLifecycle.UNCERTAIN,
+    ]
 
 
 def test_capture_non_blocking_bounds_stale_edge_drain_and_releases_latches():
@@ -545,13 +557,24 @@ def test_capture_non_blocking_logs_prearm_phases_before_arm():
     camera.k_sigma = 4.0
     camera.min_delta = 25.0
     camera._cap_emit_rotate = False
+    camera.imaging_ejection_event = _Signal()
+    ejection_events = []
+    camera.imaging_ejection_event.connect(ejection_events.append)
     phases = []
     trigger_events = []
     camera._log_capture_phase = lambda phase, **_kwargs: phases.append(str(phase))
     camera._trigger_high = lambda: trigger_events.append("high")
     camera._trigger_low = lambda: trigger_events.append("low")
 
-    DropletCamera.capture_non_blocking(camera, timeout_s=0.01, request_id="req-arm", generation=5)
+    DropletCamera.capture_non_blocking(
+        camera,
+        timeout_s=0.01,
+        request_id="req-arm",
+        generation=5,
+        attempt_index=2,
+        requested_droplet_count=3,
+        transport_epoch=7,
+    )
 
     assert phases == [
         "drain_start",
@@ -569,6 +592,14 @@ def test_capture_non_blocking_logs_prearm_phases_before_arm():
     assert camera._cap_done.is_set() is False
     assert camera._cap_id == 8
     assert "early_arm_mark" not in phases
+    assert [event.lifecycle for event in ejection_events] == [
+        ImagingEjectionLifecycle.TRIGGERED,
+        ImagingEjectionLifecycle.ACKNOWLEDGED,
+    ]
+    assert all(event.transport_epoch == 7 for event in ejection_events)
+    assert all(event.capture_generation == 5 for event in ejection_events)
+    assert all(event.attempt_index == 2 for event in ejection_events)
+    assert all(event.requested_droplet_count == 3 for event in ejection_events)
 
 
 def _make_async_camera():
@@ -591,6 +622,7 @@ def _make_async_camera():
     camera.image_captured_signal = _Signal()
     camera.capture_failed_signal = _Signal()
     camera.capture_phase_signal = _Signal()
+    camera.imaging_ejection_event = _Signal()
     _install_backend(camera, _FakeBackend("1"))
     _install_fake_backend_factory(camera)
     camera._trigger_low = lambda: None
@@ -1255,6 +1287,8 @@ def test_machine_capture_droplet_image_passes_capture_context_to_camera_worker()
     machine = machine_mod.Machine.__new__(machine_mod.Machine)
     camera = _Camera()
     machine.droplet_camera = camera
+    machine._confirmed_imaging_droplet_count = 4
+    machine._transport_epoch = 9
 
     assert machine_mod.Machine.capture_droplet_image(
         machine,
@@ -1266,6 +1300,8 @@ def test_machine_capture_droplet_image_passes_capture_context_to_camera_worker()
     assert camera.calls[0]["request_id"] == "req-machine"
     assert camera.calls[0]["capture_context"] == "ctx-machine"
     assert camera.calls[0]["success_reasons"] == ("threshold", "fallback")
+    assert camera.calls[0]["requested_droplet_count"] == 4
+    assert camera.calls[0]["transport_epoch"] == 9
 
 
 def test_machine_get_flash_safety_state_returns_normalized_copy():
@@ -1352,7 +1388,9 @@ def test_capture_retry_timeout_drops_trigger_low_after_each_attempt(monkeypatch)
     DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
     backend = _install_backend(camera, _FakeBackend("2", edge=_EdgeNeverReady()))
     phases = []
+    ejection_events = []
     camera.capture_phase_signal.connect(lambda payload: phases.append((payload.get("phase"), dict(payload))))
+    camera.imaging_ejection_event.connect(ejection_events.append)
     sleep_calls = []
     monkeypatch.setattr(machine_mod.time, "sleep", lambda seconds: sleep_calls.append(float(seconds)))
 
@@ -1366,6 +1404,8 @@ def test_capture_retry_timeout_drops_trigger_low_after_each_attempt(monkeypatch)
             generation=0,
             backend=backend,
             backend_id="2",
+            requested_droplet_count=1,
+            transport_epoch=4,
         )
 
     assert backend.trigger_line.values == [1, 0, 1, 0, 1, 0]
@@ -1383,6 +1423,15 @@ def test_capture_retry_timeout_drops_trigger_low_after_each_attempt(monkeypatch)
     assert all("retry_total_elapsed_ms" in payload for payload in retry_results)
     assert retry_results[-1]["retry_total_elapsed_ms"] >= retry_results[0]["retry_total_elapsed_ms"]
     assert retry_results[-1]["retry_total_elapsed_ms"] >= retry_results[-1]["elapsed_ms"]
+    assert [event.lifecycle for event in ejection_events] == [
+        ImagingEjectionLifecycle.TRIGGERED,
+        ImagingEjectionLifecycle.UNCERTAIN,
+        ImagingEjectionLifecycle.TRIGGERED,
+        ImagingEjectionLifecycle.UNCERTAIN,
+        ImagingEjectionLifecycle.TRIGGERED,
+        ImagingEjectionLifecycle.UNCERTAIN,
+    ]
+    assert [event.attempt_index for event in ejection_events] == [1, 1, 2, 2, 3, 3]
 
 
 def test_capture_retry_frame_selection_emits_retrying_and_success_markers(monkeypatch):
