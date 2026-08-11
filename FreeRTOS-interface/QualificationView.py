@@ -632,6 +632,7 @@ class MachineQualificationWindow(QtWidgets.QDialog):
         long_timeout_suites = {
             "gripper_seal_v1",
             "gripper_seal_stress_v1",
+            "motion_timing_v1",
             "motion_envelope_v1",
             "pressure_regulator_v1",
             "valve_characterization_v1",

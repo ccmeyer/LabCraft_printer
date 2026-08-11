@@ -425,6 +425,7 @@ static volatile uint32_t s_statusAlternationErrors = 0;
 static volatile uint32_t s_statusLastTickMs = 0;
 static volatile uint32_t s_statusPeriodSumMs = 0;
 static volatile uint32_t s_statusPeriodSamples = 0;
+static volatile uint32_t s_statusPeriodMaxMs = 0;
 static volatile uint32_t s_statusPeriodMaxJitterMs = 0;
 static volatile int s_statusLastChunk = -1;
 
@@ -436,6 +437,7 @@ void Comm::resetStatusMetrics() {
     s_statusLastTickMs = 0;
     s_statusPeriodSumMs = 0;
     s_statusPeriodSamples = 0;
+    s_statusPeriodMaxMs = 0;
     s_statusPeriodMaxJitterMs = 0;
     s_statusLastChunk = -1;
     taskEXIT_CRITICAL();
@@ -456,6 +458,10 @@ uint32_t Comm::getStatusAlternationErrors() {
 uint32_t Comm::getStatusPeriodAvgMs() {
     const uint32_t samples = s_statusPeriodSamples;
     return (samples == 0u) ? 0u : (s_statusPeriodSumMs / samples);
+}
+
+uint32_t Comm::getStatusPeriodMaxMs() {
+    return s_statusPeriodMaxMs;
 }
 
 uint32_t Comm::getStatusPeriodMaxJitterMs() {
@@ -480,6 +486,9 @@ static void recordStatusSend(Chunk sentChunk) {
         const uint32_t period = now - s_statusLastTickMs;
         s_statusPeriodSumMs += period;
         s_statusPeriodSamples++;
+        if (period > s_statusPeriodMaxMs) {
+            s_statusPeriodMaxMs = period;
+        }
         const uint32_t jitter = (period > 50u) ? (period - 50u) : (50u - period);
         if (jitter > s_statusPeriodMaxJitterMs) {
             s_statusPeriodMaxJitterMs = jitter;

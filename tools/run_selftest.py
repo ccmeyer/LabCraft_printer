@@ -1196,12 +1196,13 @@ def run(args: argparse.Namespace) -> int:
         gripper_seal_suite = bool(getattr(args, "gripper_seal_suite", False))
         gripper_seal_stress_suite = bool(getattr(args, "gripper_seal_stress_suite", False))
         xy_motion_suite = bool(getattr(args, "xy_motion_suite", False))
+        motion_timing_suite = bool(getattr(args, "motion_timing_suite", False))
         motion_envelope_suite = bool(getattr(args, "motion_envelope_suite", False))
         pressure_regulator_suite = bool(getattr(args, "pressure_regulator_suite", False))
         refuel_vacuum_suite = bool(getattr(args, "refuel_vacuum_suite", False))
         valve_characterization_suite = bool(getattr(args, "valve_characterization_suite", False))
         valve_gap_sweep_suite = bool(getattr(args, "valve_gap_sweep_suite", False))
-        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
+        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
             pressure_sweep_suite if pressure_sweep_suite is not None else (
                 CUSTOM_PRESSURE_TRACE_TEST_ID if custom_trace_config is not None else pressure_trace_test
             )
@@ -1318,6 +1319,9 @@ def run(args: argparse.Namespace) -> int:
         last_selftest_frame_monotonic = time.monotonic()
         status_only_timeout_ms = max(1000, int(getattr(args, "status_only_timeout_ms", 5000)))
         status_frames_since_selftest = 0
+        last_status_frame_monotonic = None
+        status_gap_max_ms = 0
+        status_gap_samples = 0
         selftest_frames_seen = 0
         reset_report_details = None
         while True:
@@ -1351,6 +1355,11 @@ def run(args: argparse.Namespace) -> int:
                 idle_deadline = now + (progress_timeout_ms / 1000.0)
                 if cmd == 0x02:
                     status_frames_since_selftest += 1
+                    if last_status_frame_monotonic is not None:
+                        status_gap_ms = int(max(0.0, (now - last_status_frame_monotonic) * 1000.0))
+                        status_gap_max_ms = max(status_gap_max_ms, status_gap_ms)
+                        status_gap_samples += 1
+                    last_status_frame_monotonic = now
                     if (
                         selftest_frames_seen > 0
                         and (now - last_selftest_frame_monotonic) >= (status_only_timeout_ms / 1000.0)
@@ -1383,6 +1392,10 @@ def run(args: argparse.Namespace) -> int:
                     break
 
                 if cmd == CMD_SELFTEST_RESULT:
+                    # Status is enabled only within a measured motion window for
+                    # motion timing diagnostics. Do not count the intentional
+                    # pause between result rows as a status-frame gap.
+                    last_status_frame_monotonic = None
                     selftest_frames_seen += 1
                     last_selftest_frame_monotonic = now
                     status_frames_since_selftest = 0
@@ -1698,6 +1711,8 @@ def run(args: argparse.Namespace) -> int:
                     "effective_timeout_ms": effective_timeout_ms,
                     "total_rx_bytes": total_rx_bytes,
                     "status_frames_since_selftest": status_frames_since_selftest,
+                    "status_gap_max_ms": status_gap_max_ms,
+                    "status_gap_samples": status_gap_samples,
                     "selftest_frames_seen": selftest_frames_seen,
                     "reset_report": reset_report_details,
                     "last_valid_frame_age_ms": int(max(0.0, (time.monotonic() - last_valid_frame_monotonic) * 1000.0)),
@@ -1792,6 +1807,7 @@ def main() -> int:
     selector_group.add_argument("--pressure-regulator-suite", action="store_true")
     selector_group.add_argument("--refuel-vacuum-suite", action="store_true")
     selector_group.add_argument("--xy-motion-suite", action="store_true")
+    selector_group.add_argument("--motion-timing-suite", action="store_true")
     selector_group.add_argument("--motion-envelope-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-stress-suite", action="store_true")

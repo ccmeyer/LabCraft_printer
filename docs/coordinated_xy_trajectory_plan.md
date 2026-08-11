@@ -18,6 +18,7 @@
 | Reset incident source | `6494bb57550dcbf4398606707fa5e2eac50f9590` |
 | Incident evidence | `logs/reset_bundles_260810_0739/` |
 | Designated HIL Pi | `192.168.0.33` |
+| Tracked firmware artifact policy | Every firmware milestone commit includes its matching `firmware/artifacts/LabCraft_firmware.bin` |
 | Runtime behavior changed by this document | No |
 
 The core motion sources are unchanged between the reset-incident source and
@@ -218,8 +219,8 @@ Every milestone that touches motion must preserve these invariants:
 | Milestone | Status | Outcome | Gate before continuing |
 | --- | --- | --- | --- |
 | 0. Baseline and decisions | `verified` | Reproducible legacy source/build, reset, motion, and straightness evidence recorded | Baseline source/build/HIL artifacts complete |
-| 1. Behavior-preserving instrumentation | `not_started` | Current ISR and scheduler headroom measured | Instrumentation does not change pulse behavior |
-| 2. Fixed-point normalized LUT | `not_started` | Pure LUT/profile math proven against legacy cosine | Error and cycle budgets accepted |
+| 1. Behavior-preserving instrumentation | `verified` | Legacy timing, pending-interrupt, reset, pulse, status, and straightness evidence recorded | Milestone 1 evidence complete |
+| 2. Fixed-point normalized LUT | `planned` | Pure LUT/profile math proven against legacy cosine | Error and cycle budgets accepted |
 | 3. Pure coordinated XY planner | `not_started` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `not_started` | Timer/pulse integration exists without normal routing | Build, low-rate bench, cancel, and limit gates pass |
 | 5. Route normal Gantry XY motion | `not_started` | `ABSOLUTE_XY` uses coordinated executor | Status, completion, and unchanged-path regressions pass |
@@ -228,32 +229,22 @@ Every milestone that touches motion must preserve these invariants:
 
 ## Next Planned Action
 
-Prepare the Windows firmware toolchain, prove the clean legacy baseline builds,
-and then begin Milestone 1 behavior-preserving instrumentation:
+Commit the complete Milestone 1 source, documentation, and matching tracked
+firmware binary as one milestone commit. Then begin Milestone 2 with a pure,
+unused profile module:
 
-1. Commit the verified Milestone 0 documentation as its own checkpoint and
-   confirm the tracked worktree is clean.
-2. Initialize `firmware/third_party/cpputest` with
-   `git submodule update --init --recursive`.
-3. Install CMake on `PATH` and a native Windows C++ compiler/build generator
-   suitable for the CppUTest host suite.
-4. Install STM32CubeIDE 1.18.1 at the script's expected path
-   `C:\ST\STM32CubeIDE_1.18.1\STM32CubeIDE`, or make a separate reviewed
-   build-tooling change that passes an alternate CubeIDE path through
-   `run_fw_checks.ps1`.
-5. Before any firmware edit, run the clean baseline gate:
-
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug
-   ```
-
-6. Record the passing command, test count, compiler/tool versions, rebuilt
-   binary hash, Git SHA, and clean/dirty state. Preserve the verified legacy
-   binary hash from Milestone 0 as the rollback identity.
-7. Review and freeze the smallest Milestone 1 instrumentation slice and its
-   files before editing. It must not change timer periods, pulse counts,
-   acceleration math, feed semantics, watchdog deadlines, or routing.
-8. Implement and verify Milestone 1 only after steps 1-7 pass.
+1. Add a compile-time normalized cosine LUT and fixed-point interpolation
+   helper with no HAL, FreeRTOS, Stepper routing, or ISR integration.
+2. Sweep candidate table sizes and fixed-point formats against the current
+   `StepperProfileMath::ease01` ARR behavior, reporting maximum and RMS error
+   across short, long, triangular, boundary, and representative moves.
+3. Define exact endpoint, rounding, saturation, and reverse-deceleration rules,
+   then select and record the smallest representation that meets the reviewed
+   error budget.
+4. Add a bounded non-motion target benchmark so DWT evidence can compare the
+   selected lookup cost with the Milestone 1 cruise and ramp baselines.
+5. Run host tests and the full firmware build. Do not route any normal motion
+   through the new module until Milestone 2's error and cycle gates pass.
 
 ## Milestone 0: Baseline And Decisions
 
@@ -329,7 +320,9 @@ Documentation and evidence only; no runtime rollback is required.
 
 ## Milestone 1: Behavior-Preserving Instrumentation
 
-Status: `not_started`
+Status: `verified`
+
+Evidence record: `docs/coordinated_xy_milestone1_instrumentation.md`
 
 ### Goal
 
@@ -389,7 +382,7 @@ sequence or motion profile.
 
 ## Milestone 2: Fixed-Point Normalized LUT
 
-Status: `not_started`
+Status: `planned`
 
 ### Goal
 

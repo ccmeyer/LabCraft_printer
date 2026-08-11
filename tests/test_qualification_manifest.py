@@ -128,6 +128,28 @@ def test_load_xy_motion_manifest_requires_operator_clear_envelope_fixture():
     assert manifest.analysis_rules["2011"]["metrics"]["ret_err"]["maturity"] == "candidate"
 
 
+def test_load_motion_timing_manifest_freezes_rates_vectors_and_instrumentation_metrics():
+    manifest = load_manifest("motion_timing_v1")
+
+    assert manifest.manifest_id == "motion_timing_v1"
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2020, 2021, 2022, 2023, 2024, 2025)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--motion-timing-suite",)
+    assert {item["fixture_id"] for item in manifest.fixtures} == {"motion_clear_envelope_v1"}
+    assert "6 kHz" in manifest.fixtures[0]["operator_note"]
+    assert "40 kHz" in manifest.fixtures[0]["operator_note"]
+    assert manifest.analysis_rules["2020"]["metrics"]["hz"]["equals"] == 6000
+    assert manifest.analysis_rules["2021"]["metrics"]["hz"]["equals"] == 40000
+    assert manifest.analysis_rules["2024"]["metrics"]["dx"]["equals"] == -8416
+    assert manifest.analysis_rules["2024"]["metrics"]["dy"]["equals"] == -30000
+    assert manifest.analysis_rules["2024"]["metrics"]["xn"]["equals"] == 16833
+    assert manifest.analysis_rules["2024"]["metrics"]["yn"]["equals"] == 60001
+    assert manifest.analysis_rules["2025"]["metrics"]["xp"]["equals"] == 1000
+    assert manifest.analysis_rules["2025"]["metrics"]["am"]["maturity"] == "informational"
+
+
 def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture():
     manifest = load_manifest("motion_envelope_v1")
 

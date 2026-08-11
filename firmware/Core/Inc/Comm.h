@@ -161,6 +161,7 @@ public:
     static uint32_t getStatusChunk1Count();
     static uint32_t getStatusAlternationErrors();
     static uint32_t getStatusPeriodAvgMs();
+    static uint32_t getStatusPeriodMaxMs();
     static uint32_t getStatusPeriodMaxJitterMs();
 
     // RX byte feeder (called from UART ISR or from USB receive callback)

@@ -12,6 +12,7 @@
 #include "Printer.h"
 #include "PressureRegulator.h"
 #include "MotionQualificationMath.h"
+#include "StepperInstrumentationReport.h"
 #include "PressureRegulatorMath.h"
 #include "PressureQualificationMath.h"
 #include "GripperSealQualificationMath.h"
@@ -84,6 +85,12 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2014u, "motion_384_plate_raster_factory", "motion", "FULL", "explicit_selection"},
     {2015u, "motion_z_long_travel_factory", "motion", "FULL", "explicit_selection"},
     {2016u, "motion_limit_triggered_home_fact", "motion", "FULL", "explicit_selection"},
+    {2020u, "motion_timing_low_xy", "motion", "FULL", "explicit_selection"},
+    {2021u, "motion_timing_x_only", "motion", "FULL", "explicit_selection"},
+    {2022u, "motion_timing_y_only", "motion", "FULL", "explicit_selection"},
+    {2023u, "motion_timing_equal_xy", "motion", "FULL", "explicit_selection"},
+    {2024u, "motion_timing_camera_ratio", "motion", "FULL", "explicit_selection"},
+    {2025u, "motion_timing_short_tri", "motion", "FULL", "explicit_selection"},
     {2003u, "pressure_regulator_step_response_full", "pressure", "FULL", "safe_gate_or_full"},
     {2201u, "pressure_hold_leak_factory", "pressure", "FULL", "safe_gate_or_full"},
     {2202u, "pressure_target_cycle_repeatability_factory", "pressure", "FULL", "safe_gate_or_full"},
@@ -199,6 +206,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runGripperSealStressSuite = (selectedDiagnosticId == 2599u);
     const bool runXyMotionSuite = (selectedDiagnosticId == 2009u);
     const bool runMotionEnvelopeSuite = (selectedDiagnosticId == 2019u);
+    const bool runMotionTimingSuite = (selectedDiagnosticId == 2029u);
     const bool runPressureRegulatorSuite = (selectedDiagnosticId == 2299u);
     const bool runRefuelVacuumSuite = (selectedDiagnosticId == 2298u);
     const bool runValveCharacterizationSuite = (selectedDiagnosticId == 2499u);
@@ -213,7 +221,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runSinglePressureTraceSelection =
         (selectedPressureTraceTest >= 2101u) && (selectedPressureTraceTest <= 2104u);
                   auto shouldRunPressureTraceCase = [&](uint16_t testId) {
-                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runGripperSealStressSuite || runXyMotionSuite || runMotionEnvelopeSuite || runPressureRegulatorSuite || runRefuelVacuumSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
+                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runGripperSealStressSuite || runXyMotionSuite || runMotionEnvelopeSuite || runMotionTimingSuite || runPressureRegulatorSuite || runRefuelVacuumSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
                       return false;
                     }
                     if (runSinglePressureTraceSelection) {
@@ -2370,6 +2378,289 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         }
 
                         closePressurePath();
+                        return finishSelfTestNow();
+                      }
+
+                      if (runMotionTimingSuite) {
+                        static constexpr int32_t kSafeXMax = 45000;
+                        static constexpr int32_t kSafeYMax = 35000;
+                        static constexpr int32_t kCableGuardX = 1000;
+                        static constexpr int32_t kCableGuardMinY = 500;
+                        static constexpr uint32_t kLowRateHz = 6000u;
+                        static constexpr uint32_t kRequiredMaxRateHz = 40000u;
+                        static constexpr uint32_t kMoveTimeoutMs = 20000u;
+                        static constexpr uint32_t kHomeFastHz = 30000u;
+                        static constexpr uint32_t kHomeSlowHz = 3000u;
+                        static constexpr uint32_t kHomeBackoffSteps = 400u;
+                        static constexpr uint32_t kHomeTimeoutMs = 20000u;
+                        static constexpr size_t kMetricsCapacity = 192u;
+                        const MotionQualificationMath::XySafetyEnvelope envelope{
+                            0, kSafeXMax, 0, kSafeYMax, kCableGuardX, kCableGuardMinY};
+
+                        struct TimingTestDescriptor {
+                          uint16_t testId;
+                          const char* name;
+                        };
+                        static constexpr TimingTestDescriptor kTimingTests[] = {
+                            {2020u, "motion_timing_low_xy"},
+                            {2021u, "motion_timing_x_only"},
+                            {2022u, "motion_timing_y_only"},
+                            {2023u, "motion_timing_equal_xy"},
+                            {2024u, "motion_timing_camera_ratio"},
+                            {2025u, "motion_timing_short_tri"},
+                        };
+
+                        auto emitSkippedMotionTiming = [&](uint16_t firstTestId,
+                                                           const char* gate) -> bool {
+                          char metrics[128];
+                          snprintf(metrics,
+                                   sizeof(metrics),
+                                   "gate=%s;dx=0;dy=0;hz=0;to=1;ep=0;wd=0;sg=0;sn=0;sf=0",
+                                   gate);
+                          for (const TimingTestDescriptor& test : kTimingTests) {
+                            if (test.testId >= firstTestId &&
+                                !runOne(test.testId, test.name, false, metrics)) {
+                              return false;
+                            }
+                          }
+                          return true;
+                        };
+
+                        auto pointIsSafe = [&](int32_t x, int32_t y) -> bool {
+                          return MotionQualificationMath::xyPointIsSafe({x, y}, envelope);
+                        };
+
+                        Stepper* stepperX = Stepper::stepperX();
+                        Stepper* stepperY = Stepper::stepperY();
+                        if (stepperX == nullptr || stepperY == nullptr || Gantry::instance() == nullptr) {
+                          (void)emitSkippedMotionTiming(2020u, "motion_unavailable");
+                          return finishSelfTestNow();
+                        }
+
+                        const uint32_t savedXMaxRateHz = stepperX->maxSpeedHz();
+                        const uint32_t savedYMaxRateHz = stepperY->maxSpeedHz();
+                        auto restoreXyMaxRates = [&]() {
+                          stepperX->setMaxSpeedHz(savedXMaxRateHz);
+                          stepperY->setMaxSpeedHz(savedYMaxRateHz);
+                        };
+                        auto setLowXyMaxRates = [&]() {
+                          stepperX->setMaxSpeedHz(kLowRateHz);
+                          stepperY->setMaxSpeedHz(kLowRateHz);
+                        };
+
+                        auto moveToAtLowRate = [&](int32_t x, int32_t y) -> bool {
+                          if (!pointIsSafe(x, y)) {
+                            return false;
+                          }
+                          setLowXyMaxRates();
+                          const bool completed =
+                              moveGantryToWithTimeout(x, y, kLowRateHz, kMoveTimeoutMs);
+                          restoreXyMaxRates();
+                          const GantryPosition position = Gantry::instance()->getPosition();
+                          return completed && position.x == x && position.y == y;
+                        };
+
+                        struct TimingMoveResult {
+                          bool resultEmitted = false;
+                          bool passed = false;
+                          bool safeToContinue = false;
+                        };
+
+                        auto runMeasuredMove = [&](uint16_t testId,
+                                                   const char* name,
+                                                   int32_t targetX,
+                                                   int32_t targetY) -> TimingMoveResult {
+                          TimingMoveResult result{};
+                          const GantryPosition start = Gantry::instance()->getPosition();
+                          if (!pointIsSafe(start.x, start.y) || !pointIsSafe(targetX, targetY)) {
+                            result.resultEmitted = runOne(testId, name, false, "gate=unsafe_point;to=1;ep=0");
+                            return result;
+                          }
+
+                          StepperInstrumentationReport::MoveObservation observation{};
+                          observation.deltaXSteps = targetX - start.x;
+                          observation.deltaYSteps = targetY - start.y;
+                          const uint32_t xDistance = static_cast<uint32_t>(
+                              observation.deltaXSteps < 0 ? -static_cast<int64_t>(observation.deltaXSteps)
+                                                          : observation.deltaXSteps);
+                          const uint32_t yDistance = static_cast<uint32_t>(
+                              observation.deltaYSteps < 0 ? -static_cast<int64_t>(observation.deltaYSteps)
+                                                          : observation.deltaYSteps);
+                          observation.effectiveRateHz =
+                              (xDistance >= yDistance) ? stepperX->maxSpeedHz() : stepperY->maxSpeedHz();
+
+                          xEventGroupClearBits(_doneEvents, BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+                          Comm::resetStatusMetrics();
+                          comm->setStatusPaused(false);
+                          Gantry::instance()->moveTo(targetX, targetY, observation.effectiveRateHz);
+
+                          const uint32_t waitStartMs = HAL_GetTick();
+                          const TickType_t pollTicks = msToAtLeast1Tick(10u);
+                          bool completed = false;
+                          while ((HAL_GetTick() - waitStartMs) < kMoveTimeoutMs) {
+                            Watchdog_CheckIn(CRASH_TASK_ORCH);
+                            uint32_t statusAgeMs = 0u;
+                            if (Watchdog_GetTaskLastSeenAgeMs(CRASH_TASK_STATUS, &statusAgeMs) != 0u &&
+                                statusAgeMs > observation.statusWatchdogAgeMaxMs) {
+                              observation.statusWatchdogAgeMaxMs = statusAgeMs;
+                            }
+                            if (_selfTestAbortRequested) {
+                              break;
+                            }
+                            const EventBits_t doneBits = xEventGroupGetBits(_doneEvents);
+                            if ((doneBits & (BIT_STEPPER1_DONE | BIT_STEPPER2_DONE)) ==
+                                (BIT_STEPPER1_DONE | BIT_STEPPER2_DONE)) {
+                              completed = true;
+                              break;
+                            }
+                            vTaskDelay(pollTicks);
+                          }
+
+                          uint32_t finalStatusAgeMs = 0u;
+                          if (Watchdog_GetTaskLastSeenAgeMs(CRASH_TASK_STATUS, &finalStatusAgeMs) != 0u &&
+                              finalStatusAgeMs > observation.statusWatchdogAgeMaxMs) {
+                            observation.statusWatchdogAgeMaxMs = finalStatusAgeMs;
+                          }
+                          observation.statusPeriodMaxMs = Comm::getStatusPeriodMaxMs();
+                          observation.statusFrameCount =
+                              Comm::getStatusChunk0Count() + Comm::getStatusChunk1Count();
+                          comm->setStatusPaused(true);
+
+                          if (!completed) {
+                            Gantry::cancelXYZMotors();
+                          }
+                          const GantryPosition end = Gantry::instance()->getPosition();
+                          observation.timedOut = !completed;
+                          observation.endpointReached =
+                              completed && end.x == targetX && end.y == targetY;
+                          observation.x = stepperX->getLastMoveInstrumentationSnapshot();
+                          observation.y = stepperY->getLastMoveInstrumentationSnapshot();
+
+                          char metrics[kMetricsCapacity] = {0};
+                          const size_t metricsLength =
+                              StepperInstrumentationReport::buildMetrics(
+                                  metrics, sizeof(metrics), observation);
+                          result.passed = (metricsLength != 0u) &&
+                                          StepperInstrumentationReport::movePasses(observation);
+                          result.safeToContinue = completed && observation.endpointReached;
+                          result.resultEmitted = runOne(
+                              testId,
+                              name,
+                              result.passed,
+                              (metricsLength != 0u) ? metrics : "gate=metrics_overflow;to=1;ep=0");
+                          return result;
+                        };
+
+                        if (!runZClearanceHomePreflight("timing_z_clearance_home",
+                                                        kHomeFastHz,
+                                                        kHomeSlowHz,
+                                                        kHomeBackoffSteps,
+                                                        kHomeTimeoutMs)) {
+                          restoreXyMaxRates();
+                          (void)emitSkippedMotionTiming(2020u, "z_clearance_home");
+                          return finishSelfTestNow();
+                        }
+
+                        MotionQualificationMath::AxisHomeSample xHome{};
+                        MotionQualificationMath::AxisHomeSample yHome{};
+                        sendProgressStage("timing_xy_home");
+                        if (!runXyHomeDiagnosticAttempt(xHome,
+                                                        yHome,
+                                                        kHomeFastHz,
+                                                        kHomeSlowHz,
+                                                        kHomeBackoffSteps,
+                                                        kHomeTimeoutMs)) {
+                          restoreXyMaxRates();
+                          (void)emitSkippedMotionTiming(2020u, "xy_home");
+                          return finishSelfTestNow();
+                        }
+
+                        setLowXyMaxRates();
+                        const bool lowAnchorCompleted =
+                            moveGantryToWithTimeout(2000, 2000, kLowRateHz, kMoveTimeoutMs);
+                        const GantryPosition lowAnchorPosition = Gantry::instance()->getPosition();
+                        if (!lowAnchorCompleted ||
+                            lowAnchorPosition.x != 2000 || lowAnchorPosition.y != 2000) {
+                          restoreXyMaxRates();
+                          (void)emitSkippedMotionTiming(2020u, "low_anchor");
+                          return finishSelfTestNow();
+                        }
+                        const TimingMoveResult lowResult =
+                            runMeasuredMove(2020u, "motion_timing_low_xy", 7000, 7000);
+                        restoreXyMaxRates();
+                        if (!lowResult.resultEmitted) {
+                          return finishSelfTestNow();
+                        }
+                        if (!lowResult.passed) {
+                          (void)emitSkippedMotionTiming(2021u, "low_probe_failed");
+                          return finishSelfTestNow();
+                        }
+                        if (savedXMaxRateHz != kRequiredMaxRateHz ||
+                            savedYMaxRateHz != kRequiredMaxRateHz) {
+                          (void)emitSkippedMotionTiming(2021u, "max_rate_not_40000");
+                          return finishSelfTestNow();
+                        }
+
+                        if (!moveToAtLowRate(2000, 2000)) {
+                          (void)emitSkippedMotionTiming(2021u, "x_anchor");
+                          return finishSelfTestNow();
+                        }
+                        TimingMoveResult moveResult =
+                            runMeasuredMove(2021u, "motion_timing_x_only", 12000, 2000);
+                        if (!moveResult.resultEmitted) return finishSelfTestNow();
+                        if (!moveResult.safeToContinue) {
+                          (void)emitSkippedMotionTiming(2022u, "x_move_failed");
+                          return finishSelfTestNow();
+                        }
+
+                        moveResult = runMeasuredMove(
+                            2022u, "motion_timing_y_only", 12000, 12000);
+                        if (!moveResult.resultEmitted) return finishSelfTestNow();
+                        if (!moveResult.safeToContinue) {
+                          (void)emitSkippedMotionTiming(2023u, "y_move_failed");
+                          return finishSelfTestNow();
+                        }
+
+                        moveResult = runMeasuredMove(
+                            2023u, "motion_timing_equal_xy", 22000, 22000);
+                        if (!moveResult.resultEmitted) return finishSelfTestNow();
+                        if (!moveResult.safeToContinue) {
+                          (void)emitSkippedMotionTiming(2024u, "equal_xy_failed");
+                          return finishSelfTestNow();
+                        }
+
+                        if (!moveToAtLowRate(8916, 30500)) {
+                          (void)emitSkippedMotionTiming(2024u, "camera_anchor");
+                          return finishSelfTestNow();
+                        }
+                        moveResult = runMeasuredMove(
+                            2024u, "motion_timing_camera_ratio", 500, 500);
+                        if (!moveResult.resultEmitted) return finishSelfTestNow();
+                        if (!moveResult.safeToContinue) {
+                          (void)emitSkippedMotionTiming(2025u, "camera_ratio_failed");
+                          return finishSelfTestNow();
+                        }
+
+                        if (!moveToAtLowRate(2000, 2000)) {
+                          (void)emitSkippedMotionTiming(2025u, "short_anchor");
+                          return finishSelfTestNow();
+                        }
+                        moveResult = runMeasuredMove(
+                            2025u, "motion_timing_short_tri", 3000, 2000);
+                        if (!moveResult.resultEmitted) return finishSelfTestNow();
+
+                        restoreXyMaxRates();
+                        if (moveResult.safeToContinue && !_selfTestAbortRequested) {
+                          MotionQualificationMath::AxisHomeSample xTeardownHome{};
+                          MotionQualificationMath::AxisHomeSample yTeardownHome{};
+                          sendProgressStage("timing_xy_teardown_home");
+                          (void)runXyHomeDiagnosticAttempt(xTeardownHome,
+                                                          yTeardownHome,
+                                                          kHomeFastHz,
+                                                          kHomeSlowHz,
+                                                          kHomeBackoffSteps,
+                                                          kHomeTimeoutMs);
+                        }
                         return finishSelfTestNow();
                       }
 

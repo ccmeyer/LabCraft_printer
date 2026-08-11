@@ -1,0 +1,157 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "motion_timing_v1",
+  "name": "Legacy Motion Timing Qualification v1",
+  "profile": "FULL",
+  "description": "Operator-gated behavior-preserving timing capture for the legacy independent X/Y stepper ISRs. Runs a 6 kHz safety probe before X-only, Y-only, equal-diagonal, scaled camera-to-home, and short-triangular vectors at the existing 40 kHz cap.",
+  "expected_test_ids": [2020, 2021, 2022, 2023, 2024, 2025],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": true,
+  "selftest_args": ["--motion-timing-suite"],
+  "fixtures": [
+    {
+      "fixture_id": "motion_clear_envelope_v1",
+      "required_for": [2020, 2021, 2022, 2023, 2024, 2025],
+      "operator_note": "Firmware homes Z and XY before motion, runs a 6 kHz equal-XY safety probe, and only then permits the five 40 kHz timing vectors. Confirm the full XY gantry envelope is clear. No plate, fixture, tool, cable, hand, or other obstruction may be inside X<=45000, Y<=35000. The scaled camera-to-home vector moves from (8916,30500) to (500,500)."
+    }
+  ],
+  "analysis_rules": {
+    "2020": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "dx": {"maturity": "acceptance", "equals": 5000},
+        "dy": {"maturity": "acceptance", "equals": 5000},
+        "hz": {"maturity": "acceptance", "equals": 6000},
+        "to": {"maturity": "acceptance", "equals": 0},
+        "ep": {"maturity": "acceptance", "equals": 1},
+        "xn": {"maturity": "acceptance", "equals": 10001},
+        "xp": {"maturity": "acceptance", "equals": 5000},
+        "yn": {"maturity": "acceptance", "equals": 10001},
+        "yp": {"maturity": "acceptance", "equals": 5000},
+        "sf": {"maturity": "acceptance", "equals": 0},
+        "wd": {"maturity": "informational"},
+        "sg": {"maturity": "informational"},
+        "sn": {"maturity": "informational"},
+        "du": {"maturity": "informational"},
+        "wr": {"maturity": "informational"},
+        "xo": {"maturity": "informational"},
+        "yo": {"maturity": "informational"},
+        "am": {"maturity": "informational"},
+        "cm": {"maturity": "informational"},
+        "dm": {"maturity": "informational"},
+        "ps": {"maturity": "informational"}
+      }
+    },
+    "2021": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "dx": {"maturity": "acceptance", "equals": 10000},
+        "dy": {"maturity": "acceptance", "equals": 0},
+        "hz": {"maturity": "acceptance", "equals": 40000},
+        "to": {"maturity": "acceptance", "equals": 0},
+        "ep": {"maturity": "acceptance", "equals": 1},
+        "xn": {"maturity": "acceptance", "equals": 20001},
+        "xp": {"maturity": "acceptance", "equals": 10000},
+        "yn": {"maturity": "acceptance", "equals": 0},
+        "yp": {"maturity": "acceptance", "equals": 0},
+        "sf": {"maturity": "acceptance", "equals": 0},
+        "wd": {"maturity": "informational"}, "sg": {"maturity": "informational"},
+        "sn": {"maturity": "informational"}, "du": {"maturity": "informational"},
+        "wr": {"maturity": "informational"}, "xo": {"maturity": "informational"},
+        "yo": {"maturity": "informational"}, "am": {"maturity": "informational"},
+        "cm": {"maturity": "informational"}, "dm": {"maturity": "informational"},
+        "ps": {"maturity": "informational"}
+      }
+    },
+    "2022": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "dx": {"maturity": "acceptance", "equals": 0},
+        "dy": {"maturity": "acceptance", "equals": 10000},
+        "hz": {"maturity": "acceptance", "equals": 40000},
+        "to": {"maturity": "acceptance", "equals": 0},
+        "ep": {"maturity": "acceptance", "equals": 1},
+        "xn": {"maturity": "acceptance", "equals": 0},
+        "xp": {"maturity": "acceptance", "equals": 0},
+        "yn": {"maturity": "acceptance", "equals": 20001},
+        "yp": {"maturity": "acceptance", "equals": 10000},
+        "sf": {"maturity": "acceptance", "equals": 0},
+        "wd": {"maturity": "informational"}, "sg": {"maturity": "informational"},
+        "sn": {"maturity": "informational"}, "du": {"maturity": "informational"},
+        "wr": {"maturity": "informational"}, "xo": {"maturity": "informational"},
+        "yo": {"maturity": "informational"}, "am": {"maturity": "informational"},
+        "cm": {"maturity": "informational"}, "dm": {"maturity": "informational"},
+        "ps": {"maturity": "informational"}
+      }
+    },
+    "2023": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "dx": {"maturity": "acceptance", "equals": 10000},
+        "dy": {"maturity": "acceptance", "equals": 10000},
+        "hz": {"maturity": "acceptance", "equals": 40000},
+        "to": {"maturity": "acceptance", "equals": 0},
+        "ep": {"maturity": "acceptance", "equals": 1},
+        "xn": {"maturity": "acceptance", "equals": 20001},
+        "xp": {"maturity": "acceptance", "equals": 10000},
+        "yn": {"maturity": "acceptance", "equals": 20001},
+        "yp": {"maturity": "acceptance", "equals": 10000},
+        "sf": {"maturity": "acceptance", "equals": 0},
+        "wd": {"maturity": "informational"}, "sg": {"maturity": "informational"},
+        "sn": {"maturity": "informational"}, "du": {"maturity": "informational"},
+        "wr": {"maturity": "informational"}, "xo": {"maturity": "informational"},
+        "yo": {"maturity": "informational"}, "am": {"maturity": "informational"},
+        "cm": {"maturity": "informational"}, "dm": {"maturity": "informational"},
+        "ps": {"maturity": "informational"}
+      }
+    },
+    "2024": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "dx": {"maturity": "acceptance", "equals": -8416},
+        "dy": {"maturity": "acceptance", "equals": -30000},
+        "hz": {"maturity": "acceptance", "equals": 40000},
+        "to": {"maturity": "acceptance", "equals": 0},
+        "ep": {"maturity": "acceptance", "equals": 1},
+        "xn": {"maturity": "acceptance", "equals": 16833},
+        "xp": {"maturity": "acceptance", "equals": 8416},
+        "yn": {"maturity": "acceptance", "equals": 60001},
+        "yp": {"maturity": "acceptance", "equals": 30000},
+        "sf": {"maturity": "acceptance", "equals": 0},
+        "wd": {"maturity": "informational"}, "sg": {"maturity": "informational"},
+        "sn": {"maturity": "informational"}, "du": {"maturity": "informational"},
+        "wr": {"maturity": "informational"}, "xo": {"maturity": "informational"},
+        "yo": {"maturity": "informational"}, "am": {"maturity": "informational"},
+        "cm": {"maturity": "informational"}, "dm": {"maturity": "informational"},
+        "ps": {"maturity": "informational"}
+      }
+    },
+    "2025": {
+      "category": "motion",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "dx": {"maturity": "acceptance", "equals": 1000},
+        "dy": {"maturity": "acceptance", "equals": 0},
+        "hz": {"maturity": "acceptance", "equals": 40000},
+        "to": {"maturity": "acceptance", "equals": 0},
+        "ep": {"maturity": "acceptance", "equals": 1},
+        "xn": {"maturity": "acceptance", "equals": 2001},
+        "xp": {"maturity": "acceptance", "equals": 1000},
+        "yn": {"maturity": "acceptance", "equals": 0},
+        "yp": {"maturity": "acceptance", "equals": 0},
+        "sf": {"maturity": "acceptance", "equals": 0},
+        "wd": {"maturity": "informational"}, "sg": {"maturity": "informational"},
+        "sn": {"maturity": "informational"}, "du": {"maturity": "informational"},
+        "wr": {"maturity": "informational"}, "xo": {"maturity": "informational"},
+        "yo": {"maturity": "informational"}, "am": {"maturity": "informational"},
+        "cm": {"maturity": "informational"}, "dm": {"maturity": "informational"},
+        "ps": {"maturity": "informational"}
+      }
+    }
+  }
+}

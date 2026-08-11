@@ -11,6 +11,7 @@
 #include "BoardConfig.h"
 #include "HomeInterruptionPolicy.h"
 #include "StepperLimitPolicy.h"
+#include "StepperIsrInstrumentation.h"
 #include "stm32f4xx_hal.h"
 #include "FreeRTOS.h"
 #include "event_groups.h"
@@ -126,6 +127,7 @@ public:
   };
 
   HomeDiagnosticSnapshot getLastHomeDiagnosticSnapshot() const { return _homeDiagnosticSnapshot; }
+  StepperIsrInstrumentation::Snapshot getLastMoveInstrumentationSnapshot() const;
   bool isLimitAssertedForDiagnostics() const { return _isLimitAsserted(); }
 
 
@@ -264,6 +266,9 @@ private:
   uint32_t _homeGuardSteps     = 300000;    // large but finite
   bool     _homeHardStopOnLimit = false;
   HomeDiagnosticSnapshot _homeDiagnosticSnapshot{};
+  #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+  StepperIsrInstrumentation::State _isrInstrumentation{};
+  #endif
 
   struct LimitStableSample {
     bool asserted = false;

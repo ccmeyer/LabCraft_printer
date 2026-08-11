@@ -119,8 +119,9 @@ When adding or changing test/build tooling:
 - Do not commit local artifacts:
   - `.venv/`, `__pycache__/`, logs, workspace metadata, IDE cache directories
 - Firmware artifacts:
-  - Only commit `.bin` files in `firmware/artifacts/` if the repo explicitly intends to version them.
-  - Otherwise treat them as build outputs.
+  - This repository intentionally versions `firmware/artifacts/LabCraft_firmware.bin`.
+  - Every firmware milestone commit must include the `.bin` rebuilt from the same source/configuration so the deployable image remains compatible with that commit.
+  - Other firmware build outputs remain untracked unless a separate repository policy explicitly includes them.
 
 ---
 

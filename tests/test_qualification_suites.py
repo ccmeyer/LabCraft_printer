@@ -19,6 +19,7 @@ def test_discover_suite_entries_lists_current_manifests():
         "gripper_seal_v1",
         "gripper_seal_stress_v1",
         "xy_motion_v1",
+        "motion_timing_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "refuel_vacuum_v1",
@@ -26,11 +27,12 @@ def test_discover_suite_entries_lists_current_manifests():
         "valve_gap_sweep_v1",
     }.issubset(manifest_ids)
     assert entries[0].manifest_id == "factory_acceptance_v3"
-    assert [entry.manifest_id for entry in entries[:8]] == [
+    assert [entry.manifest_id for entry in entries[:9]] == [
         "factory_acceptance_v3",
         "gripper_seal_v1",
         "gripper_seal_stress_v1",
         "xy_motion_v1",
+        "motion_timing_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "refuel_vacuum_v1",
@@ -104,6 +106,26 @@ def test_xy_motion_suite_exposes_operator_fixture_and_catalog_rows():
     assert "safe gantry envelope" in rows[2010].evaluates
     assert rows[2011].name == "XY raster repeatability"
     assert "well-plate" in rows[2011].evaluates
+
+
+def test_motion_timing_suite_exposes_safety_gate_vectors_and_cycle_metrics():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    timing = entries["motion_timing_v1"].manifest
+
+    assert timing.requires_operator_prompts is True
+    assert required_fixture_ids(timing) == ("motion_clear_envelope_v1",)
+    assert "6 kHz" in timing.fixtures[0]["operator_note"]
+    assert "40 kHz" in timing.fixtures[0]["operator_note"]
+    rows = {row.test_id: row for row in build_test_plan_rows(timing)}
+    assert list(rows) == [2020, 2021, 2022, 2023, 2024, 2025]
+    assert rows[2020].name == "Legacy XY low-rate timing"
+    assert rows[2024].name == "Legacy camera/home-ratio timing"
+    assert rows[2025].name == "Legacy short-triangular timing"
+    assert all(row.subsystem == "Motion" for row in rows.values())
+    assert all("am" in row.metrics for row in rows.values())
+    assert all("cm" in row.metrics for row in rows.values())
+    assert all("dm" in row.metrics for row in rows.values())
+    assert "incident camera-to-home" in rows[2024].evaluates
 
 
 def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():

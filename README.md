@@ -2627,6 +2627,14 @@ Run the dedicated refuel-vacuum pressure-sensor qualification suite:
 python tools/run_qualification.py --manifest refuel_vacuum_v1 --operator-prompts --fixture refuel_vacuum_dry_back_v1 --port /dev/ttyAMA0
 ```
 
+Run the Milestone 1 legacy X/Y ISR timing suite only after confirming the full
+gantry envelope is clear. It homes Z and XY, requires a passing 6 kHz safety
+probe, and then executes the five 40 kHz measurement vectors:
+
+```bash
+python tools/run_qualification.py --manifest motion_timing_v1 --operator-prompts --fixture motion_clear_envelope_v1 --port /dev/ttyAMA0
+```
+
 Outputs:
 
 - Suite reports: `hil_reports/qualification/<machine_id>/<timestamp>/`

@@ -81,11 +81,14 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 
 - Core classes:
   - `firmware/Core/Inc/Stepper.h`, `firmware/Core/Src/Stepper.cpp`
+  - `firmware/Core/Inc/StepperIsrInstrumentation.h`, `firmware/Core/Src/StepperIsrInstrumentation.cpp`
+  - `firmware/Core/Inc/StepperInstrumentationReport.h`, `firmware/Core/Src/StepperInstrumentationReport.cpp`
   - `firmware/Core/Inc/Gantry.h`, `firmware/Core/Src/Gantry.cpp`
   - `firmware/Core/Inc/TMC2208Driver.h`, `firmware/Core/Src/TMC2208Driver.cpp`
 - Key functions:
   - `Stepper::move`, `Stepper::moveTo`, `Stepper::home`, `Stepper::dispatch`, `Stepper::handleExtiFromIsr`
   - `Stepper::home` accepts a cooperative cancellation token and returns distinct succeeded, failed, or canceled outcomes; every blocking home phase polls the token and restores home-only motion settings before exit.
+  - `StepperIsrInstrumentation` is the compile-gated, fixed-size X/Y legacy ISR measurement state. `StepperInstrumentationReport` validates completed snapshots and formats compact post-move metrics; neither helper changes timer periods, pulse accounting, or routing.
   - C wrappers used by orchestrator/main: `MX_STEPPERX_Home`, `MX_STEPPERY_Home`, etc.
   - `Gantry::moveBy`, `Gantry::moveTo`
 
@@ -146,6 +149,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `CrashWatchdogSelfTestPolicy` owns the host-tested pass/fail policy and compact metrics for SAFE rows `1041 crash_record_retained_safe` and `1042 watchdog_supervisor_safe`; `DiagnosticsRunner` samples runtime state and emits the unchanged result frames.
   - Custom regulator pressure traces use selector `2110` plus self-test start TLVs `TAG_TRACE_CHANNEL`, `TAG_TRACE_PRESSURE_MPSI`, `TAG_TRACE_PULSE_US`, `TAG_TRACE_PULSE_COUNT`, and `TAG_TRACE_FREQUENCY_HZ`; `Orchestrator` copies them into `DiagnosticsRequest::customPressureTrace`, and `DiagnosticsRunner` validates the RAM-only recipe before calling the shared pressure trace runner.
   - Motion qualification diagnostics `2007 motion_home_repeatability_factory` and `2008 motion_pattern_return_factory` live in `DiagnosticsRunner::runSelfTest`, use existing X/Y homing and gantry motion primitives, and publish compact repeatability metrics for Python-side candidate analysis.
+  - Selector `2029` runs operator-gated legacy X/Y timing diagnostics `2020`-`2025`. It uses the existing result frames, requires a 6 kHz equal-axis probe before the 40 kHz vectors, keeps positioning moves at 6 kHz, and reports ISR phase-cycle maxima, exact entries/pulses, pending updates, status cadence, and watchdog age outside the ISR.
   - Pressure qualification diagnostics `2201 pressure_hold_leak_factory`, `2202 pressure_target_cycle_repeatability_factory`, and `2203 pressure_motor_position_hysteresis_factory` live in `DiagnosticsRunner::runSelfTest`, use existing print-channel pressure regulator/sensor primitives, restore the baseline target, pause the regulator at exit, and publish compact hold/leak/repeatability/hysteresis metrics for Python-side candidate analysis.
   - Standalone pressure regulator diagnostics `2210`-`2219` and refuel vacuum diagnostics `2220`-`2221` live behind explicit self-test selectors. The refuel vacuum command path and rows home the refuel regulator through `Orchestrator::startRegHomeAsync()` before `PressureRegulator::regR().enterVacuumModeAfterHome()`, temporarily lower only the refuel pressure sensor validation minimum for below-atmospheric samples, cycle between `-1 psi` and atmosphere, restore validation and regulator state at exit, and publish compact sensor-shift, settle, trace, and motor-travel guard metrics.
   - Legacy valve pulse diagnostics `2401 print_valve_pulse_drop_repeatability_factory`, `2402 refuel_valve_pulse_drop_repeatability_factory`, and `2403 dual_valve_interaction_factory` are retired from default FULL/factory acceptance runs after producing non-actionable pressure-drop warnings.
@@ -234,6 +238,7 @@ Script notes:
 
 - `tools/run_selftest.py`
   - Runs protocol selftest and writes the main JSON report.
+  - `--motion-timing-suite` selects existing self-test selector `2029`; no protocol layout changes are required.
   - Optional camera benchmark mode:
     - `--camera-benchmark`
     - `--camera-benchmark-order auto|pre_selftest|post_selftest` (default `auto`)

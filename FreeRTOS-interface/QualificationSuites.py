@@ -65,14 +65,15 @@ def _suite_sort_key(manifest_id: str) -> tuple[int, str]:
         "gripper_seal_v1": 1,
         "gripper_seal_stress_v1": 2,
         "xy_motion_v1": 3,
-        "motion_envelope_v1": 4,
-        "pressure_regulator_v1": 5,
-        "refuel_vacuum_v1": 6,
-        "valve_characterization_v1": 7,
-        "valve_gap_sweep_v1": 8,
-        "factory_acceptance_v2": 9,
-        "factory_acceptance_v1": 10,
-        "factory_acceptance_v0": 11,
+        "motion_timing_v1": 4,
+        "motion_envelope_v1": 5,
+        "pressure_regulator_v1": 6,
+        "refuel_vacuum_v1": 7,
+        "valve_characterization_v1": 8,
+        "valve_gap_sweep_v1": 9,
+        "factory_acceptance_v2": 10,
+        "factory_acceptance_v1": 11,
+        "factory_acceptance_v0": 12,
     }
     return (preferred.get(manifest_id, 100), manifest_id)
 

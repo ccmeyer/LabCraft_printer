@@ -30,6 +30,8 @@ add_executable(fw_tests
     tests/test_pressure_sensor_focus_policy.cpp
     tests/test_motion_qualification_math.cpp
     tests/test_stepper_profile_math.cpp
+    tests/test_stepper_isr_instrumentation.cpp
+    tests/test_stepper_instrumentation_report.cpp
     tests/test_stepper_limit_policy.cpp
     tests/test_exti_debounce.cpp
     tests/test_crash_log_codec.cpp
@@ -63,6 +65,8 @@ add_executable(fw_tests
     ../Core/Src/ValvePulseQualificationMath.cpp
     ../Core/Src/MotionQualificationMath.cpp
     ../Core/Src/StepperProfileMath.cpp
+    ../Core/Src/StepperIsrInstrumentation.cpp
+    ../Core/Src/StepperInstrumentationReport.cpp
     ../Core/Src/CrashLogCodec.c
     ../Core/Src/CrashFaultContext.c
     ../Core/Src/ResetReportPolicy.cpp

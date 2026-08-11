@@ -51,6 +51,27 @@ static constexpr uint32_t kHomeLimitStableSampleIntervalMs = 2u;
 static constexpr uint32_t kHomeLimitLevelPollMs = 5u;
 static constexpr uint8_t kHomeLimitLevelPollRequiredSamples = 2u;
 
+#if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+static inline bool stepperInstrumentationAxis(Stepper::Axis axis)
+{
+  return axis == Stepper::X_AXIS || axis == Stepper::Y_AXIS;
+}
+
+static inline void stepperEnableCycleCounter()
+{
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0u) {
+    DWT->CYCCNT = 0u;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+  }
+}
+
+static inline uint32_t stepperCycleNow()
+{
+  return DWT->CYCCNT;
+}
+#endif
+
 static TickType_t stepperMsToAtLeast1Tick(uint32_t ms)
 {
   if (ms == 0u) {
@@ -109,6 +130,14 @@ Stepper* Stepper::getAxis(Axis axis) {
   return nullptr;
 }
 
+StepperIsrInstrumentation::Snapshot Stepper::getLastMoveInstrumentationSnapshot() const {
+  #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+  return StepperIsrInstrumentation::makeSnapshot(_isrInstrumentation);
+  #else
+  return StepperIsrInstrumentation::Snapshot{};
+  #endif
+}
+
 void Stepper::begin(
 	Axis			   axis,
     TIM_HandleTypeDef* htim,
@@ -157,6 +186,14 @@ void Stepper::moveTo(bool sign, uint32_t newPos, uint32_t freqHz, uint32_t accel
   int32_t delta  = target - _pos;
 
   if (delta == 0) {
+	#if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+	if (stepperInstrumentationAxis(_axis)) {
+	  stepperEnableCycleCounter();
+	  const uint32_t now = stepperCycleNow();
+	  StepperIsrInstrumentation::reset(_isrInstrumentation, now);
+	  StepperIsrInstrumentation::finishWithoutSample(_isrInstrumentation, now, false);
+	}
+	#endif
 	HAL_TIM_Base_Stop_IT(_htim);
 	xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
 	return;
@@ -174,6 +211,14 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
   _resetMoveLimitState();
 
   if (steps == 0u) {
+  #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+    if (stepperInstrumentationAxis(_axis)) {
+      stepperEnableCycleCounter();
+      const uint32_t now = stepperCycleNow();
+      StepperIsrInstrumentation::reset(_isrInstrumentation, now);
+      StepperIsrInstrumentation::finishWithoutSample(_isrInstrumentation, now, false);
+    }
+  #endif
     xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
     return;
   }
@@ -229,6 +274,12 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
   __HAL_TIM_SET_AUTORELOAD(_htim, _startARR);
   __HAL_TIM_SET_COUNTER   (_htim, 0);
   __HAL_TIM_CLEAR_FLAG    (_htim, TIM_FLAG_UPDATE);
+  #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+  if (stepperInstrumentationAxis(_axis)) {
+    stepperEnableCycleCounter();
+    StepperIsrInstrumentation::reset(_isrInstrumentation, stepperCycleNow());
+  }
+  #endif
   HAL_TIM_Base_Start_IT(_htim);
 }
 
@@ -716,6 +767,13 @@ void Stepper::stop() {
 
   HAL_TIM_Base_Stop_IT(_htim);
 
+  #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+  if (stepperInstrumentationAxis(_axis) && _isrInstrumentation.active) {
+    StepperIsrInstrumentation::finishWithoutSample(
+        _isrInstrumentation, stepperCycleNow(), true);
+  }
+  #endif
+
   _togglesRemaining = _togglesDone = 0;
   _inSoftStop = false;
 }
@@ -884,13 +942,29 @@ void Stepper::resumeMove() {
 void Stepper::cancelMove() {
   // stop *and* clear all counts
   if (!_htim || _togglesRemaining == 0) return;
+  #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+  if (stepperInstrumentationAxis(_axis)) {
+    StepperIsrInstrumentation::markAborted(_isrInstrumentation);
+  }
+  #endif
   _togglesRemaining = 0;
   _inSoftStop = false;
 }
 
 void Stepper::_stepTick() {
+  #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+  const bool instrumentThisAxis = stepperInstrumentationAxis(_axis);
+  const uint32_t instrumentationEntryCycle = instrumentThisAxis ? stepperCycleNow() : 0u;
+  #endif
+
   uint32_t done = _togglesDone;
   uint32_t rem  = _togglesRemaining;
+
+  #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+  const StepperIsrInstrumentation::Phase instrumentationPhase =
+      StepperIsrInstrumentation::classifyPhase(
+          done, rem, _totalToggles, _accelToggles, _decelToggles);
+  #endif
 
   if (rem == 0) {
     // complete
@@ -904,6 +978,21 @@ void Stepper::_stepTick() {
       &woken
     );
     portYIELD_FROM_ISR(woken);
+    #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+    if (instrumentThisAxis) {
+      const uint32_t exitCycle = stepperCycleNow();
+      const bool updatePending =
+          (__HAL_TIM_GET_FLAG(_htim, TIM_FLAG_UPDATE) != RESET);
+      StepperIsrInstrumentation::recordSample(
+          _isrInstrumentation,
+          instrumentationPhase,
+          instrumentationEntryCycle,
+          exitCycle,
+          updatePending,
+          false,
+          true);
+    }
+    #endif
     return;
   }
 
@@ -945,6 +1034,22 @@ void Stepper::_stepTick() {
   if ((_togglesDone & 1) == 0) {
     _pos += (_direction ? +1 : -1);
   }
+
+  #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+  if (instrumentThisAxis) {
+    const uint32_t exitCycle = stepperCycleNow();
+    const bool updatePending =
+        (__HAL_TIM_GET_FLAG(_htim, TIM_FLAG_UPDATE) != RESET);
+    StepperIsrInstrumentation::recordSample(
+        _isrInstrumentation,
+        instrumentationPhase,
+        instrumentationEntryCycle,
+        exitCycle,
+        updatePending,
+        ((_togglesDone & 1u) == 0u),
+        false);
+  }
+  #endif
 }
 
 // dispatch timer IRQ to correct axis
