@@ -11,19 +11,19 @@
 
 | Field | Value |
 | --- | --- |
-| Status | `planned` |
+| Status | `in_progress` |
 | Created | 2026-08-11 |
 | Working branch | `feature/motor_movement_LUT` |
-| Current source baseline | `b66855d75466994023dba658c548baa91f6a0261` |
+| Current source baseline | `c8cb3375fd2ca9127116c62cae5ca415327bc7f4` firmware artifact source; firmware tree unchanged through branch HEAD |
 | Reset incident source | `6494bb57550dcbf4398606707fa5e2eac50f9590` |
 | Incident evidence | `logs/reset_bundles_260810_0739/` |
 | Designated HIL Pi | `192.168.0.33` |
 | Runtime behavior changed by this document | No |
 
 The core motion sources are unchanged between the reset-incident source and
-the source baseline recorded above. Milestone 0 must replace this planning
-baseline with the exact source and firmware build identity used for the first
-recorded HIL baseline.
+the source baseline recorded above. Milestone 0 replaced the original planning
+baseline with the exact retained firmware artifact source, build identity, and
+HIL evidence recorded in `docs/coordinated_xy_milestone0_baseline.md`.
 
 ## Purpose
 
@@ -217,7 +217,7 @@ Every milestone that touches motion must preserve these invariants:
 
 | Milestone | Status | Outcome | Gate before continuing |
 | --- | --- | --- | --- |
-| 0. Baseline and decisions | `not_started` | Reproducible legacy evidence and decisions recorded | Baseline source/build/HIL artifacts complete |
+| 0. Baseline and decisions | `verified` | Reproducible legacy source/build, reset, motion, and straightness evidence recorded | Baseline source/build/HIL artifacts complete |
 | 1. Behavior-preserving instrumentation | `not_started` | Current ISR and scheduler headroom measured | Instrumentation does not change pulse behavior |
 | 2. Fixed-point normalized LUT | `not_started` | Pure LUT/profile math proven against legacy cosine | Error and cycle budgets accepted |
 | 3. Pure coordinated XY planner | `not_started` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
@@ -228,20 +228,38 @@ Every milestone that touches motion must preserve these invariants:
 
 ## Next Planned Action
 
-Begin Milestone 0 on `feature/motor_movement_LUT` without changing firmware
-behavior:
+Prepare the Windows firmware toolchain, prove the clean legacy baseline builds,
+and then begin Milestone 1 behavior-preserving instrumentation:
 
-1. Commit this plan as the branch's documentation baseline.
-2. Record the exact source, build configuration, binary hash, and machine setup.
-3. Run the unchanged legacy motion qualification at its current effective
-   `40 kHz` maximum on the printer connected through `192.168.0.33`.
-4. Record existing `2010` through `2014` metrics and operator observations of
-   diagonal straightness.
-5. Only after that evidence is preserved, begin Milestone 1 instrumentation.
+1. Commit the verified Milestone 0 documentation as its own checkpoint and
+   confirm the tracked worktree is clean.
+2. Initialize `firmware/third_party/cpputest` with
+   `git submodule update --init --recursive`.
+3. Install CMake on `PATH` and a native Windows C++ compiler/build generator
+   suitable for the CppUTest host suite.
+4. Install STM32CubeIDE 1.18.1 at the script's expected path
+   `C:\ST\STM32CubeIDE_1.18.1\STM32CubeIDE`, or make a separate reviewed
+   build-tooling change that passes an alternate CubeIDE path through
+   `run_fw_checks.ps1`.
+5. Before any firmware edit, run the clean baseline gate:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug
+   ```
+
+6. Record the passing command, test count, compiler/tool versions, rebuilt
+   binary hash, Git SHA, and clean/dirty state. Preserve the verified legacy
+   binary hash from Milestone 0 as the rollback identity.
+7. Review and freeze the smallest Milestone 1 instrumentation slice and its
+   files before editing. It must not change timer periods, pulse counts,
+   acceleration math, feed semantics, watchdog deadlines, or routing.
+8. Implement and verify Milestone 1 only after steps 1-7 pass.
 
 ## Milestone 0: Baseline And Decisions
 
-Status: `not_started`
+Status: `verified`
+
+Evidence record: `docs/coordinated_xy_milestone0_baseline.md`
 
 ### Goal
 
