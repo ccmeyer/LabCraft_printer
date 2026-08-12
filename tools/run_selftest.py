@@ -700,6 +700,24 @@ def _operator_prompt_message(stage: str) -> str:
             "Confirm both limit switches are released, remove all hands, and verify the complete "
             "XY and Z motion envelope is clear before homing and motion begin."
         )
+    if stage == "coordinated_xy_performance_fixture_clear":
+        return (
+            "Confirm the pressure_closed_loop_v1 fixture is installed and rated for the 1-2 psi test, "
+            "both pressure paths are closed-loop and safe, and the complete XY/Z motion envelope is "
+            "clear. Remove all hands before the automatic homing and 5-40 kHz motion sequence begins."
+        )
+    if stage == "coordinated_xy_camera_transition_envelope_clear":
+        return (
+            "Confirm both limit switches are released and the complete XY/Z motion envelope is clear. "
+            "Remove all hands before automatic homing, one 40 kHz camera-ratio round trip, and the "
+            "immediate bounded X home begin."
+        )
+    if stage == "coordinated_xy_40khz_envelope_clear":
+        return (
+            "Confirm both limit switches are released and the complete XY/Z motion envelope is clear. "
+            "Remove all hands before automatic homing, the ten-move 40 kHz Milestone 6 geometry row, "
+            "and its bounded post-row X/Y reference homes begin."
+        )
     return "Confirm the operator-gated self-test step is ready to continue."
 
 
@@ -711,6 +729,9 @@ def _is_operator_prompt_stage(stage: str) -> bool:
         "coord_y_limit_press",
         "coord_y_limit_release",
         "normal_route_envelope_clear",
+        "coordinated_xy_performance_fixture_clear",
+        "coordinated_xy_camera_transition_envelope_clear",
+        "coordinated_xy_40khz_envelope_clear",
     }
 
 
@@ -726,6 +747,13 @@ def _read_operator_prompt_response(args, message: str) -> bool:
     if text in ("a", "abort", "cancel", "n", "no", "stop"):
         return False
     return False
+
+
+def _effective_status_only_timeout_ms(args, coordinated_xy_performance_suite: bool) -> int:
+    configured = getattr(args, "status_only_timeout_ms", None)
+    if configured is None:
+        configured = 60000 if coordinated_xy_performance_suite else 5000
+    return max(1000, int(configured))
 
 
 def write_json_atomic(path: str, obj: dict) -> None:
@@ -1231,11 +1259,29 @@ def run(args: argparse.Namespace) -> int:
         profile_lut_benchmark = bool(getattr(args, "profile_lut_benchmark", False))
         coordinated_xy_executor_suite = bool(getattr(args, "coordinated_xy_executor_suite", False))
         normal_xy_route_suite = bool(getattr(args, "normal_xy_route_suite", False))
+        coordinated_xy_performance_suite = bool(
+            getattr(args, "coordinated_xy_performance_suite", False)
+        )
+        coordinated_xy_40khz_suite = bool(
+            getattr(args, "coordinated_xy_40khz_suite", False)
+        )
+        coordinated_xy_x_direction_suite = bool(
+            getattr(args, "coordinated_xy_x_direction_suite", False)
+        )
+        coordinated_xy_camera_transition_suite = bool(
+            getattr(args, "coordinated_xy_camera_transition_suite", False)
+        )
+        coordinated_xy_performance_diagnostic = bool(
+            coordinated_xy_performance_suite
+            or coordinated_xy_40khz_suite
+            or coordinated_xy_x_direction_suite
+            or coordinated_xy_camera_transition_suite
+        )
         pressure_regulator_suite = bool(getattr(args, "pressure_regulator_suite", False))
         refuel_vacuum_suite = bool(getattr(args, "refuel_vacuum_suite", False))
         valve_characterization_suite = bool(getattr(args, "valve_characterization_suite", False))
         valve_gap_sweep_suite = bool(getattr(args, "valve_gap_sweep_suite", False))
-        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2059 if normal_xy_route_suite else 2049 if coordinated_xy_executor_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
+        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2077 if coordinated_xy_40khz_suite else 2078 if coordinated_xy_camera_transition_suite else 2079 if coordinated_xy_x_direction_suite else 2069 if coordinated_xy_performance_suite else 2059 if normal_xy_route_suite else 2049 if coordinated_xy_executor_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
             pressure_sweep_suite if pressure_sweep_suite is not None else (
                 CUSTOM_PRESSURE_TRACE_TEST_ID if custom_trace_config is not None else pressure_trace_test
             )
@@ -1350,7 +1396,9 @@ def run(args: argparse.Namespace) -> int:
         last_valid_frame_monotonic = time.monotonic()
         last_rx_byte_monotonic = time.monotonic()
         last_selftest_frame_monotonic = time.monotonic()
-        status_only_timeout_ms = max(1000, int(getattr(args, "status_only_timeout_ms", 5000)))
+        status_only_timeout_ms = _effective_status_only_timeout_ms(
+            args, coordinated_xy_performance_diagnostic
+        )
         status_frames_since_selftest = 0
         last_status_frame_monotonic = None
         status_gap_max_ms = 0
@@ -1780,6 +1828,23 @@ def run(args: argparse.Namespace) -> int:
                 "timestamp": now_iso(),
             }
         )
+        if coordinated_xy_performance_diagnostic:
+            host_checks.append(
+                {
+                    "name": "coordinated_xy_status_cadence",
+                    "pass": bool(
+                        done_seen
+                        and status_gap_samples > 0
+                        and status_gap_max_ms < 500
+                    ),
+                    "details": {
+                        "status_gap_max_ms": status_gap_max_ms,
+                        "status_gap_samples": status_gap_samples,
+                        "limit_ms_exclusive": 500,
+                    },
+                    "timestamp": now_iso(),
+                }
+            )
 
         report = {
             "run_id": run_id,
@@ -1835,7 +1900,15 @@ def main() -> int:
     p.add_argument("--timeout-ms", type=int, default=30000)
     p.add_argument("--progress-timeout-ms", type=int, default=15000)
     p.add_argument("--activity-timeout-ms", type=int, default=60000)
-    p.add_argument("--status-only-timeout-ms", type=int, default=5000)
+    p.add_argument(
+        "--status-only-timeout-ms",
+        type=int,
+        default=None,
+        help=(
+            "Abort after this many milliseconds of status-only traffic "
+            "(default: 60000 for the coordinated XY performance suite, 5000 otherwise)."
+        ),
+    )
     p.add_argument("--progress-jsonl", action="store_true", help="Emit structured SELFTEST_EVENT JSONL progress lines.")
     p.add_argument("--hello-timeout-ms", type=int, default=8000)
     p.add_argument("--hello-retry-ms", type=int, default=250)
@@ -1869,6 +1942,10 @@ def main() -> int:
     selector_group.add_argument("--profile-lut-benchmark", action="store_true")
     selector_group.add_argument("--coordinated-xy-executor-suite", action="store_true")
     selector_group.add_argument("--normal-xy-route-suite", action="store_true")
+    selector_group.add_argument("--coordinated-xy-performance-suite", action="store_true")
+    selector_group.add_argument("--coordinated-xy-40khz-suite", action="store_true")
+    selector_group.add_argument("--coordinated-xy-x-direction-suite", action="store_true")
+    selector_group.add_argument("--coordinated-xy-camera-transition-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-stress-suite", action="store_true")
     selector_group.add_argument("--valve-characterization-suite", action="store_true")

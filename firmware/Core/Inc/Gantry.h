@@ -11,6 +11,7 @@
 #include <cstdint>
 #include "Stepper.h"
 #include "CoordinatedXyExecutor.h"
+#include "CoordinatedXyIsrInstrumentation.h"
 
 struct GantryPosition {
   int32_t x, y, z;
@@ -46,6 +47,17 @@ struct CoordinatedXySnapshot {
   uint32_t arrMax = 0u;
   uint32_t pendingUpdateCount = 0u;
   uint32_t maxIsrCycles = 0u;
+  uint32_t selectedMasterRateHz = 0u;
+  uint32_t selectedMasterAccelerationStepsPerSec2 = 0u;
+  uint32_t accelerationSteps = 0u;
+  uint32_t cruiseSteps = 0u;
+  uint32_t decelerationSteps = 0u;
+  bool triangular = false;
+  CoordinatedXyIsrInstrumentation::Snapshot timing{};
+  uint32_t phaseMeanCycles[
+      static_cast<uint8_t>(CoordinatedXyIsrInstrumentation::Phase::Count)] = {};
+  uint32_t terminalMeanCycles = 0u;
+  uint32_t durationErrorBasisPoints = 0u;
   uint32_t limitAbortRequestCount = 0u;
   uint32_t rawLimitAbortCount = 0u;
   uint32_t limitRequestRisingEdges = 0u;
@@ -92,6 +104,7 @@ public:
       uint32_t& risingEdgesBefore,
       uint32_t& fallingEdgesBefore);
   static bool dispatchCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim);
+  static void recordCoordinatedTim2IrqExitFromIsr(uint32_t irqExitCycle);
   static void requestCoordinatedLimitAbortFromIsr(Stepper::Axis axis);
 
   static void pauseXYZMotors();
@@ -111,8 +124,11 @@ private:
   void _resumeCoordinatedTask();
   bool _cancelCoordinatedTask(uint32_t* risingEdgesBefore = nullptr,
                               uint32_t* fallingEdgesBefore = nullptr);
-  void _finishCoordinatedHardware(bool aborted);
-  void _finishCoordinatedFromIsr(bool aborted, BaseType_t* woken);
+  void _finishCoordinatedHardware(bool aborted,
+                                  bool stepStateKnownLow = false);
+  void _finishCoordinatedFromIsr(bool aborted,
+                                 BaseType_t* woken,
+                                 bool timingSampleWillFollow = false);
   bool _requestCoordinatedLimitAbortTask(
       Stepper::Axis axis,
       uint32_t* risingEdgesBefore = nullptr,
@@ -139,6 +155,7 @@ private:
   volatile uint32_t _coordinatedLimitRequestFallingEdges = 0u;
   volatile uint32_t _coordinatedArrMin = 0u;
   volatile uint32_t _coordinatedArrMax = 0u;
+  CoordinatedXyIsrInstrumentation::State _coordinatedTiming{};
 
 };
 
@@ -149,6 +166,7 @@ extern "C" {
   /// C wrapper for moveBy
   void MX_GANTRY_MoveBy(int32_t dx, int32_t dy, int32_t dz, uint32_t feedHz);
   void MX_GANTRY_MoveTo(int32_t x, int32_t y, int32_t z, uint32_t feedHz);
+  void MX_GANTRY_RecordTim2IrqExit(uint32_t irqExitCycle);
 }
 
 

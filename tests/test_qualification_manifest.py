@@ -214,6 +214,112 @@ def test_load_normal_xy_route_manifest_freezes_bounded_physical_safety_gates():
     assert manifest.analysis_rules["2057"]["metrics"]["z"]["equals"] == 1
 
 
+def test_load_coordinated_xy_performance_manifest_freezes_speed_and_pressure_gates():
+    manifest = load_manifest("coordinated_xy_performance_v1")
+
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (*range(2060, 2069), 2070)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--coordinated-xy-performance-suite",)
+    assert {item["fixture_id"] for item in manifest.fixtures} == {
+        "pressure_closed_loop_v1"
+    }
+    note = manifest.fixtures[0]["operator_note"]
+    assert "no repeated pressed/released prompts" in note
+    assert manifest.analysis_rules["2064"]["metrics"]["hz"]["equals"] == 40000
+    assert manifest.analysis_rules["2064"]["metrics"]["am"]["max"] == 2025
+    assert manifest.analysis_rules["2064"]["metrics"]["tm"]["max"] == 2250
+    assert manifest.analysis_rules["2064"]["metrics"]["cw"]["equals"] == 0
+    assert manifest.analysis_rules["2065"]["metrics"]["i2"]["equals"] == 122000
+    assert manifest.analysis_rules["2066"]["metrics"]["i2"]["equals"] == 824000
+    assert manifest.analysis_rules["2067"]["metrics"]["ye"]["equals"] == 300000
+    assert manifest.analysis_rules["2068"]["metrics"]["pm"]["equals"] == 1
+    assert manifest.analysis_rules["2068"]["metrics"]["rej"]["equals"] == 0
+    assert manifest.analysis_rules["2070"]["metrics"]["n"]["equals"] == 8
+    assert manifest.analysis_rules["2070"]["metrics"]["xe"]["equals"] == 168000
+    assert manifest.analysis_rules["2070"]["metrics"]["i2"]["equals"] == 336000
+    assert manifest.analysis_rules["2070"]["metrics"]["p40"]["max"] == 25
+    assert manifest.analysis_rules["2070"]["metrics"]["al"]["equals"] == 70000
+
+
+def test_load_coordinated_xy_x_direction_manifest_is_focused_and_fail_closed():
+    manifest = load_manifest("coordinated_xy_x_direction_v1")
+
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2070,)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--coordinated-xy-x-direction-suite",)
+    assert {item["fixture_id"] for item in manifest.fixtures} == {
+        "pressure_closed_loop_v1"
+    }
+    note = manifest.fixtures[0]["operator_note"]
+    assert "does not repeat" in note
+    assert "terminal cleanup" in note
+    assert manifest.analysis_rules["2070"]["metrics"]["n"]["equals"] == 8
+    assert manifest.analysis_rules["2070"]["metrics"]["xe"]["equals"] == 168000
+    assert manifest.analysis_rules["2070"]["metrics"]["i2"]["equals"] == 336000
+    assert manifest.analysis_rules["2070"]["metrics"]["p4l"]["max"] == 25
+    assert manifest.analysis_rules["2070"]["metrics"]["an"]["equals"] == 140000
+
+
+def test_load_coordinated_xy_camera_transition_manifest_is_bounded_and_focused():
+    manifest = load_manifest("coordinated_xy_camera_transition_v1")
+
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2071,)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--coordinated-xy-camera-transition-suite",)
+    assert {item["fixture_id"] for item in manifest.fixtures} == {
+        "motion_clear_envelope_v1"
+    }
+    note = manifest.fixtures[0]["operator_note"]
+    assert "exactly one 40 kHz camera-ratio" in note
+    assert "No pressure actuation" in note
+    rules = manifest.analysis_rules["2071"]["metrics"]
+    assert rules["n"]["equals"] == 2
+    assert rules["xe"]["equals"] == 16832
+    assert rules["ye"]["equals"] == 60000
+    assert rules["i2"]["equals"] == 120000
+    assert rules["en"]["equals"] == 1
+    assert rules["hs"]["equals"] == 8916
+    assert rules["hg"]["equals"] == 11916
+    assert rules["hpc"]["equals"] == 100
+    assert rules["hd"]["max"] == 25
+
+
+def test_load_coordinated_xy_40khz_manifest_reuses_only_the_existing_row():
+    manifest = load_manifest("coordinated_xy_40khz_v1")
+
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2064, 2072)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--coordinated-xy-40khz-suite",)
+    assert {item["fixture_id"] for item in manifest.fixtures} == {
+        "motion_clear_envelope_v1"
+    }
+    note = manifest.fixtures[0]["operator_note"]
+    assert "only the ten-move" in note
+    assert "does not run the 5-30 kHz tiers" in note
+    rules = manifest.analysis_rules["2064"]["metrics"]
+    assert rules["hz"]["equals"] == 40000
+    assert rules["n"]["equals"] == 10
+    assert rules["i2"]["equals"] == 440000
+    assert rules["pu"]["equals"] == 0
+    assert rules["cw"]["max"] == 10
+    assert rules["xd"]["max"] == 25
+    assert rules["yd"]["max"] == 25
+    irq_rules = manifest.analysis_rules["2072"]["metrics"]
+    assert irq_rules["i2"]["min"] == 1
+    assert irq_rules["s"]["min"] == 1
+    assert irq_rules["mi"]["equals"] == 0
+    assert irq_rules["ax"]["min"] == 1
+    assert irq_rules["sf"]["equals"] == 0
+
+
 def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture():
     manifest = load_manifest("motion_envelope_v1")
 

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -318,6 +319,100 @@ TEST(CoordinatedXyPlanner, QualificationAnd384WellRastersHaveExactMoveTraces) {
       static_cast<int64_t>(43000) - currentX,
       static_cast<int64_t>(13000) - currentY));
   checkPathAtEveryPrefix(returnPlan);
+}
+
+TEST(CoordinatedXyPlanner, Milestone6VectorGroupsHaveFrozenPulseAndCallbackTotals) {
+  struct Totals {
+    uint32_t moves = 0u;
+    uint32_t x = 0u;
+    uint32_t y = 0u;
+    uint32_t master = 0u;
+  };
+  auto add = [](Totals& totals, int64_t dx, int64_t dy, uint32_t rateHz) {
+    PlanRequest request = normalRequest(dx, dy);
+    request.requestedMasterRateHz = rateHz;
+    const CoordinatedXyPlan plan = readyPlan(request);
+    totals.moves++;
+    totals.x += plan.xSteps;
+    totals.y += plan.ySteps;
+    totals.master += plan.masterSteps;
+  };
+
+  const int32_t geometry[][4] = {
+      {5000, 5000, 25000, 5000},
+      {5000, 5000, 5000, 25000},
+      {5000, 5000, 25000, 25000},
+      {5000, 5000, 10000, 25000},
+      {8916, 30500, 500, 500},
+  };
+  for (uint32_t rate : {5000u, 10000u, 20000u, 30000u, 40000u}) {
+    Totals tier{};
+    for (const auto& pair : geometry) {
+      const int64_t dx = static_cast<int64_t>(pair[2]) - pair[0];
+      const int64_t dy = static_cast<int64_t>(pair[3]) - pair[1];
+      add(tier, dx, dy, rate);
+      add(tier, -dx, -dy, rate);
+    }
+    UNSIGNED_LONGS_EQUAL(10u, tier.moves);
+    UNSIGNED_LONGS_EQUAL(106832u, tier.x);
+    UNSIGNED_LONGS_EQUAL(180000u, tier.y);
+    UNSIGNED_LONGS_EQUAL(220000u, tier.master);
+    UNSIGNED_LONGS_EQUAL(440000u, tier.master * 2u);
+  }
+
+  Totals milestone1{};
+  add(milestone1, 10000, 0, 40000u);
+  add(milestone1, 0, 10000, 40000u);
+  add(milestone1, 10000, 10000, 40000u);
+  add(milestone1, -8416, -30000, 40000u);
+  add(milestone1, 1000, 0, 40000u);
+  UNSIGNED_LONGS_EQUAL(5u, milestone1.moves);
+  UNSIGNED_LONGS_EQUAL(29416u, milestone1.x);
+  UNSIGNED_LONGS_EQUAL(50000u, milestone1.y);
+  UNSIGNED_LONGS_EQUAL(61000u, milestone1.master);
+  UNSIGNED_LONGS_EQUAL(122000u, milestone1.master * 2u);
+
+  Totals repeatedCamera{};
+  for (uint32_t cycle = 0u; cycle < 5u; ++cycle) {
+    add(repeatedCamera, -8416, -30000, 40000u);
+    add(repeatedCamera, 8416, 30000, 40000u);
+  }
+  UNSIGNED_LONGS_EQUAL(10u, repeatedCamera.moves);
+  UNSIGNED_LONGS_EQUAL(84160u, repeatedCamera.x);
+  UNSIGNED_LONGS_EQUAL(300000u, repeatedCamera.y);
+  UNSIGNED_LONGS_EQUAL(300000u, repeatedCamera.master);
+  UNSIGNED_LONGS_EQUAL(600000u, repeatedCamera.master * 2u);
+
+  Totals asymRaster{};
+  for (const auto& delta : {std::pair<int32_t, int32_t>{10000, 20000},
+                            {5000, 20000}, {20000, 5000}}) {
+    add(asymRaster, delta.first, delta.second, 40000u);
+    add(asymRaster, -delta.first, -delta.second, 40000u);
+  }
+  int32_t x = 43000;
+  int32_t y = 13000;
+  for (uint32_t row = 0u; row < 16u; ++row) {
+    const int32_t targetX = interpolateEndpoint(43000, 33000, row, 16u);
+    for (uint32_t columnIndex = 0u; columnIndex < 24u; ++columnIndex) {
+      const uint32_t column = (row & 1u) == 0u ? columnIndex : 23u - columnIndex;
+      const int32_t targetY = interpolateEndpoint(13000, 30000, column, 24u);
+      if (targetX != x || targetY != y) {
+        add(asymRaster,
+            static_cast<int64_t>(targetX) - x,
+            static_cast<int64_t>(targetY) - y,
+            40000u);
+      }
+      x = targetX;
+      y = targetY;
+    }
+  }
+  add(asymRaster, static_cast<int64_t>(43000) - x,
+      static_cast<int64_t>(13000) - y, 40000u);
+  UNSIGNED_LONGS_EQUAL(390u, asymRaster.moves);
+  UNSIGNED_LONGS_EQUAL(90000u, asymRaster.x);
+  UNSIGNED_LONGS_EQUAL(362000u, asymRaster.y);
+  UNSIGNED_LONGS_EQUAL(412000u, asymRaster.master);
+  UNSIGNED_LONGS_EQUAL(824000u, asymRaster.master * 2u);
 }
 
 TEST(CoordinatedXyPlanner, LongAndTriangularProfilesHaveExactSegmentsAndEndpoints) {

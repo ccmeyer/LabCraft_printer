@@ -23,6 +23,9 @@ def test_discover_suite_entries_lists_current_manifests():
         "profile_lut_benchmark_v1",
         "coordinated_xy_executor_v1",
         "normal_xy_route_v1",
+        "coordinated_xy_performance_v1",
+        "coordinated_xy_x_direction_v1",
+        "coordinated_xy_camera_transition_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "refuel_vacuum_v1",
@@ -185,6 +188,65 @@ def test_normal_xy_route_suite_exposes_physical_limit_and_legacy_gates():
     assert "lat" in rows[2055].metrics
     assert "win" in rows[2056].metrics
     assert "z" in rows[2057].metrics
+
+
+def test_coordinated_xy_performance_suite_exposes_speed_raster_and_pressure_gates():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    performance = entries["coordinated_xy_performance_v1"].manifest
+
+    assert performance.profile == "FULL"
+    assert required_fixture_ids(performance) == ("pressure_closed_loop_v1",)
+    rows = {row.test_id: row for row in build_test_plan_rows(performance)}
+    assert list(rows) == [*range(2060, 2069), 2070]
+    assert rows[2060].name == "Coordinated XY 5 kHz performance"
+    assert rows[2068].name == "Coordinated XY pressure coexistence"
+    assert rows[2070].name == "Coordinated XY X-direction speed isolation"
+    assert all(row.subsystem == "System" for row in rows.values())
+    assert "am" in rows[2064].metrics
+    assert "xd" in rows[2066].metrics
+    assert "pm" in rows[2068].metrics
+    assert "p40" in rows[2070].metrics
+
+
+def test_coordinated_xy_x_direction_suite_is_a_single_focused_gate():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    focused = entries["coordinated_xy_x_direction_v1"].manifest
+
+    assert focused.profile == "FULL"
+    assert required_fixture_ids(focused) == ("pressure_closed_loop_v1",)
+    rows = build_test_plan_rows(focused)
+    assert [row.test_id for row in rows] == [2070]
+    assert "p30" in rows[0].metrics
+    assert "n40" in rows[0].metrics
+
+
+def test_coordinated_xy_40khz_suite_is_only_the_existing_geometry_row():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    focused = entries["coordinated_xy_40khz_v1"].manifest
+
+    assert focused.profile == "FULL"
+    assert required_fixture_ids(focused) == ("motion_clear_envelope_v1",)
+    rows = build_test_plan_rows(focused)
+    assert [row.test_id for row in rows] == [2064, 2072]
+    assert rows[0].name == "Coordinated XY 40 kHz performance"
+    assert "am" in rows[0].metrics
+    assert "xd" in rows[0].metrics
+    assert rows[1].name == "Coordinated XY 40 kHz full IRQ timing"
+    assert "fm" in rows[1].metrics
+    assert "pf" in rows[1].metrics
+
+
+def test_coordinated_xy_camera_transition_suite_is_single_motion_fixture_gate():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    focused = entries["coordinated_xy_camera_transition_v1"].manifest
+
+    assert focused.profile == "FULL"
+    assert required_fixture_ids(focused) == ("motion_clear_envelope_v1",)
+    rows = build_test_plan_rows(focused)
+    assert [row.test_id for row in rows] == [2071]
+    assert rows[0].name == "Coordinated XY camera/home transition"
+    assert "en" in rows[0].metrics
+    assert "hpc" in rows[0].metrics
 
 
 def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():

@@ -3,6 +3,8 @@ import struct
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_SELFTEST_PATH = REPO_ROOT / "tools" / "run_selftest.py"
@@ -14,6 +16,15 @@ def _load_run_selftest():
     assert spec and spec.loader
     spec.loader.exec_module(module)
     return module
+
+
+def test_status_only_timeout_allows_blocking_performance_legs_by_default():
+    mod = _load_run_selftest()
+    assert mod._effective_status_only_timeout_ms(SimpleNamespace(), True) == 60000
+    assert mod._effective_status_only_timeout_ms(SimpleNamespace(), False) == 5000
+    assert mod._effective_status_only_timeout_ms(
+        SimpleNamespace(status_only_timeout_ms=12000), True
+    ) == 12000
 
 
 class FakeSerial:
@@ -1046,6 +1057,79 @@ def test_run_sends_normal_xy_route_selector_and_keeps_goodbye(monkeypatch, tmp_p
     assert sent_goodbye is True
 
 
+@pytest.mark.parametrize(
+    ("performance_suite", "forty_suite", "direction_suite", "transition_suite", "expected_selector"),
+    ((True, False, False, False, 2069),
+     (False, True, False, False, 2077),
+     (False, False, True, False, 2079),
+     (False, False, False, True, 2078)),
+)
+def test_run_sends_coordinated_xy_performance_selector_and_checks_status_cadence(
+    monkeypatch, tmp_path, performance_suite, forty_suite, direction_suite, transition_suite,
+    expected_selector
+):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+    status = _frame_payload(mod, bytes([0x02, 0]))
+    inbound = b"".join(
+        [
+            _hello_ack(mod),
+            status,
+            status,
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="FULL",
+        timeout_ms=1000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        gripper_seal_suite=False,
+        xy_motion_suite=False,
+        motion_envelope_suite=False,
+        motion_timing_suite=False,
+        profile_lut_benchmark=False,
+        coordinated_xy_executor_suite=False,
+        normal_xy_route_suite=False,
+        coordinated_xy_performance_suite=performance_suite,
+        coordinated_xy_40khz_suite=forty_suite,
+        coordinated_xy_x_direction_suite=direction_suite,
+        coordinated_xy_camera_transition_suite=transition_suite,
+        out=str(out_path),
+    )
+
+    assert mod.run(args) == 0
+    sent_p3 = None
+    for outbound in serial.writes:
+        reader = mod.FrameReader()
+        for byte in outbound:
+            frame = reader.feed(byte)
+            if frame and frame[0] == mod.CMD_SELFTEST_START:
+                sent_p3 = mod.parse_tlvs(frame[2:]).get(mod.TAG_P3)
+    assert sent_p3 == expected_selector.to_bytes(2, "little")
+    report = __import__("json").loads(out_path.read_text(encoding="utf-8"))
+    cadence = next(
+        item for item in report["host_checks"]
+        if item["name"] == "coordinated_xy_status_cadence"
+    )
+    assert cadence["pass"] is True
+    assert cadence["details"]["status_gap_max_ms"] < 500
+
+
 def test_run_sends_pressure_regulator_selector_and_keeps_goodbye(monkeypatch, tmp_path):
     mod = _load_run_selftest()
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
@@ -1951,3 +2035,39 @@ def test_coordinated_limit_preflight_stages_are_explicit_operator_prompts():
         assert mod._is_operator_prompt_stage(stage)
         assert phrase in mod._operator_prompt_message(stage)
     assert not mod._is_operator_prompt_stage("coord_x_home_low")
+
+
+def test_m6_combined_fixture_stage_is_one_explicit_prompt_without_switch_language():
+    mod = _load_run_selftest()
+    stage = "coordinated_xy_performance_fixture_clear"
+
+    assert mod._is_operator_prompt_stage(stage)
+    message = mod._operator_prompt_message(stage)
+    assert "pressure_closed_loop_v1" in message
+    assert "complete XY/Z motion envelope" in message
+    assert "press and hold" not in message.lower()
+    assert "limit switch" not in message.lower()
+
+
+def test_camera_transition_stage_is_one_clear_envelope_prompt_without_pressure():
+    mod = _load_run_selftest()
+    stage = "coordinated_xy_camera_transition_envelope_clear"
+
+    assert mod._is_operator_prompt_stage(stage)
+    message = mod._operator_prompt_message(stage)
+    assert "complete XY/Z motion envelope" in message
+    assert "one 40 kHz camera-ratio round trip" in message
+    assert "pressure_closed_loop_v1" not in message
+    assert "press and hold" not in message.lower()
+
+
+def test_standalone_40khz_stage_is_one_clear_envelope_prompt_without_pressure():
+    mod = _load_run_selftest()
+    stage = "coordinated_xy_40khz_envelope_clear"
+
+    assert mod._is_operator_prompt_stage(stage)
+    message = mod._operator_prompt_message(stage)
+    assert "complete XY/Z motion envelope" in message
+    assert "ten-move 40 kHz Milestone 6 geometry row" in message
+    assert "pressure_closed_loop_v1" not in message
+    assert "press and hold" not in message.lower()

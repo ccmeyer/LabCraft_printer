@@ -137,14 +137,50 @@ def test_normal_route_diagnostic_is_explicit_bounded_and_keeps_protocol_shape():
     assert suite.count("metrics_overflow") >= 5
 
 
-def test_debug_size_optimization_is_limited_to_explicit_m4_and_m5_suites():
+def test_debug_size_optimization_is_scoped_to_diagnostics_translation_unit():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+    project = _read("firmware/.cproject")
 
-    assert diagnostics.count('optimize("Os"), noinline') == 2
-    runner_signature = "DiagnosticsSummary DiagnosticsRunner::runSelfTest"
-    runner_start = diagnostics.index(runner_signature)
-    first_suite = diagnostics.index('optimize("Os"), noinline', runner_start)
-    assert 'optimize("Os")' not in diagnostics[runner_start:first_suite]
+    push = "#pragma GCC push_options"
+    optimize = '#pragma GCC optimize ("Os")'
+    pop = "#pragma GCC pop_options"
+    first_include = diagnostics.index("#include")
+    runner_start = diagnostics.index(
+        "DiagnosticsSummary DiagnosticsRunner::runSelfTest"
+    )
+    final_definition_end = diagnostics.rindex("}")
+
+    assert diagnostics.count(push) == 1
+    assert diagnostics.count(optimize) == 1
+    assert diagnostics.count(pop) == 1
+    assert diagnostics.index(push) < diagnostics.index(optimize) < first_include
+    assert first_include < runner_start < final_definition_end < diagnostics.index(pop)
+
+    assert diagnostics.count('optimize("Os"), noinline') == 3
+
+    other_optimized_sources = [
+        path.name
+        for path in (ROOT / "firmware/Core/Src").glob("*.cpp")
+        if path.name != "Diagnostics.cpp"
+        and optimize in path.read_text(encoding="utf-8")
+    ]
+    assert other_optimized_sources == []
+    assert project.count("cpp.compiler.option.optimization.level.value.os") == 1
+
+    benchmark_start = diagnostics.index("if (runProfileLutBenchmark)")
+    benchmark_end = diagnostics.index(
+        "if (runCoordinatedXyExecutorSuite)", benchmark_start
+    )
+    benchmark = diagnostics[benchmark_start:benchmark_end]
+    measure_start = benchmark.index("auto measureCycles")
+    measure_end = benchmark.index("uint32_t emptyHarnessMax", measure_start)
+    assert 'optimize("O0"), noinline' in benchmark[measure_start:measure_end]
+    empty_start = benchmark.index("const uint32_t cycles = measureCycles", measure_end)
+    empty_end = benchmark.index("if (cycles > emptyHarnessMax)", empty_start)
+    assert 'optimize("O0"), noipa' in benchmark[empty_start:empty_end]
+    legacy_start = benchmark.index("const uint32_t legacyCycles")
+    legacy_end = benchmark.index("const uint32_t error", legacy_start)
+    assert 'optimize("O0"), noipa' in benchmark[legacy_start:legacy_end]
 
 
 def test_no_application_or_protocol_source_was_added_to_milestone_scope():

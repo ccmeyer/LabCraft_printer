@@ -63,7 +63,7 @@ def test_coordinated_edge_and_terminal_paths_use_bounded_register_operations():
     assert "->BSRR =" in write_body
     assert "HAL_GPIO_WritePin" not in write_body
 
-    finish = gantry.index("void Gantry::_finishCoordinatedHardware(bool aborted)")
+    finish = gantry.index("void Gantry::_finishCoordinatedHardware(bool aborted,")
     finish_from_isr = gantry.index("void Gantry::_finishCoordinatedFromIsr", finish)
     finish_body = gantry[finish:finish_from_isr]
     assert "gantryStopAndClearUpdateTimer(_coordinatedMasterTimer)" in finish_body
@@ -107,6 +107,17 @@ def test_target_build_optimizes_only_the_bounded_coordinated_edge_path():
     assert "LC_COORDINATED_GPIO_OPTIMIZED\nvoid Stepper::_writeCoordinatedStep" in stepper
     assert "LC_COORDINATED_GPIO_OPTIMIZED\nvoid Stepper::_accountCoordinatedPulse" in stepper
     assert "LC_COORDINATED_GPIO_OPTIMIZED\nvoid Stepper::_finishCoordinatedAxis" in stepper
+    assert "LC_COORDINATED_GPIO_OPTIMIZED\nvoid Stepper::_finishAbortedCoordinatedAxisFromLow" in stepper
+    assert "LC_COORDINATED_GPIO_OPTIMIZED\nvoid Stepper::_finishCompletedCoordinatedAxisFromLow" in stepper
+    assert "Successful coordinated completion is entered only after the final" in stepper
+    finish_hardware = gantry[gantry.index("void Gantry::_finishCoordinatedHardware") :]
+    finish_hardware = finish_hardware[: finish_hardware.index("void Gantry::_finishCoordinatedFromIsr")]
+    assert "_finishCoordinatedAxis(true)" in finish_hardware
+    assert "_finishAbortedCoordinatedAxisFromLow()" in finish_hardware
+    assert "_finishCompletedCoordinatedAxisFromLow()" in finish_hardware
+    finish_from_isr = gantry[gantry.index("void Gantry::_finishCoordinatedFromIsr") :]
+    finish_from_isr = finish_from_isr[: finish_from_isr.index("bool Gantry::_handleCoordinatedTimerFromIsr")]
+    assert "_finishCoordinatedHardware(aborted, true);" in finish_from_isr
 
 
 def test_xy_home_limits_hard_stop_without_debounce_or_task_scheduling():

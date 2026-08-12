@@ -53,6 +53,155 @@ def test_raw_firmware_failure_is_classified():
     assert failed["failure_domain"] == "infrastructure"
 
 
+def test_coordinated_xy_performance_manifest_accepts_nominal_and_blocks_pending_regression():
+    manifest = load_manifest("coordinated_xy_performance_v1")
+    totals = {
+        2060: (5000, 10, 106832, 180000, 220000, 440000),
+        2061: (10000, 10, 106832, 180000, 220000, 440000),
+        2062: (20000, 10, 106832, 180000, 220000, 440000),
+        2063: (30000, 10, 106832, 180000, 220000, 440000),
+        2064: (40000, 10, 106832, 180000, 220000, 440000),
+        2065: (40000, 5, 29416, 50000, 61000, 122000),
+        2066: (40000, 390, 90000, 362000, 412000, 824000),
+        2067: (40000, 10, 84160, 300000, 300000, 600000),
+        2068: (40000, 2, 16832, 60000, 60000, 120000),
+        2070: (0, 8, 168000, 0, 168000, 336000),
+    }
+    results = []
+    for test_id, (hz, count, x, y, master, callbacks) in totals.items():
+        metrics = {
+            "hz": hz, "n": count, "xe": x, "ye": y, "ms": master,
+            "i2": callbacks, "i7": 0, "pu": 0, "ps": 0,
+            "am": 1400, "cm": 900, "dm": 1500, "tm": 2100,
+            "de": 25, "sg": 65, "wd": 70, "sa": 0, "wl": 0,
+            "cw": 0, "sf": 0, "xd": 4, "yd": 5, "to": 0,
+        }
+        if test_id <= 2064:
+            metrics.update({"ok": 1, "aa": 800, "ca": 500, "da": 850})
+        elif test_id < 2068:
+            metrics["ok"] = 1
+        elif test_id == 2068:
+            metrics.update({
+                "pa": 1, "ra": 1, "pm": 1, "rm": 1,
+                "p2": 1, "r2": 1, "p1": 1, "r1": 1,
+                "rej": 0, "flt": 0, "g": 0,
+            })
+        else:
+            metrics.update({
+                "ok": 1, "p30": 2, "n30": 3, "p35": 3, "n35": 4,
+                "p4l": 5, "n4l": 4, "p40": 6, "n40": 5,
+                "an": 140000, "al": 70000,
+            })
+        results.append({
+            "test_id": test_id,
+            "name": f"m6_{test_id}",
+            "pass": True,
+            "metrics": metrics,
+        })
+    raw = {
+        "run_id": 2069,
+        "profile": "FULL",
+        "started_at": "2026-08-11T00:00:00Z",
+        "finished_at": "2026-08-11T00:10:00Z",
+        "aborted": False,
+        "summary": {"total": 10, "passed": 10, "failed": 0},
+        "results": results,
+        "host_checks": [
+            {"name": "coordinated_xy_status_cadence", "pass": True, "details": {"status_gap_max_ms": 200}}
+        ],
+    }
+
+    accepted = _analyze(raw, manifest)
+    assert accepted["verdict"]["status"] == "pass"
+    results[4]["metrics"]["pu"] = 1
+    rejected = _analyze(raw, manifest)
+    assert rejected["verdict"]["status"] == "fail"
+    assert any(
+        item.get("metric_name") == "pu" and item.get("status") == "fail"
+        for item in rejected["metric_evaluations"]
+    )
+
+
+def test_camera_transition_manifest_accepts_complete_home_and_blocks_missing_enable():
+    manifest = load_manifest("coordinated_xy_camera_transition_v1")
+    metrics = {
+        "fs": 0, "n": 2, "xe": 16832, "ye": 60000,
+        "i2": 120000, "i7": 0, "pu": 0, "am": 1200, "tm": 2200,
+        "en": 1, "sl": 1, "ow": 0, "lb": 0,
+        "hs": 8916, "he": 100, "hg": 11916, "hc": 11916,
+        "ha": 8916, "hp": 7, "ho": 2, "hl": 1, "la": 0,
+        "hi": 201, "hpc": 100, "hpu": 0, "hd": 3, "to": 0,
+    }
+    raw = {
+        "run_id": 2071,
+        "profile": "FULL",
+        "started_at": "2026-08-12T00:00:00Z",
+        "finished_at": "2026-08-12T00:00:10Z",
+        "aborted": False,
+        "summary": {"total": 1, "passed": 1, "failed": 0},
+        "results": [{
+            "test_id": 2071,
+            "name": "coord_xy_camera_home_transition",
+            "pass": True,
+            "metrics": metrics,
+        }],
+        "host_checks": [{"name": "hello_ack", "pass": True, "details": {}}],
+    }
+
+    assert _analyze(raw, manifest)["verdict"]["status"] == "pass"
+    raw["results"][0]["metrics"] = {**metrics, "en": 0}
+    assert _analyze(raw, manifest)["verdict"]["status"] == "fail"
+
+
+def test_standalone_40khz_manifest_accepts_exact_row_and_blocks_home_drift():
+    manifest = load_manifest("coordinated_xy_40khz_v1")
+    metrics = {
+        "hz": 40000, "n": 10, "xe": 106832, "ye": 180000,
+        "ms": 220000, "i2": 440000, "i7": 0, "ok": 1,
+        "pu": 0, "ps": 0, "am": 1200, "aa": 800,
+        "cm": 900, "ca": 600, "dm": 1300, "da": 850,
+        "tm": 2150, "de": 20, "sg": 65, "wd": 70,
+        "sa": 0, "wl": 0, "cw": 1, "sf": 0,
+        "xd": 4, "yd": 5, "to": 0,
+    }
+    raw = {
+        "run_id": 2077,
+        "profile": "FULL",
+        "started_at": "2026-08-12T00:00:00Z",
+        "finished_at": "2026-08-12T00:00:10Z",
+        "aborted": False,
+        "summary": {"total": 2, "passed": 2, "failed": 0},
+        "results": [
+            {
+                "test_id": 2064,
+                "name": "coordinated_xy_performance_40khz",
+                "pass": True,
+                "metrics": metrics,
+            },
+            {
+                "test_id": 2072,
+                "name": "coord_xy_40khz_irq_path",
+                "pass": True,
+                "metrics": {
+                    "i2": 440000, "s": 440000, "mi": 0,
+                    "ph": 50, "pa": 20, "fm": 1500, "fa": 900,
+                    "ax": 1450, "tf": 2200, "pp": 0, "pf": 0, "pu": 0,
+                    "ps": 0, "sf": 0, "to": 0,
+                },
+            },
+        ],
+        "host_checks": [{
+            "name": "coordinated_xy_status_cadence",
+            "pass": True,
+            "details": {"status_gap_max_ms": 100},
+        }],
+    }
+
+    assert _analyze(raw, manifest)["verdict"]["status"] == "pass"
+    raw["results"][0]["metrics"] = {**metrics, "xd": 26}
+    assert _analyze(raw, manifest)["verdict"]["status"] == "fail"
+
+
 def test_aborted_or_missing_raw_output_is_infrastructure_failure():
     analysis = _analyze(_raw(aborted=True), _manifest(), returncode=3)
 

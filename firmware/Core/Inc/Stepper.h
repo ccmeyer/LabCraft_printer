@@ -91,6 +91,7 @@ public:
 
   void setHomeDir(bool toward_limit) { _homeTowardLimitDir = toward_limit; }
   void setHomeGuardSteps(uint32_t s) { _homeGuardSteps = s ? s : 100000; }
+  uint32_t homeGuardSteps() const { return _homeGuardSteps; }
 
 
   /// Abort any in-progress move immediately
@@ -122,15 +123,40 @@ public:
   int32_t getTargetPosition() const { return _targetPos; }
 
   struct HomeDiagnosticSnapshot {
+    enum class Phase : uint8_t {
+      NotStarted = 0,
+      InitialCheck,
+      InitialRelease,
+      CoarseSeek,
+      Probe,
+      PreFineRelease,
+      FineSeek,
+      FinalBackoff,
+    };
+
+    int32_t startPositionSteps = 0;
+    int32_t endPositionSteps = 0;
     int32_t fineLimitPositionSteps = 0;
     int32_t finalBackoffPositionSteps = 0;
+    uint32_t coarseCommandSteps = 0;
+    uint32_t coarseAccountedSteps = 0;
     uint32_t moveTimeoutCount = 0;
+    Phase phase = Phase::NotStarted;
+    HomeInterruptionPolicy::Outcome outcome =
+        HomeInterruptionPolicy::Outcome::NotStarted;
+    bool limitSeen = false;
+    bool limitAsserted = false;
     bool success = false;
   };
 
   HomeDiagnosticSnapshot getLastHomeDiagnosticSnapshot() const { return _homeDiagnosticSnapshot; }
   StepperIsrInstrumentation::Snapshot getLastMoveInstrumentationSnapshot() const;
   bool isLimitAssertedForDiagnostics() const { return _isLimitAsserted(); }
+  bool enableOutputsAssertedForDiagnostics() const {
+    if (_enPort == nullptr || (_enPort->ODR & _enPin) != 0u) return false;
+    return !_dualDriver ||
+           (_enPort2 != nullptr && (_enPort2->ODR & _enPin2) == 0u);
+  }
 
 
   void configureLimitPin(GPIO_TypeDef* port, uint16_t pin);
@@ -259,6 +285,8 @@ private:
   void          _writeCoordinatedStep(bool high);
   void          _accountCoordinatedPulse();
   void          _finishCoordinatedAxis(bool aborted);
+  void          _finishAbortedCoordinatedAxisFromLow();
+  void          _finishCompletedCoordinatedAxisFromLow();
   bool          _coordinatedStepIsLow() const;
 #if defined(__GNUC__) && !defined(UNIT_TEST)
   __attribute__((always_inline)) inline bool

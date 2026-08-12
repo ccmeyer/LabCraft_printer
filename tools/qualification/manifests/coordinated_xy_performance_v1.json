@@ -1,0 +1,1124 @@
+{
+    "schema_version": "qualification_manifest_v0",
+    "manifest_id": "coordinated_xy_performance_v1",
+    "name": "Coordinated XY Production-Speed Qualification v1",
+    "profile": "FULL",
+    "description": "Fail-stop 5-40 kHz qualification of the production coordinated XY route, Milestone 1 vectors, Z-up raster, repeated camera motion, and concurrent closed-loop pressure regulation.",
+    "expected_test_ids": [
+        2060,
+        2061,
+        2062,
+        2063,
+        2064,
+        2065,
+        2066,
+        2067,
+        2068,
+        2070
+    ],
+    "enforce_expected_test_ids": true,
+    "requires_operator_prompts": true,
+    "selftest_args": [
+        "--coordinated-xy-performance-suite"
+    ],
+    "fixtures": [
+        {
+            "fixture_id": "pressure_closed_loop_v1",
+            "required_for": [
+                2060,
+                2061,
+                2062,
+                2063,
+                2064,
+                2065,
+                2066,
+                2067,
+                2068,
+                2070
+            ],
+            "operator_note": "Confirm the pressure_closed_loop_v1 fixture is installed and rated for 1-2 psi, both pressure paths are closed-loop and safe, and the complete XY/Z envelope is clear. The manual switch preflight and low-rate homing regression already passed after the bounded diagnostic-home change; no subsequent code affects switch reading or homing, so this suite has no repeated pressed/released prompts. Stop immediately for unexpected contact, abnormal sound, pressure leakage, reset, or motion outside the established X<=45000, Y<=35000 envelope."
+        }
+    ],
+    "analysis_rules": {
+        "2060": {
+            "category": "performance",
+            "failure_domain": "firmware_motion",
+            "metrics": {
+                "hz": {
+                    "maturity": "acceptance",
+                    "equals": 5000
+                },
+                "n": {
+                    "maturity": "acceptance",
+                    "equals": 10
+                },
+                "xe": {
+                    "maturity": "acceptance",
+                    "equals": 106832
+                },
+                "ye": {
+                    "maturity": "acceptance",
+                    "equals": 180000
+                },
+                "ms": {
+                    "maturity": "acceptance",
+                    "equals": 220000
+                },
+                "i2": {
+                    "maturity": "acceptance",
+                    "equals": 440000
+                },
+                "i7": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ok": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "pu": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ps": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "am": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "aa": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "cm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "ca": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "dm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "da": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "tm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2250
+                },
+                "de": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sg": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "wd": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sa": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "wl": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "cw": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "sf": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "xd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "yd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "to": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                }
+            }
+        },
+        "2061": {
+            "category": "performance",
+            "failure_domain": "firmware_motion",
+            "metrics": {
+                "hz": {
+                    "maturity": "acceptance",
+                    "equals": 10000
+                },
+                "n": {
+                    "maturity": "acceptance",
+                    "equals": 10
+                },
+                "xe": {
+                    "maturity": "acceptance",
+                    "equals": 106832
+                },
+                "ye": {
+                    "maturity": "acceptance",
+                    "equals": 180000
+                },
+                "ms": {
+                    "maturity": "acceptance",
+                    "equals": 220000
+                },
+                "i2": {
+                    "maturity": "acceptance",
+                    "equals": 440000
+                },
+                "i7": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ok": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "pu": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ps": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "am": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "aa": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "cm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "ca": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "dm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "da": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "tm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2250
+                },
+                "de": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sg": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "wd": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sa": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "wl": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "cw": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "sf": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "xd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "yd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "to": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                }
+            }
+        },
+        "2062": {
+            "category": "performance",
+            "failure_domain": "firmware_motion",
+            "metrics": {
+                "hz": {
+                    "maturity": "acceptance",
+                    "equals": 20000
+                },
+                "n": {
+                    "maturity": "acceptance",
+                    "equals": 10
+                },
+                "xe": {
+                    "maturity": "acceptance",
+                    "equals": 106832
+                },
+                "ye": {
+                    "maturity": "acceptance",
+                    "equals": 180000
+                },
+                "ms": {
+                    "maturity": "acceptance",
+                    "equals": 220000
+                },
+                "i2": {
+                    "maturity": "acceptance",
+                    "equals": 440000
+                },
+                "i7": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ok": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "pu": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ps": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "am": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "aa": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "cm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "ca": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "dm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "da": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "tm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2250
+                },
+                "de": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sg": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "wd": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sa": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "wl": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "cw": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "sf": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "xd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "yd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "to": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                }
+            }
+        },
+        "2063": {
+            "category": "performance",
+            "failure_domain": "firmware_motion",
+            "metrics": {
+                "hz": {
+                    "maturity": "acceptance",
+                    "equals": 30000
+                },
+                "n": {
+                    "maturity": "acceptance",
+                    "equals": 10
+                },
+                "xe": {
+                    "maturity": "acceptance",
+                    "equals": 106832
+                },
+                "ye": {
+                    "maturity": "acceptance",
+                    "equals": 180000
+                },
+                "ms": {
+                    "maturity": "acceptance",
+                    "equals": 220000
+                },
+                "i2": {
+                    "maturity": "acceptance",
+                    "equals": 440000
+                },
+                "i7": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ok": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "pu": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ps": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "am": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "aa": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "cm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "ca": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "dm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "da": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "tm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2250
+                },
+                "de": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sg": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "wd": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sa": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "wl": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "cw": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "sf": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "xd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "yd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "to": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                }
+            }
+        },
+        "2064": {
+            "category": "performance",
+            "failure_domain": "firmware_motion",
+            "metrics": {
+                "hz": {
+                    "maturity": "acceptance",
+                    "equals": 40000
+                },
+                "n": {
+                    "maturity": "acceptance",
+                    "equals": 10
+                },
+                "xe": {
+                    "maturity": "acceptance",
+                    "equals": 106832
+                },
+                "ye": {
+                    "maturity": "acceptance",
+                    "equals": 180000
+                },
+                "ms": {
+                    "maturity": "acceptance",
+                    "equals": 220000
+                },
+                "i2": {
+                    "maturity": "acceptance",
+                    "equals": 440000
+                },
+                "i7": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ok": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "pu": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ps": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "am": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "aa": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "cm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "ca": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "dm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "da": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "tm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2250
+                },
+                "de": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sg": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "wd": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sa": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "wl": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "cw": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "sf": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "xd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "yd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "to": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                }
+            }
+        },
+        "2065": {
+            "category": "performance",
+            "failure_domain": "firmware_motion",
+            "metrics": {
+                "hz": {
+                    "maturity": "acceptance",
+                    "equals": 40000
+                },
+                "n": {
+                    "maturity": "acceptance",
+                    "equals": 5
+                },
+                "xe": {
+                    "maturity": "acceptance",
+                    "equals": 29416
+                },
+                "ye": {
+                    "maturity": "acceptance",
+                    "equals": 50000
+                },
+                "ms": {
+                    "maturity": "acceptance",
+                    "equals": 61000
+                },
+                "i2": {
+                    "maturity": "acceptance",
+                    "equals": 122000
+                },
+                "i7": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ok": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "pu": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ps": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "am": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "cm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "dm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "tm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2250
+                },
+                "de": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sg": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "wd": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sa": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "wl": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "cw": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "sf": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "to": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                }
+            }
+        },
+        "2066": {
+            "category": "performance",
+            "failure_domain": "firmware_motion",
+            "metrics": {
+                "hz": {
+                    "maturity": "acceptance",
+                    "equals": 40000
+                },
+                "n": {
+                    "maturity": "acceptance",
+                    "equals": 390
+                },
+                "xe": {
+                    "maturity": "acceptance",
+                    "equals": 90000
+                },
+                "ye": {
+                    "maturity": "acceptance",
+                    "equals": 362000
+                },
+                "ms": {
+                    "maturity": "acceptance",
+                    "equals": 412000
+                },
+                "i2": {
+                    "maturity": "acceptance",
+                    "equals": 824000
+                },
+                "i7": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ok": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "pu": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ps": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "am": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "cm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "dm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "tm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2250
+                },
+                "de": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sg": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "wd": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sa": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "wl": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "cw": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "sf": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "xd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "yd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "to": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                }
+            }
+        },
+        "2067": {
+            "category": "performance",
+            "failure_domain": "firmware_motion",
+            "metrics": {
+                "hz": {
+                    "maturity": "acceptance",
+                    "equals": 40000
+                },
+                "n": {
+                    "maturity": "acceptance",
+                    "equals": 10
+                },
+                "xe": {
+                    "maturity": "acceptance",
+                    "equals": 84160
+                },
+                "ye": {
+                    "maturity": "acceptance",
+                    "equals": 300000
+                },
+                "ms": {
+                    "maturity": "acceptance",
+                    "equals": 300000
+                },
+                "i2": {
+                    "maturity": "acceptance",
+                    "equals": 600000
+                },
+                "i7": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ok": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "pu": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ps": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "am": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "cm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "dm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "tm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2250
+                },
+                "de": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sg": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "wd": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sa": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "wl": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "cw": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "sf": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "to": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                }
+            }
+        },
+        "2068": {
+            "category": "performance",
+            "failure_domain": "firmware_pressure_motion",
+            "metrics": {
+                "hz": {
+                    "maturity": "acceptance",
+                    "equals": 40000
+                },
+                "n": {
+                    "maturity": "acceptance",
+                    "equals": 2
+                },
+                "xe": {
+                    "maturity": "acceptance",
+                    "equals": 16832
+                },
+                "ye": {
+                    "maturity": "acceptance",
+                    "equals": 60000
+                },
+                "ms": {
+                    "maturity": "acceptance",
+                    "equals": 60000
+                },
+                "i2": {
+                    "maturity": "acceptance",
+                    "equals": 120000
+                },
+                "i7": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "pu": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "ps": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "am": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "cm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "dm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2025
+                },
+                "tm": {
+                    "maturity": "acceptance",
+                    "min": 1,
+                    "max": 2250
+                },
+                "de": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sg": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "wd": {
+                    "maturity": "acceptance",
+                    "max": 100
+                },
+                "sa": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "wl": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "cw": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "sf": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "pa": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "ra": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "pm": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "rm": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "p2": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "r2": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "p1": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "r1": {
+                    "maturity": "acceptance",
+                    "equals": 1
+                },
+                "rej": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "flt": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "g": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                },
+                "xd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "yd": {
+                    "maturity": "acceptance",
+                    "max": 25
+                },
+                "to": {
+                    "maturity": "acceptance",
+                    "equals": 0
+                }
+            }
+        },
+        "2070": {
+            "category": "performance",
+            "failure_domain": "firmware_motion",
+            "metrics": {
+                "n": {"maturity": "acceptance", "equals": 8},
+                "xe": {"maturity": "acceptance", "equals": 168000},
+                "ye": {"maturity": "acceptance", "equals": 0},
+                "ms": {"maturity": "acceptance", "equals": 168000},
+                "i2": {"maturity": "acceptance", "equals": 336000},
+                "i7": {"maturity": "acceptance", "equals": 0},
+                "ok": {"maturity": "acceptance", "equals": 1},
+                "pu": {"maturity": "acceptance", "equals": 0},
+                "am": {"maturity": "acceptance", "min": 1, "max": 2025},
+                "tm": {"maturity": "acceptance", "min": 1, "max": 2250},
+                "p30": {"maturity": "acceptance", "max": 25},
+                "n30": {"maturity": "acceptance", "max": 25},
+                "p35": {"maturity": "acceptance", "max": 25},
+                "n35": {"maturity": "acceptance", "max": 25},
+                "p4l": {"maturity": "acceptance", "max": 25},
+                "n4l": {"maturity": "acceptance", "max": 25},
+                "p40": {"maturity": "acceptance", "max": 25},
+                "n40": {"maturity": "acceptance", "max": 25},
+                "an": {"maturity": "acceptance", "equals": 140000},
+                "al": {"maturity": "acceptance", "equals": 70000},
+                "to": {"maturity": "acceptance", "equals": 0}
+            }
+        }
+    }
+}

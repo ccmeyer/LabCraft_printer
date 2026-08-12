@@ -224,21 +224,21 @@ Every milestone that touches motion must preserve these invariants:
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
-| 6. Performance and motion HIL qualification | `not_started` | Speed ladder, straightness, lost-step, and reset evidence pass | Acceptance matrix complete |
+| 6. Performance and motion HIL qualification | `implemented` | Focused X gate and full 5-30 kHz geometry pass; the mixed 40 kHz geometry row passes every logical/timing gate but leaves an X physical/software offset exceeding 4,600 steps, detected by bounded home | Isolate the failing coordinated vector/direction, correct the physical-motion limit without weakening timing gates, then pass FULL, pressure coexistence, and operator observation |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
 
-Milestone 5 is verified at its 3 kHz integration scope. The exact route-enabled
-binary passed ordinary SAFE 28/28, normal-route 8/8, Milestone 4 executor 7/7,
-and closed-loop pressure 10/10 without reset or abort. Physical X/Y limits
-stopped after 105/102 emitted steps inside the 200-step bound, no rising edge
-followed assertion, home drift was 1/0 step, the worst normal-route ISR sample
-was 2,137 cycles, and the operator reported straight equal and asymmetric
-diagonals. Next, create the Milestone 6 performance and motion HIL plan for the
-5-40 kHz ladder, starvation proof, lost-step qualification, and production-rate
-straightness evidence. Evidence is recorded in
-`docs/coordinated_xy_milestone5_normal_route.md`.
+The bounded-home investigation, manual switch preflight, low-rate regression,
+and focused X direction/rate gate are accepted. Two full-suite attempts then
+passed 5-30 kHz and every logical/timing observation for all ten 40 kHz
+geometry legs, but the following X home identically exhausted an 11,916-step
+coarse guard plus 1,600-step probe without seeing the switch. Post-SAFE passed
+with no reset. Do not rerun the full suite. Run selector `2078` once on the
+ready, relatively cold machine: it executes only the camera-ratio 40 kHz
+round trip and its immediate bounded X home while recording both X enable
+outputs, STEP/ownership state, raw limit state, and legacy-home ISR evidence.
+Target evidence belongs in `docs/coordinated_xy_milestone6_performance.md`.
 
 ## Milestone 0: Baseline And Decisions
 
@@ -667,7 +667,7 @@ Use a clear, controlled motion envelope and begin below production speed:
 
 ## Milestone 6: Performance And Motion HIL Qualification
 
-Status: `not_started`
+Status: `implemented`
 
 ### Goal
 
@@ -738,6 +738,21 @@ the following are hard qualitative requirements:
 - `xy_motion_v1`: `2010`, `2011`.
 - `motion_envelope_v1`: `2012`, `2013`, `2014`, plus unchanged Z/home regression
   rows `2015`, `2016`.
+- `coordinated_xy_camera_transition_v1`: cold 40 kHz camera-ratio round trip
+  followed immediately by bounded legacy X home passed on 2026-08-12. This
+  isolates the vector and executor-to-home transition from the preceding speed
+  tiers and favors an accumulated-workload cause for the full-suite failure.
+- `coordinated_xy_40khz_v1`: selector `2077` runs only the existing result
+  `2064` geometry row and bounded post-row X/Y homes, without the lower-rate
+  tiers, focused X-direction gate, raster, camera-repeat, or pressure workload.
+  Its first run failed closed on one pending TIM2 update during the forward 1:4
+  leg. After adding result `2072`, a refined run reproduced 16 pending updates
+  during the equal-diagonal reverse and stopped before the 1:4 pair. All
+  240,000 callbacks had complete outer samples. The non-terminal full software
+  IRQ maximum was 1,909 cycles and the pending-correlated full path was 1,816
+  cycles, both below the 2,250-cycle edge interval. This moves the remaining
+  latency outside the measured C handler, toward pre-entry interrupt masking or
+  equal-priority service delay. Pre/post SAFE passed with no reset evidence.
 - Applicable pressure-regulator and homing smoke/qualification lanes because
   the shared Stepper integration was touched even though P/R behavior is out of
   scope.
@@ -755,6 +770,9 @@ powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1
 - Existing motion qualification reports pass without hiding warnings.
 - Camera-to-home no longer causes connection loss/reset in the accepted repeat
   count.
+- A bounded incremental-workload diagnostic identifies and clears the
+  history-dependent X displacement seen after the full 40 kHz geometry row;
+  the full suite remains blocked until then.
 - Host pulse-trace evidence proves the DDA path bound, and the operator reports
   that the required physical diagonal moves appear straight.
 

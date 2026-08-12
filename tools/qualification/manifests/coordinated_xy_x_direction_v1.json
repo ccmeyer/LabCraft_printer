@@ -1,0 +1,47 @@
+{
+    "schema_version": "qualification_manifest_v0",
+    "manifest_id": "coordinated_xy_x_direction_v1",
+    "name": "Coordinated XY X-Direction Investigation v1",
+    "profile": "FULL",
+    "description": "Fail-stop, home-referenced positive and negative X-only qualification at 30, 35, and 40 kHz before the full Milestone 6 suite is allowed to resume.",
+    "expected_test_ids": [2070],
+    "enforce_expected_test_ids": true,
+    "requires_operator_prompts": true,
+    "selftest_args": ["--coordinated-xy-x-direction-suite"],
+    "fixtures": [
+        {
+            "fixture_id": "pressure_closed_loop_v1",
+            "required_for": [2070],
+            "operator_note": "Confirm the fixture is installed and the full XY/Z envelope is clear. Manual X/Y switch verification was completed on the immediately preceding build; this focused selector does not repeat it because the intervening change only shortens coordinated terminal cleanup. Stop immediately for unexpected contact, abnormal sound, or loss of gantry squareness."
+        }
+    ],
+    "analysis_rules": {
+        "2070": {
+            "category": "performance",
+            "failure_domain": "firmware_motion",
+            "metrics": {
+                "n": {"maturity": "acceptance", "equals": 8},
+                "xe": {"maturity": "acceptance", "equals": 168000},
+                "ye": {"maturity": "acceptance", "equals": 0},
+                "ms": {"maturity": "acceptance", "equals": 168000},
+                "i2": {"maturity": "acceptance", "equals": 336000},
+                "i7": {"maturity": "acceptance", "equals": 0},
+                "ok": {"maturity": "acceptance", "equals": 1},
+                "pu": {"maturity": "acceptance", "equals": 0},
+                "am": {"maturity": "acceptance", "min": 1, "max": 2025},
+                "tm": {"maturity": "acceptance", "min": 1, "max": 2250},
+                "p30": {"maturity": "acceptance", "max": 25},
+                "n30": {"maturity": "acceptance", "max": 25},
+                "p35": {"maturity": "acceptance", "max": 25},
+                "n35": {"maturity": "acceptance", "max": 25},
+                "p4l": {"maturity": "acceptance", "max": 25},
+                "n4l": {"maturity": "acceptance", "max": 25},
+                "p40": {"maturity": "acceptance", "max": 25},
+                "n40": {"maturity": "acceptance", "max": 25},
+                "an": {"maturity": "acceptance", "equals": 140000},
+                "al": {"maturity": "acceptance", "equals": 70000},
+                "to": {"maturity": "acceptance", "equals": 0}
+            }
+        }
+    }
+}

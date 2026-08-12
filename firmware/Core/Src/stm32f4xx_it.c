@@ -32,6 +32,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#ifndef LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE
+#define LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE 1
+#endif
 
 /* USER CODE END PD */
 
@@ -78,6 +81,12 @@ extern UART_HandleTypeDef huart2;
 extern TIM_HandleTypeDef htim6;
 
 /* USER CODE BEGIN EV */
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+extern volatile uint8_t g_lcCoordinatedTim2IrqTimingArmed;
+extern volatile uint8_t g_lcCoordinatedTim2IrqEntryValid;
+extern volatile uint32_t g_lcCoordinatedTim2IrqEntryCycle;
+extern void MX_GANTRY_RecordTim2IrqExit(uint32_t irqExitCycle);
+#endif
 
 /* USER CODE END EV */
 
@@ -295,11 +304,19 @@ void TIM1_UP_TIM10_IRQHandler(void)
 void TIM2_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM2_IRQn 0 */
-
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  if (g_lcCoordinatedTim2IrqTimingArmed != 0u)
+  {
+    g_lcCoordinatedTim2IrqEntryCycle = DWT->CYCCNT;
+    g_lcCoordinatedTim2IrqEntryValid = 1u;
+  }
+#endif
   /* USER CODE END TIM2_IRQn 0 */
   HAL_TIM_IRQHandler(&htim2);
   /* USER CODE BEGIN TIM2_IRQn 1 */
-
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  MX_GANTRY_RecordTim2IrqExit(DWT->CYCCNT);
+#endif
   /* USER CODE END TIM2_IRQn 1 */
 }
 

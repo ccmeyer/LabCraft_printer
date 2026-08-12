@@ -2701,6 +2701,85 @@ The ten-test pressure suite takes longer than the generic 90-second FULL
 window; retain the explicit 240-second host timeout so settling progress is not
 mistaken for a stalled diagnostic.
 
+Milestone 6 qualifies the normal coordinated route at production speed while
+the approved closed-loop pressure fixture is installed. The suite uses P3
+selector `2069`, emits results `2060`-`2068` plus focused investigation result
+`2070`, stops before every later row after
+the first failure, and retains the configured 40 kHz X/Y cap:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-performance-suite --timeout-ms 900000 --out hil_reports/coordinated_xy_performance.json
+python3 tools/run_qualification.py --manifest coordinated_xy_performance_v1 --operator-prompts --fixture pressure_closed_loop_v1 --machine-id LC-001 --raw-report hil_reports/coordinated_xy_performance.json
+```
+
+After a failed post-40 kHz home reference, run the focused direction-isolation
+gate before rerunning the full suite:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-x-direction-suite --timeout-ms 300000 --out hil_reports/coordinated_xy_x_direction.json
+python3 tools/run_qualification.py --manifest coordinated_xy_x_direction_v1 --operator-prompts --fixture pressure_closed_loop_v1 --machine-id LC-001 --raw-report hil_reports/coordinated_xy_x_direction.json
+```
+
+This selector emits only result `2070`; it cannot continue into the ordinary
+40 kHz geometry, raster, camera-repeat, or pressure-stress rows.
+
+To distinguish a cold camera-vector/ownership transition from cumulative
+driver loading, run the shorter camera/home transition selector:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-camera-transition-suite --timeout-ms 180000 --out hil_reports/coordinated_xy_camera_transition.json
+python3 tools/run_qualification.py --manifest coordinated_xy_camera_transition_v1 --operator-prompts --fixture motion_clear_envelope_v1 --machine-id LC-001 --raw-report hil_reports/coordinated_xy_camera_transition.json
+```
+
+Selector `2078` emits only result `2071`. It homes Z and then X/Y, uses the
+qualified 5 kHz route to position at `(8916,30500)`, executes exactly one
+40 kHz camera-ratio round trip through `(500,500)`, and immediately starts the
+bounded legacy X home. The result records exact coordinated pulse/callback
+totals, both X enable-output states, STEP-low/ownership state, the raw X limit
+state, bounded-home phase/outcome/accounting, and final legacy TIM2 evidence.
+It does not actuate pressure or continue into any other Milestone 6 row.
+
+To isolate the complete 40 kHz geometry row from all preceding speed tiers and
+the focused X-direction workload, run:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-40khz-suite --timeout-ms 240000 --out hil_reports/coordinated_xy_40khz.json
+python3 tools/run_qualification.py --manifest coordinated_xy_40khz_v1 --operator-prompts --fixture motion_clear_envelope_v1 --machine-id LC-001 --raw-report hil_reports/coordinated_xy_40khz.json
+```
+
+Selector `2077` emits the existing result `2064` plus timing-evidence result
+`2072`. It performs the normal
+Z and sequential X/Y reference homes, runs the exact ten-move 40 kHz geometry
+row, performs the existing bounded post-row X/Y homes, restores the production
+rate caps, and exits. It does not run the 5-30 kHz tiers, result `2070`, raster,
+camera-repeat, or pressure cases. Result `2072` correlates each TIM2 callback's
+earliest user-code IRQ timestamp, Gantry-handler entry, pending-update state,
+and the timestamp immediately after `HAL_TIM_IRQHandler()` returns. Metrics
+include callback/sample counts (`i2`/`s`), missing correlations (`mi`),
+pre-handler maximum/mean (`ph`/`pa`), full software IRQ maximum/mean
+(`fm`/`fa`), non-terminal full-path maximum (`ax`), terminal full-path maximum
+(`tf`), pending-correlated pre/full maxima (`pp`/`pf`), pending count/streak
+(`pu`/`ps`), and saturation (`sf`).
+This timing begins at the first TIM2 user-code instruction; it does not include
+hardware exception-entry latency before the C handler starts or exception
+return after the final timestamp.
+
+First confirm that the `pressure_closed_loop_v1` fixture is installed and safe
+at 1-2 psi and that the complete XY/Z envelope is clear. Both performance
+selectors have exactly this one live confirmation. The manual X/Y switch
+preflight and low-rate homing regression already passed after the bounded-home
+diagnostic change, and no subsequent code affects switch reading or homing.
+It automatically homes Z, then homes X and Y sequentially at 3 kHz/1 kHz before
+the 5, 10, 20, 30, and 40 kHz ladder. Before the ordinary 40 kHz row, result
+`2070` independently qualifies positive and negative X motion at 30/35/40 kHz,
+including a 24,000-step reduced-acceleration 40 kHz case long enough to reach a
+real cruise plateau, with bounded home-reference checks after every measured
+leg. The other direction-isolation legs remain 20,000 steps.
+It also covers the Milestone 1 vectors, the Z-up 16x24 raster, repeated
+camera/home-ratio moves, and a final 40 kHz move while both pressure regulators
+are active. Stop immediately for unexpected contact, abnormal sound, pressure
+leakage, reset, or motion outside the documented envelope.
+
 Outputs:
 
 - Suite reports: `hil_reports/qualification/<machine_id>/<timestamp>/`

@@ -35,6 +35,14 @@ extern "C" int32_t MX_STEPPERZ_GetPos(void);
 extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim7;
 
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+extern "C" {
+volatile uint8_t g_lcCoordinatedTim2IrqTimingArmed = 0u;
+volatile uint8_t g_lcCoordinatedTim2IrqEntryValid = 0u;
+volatile uint32_t g_lcCoordinatedTim2IrqEntryCycle = 0u;
+}
+#endif
+
 namespace {
 
 #if defined(__GNUC__) && !defined(UNIT_TEST)
@@ -72,6 +80,20 @@ uint32_t gantryTimerMaxArr(TIM_HandleTypeDef* timer) {
 LC_COORDINATED_HW_ALWAYS_INLINE
 uint32_t gantryCycleNow() {
   return DWT->CYCCNT;
+}
+
+LC_COORDINATED_HW_ALWAYS_INLINE
+CoordinatedXyIsrInstrumentation::Phase gantryTimingPhase(
+    CoordinatedXyPlanner::ProfilePhase phase) {
+  switch (phase) {
+    case CoordinatedXyPlanner::ProfilePhase::Acceleration:
+      return CoordinatedXyIsrInstrumentation::Phase::Acceleration;
+    case CoordinatedXyPlanner::ProfilePhase::Deceleration:
+      return CoordinatedXyIsrInstrumentation::Phase::Deceleration;
+    case CoordinatedXyPlanner::ProfilePhase::Cruise:
+    default:
+      return CoordinatedXyIsrInstrumentation::Phase::Cruise;
+  }
 }
 
 void gantryEnableCycleCounter() {
@@ -267,6 +289,10 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
     _coordinatedMasterTimer = sx->_htim;
     _coordinatedTimerOwned = false;
     _resetCoordinatedInstrumentation(0u);
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+    CoordinatedXyIsrInstrumentation::finishWithoutSample(
+        _coordinatedTiming, gantryCycleNow(), false);
+#endif
     _coordinatedStartStatus = CoordinatedStartStatus::Immediate;
     xEventGroupClearBits(Orchestrator::getDoneEvents(),
                          BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
@@ -370,6 +396,9 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
 
   taskENTER_CRITICAL();
   _coordinatedTimerOwned = true;
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  g_lcCoordinatedTim2IrqTimingArmed = 1u;
+#endif
   const CoordinatedXyExecutor::ControlDisposition startDisposition =
       CoordinatedXyExecutor::start(_coordinatedCursor);
   taskEXIT_CRITICAL();
@@ -378,6 +407,10 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
     taskENTER_CRITICAL();
     (void)CoordinatedXyExecutor::requestCancel(_coordinatedCursor);
     _finishCoordinatedHardware(true);
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+    CoordinatedXyIsrInstrumentation::finishWithoutSample(
+        _coordinatedTiming, gantryCycleNow(), true);
+#endif
     taskEXIT_CRITICAL();
     _coordinatedStartStatus = CoordinatedStartStatus::HardwareMismatch;
     return _coordinatedStartStatus;
@@ -390,6 +423,11 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
 
 void Gantry::_resetCoordinatedInstrumentation(uint32_t firstArr) {
   gantryEnableCycleCounter();
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  g_lcCoordinatedTim2IrqTimingArmed = 0u;
+  g_lcCoordinatedTim2IrqEntryValid = 0u;
+  g_lcCoordinatedTim2IrqEntryCycle = 0u;
+#endif
   _coordinatedTim7Interrupts = 0u;
   _coordinatedPendingUpdateCount = 0u;
   _coordinatedMaxIsrCycles = 0u;
@@ -399,6 +437,12 @@ void Gantry::_resetCoordinatedInstrumentation(uint32_t firstArr) {
   _coordinatedLimitRequestFallingEdges = 0u;
   _coordinatedArrMin = firstArr;
   _coordinatedArrMax = firstArr;
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  CoordinatedXyIsrInstrumentation::reset(
+      _coordinatedTiming, gantryCycleNow());
+#else
+  _coordinatedTiming = CoordinatedXyIsrInstrumentation::State{};
+#endif
 }
 
 LC_COORDINATED_HW_ALWAYS_INLINE
@@ -408,26 +452,64 @@ void Gantry::_observeCoordinatedArr(uint32_t arr) {
 }
 
 LC_COORDINATED_HW_ALWAYS_INLINE
-void Gantry::_finishCoordinatedHardware(bool aborted) {
+void Gantry::_finishCoordinatedHardware(bool aborted,
+                                        bool stepStateKnownLow) {
   gantryStopAndClearUpdateTimer(_coordinatedMasterTimer);
   if (_coordinatedY != nullptr) {
     gantryStopAndClearUpdateTimer(_coordinatedY->_htim);
   }
   if (_coordinatedX != nullptr) {
-    _coordinatedX->_finishCoordinatedAxis(aborted);
+    if (aborted) {
+      if (stepStateKnownLow) {
+        _coordinatedX->_finishAbortedCoordinatedAxisFromLow();
+      } else {
+        _coordinatedX->_finishCoordinatedAxis(true);
+      }
+    } else {
+      _coordinatedX->_finishCompletedCoordinatedAxisFromLow();
+    }
   }
   if (_coordinatedY != nullptr) {
-    _coordinatedY->_finishCoordinatedAxis(aborted);
+    if (aborted) {
+      if (stepStateKnownLow) {
+        _coordinatedY->_finishAbortedCoordinatedAxisFromLow();
+      } else {
+        _coordinatedY->_finishCoordinatedAxis(true);
+      }
+    } else {
+      _coordinatedY->_finishCompletedCoordinatedAxisFromLow();
+    }
   }
   _coordinatedTimerOwned = false;
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  g_lcCoordinatedTim2IrqTimingArmed = 0u;
+  g_lcCoordinatedTim2IrqEntryValid = 0u;
+#endif
 }
 
 LC_COORDINATED_HW_ALWAYS_INLINE
-void Gantry::_finishCoordinatedFromIsr(bool aborted, BaseType_t* woken) {
-  _finishCoordinatedHardware(aborted);
+void Gantry::_finishCoordinatedFromIsr(bool aborted,
+                                       BaseType_t* woken,
+                                       bool timingSampleWillFollow) {
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  if (aborted) {
+    CoordinatedXyIsrInstrumentation::markAborted(_coordinatedTiming);
+  }
+#endif
+  // Executor terminal transitions are accepted only while STEP is already
+  // low: either before a new rise or immediately after the accounted fall.
+  _finishCoordinatedHardware(aborted, true);
   xEventGroupSetBitsFromISR(Orchestrator::getDoneEvents(),
                             BIT_STEPPER1_DONE | BIT_STEPPER2_DONE,
                             woken);
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  if (!timingSampleWillFollow) {
+    CoordinatedXyIsrInstrumentation::finishWithoutSample(
+        _coordinatedTiming, gantryCycleNow(), aborted);
+  }
+#else
+  (void)timingSampleWillFollow;
+#endif
 }
 
 LC_COORDINATED_HW_OPTIMIZED
@@ -445,7 +527,17 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
   }
   if (htim != _coordinatedMasterTimer) return false;
 
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  const bool irqEntryValid = g_lcCoordinatedTim2IrqEntryValid != 0u;
+  const uint32_t irqEntryCycle = g_lcCoordinatedTim2IrqEntryCycle;
+  g_lcCoordinatedTim2IrqEntryValid = 0u;
+#endif
   const uint32_t entryCycle = gantryCycleNow();
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  const CoordinatedXyIsrInstrumentation::Phase timingPhase =
+      gantryTimingPhase(_coordinatedCursor.cachedEvent.phase);
+  const uint32_t timingArr = _coordinatedCursor.cachedEvent.arr;
+#endif
   CoordinatedXyExecutor::ControlDisposition observedLimit =
       CoordinatedXyExecutor::ControlDisposition::AlreadySatisfied;
   if (_coordinatedX != nullptr &&
@@ -472,8 +564,37 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
 
   if (observedLimit == CoordinatedXyExecutor::ControlDisposition::StopNow) {
     BaseType_t woken = pdFALSE;
-    _finishCoordinatedFromIsr(true, &woken);
-    const uint32_t cycles = gantryCycleNow() - entryCycle;
+    _finishCoordinatedFromIsr(true, &woken, true);
+    const uint32_t recordedExitCycle = gantryCycleNow();
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+    CoordinatedXyIsrInstrumentation::recordSample(
+        _coordinatedTiming,
+        timingPhase,
+        entryCycle,
+        recordedExitCycle,
+        timingArr,
+        false,
+        false,
+        true);
+    const uint32_t finalExitCycle = gantryCycleNow();
+    CoordinatedXyIsrInstrumentation::completeSampleTiming(
+        _coordinatedTiming,
+        timingPhase,
+        entryCycle,
+        recordedExitCycle,
+        finalExitCycle,
+        true);
+    CoordinatedXyIsrInstrumentation::beginIrqPathSample(
+        _coordinatedTiming,
+        irqEntryValid,
+        irqEntryCycle,
+        entryCycle,
+        false,
+        true);
+#else
+    const uint32_t finalExitCycle = recordedExitCycle;
+#endif
+    const uint32_t cycles = finalExitCycle - entryCycle;
     if (cycles > _coordinatedMaxIsrCycles) {
       _coordinatedMaxIsrCycles = cycles;
     }
@@ -516,19 +637,52 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
   }
 
   BaseType_t woken = pdFALSE;
+  bool updatePending = false;
+  const bool terminal = tick.stopTimer &&
+      status != CoordinatedXyExecutor::TickStatus::Paused;
   if (tick.stopTimer) {
     if (status == CoordinatedXyExecutor::TickStatus::Paused) {
       HAL_TIM_Base_Stop_IT(_coordinatedMasterTimer);
       __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
     } else {
       const bool aborted = status != CoordinatedXyExecutor::TickStatus::Completed;
-      _finishCoordinatedFromIsr(aborted, &woken);
+      _finishCoordinatedFromIsr(aborted, &woken, true);
     }
   } else if (__HAL_TIM_GET_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE) != RESET) {
     ++_coordinatedPendingUpdateCount;
+    updatePending = true;
   }
 
-  const uint32_t cycles = gantryCycleNow() - entryCycle;
+  const uint32_t recordedExitCycle = gantryCycleNow();
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  CoordinatedXyIsrInstrumentation::recordSample(
+      _coordinatedTiming,
+      timingPhase,
+      entryCycle,
+      recordedExitCycle,
+      timingArr,
+      updatePending,
+      tick.accountCompletePulse,
+      terminal);
+  const uint32_t finalExitCycle = gantryCycleNow();
+  CoordinatedXyIsrInstrumentation::completeSampleTiming(
+      _coordinatedTiming,
+      timingPhase,
+      entryCycle,
+      recordedExitCycle,
+      finalExitCycle,
+      terminal);
+  CoordinatedXyIsrInstrumentation::beginIrqPathSample(
+      _coordinatedTiming,
+      irqEntryValid,
+      irqEntryCycle,
+      entryCycle,
+      updatePending,
+      terminal);
+#else
+  const uint32_t finalExitCycle = recordedExitCycle;
+#endif
+  const uint32_t cycles = finalExitCycle - entryCycle;
   if (cycles > _coordinatedMaxIsrCycles) {
     _coordinatedMaxIsrCycles = cycles;
   }
@@ -539,6 +693,23 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
 
 bool Gantry::dispatchCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
   return _instance != nullptr && _instance->_handleCoordinatedTimerFromIsr(htim);
+}
+
+LC_COORDINATED_HW_OPTIMIZED
+void Gantry::recordCoordinatedTim2IrqExitFromIsr(uint32_t irqExitCycle) {
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  if (_instance != nullptr) {
+    CoordinatedXyIsrInstrumentation::completeIrqPath(
+        _instance->_coordinatedTiming, irqExitCycle);
+  }
+#else
+  (void)irqExitCycle;
+#endif
+}
+
+extern "C" LC_COORDINATED_HW_OPTIMIZED
+void MX_GANTRY_RecordTim2IrqExit(uint32_t irqExitCycle) {
+  Gantry::recordCoordinatedTim2IrqExitFromIsr(irqExitCycle);
 }
 
 #undef LC_COORDINATED_HW_OPTIMIZED
@@ -707,6 +878,10 @@ bool Gantry::_cancelCoordinatedTask(uint32_t* risingEdgesBefore,
       CoordinatedXyExecutor::requestCancel(_coordinatedCursor);
   if (disposition == CoordinatedXyExecutor::ControlDisposition::StopNow) {
     _finishCoordinatedHardware(true);
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+    CoordinatedXyIsrInstrumentation::finishWithoutSample(
+        _coordinatedTiming, gantryCycleNow(), true);
+#endif
     signalDone = true;
   }
   taskEXIT_CRITICAL();
@@ -737,6 +912,10 @@ bool Gantry::_requestCoordinatedLimitAbortTask(Stepper::Axis axis,
                                   : CoordinatedXyExecutor::LimitAxis::Y);
   if (disposition == CoordinatedXyExecutor::ControlDisposition::StopNow) {
     _finishCoordinatedHardware(true);
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+    CoordinatedXyIsrInstrumentation::finishWithoutSample(
+        _coordinatedTiming, gantryCycleNow(), true);
+#endif
     signalDone = true;
   }
   taskEXIT_CRITICAL();
@@ -849,6 +1028,15 @@ CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
   snapshot.arrMax = _coordinatedArrMax;
   snapshot.pendingUpdateCount = _coordinatedPendingUpdateCount;
   snapshot.maxIsrCycles = _coordinatedMaxIsrCycles;
+  snapshot.selectedMasterRateHz = _coordinatedPlan.masterRateHz;
+  snapshot.selectedMasterAccelerationStepsPerSec2 =
+      _coordinatedPlan.masterAccelerationStepsPerSec2;
+  snapshot.accelerationSteps = _coordinatedPlan.accelerationSteps;
+  snapshot.cruiseSteps = _coordinatedPlan.cruiseSteps;
+  snapshot.decelerationSteps = _coordinatedPlan.decelerationSteps;
+  snapshot.triangular = _coordinatedPlan.triangular;
+  snapshot.timing = CoordinatedXyIsrInstrumentation::makeSnapshot(
+      _coordinatedTiming);
   snapshot.limitAbortRequestCount = _coordinatedLimitAbortRequestCount;
   snapshot.rawLimitAbortCount = _coordinatedRawLimitAbortCount;
   snapshot.limitRequestRisingEdges = _coordinatedLimitRequestRisingEdges;
@@ -867,6 +1055,21 @@ CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
     snapshot.yStepLow = _coordinatedY->_coordinatedStepIsLow();
   }
   taskEXIT_CRITICAL();
+  for (uint8_t i = 0u;
+       i < static_cast<uint8_t>(CoordinatedXyIsrInstrumentation::Phase::Count);
+       ++i) {
+    snapshot.phaseMeanCycles[i] =
+        CoordinatedXyIsrInstrumentation::phaseMeanCycles(
+            snapshot.timing,
+            static_cast<CoordinatedXyIsrInstrumentation::Phase>(i));
+  }
+  snapshot.terminalMeanCycles =
+      CoordinatedXyIsrInstrumentation::terminalMeanCycles(snapshot.timing);
+  snapshot.durationErrorBasisPoints =
+      CoordinatedXyIsrInstrumentation::durationErrorBasisPoints(
+          snapshot.timing,
+          HAL_RCC_GetHCLKFreq(),
+          _coordinatedPlan.timer.inputClockHz);
   snapshot.doneBits = static_cast<uint32_t>(
       xEventGroupGetBits(Orchestrator::getDoneEvents()));
   return snapshot;

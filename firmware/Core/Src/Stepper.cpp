@@ -374,10 +374,13 @@ HomeInterruptionPolicy::Outcome Stepper::home(
     const HomeInterruptionPolicy::CancellationToken* cancelToken) {
   using HomeInterruptionPolicy::Outcome;
   _homeDiagnosticSnapshot = HomeDiagnosticSnapshot{};
+  _homeDiagnosticSnapshot.startPositionSteps = _pos;
+  _homeDiagnosticSnapshot.endPositionSteps = _pos;
 
   taskENTER_CRITICAL();
   if (_coordinatedReserved || _homeSequenceActive) {
     taskEXIT_CRITICAL();
+    _homeDiagnosticSnapshot.outcome = Outcome::Failed;
     return Outcome::Failed;
   }
   _homeSequenceActive = true;
@@ -399,6 +402,9 @@ HomeInterruptionPolicy::Outcome Stepper::home(
 	taskENTER_CRITICAL();
 	_homeSequenceActive = false;
 	taskEXIT_CRITICAL();
+    _homeDiagnosticSnapshot.endPositionSteps = _pos;
+    _homeDiagnosticSnapshot.outcome = outcome;
+    _homeDiagnosticSnapshot.success = (outcome == Outcome::Succeeded);
     CrashHomePhase phase = CRASH_HOME_PHASE_FAILED;
     if (outcome == Outcome::Succeeded) phase = CRASH_HOME_PHASE_SUCCEEDED;
     else if (outcome == Outcome::Canceled) phase = CRASH_HOME_PHASE_CANCELED;
@@ -406,6 +412,7 @@ HomeInterruptionPolicy::Outcome Stepper::home(
     setHomeCheckpoint(CRASH_HOME_CHECKPOINT_FINISHING);
     return outcome;
   };
+  _homeDiagnosticSnapshot.phase = HomeDiagnosticSnapshot::Phase::InitialCheck;
   CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_INITIAL_CHECK);
 
   auto cancellationRequested = [&]() {
@@ -516,6 +523,7 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   };
 
   if (initialLimit.asserted) {
+    _homeDiagnosticSnapshot.phase = HomeDiagnosticSnapshot::Phase::InitialRelease;
     CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_RELEASE);
     if (!_backOffLimitUntilReleased(releaseChunkSteps, slowHz, releaseGuardSteps, false, "initial release", cancelToken)) {
       restoreHomeState();
@@ -537,9 +545,18 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   _softstop_floor_hz            = 200u;
 
   // Coarse approach with finite guard
+  _homeDiagnosticSnapshot.phase = HomeDiagnosticSnapshot::Phase::CoarseSeek;
+  _homeDiagnosticSnapshot.coarseCommandSteps = _homeGuardSteps;
+  const int32_t coarseStartPosition = _pos;
   CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_COARSE_SEEK);
   _softStopOnLimit = true;
   const MoveResult coarse = runMoveAndWait(_homeTowardLimitDir, _homeGuardSteps, fastHz);
+  const int64_t coarseDelta = static_cast<int64_t>(_pos) -
+                              static_cast<int64_t>(coarseStartPosition);
+  _homeDiagnosticSnapshot.coarseAccountedSteps = static_cast<uint32_t>(
+      coarseDelta < 0 ? -coarseDelta : coarseDelta);
+  _homeDiagnosticSnapshot.limitSeen = coarse.limitSeen;
+  _homeDiagnosticSnapshot.limitAsserted = coarse.limitAsserted;
   if (!coarse.completed) {
     return finishOutcome(cancellationRequested() ? Outcome::Canceled : Outcome::Failed);
   }
@@ -548,8 +565,12 @@ HomeInterruptionPolicy::Outcome Stepper::home(
 
   bool coarseDetected = StepperLimitPolicy::homeLimitDetected(coarse.limitSeen, coarse.limitAsserted);
   if (!coarseDetected) {
+    _homeDiagnosticSnapshot.phase = HomeDiagnosticSnapshot::Phase::Probe;
     _softStopOnLimit = true;
     const MoveResult probe = runMoveAndWait(_homeTowardLimitDir, backoffSteps * 4u, slowHz);
+    _homeDiagnosticSnapshot.limitSeen =
+        _homeDiagnosticSnapshot.limitSeen || probe.limitSeen;
+    _homeDiagnosticSnapshot.limitAsserted = probe.limitAsserted;
     if (!probe.completed) {
       return finishOutcome(cancellationRequested() ? Outcome::Canceled : Outcome::Failed);
     }
@@ -581,6 +602,7 @@ HomeInterruptionPolicy::Outcome Stepper::home(
 //  }
 
   _softstop_accel_override_sps2 = 0.f;
+  _homeDiagnosticSnapshot.phase = HomeDiagnosticSnapshot::Phase::PreFineRelease;
   CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_RELEASE);
   if (!_backOffLimitUntilReleased(releaseChunkSteps, slowHz, releaseGuardSteps, true, "pre-fine release", cancelToken)) {
     restoreHomeState();
@@ -589,10 +611,14 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   _resetMoveLimitState();
 
   // Fine approach (short)
+  _homeDiagnosticSnapshot.phase = HomeDiagnosticSnapshot::Phase::FineSeek;
   CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_FINE_SEEK);
   _softstop_accel_override_sps2 = home_brake_accel;
   _softStopOnLimit = true;
   const MoveResult fine = runMoveAndWait(_homeTowardLimitDir, backoffSteps * 8u, slowHz);
+  _homeDiagnosticSnapshot.limitSeen =
+      _homeDiagnosticSnapshot.limitSeen || fine.limitSeen;
+  _homeDiagnosticSnapshot.limitAsserted = fine.limitAsserted;
   if (!fine.completed) {
     return finishOutcome(cancellationRequested() ? Outcome::Canceled : Outcome::Failed);
   }
@@ -605,6 +631,7 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   }
 
   // Zero & move off switch slightly
+  _homeDiagnosticSnapshot.phase = HomeDiagnosticSnapshot::Phase::FinalBackoff;
   CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_FINAL_BACKOFF);
   _homeDiagnosticSnapshot.fineLimitPositionSteps = _pos;
   _pos = 0;
@@ -616,7 +643,6 @@ HomeInterruptionPolicy::Outcome Stepper::home(
     return finishOutcome(Outcome::Canceled);
   }
   _homeDiagnosticSnapshot.finalBackoffPositionSteps = _pos;
-  _homeDiagnosticSnapshot.success = true;
 
   restoreHomeState();
   return finishOutcome(Outcome::Succeeded);
@@ -1023,6 +1049,27 @@ void Stepper::_finishCoordinatedAxis(bool aborted)
   if (aborted) {
     _targetPos = _pos;
   }
+  _inSoftStop = false;
+  _coordinatedReserved = false;
+}
+
+LC_COORDINATED_GPIO_OPTIMIZED
+void Stepper::_finishAbortedCoordinatedAxisFromLow()
+{
+  // ISR aborts reach cleanup only before a new rise or after accounting the
+  // current falling edge. Preserve the task-context forced-low finalizer for
+  // paths where that invariant has not already been established.
+  _targetPos = _pos;
+  _inSoftStop = false;
+  _coordinatedReserved = false;
+}
+
+LC_COORDINATED_GPIO_OPTIMIZED
+void Stepper::_finishCompletedCoordinatedAxisFromLow()
+{
+  // Successful coordinated completion is entered only after the final
+  // falling edge. Avoid repeating the STEP-low GPIO write in that bounded
+  // terminal path; abort cleanup continues to force all STEP pins low.
   _inSoftStop = false;
   _coordinatedReserved = false;
 }
