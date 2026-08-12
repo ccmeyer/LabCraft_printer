@@ -14,6 +14,13 @@ namespace {
 #endif
 
 constexpr uint64_t kNanosecondsPerSecond = 1000000000ULL;
+// The ideal velocity-squared cosine period LUT has a worst piecewise-linear
+// acceleration coefficient below 0.800 for every start/target period ratio
+// in the planner's supported [1, 5] range. Use 7/8 (0.875) so phase sampling
+// and integer ARR rounding retain explicit margin below the axis acceleration
+// cap on the real timer sequence.
+constexpr uint64_t kProfileAccelerationNumerator = 7u;
+constexpr uint64_t kProfileAccelerationDenominator = 8u;
 
 bool magnitudeOf(int64_t value, uint32_t& magnitude) {
   if (value == std::numeric_limits<int64_t>::min()) {
@@ -56,6 +63,38 @@ uint32_t integerSquareRoot(uint64_t value) {
     bit >>= 2u;
   }
   return static_cast<uint32_t>(root);
+}
+
+uint64_t requiredProfileRampSteps(uint32_t rateHz,
+                                  uint32_t accelerationStepsPerSec2) {
+  const uint64_t rateSquared = static_cast<uint64_t>(rateHz) * rateHz;
+  const uint64_t numerator =
+      rateSquared * kProfileAccelerationNumerator;
+  const uint64_t denominator =
+      static_cast<uint64_t>(accelerationStepsPerSec2) *
+      kProfileAccelerationDenominator;
+  return ceilDivide(numerator, denominator);
+}
+
+uint32_t maximumTriangularRate(uint32_t requestedRateHz,
+                               uint32_t accelerationStepsPerSec2,
+                               uint32_t rampSteps) {
+  uint32_t accepted = 0u;
+  uint32_t low = 1u;
+  uint32_t high = requestedRateHz;
+  while (low <= high) {
+    const uint32_t middle = low + ((high - low) / 2u);
+    if (requiredProfileRampSteps(middle, accelerationStepsPerSec2) <=
+        rampSteps) {
+      accepted = middle;
+      if (middle == std::numeric_limits<uint32_t>::max()) break;
+      low = middle + 1u;
+    } else {
+      if (middle == 0u) break;
+      high = middle - 1u;
+    }
+  }
+  return accepted;
 }
 
 uint64_t scaledMasterLimit(uint32_t axisLimit,
@@ -212,12 +251,9 @@ PlanStatus prepare(const PlanRequest& request, CoordinatedXyPlan& plan) {
     return plan.status;
   }
 
-  const uint64_t rateSquared =
-      static_cast<uint64_t>(plan.masterRateHz) * plan.masterRateHz;
-  const uint64_t twiceAcceleration =
-      static_cast<uint64_t>(plan.masterAccelerationStepsPerSec2) * 2u;
   const uint64_t requestedAccelerationSteps =
-      ceilDivide(rateSquared, twiceAcceleration);
+      requiredProfileRampSteps(plan.masterRateHz,
+                               plan.masterAccelerationStepsPerSec2);
 
   if ((requestedAccelerationSteps * 2u) <= plan.masterSteps) {
     plan.accelerationSteps = static_cast<uint32_t>(requestedAccelerationSteps);
@@ -225,16 +261,17 @@ PlanStatus prepare(const PlanRequest& request, CoordinatedXyPlan& plan) {
     plan.cruiseSteps = plan.masterSteps - plan.accelerationSteps -
                        plan.decelerationSteps;
   } else {
-    const uint64_t peakProduct =
-        static_cast<uint64_t>(plan.masterSteps) *
-        plan.masterAccelerationStepsPerSec2;
-    uint32_t peakRate = integerSquareRoot(peakProduct);
-    if (peakRate == 0u) peakRate = 1u;
-    plan.masterRateHz = std::min(peakRate, plan.masterRateCapHz);
     plan.accelerationSteps = plan.masterSteps / 2u;
     plan.decelerationSteps = plan.accelerationSteps;
     plan.cruiseSteps = plan.masterSteps - plan.accelerationSteps -
                        plan.decelerationSteps;
+    uint32_t peakRate = plan.accelerationSteps == 0u
+        ? integerSquareRoot(plan.masterAccelerationStepsPerSec2)
+        : maximumTriangularRate(plan.masterRateHz,
+                                plan.masterAccelerationStepsPerSec2,
+                                plan.accelerationSteps);
+    if (peakRate == 0u) peakRate = 1u;
+    plan.masterRateHz = std::min(peakRate, plan.masterRateCapHz);
     plan.triangular = true;
   }
 

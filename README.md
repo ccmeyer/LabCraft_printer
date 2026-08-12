@@ -2764,6 +2764,14 @@ This timing begins at the first TIM2 user-code instruction; it does not include
 hardware exception-entry latency before the C handler starts or exception
 return after the final timestamp.
 
+The coordinated profile applies its cosine to velocity squared and transforms
+the result into the fixed-point timer-period LUT. With the default 140,000
+steps/s2 setting, the 40 kHz ramp is 10,000 master steps and its calculated
+smooth-envelope peak is approximately 131,100 steps/s2. Each 20,000-step
+selector-2077 leg still reaches the exact 40 kHz target at the phase join; this
+corrects the former ARR-cosine profile's approximately 443,900 steps/s2 peak
+without silently lowering the focused test rate.
+
 Result `2073` captures TIM2 `CNT` and `ARR` beside that first DWT timestamp,
 before HAL dispatch and without calling HAL or FreeRTOS. It reports callbacks
 (`i2`), valid/missing entry samples (`s`/`mi`), maximum/mean entry counter

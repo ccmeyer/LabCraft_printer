@@ -525,6 +525,98 @@ production ceiling; Stage 1 remains diagnostic-only and is not a production
 default. The task-mutex variant is not implemented or enabled, so normal
 operation continues to use the existing status critical section.
 
+### Velocity-Domain Acceleration Correction Candidate
+
+Review of the separate X reference defect found that the `140000 steps/s^2`
+axis value was a planner input but not an actual peak bound. The old planner
+used `v^2/(2a)` to select 5,715 acceleration steps at 40 kHz, then applied the
+cosine to timer `ARR`. Because velocity is proportional to `1/(ARR+1)`, the
+resulting smooth velocity envelope peaked at approximately 443,900 steps/s2,
+about 3.17 times the configured value, near 86 percent of the ramp. This can
+increase physical torque demand and is a credible contributor to lost steps;
+it is separate from the TIM2 interrupt-entry investigation.
+
+The correction keeps the ISR fixed-point, table-driven, allocation-free, and
+division-free. The 257-point Q20 table now represents a cosine in velocity
+squared transformed back into timer period. Deceleration reads its reciprocal
+time-reversed form. Planner preparation uses the conservative bounded ramp
+length
+
+`ceil(7 * target_rate^2 / (8 * acceleration_cap))`.
+
+For the 90 MHz timer, 40 kHz target, and 140,000 steps/s2 cap, this changes each
+full acceleration/deceleration ramp from 5,715 to 10,000 master steps. The
+calculated piecewise smooth-envelope peak is approximately 131,100 steps/s2.
+Every 20,000-step geometry leg still reaches target `ARR=1124` at its phase
+join, and the 30,000-step camera-ratio leg has a 10,000-step cruise, so the
+focused selector remains a genuine 40 kHz qualification. Integer ARR
+quantization remains visible as one-tick pulse-period granularity; the bounded
+contract is the 256-cell velocity envelope that exposed the prior 443,900
+steps/s2 defect.
+
+Automated candidate evidence before HIL:
+
+- 344/344 host tests and 8,723,583 checks pass, including period ratios
+  1.01-5.00, full coordinated traces from 3-40 kHz, triangular moves, unequal
+  axis limits, and 16-/32-bit timer bounds;
+- Debug target build passes with the same three pre-existing warnings;
+- candidate binary: 328,272 bytes, SHA-256
+  `598EAD7B83DA6E0455B9D1B9761DD0D2865DD63D151BDE38FD085D341B796F20`.
+
+HIL acceptance remains one pre-SAFE 28/28 run, exactly one guarded selector
+`2077` run, and one post-SAFE 28/28 run. The Stage 1 lateness/IRQ results remain
+enabled so the repeat also reports whether the pending symptom recurs. This
+motion-profile candidate does not implement status mutex selector `2076`.
+
+### Velocity-Domain Correction HIL Result
+
+The single authorized selector `2077` repeat passed all three firmware results
+and normalized with no blocking issues or warnings. The motion row completed
+the exact ten moves, 106,832 X pulses, 180,000 Y pulses, 220,000 master steps,
+and 440,000 TIM2 callbacks with no TIM7 callbacks. It retained the real 40 kHz
+target, reported zero pending observations/streak, zero saturation, zero
+timeout, 100 ms maximum host status gap over 181 samples, and a passing progress
+watchdog. The post-row reference errors were X=4 and Y=1 steps, compared with
+X=54 and Y=3 on the immediately preceding ARR-cosine Stage 1 image.
+
+The result strongly supports excessive effective acceleration as a contributor
+to the physical X displacement, but one passing repeat is not a statistical
+proof that all lost-step behavior is eliminated. It also does not resolve the
+separate interrupt-entry issue: result `2073` still measured `cm=507`,
+`lc=1799`, and `dm=968`. No pending update happened in this run, so `pm=0` is
+again not a pending-correlated sample and the status-mutex Stage 2 gate remains
+closed.
+
+Timing remained within the retained acceptance gates: inner acceleration,
+cruise, deceleration, and terminal maxima were 1,202, 1,068, 1,230, and 2,221
+core cycles respectively; non-terminal complete software IRQ maximum was 2,051
+cycles. Results `2064`, `2072`, and `2073` all passed with complete coverage.
+Pre/post SAFE passed 28/28, both reported no reset record, and watchdog metrics
+were unchanged (`sticky_ct=1`, `recovery_boot=1`, all four required tasks live).
+
+Evidence:
+
+- binary: 328,272 bytes, SHA-256
+  `598EAD7B83DA6E0455B9D1B9761DD0D2865DD63D151BDE38FD085D341B796F20`;
+- pre-SAFE: `hil_reports/m6_accel_profile_pre_safe_20260812T183642Z.json`,
+  SHA-256 `4B1D416E203C3CDFE5157F9FAB50C6A237BDD8E551019AD62836B684484B7328`,
+  28/28 pass;
+- focused physical run:
+  `hil_reports/m6_accel_profile_40khz_20260812T183642Z.json`, SHA-256
+  `090CCACC94F4CE29DF6289BB5CC37E6DB3859AD4BCE0FD95505EB36FE23E3476`,
+  3/3 pass;
+- normalized report:
+  `hil_reports/qualification/LC-001/20260812T184002Z/report.json`, SHA-256
+  `BA7A8ABCBA82D50BBEA872F1C96C136831AA6AD4417A48C0978E92F3EEA41E14`,
+  verdict `pass` with zero blocking issues and zero warnings;
+- post-SAFE: `hil_reports/m6_accel_profile_post_safe_20260812T183642Z.json`,
+  SHA-256 `28E44458848E972124811557E8BFAEAAD13F17D2FF7B4BD66589F72883973983`,
+  28/28 pass.
+
+The printer remains flashed with this exact velocity-domain correction image.
+Do not promote it to the production default or rerun FULL until the evidence
+and the remaining entry-lateness risk are reviewed.
+
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort
 terminal measured 2,349 cycles versus the retained 2,250-cycle gate; cancel

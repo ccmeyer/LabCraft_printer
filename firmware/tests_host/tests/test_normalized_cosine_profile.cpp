@@ -1,6 +1,5 @@
 #include "CppUTest/TestHarness.h"
 #include "NormalizedCosineProfile.h"
-#include "StepperProfileMath.h"
 
 #include <algorithm>
 #include <cmath>
@@ -9,21 +8,27 @@
 
 namespace {
 
-uint32_t legacyArr(uint32_t intervalIndex,
-                   uint32_t intervalCount,
-                   uint32_t fromArr,
-                   uint32_t toArr)
+uint32_t velocitySquaredCosineArr(uint32_t intervalIndex,
+                                  uint32_t intervalCount,
+                                  uint32_t fromArr,
+                                  uint32_t toArr)
 {
     if (intervalCount == 0u || intervalIndex >= intervalCount) {
         return toArr;
     }
-    const float t = static_cast<float>(intervalIndex) /
-                    static_cast<float>(intervalCount);
-    const float ease = StepperProfileMath::ease01(
-        StepperProfileMath::Profile::SCurveCosine, t);
-    const int32_t offset = static_cast<int32_t>(
-        (static_cast<float>(toArr) - static_cast<float>(fromArr)) * ease);
-    return static_cast<uint32_t>(static_cast<int64_t>(fromArr) + offset);
+    const bool descending = fromArr > toArr;
+    double phase = static_cast<double>(intervalIndex) /
+                   static_cast<double>(intervalCount);
+    if (!descending) phase = 1.0 - phase;
+    const double ease = 0.5 * (1.0 - std::cos(3.14159265358979323846 * phase));
+    const double slowPeriod = static_cast<double>(std::max(fromArr, toArr)) + 1.0;
+    const double fastPeriod = static_cast<double>(std::min(fromArr, toArr)) + 1.0;
+    const double inversePeriodSquared =
+        (1.0 - ease) / (slowPeriod * slowPeriod) +
+        ease / (fastPeriod * fastPeriod);
+    const uint32_t period = static_cast<uint32_t>(
+        std::llround(1.0 / std::sqrt(inversePeriodSquared)));
+    return period - 1u;
 }
 
 uint32_t absDifference(uint32_t lhs, uint32_t rhs)
@@ -64,30 +69,42 @@ TEST(NormalizedCosineProfile, HandlesInvalidImmediateAndClampedPreparation)
     CHECK_FALSE(advance(cursor));
 }
 
-TEST(NormalizedCosineProfile, LutIsExactMonotonicAndSymmetric)
+TEST(NormalizedCosineProfile, LutIsExactMonotonicAndTimeReversible)
 {
     using namespace NormalizedCosineProfile;
-    uint32_t values[kLutIntervals + 1u] = {};
-    RampCursor cursor{};
+    uint32_t acceleration[kLutIntervals + 1u] = {};
+    uint32_t deceleration[kLutIntervals + 1u] = {};
+    RampCursor accelerationCursor{};
+    RampCursor decelerationCursor{};
     CHECK_EQUAL(static_cast<int>(PrepareStatus::Ready),
                 static_cast<int>(prepare(
-                    {0u, kEaseOne, 0u, kEaseOne, kLutIntervals}, cursor)));
+                    {kEaseOne, 0u, 0u, kEaseOne, kLutIntervals},
+                    accelerationCursor)));
+    CHECK_EQUAL(static_cast<int>(PrepareStatus::Ready),
+                static_cast<int>(prepare(
+                    {0u, kEaseOne, 0u, kEaseOne, kLutIntervals},
+                    decelerationCursor)));
 
     for (uint32_t i = 0u; i <= kLutIntervals; ++i) {
-        values[i] = currentArr(cursor);
+        acceleration[i] = currentArr(accelerationCursor);
+        deceleration[i] = currentArr(decelerationCursor);
         if (i != 0u) {
-            CHECK_TRUE(values[i] >= values[i - 1u]);
+            CHECK_TRUE(acceleration[i] <= acceleration[i - 1u]);
+            CHECK_TRUE(deceleration[i] >= deceleration[i - 1u]);
         }
         if (i != kLutIntervals) {
-            CHECK_TRUE(advance(cursor));
+            CHECK_TRUE(advance(accelerationCursor));
+            CHECK_TRUE(advance(decelerationCursor));
         }
     }
 
-    UNSIGNED_LONGS_EQUAL(0u, values[0]);
-    UNSIGNED_LONGS_EQUAL(kEaseOne, values[kLutIntervals]);
+    UNSIGNED_LONGS_EQUAL(kEaseOne, acceleration[0]);
+    UNSIGNED_LONGS_EQUAL(0u, acceleration[kLutIntervals]);
+    UNSIGNED_LONGS_EQUAL(0u, deceleration[0]);
+    UNSIGNED_LONGS_EQUAL(kEaseOne, deceleration[kLutIntervals]);
     for (uint32_t i = 0u; i <= kLutIntervals; ++i) {
-        UNSIGNED_LONGS_EQUAL(kEaseOne,
-                            values[i] + values[kLutIntervals - i]);
+        CHECK_TRUE(absDifference(
+            acceleration[i], deceleration[kLutIntervals - i]) <= 1u);
     }
 }
 
@@ -112,51 +129,86 @@ TEST(NormalizedCosineProfile, PhaseAccumulatorMatchesExactQ32Fractions)
     }
 }
 
-TEST(NormalizedCosineProfile, MatchesLegacyArrWithinAcceptedNormalXyError)
+TEST(NormalizedCosineProfile, MatchesVelocitySquaredCosineAtNominalPeriodRatio)
 {
     using namespace NormalizedCosineProfile;
-    constexpr uint32_t kTimerClockHz = 90000000u;
-    const uint32_t ratesHz[] = {3000u, 6000u, 10000u, 20000u, 40000u};
     const uint32_t intervalCounts[] = {1u, 2u, 3u, 10u, 258u, 1000u, 10000u, 11430u, 60000u};
-    const uint32_t timerMaxima[] = {std::numeric_limits<uint32_t>::max(), 65535u};
+    constexpr uint32_t kSlowArr = 4999u;
+    constexpr uint32_t kFastArr = 999u;
 
     uint32_t maximumError = 0u;
     double squaredError = 0.0;
     uint64_t sampleCount = 0u;
 
-    for (uint32_t timerMaximum : timerMaxima) {
-        for (uint32_t rateHz : ratesHz) {
-            const uint32_t target = std::min(
-                StepperProfileMath::arrForFreq(kTimerClockHz, rateHz), timerMaximum);
-            const uint32_t start = static_cast<uint32_t>(std::min<uint64_t>(
-                static_cast<uint64_t>(target) * 5u, timerMaximum));
-            for (uint32_t intervalCount : intervalCounts) {
-                for (uint32_t direction = 0u; direction < 2u; ++direction) {
-                    const uint32_t from = (direction == 0u) ? start : target;
-                    const uint32_t to = (direction == 0u) ? target : start;
-                    RampCursor cursor{};
-                    CHECK_EQUAL(static_cast<int>(PrepareStatus::Ready),
-                                static_cast<int>(prepare(
-                                    {from, to, 179u, timerMaximum, intervalCount}, cursor)));
-                    for (uint32_t k = 0u; k <= intervalCount; ++k) {
-                        const uint32_t actual = currentArr(cursor);
-                        const uint32_t expected = legacyArr(k, intervalCount, from, to);
-                        const uint32_t error = absDifference(actual, expected);
-                        maximumError = std::max(maximumError, error);
-                        squaredError += static_cast<double>(error) * error;
-                        ++sampleCount;
-                        if (k != intervalCount) {
-                            CHECK_TRUE(advance(cursor));
-                        }
-                    }
+    for (uint32_t intervalCount : intervalCounts) {
+        for (uint32_t direction = 0u; direction < 2u; ++direction) {
+            const uint32_t from = direction == 0u ? kSlowArr : kFastArr;
+            const uint32_t to = direction == 0u ? kFastArr : kSlowArr;
+            RampCursor cursor{};
+            CHECK_EQUAL(static_cast<int>(PrepareStatus::Ready),
+                        static_cast<int>(prepare(
+                            {from, to, 0u, 65535u, intervalCount}, cursor)));
+            for (uint32_t k = 0u; k <= intervalCount; ++k) {
+                const uint32_t actual = currentArr(cursor);
+                const uint32_t expected = velocitySquaredCosineArr(
+                    k, intervalCount, from, to);
+                const uint32_t error = absDifference(actual, expected);
+                maximumError = std::max(maximumError, error);
+                squaredError += static_cast<double>(error) * error;
+                ++sampleCount;
+                if (k != intervalCount) {
+                    CHECK_TRUE(advance(cursor));
                 }
             }
         }
     }
 
     const double rmsError = std::sqrt(squaredError / static_cast<double>(sampleCount));
-    CHECK_TRUE(maximumError <= 2u);
-    CHECK_TRUE(rmsError <= 0.5);
+    CHECK_TRUE(maximumError <= 3u);
+    CHECK_TRUE(rmsError <= 1.0);
+}
+
+TEST(NormalizedCosineProfile, PiecewiseAccelerationCoefficientStaysBelowPlannerBound)
+{
+    using namespace NormalizedCosineProfile;
+    constexpr uint32_t kFastPeriod = 100000u;
+    double maximumCoefficient = 0.0;
+
+    // Cover period ratios 1.01 through 5.00. The coordinated planner always
+    // stays in this range because start ARR is target ARR times five, capped
+    // by the timer maximum.
+    for (uint32_t ratioHundredths = 101u;
+         ratioHundredths <= 500u;
+         ++ratioHundredths) {
+        const uint32_t slowPeriod =
+            (kFastPeriod * ratioHundredths) / 100u;
+        RampCursor cursor{};
+        CHECK_EQUAL(static_cast<int>(PrepareStatus::Ready),
+                    static_cast<int>(prepare(
+                        {slowPeriod - 1u,
+                         kFastPeriod - 1u,
+                         0u,
+                         std::numeric_limits<uint32_t>::max(),
+                         kLutIntervals},
+                        cursor)));
+        double previousNormalizedRate =
+            static_cast<double>(kFastPeriod) / slowPeriod;
+        for (uint32_t cell = 0u; cell < kLutIntervals; ++cell) {
+            CHECK_TRUE(advance(cursor));
+            const double normalizedRate =
+                static_cast<double>(kFastPeriod) /
+                (static_cast<double>(currentArr(cursor)) + 1.0);
+            const double coefficient =
+                (normalizedRate * normalizedRate -
+                 previousNormalizedRate * previousNormalizedRate) *
+                (static_cast<double>(kLutIntervals) / 2.0);
+            maximumCoefficient = std::max(maximumCoefficient, coefficient);
+            previousNormalizedRate = normalizedRate;
+        }
+    }
+
+    CHECK_COMPARE(maximumCoefficient, <, 0.8005);
+    CHECK_COMPARE(maximumCoefficient, <, 7.0 / 8.0);
 }
 
 TEST(NormalizedCosineProfile, ReverseRampIsMonotonicAndDeterministic)

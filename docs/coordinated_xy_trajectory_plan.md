@@ -224,22 +224,31 @@ Every milestone that touches motion must preserve these invariants:
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
-| 6. Performance and motion HIL qualification | `implemented` | Stage 1 completed 440,000 fully covered callbacks with measurable entry lateness but no pending updates; its separate post-row X reference drift was 54 steps | Stage 2 is not authorized by this run; do not repeat motion to force pending or rerun FULL, and treat the X drift as a separate defect |
+| 6. Performance and motion HIL qualification | `implemented` | The velocity-domain correction reduced the calculated peak from 443,900 to about 131,100 steps/s2 and passed one guarded 40 kHz row with X=4/Y=1 drift; measurable entry lateness remains | Review the passing correction evidence; Stage 2 remains unauthorized unless its independent pending/lateness gate opens, and FULL remains blocked pending review |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
 
-Stage 1 is complete at source/artifact commit `b777f993`. The physical selector
-`2077` run covered all 440,000 callbacks without missing samples, saturation,
-pending observations, watchdog trouble, or reset evidence. It measured
-`cm=506`, `lc=2072`, and `dm=966`, but `pu=0`/`ps=0` means the approved Stage 2
-condition did not reproduce. Do not implement selector `2076`, repeat motion
-to force pending, or rerun FULL from this result. The row separately failed its
-post-row X reference with `xd=54` while `yd=3`; the bounded home reached its
-limit and completed, so track this as an X displacement/repeatability defect
-rather than attributing it to the status critical section. Review the Stage 1
-evidence and choose a separately planned next isolation step before more
-physical motion.
+Stage 1 is complete at source/artifact commit `b777f993`. Its physical selector
+`2077` run covered all 440,000 callbacks without pending observations, but the
+row failed its post-row X reference with `xd=54`. Review then identified an
+independent trajectory defect: the configured `140000 steps/s^2` selected only
+the old ramp distance, while applying the cosine to timer period produced an
+approximately `443900 steps/s^2` smooth-envelope peak at 40 kHz.
+
+The verified correction candidate applies the cosine to velocity squared,
+maps that curve back into the same fixed-point ARR LUT, and sizes the ramp with
+a conservative `7/8 * v^2/a` bound. At 40 kHz it uses 10,000 acceleration
+steps and has a calculated smooth peak of approximately `131100 steps/s^2`.
+The shortest 20,000-step qualification legs still reach the exact target ARR,
+so selector `2077` remained a real 40 kHz test. The required automated gates,
+pre-SAFE 28/28, single guarded selector `2077`, and post-SAFE 28/28 all passed.
+The physical reference error improved from X=54/Y=3 to X=4/Y=1, with all three
+focused results passing. Entry lateness remained measurable (`cm=507`,
+`dm=968`) without a pending observation. Review this correction evidence
+before production promotion or FULL qualification. Selector `2076` remains
+unauthorized unless the original Stage 2 pending/lateness gate is independently
+met.
 
 ## Milestone 0: Baseline And Decisions
 
@@ -380,6 +389,13 @@ sequence or motion profile.
 Status: `verified`
 
 Evidence record: `docs/coordinated_xy_milestone2_lut.md`
+
+Post-Milestone-6 correction: the original compatibility LUT applied its cosine
+directly to ARR. That preserved the legacy timer sequence but did not preserve
+the configured velocity-domain acceleration bound. The correction milestone
+retains the 257-point Q20 fixed-cost ISR interface while transforming a cosine
+in velocity squared back into timer period and using its proven acceleration
+coefficient to size the ramp.
 
 ### Goal
 

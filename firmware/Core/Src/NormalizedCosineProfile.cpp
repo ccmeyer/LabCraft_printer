@@ -14,43 +14,56 @@ namespace {
 #define LC_PROFILE_FORCE_INLINE inline
 #endif
 
-constexpr uint32_t kCosineEaseQ20[kLutIntervals + 1u] = {
-    0u, 39u, 158u, 355u, 632u, 987u, 1421u, 1933u,
-    2525u, 3195u, 3943u, 4770u, 5675u, 6658u, 7719u, 8858u,
-    10074u, 11368u, 12739u, 14187u, 15712u, 17314u, 18992u, 20746u,
-    22576u, 24481u, 26462u, 28517u, 30648u, 32852u, 35131u, 37483u,
-    39909u, 42408u, 44979u, 47622u, 50337u, 53124u, 55981u, 58909u,
-    61907u, 64975u, 68112u, 71317u, 74591u, 77933u, 81341u, 84817u,
-    88358u, 91966u, 95638u, 99375u, 103176u, 107040u, 110967u, 114957u,
-    119008u, 123120u, 127292u, 131525u, 135816u, 140166u, 144574u, 149039u,
-    153560u, 158138u, 162770u, 167457u, 172198u, 176991u, 181837u, 186735u,
-    191683u, 196682u, 201729u, 206826u, 211970u, 217161u, 222399u, 227682u,
-    233009u, 238381u, 243795u, 249252u, 254750u, 260289u, 265867u, 271485u,
-    277140u, 282833u, 288562u, 294327u, 300126u, 305959u, 311825u, 317723u,
-    323652u, 329611u, 335599u, 341616u, 347661u, 353732u, 359828u, 365950u,
-    372095u, 378263u, 384454u, 390665u, 396896u, 403147u, 409416u, 415702u,
-    422004u, 428322u, 434655u, 441001u, 447359u, 453729u, 460110u, 466500u,
-    472899u, 479305u, 485719u, 492138u, 498562u, 504990u, 511421u, 517854u,
-    524288u, 530722u, 537155u, 543586u, 550014u, 556438u, 562857u, 569271u,
-    575677u, 582076u, 588466u, 594847u, 601217u, 607575u, 613921u, 620254u,
-    626572u, 632874u, 639160u, 645429u, 651680u, 657911u, 664122u, 670313u,
-    676481u, 682626u, 688748u, 694844u, 700915u, 706960u, 712977u, 718965u,
-    724924u, 730853u, 736751u, 742617u, 748450u, 754249u, 760014u, 765743u,
-    771436u, 777091u, 782709u, 788287u, 793826u, 799324u, 804781u, 810195u,
-    815567u, 820894u, 826177u, 831415u, 836606u, 841750u, 846847u, 851894u,
-    856893u, 861841u, 866739u, 871585u, 876378u, 881119u, 885806u, 890438u,
-    895016u, 899537u, 904002u, 908410u, 912760u, 917051u, 921284u, 925456u,
-    929568u, 933619u, 937609u, 941536u, 945400u, 949201u, 952938u, 956610u,
-    960218u, 963759u, 967235u, 970643u, 973985u, 977259u, 980464u, 983601u,
-    986669u, 989667u, 992595u, 995452u, 998239u, 1000954u, 1003597u, 1006168u,
-    1008667u, 1011093u, 1013445u, 1015724u, 1017928u, 1020059u, 1022114u, 1024095u,
-    1026000u, 1027830u, 1029584u, 1031262u, 1032864u, 1034389u, 1035837u, 1037208u,
-    1038502u, 1039718u, 1040857u, 1041918u, 1042901u, 1043806u, 1044633u, 1045381u,
-    1046051u, 1046643u, 1047155u, 1047589u, 1047944u, 1048221u, 1048418u, 1048537u,
-    1048576u,
+// Period-domain transform of a cosine applied to velocity squared. The table
+// assumes the coordinated planner's nominal 5:1 start/target period ratio:
+//
+//   E(u) = (1 - cos(pi*u)) / 2
+//   P(u) / Ptarget = 5 / sqrt(1 + 24*E(u))
+//
+// Interpolating this table into ARR keeps the ISR fixed-point and bounded,
+// while avoiding the 3.17x acceleration amplification caused by applying the
+// cosine directly to ARR. Ascending (deceleration) ramps use the time-reversed
+// table so acceleration and deceleration remain reciprocal.
+constexpr uint32_t kVelocitySquaredCosinePeriodEaseQ20[
+    kLutIntervals + 1u] = {
+    0u, 592u, 2362u, 5297u, 9371u, 14554u, 20803u, 28071u,
+    36303u, 45440u, 55419u, 66173u, 77634u, 89732u, 102397u, 115563u,
+    129161u, 143127u, 157399u, 171919u, 186632u, 201486u, 216433u, 231429u,
+    246435u, 261414u, 276333u, 291163u, 305878u, 320455u, 334874u, 349117u,
+    363171u, 377021u, 390658u, 404073u, 417259u, 430210u, 442923u, 455396u,
+    467625u, 479611u, 491353u, 502853u, 514111u, 525130u, 535913u, 546462u,
+    556781u, 566872u, 576741u, 586390u, 595824u, 605048u, 614065u, 622880u,
+    631497u, 639921u, 648156u, 656207u, 664078u, 671774u, 679298u, 686655u,
+    693849u, 700884u, 707764u, 714494u, 721076u, 727516u, 733815u, 739979u,
+    746010u, 751913u, 757689u, 763344u, 768878u, 774297u, 779603u, 784798u,
+    789885u, 794868u, 799749u, 804531u, 809215u, 813805u, 818303u, 822711u,
+    827031u, 831266u, 835418u, 839488u, 843479u, 847393u, 851231u, 854996u,
+    858688u, 862311u, 865865u, 869352u, 872774u, 876132u, 879427u, 882662u,
+    885837u, 888954u, 892014u, 895019u, 897969u, 900866u, 903711u, 906505u,
+    909250u, 911946u, 914594u, 917196u, 919752u, 922263u, 924731u, 927156u,
+    929539u, 931881u, 934182u, 936445u, 938668u, 940854u, 943003u, 945115u,
+    947192u, 949233u, 951241u, 953214u, 955155u, 957063u, 958939u, 960785u,
+    962599u, 964384u, 966139u, 967865u, 969562u, 971232u, 972874u, 974488u,
+    976077u, 977639u, 979176u, 980687u, 982174u, 983636u, 985075u, 986489u,
+    987881u, 989249u, 990596u, 991920u, 993222u, 994503u, 995763u, 997002u,
+    998220u, 999418u, 1000597u, 1001756u, 1002896u, 1004016u, 1005118u,
+    1006202u, 1007267u, 1008314u, 1009344u, 1010356u, 1011350u, 1012328u,
+    1013289u, 1014234u, 1015162u, 1016074u, 1016970u, 1017851u, 1018715u,
+    1019565u, 1020399u, 1021218u, 1022023u, 1022813u, 1023588u, 1024349u,
+    1025096u, 1025829u, 1026549u, 1027254u, 1027946u, 1028625u, 1029290u,
+    1029942u, 1030581u, 1031208u, 1031821u, 1032422u, 1033011u, 1033587u,
+    1034151u, 1034703u, 1035242u, 1035770u, 1036286u, 1036790u, 1037283u,
+    1037764u, 1038234u, 1038692u, 1039139u, 1039575u, 1039999u, 1040413u,
+    1040816u, 1041207u, 1041588u, 1041959u, 1042318u, 1042667u, 1043006u,
+    1043334u, 1043652u, 1043959u, 1044256u, 1044542u, 1044819u, 1045085u,
+    1045342u, 1045588u, 1045824u, 1046050u, 1046267u, 1046473u, 1046670u,
+    1046857u, 1047034u, 1047201u, 1047359u, 1047507u, 1047645u, 1047773u,
+    1047892u, 1048002u, 1048102u, 1048192u, 1048273u, 1048344u, 1048405u,
+    1048458u, 1048500u, 1048533u, 1048557u, 1048571u, 1048576u,
 };
 
-static_assert(sizeof(kCosineEaseQ20) == 1028u, "The normalized cosine LUT must occupy 1,028 bytes");
+static_assert(sizeof(kVelocitySquaredCosinePeriodEaseQ20) == 1028u,
+              "The normalized cosine LUT must occupy 1,028 bytes");
 
 uint32_t clampArr(uint32_t value, uint32_t minimum, uint32_t maximum) {
   if (value < minimum) return minimum;
@@ -58,12 +71,20 @@ uint32_t clampArr(uint32_t value, uint32_t minimum, uint32_t maximum) {
   return value;
 }
 
-LC_PROFILE_FORCE_INLINE uint32_t easeQ20(uint32_t phaseQ32) {
+LC_PROFILE_FORCE_INLINE uint32_t forwardEaseQ20(uint32_t phaseQ32) {
   const uint32_t index = phaseQ32 >> 24u;
   const uint32_t fractionQ16 = (phaseQ32 >> 8u) & 0xFFFFu;
-  const uint32_t lower = kCosineEaseQ20[index];
-  const uint32_t delta = kCosineEaseQ20[index + 1u] - lower;
+  const uint32_t lower = kVelocitySquaredCosinePeriodEaseQ20[index];
+  const uint32_t delta =
+      kVelocitySquaredCosinePeriodEaseQ20[index + 1u] - lower;
   return lower + ((delta * fractionQ16) >> 16u);
+}
+
+LC_PROFILE_FORCE_INLINE uint32_t easeQ20(uint32_t phaseQ32,
+                                         bool descending) {
+  if (descending) return forwardEaseQ20(phaseQ32);
+  const uint32_t reversePhaseQ32 = 0u - phaseQ32;
+  return kEaseOne - forwardEaseQ20(reversePhaseQ32);
 }
 
 }  // namespace
@@ -92,8 +113,10 @@ PrepareStatus prepare(const RampSpec& spec, RampCursor& cursor) {
 
   if (spec.intervalCount > 1u) {
     constexpr uint64_t kPhaseRange = uint64_t{1u} << 32u;
-    cursor.phaseIncrementQ32 = static_cast<uint32_t>(kPhaseRange / spec.intervalCount);
-    cursor.phaseRemainderIncrement = static_cast<uint32_t>(kPhaseRange % spec.intervalCount);
+    cursor.phaseIncrementQ32 = static_cast<uint32_t>(
+        kPhaseRange / spec.intervalCount);
+    cursor.phaseRemainderIncrement = static_cast<uint32_t>(
+        kPhaseRange % spec.intervalCount);
   }
   cursor.status = PrepareStatus::Ready;
   return cursor.status;
@@ -116,13 +139,14 @@ LC_PROFILE_ISR_OPTIMIZED bool advance(RampCursor& cursor) {
   const uint64_t remainder = static_cast<uint64_t>(cursor.phaseRemainder) +
                              cursor.phaseRemainderIncrement;
   if (remainder >= cursor.intervalCount) {
-    cursor.phaseRemainder = static_cast<uint32_t>(remainder - cursor.intervalCount);
+    cursor.phaseRemainder = static_cast<uint32_t>(
+        remainder - cursor.intervalCount);
     ++cursor.phaseQ32;
   } else {
     cursor.phaseRemainder = static_cast<uint32_t>(remainder);
   }
 
-  const uint32_t ease = easeQ20(cursor.phaseQ32);
+  const uint32_t ease = easeQ20(cursor.phaseQ32, cursor.descending);
   const uint32_t offset = static_cast<uint32_t>(
       (static_cast<uint64_t>(cursor.rangeArr) * ease) >> kEaseFractionBits);
   cursor.currentSampleArr = cursor.descending

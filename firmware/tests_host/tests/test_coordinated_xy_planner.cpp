@@ -2,6 +2,7 @@
 #include "CppUTest/TestHarness.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <utility>
@@ -81,6 +82,47 @@ std::vector<StepEvent> runTrace(const CoordinatedXyPlan& plan,
   UNSIGNED_LONGS_EQUAL(plan.ySteps, cursor.yEmittedSteps);
   if (finishedCursor != nullptr) *finishedCursor = cursor;
   return events;
+}
+
+double squaredRateForArr(const CoordinatedXyPlan& plan, uint32_t arr) {
+  const double denominator = 2.0 * (static_cast<double>(arr) + 1.0);
+  const double rate = static_cast<double>(plan.timer.inputClockHz) /
+                      denominator;
+  return rate * rate;
+}
+
+void checkSmoothMasterAccelerationBound(const CoordinatedXyPlan& plan) {
+  const std::vector<StepEvent> events = runTrace(plan);
+  const uint32_t cap = plan.masterAccelerationCapStepsPerSec2;
+  auto checkRamp = [&](uint32_t firstEvent,
+                       uint32_t steps,
+                       uint32_t endpointArr) {
+    if (steps == 0u) return;
+    // One LUT cell is the shortest meaningful envelope interval. Individual
+    // timer periods are integer-valued and therefore contain expected
+    // one-tick quantization; the physical acceleration contract applies to
+    // the piecewise-linear velocity envelope represented by the 256 cells.
+    const uint32_t window = std::max(
+        1u, (steps + NormalizedCosineProfile::kLutIntervals - 1u) /
+                NormalizedCosineProfile::kLutIntervals);
+    for (uint32_t offset = 0u; offset + window <= steps; ++offset) {
+      const uint32_t endOffset = offset + window;
+      const uint32_t firstArr = events[firstEvent + offset].arr;
+      const uint32_t lastArr = endOffset == steps
+          ? endpointArr
+          : events[firstEvent + endOffset].arr;
+      const double acceleration = std::abs(
+          squaredRateForArr(plan, lastArr) -
+          squaredRateForArr(plan, firstArr)) /
+          (2.0 * static_cast<double>(window));
+      CHECK_COMPARE(acceleration, <=, static_cast<double>(cap));
+    }
+  };
+
+  checkRamp(0u, plan.accelerationSteps, plan.targetArr);
+  checkRamp(plan.accelerationSteps + plan.cruiseSteps,
+            plan.decelerationSteps,
+            plan.startArr);
 }
 
 void checkPathAtEveryPrefix(const CoordinatedXyPlan& plan) {
@@ -418,9 +460,9 @@ TEST(CoordinatedXyPlanner, Milestone6VectorGroupsHaveFrozenPulseAndCallbackTotal
 TEST(CoordinatedXyPlanner, LongAndTriangularProfilesHaveExactSegmentsAndEndpoints) {
   CoordinatedXyPlan longPlan = readyPlan(normalRequest(8416, 30000));
   UNSIGNED_LONGS_EQUAL(40000u, longPlan.masterRateHz);
-  UNSIGNED_LONGS_EQUAL(5715u, longPlan.accelerationSteps);
-  UNSIGNED_LONGS_EQUAL(18570u, longPlan.cruiseSteps);
-  UNSIGNED_LONGS_EQUAL(5715u, longPlan.decelerationSteps);
+  UNSIGNED_LONGS_EQUAL(10000u, longPlan.accelerationSteps);
+  UNSIGNED_LONGS_EQUAL(10000u, longPlan.cruiseSteps);
+  UNSIGNED_LONGS_EQUAL(10000u, longPlan.decelerationSteps);
   UNSIGNED_LONGS_EQUAL(1124u, longPlan.targetArr);
   UNSIGNED_LONGS_EQUAL(5620u, longPlan.startArr);
   CHECK_FALSE(longPlan.triangular);
@@ -448,13 +490,25 @@ TEST(CoordinatedXyPlanner, LongAndTriangularProfilesHaveExactSegmentsAndEndpoint
                        NormalizedCosineProfile::currentArr(
                            longCursor.decelerationCursor));
 
+  // The shortest Milestone 6 geometry legs contain exactly enough distance
+  // to touch the requested 40 kHz endpoint without exceeding the acceleration
+  // cap; the test must not silently become a lower-rate qualification.
+  CoordinatedXyPlan boundaryPlan = readyPlan(normalRequest(20000, 5000));
+  UNSIGNED_LONGS_EQUAL(40000u, boundaryPlan.masterRateHz);
+  UNSIGNED_LONGS_EQUAL(10000u, boundaryPlan.accelerationSteps);
+  UNSIGNED_LONGS_EQUAL(0u, boundaryPlan.cruiseSteps);
+  UNSIGNED_LONGS_EQUAL(10000u, boundaryPlan.decelerationSteps);
+  const std::vector<StepEvent> boundaryEvents = runTrace(boundaryPlan);
+  UNSIGNED_LONGS_EQUAL(boundaryPlan.targetArr,
+                       boundaryEvents[boundaryPlan.accelerationSteps].arr);
+
   CoordinatedXyPlan shortPlan = readyPlan(normalRequest(1000, 0));
-  UNSIGNED_LONGS_EQUAL(11832u, shortPlan.masterRateHz);
+  UNSIGNED_LONGS_EQUAL(8944u, shortPlan.masterRateHz);
   UNSIGNED_LONGS_EQUAL(500u, shortPlan.accelerationSteps);
   UNSIGNED_LONGS_EQUAL(0u, shortPlan.cruiseSteps);
   UNSIGNED_LONGS_EQUAL(500u, shortPlan.decelerationSteps);
-  UNSIGNED_LONGS_EQUAL(3802u, shortPlan.targetArr);
-  UNSIGNED_LONGS_EQUAL(19010u, shortPlan.startArr);
+  UNSIGNED_LONGS_EQUAL(5030u, shortPlan.targetArr);
+  UNSIGNED_LONGS_EQUAL(25150u, shortPlan.startArr);
   CHECK_TRUE(shortPlan.triangular);
   Cursor shortCursor{};
   const std::vector<StepEvent> shortEvents = runTrace(shortPlan, &shortCursor);
@@ -466,6 +520,33 @@ TEST(CoordinatedXyPlanner, LongAndTriangularProfilesHaveExactSegmentsAndEndpoint
   UNSIGNED_LONGS_EQUAL(shortPlan.startArr,
                        NormalizedCosineProfile::currentArr(
                            shortCursor.decelerationCursor));
+}
+
+TEST(CoordinatedXyPlanner, VelocityEnvelopeHonorsConfiguredAccelerationCap) {
+  const int64_t geometries[][2] = {
+      {60000, 0},
+      {30000, 60000},
+      {60000, 60000},
+      {20000, 5000},
+      {1000, 0},
+  };
+  for (uint32_t rateHz : {3000u, 5000u, 10000u, 20000u, 30000u, 40000u}) {
+    for (const auto& geometry : geometries) {
+      PlanRequest request = normalRequest(geometry[0], geometry[1]);
+      request.requestedMasterRateHz = rateHz;
+      checkSmoothMasterAccelerationBound(readyPlan(request));
+    }
+  }
+
+  PlanRequest timer16 = normalRequest(60000, 30000);
+  timer16.requestedMasterRateHz = 3000u;
+  timer16.timer.maxArr = 65535u;
+  checkSmoothMasterAccelerationBound(readyPlan(timer16));
+
+  PlanRequest unequal = normalRequest(60000, 30000);
+  unequal.requestedMasterRateHz = 40000u;
+  unequal.yLimits = {30000u, 50000u};
+  checkSmoothMasterAccelerationBound(readyPlan(unequal));
 }
 
 TEST(CoordinatedXyPlanner, TinyMovesHaveDefinedTriangularPhaseJoins) {
@@ -490,7 +571,7 @@ TEST(CoordinatedXyPlanner, TinyMovesHaveDefinedTriangularPhaseJoins) {
 }
 
 TEST(CoordinatedXyPlanner, ComponentScalingHonorsUnequalAxisLimitsExactly) {
-  PlanRequest request = normalRequest(10000, 5000);
+  PlanRequest request = normalRequest(20000, 10000);
   request.requestedMasterRateHz = 50000u;
   request.yLimits = {10000u, 30000u};
   const CoordinatedXyPlan plan = readyPlan(request);
