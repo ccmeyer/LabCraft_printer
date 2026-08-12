@@ -77,7 +77,12 @@ def test_standalone_40khz_selector_reuses_only_existing_tier_four_and_exits():
     assert 'runOne(2073u,' in suite
     assert "emitEntryLatenessEvidence(aggregate)" in suite
     assert '"i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"' in suite
-    assert '"lc=%lu;dm=%lu;sm=%u;lf=%lu;sf=%lu;to=%lu"' in suite
+    assert '"lc=%lu;dm=%lu;sm=%u;lf=%lu;sf=%lu;to=%lu;"' in suite
+    assert '"fv=%u;tr=%u;la=%lu;ra=%lu"' in suite
+    assert "captureFirstFailure(" in suite
+    assert "result.snapshot.terminalReason" in suite
+    assert "result.snapshot.limitAbortRequestCount" in suite
+    assert "result.snapshot.rawLimitAbortCount" in suite
     assert '"coord_xy_40khz_entry_lateness",\n                                false,' in suite
 
 

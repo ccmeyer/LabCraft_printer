@@ -127,6 +127,48 @@ TEST(CoordinatedXyPerformanceReport, ClassifiesFailedMoveGatesCompactly) {
       observation, CoordinatedXyPerformanceReport::Limits{}));
 }
 
+TEST(CoordinatedXyPerformanceReport, FailureTelemetryIgnoresPassingMove) {
+  CoordinatedXyPerformanceReport::FailureTelemetry telemetry{};
+
+  CoordinatedXyPerformanceReport::captureFirstFailure(
+      telemetry,
+      true,
+      CoordinatedXyExecutor::TerminalReason::Completed,
+      0u,
+      0u);
+
+  CHECK_FALSE(telemetry.valid);
+  CHECK_EQUAL(
+      static_cast<int>(CoordinatedXyExecutor::TerminalReason::None),
+      static_cast<int>(telemetry.terminalReason));
+  UNSIGNED_LONGS_EQUAL(0u, telemetry.limitAbortRequestCount);
+  UNSIGNED_LONGS_EQUAL(0u, telemetry.rawLimitAbortCount);
+}
+
+TEST(CoordinatedXyPerformanceReport, FailureTelemetryCapturesFirstLimitAbort) {
+  CoordinatedXyPerformanceReport::FailureTelemetry telemetry{};
+
+  CoordinatedXyPerformanceReport::captureFirstFailure(
+      telemetry,
+      false,
+      CoordinatedXyExecutor::TerminalReason::XLimit,
+      1u,
+      2u);
+  CoordinatedXyPerformanceReport::captureFirstFailure(
+      telemetry,
+      false,
+      CoordinatedXyExecutor::TerminalReason::PlannerFault,
+      3u,
+      4u);
+
+  CHECK_TRUE(telemetry.valid);
+  CHECK_EQUAL(
+      static_cast<int>(CoordinatedXyExecutor::TerminalReason::XLimit),
+      static_cast<int>(telemetry.terminalReason));
+  UNSIGNED_LONGS_EQUAL(1u, telemetry.limitAbortRequestCount);
+  UNSIGNED_LONGS_EQUAL(2u, telemetry.rawLimitAbortCount);
+}
+
 TEST(CoordinatedXyPerformanceReport, RejectsEverySafetyAndTimingMismatch) {
   auto observation = acceptedMove(1000u, 1000u, 1000u, 40000u, 3802u, 19010u);
   observation.timer2Callbacks++;

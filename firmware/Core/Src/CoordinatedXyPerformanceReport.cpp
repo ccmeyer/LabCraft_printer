@@ -136,6 +136,18 @@ bool movePasses(const MoveObservation& observation, const Limits& limits) {
   return moveFailureMask(observation, limits) == 0u;
 }
 
+void captureFirstFailure(FailureTelemetry& telemetry,
+                         bool movePassed,
+                         CoordinatedXyExecutor::TerminalReason terminalReason,
+                         uint32_t limitAbortRequestCount,
+                         uint32_t rawLimitAbortCount) {
+  if (movePassed || telemetry.valid) return;
+  telemetry.valid = true;
+  telemetry.terminalReason = terminalReason;
+  telemetry.limitAbortRequestCount = limitAbortRequestCount;
+  telemetry.rawLimitAbortCount = rawLimitAbortCount;
+}
+
 void addMove(Aggregate& aggregate,
              const MoveObservation& observation,
              const Limits& limits) {

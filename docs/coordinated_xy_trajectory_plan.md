@@ -254,9 +254,15 @@ critical-section-only failure first.
 The Stage 2 image adds selector `2076`, which shares selector `2077`'s exact
 40 kHz row and bounded homes while changing only status-metric synchronization
 to a dedicated static task mutex. Boot, selector `2077`, and normal operation
-remain critical-section mode. The next action is three counterbalanced,
-SAFE-bracketed pairs in order `2077-2076`, `2076-2077`, `2077-2076`, followed
-by review before any production-default or FULL-qualification decision.
+remain critical-section mode. The first Pair 1 critical-section arm stopped on
+its first measured leg after 2,599 X pulses without pending, reset, watchdog,
+or cadence evidence; its pre/post SAFE brackets passed 28/28. The aggregate
+frame did not expose whether the terminal state was a limit abort or planner
+fault. A measurement-only follow-up now retains the first failed leg's terminal
+reason and coordinated/raw limit counts in result `2073`. The next action is a
+watched, independently SAFE-bracketed Pair 1 critical-section retry, followed
+by the remaining counterbalanced sequence only if that arm completes or fails
+solely on the permitted timing symptom.
 
 ## Milestone 0: Baseline And Decisions
 

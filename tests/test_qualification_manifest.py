@@ -354,6 +354,10 @@ def test_load_coordinated_xy_status_sync_manifest_is_strict_mutex_isolation():
     assert entry["dm"]["max"] == 255
     assert entry["sm"]["equals"] == 1
     assert entry["lf"]["equals"] == 0
+    assert entry["fv"]["equals"] == 0
+    assert entry["tr"]["equals"] == 0
+    assert entry["la"]["equals"] == 0
+    assert entry["ra"]["equals"] == 0
 
 
 def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture():

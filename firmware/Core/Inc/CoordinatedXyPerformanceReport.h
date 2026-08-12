@@ -1,6 +1,7 @@
 #ifndef INC_COORDINATEDXYPERFORMANCEREPORT_H_
 #define INC_COORDINATEDXYPERFORMANCEREPORT_H_
 
+#include "CoordinatedXyExecutor.h"
 #include "CoordinatedXyIsrInstrumentation.h"
 
 #include <cstddef>
@@ -79,6 +80,14 @@ struct MoveObservation {
   CoordinatedXyIsrInstrumentation::Snapshot timing{};
 };
 
+struct FailureTelemetry {
+  bool valid = false;
+  CoordinatedXyExecutor::TerminalReason terminalReason =
+      CoordinatedXyExecutor::TerminalReason::None;
+  uint32_t limitAbortRequestCount = 0u;
+  uint32_t rawLimitAbortCount = 0u;
+};
+
 struct Aggregate {
   uint32_t moveCount = 0u;
   uint32_t expectedXSteps = 0u;
@@ -133,6 +142,11 @@ uint32_t boundedHomeGuardSteps(int32_t currentPositionSteps,
 bool movePasses(const MoveObservation& observation, const Limits& limits);
 uint32_t moveFailureMask(const MoveObservation& observation,
                          const Limits& limits);
+void captureFirstFailure(FailureTelemetry& telemetry,
+                         bool movePassed,
+                         CoordinatedXyExecutor::TerminalReason terminalReason,
+                         uint32_t limitAbortRequestCount,
+                         uint32_t rawLimitAbortCount);
 void addMove(Aggregate& aggregate,
              const MoveObservation& observation,
              const Limits& limits);

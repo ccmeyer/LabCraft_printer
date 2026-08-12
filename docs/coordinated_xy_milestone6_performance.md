@@ -637,15 +637,43 @@ return, and an unavailable mutex or any lock failure fails closed before or
 during evidence collection. Result `2073` adds lock-failure count `lf` and
 reports `sm=1` for the mutex arm.
 
-The diagnostic artifact is 329,352 bytes with SHA-256
-`23A820FC54FF990BEA66A7F7AF893749B94BC16902F77884B7699E33F5242944`,
-leaving 63,864 bytes in the 384 KiB application partition. Firmware host tests
-pass 344/344 with 8,723,583 checks, and the Debug target links with the same
-three pre-existing warnings. The full Python regression passes 4,573 tests
-with 135 skipped. Physical evidence is pending three SAFE-bracketed pairs in
-order `2077-2076`, `2076-2077`, `2077-2076`. Mutex mode is
-diagnostic-only and must not become the production default without separate
-review and qualification.
+The initial diagnostic artifact was 329,352 bytes with SHA-256
+`23A820FC54FF990BEA66A7F7AF893749B94BC16902F77884B7699E33F5242944`.
+Its first Pair 1 critical-section arm stopped during the first measured X-only
+leg after 2,599 of 20,000 requested pulses and 5,198 TIM2 callbacks. It recorded
+complete IRQ/entry coverage for those callbacks, zero pending observations,
+`cm=253`, `lc=10`, `dm=455`, `sm=0`, `lf=0`, passing host cadence, and no reset
+or watchdog evidence. The four-second wall time rules out expiration of the
+30-second move timer; the legacy `to=1` aggregate convention represents any
+non-completed observation. Because result `2064` did not retain the terminal
+reason, this attempt cannot distinguish a raw/EXTI limit abort from a planner
+fault. No B arm or later motion was run. Pre/post SAFE both passed 28/28 with
+unchanged boot/watchdog counters.
+
+Evidence for that stopped arm:
+
+- pre-SAFE: `hil_reports/m6_status_sync_p1_a_pre_safe_20260812.json`, SHA-256
+  `8E4149DCD0BF814581D4D681827953CD63C650D2A5F7867DBEE2450AF54D1614`;
+- raw A report: `hil_reports/m6_status_sync_p1_a_critical_20260812.json`,
+  SHA-256 `74BE84744B0ECC2BBC76339F6EE79F863B32C8C4488C5C03EB131389232F9947`;
+- normalized failure: `hil_reports/qualification/LC-001/20260812T191209Z/report.json`,
+  SHA-256 `DA4D907297E42B48D0BB3E04159EABA238870D699CA6982446C850BB7B7DB532`;
+- post-SAFE: `hil_reports/m6_status_sync_p1_a_post_safe_20260812.json`, SHA-256
+  `F530C4A7DC32FD7200D759020900400FBE1C29B1AB7443E962FF4734F24BDE66`.
+
+The measurement-only retry artifact retains the first failed leg in result
+`2073` as `fv`, terminal reason `tr`, coordinated limit-abort request count
+`la`, and raw limit observation count `ra`. It does not change the planner,
+timer, GPIO, limit decision, motion, or synchronization paths. A successful row
+reports all four fields as zero; `tr=3`/`4` identifies X/Y limit termination and
+`tr=5` identifies a planner fault. The strict mutex manifest now requires those
+zero values. The artifact is 329,504 bytes with SHA-256
+`2E63EE041788393ED726F60EA8CA2477990CA2550420875DCFCE9FDA347B9A28`,
+leaving 63,712 bytes in the 384 KiB application partition. Firmware host tests
+pass 346/346 with 8,723,591 checks, the Debug target links with the same three
+pre-existing warnings, and the full Python regression passes 4,573 tests with
+135 skipped. Mutex mode remains diagnostic-only and must not become the
+production default without separate review and qualification.
 
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort

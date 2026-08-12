@@ -85,7 +85,11 @@
         "sm": {"maturity": "acceptance", "equals": 1},
         "lf": {"maturity": "acceptance", "equals": 0},
         "sf": {"maturity": "acceptance", "equals": 0},
-        "to": {"maturity": "acceptance", "equals": 0}
+        "to": {"maturity": "acceptance", "equals": 0},
+        "fv": {"maturity": "acceptance", "equals": 0},
+        "tr": {"maturity": "acceptance", "equals": 0},
+        "la": {"maturity": "acceptance", "equals": 0},
+        "ra": {"maturity": "acceptance", "equals": 0}
       }
     }
   }

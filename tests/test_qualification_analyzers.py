@@ -243,6 +243,7 @@ def test_status_sync_manifest_requires_complete_low_lateness_mutex_evidence():
         "i2": 440000, "s": 440000, "mi": 0,
         "cm": 127, "ca": 20, "pm": 0, "lc": 0,
         "dm": 255, "sm": 1, "lf": 0, "sf": 0, "to": 0,
+        "fv": 0, "tr": 0, "la": 0, "ra": 0,
     }
     valid = {
         "run_id": 2076,
@@ -277,6 +278,10 @@ def test_status_sync_manifest_requires_complete_low_lateness_mutex_evidence():
         (2, "lf", 1),
         (2, "sf", 1),
         (2, "to", 1),
+        (2, "fv", 1),
+        (2, "tr", 3),
+        (2, "la", 1),
+        (2, "ra", 1),
     )
     for result_index, metric, value in mutations:
         rejected = deepcopy(valid)

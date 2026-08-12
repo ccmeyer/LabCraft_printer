@@ -2779,9 +2779,13 @@ before HAL dispatch and without calling HAL or FreeRTOS. It reports callbacks
 at or above the diagnostic 128-tick threshold (`lc`), maximum positive
 inter-entry schedule overrun (`dm`, in 180 MHz core cycles), status
 synchronization mode (`sm=0` for the production critical section), saturation
-(`sf`), status-synchronization lock failures (`lf`), and timeout (`to`). The
-evidence result passes when coverage is
-complete and unsaturated; it does not weaken result `2064`'s zero-pending gate.
+(`sf`), status-synchronization lock failures (`lf`), and timeout (`to`). It also
+retains the first failed movement leg as failure-valid (`fv`), terminal reason
+(`tr`: 0 none, 1 completed, 2 canceled, 3 X limit, 4 Y limit, 5 planner fault),
+coordinated limit-abort request count (`la`), and raw limit observation count
+(`ra`). Successful rows report all four failure fields as zero. The evidence
+result passes when coverage is complete and unsaturated; it does not weaken
+result `2064`'s zero-pending gate.
 
 Selector `2076` provides the diagnostic-only status-synchronization arm:
 
@@ -2803,7 +2807,8 @@ The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is
 selector `2076`/manifest `coordinated_xy_status_sync_v1`. Every B run requires
 `sm=1`, `lf=0`, `pu=ps=0`, complete 440,000-callback coverage, `lc=0`,
-`cm<128`, and `dm<256`, plus clean cadence, watchdog, reset, and home evidence.
+`cm<128`, `dm<256`, and `fv=tr=la=ra=0`, plus clean cadence, watchdog, reset,
+and home evidence.
 
 First confirm that the `pressure_closed_loop_v1` fixture is installed and safe
 at 1-2 psi and that the complete XY/Z envelope is clear. Both performance

@@ -4196,7 +4196,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             return;
                           }
                           if (runCoordinatedXy40KhzSuite) {
-                            char entryMetrics[176] = {};
+                            char entryMetrics[224] = {};
                             const unsigned statusSyncMode = static_cast<unsigned>(
                                 Comm::getStatusMetricsSyncMode());
                             const unsigned long lockFailures =
@@ -4218,7 +4218,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 (snprintf(entryMetrics,
                                           sizeof(entryMetrics),
                                           "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;"
-                                          "dm=0;sm=%u;lf=%lu;sf=0;to=1",
+                                          "dm=0;sm=%u;lf=%lu;sf=0;to=1;"
+                                          "fv=0;tr=0;la=0;ra=0",
                                           statusSyncMode,
                                           lockFailures) > 0)
                                     ? entryMetrics
@@ -4394,6 +4395,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           MoveObservation observation{};
                           CoordinatedXySnapshot snapshot{};
                         };
+                        CoordinatedXyPerformanceReport::FailureTelemetry
+                            firstMoveFailure{};
                         auto observeCompletedMove = [&](Point start,
                                                         Point target,
                                                         uint32_t expectedRateHz,
@@ -4555,6 +4558,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           observation.timing = result.snapshot.timing;
                           result.passed = CoordinatedXyPerformanceReport::movePasses(
                               observation, performanceLimits);
+                          CoordinatedXyPerformanceReport::captureFirstFailure(
+                              firstMoveFailure,
+                              result.passed,
+                              result.snapshot.terminalReason,
+                              result.snapshot.limitAbortRequestCount,
+                              result.snapshot.rawLimitAbortCount);
                           return result;
                         };
 
@@ -4570,13 +4579,20 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           // This is an unmeasured positioning leg. Require safe,
                           // exact completion here; the following measured leg
                           // records and gates ISR timing and pending observations.
-                          return execution.disposition ==
+                          const bool passed = execution.disposition ==
                                   OrchestratorCompletionPolicy::AbsXyDisposition::Completed &&
                               execution.waitCompleted && execution.endpointMatches &&
                               execution.targetsMatch &&
                               snapshot.pendingUpdateCount == 0u &&
                               snapshot.xStepLow && snapshot.yStepLow &&
                               !snapshot.timerOwned;
+                          CoordinatedXyPerformanceReport::captureFirstFailure(
+                              firstMoveFailure,
+                              passed,
+                              snapshot.terminalReason,
+                              snapshot.limitAbortRequestCount,
+                              snapshot.rawLimitAbortCount);
+                          return passed;
                         };
 
                         auto addPair = [&](Aggregate& aggregate,
@@ -5155,7 +5171,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                         auto emitEntryLatenessEvidence =
                             [&](const Aggregate& aggregate) {
-                          char metrics[176] = {};
+                          char metrics[224] = {};
                           const unsigned statusSyncMode = static_cast<unsigned>(
                               Comm::getStatusMetricsSyncMode());
                           const uint32_t lockFailures =
@@ -5164,7 +5180,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               metrics,
                               sizeof(metrics),
                               "i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"
-                              "lc=%lu;dm=%lu;sm=%u;lf=%lu;sf=%lu;to=%lu",
+                              "lc=%lu;dm=%lu;sm=%u;lf=%lu;sf=%lu;to=%lu;"
+                              "fv=%u;tr=%u;la=%lu;ra=%lu",
                               (unsigned long)aggregate.timer2Callbacks,
                               (unsigned long)aggregate.entryTimerSamples,
                               (unsigned long)aggregate.entryTimerMissing,
@@ -5176,7 +5193,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               statusSyncMode,
                               (unsigned long)lockFailures,
                               (unsigned long)aggregate.saturationFlags,
-                              (unsigned long)aggregate.timeoutCount);
+                              (unsigned long)aggregate.timeoutCount,
+                              firstMoveFailure.valid ? 1u : 0u,
+                              static_cast<unsigned>(
+                                  firstMoveFailure.terminalReason),
+                              (unsigned long)
+                                  firstMoveFailure.limitAbortRequestCount,
+                              (unsigned long)firstMoveFailure.rawLimitAbortCount);
                           const bool evidenceComplete =
                               aggregate.timer2Callbacks > 0u &&
                               aggregate.entryTimerSamples ==

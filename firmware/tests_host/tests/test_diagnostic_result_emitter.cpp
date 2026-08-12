@@ -195,11 +195,13 @@ TEST(DiagnosticResultEmitter, GripperStressRasterMetricsFitWithoutTruncatingDeci
 
 TEST(DiagnosticResultEmitter, CoordinatedXyEntryLatenessMetricsFitAtSaturatedValues)
 {
-    char metricsText[176] = {};
+    char metricsText[224] = {};
     const int written = std::snprintf(
         metricsText,
         sizeof(metricsText),
-        "i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;lc=%lu;dm=%lu;sm=1;lf=%lu;sf=%lu;to=%lu",
+        "i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;lc=%lu;dm=%lu;sm=1;lf=%lu;sf=%lu;to=%lu;fv=1;tr=5;la=%lu;ra=%lu",
+        4294967295ul,
+        4294967295ul,
         4294967295ul,
         4294967295ul,
         4294967295ul,
