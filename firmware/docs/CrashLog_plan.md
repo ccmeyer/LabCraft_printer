@@ -633,10 +633,47 @@ No-motion idle-soak evidence (2026-08-12):
     `9E30251C9CF616C493A18166FD3773B5E21756E6CD89B3160E449225257C935C`;
   - `hil_reports/watchdog_evidence_99bb8c58_soak_3.json`:
     `E7F87D2A448EC120BD08E367FE9E6B54D71D3A1EEFE93DF04BEBFEB50760D652`.
-- The historical idle watchdog reset did not reproduce during 90 total minutes
-  of observation. This establishes clean soak evidence and verifies the
-  once-per-boot host capture behavior; it does not prove the underlying rare
-  starvation mechanism is fixed.
+- None of the three scheduled 30-minute SAFE observations saw a reset. This
+  establishes that each sampled interval completed cleanly and verifies the
+  once-per-boot host capture behavior, but the conclusion must include the
+  delayed evidence below.
+
+Delayed starvation evidence discovered at the next flash (2026-08-12):
+
+- The third scheduled SAFE finished at `2026-08-12T22:31:00.184513Z` with
+  `boot=112`, `fault_ct=1`, and `wdg_ct=3`. Before the next firmware flash, the
+  MCU recorded another watchdog-starvation fault. The first SAFE after that
+  flash retained it as `pending=1;fault=wdt;task=orch;wdg_late=press`, with
+  `boot=116`, `fault_ct=2`, `wdg_ct=4`, `uptime_ms=5621501`, and
+  `active_command=250` (`CMD_SELFTEST_START`). No motion had been commanded in
+  this interval.
+- Result `1041` passed only through the existing sticky-status recovery
+  exception while the record was pending. A follow-up SAFE more than 12 seconds
+  into healthy supervision reported `pending=0` while preserving the same
+  historical fault and counters. A second same-boot SAFE kept those values and
+  received no new startup or unexpected reset report.
+- The evidence-integrity objective is therefore verified: the fault survives
+  recovery and the host captures it. The idle-soak reliability objective is not
+  clean; starvation did reproduce after the last scheduled observation.
+- `active_command=250` and `wdg_late=press` localize the event to pressure-sensor
+  participation while a self-test command owned the orchestrator. The current
+  code runs diagnostics in the priority-2 orchestrator and emits result frames
+  with synchronous UART transmission, while the pressure-sensor task is
+  priority 1 with a 250 ms deadline. This is a strong scheduling-starvation
+  hypothesis, not yet a proven root cause.
+- The planned selector `2075` motion was not started. The diagnostic artifact
+  was rolled back to commit `99bb8c58`'s 329,744-byte binary with SHA-256
+  `AFC14C33B65EBBE424D47A4D51D365875FF1E79F5E0BC51E0719BB89F5FD0731`;
+  its post-flash SAFE passed 28/28 with unchanged fault/watchdog counters.
+- Additional report SHA-256 values, in execution order:
+  - `hil_reports/coord_xy_single_irq_3182a287_pre_safe.json`:
+    `CC4CC0924490B5194ACD5025DF96C759C11F4A894DBD854593C756882A24DC83`;
+  - `hil_reports/coord_xy_single_irq_3182a287_recovery_safe.json`:
+    `5D458382B8F60C864A7E4A504CC19CD261D55E8497618BD2E1B39DCE86B56140`;
+  - `hil_reports/coord_xy_single_irq_3182a287_stability_safe.json`:
+    `662BFEF90E7852C0703D60F0E81B23D3963008CA982C5AF61442A3D2B7EB2A46`;
+  - `hil_reports/coord_xy_single_irq_abort_rollback_99bb8c58_safe.json`:
+    `954BA67A6B159A0E20C7BCE315BE907A3955536B78EECEB676F3275D5097B690`.
 
 Messages from past attempts:
 I’ve implemented the crash-log/watchdog slice and the remaining issue is target boot reachability during SAFE HIL. I’m checking the latest report and the startup paths that can prevent HELLO_ACK, then I’ll make the smallest fix and rerun validation.

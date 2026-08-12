@@ -224,7 +224,7 @@ Every milestone that touches motion must preserve these invariants:
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
-| 6. Performance and motion HIL qualification | `implemented` | The velocity-domain correction reduced the calculated peak from 443,900 to about 131,100 steps/s2 and passed one guarded 40 kHz row with X=4/Y=1 drift; a diagnostic-only one-interrupt-per-step executor is implemented to test a structurally larger deadline margin | Run and review the SAFE-bracketed selector `2075` diagnostic; FULL remains blocked |
+| 6. Performance and motion HIL qualification | `blocked` | The velocity-domain correction reduced the calculated peak from 443,900 to about 131,100 steps/s2 and passed one guarded 40 kHz row with X=4/Y=1 drift; a diagnostic-only one-interrupt-per-step executor is implemented, but its pre-motion SAFE gate recovered a retained pressure-sensor watchdog-starvation event from the preceding no-motion self-test soak | Correct and verify the SAFE self-test scheduling starvation before running selector `2075`; FULL remains blocked |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
@@ -268,9 +268,22 @@ deadline samples, no pending update, at least 360 core cycles of enforced pulse
 high time, at least 500 timer ticks of remaining full-period slack, exact
 motion evidence, clean bounded homes, passing status cadence, and no reset or
 watchdog evidence. A scope guard restores the two-edge executor on every exit.
-The next action is one watched SAFE-bracketed selector `2075` run followed by
-normalization with `coordinated_xy_single_irq_v1`. Do not promote this mode or
-resume FULL qualification until that evidence is reviewed.
+The attempted watched selector `2075` gate stopped before motion. Its pre-SAFE
+run passed 28/28 but captured a newly retained watchdog fault from the prior
+boot: `fault=wdt`, `wdg_late=press`, `active_command=250`
+(`CMD_SELFTEST_START`), `fault_ct=2`, and `wdg_ct=4`. Recovery and same-boot
+SAFE runs preserved the history with `pending=0` and no further reset, and the
+printer was restored to the `99bb8c58` watchdog-evidence artifact. Selector
+`2075` was not executed.
+
+The next action is to correct and verify the self-test scheduling path without
+weakening the pressure task's 250 ms watchdog deadline. The leading hypothesis
+is that priority-2 orchestrator diagnostics can synchronously transmit enough
+result data to prevent the priority-1 pressure-sensor task from checking in.
+After repeated SAFE runs show no counter increase or retained pending fault,
+flash the hashed `3182a287` diagnostic artifact and restart the watched,
+SAFE-bracketed selector `2075` gate. Do not promote this mode or resume FULL
+qualification until that evidence is reviewed.
 
 ## Milestone 0: Baseline And Decisions
 
