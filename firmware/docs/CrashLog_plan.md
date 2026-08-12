@@ -610,6 +610,34 @@ No-motion idle-soak closeout:
 4. If watchdog starvation reproduces, retain the first post-reset `pending=1;fault=wdt` report and its non-`none` `wdg_late`, uptime, and stage evidence. After at least 12 seconds of healthy supervision, rerun SAFE and require `pending=0` with the same history still visible.
 5. Stop and flash the pre-change artifact for a reset loop, missing HELLO after the allowed window, corrupt evidence, or unexplained counter increments.
 
+No-motion idle-soak evidence (2026-08-12):
+
+- Source/artifact commit: `99bb8c5866d1d00ca5dee334b813316938268d3e`;
+  binary 329,744 bytes, SHA-256
+  `AFC14C33B65EBBE424D47A4D51D365875FF1E79F5E0BC51E0719BB89F5FD0731`.
+- Initial SAFE and the same-boot repeat both passed 28/28. The initial run
+  retained the expected once-per-boot startup reset report; the repeat did not
+  receive another one.
+- Three powered-idle intervals of 30 minutes each were followed by independent
+  SAFE runs. All three passed 28/28 with `aborted=false`, no unexpected reset
+  report, `boot=112`, `fault_ct=1`, `wdg_ct=3`, `pending=0`, `fault=none`,
+  `late_task=none`, and all four required watchdog participants live.
+- Report SHA-256 values, in execution order:
+  - `hil_reports/watchdog_evidence_99bb8c58_initial.json`:
+    `5C50982A7493904E1726B519365F5407C47121B6C1C0D5A25BEA9F2F5C1BEBBD`;
+  - `hil_reports/watchdog_evidence_99bb8c58_same_boot.json`:
+    `6BB93FFBDA3ECB339D1A17B21A32F4445D5CFCF8E2A21823C68A7DF3F72212F6`;
+  - `hil_reports/watchdog_evidence_99bb8c58_soak_1.json`:
+    `2B9B4197981B150B6A2B3B7DB3E71081561EB77E6B13584653681923EE46F304`;
+  - `hil_reports/watchdog_evidence_99bb8c58_soak_2.json`:
+    `9E30251C9CF616C493A18166FD3773B5E21756E6CD89B3160E449225257C935C`;
+  - `hil_reports/watchdog_evidence_99bb8c58_soak_3.json`:
+    `E7F87D2A448EC120BD08E367FE9E6B54D71D3A1EEFE93DF04BEBFEB50760D652`.
+- The historical idle watchdog reset did not reproduce during 90 total minutes
+  of observation. This establishes clean soak evidence and verifies the
+  once-per-boot host capture behavior; it does not prove the underlying rare
+  starvation mechanism is fixed.
+
 Messages from past attempts:
 I’ve implemented the crash-log/watchdog slice and the remaining issue is target boot reachability during SAFE HIL. I’m checking the latest report and the startup paths that can prevent HELLO_ACK, then I’ll make the smallest fix and rerun validation.
 
