@@ -129,6 +129,7 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2070u, "coord_xy_perf_x_direction", "performance", "FULL", "explicit_selection"},
     {2071u, "coord_xy_camera_home_transition", "performance", "FULL", "explicit_selection"},
     {2072u, "coord_xy_40khz_irq_path", "performance", "FULL", "explicit_selection"},
+    {2073u, "coord_xy_40khz_entry_lateness", "performance", "FULL", "explicit_selection"},
     {2003u, "pressure_regulator_step_response_full", "pressure", "FULL", "safe_gate_or_full"},
     {2201u, "pressure_hold_leak_factory", "pressure", "FULL", "safe_gate_or_full"},
     {2202u, "pressure_target_cycle_repeatability_factory", "pressure", "FULL", "safe_gate_or_full"},
@@ -4177,6 +4178,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 "coord_xy_40khz_irq_path",
                                 false,
                                 "i2=0;s=0;mi=0;ph=0;pa=0;fm=0;fa=0;tf=0;pp=0;pf=0;pu=0;ps=0;sf=0;to=1");
+                            (void)runOne(
+                                2073u,
+                                "coord_xy_40khz_entry_lateness",
+                                false,
+                                "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;sm=0;sf=0;to=1");
                             return;
                           }
                           if (!runCoordinatedXyDirectionSuite) {
@@ -5093,6 +5099,48 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return evidenceComplete && metricsFit;
                         };
 
+                        auto emitEntryLatenessEvidence =
+                            [&](const Aggregate& aggregate) {
+                          char metrics[176] = {};
+                          const int written = snprintf(
+                              metrics,
+                              sizeof(metrics),
+                              "i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"
+                              "lc=%lu;dm=%lu;sm=0;sf=%lu;to=%lu",
+                              (unsigned long)aggregate.timer2Callbacks,
+                              (unsigned long)aggregate.entryTimerSamples,
+                              (unsigned long)aggregate.entryTimerMissing,
+                              (unsigned long)aggregate.entryTimerCountMax,
+                              (unsigned long)CoordinatedXyPerformanceReport::entryTimerMeanTicks(aggregate),
+                              (unsigned long)aggregate.pendingEntryTimerCountMax,
+                              (unsigned long)aggregate.lateEntryCount,
+                              (unsigned long)aggregate.entryScheduleOverrunMaxCycles,
+                              (unsigned long)aggregate.saturationFlags,
+                              (unsigned long)aggregate.timeoutCount);
+                          const bool evidenceComplete =
+                              aggregate.timer2Callbacks > 0u &&
+                              aggregate.entryTimerSamples ==
+                                  aggregate.timer2Callbacks &&
+                              aggregate.entryTimerMissing == 0u &&
+                              aggregate.saturationFlags == 0u &&
+                              aggregate.timeoutCount == 0u;
+                          const size_t nameLength = std::min(
+                              std::strlen("coord_xy_40khz_entry_lateness"),
+                              DiagnosticResultEmitter::kMaxResultNameBytes);
+                          const size_t metricBudget =
+                              DiagnosticResultEmitter::kResultMetricsFrameBudget -
+                              nameLength;
+                          const bool metricsFit = written > 0 &&
+                              static_cast<size_t>(written) < sizeof(metrics) &&
+                              static_cast<size_t>(written) <= metricBudget;
+                          (void)runOne(2073u,
+                                       "coord_xy_40khz_entry_lateness",
+                                       evidenceComplete && metricsFit,
+                                       metricsFit ? metrics
+                                                  : "gate=metrics_overflow;to=1");
+                          return evidenceComplete && metricsFit;
+                        };
+
                         if (runCoordinatedXyTransitionSuite) {
                           const bool transitionPass =
                               runCameraHomeTransitionQualification();
@@ -5165,6 +5213,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               rowPass);
                           if (runCoordinatedXy40KhzSuite) {
                             (void)emitIrqPathEvidence(aggregate);
+                            (void)emitEntryLatenessEvidence(aggregate);
                           }
                           if (!emitted) {
                             if (runCoordinatedXy40KhzSuite) {

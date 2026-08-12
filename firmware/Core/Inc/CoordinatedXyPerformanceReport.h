@@ -103,6 +103,13 @@ struct Aggregate {
   uint32_t terminalFullIrqMaxCycles = 0u;
   uint32_t pendingPreHandlerMaxCycles = 0u;
   uint32_t pendingFullIrqMaxCycles = 0u;
+  uint32_t entryTimerSamples = 0u;
+  uint32_t entryTimerMissing = 0u;
+  uint32_t entryTimerCountSum = 0u;
+  uint32_t entryTimerCountMax = 0u;
+  uint32_t pendingEntryTimerCountMax = 0u;
+  uint32_t lateEntryCount = 0u;
+  uint32_t entryScheduleOverrunMaxCycles = 0u;
   uint32_t pendingObservations = 0u;
   uint32_t maxPendingStreak = 0u;
   uint32_t durationErrorMaxBasisPoints = 0u;
@@ -133,6 +140,7 @@ uint32_t phaseMeanCycles(const Aggregate& aggregate,
                          CoordinatedXyIsrInstrumentation::Phase phase);
 uint32_t preHandlerMeanCycles(const Aggregate& aggregate);
 uint32_t fullIrqMeanCycles(const Aggregate& aggregate);
+uint32_t entryTimerMeanTicks(const Aggregate& aggregate);
 bool aggregatePasses(const Aggregate& aggregate,
                      uint32_t expectedMoves,
                      uint32_t expectedXSteps,

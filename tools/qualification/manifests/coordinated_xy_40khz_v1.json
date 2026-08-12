@@ -4,14 +4,14 @@
   "name": "Coordinated XY Standalone 40 kHz Geometry v1",
   "profile": "FULL",
   "description": "Runs only the existing Milestone 6 40 kHz geometry row and its bounded post-row X/Y reference homes.",
-  "expected_test_ids": [2064, 2072],
+  "expected_test_ids": [2064, 2072, 2073],
   "enforce_expected_test_ids": true,
   "requires_operator_prompts": true,
   "selftest_args": ["--coordinated-xy-40khz-suite"],
   "fixtures": [
     {
       "fixture_id": "motion_clear_envelope_v1",
-      "required_for": [2064, 2072],
+      "required_for": [2064, 2072, 2073],
       "operator_note": "Confirm both limit switches are released and the complete XY/Z envelope is clear. The diagnostic homes Z then X/Y, executes only the ten-move Milestone 6 40 kHz geometry row, and performs bounded X/Y reference homes. It does not run the 5-30 kHz tiers, focused X-direction workload, raster, repeated-camera, or pressure cases. Stop immediately for unexpected contact, abnormal sound, loss of gantry squareness, or absent reference-home motion."
     }
   ],
@@ -66,6 +66,23 @@
         "pf": {"maturity": "candidate", "min": 0},
         "pu": {"maturity": "candidate", "min": 0},
         "ps": {"maturity": "candidate", "min": 0},
+        "sf": {"maturity": "acceptance", "equals": 0},
+        "to": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "2073": {
+      "category": "performance",
+      "failure_domain": "firmware_timing",
+      "metrics": {
+        "i2": {"maturity": "acceptance", "equals": 440000},
+        "s": {"maturity": "acceptance", "equals": 440000},
+        "mi": {"maturity": "acceptance", "equals": 0},
+        "cm": {"maturity": "candidate", "min": 0},
+        "ca": {"maturity": "candidate", "min": 0},
+        "pm": {"maturity": "candidate", "min": 0},
+        "lc": {"maturity": "candidate", "min": 0},
+        "dm": {"maturity": "candidate", "min": 0},
+        "sm": {"maturity": "acceptance", "equals": 0},
         "sf": {"maturity": "acceptance", "equals": 0},
         "to": {"maturity": "acceptance", "equals": 0}
       }

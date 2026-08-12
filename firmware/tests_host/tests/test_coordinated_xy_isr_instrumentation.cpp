@@ -109,14 +109,14 @@ TEST(CoordinatedXyIsrInstrumentation, TracksOuterIrqPathAndCorrelatesPendingSamp
   CoordinatedXyIsrInstrumentation::completeSampleTiming(
       state, Phase::Acceleration, 110u, 150u, 175u, false);
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
-      state, true, 105u, 110u, true, false);
+      state, true, 105u, true, 130u, 99u, 110u, true, false);
   CoordinatedXyIsrInstrumentation::completeIrqPath(state, 175u);
   CoordinatedXyIsrInstrumentation::recordSample(
       state, Phase::Deceleration, 200u, 260u, 99u, false, true, true);
   CoordinatedXyIsrInstrumentation::completeSampleTiming(
       state, Phase::Deceleration, 200u, 260u, 300u, true);
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
-      state, true, 190u, 200u, false, true);
+      state, true, 190u, true, 20u, 99u, 200u, false, true);
   CoordinatedXyIsrInstrumentation::completeIrqPath(state, 300u);
 
   const auto snapshot = CoordinatedXyIsrInstrumentation::makeSnapshot(state);
@@ -130,6 +130,15 @@ TEST(CoordinatedXyIsrInstrumentation, TracksOuterIrqPathAndCorrelatesPendingSamp
   UNSIGNED_LONGS_EQUAL(110u, snapshot.terminalFullIrqMaxCycles);
   UNSIGNED_LONGS_EQUAL(5u, snapshot.pendingPreHandlerMaxCycles);
   UNSIGNED_LONGS_EQUAL(70u, snapshot.pendingFullIrqMaxCycles);
+  UNSIGNED_LONGS_EQUAL(2u, snapshot.entryTimerSamples);
+  UNSIGNED_LONGS_EQUAL(0u, snapshot.entryTimerMissing);
+  UNSIGNED_LONGS_EQUAL(150u, snapshot.entryTimerCountSum);
+  UNSIGNED_LONGS_EQUAL(130u, snapshot.entryTimerCountMax);
+  UNSIGNED_LONGS_EQUAL(130u, snapshot.pendingEntryTimerCountMax);
+  UNSIGNED_LONGS_EQUAL(1u, snapshot.lateEntryCount);
+  UNSIGNED_LONGS_EQUAL(0u, snapshot.entryScheduleOverrunMaxCycles);
+  UNSIGNED_LONGS_EQUAL(
+      75u, CoordinatedXyIsrInstrumentation::entryTimerMeanTicks(snapshot));
   UNSIGNED_LONGS_EQUAL(
       7u, CoordinatedXyIsrInstrumentation::preHandlerMeanCycles(snapshot));
   UNSIGNED_LONGS_EQUAL(
@@ -142,11 +151,13 @@ TEST(CoordinatedXyIsrInstrumentation, CountsMissingOuterIrqEntrySample) {
   CoordinatedXyIsrInstrumentation::recordSample(
       state, Phase::Cruise, 1u, 2u, 0u, false, false, true);
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
-      state, false, 0u, 1u, false, true);
+      state, false, 0u, false, 0u, 0u, 1u, false, true);
 
   const auto snapshot = CoordinatedXyIsrInstrumentation::makeSnapshot(state);
   UNSIGNED_LONGS_EQUAL(0u, snapshot.irqPathSamples);
   UNSIGNED_LONGS_EQUAL(1u, snapshot.irqPathMissing);
+  UNSIGNED_LONGS_EQUAL(0u, snapshot.entryTimerSamples);
+  UNSIGNED_LONGS_EQUAL(1u, snapshot.entryTimerMissing);
   UNSIGNED_LONGS_EQUAL(
       0u, CoordinatedXyIsrInstrumentation::preHandlerMeanCycles(snapshot));
   UNSIGNED_LONGS_EQUAL(
@@ -163,7 +174,8 @@ TEST(CoordinatedXyIsrInstrumentation, OuterIrqPathUsesUnsignedWrapArithmetic) {
       state, Phase::Cruise, 0xFFFFFFF5u, 0x00000010u, 0x00000020u,
       true);
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
-      state, true, 0xFFFFFFF0u, 0xFFFFFFF5u, false, true);
+      state, true, 0xFFFFFFF0u, true, 7u, 15u,
+      0xFFFFFFF5u, false, true);
   CoordinatedXyIsrInstrumentation::completeIrqPath(state, 0x00000020u);
 
   const auto snapshot = CoordinatedXyIsrInstrumentation::makeSnapshot(state);
@@ -220,17 +232,21 @@ TEST(CoordinatedXyIsrInstrumentation, SaturatesInsteadOfWrapping) {
   state.irqPathSamples = std::numeric_limits<uint32_t>::max();
   state.preHandlerCycleSum = std::numeric_limits<uint32_t>::max();
   state.fullIrqCycleSum = std::numeric_limits<uint32_t>::max();
+  state.entryTimerSamples = std::numeric_limits<uint32_t>::max();
+  state.entryTimerCountSum = std::numeric_limits<uint32_t>::max();
+  state.lateEntryCount = std::numeric_limits<uint32_t>::max();
 
   CoordinatedXyIsrInstrumentation::recordSample(
       state, Phase::Acceleration, 1u, 2u, 1u, true, true, false);
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
-      state, true, 0u, 1u, true, false);
+      state, true, 0u, true, 128u, 1u, 1u, true, false);
   CoordinatedXyIsrInstrumentation::completeIrqPath(state, 2u);
   state.irqPathMissing = std::numeric_limits<uint32_t>::max();
+  state.entryTimerMissing = std::numeric_limits<uint32_t>::max();
   CoordinatedXyIsrInstrumentation::recordSample(
       state, Phase::Acceleration, 3u, 4u, 1u, false, false, false);
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
-      state, false, 0u, 3u, false, false);
+      state, false, 0u, false, 0u, 0u, 3u, false, false);
   const auto snapshot = CoordinatedXyIsrInstrumentation::makeSnapshot(state);
 
   CHECK_TRUE((snapshot.saturationFlags &
@@ -251,6 +267,34 @@ TEST(CoordinatedXyIsrInstrumentation, SaturatesInsteadOfWrapping) {
               CoordinatedXyIsrInstrumentation::SaturatedIrqPathSamples) != 0u);
   CHECK_TRUE((snapshot.saturationFlags &
               CoordinatedXyIsrInstrumentation::SaturatedIrqPathMissing) != 0u);
+  CHECK_TRUE((snapshot.saturationFlags &
+              CoordinatedXyIsrInstrumentation::SaturatedEntryTimerSamples) != 0u);
+  CHECK_TRUE((snapshot.saturationFlags &
+              CoordinatedXyIsrInstrumentation::SaturatedEntryTimerMissing) != 0u);
+  CHECK_TRUE((snapshot.saturationFlags &
+              CoordinatedXyIsrInstrumentation::SaturatedEntryTimerCountSum) != 0u);
+  CHECK_TRUE((snapshot.saturationFlags &
+              CoordinatedXyIsrInstrumentation::SaturatedLateEntryCount) != 0u);
+}
+
+TEST(CoordinatedXyIsrInstrumentation, TracksEntryScheduleOverrunAcrossDwtWrap) {
+  State state{};
+  CoordinatedXyIsrInstrumentation::reset(state, 0u);
+  CoordinatedXyIsrInstrumentation::beginIrqPathSample(
+      state, true, 0xFFFFFFF0u, true, 10u, 49u,
+      0xFFFFFFF5u, false, false);
+  CoordinatedXyIsrInstrumentation::completeIrqPath(state, 0xFFFFFFFAu);
+  CoordinatedXyIsrInstrumentation::beginIrqPathSample(
+      state, true, 0x00000072u, true, 140u, 49u,
+      0x00000077u, true, true);
+  CoordinatedXyIsrInstrumentation::completeIrqPath(state, 0x0000007Cu);
+
+  const auto snapshot = CoordinatedXyIsrInstrumentation::makeSnapshot(state);
+  // Unsigned subtraction yields 130 actual cycles across wrap; ARR 49 is a
+  // 100-cycle schedule at the fixed 2:1 core/timer clock ratio.
+  UNSIGNED_LONGS_EQUAL(30u, snapshot.entryScheduleOverrunMaxCycles);
+  UNSIGNED_LONGS_EQUAL(140u, snapshot.pendingEntryTimerCountMax);
+  UNSIGNED_LONGS_EQUAL(1u, snapshot.lateEntryCount);
 }
 
 TEST(CoordinatedXyIsrInstrumentation, MarkAbortAndFinishWithoutSample) {

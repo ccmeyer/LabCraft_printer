@@ -1,6 +1,7 @@
 #include "CppUTest/TestHarness.h"
 #include "DiagnosticResultEmitter.h"
 
+#include <cstdio>
 #include <cstring>
 
 namespace {
@@ -190,6 +191,53 @@ TEST(DiagnosticResultEmitter, GripperStressRasterMetricsFitWithoutTruncatingDeci
     MEMCMP_EQUAL(metricsText, &payload[metrics + 2], std::strlen(metricsText));
     CHECK_TRUE(std::strstr(metricsText, "stride=5") != nullptr);
     CHECK_TRUE(std::strstr(metricsText, "sample_ms=25") != nullptr);
+}
+
+TEST(DiagnosticResultEmitter, CoordinatedXyEntryLatenessMetricsFitAtSaturatedValues)
+{
+    char metricsText[176] = {};
+    const int written = std::snprintf(
+        metricsText,
+        sizeof(metricsText),
+        "i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;lc=%lu;dm=%lu;sm=0;sf=%lu;to=%lu",
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul);
+    const char name[] = "coord_xy_40khz_entry_lateness";
+    const size_t nameLength = std::strlen(name) >
+            DiagnosticResultEmitter::kMaxResultNameBytes
+        ? DiagnosticResultEmitter::kMaxResultNameBytes
+        : std::strlen(name);
+    const size_t metricsBudget =
+        DiagnosticResultEmitter::kResultMetricsFrameBudget - nameLength;
+
+    CHECK_TRUE(written > 0);
+    CHECK_TRUE(static_cast<size_t>(written) < sizeof(metricsText));
+    CHECK_TRUE(static_cast<size_t>(written) <= metricsBudget);
+
+    uint8_t payload[256] = {0};
+    const size_t len = DiagnosticResultEmitter::buildResultPayload(
+        payload,
+        sizeof(payload),
+        0x01u,
+        0x02u,
+        2073u,
+        name,
+        true,
+        metricsText,
+        0x04u);
+    const size_t metrics =
+        findTag(payload, len, DiagnosticResultEmitter::kTagMetrics);
+    CHECK_TRUE(metrics < len);
+    UNSIGNED_LONGS_EQUAL(std::strlen(metricsText), payload[metrics + 1]);
+    MEMCMP_EQUAL(metricsText, &payload[metrics + 2], std::strlen(metricsText));
 }
 
 TEST(DiagnosticResultEmitter, DonePayloadPreservesCurrentLayout)

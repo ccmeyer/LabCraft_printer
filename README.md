@@ -2743,12 +2743,12 @@ To isolate the complete 40 kHz geometry row from all preceding speed tiers and
 the focused X-direction workload, run:
 
 ```bash
-python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-40khz-suite --timeout-ms 240000 --out hil_reports/coordinated_xy_40khz.json
-python3 tools/run_qualification.py --manifest coordinated_xy_40khz_v1 --operator-prompts --fixture motion_clear_envelope_v1 --machine-id LC-001 --raw-report hil_reports/coordinated_xy_40khz.json
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-40khz-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_entry_lateness.json
+python3 tools/run_qualification.py --manifest coordinated_xy_40khz_v1 --operator-prompts --fixture motion_clear_envelope_v1 --machine-id LC-001 --raw-report hil_reports/coordinated_xy_entry_lateness.json
 ```
 
-Selector `2077` emits the existing result `2064` plus timing-evidence result
-`2072`. It performs the normal
+Selector `2077` emits the existing result `2064` plus timing-evidence results
+`2072` and `2073`. It performs the normal
 Z and sequential X/Y reference homes, runs the exact ten-move 40 kHz geometry
 row, performs the existing bounded post-row X/Y homes, restores the production
 rate caps, and exits. It does not run the 5-30 kHz tiers, result `2070`, raster,
@@ -2763,6 +2763,21 @@ pre-handler maximum/mean (`ph`/`pa`), full software IRQ maximum/mean
 This timing begins at the first TIM2 user-code instruction; it does not include
 hardware exception-entry latency before the C handler starts or exception
 return after the final timestamp.
+
+Result `2073` captures TIM2 `CNT` and `ARR` beside that first DWT timestamp,
+before HAL dispatch and without calling HAL or FreeRTOS. It reports callbacks
+(`i2`), valid/missing entry samples (`s`/`mi`), maximum/mean entry counter
+(`cm`/`ca`, in 90 MHz timer ticks), pending-correlated maximum (`pm`), entries
+at or above the diagnostic 128-tick threshold (`lc`), maximum positive
+inter-entry schedule overrun (`dm`, in 180 MHz core cycles), status
+synchronization mode (`sm=0` for the production critical section), saturation
+(`sf`), and timeout (`to`). The evidence result passes when coverage is
+complete and unsaturated; it does not weaken result `2064`'s zero-pending gate.
+Proceed to the status-synchronization A/B only if a single Stage 1 run
+reproduces pending updates and either `pm >= 128` or `dm >= 256`. If pending is
+reproduced below both thresholds, investigate the post-check instrumentation
+tail instead. If no pending update occurs, do not repeat motion solely to force
+the failure.
 
 First confirm that the `pressure_closed_loop_v1` fixture is installed and safe
 at 1-2 psi and that the complete XY/Z envelope is clear. Both performance

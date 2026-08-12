@@ -227,13 +227,16 @@ def test_coordinated_xy_40khz_suite_is_only_the_existing_geometry_row():
     assert focused.profile == "FULL"
     assert required_fixture_ids(focused) == ("motion_clear_envelope_v1",)
     rows = build_test_plan_rows(focused)
-    assert [row.test_id for row in rows] == [2064, 2072]
+    assert [row.test_id for row in rows] == [2064, 2072, 2073]
     assert rows[0].name == "Coordinated XY 40 kHz performance"
     assert "am" in rows[0].metrics
     assert "xd" in rows[0].metrics
     assert rows[1].name == "Coordinated XY 40 kHz full IRQ timing"
     assert "fm" in rows[1].metrics
     assert "pf" in rows[1].metrics
+    assert rows[2].name == "Coordinated XY 40 kHz entry lateness"
+    assert "pm" in rows[2].metrics
+    assert "dm" in rows[2].metrics
 
 
 def test_coordinated_xy_camera_transition_suite_is_single_motion_fixture_gate():

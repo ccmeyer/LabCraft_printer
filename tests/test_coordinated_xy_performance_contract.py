@@ -71,6 +71,11 @@ def test_standalone_40khz_selector_reuses_only_existing_tier_four_and_exits():
     assert 'runOne(2072u,' in suite
     assert "emitIrqPathEvidence(aggregate)" in suite
     assert '"ax=%lu;tf=%lu' in suite
+    assert 'runOne(2073u,' in suite
+    assert "emitEntryLatenessEvidence(aggregate)" in suite
+    assert '"i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"' in suite
+    assert '"lc=%lu;dm=%lu;sm=0;sf=%lu;to=%lu"' in suite
+    assert '"coord_xy_40khz_entry_lateness",\n                                false,' in suite
 
 
 def test_outer_tim2_instrumentation_stays_in_generated_user_blocks_and_brackets_hal():
@@ -87,7 +92,18 @@ def test_outer_tim2_instrumentation_stays_in_generated_user_blocks_and_brackets_
     after_end = handler.index("/* USER CODE END TIM2_IRQn 1 */")
     assert before_start < before_end < hal < after_start < after_end
     assert "g_lcCoordinatedTim2IrqEntryCycle = DWT->CYCCNT" in handler[before_start:before_end]
+    assert "g_lcCoordinatedTim2IrqEntryTimerCount = TIM2->CNT" in handler[before_start:before_end]
+    assert "g_lcCoordinatedTim2IrqEntryTimerArr = TIM2->ARR" in handler[before_start:before_end]
+    assert "g_lcCoordinatedTim2IrqEntryTimerValid = 1u" in handler[before_start:before_end]
     assert "MX_GANTRY_RecordTim2IrqExit(DWT->CYCCNT)" in handler[after_start:after_end]
+    gantry_handler_start = gantry.index("bool Gantry::_handleCoordinatedTimerFromIsr")
+    gantry_handler_end = gantry.index("bool Gantry::dispatchCoordinatedTimerFromIsr", gantry_handler_start)
+    gantry_handler = gantry[gantry_handler_start:gantry_handler_end]
+    pending_check = gantry_handler.index("__HAL_TIM_GET_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE)")
+    consume_capture = gantry_handler.rindex("g_lcCoordinatedTim2IrqEntryTimerCount")
+    aggregate_capture = gantry_handler.rindex("beginIrqPathSample")
+    assert pending_check < consume_capture
+    assert pending_check < aggregate_capture
     assert "completeIrqPath" in gantry
 
 

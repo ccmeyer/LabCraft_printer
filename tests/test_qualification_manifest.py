@@ -294,7 +294,7 @@ def test_load_coordinated_xy_40khz_manifest_reuses_only_the_existing_row():
     manifest = load_manifest("coordinated_xy_40khz_v1")
 
     assert manifest.profile == "FULL"
-    assert manifest.expected_test_ids == (2064, 2072)
+    assert manifest.expected_test_ids == (2064, 2072, 2073)
     assert manifest.enforce_expected_test_ids is True
     assert manifest.requires_operator_prompts is True
     assert manifest.selftest_args == ("--coordinated-xy-40khz-suite",)
@@ -318,6 +318,12 @@ def test_load_coordinated_xy_40khz_manifest_reuses_only_the_existing_row():
     assert irq_rules["mi"]["equals"] == 0
     assert irq_rules["ax"]["min"] == 1
     assert irq_rules["sf"]["equals"] == 0
+    entry_rules = manifest.analysis_rules["2073"]["metrics"]
+    assert entry_rules["i2"]["equals"] == 440000
+    assert entry_rules["s"]["equals"] == 440000
+    assert entry_rules["mi"]["equals"] == 0
+    assert entry_rules["sm"]["equals"] == 0
+    assert entry_rules["sf"]["equals"] == 0
 
 
 def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture():

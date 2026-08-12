@@ -218,6 +218,32 @@ void addMove(Aggregate& aggregate,
     aggregate.pendingFullIrqMaxCycles =
         observation.timing.pendingFullIrqMaxCycles;
   }
+  addSaturating(aggregate.entryTimerSamples,
+                observation.timing.entryTimerSamples,
+                aggregate.saturationFlags);
+  addSaturating(aggregate.entryTimerMissing,
+                observation.timing.entryTimerMissing,
+                aggregate.saturationFlags);
+  addSaturating(aggregate.entryTimerCountSum,
+                observation.timing.entryTimerCountSum,
+                aggregate.saturationFlags);
+  if (observation.timing.entryTimerCountMax >
+      aggregate.entryTimerCountMax) {
+    aggregate.entryTimerCountMax = observation.timing.entryTimerCountMax;
+  }
+  if (observation.timing.pendingEntryTimerCountMax >
+      aggregate.pendingEntryTimerCountMax) {
+    aggregate.pendingEntryTimerCountMax =
+        observation.timing.pendingEntryTimerCountMax;
+  }
+  addSaturating(aggregate.lateEntryCount,
+                observation.timing.lateEntryCount,
+                aggregate.saturationFlags);
+  if (observation.timing.entryScheduleOverrunMaxCycles >
+      aggregate.entryScheduleOverrunMaxCycles) {
+    aggregate.entryScheduleOverrunMaxCycles =
+        observation.timing.entryScheduleOverrunMaxCycles;
+  }
   addSaturating(aggregate.pendingObservations,
                 observation.timing.pendingObservations,
                 aggregate.saturationFlags);
@@ -276,6 +302,11 @@ uint32_t preHandlerMeanCycles(const Aggregate& aggregate) {
 uint32_t fullIrqMeanCycles(const Aggregate& aggregate) {
   if (aggregate.irqPathSamples == 0u) return 0u;
   return aggregate.fullIrqCycleSum / aggregate.irqPathSamples;
+}
+
+uint32_t entryTimerMeanTicks(const Aggregate& aggregate) {
+  if (aggregate.entryTimerSamples == 0u) return 0u;
+  return aggregate.entryTimerCountSum / aggregate.entryTimerSamples;
 }
 
 bool aggregatePasses(const Aggregate& aggregate,

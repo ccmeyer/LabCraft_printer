@@ -437,6 +437,47 @@ lateness at the first TIM2 C hook and perform a controlled status-critical-
 section A/B test. A fix should shorten or remove the priority-5 masking window;
 the zero-pending gate must not be relaxed.
 
+### Stage 1 TIM2 Entry-Lateness Candidate
+
+The measurement-only Stage 1 candidate implements the first half of that next
+diagnostic. In the first TIM2 USER CODE block, while coordinated timing is
+armed and before `HAL_TIM_IRQHandler()`, it captures DWT `CYCCNT`, TIM2 `CNT`,
+and TIM2 `ARR` using register reads and stores only. Bounded integer aggregation
+runs after the established pending-update observation, so the new calculations
+cannot create the pending state they are intended to correlate.
+
+Result `2073`, `coord_xy_40khz_entry_lateness`, is emitted beside `2064` and
+`2072`, including on a measured-row fail-stop. Its metrics are callback count
+(`i2`), valid/missing samples (`s`/`mi`), maximum/mean entry counter in 90 MHz
+timer ticks (`cm`/`ca`), pending-correlated counter maximum (`pm`), entries at
+or above 128 ticks (`lc`), maximum positive inter-entry overrun in 180 MHz core
+cycles (`dm`), status synchronization mode (`sm=0`), saturation (`sf`), and
+timeout (`to`). The 128-tick value is diagnostic only. Result `2073` requires
+complete unsaturated evidence but does not require zero pending observations;
+the unchanged `2064` row remains the fail-closed zero-pending acceptance gate.
+
+Automated validation is complete for normal/late entry samples, pending
+correlation, first-sample suppression, DWT wrap, schedule overrun, missing
+samples, saturation, result-frame budget, selector routing, manifest coverage,
+and analyzer rejection of incomplete evidence:
+
+- firmware checks: 342/342 host tests and a zero-error Debug target link (the
+  three existing target warnings remain unchanged);
+- Python regression: 4,568 passed and 135 skipped;
+- candidate binary: 328,096 bytes, SHA-256
+  `CD3330841ACF8FF9099FE621096971E1641F66BF70D1A10D43992F70BC4A07CE`,
+  leaving 65,120 bytes in the 384 KiB application partition;
+- baseline source commit: `23d706af`; the final Stage 1 source commit must be
+  recorded with the HIL report after the diagnostic diff is checkpointed.
+
+Run one focused selector with a 120-second status-only timeout between passing
+28/28 pre- and post-SAFE runs. Stage 2 is gated: it may start only if Stage 1
+reproduces pending updates and either `pm >= 128` or `dm >= 256`. If pending
+occurs below both thresholds, isolate the post-check instrumentation tail. If
+no pending occurs, do not repeat motion solely to force it. The task-mutex
+variant is not implemented or enabled by Stage 1; normal operation continues
+to use the existing status critical section.
+
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort
 terminal measured 2,349 cycles versus the retained 2,250-cycle gate; cancel

@@ -224,21 +224,23 @@ Every milestone that touches motion must preserve these invariants:
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
-| 6. Performance and motion HIL qualification | `implemented` | Focused X gate and full 5-30 kHz geometry pass; the mixed 40 kHz geometry row passes every logical/timing gate but leaves an X physical/software offset exceeding 4,600 steps, detected by bounded home | Isolate the failing coordinated vector/direction, correct the physical-motion limit without weakening timing gates, then pass FULL, pressure coexistence, and operator observation |
+| 6. Performance and motion HIL qualification | `implemented` | Full 5-30 kHz geometry passed; standalone 40 kHz reproduced pending TIM2 updates outside the measured C-handler duration; entry-lateness diagnostic is implemented and awaiting one gated HIL run | Use result `2073` to decide whether status synchronization may be A/B tested; do not weaken zero-pending or rerun FULL |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
 
-The bounded-home investigation, manual switch preflight, low-rate regression,
-and focused X direction/rate gate are accepted. Two full-suite attempts then
-passed 5-30 kHz and every logical/timing observation for all ten 40 kHz
-geometry legs, but the following X home identically exhausted an 11,916-step
-coarse guard plus 1,600-step probe without seeing the switch. Post-SAFE passed
-with no reset. Do not rerun the full suite. Run selector `2078` once on the
-ready, relatively cold machine: it executes only the camera-ratio 40 kHz
-round trip and its immediate bounded X home while recording both X enable
-outputs, STEP/ownership state, raw limit state, and legacy-home ISR evidence.
-Target evidence belongs in `docs/coordinated_xy_milestone6_performance.md`.
+The bounded-home, manual-switch, low-rate, focused X-direction, and cold
+camera-transition investigations are accepted. Standalone selector `2077`
+then reproduced 16 pending TIM2 updates even though its pending-correlated
+full C-level IRQ path remained below the 2,250-cycle edge interval. Stage 1 now
+adds measurement-only result `2073`: TIM2 `CNT`/`ARR` are captured with DWT at
+the first C hook and aggregated after the existing pending observation. Build,
+SAFE, and run selector `2077` exactly once with a 120-second status-only
+timeout, followed by post-SAFE and manifest normalization. Begin the
+status-synchronization A/B only if pending is reproduced and `pm >= 128` timer
+ticks or `dm >= 256` core cycles. Pending below both thresholds redirects the
+investigation to the post-check instrumentation tail; no pending means stop
+without repeating motion merely to force a failure. Do not rerun FULL.
 
 ## Milestone 0: Baseline And Decisions
 
@@ -742,8 +744,9 @@ the following are hard qualitative requirements:
   followed immediately by bounded legacy X home passed on 2026-08-12. This
   isolates the vector and executor-to-home transition from the preceding speed
   tiers and favors an accumulated-workload cause for the full-suite failure.
-- `coordinated_xy_40khz_v1`: selector `2077` runs only the existing result
-  `2064` geometry row and bounded post-row X/Y homes, without the lower-rate
+- `coordinated_xy_40khz_v1`: selector `2077` runs the existing result `2064`
+  geometry row plus results `2072` and `2073`, with bounded post-row X/Y homes
+  and without the lower-rate
   tiers, focused X-direction gate, raster, camera-repeat, or pressure workload.
   Its first run failed closed on one pending TIM2 update during the forward 1:4
   leg. After adding result `2072`, a refined run reproduced 16 pending updates
@@ -753,6 +756,8 @@ the following are hard qualitative requirements:
   cycles, both below the 2,250-cycle edge interval. This moves the remaining
   latency outside the measured C handler, toward pre-entry interrupt masking or
   equal-priority service delay. Pre/post SAFE passed with no reset evidence.
+  The Stage 1 candidate adds first-hook counter-at-entry and inter-entry
+  schedule-lateness evidence without changing motion; its HIL gate is pending.
 - Applicable pressure-regulator and homing smoke/qualification lanes because
   the shared Stepper integration was touched even though P/R behavior is out of
   scope.

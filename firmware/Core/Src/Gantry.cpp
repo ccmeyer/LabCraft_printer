@@ -39,7 +39,10 @@ extern TIM_HandleTypeDef htim7;
 extern "C" {
 volatile uint8_t g_lcCoordinatedTim2IrqTimingArmed = 0u;
 volatile uint8_t g_lcCoordinatedTim2IrqEntryValid = 0u;
+volatile uint8_t g_lcCoordinatedTim2IrqEntryTimerValid = 0u;
 volatile uint32_t g_lcCoordinatedTim2IrqEntryCycle = 0u;
+volatile uint32_t g_lcCoordinatedTim2IrqEntryTimerCount = 0u;
+volatile uint32_t g_lcCoordinatedTim2IrqEntryTimerArr = 0u;
 }
 #endif
 
@@ -426,7 +429,10 @@ void Gantry::_resetCoordinatedInstrumentation(uint32_t firstArr) {
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
   g_lcCoordinatedTim2IrqTimingArmed = 0u;
   g_lcCoordinatedTim2IrqEntryValid = 0u;
+  g_lcCoordinatedTim2IrqEntryTimerValid = 0u;
   g_lcCoordinatedTim2IrqEntryCycle = 0u;
+  g_lcCoordinatedTim2IrqEntryTimerCount = 0u;
+  g_lcCoordinatedTim2IrqEntryTimerArr = 0u;
 #endif
   _coordinatedTim7Interrupts = 0u;
   _coordinatedPendingUpdateCount = 0u;
@@ -567,6 +573,12 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
     _finishCoordinatedFromIsr(true, &woken, true);
     const uint32_t recordedExitCycle = gantryCycleNow();
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+    const bool entryTimerValid =
+        g_lcCoordinatedTim2IrqEntryTimerValid != 0u;
+    const uint32_t entryTimerCount =
+        g_lcCoordinatedTim2IrqEntryTimerCount;
+    const uint32_t entryTimerArr = g_lcCoordinatedTim2IrqEntryTimerArr;
+    g_lcCoordinatedTim2IrqEntryTimerValid = 0u;
     CoordinatedXyIsrInstrumentation::recordSample(
         _coordinatedTiming,
         timingPhase,
@@ -588,6 +600,9 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
         _coordinatedTiming,
         irqEntryValid,
         irqEntryCycle,
+        entryTimerValid,
+        entryTimerCount,
+        entryTimerArr,
         entryCycle,
         false,
         true);
@@ -655,6 +670,14 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
 
   const uint32_t recordedExitCycle = gantryCycleNow();
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  // Consume the new entry-register capture only after the existing pending
+  // observation so Stage 1 cannot perturb the value it is correlating.
+  const bool entryTimerValid =
+      g_lcCoordinatedTim2IrqEntryTimerValid != 0u;
+  const uint32_t entryTimerCount =
+      g_lcCoordinatedTim2IrqEntryTimerCount;
+  const uint32_t entryTimerArr = g_lcCoordinatedTim2IrqEntryTimerArr;
+  g_lcCoordinatedTim2IrqEntryTimerValid = 0u;
   CoordinatedXyIsrInstrumentation::recordSample(
       _coordinatedTiming,
       timingPhase,
@@ -676,6 +699,9 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
       _coordinatedTiming,
       irqEntryValid,
       irqEntryCycle,
+      entryTimerValid,
+      entryTimerCount,
+      entryTimerArr,
       entryCycle,
       updatePending,
       terminal);

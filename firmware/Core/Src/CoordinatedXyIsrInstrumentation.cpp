@@ -202,10 +202,62 @@ void completeSampleTiming(State& state,
 void beginIrqPathSample(State& state,
                         bool irqEntryValid,
                         uint32_t irqEntryCycle,
+                        bool entryTimerValid,
+                        uint32_t entryTimerCount,
+                        uint32_t entryTimerArr,
                         uint32_t handlerEntryCycle,
                         bool updatePending,
                         bool terminal) {
   if (!state.valid) return;
+  if (!entryTimerValid) {
+    saturatingIncrement(state.entryTimerMissing,
+                        state.saturationFlags,
+                        SaturatedEntryTimerMissing);
+    state.entryScheduleReferenceValid = false;
+  } else {
+    saturatingIncrement(state.entryTimerSamples,
+                        state.saturationFlags,
+                        SaturatedEntryTimerSamples);
+    saturatingAdd(state.entryTimerCountSum,
+                  entryTimerCount,
+                  state.saturationFlags,
+                  SaturatedEntryTimerCountSum);
+    if (entryTimerCount > state.entryTimerCountMax) {
+      state.entryTimerCountMax = entryTimerCount;
+    }
+    if (updatePending &&
+        entryTimerCount > state.pendingEntryTimerCountMax) {
+      state.pendingEntryTimerCountMax = entryTimerCount;
+    }
+    if (entryTimerCount >= kLateEntryTimerTicks) {
+      saturatingIncrement(state.lateEntryCount,
+                          state.saturationFlags,
+                          SaturatedLateEntryCount);
+    }
+
+    if (irqEntryValid && state.entryScheduleReferenceValid) {
+      const uint32_t actualCycles =
+          irqEntryCycle - state.previousIrqEntryCycle;
+      const uint64_t expectedWide =
+          (static_cast<uint64_t>(entryTimerArr) + 1u) *
+          kCoreCyclesPerTimerTick;
+      const uint32_t expectedCycles = expectedWide > kUint32Max
+          ? kUint32Max
+          : static_cast<uint32_t>(expectedWide);
+      if (actualCycles > expectedCycles) {
+        const uint32_t overrun = actualCycles - expectedCycles;
+        if (overrun > state.entryScheduleOverrunMaxCycles) {
+          state.entryScheduleOverrunMaxCycles = overrun;
+        }
+      }
+    }
+    if (irqEntryValid) {
+      state.previousIrqEntryCycle = irqEntryCycle;
+      state.entryScheduleReferenceValid = true;
+    } else {
+      state.entryScheduleReferenceValid = false;
+    }
+  }
   if (!irqEntryValid) {
     saturatingIncrement(state.irqPathMissing,
                         state.saturationFlags,
@@ -298,6 +350,14 @@ Snapshot makeSnapshot(const State& state) {
   snapshot.terminalFullIrqMaxCycles = state.terminalFullIrqMaxCycles;
   snapshot.pendingPreHandlerMaxCycles = state.pendingPreHandlerMaxCycles;
   snapshot.pendingFullIrqMaxCycles = state.pendingFullIrqMaxCycles;
+  snapshot.entryTimerSamples = state.entryTimerSamples;
+  snapshot.entryTimerMissing = state.entryTimerMissing;
+  snapshot.entryTimerCountSum = state.entryTimerCountSum;
+  snapshot.entryTimerCountMax = state.entryTimerCountMax;
+  snapshot.pendingEntryTimerCountMax = state.pendingEntryTimerCountMax;
+  snapshot.lateEntryCount = state.lateEntryCount;
+  snapshot.entryScheduleOverrunMaxCycles =
+      state.entryScheduleOverrunMaxCycles;
   snapshot.saturationFlags = state.saturationFlags;
   return snapshot;
 }
@@ -319,6 +379,11 @@ uint32_t preHandlerMeanCycles(const Snapshot& snapshot) {
 
 uint32_t fullIrqMeanCycles(const Snapshot& snapshot) {
   return boundedMean(snapshot.fullIrqCycleSum, snapshot.irqPathSamples);
+}
+
+uint32_t entryTimerMeanTicks(const Snapshot& snapshot) {
+  return boundedMean(snapshot.entryTimerCountSum,
+                     snapshot.entryTimerSamples);
 }
 
 uint32_t durationErrorBasisPoints(const Snapshot& snapshot,

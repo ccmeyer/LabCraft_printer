@@ -170,7 +170,7 @@ def test_standalone_40khz_manifest_accepts_exact_row_and_blocks_home_drift():
         "started_at": "2026-08-12T00:00:00Z",
         "finished_at": "2026-08-12T00:00:10Z",
         "aborted": False,
-        "summary": {"total": 2, "passed": 2, "failed": 0},
+        "summary": {"total": 3, "passed": 3, "failed": 0},
         "results": [
             {
                 "test_id": 2064,
@@ -189,6 +189,16 @@ def test_standalone_40khz_manifest_accepts_exact_row_and_blocks_home_drift():
                     "ps": 0, "sf": 0, "to": 0,
                 },
             },
+            {
+                "test_id": 2073,
+                "name": "coord_xy_40khz_entry_lateness",
+                "pass": True,
+                "metrics": {
+                    "i2": 440000, "s": 440000, "mi": 0,
+                    "cm": 100, "ca": 20, "pm": 0, "lc": 0,
+                    "dm": 100, "sm": 0, "sf": 0, "to": 0,
+                },
+            },
         ],
         "host_checks": [{
             "name": "coordinated_xy_status_cadence",
@@ -199,6 +209,14 @@ def test_standalone_40khz_manifest_accepts_exact_row_and_blocks_home_drift():
 
     assert _analyze(raw, manifest)["verdict"]["status"] == "pass"
     raw["results"][0]["metrics"] = {**metrics, "xd": 26}
+    assert _analyze(raw, manifest)["verdict"]["status"] == "fail"
+
+    raw["results"][0]["metrics"] = metrics
+    raw["results"][2]["metrics"]["mi"] = 1
+    assert _analyze(raw, manifest)["verdict"]["status"] == "fail"
+
+    raw["results"][2]["metrics"]["mi"] = 0
+    raw["results"][2]["metrics"]["s"] = 439999
     assert _analyze(raw, manifest)["verdict"]["status"] == "fail"
 
 

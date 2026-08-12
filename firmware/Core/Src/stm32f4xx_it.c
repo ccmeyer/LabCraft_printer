@@ -84,7 +84,10 @@ extern TIM_HandleTypeDef htim6;
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
 extern volatile uint8_t g_lcCoordinatedTim2IrqTimingArmed;
 extern volatile uint8_t g_lcCoordinatedTim2IrqEntryValid;
+extern volatile uint8_t g_lcCoordinatedTim2IrqEntryTimerValid;
 extern volatile uint32_t g_lcCoordinatedTim2IrqEntryCycle;
+extern volatile uint32_t g_lcCoordinatedTim2IrqEntryTimerCount;
+extern volatile uint32_t g_lcCoordinatedTim2IrqEntryTimerArr;
 extern void MX_GANTRY_RecordTim2IrqExit(uint32_t irqExitCycle);
 #endif
 
@@ -308,6 +311,9 @@ void TIM2_IRQHandler(void)
   if (g_lcCoordinatedTim2IrqTimingArmed != 0u)
   {
     g_lcCoordinatedTim2IrqEntryCycle = DWT->CYCCNT;
+    g_lcCoordinatedTim2IrqEntryTimerCount = TIM2->CNT;
+    g_lcCoordinatedTim2IrqEntryTimerArr = TIM2->ARR;
+    g_lcCoordinatedTim2IrqEntryTimerValid = 1u;
     g_lcCoordinatedTim2IrqEntryValid = 1u;
   }
 #endif

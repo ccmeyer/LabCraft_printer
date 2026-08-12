@@ -9,6 +9,9 @@
 
 namespace CoordinatedXyIsrInstrumentation {
 
+static constexpr uint32_t kLateEntryTimerTicks = 128u;
+static constexpr uint32_t kCoreCyclesPerTimerTick = 2u;
+
 enum class Phase : uint8_t {
   Acceleration = 0u,
   Cruise = 1u,
@@ -29,6 +32,10 @@ enum SaturationFlag : uint32_t {
   SaturatedTerminalCallbacks = 1u << 8u,
   SaturatedIrqPathSamples = 1u << 9u,
   SaturatedIrqPathMissing = 1u << 10u,
+  SaturatedEntryTimerSamples = 1u << 11u,
+  SaturatedEntryTimerMissing = 1u << 12u,
+  SaturatedEntryTimerCountSum = 1u << 13u,
+  SaturatedLateEntryCount = 1u << 14u,
 };
 
 struct State {
@@ -62,6 +69,15 @@ struct State {
   uint32_t terminalFullIrqMaxCycles = 0u;
   uint32_t pendingPreHandlerMaxCycles = 0u;
   uint32_t pendingFullIrqMaxCycles = 0u;
+  uint32_t entryTimerSamples = 0u;
+  uint32_t entryTimerMissing = 0u;
+  uint32_t entryTimerCountSum = 0u;
+  uint32_t entryTimerCountMax = 0u;
+  uint32_t pendingEntryTimerCountMax = 0u;
+  uint32_t lateEntryCount = 0u;
+  uint32_t entryScheduleOverrunMaxCycles = 0u;
+  bool entryScheduleReferenceValid = false;
+  uint32_t previousIrqEntryCycle = 0u;
   bool irqPathSampleOpen = false;
   bool irqPathSamplePending = false;
   bool irqPathSampleTerminal = false;
@@ -99,6 +115,13 @@ struct Snapshot {
   uint32_t terminalFullIrqMaxCycles = 0u;
   uint32_t pendingPreHandlerMaxCycles = 0u;
   uint32_t pendingFullIrqMaxCycles = 0u;
+  uint32_t entryTimerSamples = 0u;
+  uint32_t entryTimerMissing = 0u;
+  uint32_t entryTimerCountSum = 0u;
+  uint32_t entryTimerCountMax = 0u;
+  uint32_t pendingEntryTimerCountMax = 0u;
+  uint32_t lateEntryCount = 0u;
+  uint32_t entryScheduleOverrunMaxCycles = 0u;
   uint32_t saturationFlags = SaturatedNone;
 };
 
@@ -122,6 +145,9 @@ void completeSampleTiming(State& state,
 void beginIrqPathSample(State& state,
                         bool irqEntryValid,
                         uint32_t irqEntryCycle,
+                        bool entryTimerValid,
+                        uint32_t entryTimerCount,
+                        uint32_t entryTimerArr,
                         uint32_t handlerEntryCycle,
                         bool updatePending,
                         bool terminal);
@@ -131,6 +157,7 @@ uint32_t phaseMeanCycles(const Snapshot& snapshot, Phase phase);
 uint32_t terminalMeanCycles(const Snapshot& snapshot);
 uint32_t preHandlerMeanCycles(const Snapshot& snapshot);
 uint32_t fullIrqMeanCycles(const Snapshot& snapshot);
+uint32_t entryTimerMeanTicks(const Snapshot& snapshot);
 uint32_t durationErrorBasisPoints(const Snapshot& snapshot,
                                   uint32_t coreClockHz,
                                   uint32_t timerClockHz);

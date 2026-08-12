@@ -80,6 +80,7 @@ TEST_CATALOG: dict[int, TestCatalogEntry] = {
     2070: TestCatalogEntry(2070, "Coordinated XY X-direction speed isolation", "Home-referenced positive and negative X-only qualification at 30, 35, and 40 kHz with normal and reduced acceleration."),
     2071: TestCatalogEntry(2071, "Coordinated XY camera/home transition", "Cold 40 kHz camera-ratio round trip followed immediately by bounded legacy X homing with enable, timer, STEP, and limit evidence."),
     2072: TestCatalogEntry(2072, "Coordinated XY 40 kHz full IRQ timing", "Earliest TIM2 IRQ entry through HAL callback return timing, correlated with pending-update observations."),
+    2073: TestCatalogEntry(2073, "Coordinated XY 40 kHz entry lateness", "TIM2 counter-at-entry and inter-entry schedule lateness captured before HAL dispatch."),
     2201: TestCatalogEntry(2201, "Pressure hold leak", "Closed-loop pressure decay and correction effort."),
     2202: TestCatalogEntry(2202, "Pressure target cycling", "Repeated low/high target settling and pressure span."),
     2203: TestCatalogEntry(2203, "Pressure hysteresis", "Regulator motor repeatability and hysteresis span."),

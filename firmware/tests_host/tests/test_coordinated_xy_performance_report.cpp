@@ -60,6 +60,12 @@ CoordinatedXyPerformanceReport::MoveObservation acceptedMove(
   observation.timing.fullIrqMaxCycles = 900u;
   observation.timing.activeFullIrqMaxCycles = 850u;
   observation.timing.terminalFullIrqMaxCycles = 1900u;
+  observation.timing.entryTimerSamples = master * 2u;
+  observation.timing.entryTimerCountSum = master * 40u;
+  observation.timing.entryTimerCountMax = 50u;
+  observation.timing.pendingEntryTimerCountMax = 40u;
+  observation.timing.lateEntryCount = 2u;
+  observation.timing.entryScheduleOverrunMaxCycles = 60u;
   return observation;
 }
 
@@ -182,6 +188,13 @@ TEST(CoordinatedXyPerformanceReport, AggregatesMovesAndPhaseMeans) {
       CoordinatedXyPerformanceReport::fullIrqMeanCycles(aggregate));
   UNSIGNED_LONGS_EQUAL(1900u, aggregate.terminalFullIrqMaxCycles);
   UNSIGNED_LONGS_EQUAL(850u, aggregate.activeFullIrqMaxCycles);
+  UNSIGNED_LONGS_EQUAL(80000u, aggregate.entryTimerSamples);
+  UNSIGNED_LONGS_EQUAL(20u,
+      CoordinatedXyPerformanceReport::entryTimerMeanTicks(aggregate));
+  UNSIGNED_LONGS_EQUAL(50u, aggregate.entryTimerCountMax);
+  UNSIGNED_LONGS_EQUAL(40u, aggregate.pendingEntryTimerCountMax);
+  UNSIGNED_LONGS_EQUAL(4u, aggregate.lateEntryCount);
+  UNSIGNED_LONGS_EQUAL(60u, aggregate.entryScheduleOverrunMaxCycles);
   UNSIGNED_LONGS_EQUAL(
       500u,
       CoordinatedXyPerformanceReport::phaseMeanCycles(
