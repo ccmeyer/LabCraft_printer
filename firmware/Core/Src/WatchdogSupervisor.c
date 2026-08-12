@@ -3,6 +3,7 @@
 #include "main.h"
 #include "RegulatorTelemetry.h"
 #include "PressureRegulatorTelemetry.h"
+#include "PressureSensorWatchdogTelemetry.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "WatchdogParticipationPolicy.h"
@@ -233,6 +234,30 @@ static void Watchdog_Task(void* argument)
         rAgeMs,
         nowMs);
     CrashLog_CaptureRegulatorContext(&regulatorContext);
+    if (late == CRASH_TASK_PRESSURE) {
+      PressureSensorWatchdogSnapshot livePressure;
+      PressureSensorWatchdogResetContext pressureContext = {0};
+      if (PressureSensorWatchdog_GetSnapshot(&livePressure) != 0u) {
+        uint32_t pressureAgeMs = PRESSURE_SENSOR_WDG_AGE_UNKNOWN;
+        (void)Watchdog_GetTaskLastSeenAgeMs(CRASH_TASK_PRESSURE, &pressureAgeMs);
+        pressureContext.valid = livePressure.valid;
+        pressureContext.phase = livePressure.phase;
+        pressureContext.saturated = livePressure.saturated;
+        pressureContext.watchdogAgeMs = pressureAgeMs;
+        pressureContext.phaseAgeMs = livePressure.phaseAgeMs;
+        pressureContext.lastLoopAgeMs = livePressure.lastLoopAgeMs;
+        pressureContext.maxCheckInGapMs = livePressure.maxCheckInGapMs;
+        pressureContext.selectFailureCount = livePressure.selectFailureCount;
+        pressureContext.readFailureCount = livePressure.readFailureCount;
+        pressureContext.recoveryCount = livePressure.recoveryCount;
+        pressureContext.loopCount = livePressure.loopCount;
+        pressureContext.stackHighWaterWords = livePressure.stackHighWaterWords;
+        pressureContext.snapshotTickMs = livePressure.snapshotTickMs;
+        CrashLog_CapturePressureSensorContext(&pressureContext);
+      } else {
+        CrashLog_CapturePressureSensorContext(NULL);
+      }
+    }
     CrashLog_RecordWatchdogFault(late);
   }
 }

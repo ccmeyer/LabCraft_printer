@@ -34,6 +34,8 @@
 #include "CrashLog.h"
 #include "WatchdogSupervisor.h"
 #include "PressureTraceRecorder.h"
+#include "PressureSensorWatchdogTelemetry.h"
+#include "SelfTestSchedulingPolicy.h"
 #include "cmsis_os.h"
 #include "task.h"
 
@@ -126,6 +128,8 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {1040u, "rtos_memory_headroom_safe", "rtos", "SAFE", "always"},
     {1041u, "crash_record_retained_safe", "crash", "SAFE", "compile_gate"},
     {1042u, "watchdog_supervisor_safe", "watchdog", "SAFE", "compile_gate"},
+    {1044u, "pressure_wdg_context_safe", "watchdog", "SAFE", "safe_terminal"},
+    {1043u, "selftest_scheduler_safe", "watchdog", "SAFE", "safe_terminal"},
     {2001u, "motion_home_cycle_full", "motion", "FULL", "safe_gate_or_full"},
     {2002u, "motion_absolute_move_bounds_full", "motion", "FULL", "safe_gate_or_full"},
     {2007u, "motion_home_repeatability_factory", "motion", "FULL", "safe_gate_or_full"},
@@ -308,6 +312,16 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runRefuelVacuumSuite = (selectedDiagnosticId == 2298u);
     const bool runValveCharacterizationSuite = (selectedDiagnosticId == 2499u);
     const bool runValveGapSweepSuite = (selectedDiagnosticId == 2498u);
+    const bool runSelfTestSchedulerNoYieldSuite = (selectedDiagnosticId == 1039u);
+    const bool runSelfTestSchedulerCooperativeSuite = (selectedDiagnosticId == 1038u);
+    const SelfTestResultSchedulingMode resultSchedulingMode = runSelfTestSchedulerNoYieldSuite
+        ? SelfTestResultSchedulingMode::NoYield
+        : SelfTestResultSchedulingMode::Cooperative;
+    SelfTestSchedulingState schedulingState{};
+    SelfTestScheduling_Init(schedulingState, resultSchedulingMode);
+    if (PressureSensorWatchdog_BeginDiagnosticWindow() == 0u) {
+      schedulingState.saturated = true;
+    }
     const bool runPressureSweepCore = (selectedPressureTraceTest == 2301u);
     const bool runPressureSweepExtended = (selectedPressureTraceTest == 2302u);
     const bool runPressureSweepFocused = (selectedPressureTraceTest == 2303u);
@@ -345,7 +359,17 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         pass,
                         metrics,
                         HAL_GetTick());
+                    const uint32_t transmitStartMs = HAL_GetTick();
                     comm->sendFrame(comm->handle(), payload, payloadLen);
+                    SelfTestScheduling_RecordTransmit(schedulingState,
+                                                      HAL_GetTick() - transmitStartMs);
+                    if (payloadLen == 0u) {
+                      schedulingState.saturated = true;
+                    }
+                    if (SelfTestScheduling_ShouldDelay(schedulingState)) {
+                      vTaskDelay(pdMS_TO_TICKS(1u));
+                      SelfTestScheduling_RecordDelay(schedulingState);
+                    }
                   };
 					  auto runOne = [&](uint16_t testId, const char* name, bool pass, const char* metrics) {
 				    if (_selfTestAbortRequested) {
@@ -11823,6 +11847,47 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 			
 
                               selftest_done:
+    if (!request.fullProfile &&
+        (selectedDiagnosticId == 0u ||
+         runSelfTestSchedulerNoYieldSuite ||
+         runSelfTestSchedulerCooperativeSuite)) {
+      CrashLogSnapshot crashSnapshot{};
+      CrashLog_GetSnapshot(&crashSnapshot);
+      const bool pressureContextExpected =
+          ((crashSnapshot.flags & CRASHLOG_FLAG_PENDING) != 0u) &&
+          (crashSnapshot.lastFault == CRASH_FAULT_WDT_STARVE) &&
+          (crashSnapshot.watchdogLateTask == CRASH_TASK_PRESSURE) &&
+          (crashSnapshot.resetCause != CRASH_RESET_POWER) &&
+          (crashSnapshot.resetCause != CRASH_RESET_LOW_POWER);
+      char contextMetrics[208];
+      const bool contextPass = BuildPressureSensorWatchdogContextResult(
+          pressureContextExpected,
+          crashSnapshot.pressureSensorContextValid != 0u,
+          crashSnapshot.pressureSensorContext,
+          contextMetrics,
+          sizeof(contextMetrics));
+      ++total;
+      if (contextPass) ++passed; else ++failed;
+      sendResult(1044u, "pressure_wdg_context_safe", contextPass, contextMetrics);
+
+      PressureSensorWatchdogSnapshot pressureSnapshot{};
+      pressureSnapshot.phaseAgeMs = PRESSURE_SENSOR_WDG_AGE_UNKNOWN;
+      pressureSnapshot.lastLoopAgeMs = PRESSURE_SENSOR_WDG_AGE_UNKNOWN;
+      pressureSnapshot.stackHighWaterWords = PRESSURE_SENSOR_WDG_AGE_UNKNOWN;
+      (void)PressureSensorWatchdog_GetSnapshot(&pressureSnapshot);
+      uint32_t pressureWatchdogAgeMs = PRESSURE_SENSOR_WDG_AGE_UNKNOWN;
+      (void)Watchdog_GetTaskLastSeenAgeMs(CRASH_TASK_PRESSURE, &pressureWatchdogAgeMs);
+      char schedulerMetrics[208];
+      const bool schedulerPass = BuildSelfTestSchedulerResult(
+          schedulingState,
+          pressureSnapshot,
+          pressureWatchdogAgeMs,
+          schedulerMetrics,
+          sizeof(schedulerMetrics));
+      ++total;
+      if (schedulerPass) ++passed; else ++failed;
+      sendResult(1043u, "selftest_scheduler_safe", schedulerPass, schedulerMetrics);
+    }
     comm->setStatusPaused(true);
     uint8_t donePayload[64] = {0};
     const size_t doneLen = DiagnosticResultEmitter::buildDonePayload(

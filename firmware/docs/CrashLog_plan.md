@@ -675,6 +675,39 @@ Delayed starvation evidence discovered at the next flash (2026-08-12):
   - `hil_reports/coord_xy_single_irq_abort_rollback_99bb8c58_safe.json`:
     `954BA67A6B159A0E20C7BCE315BE907A3955536B78EECEB676F3275D5097B690`.
 
+## Self-test scheduling attribution implementation
+
+The follow-up image retains the 250 ms pressure deadline, 20 ms I2C operation
+timeouts, and task priorities. Its result emitter yields for one tick after
+each result/progress frame so the lower-priority pressure task gets a bounded
+scheduling opportunity. Diagnostic selector `1039` disables only that yield;
+selector `1038` explicitly selects the default cooperative behavior. Both run
+the same no-motion SAFE inventory.
+
+`PressureSensorWatchdogTelemetry` records loop-start gaps and phases for delay,
+mux select, sensor read, both recovery paths, and sample processing. A pressure
+watchdog fault copies this data into a versioned/checksummed `.noinit` context
+before the normal 20-register crash record is committed. The reset report and
+backup-domain version remain unchanged. SAFE rows `1044` and `1043` expose the
+retained context and live scheduler window; prior versioned FULL/focused
+qualification manifests remain unchanged.
+
+The no-motion HIL order is `1039-1038, 1038-1039, 1039-1038`, with at least six
+seconds between arms, followed by a default SAFE after 12 seconds and one
+30-minute idle soak. Cooperative arms must keep pressure gap and age at or
+below 125 ms with no I2C error/recovery delta or watchdog increment. The
+deadline is not increased if these gates fail.
+
+The matching Debug artifact is 337,984 bytes with SHA-256
+`894BACF36E088FEAD500E26D8B45274F56355C8F3F98E9DDA29047087883F7C6`.
+It leaves 55,232 bytes in the 384 KiB application partition. The globally
+enabled `INCLUDE_uxTaskGetStackHighWaterMark` option remains off. Instead, the
+existing trace facility scans only the pressure task once when a diagnostic or
+fault snapshot is requested; there is no per-loop stack scan. Unknown headroom
+fails result evidence closed. The outer
+diagnostic runner's static frame remains 3,504 bytes, below the retained
+4,096-byte investigation ceiling.
+
 Messages from past attempts:
 I’ve implemented the crash-log/watchdog slice and the remaining issue is target boot reachability during SAFE HIL. I’m checking the latest report and the startup paths that can prevent HELLO_ACK, then I’ll make the smallest fix and rerun validation.
 

@@ -31,6 +31,8 @@ TEST_CATALOG: dict[int, TestCatalogEntry] = {
     1040: TestCatalogEntry(1040, "Runtime memory margins", "Heap and task stack margin telemetry."),
     1041: TestCatalogEntry(1041, "Reset/crash report path", "Reset report availability and crash-report plumbing."),
     1042: TestCatalogEntry(1042, "Watchdog diagnostic path", "Watchdog diagnostic reporting path."),
+    1043: TestCatalogEntry(1043, "Self-test scheduler", "Result-emission scheduling and live pressure-task latency evidence."),
+    1044: TestCatalogEntry(1044, "Pressure watchdog context", "Checksummed retained pressure-task phase and I2C evidence."),
     2001: TestCatalogEntry(2001, "Motion homing", "Axis homing success, duration, and limit switch behavior."),
     2002: TestCatalogEntry(2002, "Motion move/return", "Bounded gantry move accuracy and return error."),
     2003: TestCatalogEntry(2003, "Pressure response", "Regulator settle time, overshoot, and steady-state error."),

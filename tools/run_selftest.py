@@ -1294,6 +1294,12 @@ def run(args: argparse.Namespace) -> int:
         profile_lut_benchmark = bool(getattr(args, "profile_lut_benchmark", False))
         coordinated_xy_executor_suite = bool(getattr(args, "coordinated_xy_executor_suite", False))
         normal_xy_route_suite = bool(getattr(args, "normal_xy_route_suite", False))
+        selftest_scheduler_no_yield_suite = bool(
+            getattr(args, "selftest_scheduler_no_yield_suite", False)
+        )
+        selftest_scheduler_cooperative_suite = bool(
+            getattr(args, "selftest_scheduler_cooperative_suite", False)
+        )
         coordinated_xy_performance_suite = bool(
             getattr(args, "coordinated_xy_performance_suite", False)
         )
@@ -1320,11 +1326,15 @@ def run(args: argparse.Namespace) -> int:
             or coordinated_xy_x_direction_suite
             or coordinated_xy_camera_transition_suite
         )
+        status_cadence_diagnostic = bool(
+            coordinated_xy_performance_diagnostic
+            or selftest_scheduler_cooperative_suite
+        )
         pressure_regulator_suite = bool(getattr(args, "pressure_regulator_suite", False))
         refuel_vacuum_suite = bool(getattr(args, "refuel_vacuum_suite", False))
         valve_characterization_suite = bool(getattr(args, "valve_characterization_suite", False))
         valve_gap_sweep_suite = bool(getattr(args, "valve_gap_sweep_suite", False))
-        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2075 if coordinated_xy_single_irq_suite else 2076 if coordinated_xy_status_sync_suite else 2077 if coordinated_xy_40khz_suite else 2078 if coordinated_xy_camera_transition_suite else 2079 if coordinated_xy_x_direction_suite else 2069 if coordinated_xy_performance_suite else 2059 if normal_xy_route_suite else 2049 if coordinated_xy_executor_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
+        selector = 1039 if selftest_scheduler_no_yield_suite else 1038 if selftest_scheduler_cooperative_suite else 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2075 if coordinated_xy_single_irq_suite else 2076 if coordinated_xy_status_sync_suite else 2077 if coordinated_xy_40khz_suite else 2078 if coordinated_xy_camera_transition_suite else 2079 if coordinated_xy_x_direction_suite else 2069 if coordinated_xy_performance_suite else 2059 if normal_xy_route_suite else 2049 if coordinated_xy_executor_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
             pressure_sweep_suite if pressure_sweep_suite is not None else (
                 CUSTOM_PRESSURE_TRACE_TEST_ID if custom_trace_config is not None else pressure_trace_test
             )
@@ -1442,7 +1452,7 @@ def run(args: argparse.Namespace) -> int:
         last_rx_byte_monotonic = time.monotonic()
         last_selftest_frame_monotonic = time.monotonic()
         status_only_timeout_ms = _effective_status_only_timeout_ms(
-            args, coordinated_xy_performance_diagnostic
+            args, status_cadence_diagnostic
         )
         status_frames_since_selftest = 0
         last_status_frame_monotonic = None
@@ -1877,10 +1887,14 @@ def run(args: argparse.Namespace) -> int:
                 "timestamp": now_iso(),
             }
         )
-        if coordinated_xy_performance_diagnostic:
+        if status_cadence_diagnostic:
             host_checks.append(
                 {
-                    "name": "coordinated_xy_status_cadence",
+                    "name": (
+                        "selftest_scheduler_status_cadence"
+                        if selftest_scheduler_cooperative_suite
+                        else "coordinated_xy_status_cadence"
+                    ),
                     "pass": bool(
                         done_seen
                         and status_gap_samples > 0
@@ -1993,6 +2007,8 @@ def main() -> int:
     selector_group.add_argument("--profile-lut-benchmark", action="store_true")
     selector_group.add_argument("--coordinated-xy-executor-suite", action="store_true")
     selector_group.add_argument("--normal-xy-route-suite", action="store_true")
+    selector_group.add_argument("--selftest-scheduler-no-yield-suite", action="store_true")
+    selector_group.add_argument("--selftest-scheduler-cooperative-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-performance-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-40khz-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-status-sync-suite", action="store_true")

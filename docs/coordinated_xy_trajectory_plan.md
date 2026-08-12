@@ -276,14 +276,16 @@ SAFE runs preserved the history with `pending=0` and no further reset, and the
 printer was restored to the `99bb8c58` watchdog-evidence artifact. Selector
 `2075` was not executed.
 
-The next action is to correct and verify the self-test scheduling path without
-weakening the pressure task's 250 ms watchdog deadline. The leading hypothesis
-is that priority-2 orchestrator diagnostics can synchronously transmit enough
-result data to prevent the priority-1 pressure-sensor task from checking in.
-After repeated SAFE runs show no counter increase or retained pending fault,
-flash the hashed `3182a287` diagnostic artifact and restart the watched,
-SAFE-bracketed selector `2075` gate. Do not promote this mode or resume FULL
-qualification until that evidence is reviewed.
+The self-test scheduling correction and attribution telemetry are implemented
+without weakening the pressure task's 250 ms watchdog deadline. Normal result
+emission now yields one RTOS tick; selectors `1039` and `1038` compare the old
+no-yield and cooperative behavior using the identical no-motion SAFE inventory.
+Results `1043` and `1044` distinguish scheduler gaps from mux/read/recovery
+stalls and retain the latter evidence over an MCU watchdog reset. Complete the
+counterbalanced `A-B, B-A, A-B` experiment, final default SAFE, and 30-minute
+idle soak before restarting the watched, SAFE-bracketed selector `2075` gate.
+Do not promote the one-interrupt executor or resume FULL qualification until
+that evidence is reviewed.
 
 ## Milestone 0: Baseline And Decisions
 

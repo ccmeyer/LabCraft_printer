@@ -224,6 +224,25 @@ def analyze_report(
             "unexpected_test_ids": unexpected_ids,
         })
 
+    observed_host_checks = {
+        str(row.get("name"))
+        for row in raw_selftest.get("host_checks") or []
+        if row.get("name")
+    }
+    missing_host_checks = [
+        name for name in manifest.required_host_checks
+        if name not in observed_host_checks
+    ]
+    if missing_host_checks:
+        items.append({
+            "item_kind": "manifest_check",
+            "status": "fail",
+            "severity": "error",
+            "failure_domain": "infrastructure",
+            "message": f"Missing required host checks: {missing_host_checks}.",
+            "missing_host_checks": missing_host_checks,
+        })
+
     for row in raw_selftest.get("results") or []:
         rule = _manifest_rule(manifest, row.get("test_id"))
         category, domain = _category_and_domain(rule)

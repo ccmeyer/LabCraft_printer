@@ -28,6 +28,8 @@ add_executable(fw_tests
     tests/test_regulator_telemetry.cpp
     tests/test_pressure_trace_math.cpp
     tests/test_pressure_sensor_focus_policy.cpp
+    tests/test_pressure_sensor_watchdog_telemetry.cpp
+    tests/test_selftest_scheduling_policy.cpp
     tests/test_motion_qualification_math.cpp
     tests/test_stepper_profile_math.cpp
     tests/test_normalized_cosine_profile.cpp
@@ -66,6 +68,8 @@ add_executable(fw_tests
     ../Core/Src/RegulatorPausePolicy.cpp
     ../Core/Src/PressureTraceRecorder.cpp
     ../Core/Src/PressureSensorFocusPolicy.cpp
+    ../Core/Src/PressureSensorWatchdogTelemetry.c
+    ../Core/Src/SelfTestSchedulingPolicy.cpp
     ../Core/Src/PressureQualificationMath.cpp
     ../Core/Src/GripperSealQualificationMath.cpp
     ../Core/Src/ValvePulseQualificationMath.cpp

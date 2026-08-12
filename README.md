@@ -2899,6 +2899,48 @@ the later run must show `pending=0` while preserving the same historical
 `fault=wdt` and `wdg_late` evidence. Stop for a reset loop, missing HELLO,
 corrupt evidence, or unexplained counter changes.
 
+### Self-test scheduler and pressure-watchdog A/B diagnostic
+
+Self-test result and progress frames now yield the orchestrator for one RTOS
+tick after synchronous UART transmission. This is the default for SAFE, FULL,
+and focused diagnostics; it does not affect ordinary command/status traffic.
+SAFE adds result `1044 pressure_wdg_context_safe` and final result
+`1043 selftest_scheduler_safe`, so an ordinary SAFE run now reports 30 rows.
+Result `1043` records result-frame/yield counts, UART blocking time, live
+pressure-task gap/age/phase, I2C failure/recovery deltas, and stack headroom.
+Result `1044` exposes the checksummed `.noinit` pressure context retained when
+the watchdog identifies the pressure task as late. A context is required only
+for a still-pending pressure watchdog fault under the same firmware image;
+power cycles and flashing a different image may invalidate `.noinit`.
+
+Selectors `1039` and `1038` run the identical non-destructive SAFE inventory
+with no-yield and cooperative scheduling respectively. They do not move axes,
+change pressure targets, or actuate valves:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile SAFE --selftest-scheduler-no-yield-suite --timeout-ms 240000 --out hil_reports/selftest_scheduler_a1.json
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile SAFE --selftest-scheduler-cooperative-suite --timeout-ms 240000 --out hil_reports/selftest_scheduler_b1.json
+```
+
+Run six arms in `A-B, B-A, A-B` order, waiting at least six seconds after each
+arm. Normalize A with `selftest_scheduler_no_yield_v1` and B with
+`selftest_scheduler_cooperative_v1`, then compare all reports:
+
+```bash
+python3 -m tools.qualification.cli --manifest selftest_scheduler_no_yield_v1 --raw-report <A1.json> --output-root hil_reports/qualification
+python3 -m tools.qualification.cli --manifest selftest_scheduler_cooperative_v1 --raw-report <B1.json> --output-root hil_reports/qualification
+python3 tools/compare_selftest_scheduler_ab.py \
+  <A1.json> <B1.json> <B2.json> <A2.json> <A3.json> <B3.json> \
+  --final-safe <final_safe.json> \
+  --out hil_reports/selftest_scheduler_ab_comparison.json
+```
+
+The cooperative manifest requires `rf=yc=29`, pressure gap and current age no
+greater than 125 ms, no I2C failure/recovery delta, complete unsaturated
+evidence, and clean host checks. The production pressure deadline remains
+250 ms. If MSBuild reports `FileTracker` access denied during local checks,
+rerun the firmware script from a normal non-sandboxed PowerShell session.
+
 Prerequisites:
 
 - CMake available on `PATH`

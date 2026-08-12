@@ -1,0 +1,40 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "selftest_scheduler_cooperative_v1",
+  "name": "Self-Test Scheduler Cooperative Diagnostic v1",
+  "profile": "SAFE",
+  "description": "Runs the ordinary non-destructive SAFE inventory with one scheduler delay after every result frame and applies strict pressure-watchdog headroom gates.",
+  "expected_test_ids": [1001, 1002, 1010, 1011, 1012, 1003, 1013, 1020, 1021, 1004, 1005, 1007, 1006, 1030, 1040, 1041, 1042, 2001, 2002, 2007, 2008, 2003, 2201, 2202, 2203, 2004, 2005, 2006, 1044, 1043],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": false,
+  "selftest_args": ["--selftest-scheduler-cooperative-suite"],
+  "required_host_checks": ["selftest_progress_watchdog", "selftest_scheduler_status_cadence"],
+  "fixtures": [],
+  "analysis_rules": {
+    "1043": {
+      "category": "watchdog",
+      "failure_domain": "firmware_scheduling",
+      "metrics": {
+        "sm": {"maturity": "acceptance", "equals": 1},
+        "rf": {"maturity": "acceptance", "equals": 29},
+        "yc": {"maturity": "acceptance", "equals": 29},
+        "txm": {"maturity": "candidate", "min": 0},
+        "pg": {"maturity": "acceptance", "min": 0, "max": 125},
+        "pa": {"maturity": "acceptance", "min": 0, "max": 125},
+        "se": {"maturity": "acceptance", "equals": 0},
+        "re": {"maturity": "acceptance", "equals": 0},
+        "bc": {"maturity": "acceptance", "equals": 0},
+        "hw": {"maturity": "acceptance", "min": 1, "max": 4294967294},
+        "sf": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "1044": {
+      "category": "watchdog",
+      "failure_domain": "firmware_evidence",
+      "metrics": {
+        "v": {"maturity": "candidate", "min": 0, "max": 1},
+        "sf": {"maturity": "acceptance", "equals": 0}
+      }
+    }
+  }
+}

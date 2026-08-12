@@ -1,0 +1,37 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "selftest_scheduler_no_yield_v1",
+  "name": "Self-Test Scheduler No-Yield Diagnostic v1",
+  "profile": "SAFE",
+  "description": "Runs the ordinary non-destructive SAFE inventory with the historical no-yield result emitter and records pressure scheduling evidence.",
+  "expected_test_ids": [1001, 1002, 1010, 1011, 1012, 1003, 1013, 1020, 1021, 1004, 1005, 1007, 1006, 1030, 1040, 1041, 1042, 2001, 2002, 2007, 2008, 2003, 2201, 2202, 2203, 2004, 2005, 2006, 1044, 1043],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": false,
+  "selftest_args": ["--selftest-scheduler-no-yield-suite"],
+  "required_host_checks": ["selftest_progress_watchdog"],
+  "fixtures": [],
+  "analysis_rules": {
+    "1043": {
+      "category": "watchdog",
+      "failure_domain": "firmware_scheduling",
+      "metrics": {
+        "sm": {"maturity": "acceptance", "equals": 0},
+        "rf": {"maturity": "acceptance", "equals": 29},
+        "yc": {"maturity": "acceptance", "equals": 0},
+        "pg": {"maturity": "candidate", "min": 0},
+        "pa": {"maturity": "candidate", "min": 0},
+        "txm": {"maturity": "candidate", "min": 0},
+        "hw": {"maturity": "acceptance", "min": 1, "max": 4294967294},
+        "sf": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "1044": {
+      "category": "watchdog",
+      "failure_domain": "firmware_evidence",
+      "metrics": {
+        "v": {"maturity": "candidate", "min": 0, "max": 1},
+        "sf": {"maturity": "acceptance", "equals": 0}
+      }
+    }
+  }
+}

@@ -21,6 +21,7 @@ class QualificationManifest:
     enforce_expected_test_ids: bool
     requires_operator_prompts: bool
     selftest_args: tuple[str, ...]
+    required_host_checks: tuple[str, ...]
     analysis_rules: dict[str, Any]
     raw: dict[str, Any]
 
@@ -35,6 +36,7 @@ class QualificationManifest:
             "enforce_expected_test_ids": bool(self.enforce_expected_test_ids),
             "requires_operator_prompts": bool(self.requires_operator_prompts),
             "selftest_args": list(self.selftest_args),
+            "required_host_checks": list(self.required_host_checks),
             "analysis_rules": dict(self.analysis_rules),
         }
 
@@ -141,6 +143,15 @@ def parse_manifest(payload: dict[str, Any]) -> QualificationManifest:
             raise ManifestError("Manifest 'selftest_args' entries must be non-empty strings.")
         parsed_selftest_args.append(item.strip())
 
+    required_host_checks = payload.get("required_host_checks", [])
+    if not isinstance(required_host_checks, list):
+        raise ManifestError("Manifest 'required_host_checks' must be a list when present.")
+    parsed_required_host_checks: list[str] = []
+    for item in required_host_checks:
+        if not isinstance(item, str) or not item.strip():
+            raise ManifestError("Manifest 'required_host_checks' entries must be non-empty strings.")
+        parsed_required_host_checks.append(item.strip())
+
     return QualificationManifest(
         schema_version=schema_version,
         manifest_id=manifest_id,
@@ -151,6 +162,7 @@ def parse_manifest(payload: dict[str, Any]) -> QualificationManifest:
         enforce_expected_test_ids=enforce_expected,
         requires_operator_prompts=requires_operator_prompts,
         selftest_args=tuple(parsed_selftest_args),
+        required_host_checks=tuple(parsed_required_host_checks),
         analysis_rules=_parse_analysis_rules(payload),
         raw=dict(payload),
     )

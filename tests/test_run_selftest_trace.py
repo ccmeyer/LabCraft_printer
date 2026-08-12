@@ -1108,6 +1108,55 @@ def test_run_sends_normal_xy_route_selector_and_keeps_goodbye(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize(
+    ("flag_name", "expected_selector"),
+    (("selftest_scheduler_no_yield_suite", 1039),
+     ("selftest_scheduler_cooperative_suite", 1038)),
+)
+def test_run_sends_selftest_scheduler_selector(monkeypatch, tmp_path, flag_name, expected_selector):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+    status = _frame_payload(mod, bytes([0x02, 0]))
+    inbound = b"".join([
+        _hello_ack(mod),
+        status,
+        status,
+        _selftest_done(mod, run_id),
+        _bye_ack(mod, 3),
+        _bye_done(mod, 3, run_id),
+    ])
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0", baud=115200, profile="SAFE", timeout_ms=1000,
+        hello_timeout_ms=1000, hello_retry_ms=50, fast_fail_on_missing_hello=False,
+        pressure_trace=False, pressure_trace_test=None, pressure_sweep_suite=None,
+        out=str(tmp_path / f"{flag_name}.json"), **{flag_name: True},
+    )
+
+    assert mod.run(args) == 0
+    sent_selector = None
+    for outbound in serial.writes:
+        reader = mod.FrameReader()
+        for byte in outbound:
+            frame = reader.feed(byte)
+            if frame and frame[0] == mod.CMD_SELFTEST_START:
+                sent_selector = mod.parse_tlvs(frame[2:]).get(mod.TAG_P3)
+    assert sent_selector == expected_selector.to_bytes(2, "little")
+    report = __import__("json").loads(
+        (tmp_path / f"{flag_name}.json").read_text(encoding="utf-8")
+    )
+    cadence = [
+        item for item in report["host_checks"]
+        if item["name"] == "selftest_scheduler_status_cadence"
+    ]
+    assert bool(cadence) is (expected_selector == 1038)
+    if cadence:
+        assert cadence[0]["pass"] is True
+
+
+@pytest.mark.parametrize(
     ("performance_suite", "forty_suite", "status_sync_suite", "single_irq_suite", "direction_suite", "transition_suite", "expected_selector"),
     ((True, False, False, False, False, False, 2069),
      (False, True, False, False, False, False, 2077),

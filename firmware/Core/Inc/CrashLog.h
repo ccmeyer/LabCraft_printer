@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "CrashFaultContext.h"
 #include "RegulatorTelemetry.h"
+#include "PressureSensorWatchdogTelemetry.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -129,6 +130,8 @@ typedef struct {
   uint8_t faultContextValid;
   CrashFaultContextV2 faultContext;
   RegulatorTelemetryResetContext regulatorContext;
+  uint8_t pressureSensorContextValid;
+  PressureSensorWatchdogResetContext pressureSensorContext;
 } CrashLogSnapshot;
 
 #define CRASHLOG_FLAG_VALID            0x00000001u
@@ -147,6 +150,7 @@ void CrashLog_RecordWatchdogSticky(uint32_t rawStatus);
 void CrashLog_RequestWatchdogRecoveryReset(uint32_t rawStatus);
 void CrashLog_ClearWatchdogRecoveryReset(void);
 void CrashLog_CaptureRegulatorContext(const RegulatorTelemetryResetContext* context);
+void CrashLog_CapturePressureSensorContext(const PressureSensorWatchdogResetContext* context);
 uint32_t CrashLog_IsWatchdogRecoveryBoot(void);
 void CrashLog_MarkBootHealthy(void);
 void CrashLog_GetSnapshot(CrashLogSnapshot* out);

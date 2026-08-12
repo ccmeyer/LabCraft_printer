@@ -5,6 +5,23 @@ import pytest
 from tools.qualification.manifest import ManifestError, load_manifest, parse_manifest
 
 
+def test_load_selftest_scheduler_manifests():
+    no_yield = load_manifest("selftest_scheduler_no_yield_v1")
+    cooperative = load_manifest("selftest_scheduler_cooperative_v1")
+
+    assert no_yield.profile == cooperative.profile == "SAFE"
+    assert no_yield.expected_test_ids == cooperative.expected_test_ids
+    assert no_yield.expected_test_ids[-2:] == (1044, 1043)
+    assert no_yield.selftest_args == ("--selftest-scheduler-no-yield-suite",)
+    assert cooperative.selftest_args == ("--selftest-scheduler-cooperative-suite",)
+    assert no_yield.required_host_checks == ("selftest_progress_watchdog",)
+    assert cooperative.required_host_checks == (
+        "selftest_progress_watchdog", "selftest_scheduler_status_cadence"
+    )
+    assert no_yield.analysis_rules["1043"]["metrics"]["sm"]["equals"] == 0
+    assert cooperative.analysis_rules["1043"]["metrics"]["pg"]["max"] == 125
+
+
 def test_load_builtin_factory_acceptance_manifest():
     manifest = load_manifest("factory_acceptance_v3")
 

@@ -710,12 +710,21 @@ outer diagnostic runner. ARM disassembly confirms that the DWT pulse loop is
 an inlined load/subtract/compare/branch sequence with no helper call, division,
 HAL GPIO call, allocator call, or interrupt-masking instruction.
 
-Automated host and target checks are the prerequisite for flashing. The HIL
-procedure is one pre-SAFE 28/28 run, one watched selector `2075` run, one
-post-SAFE 28/28 run, and normalization with the matching manifest. Stop for
+Automated host and target checks are the prerequisite for flashing. Before
+selector `2075`, the no-motion self-test scheduler A/B experiment must close
+the retained pressure-watchdog starvation finding. New images report SAFE as
+30/30 because rows `1044` and `1043` add retained pressure-phase and live
+scheduler evidence. After that closeout, the motion HIL procedure is one
+pre-SAFE 30/30 run, one watched selector `2075` run, one post-SAFE 30/30 run,
+and normalization with the matching manifest. Stop for
 contact, abnormal sound, lost squareness, limit anomalies, incomplete motion,
 reset/watchdog evidence, missing telemetry, or any deadline miss. This is an
 experimental candidate, not production enablement.
+
+The subsequent self-test scheduling/pressure-attribution image includes this
+same selector `2075` implementation and is 337,984 bytes with SHA-256
+`894BACF36E088FEAD500E26D8B45274F56355C8F3F98E9DDA29047087883F7C6`.
+It must complete the no-motion scheduler A/B gate before `2075` is run.
 
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort

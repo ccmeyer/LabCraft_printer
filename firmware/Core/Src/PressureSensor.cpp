@@ -13,6 +13,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "WatchdogSupervisor.h"
+#include "PressureSensorWatchdogTelemetry.h"
 
 #include <cstring>
 
@@ -22,6 +23,18 @@ extern "C" {
 
 namespace {
 constexpr uint32_t kPressureI2cTimeoutMs = 20u;
+PressureSensorWatchdogState g_pressureWatchdogTelemetry{};
+TaskHandle_t g_pressureTaskHandle = nullptr;
+
+void setTelemetryPhase(PressureSensorWatchdogPhase phase)
+{
+  PressureSensorWatchdogTelemetry_SetPhase(&g_pressureWatchdogTelemetry, phase, HAL_GetTick());
+}
+
+void noteTelemetryRecovery()
+{
+  PressureSensorWatchdogTelemetry_NoteRecovery(&g_pressureWatchdogTelemetry);
+}
 }
 
 
@@ -108,6 +121,7 @@ void PressureSensor::I2C1_BusRecovery()
 void PressureSensor::begin() {
   // nothing special on I2C side—MX_I2C#_Init() was run by CubeMX
   _instance = this;
+  PressureSensorWatchdogTelemetry_Init(&g_pressureWatchdogTelemetry, HAL_GetTick());
 
   // now create our FreeRTOS task:
   xTaskCreate(
@@ -118,6 +132,7 @@ void PressureSensor::begin() {
     tskIDLE_PRIORITY+1,
     &_taskHandle
   );
+  g_pressureTaskHandle = _taskHandle;
 }
 
 void PressureSensor::start() {
@@ -140,13 +155,18 @@ void PressureSensor::taskLoop() {
     Watchdog_EnableTask(CRASH_TASK_PRESSURE);
 
     // run bus-recovery once up front:
+    setTelemetryPhase(PRESSURE_SENSOR_WDG_PHASE_RECOVER_SELECT);
+    noteTelemetryRecovery();
     I2C1_BusRecovery();     // drain off any stuck bus low
 
 
     // skip the first 10 reads
+    setTelemetryPhase(PRESSURE_SENSOR_WDG_PHASE_DELAY);
     for (int i = 0; i < 10; ++i) { vTaskDelay(_readInterval); }
 
     for (;;) {
+        const uint32_t loopStartMs = HAL_GetTick();
+        PressureSensorWatchdogTelemetry_NoteLoopStart(&g_pressureWatchdogTelemetry, loopStartMs);
         Watchdog_CheckIn(CRASH_TASK_PRESSURE);
 //    	Logger::instance()->log("TEST %u\r\n", port);
         bool focusEnabled = false;
@@ -158,15 +178,29 @@ void PressureSensor::taskLoop() {
         port = PressureSensorFocusPolicy::portForRead(port, _numPorts, focusEnabled, focusPort);
         // 1) switch the I²C multiplexer
     	HAL_StatusTypeDef st;
+        setTelemetryPhase(PRESSURE_SENSOR_WDG_PHASE_SELECT_PORT);
         st = selectPort(port);
     	if (st != HAL_OK) {
+			PressureSensorWatchdogTelemetry_NoteSelectFailure(&g_pressureWatchdogTelemetry);
+			setTelemetryPhase(PRESSURE_SENSOR_WDG_PHASE_RECOVER_SELECT);
+			noteTelemetryRecovery();
     		I2C1_BusRecovery();
+			setTelemetryPhase(PRESSURE_SENSOR_WDG_PHASE_DELAY);
     		vTaskDelay(pdMS_TO_TICKS(2)); // small backoff
     	  continue;
     	}
 
         // 2) grab a raw reading and validate it for control use
-        uint16_t raw = readSensorRaw(port);
+        bool readOk = false;
+        setTelemetryPhase(PRESSURE_SENSOR_WDG_PHASE_READ_SENSOR);
+        uint16_t raw = readSensorRaw(port, &readOk);
+        if (!readOk) {
+          PressureSensorWatchdogTelemetry_NoteReadFailure(&g_pressureWatchdogTelemetry);
+          setTelemetryPhase(PRESSURE_SENSOR_WDG_PHASE_RECOVER_READ);
+          noteTelemetryRecovery();
+          I2C1_BusRecovery();
+        }
+        setTelemetryPhase(PRESSURE_SENSOR_WDG_PHASE_PROCESS_SAMPLE);
         PressureRegulatorMath::ValidationConfig cfg{};
         cfg.minRaw = _validationCfg[port].minRaw;
         cfg.maxRaw = _validationCfg[port].maxRaw;
@@ -250,6 +284,11 @@ void PressureSensor::taskLoop() {
         taskEXIT_CRITICAL();
         port = PressureSensorFocusPolicy::nextPortAfterRead(port, _numPorts, focusEnabled, focusPort);
         // 5) delay before the next read
+        const uint32_t loopCompleteMs = HAL_GetTick();
+        PressureSensorWatchdogTelemetry_NoteLoopComplete(&g_pressureWatchdogTelemetry, loopCompleteMs);
+        PressureSensorWatchdogTelemetry_SetPhase(&g_pressureWatchdogTelemetry,
+                                                 PRESSURE_SENSOR_WDG_PHASE_DELAY,
+                                                 loopCompleteMs);
         vTaskDelay(_readInterval);
     }
 }
@@ -264,13 +303,14 @@ HAL_StatusTypeDef PressureSensor::selectPort(uint8_t port) {
 #endif
 }
 
-uint16_t PressureSensor::readSensorRaw(uint8_t port) {
+uint16_t PressureSensor::readSensorRaw(uint8_t port, bool* readOk) {
   uint8_t buf[4];
   HAL_StatusTypeDef st = HAL_I2C_Master_Receive(_hi2c, _sensorAddr << 1, buf, 4, kPressureI2cTimeoutMs);
   if (st != HAL_OK) {
-    I2C1_BusRecovery();
+    if (readOk != nullptr) *readOk = false;
     return _controlSample[port].raw;
   }
+  if (readOk != nullptr) *readOk = true;
   uint8_t p1 = buf[0], p2 = buf[1];
   uint16_t raw = (uint16_t(p1 & 0x3F) << 8) | p2;
   return raw;
@@ -330,6 +370,37 @@ void PressureSensor::endDiagnosticFocus() {
 }
 
 extern "C" {
+
+uint32_t PressureSensorWatchdog_BeginDiagnosticWindow(void)
+{
+  for (uint32_t attempt = 0u; attempt < 3u; ++attempt) {
+    if (PressureSensorWatchdogTelemetry_BeginWindow(&g_pressureWatchdogTelemetry) != 0u) {
+      return 1u;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1u));
+  }
+  return 0u;
+}
+
+uint32_t PressureSensorWatchdog_GetSnapshot(PressureSensorWatchdogSnapshot* out)
+{
+  if (out == nullptr) return 0u;
+  for (uint32_t attempt = 0u; attempt < 2u; ++attempt) {
+    PressureSensorWatchdogTelemetry_GetSnapshot(&g_pressureWatchdogTelemetry, HAL_GetTick(), out);
+    if (out->valid != 0u) {
+#if (configUSE_TRACE_FACILITY == 1)
+      if (g_pressureTaskHandle != nullptr) {
+        TaskStatus_t taskStatus{};
+        vTaskGetInfo(g_pressureTaskHandle, &taskStatus, pdTRUE, eInvalid);
+        out->stackHighWaterWords = static_cast<uint32_t>(taskStatus.usStackHighWaterMark);
+      }
+#endif
+      return 1u;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1u));
+  }
+  return 0u;
+}
 
 void MX_PS_Init(I2C_HandleTypeDef* hi2c,
                 uint8_t tcaAddress,

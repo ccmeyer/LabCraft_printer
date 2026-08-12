@@ -18,6 +18,7 @@ static volatile uint32_t g_watchdogRecoveryBoot = 0u;
 static volatile CrashTaskId g_activeTask = CRASH_TASK_NONE;
 static volatile uint8_t g_activeCommand = 0u;
 static RegulatorTelemetryRetainedContext g_regulatorContext __attribute__((section(".noinit")));
+static PressureSensorWatchdogRetainedContext g_pressureSensorContext __attribute__((section(".noinit")));
 static CrashFaultContextRetained g_faultContext __attribute__((section(".noinit")));
 volatile uint32_t g_crashFaultEntryCallee[8] __attribute__((section(".noinit")));
 static CrashFaultStackRange g_taskStackRanges[CRASH_HOME_AXIS_COUNT];
@@ -134,6 +135,7 @@ static void CrashLog_ResetStorage(void)
   CrashLog_Write(CRASHLOG_BKP_WATCHDOG_LATE_TASK, (uint32_t)CRASH_TASK_NONE);
   CrashLog_Write(CRASHLOG_BKP_ACTIVE_COMMAND, 0u);
   RegulatorTelemetry_ClearRetainedContext(&g_regulatorContext);
+  PressureSensorWatchdogTelemetry_ClearRetainedContext(&g_pressureSensorContext);
   CrashLog_ClearFaultContext();
 }
 
@@ -189,6 +191,14 @@ static void CrashLog_FillSnapshot(CrashLogSnapshot* out)
     (void)RegulatorTelemetry_ReadRetainedContext(&g_regulatorContext,
                                                  &out->regulatorContext);
   }
+  memset(&out->pressureSensorContext, 0, sizeof(out->pressureSensorContext));
+  out->pressureSensorContext.watchdogAgeMs = PRESSURE_SENSOR_WDG_AGE_UNKNOWN;
+  out->pressureSensorContext.phaseAgeMs = PRESSURE_SENSOR_WDG_AGE_UNKNOWN;
+  out->pressureSensorContext.lastLoopAgeMs = PRESSURE_SENSOR_WDG_AGE_UNKNOWN;
+  if (CrashLog_ShouldKeepRegulatorContext(out->resetCause) != 0u) {
+    out->pressureSensorContextValid = (uint8_t)PressureSensorWatchdogTelemetry_ReadRetainedContext(
+        &g_pressureSensorContext, &out->pressureSensorContext);
+  }
 }
 
 static void CrashLog_WriteFaultRecord(CrashFaultKind kind,
@@ -238,6 +248,7 @@ void CrashLog_EarlyBootInit(void)
   CrashLog_Write(CRASHLOG_BKP_RESET_CAUSE, (uint32_t)resetCause);
   if (CrashLog_ShouldKeepRegulatorContext(resetCause) == 0u) {
     RegulatorTelemetry_ClearRetainedContext(&g_regulatorContext);
+    PressureSensorWatchdogTelemetry_ClearRetainedContext(&g_pressureSensorContext);
     CrashLog_ClearFaultContext();
   }
   g_watchdogRecoveryBoot = (((flags & CRASHLOG_FLAG_WDT_RECOVERY_PENDING) != 0u) &&
@@ -275,6 +286,7 @@ void CrashLog_RecordFault(CrashFaultKind kind, CrashTaskId taskIdHint)
   }
 
   CrashLog_ClearFaultContext();
+  PressureSensorWatchdogTelemetry_ClearRetainedContext(&g_pressureSensorContext);
 
   CrashLog_WriteFaultRecord(kind,
                             taskId,
@@ -304,6 +316,9 @@ void CrashLog_RecordWatchdogFault(CrashTaskId lateTask)
   }
 
   CrashLog_ClearFaultContext();
+  if (lateTask != CRASH_TASK_PRESSURE) {
+    PressureSensorWatchdogTelemetry_ClearRetainedContext(&g_pressureSensorContext);
+  }
 
   CrashLog_WriteFaultRecord(CRASH_FAULT_WDT_STARVE,
                             taskId,
@@ -328,6 +343,7 @@ void CrashLog_RecordFaultFromHandler(CrashFaultKind kind, CrashTaskId taskIdHint
     CrashLog_ResetStorage();
   }
   CrashLog_ClearFaultContext();
+  PressureSensorWatchdogTelemetry_ClearRetainedContext(&g_pressureSensorContext);
   CrashLog_WriteFaultRecord(kind,
                             taskIdHint,
                             CRASH_TASK_NONE,
@@ -351,6 +367,7 @@ void CrashLog_RecordStackOverflowFromHook(CrashTaskId taskIdHint, const char* ta
     CrashLog_ResetStorage();
   }
   CrashLog_ClearFaultContext();
+  PressureSensorWatchdogTelemetry_ClearRetainedContext(&g_pressureSensorContext);
   const CrashTaskId taskId = CrashLog_SelectStackOverflowTaskId(taskIdHint, g_activeTask);
   CrashLog_WriteFaultRecord(CRASH_FAULT_STACK_OVF,
                             taskId,
@@ -466,6 +483,7 @@ static void CrashLog_RecordExceptionCommon(CrashFaultKind kind,
   }
 #endif
 
+  PressureSensorWatchdogTelemetry_ClearRetainedContext(&g_pressureSensorContext);
   g_faultContext.magic = 0u;
   __DMB();
 
@@ -661,6 +679,19 @@ void CrashLog_CaptureRegulatorContext(const RegulatorTelemetryResetContext* cont
     return;
   }
   RegulatorTelemetry_WriteRetainedContext(&g_regulatorContext, context);
+}
+
+void CrashLog_CapturePressureSensorContext(const PressureSensorWatchdogResetContext* context)
+{
+#if (LC_CRASHLOG_ENABLE == 0)
+  (void)context;
+  return;
+#endif
+  if (context == NULL || context->valid == 0u) {
+    PressureSensorWatchdogTelemetry_ClearRetainedContext(&g_pressureSensorContext);
+    return;
+  }
+  PressureSensorWatchdogTelemetry_WriteRetainedContext(&g_pressureSensorContext, context);
 }
 
 uint32_t CrashLog_IsWatchdogRecoveryBoot(void)
