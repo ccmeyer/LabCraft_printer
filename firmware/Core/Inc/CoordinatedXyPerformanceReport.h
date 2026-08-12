@@ -37,6 +37,9 @@ static constexpr uint32_t kMoveFailureStatusPeriod = 1u << 21;
 static constexpr uint32_t kMoveFailureStatusWatchdog = 1u << 22;
 static constexpr uint32_t kMoveFailureStatusAlternation = 1u << 23;
 static constexpr uint32_t kMoveFailureWatchdogLate = 1u << 24;
+static constexpr uint32_t kMoveFailureExecutionMode = 1u << 25;
+static constexpr uint32_t kMoveFailurePulseTiming = 1u << 26;
+static constexpr uint32_t kMoveFailureDeadlineSlack = 1u << 27;
 
 struct Limits {
   uint32_t activeMaxCycles = 2025u;
@@ -54,6 +57,10 @@ struct MoveObservation {
   uint32_t expectedRateHz = 0u;
   uint32_t expectedTargetArr = 0u;
   uint32_t expectedStartArr = 0u;
+  uint32_t interruptsPerMasterStep = 2u;
+  CoordinatedXyExecutor::ExecutionMode executionMode =
+      CoordinatedXyExecutor::ExecutionMode::TwoEdge;
+  uint32_t minimumPulseCoreCycles = 0u;
   uint32_t requestedXSteps = 0u;
   uint32_t requestedYSteps = 0u;
   uint32_t emittedXSteps = 0u;
@@ -98,6 +105,10 @@ struct Aggregate {
   uint32_t masterSteps = 0u;
   uint32_t timer2Callbacks = 0u;
   uint32_t timer7Callbacks = 0u;
+  uint32_t interruptsPerMasterStep = 0u;
+  CoordinatedXyExecutor::ExecutionMode executionMode =
+      CoordinatedXyExecutor::ExecutionMode::TwoEdge;
+  uint32_t minimumPulseCoreCycles = 0u;
   uint32_t phaseCallbacks[static_cast<uint8_t>(CoordinatedXyIsrInstrumentation::Phase::Count)] = {};
   uint32_t phaseCycleSums[static_cast<uint8_t>(CoordinatedXyIsrInstrumentation::Phase::Count)] = {};
   uint32_t phaseMaxCycles[static_cast<uint8_t>(CoordinatedXyIsrInstrumentation::Phase::Count)] = {};
@@ -119,6 +130,13 @@ struct Aggregate {
   uint32_t pendingEntryTimerCountMax = 0u;
   uint32_t lateEntryCount = 0u;
   uint32_t entryScheduleOverrunMaxCycles = 0u;
+  uint32_t completeStepPulseSamples = 0u;
+  uint32_t completeStepPulseMinCycles = 0u;
+  uint32_t completeStepPulseMaxCycles = 0u;
+  uint32_t deadlineSamples = 0u;
+  uint32_t deadlineMissing = 0u;
+  uint32_t deadlineMisses = 0u;
+  uint32_t deadlineSlackMinTicks = 0u;
   uint32_t pendingObservations = 0u;
   uint32_t maxPendingStreak = 0u;
   uint32_t durationErrorMaxBasisPoints = 0u;

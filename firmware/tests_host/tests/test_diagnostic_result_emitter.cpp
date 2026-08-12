@@ -243,6 +243,56 @@ TEST(DiagnosticResultEmitter, CoordinatedXyEntryLatenessMetricsFitAtSaturatedVal
     MEMCMP_EQUAL(metricsText, &payload[metrics + 2], std::strlen(metricsText));
 }
 
+TEST(DiagnosticResultEmitter, CoordinatedXySingleIrqMetricsFitAtSaturatedValues)
+{
+    char metricsText[224] = {};
+    const int written = std::snprintf(
+        metricsText,
+        sizeof(metricsText),
+        "em=1;ip=%lu;i2=%lu;pc=%lu;pn=%lu;px=%lu;pe=%lu;ds=%lu;mi=%lu;md=%lu;sl=%lu;pu=%lu;ok=1;sf=%lu;to=%lu",
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul,
+        4294967295ul);
+    const char name[] = "coord_xy_single_irq_pulse";
+    const size_t nameLength = std::strlen(name) >
+            DiagnosticResultEmitter::kMaxResultNameBytes
+        ? DiagnosticResultEmitter::kMaxResultNameBytes
+        : std::strlen(name);
+    const size_t metricsBudget =
+        DiagnosticResultEmitter::kResultMetricsFrameBudget - nameLength;
+
+    CHECK_TRUE(written > 0);
+    CHECK_TRUE(static_cast<size_t>(written) < sizeof(metricsText));
+    CHECK_TRUE(static_cast<size_t>(written) <= metricsBudget);
+
+    uint8_t payload[256] = {0};
+    const size_t len = DiagnosticResultEmitter::buildResultPayload(
+        payload,
+        sizeof(payload),
+        0x01u,
+        0x02u,
+        2074u,
+        name,
+        true,
+        metricsText,
+        0x04u);
+    const size_t metrics =
+        findTag(payload, len, DiagnosticResultEmitter::kTagMetrics);
+    CHECK_TRUE(metrics < len);
+    UNSIGNED_LONGS_EQUAL(std::strlen(metricsText), payload[metrics + 1]);
+    MEMCMP_EQUAL(metricsText, &payload[metrics + 2], std::strlen(metricsText));
+}
+
 TEST(DiagnosticResultEmitter, DonePayloadPreservesCurrentLayout)
 {
     uint8_t payload[64] = {0};

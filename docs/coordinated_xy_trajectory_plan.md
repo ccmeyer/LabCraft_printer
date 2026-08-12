@@ -224,7 +224,7 @@ Every milestone that touches motion must preserve these invariants:
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
-| 6. Performance and motion HIL qualification | `implemented` | The velocity-domain correction reduced the calculated peak from 443,900 to about 131,100 steps/s2 and passed one guarded 40 kHz row with X=4/Y=1 drift; the diagnostic-only status-mutex A/B image is implemented | Complete and review the three SAFE-bracketed A/B pairs; FULL remains blocked |
+| 6. Performance and motion HIL qualification | `implemented` | The velocity-domain correction reduced the calculated peak from 443,900 to about 131,100 steps/s2 and passed one guarded 40 kHz row with X=4/Y=1 drift; a diagnostic-only one-interrupt-per-step executor is implemented to test a structurally larger deadline margin | Run and review the SAFE-bracketed selector `2075` diagnostic; FULL remains blocked |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
@@ -251,18 +251,26 @@ prioritized eliminating rare movement-related failures. That reliability goal
 authorizes the controlled Stage 2 comparison without requiring another
 critical-section-only failure first.
 
-The Stage 2 image adds selector `2076`, which shares selector `2077`'s exact
-40 kHz row and bounded homes while changing only status-metric synchronization
-to a dedicated static task mutex. Boot, selector `2077`, and normal operation
-remain critical-section mode. The first Pair 1 critical-section arm stopped on
-its first measured leg after 2,599 X pulses without pending, reset, watchdog,
-or cadence evidence; its pre/post SAFE brackets passed 28/28. The aggregate
-frame did not expose whether the terminal state was a limit abort or planner
-fault. A measurement-only follow-up now retains the first failed leg's terminal
-reason and coordinated/raw limit counts in result `2073`. The next action is a
-watched, independently SAFE-bracketed Pair 1 critical-section retry, followed
-by the remaining counterbalanced sequence only if that arm completes or fails
-solely on the permitted timing symptom.
+The status-synchronization experiment showed that removing the status-metric
+critical section alone does not address the more fundamental fragility of a
+two-edge executor at the maximum rate. The next candidate therefore adds
+diagnostic selector `2075` while leaving boot and normal operation unchanged.
+It programs one full-period TIM2 interval per master step, emits a complete
+STEP-high/STEP-low pulse in that one ISR with a DWT-enforced 2 us minimum, and
+commits exactly one planner event. The same 40 kHz row consequently expects
+220,000 callbacks instead of 440,000 while preserving the planner LUT,
+approximately 131,100 steps/s2 acceleration peak, geometry, DDA masks, limits,
+status traffic, and watchdog behavior.
+
+Result `2074` adds pulse and post-handler deadline evidence. The required HIL
+gate is complete 220,000-callback/pulse/deadline coverage, no missing or missed
+deadline samples, no pending update, at least 360 core cycles of enforced pulse
+high time, at least 500 timer ticks of remaining full-period slack, exact
+motion evidence, clean bounded homes, passing status cadence, and no reset or
+watchdog evidence. A scope guard restores the two-edge executor on every exit.
+The next action is one watched SAFE-bracketed selector `2075` run followed by
+normalization with `coordinated_xy_single_irq_v1`. Do not promote this mode or
+resume FULL qualification until that evidence is reviewed.
 
 ## Milestone 0: Baseline And Decisions
 

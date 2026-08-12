@@ -84,6 +84,30 @@ private:
     bool _activated = false;
 };
 
+class ScopedCoordinatedXyExecutionMode {
+public:
+    ScopedCoordinatedXyExecutionMode(
+        Gantry* gantry,
+        CoordinatedXyExecutor::ExecutionMode mode)
+        : _gantry(gantry) {
+        _activated = _gantry != nullptr &&
+            _gantry->setCoordinatedExecutionModeForDiagnostics(mode);
+    }
+
+    ~ScopedCoordinatedXyExecutionMode() {
+        if (_gantry != nullptr) {
+            (void)_gantry->setCoordinatedExecutionModeForDiagnostics(
+                CoordinatedXyExecutor::ExecutionMode::TwoEdge);
+        }
+    }
+
+    bool activated() const { return _activated; }
+
+private:
+    Gantry* _gantry = nullptr;
+    bool _activated = false;
+};
+
 static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {1001u, "comm_crc_known_vector", "protocol", "SAFE", "always"},
     {1002u, "comm_frame_roundtrip", "protocol", "SAFE", "always"},
@@ -148,6 +172,7 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2071u, "coord_xy_camera_home_transition", "performance", "FULL", "explicit_selection"},
     {2072u, "coord_xy_40khz_irq_path", "performance", "FULL", "explicit_selection"},
     {2073u, "coord_xy_40khz_entry_lateness", "performance", "FULL", "explicit_selection"},
+    {2074u, "coord_xy_single_irq_pulse", "performance", "FULL", "explicit_selection"},
     {2003u, "pressure_regulator_step_response_full", "pressure", "FULL", "safe_gate_or_full"},
     {2201u, "pressure_hold_leak_factory", "pressure", "FULL", "safe_gate_or_full"},
     {2202u, "pressure_target_cycle_repeatability_factory", "pressure", "FULL", "safe_gate_or_full"},
@@ -269,8 +294,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runNormalXyRouteSuite = (selectedDiagnosticId == 2059u);
     const bool runCoordinatedXyStatusSyncSuite =
         (selectedDiagnosticId == 2076u);
+    const bool runCoordinatedXySingleIrqSuite =
+        (selectedDiagnosticId == 2075u);
     const bool runCoordinatedXy40KhzSuite =
-        (selectedDiagnosticId == 2077u) || runCoordinatedXyStatusSyncSuite;
+        (selectedDiagnosticId == 2077u) || runCoordinatedXyStatusSyncSuite ||
+        runCoordinatedXySingleIrqSuite;
     const bool runCoordinatedXyDirectionSuite = (selectedDiagnosticId == 2079u);
     const bool runCoordinatedXyTransitionSuite = (selectedDiagnosticId == 2078u);
     const bool runCoordinatedXyPerformanceSuite =
@@ -4105,7 +4133,16 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr int32_t kFocusedHomePosition = 100;
                         static constexpr int32_t kFocusedAwayPosition = 20100;
                         static constexpr int32_t kFocusedReducedAwayPosition = 24100;
-                        const Limits performanceLimits{};
+                        // The production two-edge path retains its established
+                        // half-period cycle gates. CompleteStep has a 4,500-
+                        // core-cycle full period at 40 kHz; its 3,500-cycle
+                        // active gate preserves the independently reported
+                        // 500-timer-tick (1,000-core-cycle) minimum slack.
+                        Limits performanceLimits{};
+                        if (runCoordinatedXySingleIrqSuite) {
+                          performanceLimits.activeMaxCycles = 3500u;
+                          performanceLimits.terminalMaxCycles = 4500u;
+                        }
                         const Comm::StatusMetricsSyncMode requestedStatusSyncMode =
                             runCoordinatedXyStatusSyncSuite
                                 ? Comm::StatusMetricsSyncMode::TaskMutex
@@ -4153,6 +4190,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         Stepper* stepperR = Stepper::stepperR();
                         Gantry* gantry = Gantry::instance();
                         PressureSensor* pressureSensor = PressureSensor::instance();
+                        const CoordinatedXyExecutor::ExecutionMode
+                            requestedExecutionMode = runCoordinatedXySingleIrqSuite
+                                ? CoordinatedXyExecutor::ExecutionMode::CompleteStep
+                                : CoordinatedXyExecutor::ExecutionMode::TwoEdge;
+                        ScopedCoordinatedXyExecutionMode executionModeGuard(
+                            gantry, requestedExecutionMode);
 
                         const uint32_t savedXMaxRateHz =
                             stepperX != nullptr ? stepperX->maxSpeedHz() : 0u;
@@ -4224,6 +4267,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                           lockFailures) > 0)
                                     ? entryMetrics
                                     : "gate=metrics_overflow;to=1");
+                            if (runCoordinatedXySingleIrqSuite) {
+                              (void)runOne(
+                                  2074u,
+                                  "coord_xy_single_irq_pulse",
+                                  false,
+                                  "em=1;ip=1;i2=0;pc=0;pn=0;px=0;pe=0;ds=0;mi=0;md=0;sl=0;pu=0;ok=0;sf=0;to=1");
+                            }
                             return;
                           }
                           if (!runCoordinatedXyDirectionSuite) {
@@ -4253,6 +4303,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           failRemaining(2060u, "status_sync_unavailable");
                           return finishSelfTestNow();
                         }
+                        if (!executionModeGuard.activated()) {
+                          failRemaining(2060u, "executor_mode_unavailable");
+                          return finishSelfTestNow();
+                        }
 
                         if (stepperX == nullptr || stepperY == nullptr ||
                             stepperZ == nullptr || gantry == nullptr || comm == nullptr ||
@@ -4264,6 +4318,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         }
                         const char* fixtureStage = runCoordinatedXyTransitionSuite
                             ? "coordinated_xy_camera_transition_envelope_clear"
+                            : runCoordinatedXySingleIrqSuite
+                                ? "coordinated_xy_single_irq_envelope_clear"
                             : runCoordinatedXy40KhzSuite
                                 ? "coordinated_xy_40khz_envelope_clear"
                                 : "coordinated_xy_performance_fixture_clear";
@@ -4516,6 +4572,15 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           observation.expectedYSteps = expectedY;
                           observation.expectedMasterSteps = expectedMaster;
                           observation.expectedRateHz = expectedRateHz;
+                          observation.executionMode =
+                              result.snapshot.executionMode;
+                          observation.interruptsPerMasterStep =
+                              result.snapshot.executionMode ==
+                                      CoordinatedXyExecutor::ExecutionMode::CompleteStep
+                                  ? 1u
+                                  : 2u;
+                          observation.minimumPulseCoreCycles =
+                              result.snapshot.minimumPulseCoreCycles;
                           observation.expectedTargetArr =
                               targetArrForRate(expectedRateHz);
                           observation.expectedStartArr =
@@ -5225,6 +5290,71 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return evidenceComplete && metricsFit;
                         };
 
+                        auto emitCompleteStepEvidence =
+                            [&](const Aggregate& aggregate) {
+                          static constexpr uint32_t kExpectedCallbacks = 220000u;
+                          static constexpr uint32_t kMinimumDeadlineSlackTicks =
+                              500u;
+                          char metrics[224] = {};
+                          const unsigned mode =
+                              static_cast<unsigned>(aggregate.executionMode);
+                          const int written = snprintf(
+                              metrics,
+                              sizeof(metrics),
+                              "em=%u;ip=%lu;i2=%lu;pc=%lu;pn=%lu;px=%lu;"
+                              "pe=%lu;ds=%lu;mi=%lu;md=%lu;sl=%lu;pu=%lu;"
+                              "ok=%u;sf=%lu;to=%lu",
+                              mode,
+                              (unsigned long)aggregate.interruptsPerMasterStep,
+                              (unsigned long)aggregate.timer2Callbacks,
+                              (unsigned long)aggregate.completeStepPulseSamples,
+                              (unsigned long)aggregate.completeStepPulseMinCycles,
+                              (unsigned long)aggregate.completeStepPulseMaxCycles,
+                              (unsigned long)aggregate.minimumPulseCoreCycles,
+                              (unsigned long)aggregate.deadlineSamples,
+                              (unsigned long)aggregate.deadlineMissing,
+                              (unsigned long)aggregate.deadlineMisses,
+                              (unsigned long)aggregate.deadlineSlackMinTicks,
+                              (unsigned long)aggregate.pendingObservations,
+                              aggregate.exactAndSafe ? 1u : 0u,
+                              (unsigned long)aggregate.saturationFlags,
+                              (unsigned long)aggregate.timeoutCount);
+                          const bool evidenceComplete =
+                              aggregate.executionMode ==
+                                  CoordinatedXyExecutor::ExecutionMode::CompleteStep &&
+                              aggregate.interruptsPerMasterStep == 1u &&
+                              aggregate.timer2Callbacks == kExpectedCallbacks &&
+                              aggregate.completeStepPulseSamples ==
+                                  kExpectedCallbacks &&
+                              aggregate.minimumPulseCoreCycles == 360u &&
+                              aggregate.completeStepPulseMinCycles >=
+                                  aggregate.minimumPulseCoreCycles &&
+                              aggregate.deadlineSamples == kExpectedCallbacks &&
+                              aggregate.deadlineMissing == 0u &&
+                              aggregate.deadlineMisses == 0u &&
+                              aggregate.deadlineSlackMinTicks >=
+                                  kMinimumDeadlineSlackTicks &&
+                              aggregate.pendingObservations == 0u &&
+                              aggregate.saturationFlags == 0u &&
+                              aggregate.timeoutCount == 0u &&
+                              aggregate.exactAndSafe;
+                          const size_t nameLength = std::min(
+                              std::strlen("coord_xy_single_irq_pulse"),
+                              DiagnosticResultEmitter::kMaxResultNameBytes);
+                          const size_t metricBudget =
+                              DiagnosticResultEmitter::kResultMetricsFrameBudget -
+                              nameLength;
+                          const bool metricsFit = written > 0 &&
+                              static_cast<size_t>(written) < sizeof(metrics) &&
+                              static_cast<size_t>(written) <= metricBudget;
+                          (void)runOne(2074u,
+                                       "coord_xy_single_irq_pulse",
+                                       evidenceComplete && metricsFit,
+                                       metricsFit ? metrics
+                                                  : "gate=metrics_overflow;to=1");
+                          return evidenceComplete && metricsFit;
+                        };
+
                         if (runCoordinatedXyTransitionSuite) {
                           const bool transitionPass =
                               runCameraHomeTransitionQualification();
@@ -5298,6 +5428,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           if (runCoordinatedXy40KhzSuite) {
                             (void)emitIrqPathEvidence(aggregate);
                             (void)emitEntryLatenessEvidence(aggregate);
+                            if (runCoordinatedXySingleIrqSuite) {
+                              (void)emitCompleteStepEvidence(aggregate);
+                            }
                           }
                           if (!emitted) {
                             if (runCoordinatedXy40KhzSuite) {

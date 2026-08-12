@@ -83,9 +83,18 @@ uint32_t moveFailureMask(const MoveObservation& observation,
   if (observation.selectedRateHz != observation.expectedRateHz) {
     failures |= kMoveFailureSelectedRate;
   }
-  if (observation.timer2Callbacks != (observation.expectedMasterSteps * 2u) ||
+  if ((observation.interruptsPerMasterStep != 1u &&
+       observation.interruptsPerMasterStep != 2u) ||
+      observation.timer2Callbacks !=
+          (observation.expectedMasterSteps *
+           observation.interruptsPerMasterStep) ||
       observation.timer7Callbacks != 0u) {
     failures |= kMoveFailureTimerCounts;
+  }
+  const bool completeStepMode = observation.executionMode ==
+      CoordinatedXyExecutor::ExecutionMode::CompleteStep;
+  if (completeStepMode != (observation.interruptsPerMasterStep == 1u)) {
+    failures |= kMoveFailureExecutionMode;
   }
   if (observation.arrMin != observation.expectedTargetArr ||
       observation.arrMax != observation.expectedStartArr) {
@@ -98,6 +107,19 @@ uint32_t moveFailureMask(const MoveObservation& observation,
       timing.completedPulses != observation.expectedMasterSteps ||
       timing.terminalCallbacks != 1u) {
     failures |= kMoveFailureTimingCounts;
+  }
+  if (completeStepMode &&
+      (observation.minimumPulseCoreCycles == 0u ||
+       timing.completeStepPulseSamples != observation.expectedMasterSteps ||
+       timing.completeStepPulseMinCycles <
+           observation.minimumPulseCoreCycles)) {
+    failures |= kMoveFailurePulseTiming;
+  }
+  if (completeStepMode &&
+      (timing.deadlineSamples != observation.timer2Callbacks ||
+       timing.deadlineMissing != 0u || timing.deadlineMisses != 0u ||
+       timing.deadlineSlackMinTicks == 0u)) {
+    failures |= kMoveFailureDeadlineSlack;
   }
   if (timing.pendingObservations != 0u || timing.maxPendingStreak != 0u) {
     failures |= kMoveFailurePendingUpdate;
@@ -151,6 +173,18 @@ void captureFirstFailure(FailureTelemetry& telemetry,
 void addMove(Aggregate& aggregate,
              const MoveObservation& observation,
              const Limits& limits) {
+  const bool firstMove = aggregate.moveCount == 0u;
+  const bool modeConsistent = firstMove ||
+      (aggregate.interruptsPerMasterStep ==
+           observation.interruptsPerMasterStep &&
+       aggregate.executionMode == observation.executionMode &&
+       aggregate.minimumPulseCoreCycles ==
+           observation.minimumPulseCoreCycles);
+  if (firstMove) {
+    aggregate.interruptsPerMasterStep = observation.interruptsPerMasterStep;
+    aggregate.executionMode = observation.executionMode;
+    aggregate.minimumPulseCoreCycles = observation.minimumPulseCoreCycles;
+  }
   addSaturating(aggregate.moveCount, 1u, aggregate.saturationFlags);
   addSaturating(aggregate.expectedXSteps,
                 observation.expectedXSteps,
@@ -256,6 +290,37 @@ void addMove(Aggregate& aggregate,
     aggregate.entryScheduleOverrunMaxCycles =
         observation.timing.entryScheduleOverrunMaxCycles;
   }
+  const bool firstPulseSample = aggregate.completeStepPulseSamples == 0u;
+  addSaturating(aggregate.completeStepPulseSamples,
+                observation.timing.completeStepPulseSamples,
+                aggregate.saturationFlags);
+  if (observation.timing.completeStepPulseSamples != 0u &&
+      (firstPulseSample || observation.timing.completeStepPulseMinCycles <
+          aggregate.completeStepPulseMinCycles)) {
+    aggregate.completeStepPulseMinCycles =
+        observation.timing.completeStepPulseMinCycles;
+  }
+  if (observation.timing.completeStepPulseMaxCycles >
+      aggregate.completeStepPulseMaxCycles) {
+    aggregate.completeStepPulseMaxCycles =
+        observation.timing.completeStepPulseMaxCycles;
+  }
+  const bool firstDeadlineSample = aggregate.deadlineSamples == 0u;
+  addSaturating(aggregate.deadlineSamples,
+                observation.timing.deadlineSamples,
+                aggregate.saturationFlags);
+  addSaturating(aggregate.deadlineMissing,
+                observation.timing.deadlineMissing,
+                aggregate.saturationFlags);
+  addSaturating(aggregate.deadlineMisses,
+                observation.timing.deadlineMisses,
+                aggregate.saturationFlags);
+  if (observation.timing.deadlineSamples != 0u &&
+      (firstDeadlineSample || observation.timing.deadlineSlackMinTicks <
+          aggregate.deadlineSlackMinTicks)) {
+    aggregate.deadlineSlackMinTicks =
+        observation.timing.deadlineSlackMinTicks;
+  }
   addSaturating(aggregate.pendingObservations,
                 observation.timing.pendingObservations,
                 aggregate.saturationFlags);
@@ -290,8 +355,8 @@ void addMove(Aggregate& aggregate,
   if (observation.timedOut) {
     addSaturating(aggregate.timeoutCount, 1u, aggregate.saturationFlags);
   }
-  aggregate.exactAndSafe =
-      aggregate.exactAndSafe && movePasses(observation, limits);
+  aggregate.exactAndSafe = aggregate.exactAndSafe && modeConsistent &&
+      movePasses(observation, limits);
 }
 
 uint32_t phaseMeanCycles(const Aggregate& aggregate,
@@ -342,7 +407,10 @@ bool aggregatePasses(const Aggregate& aggregate,
       aggregate.emittedXSteps == expectedXSteps &&
       aggregate.emittedYSteps == expectedYSteps &&
       aggregate.masterSteps == expectedMasterSteps &&
-      aggregate.timer2Callbacks == (expectedMasterSteps * 2u) &&
+      (aggregate.interruptsPerMasterStep == 1u ||
+       aggregate.interruptsPerMasterStep == 2u) &&
+      aggregate.timer2Callbacks ==
+          (expectedMasterSteps * aggregate.interruptsPerMasterStep) &&
       aggregate.timer7Callbacks == 0u &&
       aggregate.pendingObservations == 0u &&
       aggregate.maxPendingStreak == 0u &&

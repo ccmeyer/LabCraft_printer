@@ -317,6 +317,50 @@ void completeIrqPath(State& state, uint32_t irqExitCycle) {
   state.irqPathSampleTerminal = false;
 }
 
+void recordCompleteStepPulse(State& state, uint32_t pulseHighCycles) {
+  if (!state.valid || !state.active) return;
+  const bool firstSample = state.completeStepPulseSamples == 0u;
+  saturatingIncrement(state.completeStepPulseSamples,
+                      state.saturationFlags,
+                      SaturatedCompleteStepPulseSamples);
+  if (firstSample || pulseHighCycles < state.completeStepPulseMinCycles) {
+    state.completeStepPulseMinCycles = pulseHighCycles;
+  }
+  if (pulseHighCycles > state.completeStepPulseMaxCycles) {
+    state.completeStepPulseMaxCycles = pulseHighCycles;
+  }
+}
+
+void recordCompleteStepDeadline(State& state,
+                                bool timerSampleValid,
+                                uint32_t timerCount,
+                                uint32_t timerArr,
+                                bool timerUpdatePending) {
+  if (!state.valid || !state.irqPathSampleOpen) return;
+  if (!timerSampleValid) {
+    saturatingIncrement(state.deadlineMissing,
+                        state.saturationFlags,
+                        SaturatedDeadlineMissing);
+    return;
+  }
+  const bool firstSample = state.deadlineSamples == 0u;
+  saturatingIncrement(state.deadlineSamples,
+                      state.saturationFlags,
+                      SaturatedDeadlineSamples);
+  uint32_t slackTicks = 0u;
+  if (state.irqPathSamplePending || timerUpdatePending ||
+      timerCount > timerArr) {
+    saturatingIncrement(state.deadlineMisses,
+                        state.saturationFlags,
+                        SaturatedDeadlineMisses);
+  } else {
+    slackTicks = (timerArr - timerCount) + 1u;
+  }
+  if (firstSample || slackTicks < state.deadlineSlackMinTicks) {
+    state.deadlineSlackMinTicks = slackTicks;
+  }
+}
+
 Snapshot makeSnapshot(const State& state) {
   Snapshot snapshot{};
   snapshot.valid = state.valid;
@@ -358,6 +402,13 @@ Snapshot makeSnapshot(const State& state) {
   snapshot.lateEntryCount = state.lateEntryCount;
   snapshot.entryScheduleOverrunMaxCycles =
       state.entryScheduleOverrunMaxCycles;
+  snapshot.completeStepPulseSamples = state.completeStepPulseSamples;
+  snapshot.completeStepPulseMinCycles = state.completeStepPulseMinCycles;
+  snapshot.completeStepPulseMaxCycles = state.completeStepPulseMaxCycles;
+  snapshot.deadlineSamples = state.deadlineSamples;
+  snapshot.deadlineMissing = state.deadlineMissing;
+  snapshot.deadlineMisses = state.deadlineMisses;
+  snapshot.deadlineSlackMinTicks = state.deadlineSlackMinTicks;
   snapshot.saturationFlags = state.saturationFlags;
   return snapshot;
 }

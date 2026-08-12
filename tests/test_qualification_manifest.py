@@ -360,6 +360,39 @@ def test_load_coordinated_xy_status_sync_manifest_is_strict_mutex_isolation():
     assert entry["ra"]["equals"] == 0
 
 
+def test_load_coordinated_xy_single_irq_manifest_is_diagnostic_only_and_strict():
+    manifest = load_manifest("coordinated_xy_single_irq_v1")
+
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2064, 2072, 2073, 2074)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--coordinated-xy-single-irq-suite",)
+    note = manifest.fixtures[0]["operator_note"]
+    assert "one TIM2 interrupt per complete coordinated step" in note
+    assert "restores the two-edge production default" in note
+
+    motion = manifest.analysis_rules["2064"]["metrics"]
+    assert motion["i2"]["equals"] == 220000
+    assert motion["pu"]["equals"] == 0
+    irq = manifest.analysis_rules["2072"]["metrics"]
+    assert irq["s"]["equals"] == 220000
+    entry = manifest.analysis_rules["2073"]["metrics"]
+    assert entry["s"]["equals"] == 220000
+    assert entry["sm"]["equals"] == 0
+    assert entry["fv"]["equals"] == 0
+    assert entry["tr"]["equals"] == 0
+    assert entry["la"]["equals"] == 0
+    assert entry["ra"]["equals"] == 0
+    pulse = manifest.analysis_rules["2074"]["metrics"]
+    performance = manifest.analysis_rules["2064"]["metrics"]
+    assert performance["am"]["max"] == 3500
+    assert performance["tm"]["max"] == 4500
+    assert pulse["pe"]["equals"] == 360
+    assert pulse["md"]["equals"] == 0
+    assert pulse["sl"]["min"] == 500
+
+
 def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture():
     manifest = load_manifest("motion_envelope_v1")
 

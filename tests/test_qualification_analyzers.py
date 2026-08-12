@@ -293,6 +293,75 @@ def test_status_sync_manifest_requires_complete_low_lateness_mutex_evidence():
     assert _analyze(cadence_failure, manifest)["verdict"]["status"] == "fail"
 
 
+def test_single_irq_manifest_requires_one_callback_and_complete_pulse_margin():
+    manifest = load_manifest("coordinated_xy_single_irq_v1")
+    motion = {
+        "hz": 40000, "n": 10, "xe": 106832, "ye": 180000,
+        "ms": 220000, "i2": 220000, "i7": 0, "ok": 1,
+        "pu": 0, "ps": 0, "am": 1300, "aa": 900,
+        "cm": 1200, "ca": 850, "dm": 1400, "da": 950,
+        "tm": 2200, "de": 20, "sg": 65, "wd": 70,
+        "sa": 0, "wl": 0, "cw": 1, "sf": 0,
+        "xd": 4, "yd": 5, "to": 0,
+    }
+    irq = {
+        "i2": 220000, "s": 220000, "mi": 0,
+        "ph": 50, "pa": 20, "fm": 1600, "fa": 1000,
+        "ax": 1550, "tf": 2200, "pp": 0, "pf": 0,
+        "pu": 0, "ps": 0, "sf": 0, "to": 0,
+    }
+    entry = {
+        "i2": 220000, "s": 220000, "mi": 0,
+        "cm": 180, "ca": 25, "pm": 0, "lc": 2,
+        "dm": 300, "sm": 0, "lf": 0, "sf": 0, "to": 0,
+        "fv": 0, "tr": 0, "la": 0, "ra": 0,
+    }
+    pulse = {
+        "em": 1, "ip": 1, "i2": 220000, "pc": 220000,
+        "pn": 360, "px": 700, "pe": 360, "ds": 220000,
+        "mi": 0, "md": 0, "sl": 700, "pu": 0, "ok": 1,
+        "sf": 0, "to": 0,
+    }
+    valid = {
+        "run_id": 2075,
+        "profile": "FULL",
+        "started_at": "2026-08-12T00:00:00Z",
+        "finished_at": "2026-08-12T00:00:10Z",
+        "aborted": False,
+        "summary": {"total": 4, "passed": 4, "failed": 0},
+        "results": [
+            {"test_id": 2064, "name": "coordinated_xy_performance_40khz", "pass": True, "metrics": motion},
+            {"test_id": 2072, "name": "coord_xy_40khz_irq_path", "pass": True, "metrics": irq},
+            {"test_id": 2073, "name": "coord_xy_40khz_entry_lateness", "pass": True, "metrics": entry},
+            {"test_id": 2074, "name": "coord_xy_single_irq_pulse", "pass": True, "metrics": pulse},
+        ],
+        "host_checks": [{
+            "name": "coordinated_xy_status_cadence",
+            "pass": True,
+            "details": {"status_gap_max_ms": 100},
+        }],
+    }
+
+    assert _analyze(valid, manifest)["verdict"]["status"] == "pass"
+    mutations = (
+        (0, "i2", 440000), (0, "pu", 1),
+        (1, "s", 219999), (1, "pu", 1),
+        (2, "mi", 1), (2, "sm", 1), (2, "tr", 5), (2, "ra", 1),
+        (3, "em", 0), (3, "ip", 2), (3, "pc", 219999),
+        (3, "pn", 359), (3, "pe", 359), (3, "ds", 219999),
+        (3, "mi", 1), (3, "md", 1), (3, "sl", 499),
+        (3, "pu", 1), (3, "sf", 1), (3, "to", 1),
+    )
+    for result_index, metric, value in mutations:
+        rejected = deepcopy(valid)
+        rejected["results"][result_index]["metrics"][metric] = value
+        assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
+
+    cadence_failure = deepcopy(valid)
+    cadence_failure["host_checks"][0]["pass"] = False
+    assert _analyze(cadence_failure, manifest)["verdict"]["status"] == "fail"
+
+
 def test_aborted_or_missing_raw_output_is_infrastructure_failure():
     analysis = _analyze(_raw(aborted=True), _manifest(), returncode=3)
 

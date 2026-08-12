@@ -34,6 +34,8 @@ struct CoordinatedXySnapshot {
   CoordinatedXyExecutor::State state = CoordinatedXyExecutor::State::Idle;
   CoordinatedXyExecutor::TerminalReason terminalReason =
       CoordinatedXyExecutor::TerminalReason::None;
+  CoordinatedXyExecutor::ExecutionMode executionMode =
+      CoordinatedXyExecutor::ExecutionMode::TwoEdge;
   uint32_t requestedXSteps = 0u;
   uint32_t requestedYSteps = 0u;
   uint32_t emittedXSteps = 0u;
@@ -58,6 +60,7 @@ struct CoordinatedXySnapshot {
       static_cast<uint8_t>(CoordinatedXyIsrInstrumentation::Phase::Count)] = {};
   uint32_t terminalMeanCycles = 0u;
   uint32_t durationErrorBasisPoints = 0u;
+  uint32_t minimumPulseCoreCycles = 0u;
   uint32_t limitAbortRequestCount = 0u;
   uint32_t rawLimitAbortCount = 0u;
   uint32_t limitRequestRisingEdges = 0u;
@@ -96,6 +99,9 @@ public:
                                              int64_t dy,
                                              uint32_t requestedRateHz = 0u);
   CoordinatedXySnapshot coordinatedSnapshot() const;
+  bool setCoordinatedExecutionModeForDiagnostics(
+      CoordinatedXyExecutor::ExecutionMode mode);
+  CoordinatedXyExecutor::ExecutionMode coordinatedExecutionMode() const;
   bool requestCoordinatedCancelForDiagnostics(uint32_t& risingEdgesBefore,
                                                uint32_t& fallingEdgesBefore);
   bool requestCoordinatedLimitAbortForDiagnostics(Stepper::Axis axis);
@@ -155,6 +161,10 @@ private:
   volatile uint32_t _coordinatedLimitRequestFallingEdges = 0u;
   volatile uint32_t _coordinatedArrMin = 0u;
   volatile uint32_t _coordinatedArrMax = 0u;
+  CoordinatedXyExecutor::ExecutionMode _coordinatedExecutionMode =
+      CoordinatedXyExecutor::ExecutionMode::TwoEdge;
+  volatile uint32_t _coordinatedProgrammedArr = 0u;
+  uint32_t _coordinatedPulseHighCycles = 0u;
   CoordinatedXyIsrInstrumentation::State _coordinatedTiming{};
 
 };

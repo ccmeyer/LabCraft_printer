@@ -1303,6 +1303,9 @@ def run(args: argparse.Namespace) -> int:
         coordinated_xy_status_sync_suite = bool(
             getattr(args, "coordinated_xy_status_sync_suite", False)
         )
+        coordinated_xy_single_irq_suite = bool(
+            getattr(args, "coordinated_xy_single_irq_suite", False)
+        )
         coordinated_xy_x_direction_suite = bool(
             getattr(args, "coordinated_xy_x_direction_suite", False)
         )
@@ -1313,6 +1316,7 @@ def run(args: argparse.Namespace) -> int:
             coordinated_xy_performance_suite
             or coordinated_xy_40khz_suite
             or coordinated_xy_status_sync_suite
+            or coordinated_xy_single_irq_suite
             or coordinated_xy_x_direction_suite
             or coordinated_xy_camera_transition_suite
         )
@@ -1320,7 +1324,7 @@ def run(args: argparse.Namespace) -> int:
         refuel_vacuum_suite = bool(getattr(args, "refuel_vacuum_suite", False))
         valve_characterization_suite = bool(getattr(args, "valve_characterization_suite", False))
         valve_gap_sweep_suite = bool(getattr(args, "valve_gap_sweep_suite", False))
-        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2076 if coordinated_xy_status_sync_suite else 2077 if coordinated_xy_40khz_suite else 2078 if coordinated_xy_camera_transition_suite else 2079 if coordinated_xy_x_direction_suite else 2069 if coordinated_xy_performance_suite else 2059 if normal_xy_route_suite else 2049 if coordinated_xy_executor_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
+        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2075 if coordinated_xy_single_irq_suite else 2076 if coordinated_xy_status_sync_suite else 2077 if coordinated_xy_40khz_suite else 2078 if coordinated_xy_camera_transition_suite else 2079 if coordinated_xy_x_direction_suite else 2069 if coordinated_xy_performance_suite else 2059 if normal_xy_route_suite else 2049 if coordinated_xy_executor_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
             pressure_sweep_suite if pressure_sweep_suite is not None else (
                 CUSTOM_PRESSURE_TRACE_TEST_ID if custom_trace_config is not None else pressure_trace_test
             )
@@ -1992,6 +1996,7 @@ def main() -> int:
     selector_group.add_argument("--coordinated-xy-performance-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-40khz-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-status-sync-suite", action="store_true")
+    selector_group.add_argument("--coordinated-xy-single-irq-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-x-direction-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-camera-transition-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-suite", action="store_true")

@@ -69,6 +69,31 @@ CoordinatedXyPerformanceReport::MoveObservation acceptedMove(
   return observation;
 }
 
+CoordinatedXyPerformanceReport::MoveObservation acceptedCompleteStepMove(
+    uint32_t x,
+    uint32_t y,
+    uint32_t master,
+    uint32_t rate,
+    uint32_t targetArr,
+    uint32_t startArr) {
+  auto observation = acceptedMove(x, y, master, rate, targetArr, startArr);
+  observation.interruptsPerMasterStep = 1u;
+  observation.executionMode =
+      CoordinatedXyExecutor::ExecutionMode::CompleteStep;
+  observation.minimumPulseCoreCycles = 360u;
+  observation.timer2Callbacks = master;
+  observation.timing.totalCallbacks = master;
+  observation.timing.phaseCallbacks[1] = master - 5u;
+  observation.timing.irqPathSamples = master;
+  observation.timing.entryTimerSamples = master;
+  observation.timing.completeStepPulseSamples = master;
+  observation.timing.completeStepPulseMinCycles = 360u;
+  observation.timing.completeStepPulseMaxCycles = 420u;
+  observation.timing.deadlineSamples = master;
+  observation.timing.deadlineSlackMinTicks = 700u;
+  return observation;
+}
+
 }  // namespace
 
 TEST_GROUP(CoordinatedXyPerformanceReport) {
@@ -105,6 +130,38 @@ TEST(CoordinatedXyPerformanceReport, AcceptsExactSafeMoveWithinBudgets) {
           observation, CoordinatedXyPerformanceReport::Limits{}));
   CHECK_TRUE(CoordinatedXyPerformanceReport::movePasses(
       observation, CoordinatedXyPerformanceReport::Limits{}));
+}
+
+TEST(CoordinatedXyPerformanceReport, AcceptsCompleteStepMoveWithOneInterrupt) {
+  const auto observation = acceptedCompleteStepMove(
+      20000u, 5000u, 20000u, 40000u, 1124u, 5620u);
+  UNSIGNED_LONGS_EQUAL(
+      0u,
+      CoordinatedXyPerformanceReport::moveFailureMask(
+          observation, CoordinatedXyPerformanceReport::Limits{}));
+}
+
+TEST(CoordinatedXyPerformanceReport, CompleteStepMoveFailsClosedOnPulseOrDeadline) {
+  auto observation = acceptedCompleteStepMove(
+      20000u, 5000u, 20000u, 40000u, 1124u, 5620u);
+  observation.timing.completeStepPulseMinCycles = 359u;
+  CHECK_TRUE((CoordinatedXyPerformanceReport::moveFailureMask(
+                  observation, CoordinatedXyPerformanceReport::Limits{}) &
+              CoordinatedXyPerformanceReport::kMoveFailurePulseTiming) != 0u);
+
+  observation = acceptedCompleteStepMove(
+      20000u, 5000u, 20000u, 40000u, 1124u, 5620u);
+  observation.timing.deadlineMissing = 1u;
+  CHECK_TRUE((CoordinatedXyPerformanceReport::moveFailureMask(
+                  observation, CoordinatedXyPerformanceReport::Limits{}) &
+              CoordinatedXyPerformanceReport::kMoveFailureDeadlineSlack) != 0u);
+
+  observation = acceptedCompleteStepMove(
+      20000u, 5000u, 20000u, 40000u, 1124u, 5620u);
+  observation.executionMode = CoordinatedXyExecutor::ExecutionMode::TwoEdge;
+  CHECK_TRUE((CoordinatedXyPerformanceReport::moveFailureMask(
+                  observation, CoordinatedXyPerformanceReport::Limits{}) &
+              CoordinatedXyPerformanceReport::kMoveFailureExecutionMode) != 0u);
 }
 
 TEST(CoordinatedXyPerformanceReport, ClassifiesFailedMoveGatesCompactly) {
@@ -241,6 +298,31 @@ TEST(CoordinatedXyPerformanceReport, AggregatesMovesAndPhaseMeans) {
       500u,
       CoordinatedXyPerformanceReport::phaseMeanCycles(
           aggregate, CoordinatedXyIsrInstrumentation::Phase::Acceleration));
+}
+
+TEST(CoordinatedXyPerformanceReport, AggregatesCompleteStepPulseEvidence) {
+  CoordinatedXyPerformanceReport::Aggregate aggregate{};
+  const CoordinatedXyPerformanceReport::Limits limits{};
+  CoordinatedXyPerformanceReport::addMove(
+      aggregate,
+      acceptedCompleteStepMove(
+          20000u, 0u, 20000u, 40000u, 1124u, 5620u),
+      limits);
+  CoordinatedXyPerformanceReport::addMove(
+      aggregate,
+      acceptedCompleteStepMove(
+          0u, 20000u, 20000u, 40000u, 1124u, 5620u),
+      limits);
+
+  CHECK_TRUE(CoordinatedXyPerformanceReport::aggregatePasses(
+      aggregate, 2u, 20000u, 20000u, 40000u, limits));
+  UNSIGNED_LONGS_EQUAL(1u, aggregate.interruptsPerMasterStep);
+  UNSIGNED_LONGS_EQUAL(40000u, aggregate.timer2Callbacks);
+  UNSIGNED_LONGS_EQUAL(40000u, aggregate.completeStepPulseSamples);
+  UNSIGNED_LONGS_EQUAL(360u, aggregate.completeStepPulseMinCycles);
+  UNSIGNED_LONGS_EQUAL(420u, aggregate.completeStepPulseMaxCycles);
+  UNSIGNED_LONGS_EQUAL(40000u, aggregate.deadlineSamples);
+  UNSIGNED_LONGS_EQUAL(700u, aggregate.deadlineSlackMinTicks);
 }
 
 TEST(CoordinatedXyPerformanceReport, BuildsCompactDeterministicMetrics) {

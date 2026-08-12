@@ -675,6 +675,48 @@ pre-existing warnings, and the full Python regression passes 4,573 tests with
 135 skipped. Mutex mode remains diagnostic-only and must not become the
 production default without separate review and qualification.
 
+### One-Interrupt-Per-Step Diagnostic Candidate
+
+The next robustness experiment is implemented behind explicit selector
+`2075`. It does not change the normal call path or boot default: ordinary
+coordinated motion still uses one TIM2 callback for the STEP rise and one for
+the STEP fall. Selector `2075` temporarily selects `CompleteStep`, programs the
+full master-step period, raises the DDA-selected STEP pins with direct BSRR
+writes, waits at least the planner's 2 us minimum using wrap-safe DWT cycle
+arithmetic, lowers the pins, and commits the event before returning from the
+same ISR. Interrupts remain enabled during the high interval. The selector's
+scope guard restores `TwoEdge` after every success, failure, abort, timeout, or
+setup exit.
+
+The exact selector-`2077` geometry now expects 220,000 TIM2 callbacks rather
+than 440,000, while master-step counts, LUT checksums, 40 kHz target, corrected
+velocity-domain acceleration, status transmission, watchdog supervision,
+limit sampling, and bounded homes remain unchanged. Result `2074` records mode,
+interrupts per step, DWT pulse-window bounds, required pulse cycles, full-path
+deadline samples, missing/missed deadlines, minimum timer slack, pending
+updates, saturation, timeout, and exact-motion state. Manifest
+`coordinated_xy_single_irq_v1` requires a 360-cycle minimum pulse interval and
+at least 500 remaining 90 MHz timer ticks after every full software IRQ path.
+
+The final unflashed diagnostic artifact is 333,584 bytes with SHA-256
+`5D429338CFB3E1EA59147E7F79D67A039237611AAF03CC1C7E3A103CDD06A3F4`,
+leaving 59,632 bytes in the 384 KiB application partition. The Debug ELF uses
+320,440 bytes of text, 13,128 bytes of initialized data, and 81,072 bytes of
+BSS. Firmware validation passes 363/363 host tests with 10,213,593 checks and
+links with zero errors and the three existing warnings. The full Python
+regression passes 4,590 tests with 135 skipped. Static stack analysis
+reports 120 bytes for the coordinated TIM2 handler and 3,464 bytes for the
+outer diagnostic runner. ARM disassembly confirms that the DWT pulse loop is
+an inlined load/subtract/compare/branch sequence with no helper call, division,
+HAL GPIO call, allocator call, or interrupt-masking instruction.
+
+Automated host and target checks are the prerequisite for flashing. The HIL
+procedure is one pre-SAFE 28/28 run, one watched selector `2075` run, one
+post-SAFE 28/28 run, and normalization with the matching manifest. Stop for
+contact, abnormal sound, lost squareness, limit anomalies, incomplete motion,
+reset/watchdog evidence, missing telemetry, or any deadline miss. This is an
+experimental candidate, not production enablement.
+
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort
 terminal measured 2,349 cycles versus the retained 2,250-cycle gate; cancel

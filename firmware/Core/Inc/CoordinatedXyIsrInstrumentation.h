@@ -36,6 +36,10 @@ enum SaturationFlag : uint32_t {
   SaturatedEntryTimerMissing = 1u << 12u,
   SaturatedEntryTimerCountSum = 1u << 13u,
   SaturatedLateEntryCount = 1u << 14u,
+  SaturatedCompleteStepPulseSamples = 1u << 15u,
+  SaturatedDeadlineSamples = 1u << 16u,
+  SaturatedDeadlineMissing = 1u << 17u,
+  SaturatedDeadlineMisses = 1u << 18u,
 };
 
 struct State {
@@ -76,6 +80,13 @@ struct State {
   uint32_t pendingEntryTimerCountMax = 0u;
   uint32_t lateEntryCount = 0u;
   uint32_t entryScheduleOverrunMaxCycles = 0u;
+  uint32_t completeStepPulseSamples = 0u;
+  uint32_t completeStepPulseMinCycles = 0u;
+  uint32_t completeStepPulseMaxCycles = 0u;
+  uint32_t deadlineSamples = 0u;
+  uint32_t deadlineMissing = 0u;
+  uint32_t deadlineMisses = 0u;
+  uint32_t deadlineSlackMinTicks = 0u;
   bool entryScheduleReferenceValid = false;
   uint32_t previousIrqEntryCycle = 0u;
   bool irqPathSampleOpen = false;
@@ -122,6 +133,13 @@ struct Snapshot {
   uint32_t pendingEntryTimerCountMax = 0u;
   uint32_t lateEntryCount = 0u;
   uint32_t entryScheduleOverrunMaxCycles = 0u;
+  uint32_t completeStepPulseSamples = 0u;
+  uint32_t completeStepPulseMinCycles = 0u;
+  uint32_t completeStepPulseMaxCycles = 0u;
+  uint32_t deadlineSamples = 0u;
+  uint32_t deadlineMissing = 0u;
+  uint32_t deadlineMisses = 0u;
+  uint32_t deadlineSlackMinTicks = 0u;
   uint32_t saturationFlags = SaturatedNone;
 };
 
@@ -152,6 +170,12 @@ void beginIrqPathSample(State& state,
                         bool updatePending,
                         bool terminal);
 void completeIrqPath(State& state, uint32_t irqExitCycle);
+void recordCompleteStepPulse(State& state, uint32_t pulseHighCycles);
+void recordCompleteStepDeadline(State& state,
+                                bool timerSampleValid,
+                                uint32_t timerCount,
+                                uint32_t timerArr,
+                                bool timerUpdatePending);
 Snapshot makeSnapshot(const State& state);
 uint32_t phaseMeanCycles(const Snapshot& snapshot, Phase phase);
 uint32_t terminalMeanCycles(const Snapshot& snapshot);

@@ -1,5 +1,7 @@
 #include "CoordinatedXyExecutor.h"
 
+#include <limits>
+
 namespace CoordinatedXyExecutor {
 
 namespace {
@@ -75,6 +77,84 @@ void setPlannerFault(Cursor& cursor, TickResult& result) {
   result.signalDone = true;
 }
 
+LC_COORDINATED_EDGE_OPTIMIZED
+TickStatus applyDeferredControl(Cursor& cursor, TickResult& result);
+
+LC_COORDINATED_EDGE_OPTIMIZED
+TickStatus raiseCurrentStep(Cursor& cursor, TickResult& result) {
+  if (cursor.pendingControl != PendingControl::None) {
+    return applyDeferredControl(cursor, result);
+  }
+  result.status = TickStatus::Raised;
+  result.mask = cursor.cachedEvent.mask;
+  result.arr = cursor.cachedEvent.arr;
+  cursor.stepHigh = true;
+  ++cursor.risingEdges;
+  return result.status;
+}
+
+LC_COORDINATED_EDGE_OPTIMIZED
+TickStatus completeCurrentStep(
+    const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
+    Cursor& cursor,
+    TickResult& result) {
+  result.status = TickStatus::Lowered;
+  result.mask = cursor.cachedEvent.mask;
+  result.arr = cursor.cachedEvent.arr;
+  result.accountCompletePulse = true;
+  cursor.stepHigh = false;
+  ++cursor.fallingEdges;
+  cursor.maskChecksum = hashWord(
+      cursor.maskChecksum, static_cast<uint32_t>(cursor.cachedEvent.mask));
+  cursor.arrChecksum = hashWord(cursor.arrChecksum, cursor.cachedEvent.arr);
+
+  const TraceStatus advanceStatus =
+      CoordinatedXyPlanner::completeCurrentStep(plan, cursor.planner);
+  cursor.xEmittedSteps = cursor.planner.xEmittedSteps;
+  cursor.yEmittedSteps = cursor.planner.yEmittedSteps;
+  if (advanceStatus != TraceStatus::Ready &&
+      advanceStatus != TraceStatus::Complete) {
+    setPlannerFault(cursor, result);
+    return result.status;
+  }
+
+  if (advanceStatus == TraceStatus::Complete) {
+    // Cancel and limit requests retain their terminal reason even when they
+    // arrive during the final high phase. A pause at the same point has no
+    // remaining event to preserve, so completing is the only resumable-safe
+    // outcome and guarantees that no extra rising edge can be emitted.
+    if (cursor.pendingControl != PendingControl::None &&
+        cursor.pendingControl != PendingControl::Pause) {
+      return applyDeferredControl(cursor, result);
+    }
+    cursor.pendingControl = PendingControl::None;
+    cursor.state = State::Completed;
+    cursor.terminalReason = TerminalReason::Completed;
+    result.status = TickStatus::Completed;
+    result.stopTimer = true;
+    result.signalDone = true;
+    return result.status;
+  }
+
+  if (cursor.pendingControl != PendingControl::None &&
+      cursor.pendingControl != PendingControl::Pause) {
+    return applyDeferredControl(cursor, result);
+  }
+
+  if (CoordinatedXyPlanner::currentEvent(cursor.planner,
+                                         cursor.cachedEvent) !=
+      TraceStatus::Ready) {
+    setPlannerFault(cursor, result);
+    return result.status;
+  }
+  result.nextArr = cursor.cachedEvent.arr;
+  result.updateArr = true;
+  if (cursor.pendingControl == PendingControl::Pause) {
+    return applyDeferredControl(cursor, result);
+  }
+  return result.status;
+}
+
 LC_COORDINATED_EDGE_ALWAYS_INLINE
 ControlDisposition requestControl(Cursor& cursor, PendingControl requested) {
   if (cursor.state == State::Completed || cursor.state == State::Canceled ||
@@ -134,10 +214,12 @@ TickStatus applyDeferredControl(Cursor& cursor, TickResult& result) {
 }  // namespace
 
 ArmStatus arm(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
-              Cursor& cursor) {
+              Cursor& cursor,
+              ExecutionMode mode) {
   if (isActive(cursor)) return ArmStatus::Busy;
 
   cursor = Cursor{};
+  cursor.executionMode = mode;
   const TraceStatus status = CoordinatedXyPlanner::begin(plan, cursor.planner);
   if (status == TraceStatus::Complete &&
       plan.status == CoordinatedXyPlanner::PlanStatus::Immediate) {
@@ -196,81 +278,81 @@ TickStatus onTimerUpdate(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
                          Cursor& cursor,
                          TickResult& result) {
   result = TickResult{};
-  if (cursor.state != State::Running) return result.status;
+  if (cursor.state != State::Running ||
+      cursor.executionMode != ExecutionMode::TwoEdge) {
+    return result.status;
+  }
 
   ++cursor.timerInterrupts;
   if (!cursor.stepHigh) {
-    if (cursor.pendingControl != PendingControl::None) {
-      return applyDeferredControl(cursor, result);
-    }
-    result.status = TickStatus::Raised;
-    result.mask = cursor.cachedEvent.mask;
-    result.arr = cursor.cachedEvent.arr;
-    cursor.stepHigh = true;
-    ++cursor.risingEdges;
+    return raiseCurrentStep(cursor, result);
+  }
+  return completeCurrentStep(plan, cursor, result);
+}
+
+LC_COORDINATED_EDGE_OPTIMIZED
+TickStatus prepareCompleteStep(
+    const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
+    Cursor& cursor,
+    TickResult& result) {
+  (void)plan;
+  result = TickResult{};
+  if (cursor.state != State::Running ||
+      cursor.executionMode != ExecutionMode::CompleteStep ||
+      cursor.stepHigh) {
     return result.status;
   }
+  ++cursor.timerInterrupts;
+  return raiseCurrentStep(cursor, result);
+}
 
-  result.status = TickStatus::Lowered;
-  result.mask = cursor.cachedEvent.mask;
-  result.arr = cursor.cachedEvent.arr;
-  result.accountCompletePulse = true;
-  cursor.stepHigh = false;
-  ++cursor.fallingEdges;
-  cursor.maskChecksum = hashWord(
-      cursor.maskChecksum, static_cast<uint32_t>(cursor.cachedEvent.mask));
-  cursor.arrChecksum = hashWord(cursor.arrChecksum, cursor.cachedEvent.arr);
-
-  const TraceStatus advanceStatus =
-      CoordinatedXyPlanner::completeCurrentStep(plan, cursor.planner);
-  cursor.xEmittedSteps = cursor.planner.xEmittedSteps;
-  cursor.yEmittedSteps = cursor.planner.yEmittedSteps;
-  if (advanceStatus != TraceStatus::Ready &&
-      advanceStatus != TraceStatus::Complete) {
-    setPlannerFault(cursor, result);
+LC_COORDINATED_EDGE_OPTIMIZED
+TickStatus commitCompleteStep(
+    const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
+    Cursor& cursor,
+    TickResult& result) {
+  result = TickResult{};
+  if (cursor.state != State::Running ||
+      cursor.executionMode != ExecutionMode::CompleteStep ||
+      !cursor.stepHigh) {
     return result.status;
   }
+  return completeCurrentStep(plan, cursor, result);
+}
 
-  if (advanceStatus == TraceStatus::Complete) {
-    // Cancel and limit requests retain their terminal reason even when they
-    // arrive during the final high phase. A pause at the same point has no
-    // remaining event to preserve, so completing is the only resumable-safe
-    // outcome and guarantees that no extra rising edge can be emitted.
-    if (cursor.pendingControl != PendingControl::None &&
-        cursor.pendingControl != PendingControl::Pause) {
-      return applyDeferredControl(cursor, result);
-    }
-    cursor.pendingControl = PendingControl::None;
-    cursor.state = State::Completed;
-    cursor.terminalReason = TerminalReason::Completed;
-    result.status = TickStatus::Completed;
-    result.stopTimer = true;
-    result.signalDone = true;
-    return result.status;
-  }
-
-  // Cancel/limit requests do not need another event. Apply them before the
-  // next-event lookup to keep their terminal ISR path bounded.
-  if (cursor.pendingControl != PendingControl::None &&
-      cursor.pendingControl != PendingControl::Pause) {
-    return applyDeferredControl(cursor, result);
-  }
-
-  // The falling edge advanced the planner, so refresh the cache before
-  // entering Paused. Resume must raise this next event, never repeat the event
-  // whose falling edge was just accounted.
-  if (CoordinatedXyPlanner::currentEvent(cursor.planner,
-                                         cursor.cachedEvent) !=
-      TraceStatus::Ready) {
-    setPlannerFault(cursor, result);
-    return result.status;
-  }
-  result.nextArr = cursor.cachedEvent.arr;
-  result.updateArr = true;
-  if (cursor.pendingControl == PendingControl::Pause) {
-    return applyDeferredControl(cursor, result);
-  }
+LC_COORDINATED_EDGE_OPTIMIZED
+TickStatus forcePlannerFault(Cursor& cursor, TickResult& result) {
+  result = TickResult{};
+  setPlannerFault(cursor, result);
   return result.status;
+}
+
+LC_COORDINATED_EDGE_OPTIMIZED
+bool fullPeriodArr(uint32_t plannerHalfPeriodArr,
+                   uint32_t timerMaxArr,
+                   uint32_t& hardwareFullPeriodArr) {
+  const uint64_t fullPeriodTicks =
+      (static_cast<uint64_t>(plannerHalfPeriodArr) + 1u) * 2u;
+  if (fullPeriodTicks == 0u ||
+      fullPeriodTicks > (static_cast<uint64_t>(timerMaxArr) + 1u)) {
+    hardwareFullPeriodArr = 0u;
+    return false;
+  }
+  hardwareFullPeriodArr = static_cast<uint32_t>(fullPeriodTicks - 1u);
+  return true;
+}
+
+uint32_t minimumPulseCoreCycles(uint32_t coreClockHz,
+                                uint32_t minimumPulseNs) {
+  if (coreClockHz == 0u || minimumPulseNs == 0u) return 0u;
+  constexpr uint64_t kNanosecondsPerSecond = 1000000000ULL;
+  const uint64_t numerator =
+      static_cast<uint64_t>(coreClockHz) * minimumPulseNs;
+  const uint64_t cycles =
+      (numerator / kNanosecondsPerSecond) +
+      ((numerator % kNanosecondsPerSecond) != 0u ? 1u : 0u);
+  if (cycles == 0u || cycles > std::numeric_limits<uint32_t>::max()) return 0u;
+  return static_cast<uint32_t>(cycles);
 }
 
 bool isActive(const Cursor& cursor) {

@@ -82,6 +82,10 @@ def test_target_build_optimizes_only_the_bounded_coordinated_edge_path():
 
     assert '#define LC_COORDINATED_EDGE_OPTIMIZED __attribute__((optimize("O2"), hot))' in executor
     assert "LC_COORDINATED_EDGE_OPTIMIZED\nTickStatus onTimerUpdate" in executor
+    assert "LC_COORDINATED_EDGE_OPTIMIZED\nTickStatus prepareCompleteStep" in executor
+    assert "LC_COORDINATED_EDGE_OPTIMIZED\nTickStatus commitCompleteStep" in executor
+    assert "LC_COORDINATED_EDGE_OPTIMIZED\nTickStatus forcePlannerFault" in executor
+    assert "LC_COORDINATED_EDGE_OPTIMIZED\nbool fullPeriodArr" in executor
     assert '#define LC_COORDINATED_STEP_OPTIMIZED __attribute__((optimize("O2"), hot))' in planner
     assert "LC_COORDINATED_STEP_OPTIMIZED\nTraceStatus currentEvent" in planner
     assert "LC_COORDINATED_STEP_OPTIMIZED\nTraceStatus completeCurrentStep" in planner
@@ -224,3 +228,52 @@ def test_host_prompts_for_each_non_motion_limit_preflight_stage():
     ):
         assert f'"{stage}"' in runner
     assert "if _is_operator_prompt_stage(stage)" in runner
+
+
+def test_complete_step_mode_is_diagnostic_only_and_generates_a_bounded_gpio_pulse():
+    executor_header = _read("firmware/Core/Inc/CoordinatedXyExecutor.h")
+    gantry_header = _read("firmware/Core/Inc/Gantry.h")
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
+
+    assert "ExecutionMode executionMode = ExecutionMode::TwoEdge" in executor_header
+    assert "_coordinatedExecutionMode =\n      CoordinatedXyExecutor::ExecutionMode::TwoEdge" in gantry_header
+    assert "_coordinatedExecutionMode = CoordinatedXyExecutor::ExecutionMode::TwoEdge" in gantry
+    assert "setCoordinatedExecutionModeForDiagnostics" in gantry_header
+
+    handler_start = gantry.index("bool Gantry::_handleCoordinatedTimerFromIsr")
+    handler_end = gantry.index("bool Gantry::dispatchCoordinatedTimerFromIsr", handler_start)
+    handler = gantry[handler_start:handler_end]
+    prepare = handler.index("CoordinatedXyExecutor::prepareCompleteStep")
+    raise_gpio = handler.index("_writeCoordinatedStep(true)", prepare)
+    wait = handler.index("_coordinatedPulseHighCycles", raise_gpio)
+    lower_gpio = handler.index("_writeCoordinatedStep(false)", wait)
+    commit = handler.index("CoordinatedXyExecutor::commitCompleteStep", lower_gpio)
+    assert prepare < raise_gpio < wait < lower_gpio < commit
+    assert "taskENTER_CRITICAL" not in handler[raise_gpio:commit]
+    assert "__disable_irq" not in handler[raise_gpio:commit]
+    assert "fullPeriodArr(" in handler
+    pulse_window = handler[raise_gpio:commit]
+    assert "gantryCycleNow() - pulseStartCycle" in pulse_window
+    assert "CoordinatedXyExecutor::elapsedCoreCycles(" not in pulse_window
+
+
+def test_complete_step_deadline_is_measured_after_the_full_tim2_irq_path():
+    irq = _read("firmware/Core/Src/stm32f4xx_it.c")
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
+
+    irq_start = irq.index("void TIM2_IRQHandler(void)")
+    irq_end = irq.index("void TIM3_IRQHandler(void)", irq_start)
+    tim2 = irq[irq_start:irq_end]
+    assert tim2.index("HAL_TIM_IRQHandler(&htim2);") < tim2.index(
+        "MX_GANTRY_RecordTim2IrqExit(DWT->CYCCNT)"
+    )
+
+    exit_start = gantry.index("void Gantry::recordCoordinatedTim2IrqExitFromIsr")
+    exit_end = gantry.index('extern "C" LC_COORDINATED_HW_OPTIMIZED', exit_start)
+    exit_path = gantry[exit_start:exit_end]
+    deadline = exit_path.index("recordCompleteStepDeadline")
+    completed = exit_path.index("completeIrqPath")
+    assert deadline < completed
+    assert "timer->Instance->CNT" in exit_path
+    assert "timer->Instance->ARR" in exit_path
+    assert "timer->Instance->SR & TIM_SR_UIF" in exit_path

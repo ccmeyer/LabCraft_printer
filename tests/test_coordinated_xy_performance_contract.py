@@ -21,16 +21,19 @@ def test_performance_suite_has_fixed_ids_selector_rates_and_fail_stop_totals():
     assert "selectedDiagnosticId == 2069u" in diagnostics
     assert "selectedDiagnosticId == 2076u" in diagnostics
     assert "selectedDiagnosticId == 2077u" in diagnostics
+    assert "selectedDiagnosticId == 2075u" in diagnostics
     assert "selectedDiagnosticId == 2079u" in diagnostics
     assert "selectedDiagnosticId == 2078u" in diagnostics
     assert "2069 if coordinated_xy_performance_suite" in runner
     assert "2076 if coordinated_xy_status_sync_suite" in runner
     assert "2077 if coordinated_xy_40khz_suite" in runner
+    assert "2075 if coordinated_xy_single_irq_suite" in runner
     assert "2079 if coordinated_xy_x_direction_suite" in runner
     assert "2078 if coordinated_xy_camera_transition_suite" in runner
     assert 'add_argument("--coordinated-xy-performance-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-status-sync-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-40khz-suite", action="store_true")' in runner
+    assert 'add_argument("--coordinated-xy-single-irq-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-x-direction-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-camera-transition-suite", action="store_true")' in runner
     assert "60000 if coordinated_xy_performance_suite else 5000" in runner
@@ -84,6 +87,30 @@ def test_standalone_40khz_selector_reuses_only_existing_tier_four_and_exits():
     assert "result.snapshot.limitAbortRequestCount" in suite
     assert "result.snapshot.rawLimitAbortCount" in suite
     assert '"coord_xy_40khz_entry_lateness",\n                                false,' in suite
+
+
+def test_single_irq_selector_reuses_40khz_geometry_and_restores_two_edge_mode():
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+    start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
+    end = diagnostics.index("if (runMotionTimingSuite)", start)
+    suite = diagnostics[start:end]
+
+    assert "runCoordinatedXySingleIrqSuite" in suite
+    assert "CoordinatedXyExecutor::ExecutionMode::CompleteStep" in suite
+    assert '"coordinated_xy_single_irq_envelope_clear"' in suite
+    assert "class ScopedCoordinatedXyExecutionMode" in diagnostics
+    guard_start = diagnostics.index("class ScopedCoordinatedXyExecutionMode")
+    guard_end = diagnostics.index("static constexpr DiagnosticTestDescriptor", guard_start)
+    guard = diagnostics[guard_start:guard_end]
+    assert "~ScopedCoordinatedXyExecutionMode()" in guard
+    assert "CoordinatedXyExecutor::ExecutionMode::TwoEdge" in guard
+    assert "executor_mode_unavailable" in suite
+    assert "performanceLimits.activeMaxCycles = 3500u" in suite
+    assert "performanceLimits.terminalMaxCycles = 4500u" in suite
+    assert 'runOne(2074u,' in suite
+    assert "emitCompleteStepEvidence(aggregate)" in suite
+    assert '"em=%u;ip=%lu;i2=%lu;pc=%lu;pn=%lu;px=%lu;"' in suite
+    assert '"pe=%lu;ds=%lu;mi=%lu;md=%lu;sl=%lu;pu=%lu;"' in suite
 
 
 def test_status_sync_variant_is_static_bounded_and_restores_critical_mode():

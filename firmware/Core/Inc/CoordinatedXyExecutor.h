@@ -20,6 +20,11 @@
 
 namespace CoordinatedXyExecutor {
 
+enum class ExecutionMode : uint8_t {
+  TwoEdge = 0u,
+  CompleteStep = 1u,
+};
+
 enum class State : uint8_t {
   Idle = 0u,
   Armed = 1u,
@@ -104,6 +109,7 @@ struct TickResult {
 struct Cursor {
   CoordinatedXyPlanner::Cursor planner{};
   CoordinatedXyPlanner::StepEvent cachedEvent{};
+  ExecutionMode executionMode = ExecutionMode::TwoEdge;
   State state = State::Idle;
   TerminalReason terminalReason = TerminalReason::None;
   PendingControl pendingControl = PendingControl::None;
@@ -118,7 +124,8 @@ struct Cursor {
 };
 
 ArmStatus arm(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
-              Cursor& cursor);
+              Cursor& cursor,
+              ExecutionMode mode = ExecutionMode::TwoEdge);
 ControlDisposition start(Cursor& cursor);
 ControlDisposition requestPause(Cursor& cursor);
 ControlDisposition resume(Cursor& cursor);
@@ -127,6 +134,24 @@ ControlDisposition requestLimitAbort(Cursor& cursor, LimitAxis axis);
 TickStatus onTimerUpdate(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
                          Cursor& cursor,
                          TickResult& result);
+TickStatus prepareCompleteStep(
+    const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
+    Cursor& cursor,
+    TickResult& result);
+TickStatus commitCompleteStep(
+    const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
+    Cursor& cursor,
+    TickResult& result);
+TickStatus forcePlannerFault(Cursor& cursor, TickResult& result);
+bool fullPeriodArr(uint32_t plannerHalfPeriodArr,
+                   uint32_t timerMaxArr,
+                   uint32_t& hardwareFullPeriodArr);
+uint32_t minimumPulseCoreCycles(uint32_t coreClockHz,
+                                uint32_t minimumPulseNs);
+inline constexpr uint32_t elapsedCoreCycles(uint32_t startCycle,
+                                            uint32_t endCycle) {
+  return endCycle - startCycle;
+}
 bool isActive(const Cursor& cursor);
 bool isTerminal(const Cursor& cursor);
 ReservationStatus evaluateReservation(const AxisReservationState& x,

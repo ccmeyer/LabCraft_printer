@@ -2803,6 +2803,38 @@ section. An exit guard restores critical-section mode on every selector-`2076`
 return path. This is an A/B diagnostic, not approval to make the mutex the
 production default.
 
+Selector `2075` evaluates a more latency-tolerant coordinated executor without
+changing normal motion. Run it only as an operator-watched diagnostic:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-single-irq-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_single_irq.json
+python3 tools/run_qualification.py --manifest coordinated_xy_single_irq_v1 --operator-prompts --fixture motion_clear_envelope_v1 --machine-id LC-001 --raw-report hil_reports/coordinated_xy_single_irq.json
+```
+
+It reuses selector `2077`'s exact ten-move 40 kHz geometry, bounded homes,
+status traffic, watchdog gates, and results `2064`, `2072`, and `2073`. For
+this selector only, TIM2 is programmed for one full step period and the ISR
+raises the selected STEP pins, holds them high for at least 2 us using the
+already-enabled DWT cycle counter, lowers them, and commits the planner event.
+That reduces the measured geometry row from 440,000 to 220,000 TIM2 callbacks
+without changing the requested step rate, trajectory LUT, acceleration, DDA
+mask sequence, or limit checks. No interrupt masking is added around the pulse.
+
+Result `2074` reports executor mode (`em=1`), interrupts per master step
+(`ip=1`), callbacks (`i2`), pulse samples and DWT-enforced high interval
+minimum/maximum (`pc`/`pn`/`px`), required high interval (`pe`, 360 core cycles
+at 180 MHz), deadline samples/missing/misses (`ds`/`mi`/`md`), minimum
+post-handler TIM2 slack (`sl`, 90 MHz timer ticks), pending updates (`pu`),
+exact-motion status (`ok`), saturation (`sf`), and timeout (`to`). The focused
+manifest requires all 220,000 callbacks and pulse/deadline samples, no missing
+or missed deadlines, at least 500 timer ticks of remaining slack, and clean
+motion/status/watchdog/home evidence. Boot and all non-`2075` operation remain
+on the existing two-edge executor; a scope guard restores that mode on every
+exit. The post-HAL sample reads TIM2 `CNT`, `ARR`, and the update flag directly,
+so an overflow that occurs in the earlier instrumentation tail is also a
+deadline miss. This diagnostic must not become the production default before
+its HIL evidence is reviewed.
+
 The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is
 selector `2076`/manifest `coordinated_xy_status_sync_v1`. Every B run requires
