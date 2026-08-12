@@ -51,6 +51,22 @@ class FakeSerial:
         return len(data)
 
 
+class ChunkedFakeSerial(FakeSerial):
+    def __init__(self, chunks: list[bytes]):
+        self._chunks = [bytearray(chunk) for chunk in chunks]
+        self.writes = []
+
+    def read(self, n: int) -> bytes:
+        while self._chunks and not self._chunks[0]:
+            self._chunks.pop(0)
+        if not self._chunks or n <= 0:
+            return b""
+        take = min(n, len(self._chunks[0]))
+        out = bytes(self._chunks[0][:take])
+        del self._chunks[0][:take]
+        return out
+
+
 class FakeClock:
     def __init__(self, step: float = 0.01, t0: float = 1000.0):
         self.now = t0
@@ -68,8 +84,18 @@ def _frame_payload(mod, payload: bytes) -> bytes:
     return mod.frame_payload(payload)
 
 
-def _hello_ack(mod) -> bytes:
-    return _frame_payload(mod, bytes([mod.CMD_HELLO_ACK, 1]))
+def _hello_ack(mod, capabilities: int | None = None) -> bytes:
+    payload = bytearray([mod.CMD_HELLO_ACK, 1])
+    if capabilities is not None:
+        payload += bytes([mod.TAG_CAPABILITIES, 4]) + capabilities.to_bytes(4, "little")
+    return _frame_payload(mod, bytes(payload))
+
+
+def _queue_ack(mod, seq8: int, seq32: int, result: int) -> bytes:
+    payload = bytearray([mod.CMD_QUEUE_ACK, seq8])
+    payload += bytes([mod.TAG_SEQ32, 4]) + seq32.to_bytes(4, "little")
+    payload += bytes([mod.TAG_ACK_RESULT, 1, result])
+    return _frame_payload(mod, bytes(payload))
 
 
 def _selftest_done(
@@ -153,8 +179,13 @@ def _selftest_result_metrics(mod, test_id: int, name: str, passed: bool, metrics
     return _frame_payload(mod, bytes(payload))
 
 
-def _reset_report(mod, seq32: int = 1234) -> bytes:
-    payload = bytearray([mod.CMD_RESET_REPORT, 2])
+def _reset_report(
+    mod,
+    seq32: int = 1234,
+    seq8: int = 2,
+    include_regulator_context: bool = True,
+) -> bytes:
+    payload = bytearray([mod.CMD_RESET_REPORT, seq8])
     payload += bytes([mod.TAG_RESET_SEQ32, 4]) + seq32.to_bytes(4, "little")
     payload += bytes([mod.TAG_RESET_CAUSE, 1, 4])
     payload += bytes([mod.TAG_RESET_FLAGS, 4]) + (0x20000000).to_bytes(4, "little")
@@ -171,9 +202,28 @@ def _reset_report(mod, seq32: int = 1234) -> bytes:
     payload += bytes([mod.TAG_RESET_FAULT_STAGE, 1, 10])
     payload += bytes([mod.TAG_RESET_WATCHDOG_LATE_TASK, 1, 1])
     payload += bytes([mod.TAG_RESET_ACTIVE_COMMAND, 1, mod.CMD_SELFTEST_START])
-    raw_context = _regulator_context_payload()
-    payload += bytes([mod.TAG_RESET_REG_CONTEXT, len(raw_context)]) + raw_context
+    if include_regulator_context:
+        raw_context = _regulator_context_payload()
+        payload += bytes([mod.TAG_RESET_REG_CONTEXT, len(raw_context)]) + raw_context
     return _frame_payload(mod, bytes(payload))
+
+
+def _basic_run_args(out_path: Path, *, progress_jsonl: bool = False):
+    return SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="SAFE",
+        timeout_ms=2000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        progress_timeout_ms=500,
+        progress_jsonl=progress_jsonl,
+        out=str(out_path),
+    )
 
 
 def _selftest_result_trace(
@@ -1859,6 +1909,125 @@ def test_selftest_reset_decoder_accepts_v1_v2_and_ignores_bad_fault_context():
     assert mod.decode_fault_context(_fault_context_v2_payload(version=3)) is None
 
 
+def test_startup_reset_report_trailing_hello_ack_in_same_read_is_retained(
+    monkeypatch, tmp_path, capsys
+):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+    serial = ChunkedFakeSerial(
+        [
+            _hello_ack(mod)
+            + _reset_report(
+                mod,
+                seq32=run_id,
+                seq8=1,
+                include_regulator_context=False,
+            ),
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    out_path = tmp_path / "selftest.json"
+    rc = mod.run(_basic_run_args(out_path, progress_jsonl=True))
+
+    assert rc == 0
+    report = mod.json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["startup_reset_report"]["reset_seq32"] == run_id
+    assert report["startup_reset_report"]["watchdog_late_task"] == 1
+    assert report["reset_report"] is None
+    checks = {entry["name"]: entry for entry in report["host_checks"]}
+    assert checks["selftest_progress_watchdog"]["pass"] is True
+    assert checks["selftest_progress_watchdog"]["details"]["timeout_reason"] is None
+    events = _captured_selftest_events(mod, capsys.readouterr().out)
+    assert "selftest_startup_reset_report" in [event["event"] for event in events]
+    assert "selftest_reset_report" not in [event["event"] for event in events]
+
+
+def test_startup_reset_report_split_after_hello_ack_is_retained(monkeypatch, tmp_path):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+    serial = ChunkedFakeSerial(
+        [
+            _hello_ack(mod),
+            _reset_report(mod, seq32=run_id, seq8=1),
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    out_path = tmp_path / "selftest.json"
+    assert mod.run(_basic_run_args(out_path)) == 0
+
+    report = mod.json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["startup_reset_report"]["reset_seq32"] == run_id
+    assert report["startup_reset_report"]["regulator_context"]["valid"] is True
+    assert report["reset_report"] is None
+
+
+def test_startup_reset_report_interleaved_with_start_ack_is_retained(
+    monkeypatch, tmp_path
+):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+    serial = ChunkedFakeSerial(
+        [
+            _hello_ack(mod, mod.SELFTEST_TRANSPORT_CAPS),
+            _reset_report(mod, seq32=run_id, seq8=1)
+            + _queue_ack(mod, 2, 1, mod.ACK_RESULT_ACCEPTED),
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    out_path = tmp_path / "selftest.json"
+    assert mod.run(_basic_run_args(out_path)) == 0
+
+    report = mod.json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["startup_reset_report"]["reset_seq32"] == run_id
+    assert report["reset_report"] is None
+    checks = {entry["name"]: entry for entry in report["host_checks"]}
+    assert checks["selftest_start_ack"]["pass"] is True
+    assert checks["selftest_start_ack"]["details"]["ack_result"] == "accepted"
+
+
+def test_report_schema_keeps_nullable_reset_fields_when_no_report_arrives(
+    monkeypatch, tmp_path
+):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+    serial = ChunkedFakeSerial(
+        [
+            _hello_ack(mod),
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    out_path = tmp_path / "selftest.json"
+    assert mod.run(_basic_run_args(out_path)) == 0
+
+    report = mod.json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["startup_reset_report"] is None
+    assert report["reset_report"] is None
+
+
 def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path, capsys):
     mod = _load_run_selftest()
     clock = FakeClock()
@@ -1903,6 +2072,8 @@ def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path, capsy
     assert rc == 3
     report = mod.json.loads(out_path.read_text(encoding="utf-8"))
     assert report["aborted"] is True
+    assert report["startup_reset_report"] is None
+    assert report["reset_report"]["reset_seq32"] == 4321
     checks = {c["name"]: c for c in report["host_checks"]}
     details = checks["selftest_progress_watchdog"]["details"]
     expected_regulator_context = {

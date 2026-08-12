@@ -5,6 +5,7 @@
 #include "PressureRegulatorTelemetry.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "WatchdogParticipationPolicy.h"
 
 static const uint32_t kWatchdogTimeoutMs = 4000u;
 static const uint32_t kWatchdogServicePeriodMs = 100u;
@@ -17,6 +18,7 @@ static const uint32_t kWatchdogInitTimeoutMs = 20u;
 
 static volatile uint32_t g_watchdogArmed = 0u;
 static volatile uint32_t g_enabledMask = 0u;
+static volatile uint32_t g_participationGeneration = 0u;
 static volatile uint32_t g_lastSeen[CRASH_TASK_COUNT] = {0u};
 static volatile CrashTaskId g_lateTask = CRASH_TASK_NONE;
 static volatile uint32_t g_starved = 0u;
@@ -125,14 +127,41 @@ static uint32_t Watchdog_Evaluate(uint32_t nowMs, uint32_t* requiredCount, uint3
   uint32_t req = 0u;
   uint32_t live = 0u;
   CrashTaskId late = CRASH_TASK_NONE;
-  const uint32_t enabledMask = g_enabledMask;
+  uint32_t enabledMask = 0u;
+  uint32_t lastSeenSnapshot[CRASH_TASK_COUNT] = {0u};
+  uint32_t generationBefore = 0u;
+  uint32_t generationAfter = 0u;
+
+  /*
+   * Enable/disable transitions are rare and publish an even generation only
+   * after both the participation bit and its initial timestamp are coherent.
+   * Check-ins remain a single aligned timestamp store and never mask IRQs.
+   */
+  do {
+    generationBefore = g_participationGeneration;
+    if ((generationBefore & 1u) != 0u) {
+      continue;
+    }
+    __DMB();
+    enabledMask = g_enabledMask;
+    for (uint32_t id = (uint32_t)CRASH_TASK_BOOT;
+         id < (uint32_t)CRASH_TASK_COUNT;
+         ++id) {
+      if ((enabledMask & Watchdog_TaskBit((CrashTaskId)id)) != 0u) {
+        lastSeenSnapshot[id] = g_lastSeen[id];
+      }
+    }
+    __DMB();
+    generationAfter = g_participationGeneration;
+  } while ((generationBefore != generationAfter) ||
+           ((generationAfter & 1u) != 0u));
 
   for (uint32_t id = (uint32_t)CRASH_TASK_BOOT; id < (uint32_t)CRASH_TASK_COUNT; ++id) {
     const uint32_t bit = Watchdog_TaskBit((CrashTaskId)id);
     if ((enabledMask & bit) == 0u) continue;
     req++;
     const uint32_t deadline = Watchdog_DeadlineMs((CrashTaskId)id);
-    const uint32_t lastSeen = g_lastSeen[id];
+    const uint32_t lastSeen = lastSeenSnapshot[id];
     if ((lastSeen != 0u) && ((nowMs - lastSeen) <= deadline)) {
       live++;
       continue;
@@ -211,6 +240,7 @@ static void Watchdog_Task(void* argument)
 void Watchdog_EarlyInit(void)
 {
   g_enabledMask = 0u;
+  g_participationGeneration = 0u;
   g_lateTask = CRASH_TASK_NONE;
   g_starved = 0u;
   g_healthyStartMs = 0u;
@@ -294,8 +324,15 @@ void Watchdog_EnableTask(CrashTaskId taskId)
 #endif
   const uint32_t bit = Watchdog_TaskBit(taskId);
   if (bit == 0u) return;
-  g_enabledMask |= bit;
-  g_lastSeen[(uint32_t)taskId] = HAL_GetTick();
+  const uint32_t nowMs = HAL_GetTick();
+  taskENTER_CRITICAL();
+  ++g_participationGeneration;
+  __DMB();
+  g_lastSeen[(uint32_t)taskId] = nowMs;
+  g_enabledMask = WatchdogParticipation_Enable(g_enabledMask, bit);
+  __DMB();
+  ++g_participationGeneration;
+  taskEXIT_CRITICAL();
 }
 
 void Watchdog_DisableTask(CrashTaskId taskId)
@@ -306,11 +343,17 @@ void Watchdog_DisableTask(CrashTaskId taskId)
 #endif
   const uint32_t bit = Watchdog_TaskBit(taskId);
   if (bit == 0u) return;
-  g_enabledMask &= ~bit;
+  taskENTER_CRITICAL();
+  ++g_participationGeneration;
+  __DMB();
+  g_enabledMask = WatchdogParticipation_Disable(g_enabledMask, bit);
   g_lastSeen[(uint32_t)taskId] = 0u;
   if (g_lateTask == taskId) {
     g_lateTask = CRASH_TASK_NONE;
   }
+  __DMB();
+  ++g_participationGeneration;
+  taskEXIT_CRITICAL();
 }
 
 void Watchdog_CheckIn(CrashTaskId taskId)
@@ -321,7 +364,6 @@ void Watchdog_CheckIn(CrashTaskId taskId)
 #endif
   const uint32_t bit = Watchdog_TaskBit(taskId);
   if (bit == 0u) return;
-  g_enabledMask |= bit;
   g_lastSeen[(uint32_t)taskId] = HAL_GetTick();
 }
 

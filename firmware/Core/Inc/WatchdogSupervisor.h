@@ -29,10 +29,8 @@ extern "C" {
 #define LC_WATCHDOG_ARM_ENABLE 1
 #endif
 
-enum {
-  WATCHDOG_ARM_IMMEDIATE = 0,
-  WATCHDOG_ARM_AFTER_HELLO_ACK = 1
-};
+#define WATCHDOG_ARM_IMMEDIATE 0
+#define WATCHDOG_ARM_AFTER_HELLO_ACK 1
 
 typedef enum {
   WATCHDOG_ARM_RESULT_NOT_ATTEMPTED = 0,
@@ -45,6 +43,11 @@ typedef enum {
 
 #ifndef LC_WATCHDOG_ARM_MODE
 #define LC_WATCHDOG_ARM_MODE WATCHDOG_ARM_AFTER_HELLO_ACK
+#endif
+
+#if (LC_WATCHDOG_ARM_MODE != WATCHDOG_ARM_IMMEDIATE) && \
+    (LC_WATCHDOG_ARM_MODE != WATCHDOG_ARM_AFTER_HELLO_ACK)
+#error "LC_WATCHDOG_ARM_MODE must select a supported watchdog arm mode"
 #endif
 
 void Watchdog_EarlyInit(void);

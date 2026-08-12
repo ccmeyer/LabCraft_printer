@@ -51,7 +51,7 @@ bool BuildCrashRecordSelfTestResult(const CrashLogSnapshot& snap,
       sticky &&
       (snap.lastFault == CRASH_FAULT_WDT_STARVE) &&
       (snap.resetCause != CRASH_RESET_IWDG);
-  const bool pass = (!pending && (snap.lastFault == CRASH_FAULT_NONE)) || staleWatchdogHistory;
+  const bool pass = !pending || staleWatchdogHistory;
 
   if (metrics != nullptr && metricsLen > 0u) {
     std::snprintf(metrics,

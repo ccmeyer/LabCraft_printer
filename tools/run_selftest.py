@@ -663,6 +663,15 @@ class FrameReader:
         return payload
 
 
+def _read_completed_frames(serial_port, reader: FrameReader, inbox: deque, size: int) -> int:
+    chunk = serial_port.read(size)
+    for value in chunk:
+        frame = reader.feed(value)
+        if frame and len(frame) >= 2:
+            inbox.append(frame)
+    return len(chunk)
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -1148,8 +1157,11 @@ def run(args: argparse.Namespace) -> int:
     camera_benchmark_runtime_error = False
     camera_benchmark_failed = False
     next_seq32 = 1
+    startup_reset_report = None
+    reset_report_details = None
     with serial.Serial(args.port, args.baud, timeout=0.1) as ser:
         reader = FrameReader()
+        frame_inbox = deque()
 
         def write_report_and_return(rc: int) -> int:
             report = {
@@ -1161,6 +1173,8 @@ def run(args: argparse.Namespace) -> int:
                 "summary": summary,
                 "results": results,
                 "host_checks": host_checks,
+                "startup_reset_report": startup_reset_report,
+                "reset_report": reset_report_details,
             }
             write_json_atomic(args.out, report)
             print(f"Wrote self-test report: {args.out}")
@@ -1169,6 +1183,25 @@ def run(args: argparse.Namespace) -> int:
         # HELLO handshake. Retry until the target is actually up so startup
         # latency after DFU does not cause us to lose both HELLO and START.
         hello_seq8 = 1
+
+        def capture_startup_reset_report(frame: bytes) -> bool:
+            nonlocal startup_reset_report
+            if frame[0] != CMD_RESET_REPORT or frame[1] != hello_seq8:
+                return False
+            details = decode_reset_report(parse_tlvs(frame[2:]))
+            if details.get("reset_seq32") != run_id:
+                return False
+            if startup_reset_report is None:
+                startup_reset_report = details
+                _emit_selftest_event(
+                    args,
+                    {
+                        "event": "selftest_startup_reset_report",
+                        "reset_report": details,
+                    },
+                )
+            return True
+
         hello_timeout_ms = int(args.hello_timeout_ms)
         hello_retry_ms = int(args.hello_retry_ms)
         hello_window_s = hello_timeout_ms / 1000.0
@@ -1178,25 +1211,27 @@ def run(args: argparse.Namespace) -> int:
         hello_retries_sent = 0
         observed_uart_bytes = 0
         hello_ack_capabilities = None
+        hello_deferred_frames = deque()
         while time.monotonic() < hello_deadline:
             now = time.monotonic()
             if now >= next_hello_send:
                 ser.write(build_control(CMD_HELLO, hello_seq8, run_id))
                 hello_retries_sent += 1
                 next_hello_send = now + (hello_retry_ms / 1000.0)
-            chunk = ser.read(128)
-            observed_uart_bytes += len(chunk)
-            for v in chunk:
-                frame = reader.feed(v)
-                if not frame or len(frame) < 2:
-                    continue
+            observed_uart_bytes += _read_completed_frames(
+                ser, reader, frame_inbox, 128
+            )
+            while frame_inbox:
+                frame = frame_inbox.popleft()
                 if frame[0] == CMD_HELLO_ACK and frame[1] == hello_seq8:
                     hello_tlv = parse_tlvs(frame[2:])
                     hello_ack_capabilities = _tlv_u32(hello_tlv, TAG_CAPABILITIES)
                     got_hello_ack = True
-                    break
+                elif not capture_startup_reset_report(frame):
+                    hello_deferred_frames.append(frame)
             if got_hello_ack:
                 break
+        frame_inbox.extend(hello_deferred_frames)
         use_selftest_transport = supports_selftest_transport(hello_ack_capabilities)
         host_checks.append(
             {
@@ -1310,13 +1345,13 @@ def run(args: argparse.Namespace) -> int:
                 "run_id": run_id,
                 "timeout_ms": start_ack_timeout_ms,
             }
+            start_ack_deferred_frames = deque()
             while time.monotonic() < ack_deadline and not start_ack_pass:
-                chunk = ser.read(1)
-                if not chunk:
-                    continue
-                for v in chunk:
-                    frame = reader.feed(v)
-                    if not frame or len(frame) < 2:
+                if not frame_inbox:
+                    _read_completed_frames(ser, reader, frame_inbox, 128)
+                while frame_inbox and not start_ack_pass:
+                    frame = frame_inbox.popleft()
+                    if capture_startup_reset_report(frame):
                         continue
                     cmd = frame[0]
                     seq8 = frame[1]
@@ -1324,6 +1359,7 @@ def run(args: argparse.Namespace) -> int:
                     if cmd != CMD_QUEUE_ACK or seq8 != 2:
                         start_ack_details["observed_cmd"] = cmd
                         start_ack_details["observed_seq8"] = seq8
+                        start_ack_deferred_frames.append(frame)
                         continue
                     ack_seq32 = _tlv_u32(tlv, TAG_SEQ32)
                     ack_result_code = _tlv_u8(tlv, TAG_ACK_RESULT)
@@ -1350,6 +1386,7 @@ def run(args: argparse.Namespace) -> int:
                     and start_ack_details.get("observed_seq32") == selftest_seq32
                 ):
                     break
+            frame_inbox.extendleft(reversed(start_ack_deferred_frames))
             if not start_ack_pass and "reason" not in start_ack_details:
                 start_ack_details["reason"] = "timeout"
             host_checks.append(
@@ -1408,7 +1445,6 @@ def run(args: argparse.Namespace) -> int:
         status_gap_max_ms = 0
         status_gap_samples = 0
         selftest_frames_seen = 0
-        reset_report_details = None
         while True:
             now = time.monotonic()
             if now >= hard_deadline:
@@ -1420,17 +1456,16 @@ def run(args: argparse.Namespace) -> int:
             if now >= idle_deadline:
                 timeout_reason = "progress_timeout"
                 break
-            chunk = ser.read(256)
-            if not chunk:
-                continue
-            total_rx_bytes += len(chunk)
+            if not frame_inbox:
+                bytes_read = _read_completed_frames(ser, reader, frame_inbox, 256)
+                if bytes_read == 0:
+                    continue
+                total_rx_bytes += bytes_read
             last_rx_byte_monotonic = now
             idle_deadline = now + (progress_timeout_ms / 1000.0)
             activity_deadline = now + (activity_timeout_ms / 1000.0)
-            for v in chunk:
-                frame = reader.feed(v)
-                if not frame or len(frame) < 2:
-                    continue
+            while frame_inbox:
+                frame = frame_inbox.popleft()
                 last_valid_frame_monotonic = now
                 cmd = frame[0]
                 body = frame[2:]
@@ -1462,6 +1497,11 @@ def run(args: argparse.Namespace) -> int:
                     continue
 
                 if cmd == CMD_RESET_REPORT:
+                    if capture_startup_reset_report(frame):
+                        frame_snapshot.update(startup_reset_report or {})
+                        frame_snapshot["startup"] = True
+                        recent_frames.append(frame_snapshot)
+                        continue
                     reset_report_details = decode_reset_report(tlv)
                     frame_snapshot.update(reset_report_details)
                     recent_frames.append(frame_snapshot)
@@ -1823,6 +1863,7 @@ def run(args: argparse.Namespace) -> int:
                     "status_gap_max_ms": status_gap_max_ms,
                     "status_gap_samples": status_gap_samples,
                     "selftest_frames_seen": selftest_frames_seen,
+                    "startup_reset_report": startup_reset_report,
                     "reset_report": reset_report_details,
                     "last_valid_frame_age_ms": int(max(0.0, (time.monotonic() - last_valid_frame_monotonic) * 1000.0)),
                     "last_rx_byte_age_ms": int(max(0.0, (time.monotonic() - last_rx_byte_monotonic) * 1000.0)),
@@ -1859,6 +1900,8 @@ def run(args: argparse.Namespace) -> int:
             "summary": summary,
             "results": results,
             "host_checks": host_checks,
+            "startup_reset_report": startup_reset_report,
+            "reset_report": reset_report_details,
         }
         write_json_atomic(args.out, report)
         if trace_chunks:

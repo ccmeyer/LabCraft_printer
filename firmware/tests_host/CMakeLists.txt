@@ -43,6 +43,7 @@ add_executable(fw_tests
     tests/test_crash_fault_context.cpp
     tests/test_reset_report_policy.cpp
     tests/test_crash_watchdog_selftest_policy.cpp
+    tests/test_watchdog_participation_policy.cpp
     tests/test_flash_safety.cpp
     tests/test_flash_cycle_policy.cpp
     tests/test_flash_output_state.cpp
@@ -120,3 +121,53 @@ set_target_properties(coordinated_xy_legacy_gate_compile PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED YES
 )
+
+# Verify both supported watchdog arming configurations at compile time. The
+# production build uses the default target; immediate arming remains an
+# explicit diagnostic/build override.
+add_library(watchdog_arm_after_hello_compile OBJECT
+    tests/compile_watchdog_arm_mode.cpp
+)
+target_include_directories(watchdog_arm_after_hello_compile PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/../Core/Inc
+)
+target_compile_definitions(watchdog_arm_after_hello_compile PRIVATE
+    EXPECTED_WATCHDOG_ARM_MODE=1
+)
+set_target_properties(watchdog_arm_after_hello_compile PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+)
+
+add_library(watchdog_arm_immediate_compile OBJECT
+    tests/compile_watchdog_arm_mode.cpp
+)
+target_include_directories(watchdog_arm_immediate_compile PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/../Core/Inc
+)
+target_compile_definitions(watchdog_arm_immediate_compile PRIVATE
+    LC_WATCHDOG_ARM_MODE=0
+    EXPECTED_WATCHDOG_ARM_MODE=0
+)
+set_target_properties(watchdog_arm_immediate_compile PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+)
+
+include(CheckCXXSourceCompiles)
+set(_watchdog_saved_required_definitions "${CMAKE_REQUIRED_DEFINITIONS}")
+set(_watchdog_saved_required_includes "${CMAKE_REQUIRED_INCLUDES}")
+set(CMAKE_REQUIRED_DEFINITIONS "-DLC_WATCHDOG_ARM_MODE=2")
+set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_LIST_DIR}/../Core/Inc")
+unset(WATCHDOG_INVALID_ARM_MODE_COMPILES CACHE)
+check_cxx_source_compiles(
+    "#include \"WatchdogSupervisor.h\"\nint main() { return 0; }"
+    WATCHDOG_INVALID_ARM_MODE_COMPILES
+)
+if(WATCHDOG_INVALID_ARM_MODE_COMPILES)
+    message(FATAL_ERROR "Unsupported LC_WATCHDOG_ARM_MODE unexpectedly compiled")
+endif()
+set(CMAKE_REQUIRED_DEFINITIONS "${_watchdog_saved_required_definitions}")
+set(CMAKE_REQUIRED_INCLUDES "${_watchdog_saved_required_includes}")
+unset(_watchdog_saved_required_definitions)
+unset(_watchdog_saved_required_includes)

@@ -152,6 +152,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `firmware/Core/Inc/Diagnostics.h`, `firmware/Core/Src/Diagnostics.cpp`
   - `firmware/Core/Inc/DiagnosticResultEmitter.h`, `firmware/Core/Src/DiagnosticResultEmitter.cpp`
   - `firmware/Core/Inc/CrashWatchdogSelfTestPolicy.h`, `firmware/Core/Src/CrashWatchdogSelfTestPolicy.cpp`
+  - `firmware/Core/Inc/WatchdogSupervisor.h`, `firmware/Core/Src/WatchdogSupervisor.c`, `firmware/Core/Inc/WatchdogParticipationPolicy.h`
   - `firmware/Core/Inc/OrchestratorCompletionPolicy.h`, `firmware/Core/Src/OrchestratorCompletionPolicy.cpp`
   - `firmware/Core/Inc/HomeInterruptionPolicy.h`, `firmware/Core/Src/HomeInterruptionPolicy.cpp`
   - `firmware/Core/Inc/RegulatorPausePolicy.h`, `firmware/Core/Src/RegulatorPausePolicy.cpp`
@@ -159,7 +160,8 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - Functions: `Orchestrator::begin`, `Orchestrator::_run`, `Orchestrator::executeCommand`, `enqueueFromISR`, `startHomeAsync`, `startRegHomeAsync`, `_flashTaskLoop`
   - Self-test entrypoint: `CMD_SELFTEST_START` remains dispatched from `Orchestrator::executeCommand`, but the SAFE/FULL diagnostic sequence now lives in `DiagnosticsRunner::runSelfTest`. `DiagnosticResultEmitter` owns the byte layout for `CMD_SELFTEST_RESULT` and `CMD_SELFTEST_DONE` payloads.
   - Stack-overflow crash attribution records the active command plus the mapped FreeRTOS task ID and compact task-name prefix so `RESET_REPORT` can identify the overflowing task when possible.
-  - `CrashWatchdogSelfTestPolicy` owns the host-tested pass/fail policy and compact metrics for SAFE rows `1041 crash_record_retained_safe` and `1042 watchdog_supervisor_safe`; `DiagnosticsRunner` samples runtime state and emits the unchanged result frames.
+  - `CrashWatchdogSelfTestPolicy` owns the host-tested pass/fail policy and compact metrics for SAFE rows `1041 crash_record_retained_safe` and `1042 watchdog_supervisor_safe`; `DiagnosticsRunner` samples runtime state and emits the unchanged result frames. Row `1041` fails active recovery (`pending=1`, subject only to the existing sticky-status exception) but passes recovered history (`pending=0`) while continuing to report the retained last-fault fields.
+  - The watchdog task is created unarmed by default and arms after the first accepted HELLO. Participant enable/disable transitions atomically publish the mask and initial timestamp; `Watchdog_CheckIn()` updates only the timestamp. Pressure-regulator state transitions own participation changes, while the 5 ms control loop only checks in.
   - Custom regulator pressure traces use selector `2110` plus self-test start TLVs `TAG_TRACE_CHANNEL`, `TAG_TRACE_PRESSURE_MPSI`, `TAG_TRACE_PULSE_US`, `TAG_TRACE_PULSE_COUNT`, and `TAG_TRACE_FREQUENCY_HZ`; `Orchestrator` copies them into `DiagnosticsRequest::customPressureTrace`, and `DiagnosticsRunner` validates the RAM-only recipe before calling the shared pressure trace runner.
   - Motion qualification diagnostics `2007 motion_home_repeatability_factory` and `2008 motion_pattern_return_factory` live in `DiagnosticsRunner::runSelfTest`, use existing X/Y homing and gantry motion primitives, and publish compact repeatability metrics for Python-side candidate analysis.
   - Selector `2029` runs operator-gated legacy X/Y timing diagnostics `2020`-`2025`. It uses the existing result frames, requires a 6 kHz equal-axis probe before the 40 kHz vectors, keeps positioning moves at 6 kHz, and reports ISR phase-cycle maxima, exact entries/pulses, pending updates, status cadence, and watchdog age outside the ISR.
@@ -398,7 +400,7 @@ Common parse path for host->MCU commands:
 
 ### 6.4 Reset report tags (`Comm.h` constants)
 
-`CMD_RESET_REPORT` frames are emitted once per host session after the `HELLO` / `HELLO_ACK` path when retained crash state or reset-cause policy requires a report. TLV value width is encoded by `len`; all multi-byte numeric fields are little-endian. The Python app treats missing optional tags as backward-compatible absent fields.
+`CMD_RESET_REPORT` frames are emitted at most once per MCU boot after the first accepted `HELLO` / `HELLO_ACK` path when retained crash state or reset-cause policy requires a report. A later host session on the same boot therefore receives no startup report. TLV value width is encoded by `len`; all multi-byte numeric fields are little-endian. The Python app treats missing optional tags as backward-compatible absent fields. `tools/run_selftest.py` retains a HELLO-sequence/run-ID-matched frame as nullable top-level `startup_reset_report`, including when it shares a serial read with `HELLO_ACK`; top-level `reset_report` remains reserved for a non-startup report that fails the active run closed.
 
 | Tag ID | Name | Width | Source in firmware |
 |---|---|---|---|
@@ -427,7 +429,7 @@ Common parse path for host->MCU commands:
 
 ### Retained fault context
 
-`CrashLog.c` stores `CrashFaultContextRetained` in the linker `NOLOAD` `.noinit` section. The wrapper contains magic, version, size, and an FNV-1a checksum. Fault entry clears magic first, writes the 132-byte context and checksum, executes a memory barrier, and commits magic last. Boot accepts this context only when the wrapper validates and the RTC crash record is pending; the existing 20-register RTC record remains the fallback. Healthy boot and power/low-power reset classification clear the retained context.
+`CrashLog.c` stores `CrashFaultContextRetained` in the linker `NOLOAD` `.noinit` section. The wrapper contains magic, version, size, and an FNV-1a checksum. Fault entry clears magic first, writes the 132-byte context and checksum, executes a memory barrier, and commits magic last. Boot accepts this context whenever the wrapper validates, including after healthy recovery clears `pending`; the existing 20-register RTC record remains the fallback. A healthy boot preserves it. Power/low-power reset classification and a newer incompatible base fault clear it under the existing retention rules.
 
 HardFault, MemManage, BusFault, and UsageFault use GCC naked entries in `stm32f4xx_it.c`. Their first instructions select MSP or PSP from `EXC_RETURN`, save R4-R11, and pass both stack pointers to the non-returning capture path. R0-R3, R12, LR, PC, and xPSR always begin at the hardware-supplied SP. `EXC_RETURN` bit 4 changes only the validated allocation from 8 to 26 words. A core frame is marked valid only when the complete allocation is within registered stack/linker RAM bounds, xPSR has the Thumb bit, and PC is within linker-defined flash or `.RamFunc` executable bounds. Capture also stores CFSR, HFSR, MMFAR, BFAR, FPCCR, FPCAR, CONTROL, BASEPRI, PRIMASK, and FAULTMASK. Configurable fault enables are unchanged.
 

@@ -256,7 +256,8 @@ private:
 
   int32_t activeMinTarget() const { return _vacuumMode ? _vacuumMinTarget : _minTarget; }
   CrashTaskId _watchdogTaskId() const;
-  void _applyWatchdogState(bool checkIn);
+  void _synchronizeWatchdogParticipation();
+  void _checkInWatchdogIfEligible();
   void _holdWatchdog(WatchdogHold reason);
   void _releaseWatchdog(WatchdogHold reason, bool checkIn);
   bool _canEnterMotionHold() const;

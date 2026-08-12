@@ -317,10 +317,11 @@ last-seen timestamp per task
 late task ID, if any
 Behavior:
 
-Watchdog_EarlyInit() starts IWDG and zeros supervisor state.
+Watchdog_EarlyInit() zeros supervisor state. In the default build it does not arm IWDG.
 Watchdog_StartTask() creates a low-priority watchdog task once scheduler is live.
-critical tasks call Watchdog_EnableTask(id) once they are fully initialized
-critical tasks call Watchdog_CheckIn(id) once per normal loop iteration
+the first accepted HELLO is the normal arming point; immediate arming is available only through the explicit LC_WATCHDOG_ARM_MODE build override
+critical tasks call Watchdog_EnableTask(id) once they are fully initialized; enable/disable mask transitions and the initial timestamp are one short task-context critical section
+critical tasks call Watchdog_CheckIn(id) once per normal loop iteration; check-in updates only the aligned timestamp and cannot change participation
 watchdog task wakes every 100 ms
 if every enabled task is within deadline:
 refresh IWDG
@@ -360,9 +361,9 @@ fault_ct: retained total crash count
 wdg_ct: retained watchdog reset count
 Pass rule:
 
-for a normal healthy SAFE boot:
 pending == 0
-fault == none
+historical fault fields do not fail this row after recovery has become healthy
+the existing narrowly scoped sticky-status recovery exception remains valid while pending is set
 New SAFE self-test 1042
 Add immediately after 1041:
 
@@ -589,6 +590,25 @@ Healthy-boot clear window defaults to 10 s
 1041 and 1042 are the stable new SAFE self-test IDs
 The last crash record remains sticky; pending clears after a healthy boot window
 Early-boot faults before watchdog arm use software-reset fallback; after watchdog arm, the watchdog is the reset mechanism
+
+Watchdog evidence-integrity implementation (2026-08-12):
+
+- Source baseline: `fd20e66a`; the final implementation source is the commit that contains this record. The matching Debug artifact is `firmware/artifacts/LabCraft_firmware.bin`, 329,744 bytes, SHA-256 `AFC14C33B65EBBE424D47A4D51D365875FF1E79F5E0BC51E0719BB89F5FD0731`.
+- `LC_WATCHDOG_ARM_MODE` is now a numeric preprocessor contract. The production default is `WATCHDOG_ARM_AFTER_HELLO_ACK`; unsupported values stop compilation, and the immediate mode is compile-tested as an explicit override.
+- Pressure-regulator hold/start/release paths explicitly enable or disable their participant. The 5 ms regulator loop only checks in when eligible, so a stale loop cannot silently re-enable itself.
+- `CrashLog_MarkBootHealthy()` clears only `PENDING`. The last fault/task, uptime, fault stage, late task, active command, raw/register values, counters, regulator context, and valid exception context remain available until a later fault replaces them or the existing retention/version/reset rules invalidate storage.
+- Base fault paths clear an older incompatible extended exception context before committing the replacement record. Exception capture continues to commit its matching extended context.
+- SAFE result `1041` treats `pending=0` as recovered health while continuing to emit the historical fields. An active `pending=1` record still fails except for the existing sticky-status recovery exception.
+- `tools/run_selftest.py` uses a completed-frame inbox across HELLO, START-ACK, and result collection. A reset report whose frame sequence matches HELLO and whose `reset_seq32` matches the run ID is retained as nullable `startup_reset_report`; it does not populate the unexpected `reset_report` field or abort SAFE.
+- Firmware attempts reset-report delivery once per MCU boot, after an accepted HELLO. A second SAFE run on the same boot is therefore expected to have `startup_reset_report: null`.
+
+No-motion idle-soak closeout:
+
+1. Flash the exact recorded artifact, wait at least 15 seconds without HELLO, and run SAFE.
+2. Run SAFE again on the same boot; no second startup reset report is expected.
+3. After GOODBYE, keep the powered MCU idle for three 30-minute intervals and run SAFE after each interval. Compare `boot`, `fault_ct`, and `wdg_ct` without commanding motion.
+4. If watchdog starvation reproduces, retain the first post-reset `pending=1;fault=wdt` report and its non-`none` `wdg_late`, uptime, and stage evidence. After at least 12 seconds of healthy supervision, rerun SAFE and require `pending=0` with the same history still visible.
+5. Stop and flash the pre-change artifact for a reset loop, missing HELLO after the allowed window, corrupt evidence, or unexplained counter increments.
 
 Messages from past attempts:
 I’ve implemented the crash-log/watchdog slice and the remaining issue is target boot reachability during SAFE HIL. I’m checking the latest report and the startup paths that can prevent HELLO_ACK, then I’ll make the smallest fix and rerun validation.

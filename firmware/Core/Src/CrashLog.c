@@ -182,10 +182,8 @@ static void CrashLog_FillSnapshot(CrashLogSnapshot* out)
   out->watchdogLateTask = (CrashTaskId)CrashLog_Read(CRASHLOG_BKP_WATCHDOG_LATE_TASK);
   out->activeCommand = (uint8_t)CrashLog_Read(CRASHLOG_BKP_ACTIVE_COMMAND);
   out->faultTaskName4 = CrashLog_Read(CRASHLOG_BKP_FAULT_TASK_NAME4);
-  if ((out->flags & CRASHLOG_FLAG_PENDING) != 0u) {
-    out->faultContextValid = (uint8_t)CrashFaultContext_ValidateRetained(
-        &g_faultContext, &out->faultContext);
-  }
+  out->faultContextValid = (uint8_t)CrashFaultContext_ValidateRetained(
+      &g_faultContext, &out->faultContext);
   RegulatorTelemetry_InitResetContext(&out->regulatorContext);
   if (CrashLog_ShouldKeepRegulatorContext(out->resetCause) != 0u) {
     (void)RegulatorTelemetry_ReadRetainedContext(&g_regulatorContext,
@@ -276,6 +274,8 @@ void CrashLog_RecordFault(CrashFaultKind kind, CrashTaskId taskIdHint)
     }
   }
 
+  CrashLog_ClearFaultContext();
+
   CrashLog_WriteFaultRecord(kind,
                             taskId,
                             CRASH_TASK_NONE,
@@ -303,6 +303,8 @@ void CrashLog_RecordWatchdogFault(CrashTaskId lateTask)
     taskId = lateTask;
   }
 
+  CrashLog_ClearFaultContext();
+
   CrashLog_WriteFaultRecord(CRASH_FAULT_WDT_STARVE,
                             taskId,
                             lateTask,
@@ -325,6 +327,7 @@ void CrashLog_RecordFaultFromHandler(CrashFaultKind kind, CrashTaskId taskIdHint
   if (CrashLog_IsStorageValid() == 0u) {
     CrashLog_ResetStorage();
   }
+  CrashLog_ClearFaultContext();
   CrashLog_WriteFaultRecord(kind,
                             taskIdHint,
                             CRASH_TASK_NONE,
@@ -347,6 +350,7 @@ void CrashLog_RecordStackOverflowFromHook(CrashTaskId taskIdHint, const char* ta
   if (CrashLog_IsStorageValid() == 0u) {
     CrashLog_ResetStorage();
   }
+  CrashLog_ClearFaultContext();
   const CrashTaskId taskId = CrashLog_SelectStackOverflowTaskId(taskIdHint, g_activeTask);
   CrashLog_WriteFaultRecord(CRASH_FAULT_STACK_OVF,
                             taskId,
@@ -671,18 +675,6 @@ void CrashLog_MarkBootHealthy(void)
 #endif
   const uint32_t flags = CrashLog_FlagsOnly(CrashLog_Read(CRASHLOG_BKP_FLAGS));
   CrashLog_Write(CRASHLOG_BKP_FLAGS, CrashLog_FlagsWithVersion((flags & ~CRASHLOG_FLAG_PENDING) | CRASHLOG_FLAG_VALID));
-  CrashLog_Write(CRASHLOG_BKP_LAST_FAULT, (uint32_t)CRASH_FAULT_NONE);
-  CrashLog_Write(CRASHLOG_BKP_LAST_TASK, (uint32_t)CRASH_TASK_NONE);
-  CrashLog_Write(CRASHLOG_BKP_CFSR, 0u);
-  CrashLog_Write(CRASHLOG_BKP_HFSR, 0u);
-  CrashLog_Write(CRASHLOG_BKP_MMFAR, 0u);
-  CrashLog_Write(CRASHLOG_BKP_BFAR, 0u);
-  CrashLog_Write(CRASHLOG_BKP_WATCHDOG_RAW_STATUS, 0u);
-  CrashLog_Write(CRASHLOG_BKP_FAULT_STAGE, (uint32_t)CRASH_BOOT_STAGE_RESET);
-  CrashLog_Write(CRASHLOG_BKP_WATCHDOG_LATE_TASK, (uint32_t)CRASH_TASK_NONE);
-  CrashLog_Write(CRASHLOG_BKP_ACTIVE_COMMAND, 0u);
-  CrashLog_Write(CRASHLOG_BKP_FAULT_TASK_NAME4, 0u);
-  CrashLog_ClearFaultContext();
 }
 
 void CrashLog_GetSnapshot(CrashLogSnapshot* out)

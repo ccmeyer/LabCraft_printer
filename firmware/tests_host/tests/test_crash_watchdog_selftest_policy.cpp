@@ -117,6 +117,25 @@ TEST(CrashWatchdogSelfTestPolicy, RetainedPendingCrashFailsWithDiagnosticMetrics
     checkContains(metrics, "wdg_late=pregp");
 }
 
+TEST(CrashWatchdogSelfTestPolicy, RecoveredHistoricalWatchdogFaultPassesAndRemainsVisible)
+{
+    CrashLogSnapshot snap = makeCleanCrashSnapshot();
+    snap.lastFault = CRASH_FAULT_WDT_STARVE;
+    snap.lastTask = CRASH_TASK_PRESSURE;
+    snap.resetCause = CRASH_RESET_IWDG;
+    snap.uptimeMs = 123456u;
+    snap.faultStage = CRASH_BOOT_STAGE_COMM_READY;
+    snap.watchdogLateTask = CRASH_TASK_PRESSURE;
+    char metrics[224] = {0};
+
+    CHECK_TRUE(BuildCrashRecordSelfTestResult(snap, metrics, sizeof(metrics)));
+    checkContains(metrics, "pending=0");
+    checkContains(metrics, "fault=wdt");
+    checkContains(metrics, "task=press");
+    checkContains(metrics, "reset=iwdg");
+    checkContains(metrics, "wdg_late=press");
+}
+
 TEST(CrashWatchdogSelfTestPolicy, StickyWatchdogHistoryExceptionIsPreserved)
 {
     CrashLogSnapshot snap = makeCleanCrashSnapshot();

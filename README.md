@@ -2834,6 +2834,39 @@ Outputs:
 
 ## Firmware Local Checks
 
+### Watchdog evidence and no-motion soak
+
+The production firmware creates the watchdog supervisor during startup but
+arms IWDG only after the first accepted `HELLO`. The timeout remains 4 seconds,
+the supervisor period 100 ms, and healthy recovery requires 10 continuous
+seconds. A healthy recovery clears only `pending`; SAFE result `1041` can pass
+with `pending=0` while still reporting the last historical fault and late task.
+
+`tools/run_selftest.py` writes two separate nullable fields. A reset report
+that matches the HELLO sequence and run ID is stored in
+`startup_reset_report` and does not abort SAFE. `reset_report` remains the
+fail-closed evidence field for a non-startup report observed during execution.
+Firmware sends the startup report at most once per MCU boot, so its absence on
+a second SAFE run without an MCU reset is expected.
+
+For the watchdog evidence milestone, do not move any axis or actuate pressure.
+After flashing the matching binary, wait at least 15 seconds before the first
+HELLO, then run:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile SAFE --out hil_reports/watchdog_soak_initial.json
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile SAFE --out hil_reports/watchdog_soak_same_boot.json
+```
+
+After GOODBYE, leave the MCU powered and idle for 30 minutes, then repeat SAFE
+to a new report; perform three intervals total. Compare result `1041` metrics
+`boot`, `fault_ct`, and `wdg_ct`, and require result `1042` to remain armed with
+all required participants live. If a reset reproduces, retain the first
+post-reset report before waiting at least 12 seconds and running SAFE again;
+the later run must show `pending=0` while preserving the same historical
+`fault=wdt` and `wdg_late` evidence. Stop for a reset loop, missing HELLO,
+corrupt evidence, or unexplained counter changes.
+
 Prerequisites:
 
 - CMake available on `PATH`

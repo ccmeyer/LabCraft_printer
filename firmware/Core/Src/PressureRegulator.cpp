@@ -150,7 +150,7 @@ void PressureRegulator::begin(
   if (_taskHandle) {
     vTaskSuspend(_taskHandle);
   }
-  _applyWatchdogState(false);
+  _synchronizeWatchdogParticipation();
   _stepper->stop();
 }
 
@@ -173,17 +173,20 @@ CrashTaskId PressureRegulator::_watchdogTaskId() const {
   return (_sensorPort == 0u) ? CRASH_TASK_PREG_P : CRASH_TASK_PREG_R;
 }
 
-void PressureRegulator::_applyWatchdogState(bool checkIn) {
+void PressureRegulator::_synchronizeWatchdogParticipation() {
   const CrashTaskId watchdogTaskId = _watchdogTaskId();
   const uint8_t mask = static_cast<uint8_t>(_watchdogHoldMask);
   if (PressureRegulatorWatchdogPolicy::shouldEnableWatchdog(mask)) {
-    if (checkIn) {
-      Watchdog_CheckIn(watchdogTaskId);
-    } else {
-      Watchdog_EnableTask(watchdogTaskId);
-    }
+    Watchdog_EnableTask(watchdogTaskId);
   } else {
     Watchdog_DisableTask(watchdogTaskId);
+  }
+}
+
+void PressureRegulator::_checkInWatchdogIfEligible() {
+  const uint8_t mask = static_cast<uint8_t>(_watchdogHoldMask);
+  if (PressureRegulatorWatchdogPolicy::shouldEnableWatchdog(mask)) {
+    Watchdog_CheckIn(_watchdogTaskId());
   }
 }
 
@@ -193,7 +196,7 @@ void PressureRegulator::_holdWatchdog(WatchdogHold reason) {
       static_cast<uint8_t>(_watchdogHoldMask),
       reason);
   taskEXIT_CRITICAL();
-  _applyWatchdogState(false);
+  _synchronizeWatchdogParticipation();
 }
 
 void PressureRegulator::_releaseWatchdog(WatchdogHold reason, bool checkIn) {
@@ -202,7 +205,10 @@ void PressureRegulator::_releaseWatchdog(WatchdogHold reason, bool checkIn) {
       static_cast<uint8_t>(_watchdogHoldMask),
       reason);
   taskEXIT_CRITICAL();
-  _applyWatchdogState(checkIn);
+  _synchronizeWatchdogParticipation();
+  if (checkIn) {
+    _checkInWatchdogIfEligible();
+  }
 }
 
 bool PressureRegulator::_canEnterMotionHold() const {
@@ -1123,10 +1129,10 @@ void PressureRegulator::requestSafetyHome() {
 
 void PressureRegulator::controlLoop() {
   const TickType_t period = pdMS_TO_TICKS(5);  // 200 Hz tick
-  _applyWatchdogState(false);
+  _synchronizeWatchdogParticipation();
   Logger::instance()->log("CONTROL LOOP\r\n");
   for (;;) {
-    _applyWatchdogState(true);
+    _checkInWatchdogIfEligible();
 
     if (_motionHoldActive) {
       if (_stepping && _stepper != nullptr) {
