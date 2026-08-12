@@ -20,7 +20,7 @@ def test_pure_executor_has_no_hal_rtos_float_or_dynamic_runtime_dependency():
         assert forbidden not in combined
     assert "#include \"CoordinatedXyPlanner.h\"" in header
     assert "LC_COORDINATED_XY_EXECUTOR_ENABLE 1" in header
-    assert "LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE 0" in header
+    assert "LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE 1" in header
     assert "#error \"Coordinated XY normal routing requires" in header
 
 
@@ -70,7 +70,7 @@ def test_coordinated_edge_and_terminal_paths_use_bounded_register_operations():
     assert "HAL_TIM_Base_Stop_IT" not in finish_body
 
     stop_helper = gantry.index("void gantryStopAndClearUpdateTimer")
-    stop_helper_end = gantry.index("bool coordinatedStartAccepted", stop_helper)
+    stop_helper_end = gantry.index("}  // namespace", stop_helper)
     assert "timer->State = HAL_TIM_STATE_READY;" in gantry[stop_helper:stop_helper_end]
 
 
@@ -89,15 +89,20 @@ def test_target_build_optimizes_only_the_bounded_coordinated_edge_path():
     assert "LC_COORDINATED_STEP_OPTIMIZED\nStepMask nextMask" in planner
     assert "LC_COORDINATED_STEP_OPTIMIZED\nvoid primeEvent" in planner
     assert "LC_COORDINATED_EDGE_OPTIMIZED\nuint32_t hashWord" in executor
-    assert "LC_COORDINATED_EDGE_OPTIMIZED\nvoid setTerminal" in executor
+    assert "LC_COORDINATED_EDGE_ALWAYS_INLINE\nvoid setTerminal" in executor
     assert "LC_COORDINATED_EDGE_OPTIMIZED\nvoid setPlannerFault" in executor
     assert "LC_COORDINATED_EDGE_OPTIMIZED\nTickStatus applyDeferredControl" in executor
+    assert "LC_COORDINATED_EDGE_ALWAYS_INLINE\nuint8_t controlPriority" in executor
+    assert "LC_COORDINATED_EDGE_ALWAYS_INLINE\nControlDisposition requestControl" in executor
+    assert "LC_COORDINATED_EDGE_OPTIMIZED\nControlDisposition requestLimitAbort" in executor
     assert "const uint8_t eventMask = static_cast<uint8_t>(cursor.cachedEvent.mask);" in planner
     assert "const uint8_t tickMask = static_cast<uint8_t>(tick.mask);" in gantry
     assert '#define LC_COORDINATED_HW_OPTIMIZED __attribute__((optimize("O2"), hot))' in gantry
     assert "LC_COORDINATED_HW_OPTIMIZED\nbool Gantry::_handleCoordinatedTimerFromIsr" in gantry
-    assert "LC_COORDINATED_HW_OPTIMIZED\nuint32_t gantryCycleNow" in gantry
-    assert "LC_COORDINATED_HW_OPTIMIZED\nvoid gantryStopAndClearUpdateTimer" in gantry
+    assert "LC_COORDINATED_HW_ALWAYS_INLINE\nuint32_t gantryCycleNow" in gantry
+    assert "LC_COORDINATED_HW_ALWAYS_INLINE\nvoid gantryStopAndClearUpdateTimer" in gantry
+    assert "LC_COORDINATED_HW_ALWAYS_INLINE\nvoid Gantry::_finishCoordinatedHardware" in gantry
+    assert "LC_COORDINATED_HW_ALWAYS_INLINE\nvoid Gantry::_finishCoordinatedFromIsr" in gantry
     assert '#define LC_COORDINATED_GPIO_OPTIMIZED __attribute__((optimize("O2"), hot))' in stepper
     assert "LC_COORDINATED_GPIO_OPTIMIZED\nvoid Stepper::_writeCoordinatedStep" in stepper
     assert "LC_COORDINATED_GPIO_OPTIMIZED\nvoid Stepper::_accountCoordinatedPulse" in stepper

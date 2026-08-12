@@ -1,0 +1,83 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "normal_xy_route_v1",
+  "name": "Normal Coordinated XY Route Qualification v1",
+  "profile": "FULL",
+  "description": "Operator-gated 3 kHz qualification of normal Gantry XY routing through the coordinated executor, including bounded physical-limit tests and legacy-axis smoke coverage.",
+  "expected_test_ids": [2050, 2051, 2052, 2053, 2054, 2055, 2056, 2057],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": true,
+  "selftest_args": ["--normal-xy-route-suite"],
+  "fixtures": [
+    {
+      "fixture_id": "coordinated_xy_physical_limit_v1",
+      "required_for": [2050, 2051, 2052, 2053, 2054, 2055, 2056, 2057],
+      "operator_note": "Confirm the complete XY/Z envelope is clear and remove all hands before motion. Firmware disables XY and requires manual press/release verification of both physical switches, homes Z, then homes X and Y sequentially at 3 kHz/1 kHz. The physical-limit cases deliberately cross each released home switch from +100 toward -100 at 3 kHz, a maximum commanded window of 200 steps. Stop immediately for aggressive contact, travel beyond the bounded target, a missed switch, abnormal sound, or reset. Observe whether equal and asymmetric ramping appears straight. This fixture is motion-only; install the approved pressure_closed_loop_v1 fixture only for the separate pressure_regulator_v1 run."
+    }
+  ],
+  "analysis_rules": {
+    "2050": {
+      "category": "motion", "failure_domain": "firmware_motion",
+      "metrics": {
+        "dx": {"maturity": "acceptance", "equals": 1000}, "dy": {"maturity": "acceptance", "equals": 0}, "hz": {"maturity": "acceptance", "equals": 3000}, "route": {"maturity": "acceptance", "equals": 1},
+        "xe": {"maturity": "acceptance", "equals": 2000}, "ye": {"maturity": "acceptance", "equals": 0}, "ms": {"maturity": "acceptance", "equals": 1000}, "i2": {"maturity": "acceptance", "equals": 4000}, "i7": {"maturity": "acceptance", "equals": 0},
+        "edge": {"maturity": "acceptance", "equals": 1}, "ck": {"maturity": "acceptance", "equals": 1}, "low": {"maturity": "acceptance", "equals": 1}, "done": {"maturity": "acceptance", "equals": 1}, "pu": {"maturity": "acceptance", "equals": 0}, "cy": {"maturity": "acceptance", "min": 1, "max": 2250}, "ep": {"maturity": "acceptance", "equals": 1}, "ret": {"maturity": "acceptance", "equals": 1}, "to": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "2051": {
+      "category": "motion", "failure_domain": "firmware_motion",
+      "metrics": {
+        "dx": {"maturity": "acceptance", "equals": 0}, "dy": {"maturity": "acceptance", "equals": 1000}, "hz": {"maturity": "acceptance", "equals": 3000}, "route": {"maturity": "acceptance", "equals": 1},
+        "xe": {"maturity": "acceptance", "equals": 0}, "ye": {"maturity": "acceptance", "equals": 2000}, "ms": {"maturity": "acceptance", "equals": 1000}, "i2": {"maturity": "acceptance", "equals": 4000}, "i7": {"maturity": "acceptance", "equals": 0},
+        "edge": {"maturity": "acceptance", "equals": 1}, "ck": {"maturity": "acceptance", "equals": 1}, "low": {"maturity": "acceptance", "equals": 1}, "done": {"maturity": "acceptance", "equals": 1}, "pu": {"maturity": "acceptance", "equals": 0}, "cy": {"maturity": "acceptance", "min": 1, "max": 2250}, "ep": {"maturity": "acceptance", "equals": 1}, "ret": {"maturity": "acceptance", "equals": 1}, "to": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "2052": {
+      "category": "motion", "failure_domain": "firmware_motion",
+      "metrics": {
+        "dx": {"maturity": "acceptance", "equals": 1000}, "dy": {"maturity": "acceptance", "equals": 1000}, "hz": {"maturity": "acceptance", "equals": 3000}, "route": {"maturity": "acceptance", "equals": 1},
+        "xe": {"maturity": "acceptance", "equals": 2000}, "ye": {"maturity": "acceptance", "equals": 2000}, "ms": {"maturity": "acceptance", "equals": 1000}, "i2": {"maturity": "acceptance", "equals": 4000}, "i7": {"maturity": "acceptance", "equals": 0},
+        "edge": {"maturity": "acceptance", "equals": 1}, "ck": {"maturity": "acceptance", "equals": 1}, "low": {"maturity": "acceptance", "equals": 1}, "done": {"maturity": "acceptance", "equals": 1}, "pu": {"maturity": "acceptance", "equals": 0}, "cy": {"maturity": "acceptance", "min": 1, "max": 2250}, "ep": {"maturity": "acceptance", "equals": 1}, "ret": {"maturity": "acceptance", "equals": 1}, "to": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "2053": {
+      "category": "motion", "failure_domain": "firmware_motion",
+      "metrics": {
+        "dx": {"maturity": "acceptance", "equals": 500}, "dy": {"maturity": "acceptance", "equals": 1500}, "hz": {"maturity": "acceptance", "equals": 3000}, "route": {"maturity": "acceptance", "equals": 1},
+        "xe": {"maturity": "acceptance", "equals": 1000}, "ye": {"maturity": "acceptance", "equals": 3000}, "ms": {"maturity": "acceptance", "equals": 1500}, "i2": {"maturity": "acceptance", "equals": 6000}, "i7": {"maturity": "acceptance", "equals": 0},
+        "edge": {"maturity": "acceptance", "equals": 1}, "ck": {"maturity": "acceptance", "equals": 1}, "low": {"maturity": "acceptance", "equals": 1}, "done": {"maturity": "acceptance", "equals": 1}, "pu": {"maturity": "acceptance", "equals": 0}, "cy": {"maturity": "acceptance", "min": 1, "max": 2250}, "ep": {"maturity": "acceptance", "equals": 1}, "ret": {"maturity": "acceptance", "equals": 1}, "to": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "2054": {
+      "category": "motion", "failure_domain": "firmware_motion",
+      "metrics": {
+        "dx": {"maturity": "acceptance", "equals": 6000}, "dy": {"maturity": "acceptance", "equals": 2000}, "hz": {"maturity": "acceptance", "equals": 3000}, "route": {"maturity": "acceptance", "equals": 1},
+        "hold": {"maturity": "acceptance", "equals": 1}, "acq": {"maturity": "informational"}, "clean": {"maturity": "acceptance", "equals": 1}, "sf": {"maturity": "acceptance", "min": 2}, "sg": {"maturity": "acceptance", "max": 499}, "sa": {"maturity": "acceptance", "max": 499}, "alt": {"maturity": "acceptance", "equals": 0},
+        "i2": {"maturity": "acceptance", "equals": 24000}, "i7": {"maturity": "acceptance", "equals": 0}, "low": {"maturity": "acceptance", "equals": 1}, "pu": {"maturity": "acceptance", "equals": 0}, "cy": {"maturity": "acceptance", "min": 1, "max": 2250}, "ep": {"maturity": "acceptance", "equals": 1}, "ret": {"maturity": "acceptance", "equals": 1}, "to": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "2055": {
+      "category": "motion", "failure_domain": "firmware_motion",
+      "metrics": {
+        "dx": {"maturity": "acceptance", "equals": 2000}, "dy": {"maturity": "acceptance", "equals": 1000}, "hz": {"maturity": "acceptance", "equals": 3000}, "route": {"maturity": "acceptance", "equals": 1},
+        "pause": {"maturity": "acceptance", "equals": 1}, "stable": {"maturity": "acceptance", "equals": 1}, "resume": {"maturity": "acceptance", "equals": 1}, "cancel": {"maturity": "acceptance", "equals": 1}, "lat": {"maturity": "acceptance", "max": 1}, "rise": {"maturity": "acceptance", "equals": 0}, "rebase": {"maturity": "acceptance", "equals": 1},
+        "low": {"maturity": "acceptance", "equals": 1}, "i7": {"maturity": "acceptance", "equals": 0}, "pu": {"maturity": "acceptance", "equals": 0}, "cy": {"maturity": "acceptance", "min": 1, "max": 2250}, "recover": {"maturity": "acceptance", "equals": 1}, "to": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "2056": {
+      "category": "motion", "failure_domain": "firmware_motion",
+      "metrics": {
+        "hz": {"maturity": "acceptance", "equals": 3000}, "route": {"maturity": "acceptance", "equals": 1}, "win": {"maturity": "acceptance", "equals": 200}, "xl": {"maturity": "acceptance", "equals": 1}, "yl": {"maturity": "acceptance", "equals": 1},
+        "xe": {"maturity": "acceptance", "min": 1, "max": 200}, "ye": {"maturity": "acceptance", "min": 1, "max": 200}, "xlat": {"maturity": "acceptance", "max": 1}, "ylat": {"maturity": "acceptance", "max": 1}, "xrise": {"maturity": "acceptance", "equals": 0}, "yrise": {"maturity": "acceptance", "equals": 0}, "req": {"maturity": "acceptance", "min": 2}, "raw": {"maturity": "informational"},
+        "rebase": {"maturity": "acceptance", "equals": 1}, "low": {"maturity": "acceptance", "equals": 1}, "i7": {"maturity": "acceptance", "equals": 0}, "pu": {"maturity": "acceptance", "equals": 0}, "cy": {"maturity": "acceptance", "min": 1, "max": 2250}, "xd": {"maturity": "acceptance", "max": 25}, "yd": {"maturity": "acceptance", "max": 25}, "home": {"maturity": "acceptance", "equals": 1}, "to": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "2057": {
+      "category": "motion", "failure_domain": "firmware_motion",
+      "metrics": {
+        "hz": {"maturity": "acceptance", "equals": 3000}, "route": {"maturity": "acceptance", "equals": 1}, "x": {"maturity": "acceptance", "equals": 1}, "y": {"maturity": "acceptance", "equals": 1}, "z": {"maturity": "acceptance", "equals": 1}, "pr": {"maturity": "acceptance", "equals": 1}, "own": {"maturity": "acceptance", "equals": 0}, "low": {"maturity": "acceptance", "equals": 1},
+        "xret": {"maturity": "acceptance", "equals": 0}, "yret": {"maturity": "acceptance", "equals": 0}, "zret": {"maturity": "acceptance", "equals": 0}, "xd": {"maturity": "acceptance", "max": 25}, "yd": {"maturity": "acceptance", "max": 25}, "home": {"maturity": "acceptance", "equals": 1}, "to": {"maturity": "acceptance", "equals": 0}
+      }
+    }
+  }
+}

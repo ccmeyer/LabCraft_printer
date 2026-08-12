@@ -22,6 +22,7 @@ def test_discover_suite_entries_lists_current_manifests():
         "motion_timing_v1",
         "profile_lut_benchmark_v1",
         "coordinated_xy_executor_v1",
+        "normal_xy_route_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "refuel_vacuum_v1",
@@ -163,6 +164,27 @@ def test_coordinated_xy_executor_suite_exposes_loaded_motion_safety_gates():
     assert "stable" in rows[2044].metrics
     assert "lat" in rows[2045].metrics
     assert "xd" in rows[2046].metrics
+
+
+def test_normal_xy_route_suite_exposes_physical_limit_and_legacy_gates():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    route = entries["normal_xy_route_v1"].manifest
+
+    assert route.profile == "FULL"
+    assert route.requires_operator_prompts is True
+    assert required_fixture_ids(route) == ("coordinated_xy_physical_limit_v1",)
+    rows = {row.test_id: row for row in build_test_plan_rows(route)}
+    assert list(rows) == list(range(2050, 2058))
+    assert rows[2050].name == "Normal XY route X-only low-rate"
+    assert rows[2054].name == "Normal XY route long status"
+    assert rows[2056].name == "Normal XY physical limit"
+    assert rows[2057].name == "Normal XY legacy smoke"
+    assert all(row.subsystem == "Motion" for row in rows.values())
+    assert "route" in rows[2050].metrics
+    assert "sg" in rows[2054].metrics
+    assert "lat" in rows[2055].metrics
+    assert "win" in rows[2056].metrics
+    assert "z" in rows[2057].metrics
 
 
 def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():

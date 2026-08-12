@@ -39,8 +39,11 @@ namespace {
 
 #if defined(__GNUC__) && !defined(UNIT_TEST)
 #define LC_COORDINATED_HW_OPTIMIZED __attribute__((optimize("O2"), hot))
+#define LC_COORDINATED_HW_ALWAYS_INLINE \
+  inline __attribute__((always_inline, optimize("O2")))
 #else
 #define LC_COORDINATED_HW_OPTIMIZED
+#define LC_COORDINATED_HW_ALWAYS_INLINE inline
 #endif
 
 bool gantryIsApb2Timer(TIM_TypeDef* instance) {
@@ -66,7 +69,7 @@ uint32_t gantryTimerMaxArr(TIM_HandleTypeDef* timer) {
       : 0xFFFFu;
 }
 
-LC_COORDINATED_HW_OPTIMIZED
+LC_COORDINATED_HW_ALWAYS_INLINE
 uint32_t gantryCycleNow() {
   return DWT->CYCCNT;
 }
@@ -79,7 +82,7 @@ void gantryEnableCycleCounter() {
   }
 }
 
-LC_COORDINATED_HW_OPTIMIZED
+LC_COORDINATED_HW_ALWAYS_INLINE
 void gantryStopAndClearUpdateTimer(TIM_HandleTypeDef* timer) {
   if (timer == nullptr || timer->Instance == nullptr) return;
 
@@ -93,11 +96,6 @@ void gantryStopAndClearUpdateTimer(TIM_HandleTypeDef* timer) {
   // Mirror HAL_TIM_Base_Stop_IT()'s ownership handoff so a terminal
   // coordinated move can be followed immediately by a legacy move.
   timer->State = HAL_TIM_STATE_READY;
-}
-
-bool coordinatedStartAccepted(CoordinatedStartStatus status) {
-  return status == CoordinatedStartStatus::Started ||
-         status == CoordinatedStartStatus::Immediate;
 }
 
 }  // namespace
@@ -118,51 +116,58 @@ void Gantry::begin() {
   _instance = this;
 }
 
-void Gantry::moveTo(int32_t x, int32_t y, uint32_t feedHz) {
+CoordinatedStartStatus Gantry::moveTo(int32_t x,
+                                      int32_t y,
+                                      uint32_t feedHz) {
 #if LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE != 0
+	(void)feedHz;
 	const GantryPosition current = getPosition();
-	const CoordinatedStartStatus status = startCoordinatedXY(
+	return startCoordinatedXY(
 	    static_cast<int64_t>(x) - current.x,
 	    static_cast<int64_t>(y) - current.y,
 	    0u);
-	if (!coordinatedStartAccepted(status)) {
-	  xEventGroupSetBits(Orchestrator::getDoneEvents(),
-	                     BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
-	}
-	return;
 #else
-	int32_t currX = MX_STEPPERX_GetPos();
-	int32_t currY = MX_STEPPERY_GetPos();
-
-	int32_t dx = x - currX;
-	int32_t dy = y - currY;
-
-	moveBy(dx,dy,0,feedHz);
+	const int64_t dx = static_cast<int64_t>(x) - MX_STEPPERX_GetPos();
+	const int64_t dy = static_cast<int64_t>(y) - MX_STEPPERY_GetPos();
+	if (dx < std::numeric_limits<int32_t>::min() ||
+	    dx > std::numeric_limits<int32_t>::max() ||
+	    dy < std::numeric_limits<int32_t>::min() ||
+	    dy > std::numeric_limits<int32_t>::max()) {
+	  return CoordinatedStartStatus::PositionOutOfRange;
+	}
+	return moveBy(static_cast<int32_t>(dx),
+	              static_cast<int32_t>(dy),
+	              0,
+	              feedHz);
 #endif
 }
 //----------------------------------------------------------------------
-void Gantry::moveBy(int32_t dx, int32_t dy, int32_t dz, uint32_t /*feedHz unused*/) {
+CoordinatedStartStatus Gantry::moveBy(int32_t dx,
+                                      int32_t dy,
+                                      int32_t dz,
+                                      uint32_t /*feedHz unused*/) {
+  if (dz != 0 && (dx != 0 || dy != 0)) {
+    return CoordinatedStartStatus::UnsupportedMixedAxis;
+  }
 #if LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE != 0
   if (dz == 0) {
-    const CoordinatedStartStatus status = startCoordinatedXY(dx, dy, 0u);
-    if (!coordinatedStartAccepted(status)) {
-      xEventGroupSetBits(Orchestrator::getDoneEvents(),
-                         BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
-    }
-    return;
+    return startCoordinatedXY(dx, dy, 0u);
   }
 #endif
-  const uint32_t Nx = (uint32_t)std::abs(dx);
-  const uint32_t Ny = (uint32_t)std::abs(dy);
-  const uint32_t Nz = (uint32_t)std::abs(dz);
+  const uint32_t Nx = static_cast<uint32_t>(
+      dx < 0 ? -static_cast<int64_t>(dx) : static_cast<int64_t>(dx));
+  const uint32_t Ny = static_cast<uint32_t>(
+      dy < 0 ? -static_cast<int64_t>(dy) : static_cast<int64_t>(dy));
+  const uint32_t Nz = static_cast<uint32_t>(
+      dz < 0 ? -static_cast<int64_t>(dz) : static_cast<int64_t>(dz));
 
   const uint32_t Nmax = std::max(std::max(Nx, Ny), Nz);
-  if (Nmax == 0u) return;
+  if (Nmax == 0u) return CoordinatedStartStatus::Immediate;
 
   Stepper* sx = Stepper::stepperX();
   Stepper* sy = Stepper::stepperY();
   Stepper* sz = Stepper::stepperZ();
-  if (!sx || !sy || !sz) return;
+  if (!sx || !sy || !sz) return CoordinatedStartStatus::HardwareMismatch;
 
   // Find which axis is the "longest" for this move
   Stepper* slong = (Nmax == Nx) ? sx : (Nmax == Ny ? sy : sz);
@@ -183,6 +188,7 @@ void Gantry::moveBy(int32_t dx, int32_t dy, int32_t dz, uint32_t /*feedHz unused
   MX_STEPPERX_Move(dx >= 0, Nx, fx, /*accelSteps ignored*/ 0u);
   MX_STEPPERY_Move(dy >= 0, Ny, fy, /*accelSteps ignored*/ 0u);
   MX_STEPPERZ_Move(dz >= 0, Nz, fz, /*accelSteps ignored*/ 0u);
+  return CoordinatedStartStatus::Started;
 }
 
 CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
@@ -209,8 +215,10 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
   const bool alreadyActive = _coordinatedTimerOwned ||
       CoordinatedXyExecutor::isActive(_coordinatedCursor);
   taskEXIT_CRITICAL();
-  if (alreadyActive || sz->isBusy() || sz->_homeSequenceActive ||
-      sz->_legacyMoveStartPending) {
+  if (alreadyActive ||
+      sx->isBusy() || sx->_homeSequenceActive || sx->_legacyMoveStartPending ||
+      sy->isBusy() || sy->_homeSequenceActive || sy->_legacyMoveStartPending ||
+      sz->isBusy() || sz->_homeSequenceActive || sz->_legacyMoveStartPending) {
     _coordinatedStartStatus = CoordinatedStartStatus::Busy;
     return _coordinatedStartStatus;
   }
@@ -252,6 +260,13 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
   if (planStatus == CoordinatedXyPlanner::PlanStatus::Immediate) {
     _coordinatedPlan = plan;
     (void)CoordinatedXyExecutor::arm(plan, _coordinatedCursor);
+    sx->_targetPos = sx->_pos;
+    sy->_targetPos = sy->_pos;
+    _coordinatedX = sx;
+    _coordinatedY = sy;
+    _coordinatedMasterTimer = sx->_htim;
+    _coordinatedTimerOwned = false;
+    _resetCoordinatedInstrumentation(0u);
     _coordinatedStartStatus = CoordinatedStartStatus::Immediate;
     xEventGroupClearBits(Orchestrator::getDoneEvents(),
                          BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
@@ -378,17 +393,21 @@ void Gantry::_resetCoordinatedInstrumentation(uint32_t firstArr) {
   _coordinatedTim7Interrupts = 0u;
   _coordinatedPendingUpdateCount = 0u;
   _coordinatedMaxIsrCycles = 0u;
+  _coordinatedLimitAbortRequestCount = 0u;
+  _coordinatedRawLimitAbortCount = 0u;
+  _coordinatedLimitRequestRisingEdges = 0u;
+  _coordinatedLimitRequestFallingEdges = 0u;
   _coordinatedArrMin = firstArr;
   _coordinatedArrMax = firstArr;
 }
 
-LC_COORDINATED_HW_OPTIMIZED
+LC_COORDINATED_HW_ALWAYS_INLINE
 void Gantry::_observeCoordinatedArr(uint32_t arr) {
   if (arr < _coordinatedArrMin) _coordinatedArrMin = arr;
   if (arr > _coordinatedArrMax) _coordinatedArrMax = arr;
 }
 
-LC_COORDINATED_HW_OPTIMIZED
+LC_COORDINATED_HW_ALWAYS_INLINE
 void Gantry::_finishCoordinatedHardware(bool aborted) {
   gantryStopAndClearUpdateTimer(_coordinatedMasterTimer);
   if (_coordinatedY != nullptr) {
@@ -403,7 +422,7 @@ void Gantry::_finishCoordinatedHardware(bool aborted) {
   _coordinatedTimerOwned = false;
 }
 
-LC_COORDINATED_HW_OPTIMIZED
+LC_COORDINATED_HW_ALWAYS_INLINE
 void Gantry::_finishCoordinatedFromIsr(bool aborted, BaseType_t* woken) {
   _finishCoordinatedHardware(aborted);
   xEventGroupSetBitsFromISR(Orchestrator::getDoneEvents(),
@@ -427,6 +446,41 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
   if (htim != _coordinatedMasterTimer) return false;
 
   const uint32_t entryCycle = gantryCycleNow();
+  CoordinatedXyExecutor::ControlDisposition observedLimit =
+      CoordinatedXyExecutor::ControlDisposition::AlreadySatisfied;
+  if (_coordinatedX != nullptr &&
+      _coordinatedX->_coordinatedLimitAssertedFast()) {
+    if (_coordinatedLimitAbortRequestCount == 0u) {
+      _coordinatedLimitRequestRisingEdges = _coordinatedCursor.risingEdges;
+      _coordinatedLimitRequestFallingEdges = _coordinatedCursor.fallingEdges;
+    }
+    ++_coordinatedLimitAbortRequestCount;
+    ++_coordinatedRawLimitAbortCount;
+    observedLimit = CoordinatedXyExecutor::requestLimitAbort(
+        _coordinatedCursor, CoordinatedXyExecutor::LimitAxis::X);
+  } else if (_coordinatedY != nullptr &&
+             _coordinatedY->_coordinatedLimitAssertedFast()) {
+    if (_coordinatedLimitAbortRequestCount == 0u) {
+      _coordinatedLimitRequestRisingEdges = _coordinatedCursor.risingEdges;
+      _coordinatedLimitRequestFallingEdges = _coordinatedCursor.fallingEdges;
+    }
+    ++_coordinatedLimitAbortRequestCount;
+    ++_coordinatedRawLimitAbortCount;
+    observedLimit = CoordinatedXyExecutor::requestLimitAbort(
+        _coordinatedCursor, CoordinatedXyExecutor::LimitAxis::Y);
+  }
+
+  if (observedLimit == CoordinatedXyExecutor::ControlDisposition::StopNow) {
+    BaseType_t woken = pdFALSE;
+    _finishCoordinatedFromIsr(true, &woken);
+    const uint32_t cycles = gantryCycleNow() - entryCycle;
+    if (cycles > _coordinatedMaxIsrCycles) {
+      _coordinatedMaxIsrCycles = cycles;
+    }
+    portYIELD_FROM_ISR(woken);
+    return true;
+  }
+
   CoordinatedXyExecutor::TickResult tick{};
   const CoordinatedXyExecutor::TickStatus status =
       CoordinatedXyExecutor::onTimerUpdate(
@@ -488,6 +542,7 @@ bool Gantry::dispatchCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
 }
 
 #undef LC_COORDINATED_HW_OPTIMIZED
+#undef LC_COORDINATED_HW_ALWAYS_INLINE
 
 //// moveBy: fan-in three axes so they finish simultaneously
 //void Gantry::moveBy(int32_t dx, int32_t dy, int32_t dz, uint32_t feedHz) {
@@ -719,12 +774,19 @@ void Gantry::requestCoordinatedLimitAbortFromIsr(Stepper::Axis axis) {
       (axis != Stepper::X_AXIS && axis != Stepper::Y_AXIS)) {
     return;
   }
-  const CoordinatedXyExecutor::ControlDisposition disposition =
+  if (gantry->_coordinatedLimitAbortRequestCount == 0u) {
+    gantry->_coordinatedLimitRequestRisingEdges =
+        gantry->_coordinatedCursor.risingEdges;
+    gantry->_coordinatedLimitRequestFallingEdges =
+        gantry->_coordinatedCursor.fallingEdges;
+  }
+  ++gantry->_coordinatedLimitAbortRequestCount;
+  const CoordinatedXyExecutor::ControlDisposition requestDisposition =
       CoordinatedXyExecutor::requestLimitAbort(
           gantry->_coordinatedCursor,
           axis == Stepper::X_AXIS ? CoordinatedXyExecutor::LimitAxis::X
                                   : CoordinatedXyExecutor::LimitAxis::Y);
-  if (disposition == CoordinatedXyExecutor::ControlDisposition::StopNow) {
+  if (requestDisposition == CoordinatedXyExecutor::ControlDisposition::StopNow) {
     BaseType_t woken = pdFALSE;
     gantry->_finishCoordinatedFromIsr(true, &woken);
     portYIELD_FROM_ISR(woken);
@@ -787,6 +849,10 @@ CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
   snapshot.arrMax = _coordinatedArrMax;
   snapshot.pendingUpdateCount = _coordinatedPendingUpdateCount;
   snapshot.maxIsrCycles = _coordinatedMaxIsrCycles;
+  snapshot.limitAbortRequestCount = _coordinatedLimitAbortRequestCount;
+  snapshot.rawLimitAbortCount = _coordinatedRawLimitAbortCount;
+  snapshot.limitRequestRisingEdges = _coordinatedLimitRequestRisingEdges;
+  snapshot.limitRequestFallingEdges = _coordinatedLimitRequestFallingEdges;
   snapshot.maskChecksum = _coordinatedCursor.maskChecksum;
   snapshot.arrChecksum = _coordinatedCursor.arrChecksum;
   snapshot.timerOwned = _coordinatedTimerOwned;

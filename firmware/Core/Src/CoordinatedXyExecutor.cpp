@@ -6,8 +6,11 @@ namespace {
 
 #if defined(__GNUC__) && !defined(UNIT_TEST)
 #define LC_COORDINATED_EDGE_OPTIMIZED __attribute__((optimize("O2"), hot))
+#define LC_COORDINATED_EDGE_ALWAYS_INLINE \
+  inline __attribute__((always_inline, optimize("O2")))
 #else
 #define LC_COORDINATED_EDGE_OPTIMIZED
+#define LC_COORDINATED_EDGE_ALWAYS_INLINE inline
 #endif
 
 using CoordinatedXyPlanner::TraceStatus;
@@ -21,6 +24,7 @@ uint32_t hashWord(uint32_t checksum, uint32_t value) {
   return checksum;
 }
 
+LC_COORDINATED_EDGE_ALWAYS_INLINE
 uint8_t controlPriority(PendingControl control) {
   switch (control) {
     case PendingControl::XLimit:
@@ -36,7 +40,7 @@ uint8_t controlPriority(PendingControl control) {
   }
 }
 
-LC_COORDINATED_EDGE_OPTIMIZED
+LC_COORDINATED_EDGE_ALWAYS_INLINE
 void setTerminal(Cursor& cursor, PendingControl control) {
   cursor.pendingControl = PendingControl::None;
   cursor.stepHigh = false;
@@ -71,8 +75,12 @@ void setPlannerFault(Cursor& cursor, TickResult& result) {
   result.signalDone = true;
 }
 
+LC_COORDINATED_EDGE_ALWAYS_INLINE
 ControlDisposition requestControl(Cursor& cursor, PendingControl requested) {
-  if (isTerminal(cursor)) return ControlDisposition::AlreadySatisfied;
+  if (cursor.state == State::Completed || cursor.state == State::Canceled ||
+      cursor.state == State::LimitAborted || cursor.state == State::Faulted) {
+    return ControlDisposition::AlreadySatisfied;
+  }
   if (cursor.state != State::Running && cursor.state != State::Armed &&
       cursor.state != State::Paused) {
     return ControlDisposition::InvalidState;
@@ -176,6 +184,7 @@ ControlDisposition requestCancel(Cursor& cursor) {
   return requestControl(cursor, PendingControl::Cancel);
 }
 
+LC_COORDINATED_EDGE_OPTIMIZED
 ControlDisposition requestLimitAbort(Cursor& cursor, LimitAxis axis) {
   return requestControl(cursor,
                         axis == LimitAxis::X ? PendingControl::XLimit
@@ -222,11 +231,16 @@ TickStatus onTimerUpdate(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
     return result.status;
   }
 
-  if (cursor.pendingControl != PendingControl::None) {
-    return applyDeferredControl(cursor, result);
-  }
-
   if (advanceStatus == TraceStatus::Complete) {
+    // Cancel and limit requests retain their terminal reason even when they
+    // arrive during the final high phase. A pause at the same point has no
+    // remaining event to preserve, so completing is the only resumable-safe
+    // outcome and guarantees that no extra rising edge can be emitted.
+    if (cursor.pendingControl != PendingControl::None &&
+        cursor.pendingControl != PendingControl::Pause) {
+      return applyDeferredControl(cursor, result);
+    }
+    cursor.pendingControl = PendingControl::None;
     cursor.state = State::Completed;
     cursor.terminalReason = TerminalReason::Completed;
     result.status = TickStatus::Completed;
@@ -235,6 +249,16 @@ TickStatus onTimerUpdate(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
     return result.status;
   }
 
+  // Cancel/limit requests do not need another event. Apply them before the
+  // next-event lookup to keep their terminal ISR path bounded.
+  if (cursor.pendingControl != PendingControl::None &&
+      cursor.pendingControl != PendingControl::Pause) {
+    return applyDeferredControl(cursor, result);
+  }
+
+  // The falling edge advanced the planner, so refresh the cache before
+  // entering Paused. Resume must raise this next event, never repeat the event
+  // whose falling edge was just accounted.
   if (CoordinatedXyPlanner::currentEvent(cursor.planner,
                                          cursor.cachedEvent) !=
       TraceStatus::Ready) {
@@ -243,6 +267,9 @@ TickStatus onTimerUpdate(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
   }
   result.nextArr = cursor.cachedEvent.arr;
   result.updateArr = true;
+  if (cursor.pendingControl == PendingControl::Pause) {
+    return applyDeferredControl(cursor, result);
+  }
   return result.status;
 }
 
@@ -268,5 +295,6 @@ ReservationStatus evaluateReservation(const AxisReservationState& x,
 }
 
 #undef LC_COORDINATED_EDGE_OPTIMIZED
+#undef LC_COORDINATED_EDGE_ALWAYS_INLINE
 
 }  // namespace CoordinatedXyExecutor

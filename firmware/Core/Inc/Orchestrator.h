@@ -15,6 +15,8 @@
 #include "PrinterCompletionBits.h"
 #include "RegulatorPausePolicy.h"
 #include "HomeInterruptionPolicy.h"
+#include "Gantry.h"
+#include "OrchestratorCompletionPolicy.h"
 
 #include <cstdint>
 #include <cstring>
@@ -186,6 +188,20 @@ public:
     inline bool  p1b() const { return p1 != 0; }
   };
 
+  struct AbsoluteXyExecutionResult {
+    CoordinatedStartStatus startStatus = CoordinatedStartStatus::Disabled;
+    CoordinatedXyExecutor::TerminalReason terminalReason =
+        CoordinatedXyExecutor::TerminalReason::None;
+    OrchestratorCompletionPolicy::AbsXyDisposition disposition =
+        OrchestratorCompletionPolicy::AbsXyDisposition::MotionFailure;
+    bool waitCompleted = false;
+    bool endpointMatches = false;
+    bool targetsMatch = false;
+    bool holdRequested = false;
+    bool printHoldAcquired = false;
+    bool refuelHoldAcquired = false;
+  };
+
   Orchestrator();
 
   static Orchestrator* instance();
@@ -284,6 +300,7 @@ public:
   bool _interruptedCommandHome = false;
   bool _restartingInterruptedHome = false;
   bool _homeFailureLatched = false;
+  bool _xyMotionFailureLatched = false;
   HomeInterruptionPolicy::Lifecycle _homeLifecycle{};
   RegulatorPausePolicy::Snapshot _regulatorPauseSnapshot{};
 
@@ -415,6 +432,14 @@ private:
   void                   drainAckQueue();
   void                   retireAcceptedPendingCommands();
   void                   applyPauseAfterWatermark();
+  AbsoluteXyExecutionResult executeAbsoluteXy(int32_t targetX,
+                                               int32_t targetY,
+                                               uint32_t feedHz,
+                                               bool latchFailure,
+                                               uint32_t diagnosticTimeoutMs = 0u);
+  bool validateResumedAbsoluteXy(int32_t targetX, int32_t targetY);
+  void latchXyMotionFailure(const char* reason);
+  void clearXyMotionFailure();
 
   QueueHandle_t          _cmdQueue;
   QueueHandle_t          _ackQueue;

@@ -98,3 +98,21 @@ target_link_libraries(fw_tests PRIVATE
     CppUTest
     CppUTestExt
 )
+
+# Compile the public gate contract a second time with the Milestone 5 A/B
+# rollback setting. This target has no runtime behavior; a normal-route gate
+# that cannot be overridden makes the host build fail.
+add_library(coordinated_xy_legacy_gate_compile OBJECT
+    tests/compile_coordinated_xy_legacy_gate.cpp
+)
+target_include_directories(coordinated_xy_legacy_gate_compile PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/../Core/Inc
+)
+target_compile_definitions(coordinated_xy_legacy_gate_compile PRIVATE
+    UNIT_TEST=1
+    LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE=0
+)
+set_target_properties(coordinated_xy_legacy_gate_compile PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+)

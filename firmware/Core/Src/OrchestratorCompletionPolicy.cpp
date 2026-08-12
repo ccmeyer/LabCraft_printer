@@ -29,6 +29,20 @@ bool shouldHoldRegulatorsForAbsXy(int32_t dx, int32_t dy, uint32_t thresholdStep
     return longest >= thresholdSteps;
 }
 
+AbsXyDisposition evaluateAbsXyCompletion(const AbsXyCompletionInput& input) {
+    if (!input.startAccepted || input.terminalFailure) {
+        return AbsXyDisposition::MotionFailure;
+    }
+    if (input.controlInterrupted) {
+        return AbsXyDisposition::Interrupted;
+    }
+    if (!input.waitCompleted || !input.terminalCompleted || !input.endpointMatches ||
+        !input.targetsMatch) {
+        return AbsXyDisposition::MotionFailure;
+    }
+    return AbsXyDisposition::Completed;
+}
+
 void retireCurrentCommand(uint32_t currentCmdNum, uint32_t& lastExecutedCmdNum, uint32_t& lastRetiredCmdNum) {
     lastExecutedCmdNum = currentCmdNum;
     lastRetiredCmdNum = currentCmdNum;

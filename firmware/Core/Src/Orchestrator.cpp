@@ -284,7 +284,7 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 			  CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_RX);
 			  // Reset any stale state and request HELLO_ACK
 			  discardPressureRegulatorResume();
-			  _paused = false; _pauseRequested = false;
+			  _paused = _xyMotionFailureLatched; _pauseRequested = false;
 		  _seqEpoch=0; _lastSeq8=0; _currentCmdNum=0; _lastExecutedCmdNum=0;
 		  _resumeRequested = false; _clearRequested = false;
 		  _shutdownRequested = false;
@@ -424,6 +424,171 @@ void Orchestrator::cancelCurrent() {
 //  Logger::instance()->log("cancelCurrent\r\n");
   Gantry::instance()->cancelXYZMotors();
   Printer::instance()->cancelDispense();
+}
+
+Orchestrator::AbsoluteXyExecutionResult Orchestrator::executeAbsoluteXy(
+    int32_t targetX,
+    int32_t targetY,
+    uint32_t feedHz,
+    bool latchFailure,
+    uint32_t diagnosticTimeoutMs) {
+  AbsoluteXyExecutionResult result{};
+  const GantryPosition start = Gantry::instance()->getPosition();
+  const int64_t dxWide = static_cast<int64_t>(targetX) - start.x;
+  const int64_t dyWide = static_cast<int64_t>(targetY) - start.y;
+  const auto clampDelta = [](int64_t value) -> int32_t {
+    if (value < static_cast<int64_t>(INT32_MIN)) return INT32_MIN;
+    if (value > static_cast<int64_t>(INT32_MAX)) return INT32_MAX;
+    return static_cast<int32_t>(value);
+  };
+
+  Printer* printer = Printer::instance();
+  const bool printerBusy = printer != nullptr && printer->isBusy();
+  result.holdRequested =
+      OrchestratorCompletionPolicy::shouldHoldRegulatorsForAbsXy(
+          clampDelta(dxWide),
+          clampDelta(dyWide),
+          kRegulatorMotionHoldAbsXyThresholdSteps,
+          printerBusy);
+  if (result.holdRequested) {
+    result.printHoldAcquired = PressureRegulator::regP().enterMotionHold();
+#if (LC_PRESSURE_PORTS > 1)
+    result.refuelHoldAcquired = PressureRegulator::regR().enterMotionHold();
+#endif
+  }
+
+  sampleOrchStack(ORCH_STACK_PHASE_ABS_XY_BEFORE_MOVE);
+  result.startStatus = Gantry::instance()->moveTo(targetX, targetY, feedHz);
+  sampleOrchStack(ORCH_STACK_PHASE_ABS_XY_AFTER_MOVE);
+  const bool startAccepted =
+      result.startStatus == CoordinatedStartStatus::Started ||
+      result.startStatus == CoordinatedStartStatus::Immediate;
+  if (startAccepted) {
+    if (diagnosticTimeoutMs == 0u) {
+      result.waitCompleted = waitForBits(BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+    } else {
+      const uint32_t startedMs = HAL_GetTick();
+      const EventBits_t completionBits = BIT_STEPPER1_DONE | BIT_STEPPER2_DONE;
+      const TickType_t pollTicks = msToAtLeast1Tick(10u);
+      while ((HAL_GetTick() - startedMs) < diagnosticTimeoutMs) {
+        Watchdog_CheckIn(CRASH_TASK_ORCH);
+        drainAckQueue();
+        if (_paused || _pauseRequested || _clearRequested || _shutdownRequested ||
+            _selfTestAbortRequested) {
+          break;
+        }
+        const EventBits_t bits = xEventGroupWaitBits(
+            _doneEvents, completionBits, pdTRUE, pdTRUE, pollTicks);
+        if ((bits & completionBits) == completionBits) {
+          result.waitCompleted = true;
+          break;
+        }
+      }
+      if (!result.waitCompleted && !_paused && !_pauseRequested &&
+          !_clearRequested && !_shutdownRequested) {
+        Gantry::cancelXYZMotors();
+      }
+    }
+  }
+
+  const bool controlInterrupted =
+      _paused || _pauseRequested || _clearRequested || _shutdownRequested;
+  const GantryPosition end = Gantry::instance()->getPosition();
+  result.endpointMatches = end.x == targetX && end.y == targetY;
+  Stepper* stepperX = Stepper::stepperX();
+  Stepper* stepperY = Stepper::stepperY();
+  result.targetsMatch = stepperX != nullptr && stepperY != nullptr &&
+      stepperX->getTargetPosition() == targetX &&
+      stepperY->getTargetPosition() == targetY;
+
+  bool terminalCompleted = result.waitCompleted;
+  bool terminalFailure = false;
+#if LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE != 0
+  const CoordinatedXySnapshot snapshot = Gantry::instance()->coordinatedSnapshot();
+  result.terminalReason = snapshot.terminalReason;
+  terminalCompleted =
+      snapshot.state == CoordinatedXyExecutor::State::Completed &&
+      snapshot.terminalReason == CoordinatedXyExecutor::TerminalReason::Completed;
+  terminalFailure =
+      snapshot.state == CoordinatedXyExecutor::State::LimitAborted ||
+      snapshot.state == CoordinatedXyExecutor::State::Faulted;
+#else
+  result.terminalReason = terminalCompleted
+      ? CoordinatedXyExecutor::TerminalReason::Completed
+      : CoordinatedXyExecutor::TerminalReason::None;
+#endif
+
+#if (LC_PRESSURE_PORTS > 1)
+  if (result.refuelHoldAcquired) {
+    PressureRegulator::regR().exitMotionHold();
+  }
+#endif
+  if (result.printHoldAcquired) {
+    PressureRegulator::regP().exitMotionHold();
+  }
+
+  result.disposition = OrchestratorCompletionPolicy::evaluateAbsXyCompletion({
+      startAccepted,
+      result.waitCompleted,
+      controlInterrupted,
+      terminalCompleted,
+      terminalFailure,
+      result.endpointMatches,
+      result.targetsMatch,
+  });
+  if (latchFailure &&
+      result.disposition ==
+          OrchestratorCompletionPolicy::AbsXyDisposition::MotionFailure) {
+    const char* reason = "endpoint_mismatch";
+    if (!startAccepted) {
+      reason = "start_rejected";
+    } else if (result.terminalReason ==
+               CoordinatedXyExecutor::TerminalReason::XLimit) {
+      reason = "x_limit";
+    } else if (result.terminalReason ==
+               CoordinatedXyExecutor::TerminalReason::YLimit) {
+      reason = "y_limit";
+    } else if (result.terminalReason ==
+               CoordinatedXyExecutor::TerminalReason::PlannerFault) {
+      reason = "planner_fault";
+    }
+    latchXyMotionFailure(reason);
+  }
+  return result;
+}
+
+bool Orchestrator::validateResumedAbsoluteXy(int32_t targetX,
+                                             int32_t targetY) {
+  const GantryPosition position = Gantry::instance()->getPosition();
+  Stepper* stepperX = Stepper::stepperX();
+  Stepper* stepperY = Stepper::stepperY();
+  bool completed = position.x == targetX && position.y == targetY &&
+      stepperX != nullptr && stepperY != nullptr &&
+      stepperX->getTargetPosition() == targetX &&
+      stepperY->getTargetPosition() == targetY;
+#if LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE != 0
+  const CoordinatedXySnapshot snapshot = Gantry::instance()->coordinatedSnapshot();
+  completed = completed &&
+      snapshot.state == CoordinatedXyExecutor::State::Completed &&
+      snapshot.terminalReason == CoordinatedXyExecutor::TerminalReason::Completed;
+#endif
+  if (!completed) {
+    latchXyMotionFailure("resume_terminal_mismatch");
+  }
+  return completed;
+}
+
+void Orchestrator::latchXyMotionFailure(const char* reason) {
+  _xyMotionFailureLatched = true;
+  _paused = true;
+  _pauseRequested = false;
+  Gantry::instance()->cancelXYZMotors();
+  Logger::instance()->log("[XY] motion failure latched reason=%s\r\n",
+                          reason != nullptr ? reason : "unknown");
+}
+
+void Orchestrator::clearXyMotionFailure() {
+  _xyMotionFailureLatched = false;
 }
 
 void Orchestrator::pausePressureRegulators() {
@@ -800,6 +965,11 @@ void Orchestrator::_run() {
 			_resumeRequested = false;
 			continue;
 		}
+		if (_xyMotionFailureLatched) {
+			Logger::instance()->log("[XY] Resume ignored while motion failure is latched\r\n");
+			_resumeRequested = false;
+			continue;
+		}
 		if (_pauseWatermarkReached) {
 			resumePressureRegulators();
 			_pauseWatermarkReached = false;
@@ -847,7 +1017,10 @@ void Orchestrator::_run() {
 			  resumedCommandCompleted = waitForBit(BIT_STEPPER3_DONE);
 			  break;
 			case CMD_ABS_XY:
-			  resumedCommandCompleted = waitForBits(BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+			  resumedCommandCompleted =
+			      waitForBits(BIT_STEPPER1_DONE | BIT_STEPPER2_DONE) &&
+			      validateResumedAbsoluteXy(_lastPausedCmd.p1s(),
+			                                _lastPausedCmd.p2s());
 			  break;
 			case CMD_DISPENSE:
 			case CMD_DISPENSE_PRINT:
@@ -917,6 +1090,9 @@ void Orchestrator::_run() {
             BIT_HOME_X_DONE|BIT_HOME_Y_DONE|BIT_HOME_Z_DONE|BIT_HOME_P_DONE|BIT_HOME_R_DONE);
 
         const bool clearSettled = homesSettled && printerSettled;
+		if (clearSettled) {
+		  clearXyMotionFailure();
+		}
         _paused = !clearSettled;
         _homeFailureLatched = !homesSettled;
         _clearRequested = false;
@@ -1107,42 +1283,10 @@ void Orchestrator::executeCommand(const Command &cmd) {
           break;
         }
         case CMD_ABS_XY: {
-          // p1=X, p2=Y, p3=freqHz
-          const GantryPosition pos = Gantry::instance()->getPosition();
-          const int32_t dx = cmd.p1 - pos.x;
-          const int32_t dy = cmd.p2 - pos.y;
-          Printer* printer = Printer::instance();
-          const bool printerBusy = (printer != nullptr) && printer->isBusy();
-          const bool shouldHoldRegulators =
-              OrchestratorCompletionPolicy::shouldHoldRegulatorsForAbsXy(
-                  dx,
-                  dy,
-                  kRegulatorMotionHoldAbsXyThresholdSteps,
-                  printerBusy);
-          bool heldPrintRegulator = false;
-          bool heldRefuelRegulator = false;
-          if (shouldHoldRegulators) {
-            heldPrintRegulator = PressureRegulator::regP().enterMotionHold();
-          #if (LC_PRESSURE_PORTS > 1)
-            heldRefuelRegulator = PressureRegulator::regR().enterMotionHold();
-          #endif
-          }
-
-          sampleOrchStack(ORCH_STACK_PHASE_ABS_XY_BEFORE_MOVE);
-          Gantry::instance()->moveTo(cmd.p1,cmd.p2,cmd.p3);
-          sampleOrchStack(ORCH_STACK_PHASE_ABS_XY_AFTER_MOVE);
-          commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(
-              waitForBit(BIT_STEPPER1_DONE, ORCH_STACK_PHASE_ABS_XY_WAIT_X) &&
-              waitForBit(BIT_STEPPER2_DONE, ORCH_STACK_PHASE_ABS_XY_WAIT_Y)
-          );
-        #if (LC_PRESSURE_PORTS > 1)
-          if (heldRefuelRegulator) {
-            PressureRegulator::regR().exitMotionHold();
-          }
-        #endif
-          if (heldPrintRegulator) {
-            PressureRegulator::regP().exitMotionHold();
-          }
+          const AbsoluteXyExecutionResult result = executeAbsoluteXy(
+              cmd.p1s(), cmd.p2s(), cmd.p3u(), true);
+          commandCompleted = result.disposition ==
+              OrchestratorCompletionPolicy::AbsXyDisposition::Completed;
           break;
         }
         case CMD_GRIPPER_OPEN: {
@@ -1798,6 +1942,7 @@ void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have
 #endif//
 
   _paused = true;     // remain paused until next HELLO
+  clearXyMotionFailure();
   _clearing = false;
 
   Logger::instance()->log("Shutdown done\r\n");

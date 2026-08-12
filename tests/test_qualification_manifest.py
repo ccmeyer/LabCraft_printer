@@ -191,6 +191,29 @@ def test_load_coordinated_xy_executor_manifest_freezes_loaded_safety_gates():
     assert manifest.analysis_rules["2046"]["metrics"]["cy"]["max"] == 2250
 
 
+def test_load_normal_xy_route_manifest_freezes_bounded_physical_safety_gates():
+    manifest = load_manifest("normal_xy_route_v1")
+
+    assert manifest.manifest_id == "normal_xy_route_v1"
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == tuple(range(2050, 2058))
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--normal-xy-route-suite",)
+    assert {item["fixture_id"] for item in manifest.fixtures} == {
+        "coordinated_xy_physical_limit_v1"
+    }
+    assert "maximum commanded window of 200 steps" in manifest.fixtures[0]["operator_note"]
+    assert "aggressive contact" in manifest.fixtures[0]["operator_note"]
+    assert manifest.analysis_rules["2050"]["metrics"]["route"]["equals"] == 1
+    assert manifest.analysis_rules["2054"]["metrics"]["sg"]["max"] == 499
+    assert manifest.analysis_rules["2055"]["metrics"]["lat"]["max"] == 1
+    assert manifest.analysis_rules["2056"]["metrics"]["win"]["equals"] == 200
+    assert manifest.analysis_rules["2056"]["metrics"]["xe"]["max"] == 200
+    assert manifest.analysis_rules["2056"]["metrics"]["cy"]["max"] == 2250
+    assert manifest.analysis_rules["2057"]["metrics"]["z"]["equals"] == 1
+
+
 def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture():
     manifest = load_manifest("motion_envelope_v1")
 

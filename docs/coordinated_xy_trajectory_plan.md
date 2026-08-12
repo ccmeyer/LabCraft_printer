@@ -19,7 +19,7 @@
 | Incident evidence | `logs/reset_bundles_260810_0739/` |
 | Designated HIL Pi | `192.168.0.33` |
 | Tracked firmware artifact policy | Every firmware milestone commit includes its matching `firmware/artifacts/LabCraft_firmware.bin` |
-| Runtime behavior changed by this document | No |
+| Runtime behavior changed by this document | Yes - the Milestone 5 candidate is verified at 3 kHz; production-speed qualification remains Milestone 6 |
 
 The core motion sources are unchanged between the reset-incident source and
 the source baseline recorded above. Milestone 0 replaced the original planning
@@ -223,22 +223,22 @@ Every milestone that touches motion must preserve these invariants:
 | 2. Fixed-point normalized LUT | `verified` | Unrouted 257-point Q20 profile and explicit non-motion target benchmark pass | Error and cycle budgets accepted |
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
-| 5. Route normal Gantry XY motion | `not_started` | `ABSOLUTE_XY` uses coordinated executor | Status, completion, and unchanged-path regressions pass |
+| 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
 | 6. Performance and motion HIL qualification | `not_started` | Speed ladder, straightness, lost-step, and reset evidence pass | Acceptance matrix complete |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
 
-Milestone 4 is verified at its 3 kHz gated integration scope. The corrected
-exact-binary suite passed SAFE 28/28 and coordinated executor results 2040-2046
-7/7, including low-rate sequential homing, pause/resume, cancel/recovery,
-injected limit aborts, exact pulse/callback counts, low STEP terminal state,
-and a 2,119-cycle worst case against the 2,250-cycle gate. The operator reported
-straight-looking equal and asymmetric motion, with the explicit caveat that
-the low speed made the short ramps difficult to judge. Next, create and review
-the concrete Milestone 5 plan; production-rate visual and starvation evidence
-remains a Milestone 6 requirement. Evidence is recorded in
-`docs/coordinated_xy_milestone4_executor.md`.
+Milestone 5 is verified at its 3 kHz integration scope. The exact route-enabled
+binary passed ordinary SAFE 28/28, normal-route 8/8, Milestone 4 executor 7/7,
+and closed-loop pressure 10/10 without reset or abort. Physical X/Y limits
+stopped after 105/102 emitted steps inside the 200-step bound, no rising edge
+followed assertion, home drift was 1/0 step, the worst normal-route ISR sample
+was 2,137 cycles, and the operator reported straight equal and asymmetric
+diagonals. Next, create the Milestone 6 performance and motion HIL plan for the
+5-40 kHz ladder, starvation proof, lost-step qualification, and production-rate
+straightness evidence. Evidence is recorded in
+`docs/coordinated_xy_milestone5_normal_route.md`.
 
 ## Milestone 0: Baseline And Decisions
 
@@ -577,7 +577,9 @@ production routing on the legacy path until bench safety behavior is verified.
 
 ## Milestone 5: Route Normal Gantry XY Motion
 
-Status: `not_started`
+Status: `verified`
+
+Evidence record: `docs/coordinated_xy_milestone5_normal_route.md`
 
 ### Goal
 
@@ -599,6 +601,25 @@ executor while leaving all named out-of-scope paths unchanged.
 - Confirm direct X/Y commands, Z, X/Y/Z homing, P/R control, and P/R homing still
   select their legacy paths.
 - Keep the A/B build gate available through Milestone 6.
+
+### Implemented shape
+
+- `LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE=1` is the tracked candidate default;
+  `-DLC_COORDINATED_XY_NORMAL_ROUTE_ENABLE=0` compiles the legacy A/B path.
+- `Gantry::moveTo()` returns the real coordinated startup result and passes a
+  requested rate of zero, preserving the ignored command feed field and the
+  configured 40 kHz cap. XY-only `moveBy()` is coordinated; Z-only remains
+  legacy; combined XY+Z is rejected before state changes.
+- Orchestrator uses one shared completion wait and validates the terminal
+  reason, positions, and targets. Rejection, limit, planner, and endpoint
+  failures pause the transport without retiring the command; successful CLEAR
+  or GOODBYE cleanup releases the latch.
+- Both EXTI forwarding and direct raw-switch sampling protect coordinated
+  motion. The raw check occurs before `onTimerUpdate()`, so no new rising edge
+  follows an asserted sample.
+- Explicit selector `2059` and manifest `normal_xy_route_v1` provide the 3 kHz
+  loaded integration, bounded physical-limit, status, control, and legacy-path
+  qualification. Pressure remains a separate fixture and suite.
 
 ### Likely files
 

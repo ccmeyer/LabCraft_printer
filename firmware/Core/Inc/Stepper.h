@@ -260,6 +260,16 @@ private:
   void          _accountCoordinatedPulse();
   void          _finishCoordinatedAxis(bool aborted);
   bool          _coordinatedStepIsLow() const;
+#if defined(__GNUC__) && !defined(UNIT_TEST)
+  __attribute__((always_inline)) inline bool
+#else
+  inline bool
+#endif
+                _coordinatedLimitAssertedFast() const {
+    if (_limPort == nullptr || _limPin == 0u) return false;
+    const bool high = (_limPort->IDR & static_cast<uint32_t>(_limPin)) != 0u;
+    return high == _limitActiveHigh;
+  }
 
   // your existing members …
   GPIO_TypeDef*   _limPort    = nullptr;

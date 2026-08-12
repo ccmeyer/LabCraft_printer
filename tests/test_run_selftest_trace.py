@@ -987,6 +987,65 @@ def test_run_sends_coordinated_xy_executor_selector_and_keeps_goodbye(monkeypatc
     assert sent_goodbye is True
 
 
+def test_run_sends_normal_xy_route_selector_and_keeps_goodbye(monkeypatch, tmp_path):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+
+    inbound = b"".join(
+        [
+            _hello_ack(mod),
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+
+    out_path = tmp_path / "selftest.json"
+    args = SimpleNamespace(
+        port="/dev/ttyAMA0",
+        baud=115200,
+        profile="FULL",
+        timeout_ms=1000,
+        hello_timeout_ms=1000,
+        hello_retry_ms=50,
+        fast_fail_on_missing_hello=False,
+        pressure_trace=False,
+        pressure_trace_test=None,
+        pressure_sweep_suite=None,
+        gripper_seal_suite=False,
+        xy_motion_suite=False,
+        motion_envelope_suite=False,
+        motion_timing_suite=False,
+        profile_lut_benchmark=False,
+        coordinated_xy_executor_suite=False,
+        normal_xy_route_suite=True,
+        out=str(out_path),
+    )
+
+    rc = mod.run(args)
+
+    assert rc == 0
+    sent_p3 = None
+    sent_goodbye = False
+    for outbound in serial.writes:
+        reader = mod.FrameReader()
+        for byte in outbound:
+            frame = reader.feed(byte)
+            if not frame:
+                continue
+            if frame[0] == mod.CMD_GOODBYE:
+                sent_goodbye = True
+            if frame[0] == mod.CMD_SELFTEST_START:
+                tlv = mod.parse_tlvs(frame[2:])
+                sent_p3 = tlv.get(mod.TAG_P3)
+    assert sent_p3 == (2059).to_bytes(2, "little")
+    assert sent_goodbye is True
+
+
 def test_run_sends_pressure_regulator_selector_and_keeps_goodbye(monkeypatch, tmp_path):
     mod = _load_run_selftest()
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
@@ -1886,6 +1945,7 @@ def test_coordinated_limit_preflight_stages_are_explicit_operator_prompts():
         "coord_x_limit_release": "Release the X limit switch",
         "coord_y_limit_press": "press and hold the Y limit switch",
         "coord_y_limit_release": "Release the Y limit switch",
+        "normal_route_envelope_clear": "complete XY and Z motion envelope is clear",
     }
     for stage, phrase in expected_phrases.items():
         assert mod._is_operator_prompt_stage(stage)

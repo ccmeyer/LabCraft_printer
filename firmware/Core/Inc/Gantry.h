@@ -25,6 +25,7 @@ enum class CoordinatedStartStatus : uint8_t {
   PositionOutOfRange = 5u,
   LimitAsserted = 6u,
   HardwareMismatch = 7u,
+  UnsupportedMixedAxis = 8u,
 };
 
 struct CoordinatedXySnapshot {
@@ -45,6 +46,10 @@ struct CoordinatedXySnapshot {
   uint32_t arrMax = 0u;
   uint32_t pendingUpdateCount = 0u;
   uint32_t maxIsrCycles = 0u;
+  uint32_t limitAbortRequestCount = 0u;
+  uint32_t rawLimitAbortCount = 0u;
+  uint32_t limitRequestRisingEdges = 0u;
+  uint32_t limitRequestFallingEdges = 0u;
   uint32_t maskChecksum = 0u;
   uint32_t arrChecksum = 0u;
   int32_t xPosition = 0;
@@ -68,9 +73,12 @@ public:
 
 
   /// Move each axis by (dx, dy, dz) full-steps, using feedHz as top speed on the longest axis
-  void moveBy(int32_t dx, int32_t dy, int32_t dz, uint32_t feedHz);
+  CoordinatedStartStatus moveBy(int32_t dx,
+                                int32_t dy,
+                                int32_t dz,
+                                uint32_t feedHz);
 
-  void moveTo(int32_t x, int32_t y, uint32_t feedHz);
+  CoordinatedStartStatus moveTo(int32_t x, int32_t y, uint32_t feedHz);
 
   CoordinatedStartStatus startCoordinatedXY(int64_t dx,
                                              int64_t dy,
@@ -125,6 +133,10 @@ private:
   volatile uint32_t _coordinatedTim7Interrupts = 0u;
   volatile uint32_t _coordinatedPendingUpdateCount = 0u;
   volatile uint32_t _coordinatedMaxIsrCycles = 0u;
+  volatile uint32_t _coordinatedLimitAbortRequestCount = 0u;
+  volatile uint32_t _coordinatedRawLimitAbortCount = 0u;
+  volatile uint32_t _coordinatedLimitRequestRisingEdges = 0u;
+  volatile uint32_t _coordinatedLimitRequestFallingEdges = 0u;
   volatile uint32_t _coordinatedArrMin = 0u;
   volatile uint32_t _coordinatedArrMax = 0u;
 

@@ -695,6 +695,11 @@ def _operator_prompt_message(stage: str) -> str:
         )
     if stage == "coord_y_limit_release":
         return "Release the Y limit switch, confirm it is fully released, then continue."
+    if stage == "normal_route_envelope_clear":
+        return (
+            "Confirm both limit switches are released, remove all hands, and verify the complete "
+            "XY and Z motion envelope is clear before homing and motion begin."
+        )
     return "Confirm the operator-gated self-test step is ready to continue."
 
 
@@ -705,6 +710,7 @@ def _is_operator_prompt_stage(stage: str) -> bool:
         "coord_x_limit_release",
         "coord_y_limit_press",
         "coord_y_limit_release",
+        "normal_route_envelope_clear",
     }
 
 
@@ -1224,11 +1230,12 @@ def run(args: argparse.Namespace) -> int:
         motion_envelope_suite = bool(getattr(args, "motion_envelope_suite", False))
         profile_lut_benchmark = bool(getattr(args, "profile_lut_benchmark", False))
         coordinated_xy_executor_suite = bool(getattr(args, "coordinated_xy_executor_suite", False))
+        normal_xy_route_suite = bool(getattr(args, "normal_xy_route_suite", False))
         pressure_regulator_suite = bool(getattr(args, "pressure_regulator_suite", False))
         refuel_vacuum_suite = bool(getattr(args, "refuel_vacuum_suite", False))
         valve_characterization_suite = bool(getattr(args, "valve_characterization_suite", False))
         valve_gap_sweep_suite = bool(getattr(args, "valve_gap_sweep_suite", False))
-        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2049 if coordinated_xy_executor_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
+        selector = 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2059 if normal_xy_route_suite else 2049 if coordinated_xy_executor_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
             pressure_sweep_suite if pressure_sweep_suite is not None else (
                 CUSTOM_PRESSURE_TRACE_TEST_ID if custom_trace_config is not None else pressure_trace_test
             )
@@ -1861,6 +1868,7 @@ def main() -> int:
     selector_group.add_argument("--motion-envelope-suite", action="store_true")
     selector_group.add_argument("--profile-lut-benchmark", action="store_true")
     selector_group.add_argument("--coordinated-xy-executor-suite", action="store_true")
+    selector_group.add_argument("--normal-xy-route-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-stress-suite", action="store_true")
     selector_group.add_argument("--valve-characterization-suite", action="store_true")

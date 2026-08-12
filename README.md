@@ -2651,11 +2651,9 @@ restoration, and a deterministic checksum. The manifest enforces the 180 MHz,
 225-cycle maximum, 4x speedup, 1,800-cycle preparation, two-tick error, and
 interrupt-restoration gates.
 
-The Milestone 4 gated coordinated-executor suite is hardware-blocked after an
-unsafe XY homing attempt. Do not run it until the printer is powered down and
-inspected for mechanical damage, both X/Y limit-switch actuators, mounts, and
-wiring have been checked, and a fresh operator authorization is given. After
-that review, the command remains:
+The Milestone 4 gated coordinated-executor suite completed its corrected 3 kHz
+qualification. It remains an explicit regression suite and still requires a
+clear motion envelope plus manual verification of both limit inputs:
 
 ```bash
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-executor-suite --out hil_reports/coordinated_xy_executor.json
@@ -2666,13 +2664,42 @@ python3 tools/run_qualification.py --manifest coordinated_xy_executor_v1 --opera
 any motion, it disables both XY motors and requires manual press/release
 verification of each physical limit input. A failed input check aborts the
 suite. After hands are removed, it homes Z and homes X/Y sequentially at a
-reduced 3 kHz/1 kHz rate, moves to `(5000,5000)` at the legacy 6 kHz safety
-rate, and runs short X-only, Y-only, equal, asymmetric, pause/resume, cancel,
-and injected-limit cases at 3 kHz. The operator must keep the entire motion
-envelope clear, stop immediately on unexpected contact, and report whether the
-equal and asymmetric ramping paths appear straight. The tracked firmware keeps
-`LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE=0`; ordinary `ABSOLUTE_XY` remains on
-the legacy independent X/TIM2 and Y/TIM7 executors.
+reduced 3 kHz/1 kHz rate, moves to `(5000,5000)`, and runs short X-only,
+Y-only, equal, asymmetric, pause/resume, cancel, and injected-limit cases at
+3 kHz. The operator must keep the entire motion envelope clear, stop
+immediately on unexpected contact, and report whether the equal and asymmetric
+ramping paths appear straight.
+
+The Milestone 5 candidate enables normal `ABSOLUTE_XY` routing through the
+coordinated TIM2 executor while retaining the compile-time legacy override.
+It is a 3 kHz integration candidate only; do not use it for production-speed
+motion before Milestone 6. Run the operator-gated normal-route suite with:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --normal-xy-route-suite --out hil_reports/normal_xy_route.json
+python3 tools/run_qualification.py --manifest normal_xy_route_v1 --operator-prompts --fixture coordinated_xy_physical_limit_v1 --machine-id LC-001 --raw-report hil_reports/normal_xy_route.json
+```
+
+`--normal-xy-route-suite` selects P3 value `2059` and emits results `2050`-
+`2057`. The suite disables XY before manual X/Y pressed/released checks, homes
+Z and then X/Y at reduced rates, temporarily caps normal XY motion at 3 kHz,
+and exercises normal-route completion, status cadence, pause/cancel recovery,
+legacy direct-axis paths, and bounded physical X/Y limit crossings. Each
+physical-limit move starts at `+100` and cannot command past `-100`. Stop the
+suite immediately for aggressive contact, travel beyond that 200-step window,
+abnormal sound, or reset.
+
+Pressure is qualified separately after removing the motion fixture and
+installing the approved closed-loop fixture:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --pressure-regulator-suite --timeout-ms 240000 --out hil_reports/pressure_regulator.json
+python3 tools/run_qualification.py --manifest pressure_regulator_v1 --operator-prompts --fixture pressure_closed_loop_v1 --machine-id LC-001 --raw-report hil_reports/pressure_regulator.json
+```
+
+The ten-test pressure suite takes longer than the generic 90-second FULL
+window; retain the explicit 240-second host timeout so settling progress is not
+mistaken for a stalled diagnostic.
 
 Outputs:
 

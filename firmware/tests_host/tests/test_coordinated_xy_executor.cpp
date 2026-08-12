@@ -170,20 +170,82 @@ TEST(CoordinatedXyExecutor, PauseWhileLowStopsImmediatelyAndResumesCachedEvent) 
 TEST(CoordinatedXyExecutor, PauseWhileHighFinishesPulseThenResumesNextEvent) {
   const CoordinatedXyPlan plan = readyPlan(20, 7, 3000u);
   ExecutorCursor cursor = runningCursor(plan);
+  ExecutorCursor uninterrupted = runningCursor(plan);
+  TickResult result{};
+  TickResult uninterruptedResult{};
+  CHECK_EQUAL(static_cast<int>(TickStatus::Raised),
+              static_cast<int>(onTimerUpdate(plan, cursor, result)));
+  CHECK_EQUAL(static_cast<int>(TickStatus::Raised),
+              static_cast<int>(onTimerUpdate(
+                  plan, uninterrupted, uninterruptedResult)));
+  CHECK_EQUAL(static_cast<int>(uninterruptedResult.mask),
+              static_cast<int>(result.mask));
+  UNSIGNED_LONGS_EQUAL(uninterruptedResult.arr, result.arr);
+  CHECK_EQUAL(static_cast<int>(ControlDisposition::Deferred),
+              static_cast<int>(requestPause(cursor)));
+  CHECK_EQUAL(static_cast<int>(TickStatus::Paused),
+              static_cast<int>(onTimerUpdate(plan, cursor, result)));
+  CHECK_EQUAL(static_cast<int>(TickStatus::Lowered),
+              static_cast<int>(onTimerUpdate(
+                  plan, uninterrupted, uninterruptedResult)));
+  CHECK_TRUE(result.accountCompletePulse);
+  CHECK_TRUE(result.stopTimer);
+  UNSIGNED_LONGS_EQUAL(1u, cursor.fallingEdges);
+  CHECK_FALSE(cursor.stepHigh);
+  CHECK_EQUAL(static_cast<int>(uninterrupted.cachedEvent.mask),
+              static_cast<int>(cursor.cachedEvent.mask));
+  UNSIGNED_LONGS_EQUAL(uninterrupted.cachedEvent.arr,
+                       cursor.cachedEvent.arr);
+  CHECK_EQUAL(static_cast<int>(ControlDisposition::Deferred),
+              static_cast<int>(resume(cursor)));
+
+  uint32_t physicalX = contains(result.mask, StepMask::X) ? 1u : 0u;
+  uint32_t physicalY = contains(result.mask, StepMask::Y) ? 1u : 0u;
+  while (cursor.state == State::Running) {
+    const TickStatus status = onTimerUpdate(plan, cursor, result);
+    const TickStatus uninterruptedStatus =
+        onTimerUpdate(plan, uninterrupted, uninterruptedResult);
+    CHECK_EQUAL(static_cast<int>(uninterruptedStatus),
+                static_cast<int>(status));
+    CHECK_EQUAL(static_cast<int>(uninterruptedResult.mask),
+                static_cast<int>(result.mask));
+    UNSIGNED_LONGS_EQUAL(uninterruptedResult.arr, result.arr);
+    if (result.accountCompletePulse) {
+      if (contains(result.mask, StepMask::X)) ++physicalX;
+      if (contains(result.mask, StepMask::Y)) ++physicalY;
+    }
+  }
+  CHECK_EQUAL(static_cast<int>(State::Completed),
+              static_cast<int>(cursor.state));
+  CHECK_EQUAL(static_cast<int>(State::Completed),
+              static_cast<int>(uninterrupted.state));
+  UNSIGNED_LONGS_EQUAL(plan.xSteps, physicalX);
+  UNSIGNED_LONGS_EQUAL(plan.ySteps, physicalY);
+  UNSIGNED_LONGS_EQUAL(uninterrupted.maskChecksum, cursor.maskChecksum);
+  UNSIGNED_LONGS_EQUAL(uninterrupted.arrChecksum, cursor.arrChecksum);
+}
+
+TEST(CoordinatedXyExecutor, PauseDuringFinalHighPulseCompletesWithoutExtraRise) {
+  const CoordinatedXyPlan plan = readyPlan(1, 1, 3000u);
+  ExecutorCursor cursor = runningCursor(plan);
   TickResult result{};
   CHECK_EQUAL(static_cast<int>(TickStatus::Raised),
               static_cast<int>(onTimerUpdate(plan, cursor, result)));
   CHECK_EQUAL(static_cast<int>(ControlDisposition::Deferred),
               static_cast<int>(requestPause(cursor)));
-  CHECK_EQUAL(static_cast<int>(TickStatus::Paused),
+  CHECK_EQUAL(static_cast<int>(TickStatus::Completed),
               static_cast<int>(onTimerUpdate(plan, cursor, result)));
   CHECK_TRUE(result.accountCompletePulse);
   CHECK_TRUE(result.stopTimer);
+  CHECK_TRUE(result.signalDone);
+  UNSIGNED_LONGS_EQUAL(1u, cursor.risingEdges);
   UNSIGNED_LONGS_EQUAL(1u, cursor.fallingEdges);
-  CHECK_FALSE(cursor.stepHigh);
-  CHECK_EQUAL(static_cast<int>(ControlDisposition::Deferred),
-              static_cast<int>(resume(cursor)));
-  runToCompletion(plan, cursor);
+  CHECK_EQUAL(static_cast<int>(State::Completed),
+              static_cast<int>(cursor.state));
+  CHECK_EQUAL(static_cast<int>(TerminalReason::Completed),
+              static_cast<int>(cursor.terminalReason));
+  CHECK_EQUAL(static_cast<int>(ControlDisposition::AlreadySatisfied),
+              static_cast<int>(requestPause(cursor)));
 }
 
 TEST(CoordinatedXyExecutor, CancelLowStopsWithoutAnotherEdge) {
@@ -316,7 +378,7 @@ TEST(CoordinatedXyExecutor, TerminalCursorCanBeRearmedDeterministically) {
 
 TEST(CoordinatedXyExecutor, FeatureGateDefaultsKeepNormalRoutingLegacy) {
   LONGS_EQUAL(1, LC_COORDINATED_XY_EXECUTOR_ENABLE);
-  LONGS_EQUAL(0, LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE);
+  LONGS_EQUAL(1, LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE);
 }
 
 TEST(CoordinatedXyExecutor, ReservationPolicyRejectsEveryConflictingAxisState) {

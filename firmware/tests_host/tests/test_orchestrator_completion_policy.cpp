@@ -69,6 +69,63 @@ TEST(OrchestratorCompletionPolicyTests, AbsXyMotionHoldDoesNotTriggerWhilePrinti
     CHECK_FALSE(OrchestratorCompletionPolicy::shouldHoldRegulatorsForAbsXy(20000, 20000, 5000u, true));
 }
 
+TEST(OrchestratorCompletionPolicyTests, AbsXyCompletionRequiresEveryGate) {
+    OrchestratorCompletionPolicy::AbsXyCompletionInput input{
+        true, true, false, true, false, true, true};
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyDisposition::Completed),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyCompletion(input)));
+
+    input.startAccepted = false;
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyCompletion(input)));
+    input.startAccepted = true;
+    input.waitCompleted = false;
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyCompletion(input)));
+    input.waitCompleted = true;
+    input.terminalCompleted = false;
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyCompletion(input)));
+    input.terminalCompleted = true;
+    input.endpointMatches = false;
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyCompletion(input)));
+    input.endpointMatches = true;
+    input.targetsMatch = false;
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyCompletion(input)));
+}
+
+TEST(OrchestratorCompletionPolicyTests, AbsXyControlInterruptionIsResumableNotFailure) {
+    const OrchestratorCompletionPolicy::AbsXyCompletionInput input{
+        true, false, true, false, false, false, false};
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyDisposition::Interrupted),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyCompletion(input)));
+}
+
+TEST(OrchestratorCompletionPolicyTests, AbsXyRejectedStartIsNotMaskedByControlInterruption) {
+    const OrchestratorCompletionPolicy::AbsXyCompletionInput input{
+        false, false, true, false, false, false, false};
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyCompletion(input)));
+}
+
+TEST(OrchestratorCompletionPolicyTests, AbsXyLimitOrPlannerFailureWinsOverControlInterruption) {
+    const OrchestratorCompletionPolicy::AbsXyCompletionInput input{
+        true, false, true, false, true, false, false};
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyCompletion(input)));
+}
+
 TEST(OrchestratorCompletionPolicyTests, DispenseLikeInterruptedWaitDoesNotRetire) {
     uint32_t lastExecuted = 20u;
     uint32_t lastRetired = 20u;

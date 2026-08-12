@@ -185,6 +185,68 @@ def test_coordinated_xy_executor_manifest_accepts_nominal_and_blocks_isr_regress
     assert [(item["test_id"], item["metric_name"]) for item in failures] == [(2042, "cy")]
 
 
+def test_normal_xy_route_manifest_accepts_nominal_and_blocks_physical_window_regression():
+    manifest = load_manifest("normal_xy_route_v1")
+    common_round_trip = {
+        "hz": 3000, "route": 1, "i7": 0, "edge": 1, "ck": 1,
+        "low": 1, "done": 1, "pu": 0, "cy": 1200, "ep": 1,
+        "ret": 1, "to": 0,
+    }
+    results = [
+        {"test_id": 2050, "name": "normal_xy_route_x_only_low", "pass": True,
+         "metrics": {**common_round_trip, "dx": 1000, "dy": 0, "xe": 2000,
+                     "ye": 0, "ms": 1000, "i2": 4000}},
+        {"test_id": 2051, "name": "normal_xy_route_y_only_low", "pass": True,
+         "metrics": {**common_round_trip, "dx": 0, "dy": 1000, "xe": 0,
+                     "ye": 2000, "ms": 1000, "i2": 4000}},
+        {"test_id": 2052, "name": "normal_xy_route_equal_low", "pass": True,
+         "metrics": {**common_round_trip, "dx": 1000, "dy": 1000, "xe": 2000,
+                     "ye": 2000, "ms": 1000, "i2": 4000}},
+        {"test_id": 2053, "name": "normal_xy_route_asymmetric_low", "pass": True,
+         "metrics": {**common_round_trip, "dx": 500, "dy": 1500, "xe": 1000,
+                     "ye": 3000, "ms": 1500, "i2": 6000}},
+        {"test_id": 2054, "name": "normal_xy_route_long_status", "pass": True,
+         "metrics": {"dx": 6000, "dy": 2000, "hz": 3000, "route": 1,
+                     "hold": 1, "acq": 0, "clean": 1, "sf": 20, "sg": 55,
+                     "sa": 60, "alt": 0, "i2": 24000, "i7": 0, "low": 1,
+                     "pu": 0, "cy": 1400, "ep": 1, "ret": 1, "to": 0}},
+        {"test_id": 2055, "name": "normal_xy_route_control_low", "pass": True,
+         "metrics": {"dx": 2000, "dy": 1000, "hz": 3000, "route": 1,
+                     "pause": 1, "stable": 1, "resume": 1, "cancel": 1,
+                     "lat": 1, "rise": 0, "rebase": 1, "low": 1, "i7": 0,
+                     "pu": 0, "cy": 1400, "recover": 1, "to": 0}},
+        {"test_id": 2056, "name": "normal_xy_route_physical_limit", "pass": True,
+         "metrics": {"hz": 3000, "route": 1, "win": 200, "xl": 1, "yl": 1,
+                     "xe": 100, "ye": 100, "xlat": 1, "ylat": 1, "xrise": 0,
+                     "yrise": 0, "req": 2, "raw": 2, "rebase": 1, "low": 1,
+                     "i7": 0, "pu": 0, "cy": 1500, "xd": 5, "yd": 6,
+                     "home": 1, "to": 0}},
+        {"test_id": 2057, "name": "normal_xy_route_legacy_smoke", "pass": True,
+         "metrics": {"hz": 3000, "route": 1, "x": 1, "y": 1, "z": 1,
+                     "pr": 1, "own": 0, "low": 1, "xret": 0, "yret": 0,
+                     "zret": 0, "xd": 5, "yd": 6, "home": 1, "to": 0}},
+    ]
+    raw = {
+        "run_id": 2059,
+        "profile": "FULL",
+        "started_at": "2026-08-11T00:00:00Z",
+        "finished_at": "2026-08-11T00:00:20Z",
+        "aborted": False,
+        "summary": {"total": 8, "passed": 8, "failed": 0},
+        "results": results,
+        "host_checks": [],
+    }
+
+    accepted = _analyze(raw, manifest)
+    assert accepted["verdict"]["status"] == "pass"
+
+    raw["results"][6]["metrics"] = {**raw["results"][6]["metrics"], "xe": 201}
+    regressed = _analyze(raw, manifest)
+    assert regressed["verdict"]["status"] == "fail"
+    failures = [item for item in regressed["metric_evaluations"] if item["status"] == "fail"]
+    assert [(item["test_id"], item["metric_name"]) for item in failures] == [(2056, "xe")]
+
+
 def test_missing_metric_follows_threshold_maturity():
     analysis = _analyze(_raw(metrics={}), _manifest(metric_rule={"maturity": "candidate", "max": 10}))
 
