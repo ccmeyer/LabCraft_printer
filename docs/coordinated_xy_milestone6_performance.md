@@ -467,16 +467,63 @@ and analyzer rejection of incomplete evidence:
 - candidate binary: 328,096 bytes, SHA-256
   `CD3330841ACF8FF9099FE621096971E1641F66BF70D1A10D43992F70BC4A07CE`,
   leaving 65,120 bytes in the 384 KiB application partition;
-- baseline source commit: `23d706af`; the final Stage 1 source commit must be
-  recorded with the HIL report after the diagnostic diff is checkpointed.
+- retained baseline commit: `23d706af`; Stage 1 source/artifact commit:
+  `b777f993`.
 
-Run one focused selector with a 120-second status-only timeout between passing
-28/28 pre- and post-SAFE runs. Stage 2 is gated: it may start only if Stage 1
-reproduces pending updates and either `pm >= 128` or `dm >= 256`. If pending
-occurs below both thresholds, isolate the post-check instrumentation tail. If
-no pending occurs, do not repeat motion solely to force it. The task-mutex
-variant is not implemented or enabled by Stage 1; normal operation continues
-to use the existing status critical section.
+### Stage 1 HIL Result And Stage 2 Gate
+
+The single physical Stage 1 run completed the exact ten-move 40 kHz row and all
+440,000 TIM2 callbacks. Results `2072` and `2073` passed with complete sample
+coverage, no missing samples, no saturation, clean host status cadence, and no
+watchdog/reset evidence. Unlike the preceding refined image, this run produced
+zero pending observations and a zero pending streak. Entry lateness was still
+visible: `cm=506` timer ticks, `ca=24`, `lc=2072`, and `dm=966` core cycles.
+Because `pu=0`, `pm=0` is not a pending-correlated observation. The approved
+Stage 2 gate requires pending to reproduce as well as `pm >= 128` or
+`dm >= 256`; it therefore did not open. Do not repeat motion solely to force a
+pending event, and do not implement or run selector `2076` from this evidence.
+
+The unchanged motion row failed for a separate post-row X reference defect:
+X drift was 54 steps against the 25-step gate while Y drift was 3. The bounded
+X home did reach its limit and return to coordinate 100; this was not an outer
+home timeout. The normalized report has 20 blocking analyzer issues because
+the fail-closed home-specific `2064` frame intentionally omits the normal
+success-frame timing fields; it does not represent 20 independent physical
+faults. Results `2072`/`2073`, host cadence (100 ms maximum over 201 samples),
+and the progress watchdog all passed.
+
+An initial SSH invocation delivered an invalid fixture response and firmware
+aborted at the envelope gate with zero results, before homing or motion. It is
+retained as infrastructure evidence. The corrected invocation supplied the
+explicit response `continue`; only that invocation performed motion.
+
+Evidence:
+
+- binary: 328,096 bytes, SHA-256
+  `CD3330841ACF8FF9099FE621096971E1641F66BF70D1A10D43992F70BC4A07CE`;
+- pre-SAFE: `hil_reports/m6_entry_lateness_pre_safe_20260812T180724Z.json`,
+  SHA-256 `837CDE4068269430CE1182A7CBD7925816438ABD6ADC2DE469BDE2397117FA2C`,
+  28/28 pass;
+- no-motion fixture-abort report:
+  `hil_reports/m6_entry_lateness_40khz_20260812T180724Z.json`, SHA-256
+  `FA99F8926AF142E041665FAE9C4CA102C8F162D42B0C9F6FC74840A1E920E6EE`;
+- physical focused report:
+  `hil_reports/m6_entry_lateness_40khz_physical_20260812T180724Z.json`,
+  SHA-256 `D3A6F52B687E5863CA03071B90017E0AF17BA0747ADD571C536A22B952145BE6`;
+- normalized report:
+  `verification_reports/LC-001/20260812T181108Z/report.json`, SHA-256
+  `A1BFA3DB4165D2ECE0C86204D9ED83355415B60459616623D6C8441323B35943`,
+  verdict `fail` with 20 blocking issues and no warnings;
+- post-SAFE: `hil_reports/m6_entry_lateness_post_safe_20260812T180724Z.json`,
+  SHA-256 `44F6E1F7333750779F094B0650A77A1B78C16B398D465ECEA90FC927F938AD4B`,
+  28/28 pass with unchanged boot/watchdog counters and no reset evidence.
+
+This diagnostic-only image is 4,096 bytes above the previously approved
+324,000-byte Milestone 6 candidate ceiling, while retaining 65,120 bytes of
+application-partition headroom. That observation is not approval to raise the
+production ceiling; Stage 1 remains diagnostic-only and is not a production
+default. The task-mutex variant is not implemented or enabled, so normal
+operation continues to use the existing status critical section.
 
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort

@@ -224,23 +224,22 @@ Every milestone that touches motion must preserve these invariants:
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
-| 6. Performance and motion HIL qualification | `implemented` | Full 5-30 kHz geometry passed; standalone 40 kHz reproduced pending TIM2 updates outside the measured C-handler duration; entry-lateness diagnostic is implemented and awaiting one gated HIL run | Use result `2073` to decide whether status synchronization may be A/B tested; do not weaken zero-pending or rerun FULL |
+| 6. Performance and motion HIL qualification | `implemented` | Stage 1 completed 440,000 fully covered callbacks with measurable entry lateness but no pending updates; its separate post-row X reference drift was 54 steps | Stage 2 is not authorized by this run; do not repeat motion to force pending or rerun FULL, and treat the X drift as a separate defect |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
 
-The bounded-home, manual-switch, low-rate, focused X-direction, and cold
-camera-transition investigations are accepted. Standalone selector `2077`
-then reproduced 16 pending TIM2 updates even though its pending-correlated
-full C-level IRQ path remained below the 2,250-cycle edge interval. Stage 1 now
-adds measurement-only result `2073`: TIM2 `CNT`/`ARR` are captured with DWT at
-the first C hook and aggregated after the existing pending observation. Build,
-SAFE, and run selector `2077` exactly once with a 120-second status-only
-timeout, followed by post-SAFE and manifest normalization. Begin the
-status-synchronization A/B only if pending is reproduced and `pm >= 128` timer
-ticks or `dm >= 256` core cycles. Pending below both thresholds redirects the
-investigation to the post-check instrumentation tail; no pending means stop
-without repeating motion merely to force a failure. Do not rerun FULL.
+Stage 1 is complete at source/artifact commit `b777f993`. The physical selector
+`2077` run covered all 440,000 callbacks without missing samples, saturation,
+pending observations, watchdog trouble, or reset evidence. It measured
+`cm=506`, `lc=2072`, and `dm=966`, but `pu=0`/`ps=0` means the approved Stage 2
+condition did not reproduce. Do not implement selector `2076`, repeat motion
+to force pending, or rerun FULL from this result. The row separately failed its
+post-row X reference with `xd=54` while `yd=3`; the bounded home reached its
+limit and completed, so track this as an X displacement/repeatability defect
+rather than attributing it to the status critical section. Review the Stage 1
+evidence and choose a separately planned next isolation step before more
+physical motion.
 
 ## Milestone 0: Baseline And Decisions
 

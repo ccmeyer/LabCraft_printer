@@ -1,0 +1,1794 @@
+{
+  "schema_version": "qualification_report_v1",
+  "manifest": {
+    "schema_version": "qualification_manifest_v0",
+    "manifest_id": "coordinated_xy_40khz_v1",
+    "name": "Coordinated XY Standalone 40 kHz Geometry v1",
+    "profile": "FULL",
+    "expected_test_ids": [
+      2064,
+      2072,
+      2073
+    ],
+    "fixtures": [
+      {
+        "fixture_id": "motion_clear_envelope_v1",
+        "required_for": [
+          2064,
+          2072,
+          2073
+        ],
+        "operator_note": "Confirm both limit switches are released and the complete XY/Z envelope is clear. The diagnostic homes Z then X/Y, executes only the ten-move Milestone 6 40 kHz geometry row, and performs bounded X/Y reference homes. It does not run the 5-30 kHz tiers, focused X-direction workload, raster, repeated-camera, or pressure cases. Stop immediately for unexpected contact, abnormal sound, loss of gantry squareness, or absent reference-home motion."
+      }
+    ],
+    "enforce_expected_test_ids": true,
+    "requires_operator_prompts": true,
+    "selftest_args": [
+      "--coordinated-xy-40khz-suite"
+    ],
+    "analysis_rules": {
+      "2064": {
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metrics": {
+          "hz": {
+            "maturity": "acceptance",
+            "equals": 40000
+          },
+          "n": {
+            "maturity": "acceptance",
+            "equals": 10
+          },
+          "xe": {
+            "maturity": "acceptance",
+            "equals": 106832
+          },
+          "ye": {
+            "maturity": "acceptance",
+            "equals": 180000
+          },
+          "ms": {
+            "maturity": "acceptance",
+            "equals": 220000
+          },
+          "i2": {
+            "maturity": "acceptance",
+            "equals": 440000
+          },
+          "i7": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ok": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "pu": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ps": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "am": {
+            "maturity": "acceptance",
+            "min": 1,
+            "max": 2025
+          },
+          "aa": {
+            "maturity": "acceptance",
+            "min": 1,
+            "max": 2025
+          },
+          "cm": {
+            "maturity": "acceptance",
+            "min": 1,
+            "max": 2025
+          },
+          "ca": {
+            "maturity": "acceptance",
+            "min": 1,
+            "max": 2025
+          },
+          "dm": {
+            "maturity": "acceptance",
+            "min": 1,
+            "max": 2025
+          },
+          "da": {
+            "maturity": "acceptance",
+            "min": 1,
+            "max": 2025
+          },
+          "tm": {
+            "maturity": "acceptance",
+            "min": 1,
+            "max": 2250
+          },
+          "de": {
+            "maturity": "acceptance",
+            "max": 100
+          },
+          "sg": {
+            "maturity": "acceptance",
+            "max": 100
+          },
+          "wd": {
+            "maturity": "acceptance",
+            "max": 100
+          },
+          "sa": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "wl": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "cw": {
+            "maturity": "acceptance",
+            "max": 10
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "xd": {
+            "maturity": "acceptance",
+            "max": 25
+          },
+          "yd": {
+            "maturity": "acceptance",
+            "max": 25
+          },
+          "to": {
+            "maturity": "acceptance",
+            "equals": 0
+          }
+        }
+      },
+      "2072": {
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metrics": {
+          "i2": {
+            "maturity": "acceptance",
+            "min": 1
+          },
+          "s": {
+            "maturity": "acceptance",
+            "min": 1
+          },
+          "mi": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ph": {
+            "maturity": "candidate",
+            "min": 1
+          },
+          "pa": {
+            "maturity": "candidate",
+            "min": 1
+          },
+          "fm": {
+            "maturity": "candidate",
+            "min": 1
+          },
+          "fa": {
+            "maturity": "candidate",
+            "min": 1
+          },
+          "ax": {
+            "maturity": "candidate",
+            "min": 1
+          },
+          "tf": {
+            "maturity": "candidate",
+            "min": 1
+          },
+          "pp": {
+            "maturity": "candidate",
+            "min": 0
+          },
+          "pf": {
+            "maturity": "candidate",
+            "min": 0
+          },
+          "pu": {
+            "maturity": "candidate",
+            "min": 0
+          },
+          "ps": {
+            "maturity": "candidate",
+            "min": 0
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "to": {
+            "maturity": "acceptance",
+            "equals": 0
+          }
+        }
+      },
+      "2073": {
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metrics": {
+          "i2": {
+            "maturity": "acceptance",
+            "equals": 440000
+          },
+          "s": {
+            "maturity": "acceptance",
+            "equals": 440000
+          },
+          "mi": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "cm": {
+            "maturity": "candidate",
+            "min": 0
+          },
+          "ca": {
+            "maturity": "candidate",
+            "min": 0
+          },
+          "pm": {
+            "maturity": "candidate",
+            "min": 0
+          },
+          "lc": {
+            "maturity": "candidate",
+            "min": 0
+          },
+          "dm": {
+            "maturity": "candidate",
+            "min": 0
+          },
+          "sm": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "to": {
+            "maturity": "acceptance",
+            "equals": 0
+          }
+        }
+      }
+    }
+  },
+  "machine": {
+    "machine_id": "LC-001",
+    "machine_uuid": "dc0f3c73-0eef-4298-a491-148f7ff5713e",
+    "assigned_at": "2026-08-11T19:48:35.686298Z",
+    "notes": ""
+  },
+  "run": {
+    "run_dir": "verification_reports\\LC-001\\20260812T181108Z",
+    "raw_selftest_path": "verification_reports\\LC-001\\20260812T181108Z\\raw_selftest.json",
+    "report_path": "verification_reports\\LC-001\\20260812T181108Z\\report.json",
+    "summary_csv_path": "verification_reports\\LC-001\\20260812T181108Z\\summary.csv",
+    "selftest_returncode": 0,
+    "fixture_id": "motion_clear_envelope_v1"
+  },
+  "overall_status": "fail",
+  "raw_summary": {
+    "total": 3,
+    "passed": 2,
+    "failed": 1
+  },
+  "run_id": 4146741457,
+  "profile": "FULL",
+  "started_at": "2026-08-12T18:09:29.297499Z",
+  "finished_at": "2026-08-12T18:10:06.541756Z",
+  "aborted": false,
+  "manifest_checks": {
+    "expected_test_ids": [
+      2064,
+      2072,
+      2073
+    ],
+    "observed_test_ids": [
+      2064,
+      2072,
+      2073
+    ],
+    "missing_test_ids": [],
+    "unexpected_test_ids": [],
+    "enforced": true
+  },
+  "results": [
+    {
+      "test_id": 2064,
+      "name": "coordinated_xy_performance_40khz",
+      "pass": false,
+      "metrics": {
+        "hz": 40000,
+        "n": 10,
+        "xe": 106832,
+        "ye": 180000,
+        "ms": 220000,
+        "i2": 440000,
+        "i7": 0,
+        "hs": 30500,
+        "he": 100,
+        "hg": 33500,
+        "hc": 33500,
+        "ha": 30515,
+        "hp": 7,
+        "ho": 2,
+        "hl": 1,
+        "ht": 0,
+        "xd": 54,
+        "yd": 3,
+        "to": 1
+      },
+      "timestamp": "2026-08-12T18:10:05.839988Z"
+    },
+    {
+      "test_id": 2072,
+      "name": "coord_xy_40khz_irq_path",
+      "pass": true,
+      "metrics": {
+        "i2": 440000,
+        "s": 440000,
+        "mi": 0,
+        "ph": 396,
+        "pa": 385,
+        "fm": 3042,
+        "fa": 1568,
+        "ax": 2042,
+        "tf": 3042,
+        "pp": 0,
+        "pf": 0,
+        "pu": 0,
+        "ps": 0,
+        "sf": 0,
+        "to": 0
+      },
+      "timestamp": "2026-08-12T18:10:05.940456Z"
+    },
+    {
+      "test_id": 2073,
+      "name": "coord_xy_40khz_entry_lateness",
+      "pass": true,
+      "metrics": {
+        "i2": 440000,
+        "s": 440000,
+        "mi": 0,
+        "cm": 506,
+        "ca": 24,
+        "pm": 0,
+        "lc": 2072,
+        "dm": 966,
+        "sm": 0,
+        "sf": 0,
+        "to": 0
+      },
+      "timestamp": "2026-08-12T18:10:05.940766Z"
+    }
+  ],
+  "host_checks": [
+    {
+      "name": "hello_ack",
+      "pass": true,
+      "details": {
+        "seq8": 1,
+        "run_id": 4146741457,
+        "timeout_ms": 8000,
+        "retry_ms": 250,
+        "retries_sent": 1,
+        "observed_uart_bytes": 128,
+        "fast_fail_on_missing_hello": false,
+        "capabilities": 15,
+        "supports_selftest_transport": true
+      },
+      "timestamp": "2026-08-12T18:09:29.345349Z"
+    },
+    {
+      "name": "selftest_start_ack",
+      "pass": true,
+      "details": {
+        "transport_mode": "queue_ack",
+        "seq8": 2,
+        "seq32": 1,
+        "run_id": 4146741457,
+        "timeout_ms": 2000,
+        "observed_cmd": 254,
+        "observed_seq8": 2,
+        "observed_seq32": 1,
+        "ack_result": "accepted",
+        "expected_seq32": null,
+        "reason": "ok"
+      },
+      "timestamp": "2026-08-12T18:09:29.350362Z"
+    },
+    {
+      "name": "goodbye_ack",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4146741457,
+        "timeout_ms": 2000
+      },
+      "timestamp": "2026-08-12T18:10:06.041087Z"
+    },
+    {
+      "name": "goodbye_done",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4146741457,
+        "timeout_ms": 5000,
+        "observed_seq32": 4146741457
+      },
+      "timestamp": "2026-08-12T18:10:06.541704Z"
+    },
+    {
+      "name": "selftest_progress_watchdog",
+      "pass": true,
+      "details": {
+        "progress_count": 38,
+        "last_progress": {
+          "kind": "progress",
+          "stage": "wait_bits_set",
+          "elapsed_ms": 36785,
+          "stk_hwm_w": 0
+        },
+        "recent_frames": [
+          {
+            "ts": "2026-08-12T18:09:29.450510Z",
+            "cmd": 254,
+            "ack_result": "accepted",
+            "ack_seq32": 1,
+            "expected_seq32": null
+          },
+          {
+            "ts": "2026-08-12T18:09:29.450747Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_40khz_envelope_clear"
+          },
+          {
+            "ts": "2026-08-12T18:09:29.485702Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "evap_plate_confirmed"
+          },
+          {
+            "ts": "2026-08-12T18:09:29.485999Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_performance_z_home"
+          },
+          {
+            "ts": "2026-08-12T18:09:29.586384Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-12T18:09:29.940624Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-12T18:09:29.940947Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_performance_x_home"
+          },
+          {
+            "ts": "2026-08-12T18:09:30.041335Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-12T18:09:31.042723Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:32.044138Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:33.045528Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:34.046924Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:34.376854Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-12T18:09:34.377179Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_performance_y_home"
+          },
+          {
+            "ts": "2026-08-12T18:09:34.477562Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-12T18:09:35.478921Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:36.480302Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:37.481708Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:37.982548Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-12T18:09:50.929295Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_performance_post_tier_x_home"
+          },
+          {
+            "ts": "2026-08-12T18:09:50.929610Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-12T18:09:51.931011Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:52.932374Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:53.933722Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:54.801872Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-12T18:09:54.802210Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_performance_post_tier_y_home"
+          },
+          {
+            "ts": "2026-08-12T18:09:54.902588Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-12T18:09:55.903931Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:56.905272Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:57.906618Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:58.907980Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:09:59.809219Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:10:00.810569Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:10:01.811951Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:10:02.813322Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:10:03.814674Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:10:04.816028Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:10:05.817379Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-12T18:10:05.817655Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-12T18:10:05.839951Z",
+            "cmd": 251,
+            "test_id": 2064,
+            "name": "coordinated_xy_performance_40khz"
+          },
+          {
+            "ts": "2026-08-12T18:10:05.940427Z",
+            "cmd": 251,
+            "test_id": 2072,
+            "name": "coord_xy_40khz_irq_path"
+          },
+          {
+            "ts": "2026-08-12T18:10:05.940746Z",
+            "cmd": 251,
+            "test_id": 2073,
+            "name": "coord_xy_40khz_entry_lateness"
+          },
+          {
+            "ts": "2026-08-12T18:10:05.940845Z",
+            "cmd": 252,
+            "run_id": 4146741457
+          }
+        ],
+        "frame_counts": {
+          "2": 202,
+          "251": 41,
+          "252": 1,
+          "254": 1
+        },
+        "progress_timeout_ms": 15000,
+        "activity_timeout_ms": 60000,
+        "status_only_timeout_ms": 120000,
+        "effective_timeout_ms": 240000,
+        "total_rx_bytes": 33564,
+        "status_frames_since_selftest": 0,
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 201,
+        "selftest_frames_seen": 42,
+        "reset_report": null,
+        "last_valid_frame_age_ms": 701,
+        "last_rx_byte_age_ms": 701,
+        "last_selftest_frame_age_ms": 701,
+        "timeout_reason": null
+      },
+      "timestamp": "2026-08-12T18:10:06.541743Z"
+    },
+    {
+      "name": "coordinated_xy_status_cadence",
+      "pass": true,
+      "details": {
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 201,
+        "limit_ms_exclusive": 500
+      },
+      "timestamp": "2026-08-12T18:10:06.541751Z"
+    }
+  ],
+  "analysis": {
+    "schema_version": "qualification_analysis_v1",
+    "status": "fail",
+    "items": [
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "status": "fail",
+        "severity": "error",
+        "failure_domain": "firmware_motion",
+        "message": "Raw firmware result failed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2073,
+        "name": "coord_xy_40khz_entry_lateness",
+        "category": "performance",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "hello_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "selftest_start_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "goodbye_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "goodbye_done",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "selftest_progress_watchdog",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "coordinated_xy_status_cadence",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      }
+    ],
+    "metric_evaluations": [
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "hz",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 40000,
+        "message": "Metric within threshold: hz=40000, equals=40000.",
+        "metric_value": 40000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "n",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 10,
+        "message": "Metric within threshold: n=10, equals=10.",
+        "metric_value": 10,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "xe",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 106832,
+        "message": "Metric within threshold: xe=106832, equals=106832.",
+        "metric_value": 106832,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ye",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 180000,
+        "message": "Metric within threshold: ye=180000, equals=180000.",
+        "metric_value": 180000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ms",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 220000,
+        "message": "Metric within threshold: ms=220000, equals=220000.",
+        "metric_value": 220000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "i2",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 440000,
+        "message": "Metric within threshold: i2=440000, equals=440000.",
+        "metric_value": 440000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "i7",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: i7=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ok",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric 'ok' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "pu",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric 'pu' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ps",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric 'ps' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "am",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 1,
+        "threshold_max": 2025,
+        "threshold_expected": null,
+        "message": "Metric 'am' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "aa",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 1,
+        "threshold_max": 2025,
+        "threshold_expected": null,
+        "message": "Metric 'aa' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "cm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 1,
+        "threshold_max": 2025,
+        "threshold_expected": null,
+        "message": "Metric 'cm' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ca",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 1,
+        "threshold_max": 2025,
+        "threshold_expected": null,
+        "message": "Metric 'ca' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "dm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 1,
+        "threshold_max": 2025,
+        "threshold_expected": null,
+        "message": "Metric 'dm' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "da",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 1,
+        "threshold_max": 2025,
+        "threshold_expected": null,
+        "message": "Metric 'da' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "tm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 1,
+        "threshold_max": 2250,
+        "threshold_expected": null,
+        "message": "Metric 'tm' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "de",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 100,
+        "threshold_expected": null,
+        "message": "Metric 'de' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sg",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 100,
+        "threshold_expected": null,
+        "message": "Metric 'sg' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "wd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 100,
+        "threshold_expected": null,
+        "message": "Metric 'wd' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sa",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric 'sa' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "wl",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric 'wl' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "cw",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 10,
+        "threshold_expected": null,
+        "message": "Metric 'cw' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric 'sf' is missing from test 2064.",
+        "metric_value": null,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "xd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 25,
+        "threshold_expected": null,
+        "message": "Acceptance metric outside threshold: xd=54, max=25.",
+        "metric_value": 54,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "yd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 25,
+        "threshold_expected": null,
+        "message": "Metric within threshold: yd=3, max=25.",
+        "metric_value": 3,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2064,
+        "name": "coordinated_xy_performance_40khz",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "to",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Acceptance metric outside threshold: to=1, equals=0.",
+        "metric_value": 1,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "i2",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 1,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: i2=440000, min=1.",
+        "metric_value": 440000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "s",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 1,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: s=440000, min=1.",
+        "metric_value": 440000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "mi",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: mi=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "ph",
+        "threshold_maturity": "candidate",
+        "threshold_min": 1,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: ph=396, min=1.",
+        "metric_value": 396,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "pa",
+        "threshold_maturity": "candidate",
+        "threshold_min": 1,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: pa=385, min=1.",
+        "metric_value": 385,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "fm",
+        "threshold_maturity": "candidate",
+        "threshold_min": 1,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: fm=3042, min=1.",
+        "metric_value": 3042,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "fa",
+        "threshold_maturity": "candidate",
+        "threshold_min": 1,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: fa=1568, min=1.",
+        "metric_value": 1568,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "ax",
+        "threshold_maturity": "candidate",
+        "threshold_min": 1,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: ax=2042, min=1.",
+        "metric_value": 2042,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "tf",
+        "threshold_maturity": "candidate",
+        "threshold_min": 1,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: tf=3042, min=1.",
+        "metric_value": 3042,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "pp",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: pp=0, min=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "pf",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: pf=0, min=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "pu",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: pu=0, min=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "ps",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: ps=0, min=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2072,
+        "name": "coord_xy_40khz_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "to",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: to=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2073,
+        "name": "coord_xy_40khz_entry_lateness",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "i2",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 440000,
+        "message": "Metric within threshold: i2=440000, equals=440000.",
+        "metric_value": 440000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2073,
+        "name": "coord_xy_40khz_entry_lateness",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "s",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 440000,
+        "message": "Metric within threshold: s=440000, equals=440000.",
+        "metric_value": 440000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2073,
+        "name": "coord_xy_40khz_entry_lateness",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "mi",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: mi=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2073,
+        "name": "coord_xy_40khz_entry_lateness",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "cm",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: cm=506, min=0.",
+        "metric_value": 506,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2073,
+        "name": "coord_xy_40khz_entry_lateness",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "ca",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: ca=24, min=0.",
+        "metric_value": 24,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2073,
+        "name": "coord_xy_40khz_entry_lateness",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "pm",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: pm=0, min=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2073,
+        "name": "coord_xy_40khz_entry_lateness",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "lc",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: lc=2072, min=0.",
+        "metric_value": 2072,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2073,
+        "name": "coord_xy_40khz_entry_lateness",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "dm",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: dm=966, min=0.",
+        "metric_value": 966,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2073,
+        "name": "coord_xy_40khz_entry_lateness",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "sm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sm=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2073,
+        "name": "coord_xy_40khz_entry_lateness",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2073,
+        "name": "coord_xy_40khz_entry_lateness",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "to",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: to=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      }
+    ],
+    "summary": {
+      "item_count": 9,
+      "metric_evaluation_count": 53,
+      "blocking_issue_count": 20,
+      "warning_count": 0
+    },
+    "verdict": {
+      "status": "fail",
+      "blocking_issue_count": 20,
+      "warning_count": 0,
+      "reason": "One or more blocking analyzer issues were found."
+    },
+    "warnings": [],
+    "operator_notes": [
+      {
+        "fixture_id": "motion_clear_envelope_v1",
+        "required_for": [
+          2064,
+          2072,
+          2073
+        ],
+        "message": "Confirm both limit switches are released and the complete XY/Z envelope is clear. The diagnostic homes Z then X/Y, executes only the ten-move Milestone 6 40 kHz geometry row, and performs bounded X/Y reference homes. It does not run the 5-30 kHz tiers, focused X-direction workload, raster, repeated-camera, or pressure cases. Stop immediately for unexpected contact, abnormal sound, loss of gantry squareness, or absent reference-home motion."
+      }
+    ]
+  },
+  "verdict": {
+    "status": "fail",
+    "blocking_issue_count": 20,
+    "warning_count": 0,
+    "reason": "One or more blocking analyzer issues were found."
+  },
+  "warnings": [],
+  "operator_notes": [
+    {
+      "fixture_id": "motion_clear_envelope_v1",
+      "required_for": [
+        2064,
+        2072,
+        2073
+      ],
+      "message": "Confirm both limit switches are released and the complete XY/Z envelope is clear. The diagnostic homes Z then X/Y, executes only the ten-move Milestone 6 40 kHz geometry row, and performs bounded X/Y reference homes. It does not run the 5-30 kHz tiers, focused X-direction workload, raster, repeated-camera, or pressure cases. Stop immediately for unexpected contact, abnormal sound, loss of gantry squareness, or absent reference-home motion."
+    }
+  ],
+  "operator_interactions": []
+}

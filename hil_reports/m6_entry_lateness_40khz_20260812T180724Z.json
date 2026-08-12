@@ -1,0 +1,135 @@
+{
+  "run_id": 4146719051,
+  "profile": "FULL",
+  "started_at": "2026-08-12T18:09:06.891556Z",
+  "finished_at": "2026-08-12T18:09:07.747672Z",
+  "aborted": true,
+  "summary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0
+  },
+  "results": [],
+  "host_checks": [
+    {
+      "name": "hello_ack",
+      "pass": true,
+      "details": {
+        "seq8": 1,
+        "run_id": 4146719051,
+        "timeout_ms": 8000,
+        "retry_ms": 250,
+        "retries_sent": 1,
+        "observed_uart_bytes": 128,
+        "fast_fail_on_missing_hello": false,
+        "capabilities": 15,
+        "supports_selftest_transport": true
+      },
+      "timestamp": "2026-08-12T18:09:06.941239Z"
+    },
+    {
+      "name": "selftest_start_ack",
+      "pass": true,
+      "details": {
+        "transport_mode": "queue_ack",
+        "seq8": 2,
+        "seq32": 1,
+        "run_id": 4146719051,
+        "timeout_ms": 2000,
+        "observed_cmd": 254,
+        "observed_seq8": 2,
+        "observed_seq32": 1,
+        "ack_result": "accepted",
+        "expected_seq32": null,
+        "reason": "ok"
+      },
+      "timestamp": "2026-08-12T18:09:06.946231Z"
+    },
+    {
+      "name": "goodbye_ack",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4146719051,
+        "timeout_ms": 2000
+      },
+      "timestamp": "2026-08-12T18:09:07.247057Z"
+    },
+    {
+      "name": "goodbye_done",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4146719051,
+        "timeout_ms": 5000,
+        "observed_seq32": 4146719051
+      },
+      "timestamp": "2026-08-12T18:09:07.747638Z"
+    },
+    {
+      "name": "selftest_progress_watchdog",
+      "pass": true,
+      "details": {
+        "progress_count": 1,
+        "last_progress": {
+          "kind": "progress",
+          "stage": "coordinated_xy_40khz_envelope_clear",
+          "elapsed_ms": 0,
+          "stk_hwm_w": 0
+        },
+        "recent_frames": [
+          {
+            "ts": "2026-08-12T18:09:07.046369Z",
+            "cmd": 254,
+            "ack_result": "accepted",
+            "ack_seq32": 1,
+            "expected_seq32": null
+          },
+          {
+            "ts": "2026-08-12T18:09:07.046558Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_40khz_envelope_clear"
+          },
+          {
+            "ts": "2026-08-12T18:09:07.146861Z",
+            "cmd": 252,
+            "run_id": 4146719051
+          }
+        ],
+        "frame_counts": {
+          "251": 1,
+          "252": 1,
+          "254": 1
+        },
+        "progress_timeout_ms": 15000,
+        "activity_timeout_ms": 60000,
+        "status_only_timeout_ms": 120000,
+        "effective_timeout_ms": 240000,
+        "total_rx_bytes": 174,
+        "status_frames_since_selftest": 0,
+        "status_gap_max_ms": 0,
+        "status_gap_samples": 0,
+        "selftest_frames_seen": 2,
+        "reset_report": null,
+        "last_valid_frame_age_ms": 700,
+        "last_rx_byte_age_ms": 700,
+        "last_selftest_frame_age_ms": 700,
+        "timeout_reason": null
+      },
+      "timestamp": "2026-08-12T18:09:07.747664Z"
+    },
+    {
+      "name": "coordinated_xy_status_cadence",
+      "pass": false,
+      "details": {
+        "status_gap_max_ms": 0,
+        "status_gap_samples": 0,
+        "limit_ms_exclusive": 500
+      },
+      "timestamp": "2026-08-12T18:09:07.747669Z"
+    }
+  ]
+}
