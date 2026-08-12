@@ -66,6 +66,24 @@ static constexpr uint16_t kTraceFrequencyHzMin = 1u;
 static constexpr uint16_t kTraceFrequencyHzMax = 50u;
 static constexpr uint32_t kTraceMaxPulseWindowMs = 10000u;
 
+class ScopedStatusMetricsSyncMode {
+public:
+    explicit ScopedStatusMetricsSyncMode(Comm::StatusMetricsSyncMode mode) {
+        Comm::resetStatusMetricsLockFailures();
+        _activated = Comm::setStatusMetricsSyncMode(mode);
+    }
+
+    ~ScopedStatusMetricsSyncMode() {
+        (void)Comm::setStatusMetricsSyncMode(
+            Comm::StatusMetricsSyncMode::CriticalSection);
+    }
+
+    bool activated() const { return _activated; }
+
+private:
+    bool _activated = false;
+};
+
 static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {1001u, "comm_crc_known_vector", "protocol", "SAFE", "always"},
     {1002u, "comm_frame_roundtrip", "protocol", "SAFE", "always"},
@@ -249,7 +267,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runProfileLutBenchmark = (selectedDiagnosticId == 2039u);
     const bool runCoordinatedXyExecutorSuite = (selectedDiagnosticId == 2049u);
     const bool runNormalXyRouteSuite = (selectedDiagnosticId == 2059u);
-    const bool runCoordinatedXy40KhzSuite = (selectedDiagnosticId == 2077u);
+    const bool runCoordinatedXyStatusSyncSuite =
+        (selectedDiagnosticId == 2076u);
+    const bool runCoordinatedXy40KhzSuite =
+        (selectedDiagnosticId == 2077u) || runCoordinatedXyStatusSyncSuite;
     const bool runCoordinatedXyDirectionSuite = (selectedDiagnosticId == 2079u);
     const bool runCoordinatedXyTransitionSuite = (selectedDiagnosticId == 2078u);
     const bool runCoordinatedXyPerformanceSuite =
@@ -4085,6 +4106,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr int32_t kFocusedAwayPosition = 20100;
                         static constexpr int32_t kFocusedReducedAwayPosition = 24100;
                         const Limits performanceLimits{};
+                        const Comm::StatusMetricsSyncMode requestedStatusSyncMode =
+                            runCoordinatedXyStatusSyncSuite
+                                ? Comm::StatusMetricsSyncMode::TaskMutex
+                                : Comm::StatusMetricsSyncMode::CriticalSection;
+                        ScopedStatusMetricsSyncMode statusSyncGuard(
+                            requestedStatusSyncMode);
 
                         struct TestDescriptor {
                           uint16_t id;
@@ -4169,6 +4196,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             return;
                           }
                           if (runCoordinatedXy40KhzSuite) {
+                            char entryMetrics[176] = {};
+                            const unsigned statusSyncMode = static_cast<unsigned>(
+                                Comm::getStatusMetricsSyncMode());
+                            const unsigned long lockFailures =
+                                static_cast<unsigned long>(
+                                    Comm::getStatusMetricsLockFailureCount());
                             (void)runOne(2064u,
                                          "coordinated_xy_performance_40khz",
                                          false,
@@ -4182,7 +4215,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 2073u,
                                 "coord_xy_40khz_entry_lateness",
                                 false,
-                                "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;sm=0;sf=0;to=1");
+                                (snprintf(entryMetrics,
+                                          sizeof(entryMetrics),
+                                          "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;"
+                                          "dm=0;sm=%u;lf=%lu;sf=0;to=1",
+                                          statusSyncMode,
+                                          lockFailures) > 0)
+                                    ? entryMetrics
+                                    : "gate=metrics_overflow;to=1");
                             return;
                           }
                           if (!runCoordinatedXyDirectionSuite) {
@@ -4207,6 +4247,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           comm->setStatusPaused(true);
                           emitSkipped(firstId, gate);
                         };
+
+                        if (!statusSyncGuard.activated()) {
+                          failRemaining(2060u, "status_sync_unavailable");
+                          return finishSelfTestNow();
+                        }
 
                         if (stepperX == nullptr || stepperY == nullptr ||
                             stepperZ == nullptr || gantry == nullptr || comm == nullptr ||
@@ -4361,7 +4406,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           const uint32_t expectedY = absoluteDelta(start.y, target.y);
                           const uint32_t expectedMaster =
                               expectedX > expectedY ? expectedX : expectedY;
-                          Comm::resetStatusMetrics();
+                          const bool statusMetricsReset =
+                              Comm::resetStatusMetrics();
                           comm->setStatusPaused(false);
                           bool completed = false;
                           bool endpoint = false;
@@ -4443,13 +4489,21 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               std::numeric_limits<uint32_t>::max();
                           (void)Watchdog_GetTaskLastSeenAgeMs(
                               CRASH_TASK_STATUS, &statusAgeMs);
-                          const uint32_t statusFrames =
-                              Comm::getStatusChunk0Count() +
-                              Comm::getStatusChunk1Count();
-                          const uint32_t statusGapMs = Comm::getStatusPeriodMaxMs();
-                          const uint32_t alternationErrors =
-                              Comm::getStatusAlternationErrors();
                           comm->setStatusPaused(true);
+                          const Comm::StatusMetricsSnapshot statusMetrics =
+                              Comm::getStatusMetricsSnapshot();
+                          const bool statusMetricsValid =
+                              statusMetricsReset && statusMetrics.valid &&
+                              statusMetrics.lockFailures == 0u;
+                          const uint32_t statusFrames = statusMetricsValid
+                              ? statusMetrics.chunk0Count + statusMetrics.chunk1Count
+                              : 0u;
+                          const uint32_t statusGapMs = statusMetricsValid
+                              ? statusMetrics.periodMaxMs
+                              : std::numeric_limits<uint32_t>::max();
+                          const uint32_t alternationErrors = statusMetricsValid
+                              ? statusMetrics.alternationErrors
+                              : 1u;
 
                           if (expectedRateHz == 0u) {
                             expectedRateHz = result.snapshot.selectedMasterRateHz;
@@ -5102,11 +5156,15 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         auto emitEntryLatenessEvidence =
                             [&](const Aggregate& aggregate) {
                           char metrics[176] = {};
+                          const unsigned statusSyncMode = static_cast<unsigned>(
+                              Comm::getStatusMetricsSyncMode());
+                          const uint32_t lockFailures =
+                              Comm::getStatusMetricsLockFailureCount();
                           const int written = snprintf(
                               metrics,
                               sizeof(metrics),
                               "i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"
-                              "lc=%lu;dm=%lu;sm=0;sf=%lu;to=%lu",
+                              "lc=%lu;dm=%lu;sm=%u;lf=%lu;sf=%lu;to=%lu",
                               (unsigned long)aggregate.timer2Callbacks,
                               (unsigned long)aggregate.entryTimerSamples,
                               (unsigned long)aggregate.entryTimerMissing,
@@ -5115,6 +5173,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               (unsigned long)aggregate.pendingEntryTimerCountMax,
                               (unsigned long)aggregate.lateEntryCount,
                               (unsigned long)aggregate.entryScheduleOverrunMaxCycles,
+                              statusSyncMode,
+                              (unsigned long)lockFailures,
                               (unsigned long)aggregate.saturationFlags,
                               (unsigned long)aggregate.timeoutCount);
                           const bool evidenceComplete =
@@ -5122,6 +5182,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               aggregate.entryTimerSamples ==
                                   aggregate.timer2Callbacks &&
                               aggregate.entryTimerMissing == 0u &&
+                              lockFailures == 0u &&
                               aggregate.saturationFlags == 0u &&
                               aggregate.timeoutCount == 0u;
                           const size_t nameLength = std::min(

@@ -326,6 +326,36 @@ def test_load_coordinated_xy_40khz_manifest_reuses_only_the_existing_row():
     assert entry_rules["sf"]["equals"] == 0
 
 
+def test_load_coordinated_xy_status_sync_manifest_is_strict_mutex_isolation():
+    manifest = load_manifest("coordinated_xy_status_sync_v1")
+
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2064, 2072, 2073)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--coordinated-xy-status-sync-suite",)
+    assert {item["fixture_id"] for item in manifest.fixtures} == {
+        "motion_clear_envelope_v1"
+    }
+    note = manifest.fixtures[0]["operator_note"]
+    assert "same ten-move 40 kHz geometry row" in note
+    assert "restores critical-section mode" in note
+
+    motion = manifest.analysis_rules["2064"]["metrics"]
+    assert motion["i2"]["equals"] == 440000
+    assert motion["pu"]["equals"] == 0
+    assert motion["xd"]["max"] == 25
+    irq = manifest.analysis_rules["2072"]["metrics"]
+    assert irq["s"]["equals"] == 440000
+    assert irq["pu"]["equals"] == 0
+    entry = manifest.analysis_rules["2073"]["metrics"]
+    assert entry["cm"]["max"] == 127
+    assert entry["lc"]["equals"] == 0
+    assert entry["dm"]["max"] == 255
+    assert entry["sm"]["equals"] == 1
+    assert entry["lf"]["equals"] == 0
+
+
 def test_load_motion_envelope_manifest_requires_operator_full_envelope_fixture():
     manifest = load_manifest("motion_envelope_v1")
 

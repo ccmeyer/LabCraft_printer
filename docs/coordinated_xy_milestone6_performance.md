@@ -617,6 +617,36 @@ The printer remains flashed with this exact velocity-domain correction image.
 Do not promote it to the production default or rerun FULL until the evidence
 and the remaining entry-lateness risk are reviewed.
 
+### Stage 2 Status-Synchronization A/B Candidate
+
+The retained pending-update run establishes an intermittent real-time deadline
+miss even though the two later entry-lateness runs did not reproduce pending.
+Because the primary objective is to eliminate rare movement-related failures,
+the user authorized a controlled A/B comparison rather than additional
+critical-section-only attempts to force the symptom.
+
+Selector `2076` now reuses selector `2077`'s exact ten-move 40 kHz geometry,
+bounded homes, result IDs, live status transmission, and watchdog checks. The
+only experimental change is status-metric synchronization. `Comm` creates a
+dedicated static FreeRTOS mutex at boot but continues to default to the existing
+critical section. Selector `2076` temporarily protects metric reset, update,
+and consistent snapshot operations with that mutex, using a 5 ms bounded wait;
+selector `2077` explicitly retains the critical section. UART transmission is
+outside the metric lock. A scope guard restores critical-section mode on every
+return, and an unavailable mutex or any lock failure fails closed before or
+during evidence collection. Result `2073` adds lock-failure count `lf` and
+reports `sm=1` for the mutex arm.
+
+The diagnostic artifact is 329,352 bytes with SHA-256
+`23A820FC54FF990BEA66A7F7AF893749B94BC16902F77884B7699E33F5242944`,
+leaving 63,864 bytes in the 384 KiB application partition. Firmware host tests
+pass 344/344 with 8,723,583 checks, and the Debug target links with the same
+three pre-existing warnings. The full Python regression passes 4,573 tests
+with 135 skipped. Physical evidence is pending three SAFE-bracketed pairs in
+order `2077-2076`, `2076-2077`, `2077-2076`. Mutex mode is
+diagnostic-only and must not become the production default without separate
+review and qualification.
+
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort
 terminal measured 2,349 cycles versus the retained 2,250-cycle gate; cancel

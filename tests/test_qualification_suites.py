@@ -239,6 +239,24 @@ def test_coordinated_xy_40khz_suite_is_only_the_existing_geometry_row():
     assert "dm" in rows[2].metrics
 
 
+def test_coordinated_xy_status_sync_suite_reuses_the_geometry_rows_with_strict_lateness():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    focused = entries["coordinated_xy_status_sync_v1"].manifest
+
+    assert focused.profile == "FULL"
+    assert required_fixture_ids(focused) == ("motion_clear_envelope_v1",)
+    rows = build_test_plan_rows(focused)
+    assert [row.test_id for row in rows] == [2064, 2072, 2073]
+    assert "sm" in rows[2].metrics
+    assert "lf" in rows[2].metrics
+    rules = focused.analysis_rules["2073"]["metrics"]
+    assert rules["sm"]["equals"] == 1
+    assert rules["lf"]["equals"] == 0
+    assert rules["cm"]["max"] == 127
+    assert rules["lc"]["equals"] == 0
+    assert rules["dm"]["max"] == 255
+
+
 def test_coordinated_xy_camera_transition_suite_is_single_motion_fixture_gate():
     entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
     focused = entries["coordinated_xy_camera_transition_v1"].manifest

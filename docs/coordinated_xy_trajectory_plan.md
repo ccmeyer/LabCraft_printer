@@ -224,7 +224,7 @@ Every milestone that touches motion must preserve these invariants:
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
-| 6. Performance and motion HIL qualification | `implemented` | The velocity-domain correction reduced the calculated peak from 443,900 to about 131,100 steps/s2 and passed one guarded 40 kHz row with X=4/Y=1 drift; measurable entry lateness remains | Review the passing correction evidence; Stage 2 remains unauthorized unless its independent pending/lateness gate opens, and FULL remains blocked pending review |
+| 6. Performance and motion HIL qualification | `implemented` | The velocity-domain correction reduced the calculated peak from 443,900 to about 131,100 steps/s2 and passed one guarded 40 kHz row with X=4/Y=1 drift; the diagnostic-only status-mutex A/B image is implemented | Complete and review the three SAFE-bracketed A/B pairs; FULL remains blocked |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
@@ -245,10 +245,18 @@ so selector `2077` remained a real 40 kHz test. The required automated gates,
 pre-SAFE 28/28, single guarded selector `2077`, and post-SAFE 28/28 all passed.
 The physical reference error improved from X=54/Y=3 to X=4/Y=1, with all three
 focused results passing. Entry lateness remained measurable (`cm=507`,
-`dm=968`) without a pending observation. Review this correction evidence
-before production promotion or FULL qualification. Selector `2076` remains
-unauthorized unless the original Stage 2 pending/lateness gate is independently
-met.
+`dm=968`) without a pending observation. The retained historical run already
+proves that pending updates can occur intermittently, and the user explicitly
+prioritized eliminating rare movement-related failures. That reliability goal
+authorizes the controlled Stage 2 comparison without requiring another
+critical-section-only failure first.
+
+The Stage 2 image adds selector `2076`, which shares selector `2077`'s exact
+40 kHz row and bounded homes while changing only status-metric synchronization
+to a dedicated static task mutex. Boot, selector `2077`, and normal operation
+remain critical-section mode. The next action is three counterbalanced,
+SAFE-bracketed pairs in order `2077-2076`, `2076-2077`, `2077-2076`, followed
+by review before any production-default or FULL-qualification decision.
 
 ## Milestone 0: Baseline And Decisions
 

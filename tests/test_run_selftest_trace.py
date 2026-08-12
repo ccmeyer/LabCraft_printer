@@ -1058,15 +1058,16 @@ def test_run_sends_normal_xy_route_selector_and_keeps_goodbye(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize(
-    ("performance_suite", "forty_suite", "direction_suite", "transition_suite", "expected_selector"),
-    ((True, False, False, False, 2069),
-     (False, True, False, False, 2077),
-     (False, False, True, False, 2079),
-     (False, False, False, True, 2078)),
+    ("performance_suite", "forty_suite", "status_sync_suite", "direction_suite", "transition_suite", "expected_selector"),
+    ((True, False, False, False, False, 2069),
+     (False, True, False, False, False, 2077),
+     (False, False, True, False, False, 2076),
+     (False, False, False, True, False, 2079),
+     (False, False, False, False, True, 2078)),
 )
 def test_run_sends_coordinated_xy_performance_selector_and_checks_status_cadence(
-    monkeypatch, tmp_path, performance_suite, forty_suite, direction_suite, transition_suite,
-    expected_selector
+    monkeypatch, tmp_path, performance_suite, forty_suite, status_sync_suite,
+    direction_suite, transition_suite, expected_selector
 ):
     mod = _load_run_selftest()
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
@@ -1107,6 +1108,7 @@ def test_run_sends_coordinated_xy_performance_selector_and_checks_status_cadence
         normal_xy_route_suite=False,
         coordinated_xy_performance_suite=performance_suite,
         coordinated_xy_40khz_suite=forty_suite,
+        coordinated_xy_status_sync_suite=status_sync_suite,
         coordinated_xy_x_direction_suite=direction_suite,
         coordinated_xy_camera_transition_suite=transition_suite,
         out=str(out_path),

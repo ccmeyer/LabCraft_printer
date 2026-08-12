@@ -2779,13 +2779,31 @@ before HAL dispatch and without calling HAL or FreeRTOS. It reports callbacks
 at or above the diagnostic 128-tick threshold (`lc`), maximum positive
 inter-entry schedule overrun (`dm`, in 180 MHz core cycles), status
 synchronization mode (`sm=0` for the production critical section), saturation
-(`sf`), and timeout (`to`). The evidence result passes when coverage is
+(`sf`), status-synchronization lock failures (`lf`), and timeout (`to`). The
+evidence result passes when coverage is
 complete and unsaturated; it does not weaken result `2064`'s zero-pending gate.
-Proceed to the status-synchronization A/B only if a single Stage 1 run
-reproduces pending updates and either `pm >= 128` or `dm >= 256`. If pending is
-reproduced below both thresholds, investigate the post-check instrumentation
-tail instead. If no pending update occurs, do not repeat motion solely to force
-the failure.
+
+Selector `2076` provides the diagnostic-only status-synchronization arm:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-status-sync-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_status_sync.json
+python3 tools/run_qualification.py --manifest coordinated_xy_status_sync_v1 --operator-prompts --fixture motion_clear_envelope_v1 --machine-id LC-001 --raw-report hil_reports/coordinated_xy_status_sync.json
+```
+
+It runs the exact selector-`2077` geometry and homes but protects only the
+status-metric reset/update/snapshot body with a dedicated statically allocated
+FreeRTOS task mutex. Interrupts remain enabled during those calculations; the
+mutex wait is bounded to 5 ms and any lock failure fails closed through `lf`.
+Boot, selector `2077`, and all normal operation remain on the existing critical
+section. An exit guard restores critical-section mode on every selector-`2076`
+return path. This is an A/B diagnostic, not approval to make the mutex the
+production default.
+
+The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
+`A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is
+selector `2076`/manifest `coordinated_xy_status_sync_v1`. Every B run requires
+`sm=1`, `lf=0`, `pu=ps=0`, complete 440,000-callback coverage, `lc=0`,
+`cm<128`, and `dm<256`, plus clean cadence, watchdog, reset, and home evidence.
 
 First confirm that the `pressure_closed_loop_v1` fixture is installed and safe
 at 1-2 psi and that the complete XY/Z envelope is clear. Both performance

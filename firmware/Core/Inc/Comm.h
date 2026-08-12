@@ -117,6 +117,22 @@ static constexpr uint32_t TRANSPORT_CAPABILITIES =
 
 class Comm {
 public:
+    enum class StatusMetricsSyncMode : uint8_t {
+        CriticalSection = 0u,
+        TaskMutex = 1u,
+    };
+
+    struct StatusMetricsSnapshot {
+        uint32_t chunk0Count = 0u;
+        uint32_t chunk1Count = 0u;
+        uint32_t alternationErrors = 0u;
+        uint32_t periodAvgMs = 0u;
+        uint32_t periodMaxMs = 0u;
+        uint32_t periodMaxJitterMs = 0u;
+        uint32_t lockFailures = 0u;
+        bool valid = false;
+    };
+
     Comm(UART_HandleTypeDef* huart);
     /// call once (from main.c) to arm UART‐RX interrupts
     void begin();
@@ -156,7 +172,15 @@ public:
 
     void resetReceiveState();
 
-    static void resetStatusMetrics();
+    // Task-context-only diagnostic synchronization control. Normal boot and
+    // production operation always use CriticalSection unless an explicit
+    // self-test temporarily selects TaskMutex.
+    static bool setStatusMetricsSyncMode(StatusMetricsSyncMode mode);
+    static StatusMetricsSyncMode getStatusMetricsSyncMode();
+    static bool resetStatusMetrics();
+    static StatusMetricsSnapshot getStatusMetricsSnapshot();
+    static void resetStatusMetricsLockFailures();
+    static uint32_t getStatusMetricsLockFailureCount();
     static uint32_t getStatusChunk0Count();
     static uint32_t getStatusChunk1Count();
     static uint32_t getStatusAlternationErrors();
@@ -191,6 +215,25 @@ public:
     volatile bool 	  _needRxRearm = false;
 
 private:
+
+    class StatusMetricsGuard {
+    public:
+        StatusMetricsGuard();
+        ~StatusMetricsGuard();
+        bool acquired() const { return _acquired; }
+
+    private:
+        StatusMetricsSyncMode _mode = StatusMetricsSyncMode::CriticalSection;
+        bool _acquired = false;
+    };
+
+    static void recordStatusSend(uint8_t sentChunk);
+    static void recordStatusMetricsLockFailure();
+
+    static StaticSemaphore_t _statusMetricsMutexStorage;
+    static SemaphoreHandle_t _statusMetricsMutex;
+    static volatile StatusMetricsSyncMode _statusMetricsSyncMode;
+    static volatile uint32_t _statusMetricsLockFailures;
 
     static Comm*        _instance;
     // for status task

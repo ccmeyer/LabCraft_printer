@@ -199,7 +199,8 @@ TEST(DiagnosticResultEmitter, CoordinatedXyEntryLatenessMetricsFitAtSaturatedVal
     const int written = std::snprintf(
         metricsText,
         sizeof(metricsText),
-        "i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;lc=%lu;dm=%lu;sm=0;sf=%lu;to=%lu",
+        "i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;lc=%lu;dm=%lu;sm=1;lf=%lu;sf=%lu;to=%lu",
+        4294967295ul,
         4294967295ul,
         4294967295ul,
         4294967295ul,

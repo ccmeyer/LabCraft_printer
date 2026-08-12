@@ -19,14 +19,17 @@ def test_performance_suite_has_fixed_ids_selector_rates_and_fail_stop_totals():
         assert f"{{{test_id}u," in diagnostics
         assert f"{test_id}u" in suite
     assert "selectedDiagnosticId == 2069u" in diagnostics
+    assert "selectedDiagnosticId == 2076u" in diagnostics
     assert "selectedDiagnosticId == 2077u" in diagnostics
     assert "selectedDiagnosticId == 2079u" in diagnostics
     assert "selectedDiagnosticId == 2078u" in diagnostics
     assert "2069 if coordinated_xy_performance_suite" in runner
+    assert "2076 if coordinated_xy_status_sync_suite" in runner
     assert "2077 if coordinated_xy_40khz_suite" in runner
     assert "2079 if coordinated_xy_x_direction_suite" in runner
     assert "2078 if coordinated_xy_camera_transition_suite" in runner
     assert 'add_argument("--coordinated-xy-performance-suite", action="store_true")' in runner
+    assert 'add_argument("--coordinated-xy-status-sync-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-40khz-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-x-direction-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-camera-transition-suite", action="store_true")' in runner
@@ -74,8 +77,56 @@ def test_standalone_40khz_selector_reuses_only_existing_tier_four_and_exits():
     assert 'runOne(2073u,' in suite
     assert "emitEntryLatenessEvidence(aggregate)" in suite
     assert '"i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"' in suite
-    assert '"lc=%lu;dm=%lu;sm=0;sf=%lu;to=%lu"' in suite
+    assert '"lc=%lu;dm=%lu;sm=%u;lf=%lu;sf=%lu;to=%lu"' in suite
     assert '"coord_xy_40khz_entry_lateness",\n                                false,' in suite
+
+
+def test_status_sync_variant_is_static_bounded_and_restores_critical_mode():
+    header = _read("firmware/Core/Inc/Comm.h")
+    comm = _read("firmware/Core/Src/Comm.cpp")
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+
+    assert "enum class StatusMetricsSyncMode : uint8_t" in header
+    assert "CriticalSection = 0u" in header
+    assert "TaskMutex = 1u" in header
+    assert "StaticSemaphore_t _statusMetricsMutexStorage" in header
+    assert "xSemaphoreCreateMutexStatic(&_statusMetricsMutexStorage)" in comm
+    assert "pdMS_TO_TICKS(5u)" in comm
+    assert "_statusMetricsSyncMode = StatusMetricsSyncMode::CriticalSection" in comm
+    assert "if (!guard.acquired()) return false;" in comm
+    assert "if (!guard.acquired()) return;" in comm
+    assert "if (_statusMetricsLockFailures != 0xFFFFFFFFu)" in comm
+    assert "StatusMetricsSnapshot Comm::getStatusMetricsSnapshot()" in comm
+
+    reset_start = comm.index("bool Comm::resetStatusMetrics()")
+    reset_end = comm.index("Comm::StatusMetricsSnapshot", reset_start)
+    reset = comm[reset_start:reset_end]
+    assert reset.index("if (!guard.acquired()) return false;") < reset.index(
+        "s_statusChunk0Count = 0"
+    )
+    record_start = comm.index("void Comm::recordStatusSend")
+    record_end = comm.index("void Comm::statusTask", record_start)
+    record = comm[record_start:record_end]
+    assert record.index("if (!guard.acquired()) return;") < record.index(
+        "s_statusChunk0Count++"
+    )
+
+    guard_start = diagnostics.index("class ScopedStatusMetricsSyncMode")
+    guard_end = diagnostics.index("static constexpr DiagnosticTestDescriptor", guard_start)
+    guard = diagnostics[guard_start:guard_end]
+    assert "Comm::resetStatusMetricsLockFailures();" in guard
+    assert "Comm::setStatusMetricsSyncMode(mode)" in guard
+    assert "Comm::StatusMetricsSyncMode::CriticalSection" in guard
+    assert "~ScopedStatusMetricsSyncMode()" in guard
+
+    suite_start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
+    suite_end = diagnostics.index("if (runMotionTimingSuite)", suite_start)
+    suite = diagnostics[suite_start:suite_end]
+    assert "runCoordinatedXyStatusSyncSuite" in suite
+    assert "Comm::StatusMetricsSyncMode::TaskMutex" in suite
+    assert "status_sync_unavailable" in suite
+    assert "statusMetrics.lockFailures == 0u" in suite
+    assert "lockFailures == 0u" in suite
 
 
 def test_outer_tim2_instrumentation_stays_in_generated_user_blocks_and_brackets_hal():
