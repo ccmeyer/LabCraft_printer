@@ -2810,7 +2810,7 @@ planner event, so it was not a sound basis for validating TMC2208 operation.
 
 The replacement diagnostic keeps the production two-edge executor and tests
 the driver-supported reduction in microstep resolution. Build the distinct
-MRES=3 image without overwriting the normal MRES=2 artifact:
+MRES=3 image without overwriting the production artifact:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File firmware/scripts/build_firmware_headless.ps1 -Config MRES3_Diagnostic -ArtifactFileName LabCraft_firmware_mres3_diagnostic.bin
@@ -2825,25 +2825,24 @@ python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-x
 python3 tools/run_qualification.py --manifest coordinated_xy_mres3_20khz_v2 --operator-prompts --fixture coordinated_xy_mres3_20khz_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_mres3_20khz.json
 ```
 
-MRES=3 selects 1/32 microsteps instead of 1/64. The selector halves every X/Y/Z
-home/backoff and XY geometry coordinate, caps X/Y at 20 kHz, and uses 70,000
-microsteps/s2, preserving the prior nominal physical speed, acceleration, and
-travel. It therefore expects the same ten physical moves but 110,000 planner
-steps and 220,000 rise/fall TIM2 callbacks. Results `2080`-`2083` verify exact
-motion, complete IRQ/entry coverage, zero pending updates, 219,990 nonterminal
-deadline samples, no deadline miss, at least 450 timer ticks of post-handler
-slack, and the intended TMC configuration (`MRES=3`, `DEDGE=1`,
-`multistep_filt=0`). P/R positions must not change.
+MRES=3 selects 1/32 microsteps instead of 1/64. Commands, configuration, and
+status remain in the original MRES=2 logical units. The firmware converts at
+the motor boundary: one complete high/low DEDGE cycle represents two logical
+units, so native pulse-cycle count, rate, and acceleration are divided by two.
+An odd signed displacement is truncated toward zero to the nearest reachable
+coordinate; status reports that actual logical coordinate rather than the
+unreachable request. The original ten-move coordinates, 40 kHz logical rate,
+and 140,000 logical-units/s2 therefore preserve physical travel, speed, and
+acceleration while producing 110,000 native cycles and 220,000 rise/fall TIM2
+callbacks. Results `2080`-`2083` verify exact motion, complete IRQ/entry
+coverage, 219,990 nonterminal deadline samples, and the intended TMC
+configuration (`MRES=3`, `DEDGE=1`, `multistep_filt=0`). P/R positions must not
+change.
 
-The MRES=3 image is diagnostic-only. Ordinary queued commands are rejected
-with all motors disabled, ordinary FULL requests fail before motion, and only
-SAFE plus selectors `2085`, `2084`, and `2086` are supported. Boot/default builds remain MRES=2;
-MRES=3 is not a production migration until the watched HIL evidence is
-reviewed. Roll back by flashing `firmware/artifacts/LabCraft_firmware.bin`.
-The matching rearm-capable diagnostic artifact is 344,128 bytes with SHA-256
-`132EC3AF0F900D3E4E22616C2D7B311765D085144EBF2E9AE42A7E004B4F0758`;
-the production artifact is 343,872 bytes with SHA-256
-`2A90E15E2561684EB4C7B8D135D6CB8428F8F817FA29034AF593849B5D2C87A9`.
+The MRES=3 diagnostic image still rejects ordinary queued commands with all
+motors disabled, rejects ordinary FULL requests before motion, and accepts
+only SAFE plus selectors `2085`, `2084`, and `2086`. Its boot schedule remains
+`FreeRunning`; selector guards restore the prior mode on every exit.
 
 Selector `2084` runs the same scaled MRES=3 row but temporarily changes TIM2
 from free-running scheduling to rearm-from-actual-edge scheduling:
@@ -2862,7 +2861,7 @@ edge-to-restart core cycles). Acceptance requires `rm=1`, `rc=219990`, `rp=0`,
 complete deadline coverage, no missed deadline, and at least 450 timer ticks
 of post-handler slack. Entry lateness (`cm`, `lc`, and `dm`) remains visible but
 is diagnostic rather than a failure: rearming is intended to tolerate it.
-Selector `2085`, boot, and the production image remain free-running.
+Selector `2085` and diagnostic boot remain free-running.
 
 Selector `2086` is the conditional late-only rearm diagnostic. It runs the same
 MRES=3 ten-move row and leaves TIM2 free-running whenever a nonterminal physical
@@ -2882,8 +2881,8 @@ python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-x
 python3 tools/run_qualification.py --manifest coordinated_xy_mres3_conditional_rearm_v3 --operator-prompts --fixture coordinated_xy_mres3_conditional_rearm_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_mres3_conditional_rearm.json
 ```
 
-This selector is diagnostic-only. It restores `FreeRunning` on every exit and
-does not authorize MRES=3 or conditional scheduling in production.
+This selector is diagnostic-only. It restores the diagnostic image's
+`FreeRunning` mode on every exit.
 
 The v3 conditional manifest adds the zero-cruise peak fallback while preserving
 the v2 result schema and strict gates. The v2 MRES3 manifests correspond to the
@@ -2899,11 +2898,35 @@ limit/planner termination, count/endpoint/checksum/state mismatches, incomplete
 coverage, saturation, watchdog evidence, and communication/operator aborts
 still stop immediately. Selector `2084` retains its original fail-stop policy.
 The v1 and v2 conditional manifests remain available to normalize earlier
-reports. The revised diagnostic's production artifact is 351,832 bytes with
-SHA-256
+reports.
+
+The production migration candidate uses the same logical-unit conversion,
+programs all shared-UART TMC2208 drivers as MRES=3/DEDGE=1/multistep_filt=0,
+and boots coordinated XY in `ConditionalLateRearm`. Synthetic late-edge
+injection and its intentional-wait path are compiled only into the diagnostic
+image. Selector `2097` exercises the production path without injection and
+emits `[2087,2088,2089,2090]`:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-production-mres3-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_production_mres3.json
+python3 tools/run_qualification.py --manifest coordinated_xy_production_mres3_v1 --operator-prompts --fixture coordinated_xy_production_mres3_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_production_mres3.json
+```
+
+Production acceptance requires exact native totals and callback coverage, zero
+pending/deadline/reset/watchdog evidence, at least 450 timer ticks of deadline
+slack, consistent conditional decisions, successful bounded homes, and normal
+operator observation. Conditional rearm need not occur in a clean row; if it
+does occur, pending-at-rearm must remain zero. The production artifact is
+351,616 bytes with SHA-256
+`76113CB35E7806F35A15D86F9EB857140B62B76771445508E4BF3084AA5D05DA`;
+the matching diagnostic artifact is 354,016 bytes with SHA-256
+`16C7F75155BC92D23E0A8A5691A779B2D446EFE5B5A85D281A765C2AB8C95084`.
+
+Rollback before production HIL is the commit-`8a1cd3c4` production artifact:
+351,832 bytes, SHA-256
 `A0D40FD82EED36B8CECFF2A2B5E56499C95CF9B962029CB8D2A52F618F165A12`.
-The matching watched-test MRES=3 artifact is 352,088 bytes with SHA-256
-`CE10D650BC5D4B3377FB92A997AC1C3334E494B9BC9D3817ACA7DD6B0682341E`.
+The single-axis LUT migration remains a separate checkpoint and is not started
+until this production MRES=3/conditional-rearm candidate passes watched HIL.
 
 The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is

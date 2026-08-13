@@ -3,7 +3,7 @@
 #include <cstdint>
 
 #ifndef LC_TMC2208_MRES
-#define LC_TMC2208_MRES 2
+#define LC_TMC2208_MRES 3
 #endif
 
 #ifndef LC_TMC2208_DIAGNOSTIC_BUILD
@@ -51,13 +51,17 @@ inline constexpr bool isMres3DiagnosticBuild() {
   return LC_TMC2208_DIAGNOSTIC_BUILD != 0 && LC_TMC2208_MRES == 3;
 }
 
+inline constexpr bool isProductionMres3Build() {
+  return LC_TMC2208_DIAGNOSTIC_BUILD == 0 && LC_TMC2208_MRES == 3;
+}
+
 inline constexpr bool preservesMres2PhysicalRate(uint32_t rateHz) {
-  return LC_TMC2208_MRES == 3 && rateHz == 20000u;
+  return LC_TMC2208_MRES == 3 && rateHz == 40000u;
 }
 
 inline constexpr bool preservesMres2PhysicalAcceleration(
     uint32_t accelerationStepsPerSec2) {
-  return LC_TMC2208_MRES == 3 && accelerationStepsPerSec2 == 70000u;
+  return LC_TMC2208_MRES == 3 && accelerationStepsPerSec2 == 140000u;
 }
 
 }  // namespace TMC2208Configuration

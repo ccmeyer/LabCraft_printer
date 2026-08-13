@@ -48,8 +48,12 @@ def test_reservations_precede_gpio_changes_and_failed_y_reservation_rolls_back_x
     prepare_x = gantry.index("sx->_prepareCoordinatedAxis", stop_timers)
 
     assert reserve_x < reserve_y < rollback_x < stop_timers < prepare_x
-    assert "reservedTargetX" in gantry
-    assert "reservedTargetY" in gantry
+    post_reservation = gantry[reserve_y:stop_timers]
+    assert "sx->_pos != initialX || sy->_pos != initialY" in post_reservation
+    assert "sy->_releaseCoordinatedReservation();" in post_reservation
+    assert "sx->_releaseCoordinatedReservation();" in post_reservation
+    assert "xMove.target" in gantry[prepare_x:]
+    assert "yMove.target" in gantry[prepare_x:]
     assert gantry.count("sx->_isLimitAsserted() || sy->_isLimitAsserted()") == 2
 
 
@@ -102,7 +106,7 @@ def test_target_build_optimizes_only_the_bounded_coordinated_edge_path():
     assert "const uint8_t eventMask = static_cast<uint8_t>(cursor.cachedEvent.mask);" in planner
     assert "const uint8_t tickMask = static_cast<uint8_t>(tick.mask);" in gantry
     assert '#define LC_COORDINATED_HW_OPTIMIZED __attribute__((optimize("O2"), hot))' in gantry
-    assert "LC_COORDINATED_HW_OPTIMIZED\nbool Gantry::_handleCoordinatedTimerFromIsr" in gantry
+    assert "LC_COORDINATED_HW_ALWAYS_INLINE\nbool Gantry::_handleCoordinatedTimerFromIsr" in gantry
     assert "LC_COORDINATED_HW_ALWAYS_INLINE\nuint32_t gantryCycleNow" in gantry
     assert "LC_COORDINATED_HW_ALWAYS_INLINE\nvoid gantryStopAndClearUpdateTimer" in gantry
     assert "LC_COORDINATED_HW_ALWAYS_INLINE\nvoid Gantry::_finishCoordinatedHardware" in gantry
@@ -121,7 +125,7 @@ def test_target_build_optimizes_only_the_bounded_coordinated_edge_path():
     assert "_finishCompletedCoordinatedAxisFromLow()" in finish_hardware
     finish_from_isr = gantry[gantry.index("void Gantry::_finishCoordinatedFromIsr") :]
     finish_from_isr = finish_from_isr[: finish_from_isr.index("bool Gantry::_handleCoordinatedTimerFromIsr")]
-    assert "_finishCoordinatedHardware(aborted, true);" in finish_from_isr
+    assert "_finishCoordinatedHardware(aborted, true, accountLateInjection);" in finish_from_isr
 
 
 def test_xy_home_limits_hard_stop_without_debounce_or_task_scheduling():
@@ -257,7 +261,7 @@ def test_complete_step_mode_is_diagnostic_only_and_generates_a_bounded_gpio_puls
     assert "CoordinatedXyExecutor::elapsedCoreCycles(" not in pulse_window
 
 
-def test_complete_step_deadline_is_measured_after_the_full_tim2_irq_path():
+def test_tim2_deadline_is_measured_after_the_full_irq_path():
     irq = _read("firmware/Core/Src/stm32f4xx_it.c")
     gantry = _read("firmware/Core/Src/Gantry.cpp")
 
@@ -271,7 +275,7 @@ def test_complete_step_deadline_is_measured_after_the_full_tim2_irq_path():
     exit_start = gantry.index("void Gantry::recordCoordinatedTim2IrqExitFromIsr")
     exit_end = gantry.index('extern "C" LC_COORDINATED_HW_OPTIMIZED', exit_start)
     exit_path = gantry[exit_start:exit_end]
-    deadline = exit_path.index("recordCompleteStepDeadline")
+    deadline = exit_path.index("recordTim2Deadline")
     completed = exit_path.index("completeIrqPath")
     assert deadline < completed
     assert "timer->Instance->CNT" in exit_path

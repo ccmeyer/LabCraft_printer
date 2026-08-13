@@ -7,7 +7,9 @@
 
 #include "Gantry.h"
 #include "Stepper.h"
+#include "MotionUnitScale.h"
 #include "Orchestrator.h"
+#include "TMC2208Configuration.h"
 #include "cmsis_os.h"      // for osDelay
 #include "task.h"
 #include <algorithm>       // for std::max
@@ -166,7 +168,9 @@ void Gantry::begin() {
   _instance = this;
   _coordinatedExecutionMode = CoordinatedXyExecutor::ExecutionMode::TwoEdge;
   _coordinatedTimerScheduleMode =
-      CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning;
+      TMC2208Configuration::isProductionMres3Build()
+          ? CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm
+          : CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning;
 }
 
 bool Gantry::setCoordinatedExecutionModeForDiagnostics(
@@ -228,6 +232,9 @@ Gantry::coordinatedTimerScheduleMode() const {
 }
 
 bool Gantry::armCoordinatedLateServiceInjectionForDiagnostics() {
+#if LC_TMC2208_DIAGNOSTIC_BUILD == 0
+  return false;
+#else
   taskENTER_CRITICAL();
   Stepper* sx = Stepper::stepperX();
   Stepper* sy = Stepper::stepperY();
@@ -241,6 +248,7 @@ bool Gantry::armCoordinatedLateServiceInjectionForDiagnostics() {
   if (available) _coordinatedLateInjectionArmed = true;
   taskEXIT_CRITICAL();
   return available;
+#endif
 }
 
 void Gantry::clearCoordinatedLateServiceInjectionForDiagnostics() {
@@ -255,9 +263,17 @@ CoordinatedStartStatus Gantry::moveTo(int32_t x,
 #if LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE != 0
 	(void)feedHz;
 	const GantryPosition current = getPosition();
+	int32_t canonicalX = current.x;
+	int32_t canonicalY = current.y;
+	if (!MotionUnitScale::canonicalizeAbsoluteTarget(
+	        current.x, x, canonicalX) ||
+	    !MotionUnitScale::canonicalizeAbsoluteTarget(
+	        current.y, y, canonicalY)) {
+	  return CoordinatedStartStatus::PositionOutOfRange;
+	}
 	return startCoordinatedXY(
-	    static_cast<int64_t>(x) - current.x,
-	    static_cast<int64_t>(y) - current.y,
+	    static_cast<int64_t>(canonicalX) - current.x,
+	    static_cast<int64_t>(canonicalY) - current.y,
 	    0u);
 #else
 	const int64_t dx = static_cast<int64_t>(x) - MX_STEPPERX_GetPos();
@@ -356,15 +372,23 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
     return _coordinatedStartStatus;
   }
 
-  const int64_t targetX = static_cast<int64_t>(sx->_pos) + dx;
-  const int64_t targetY = static_cast<int64_t>(sy->_pos) + dy;
-  if (targetX < std::numeric_limits<int32_t>::min() ||
-      targetX > std::numeric_limits<int32_t>::max() ||
-      targetY < std::numeric_limits<int32_t>::min() ||
-      targetY > std::numeric_limits<int32_t>::max()) {
+  const int32_t initialX = sx->_pos;
+  const int32_t initialY = sy->_pos;
+  const MotionUnitScale::QuantizedDisplacement xMove =
+      MotionUnitScale::quantizeDisplacement(initialX, dx);
+  const MotionUnitScale::QuantizedDisplacement yMove =
+      MotionUnitScale::quantizeDisplacement(initialY, dy);
+  if (!xMove.valid || !yMove.valid) {
     _coordinatedStartStatus = CoordinatedStartStatus::PositionOutOfRange;
     return _coordinatedStartStatus;
   }
+
+  const int64_t nativeDx = xMove.positive
+      ? static_cast<int64_t>(xMove.nativeStepCycles)
+      : -static_cast<int64_t>(xMove.nativeStepCycles);
+  const int64_t nativeDy = yMove.positive
+      ? static_cast<int64_t>(yMove.nativeStepCycles)
+      : -static_cast<int64_t>(yMove.nativeStepCycles);
 
   auto accelerationLimit = [](Stepper* stepper) -> uint32_t {
     const float acceleration = stepper->accelStepsPerSec2();
@@ -372,15 +396,19 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
         acceleration > static_cast<float>(std::numeric_limits<uint32_t>::max())) {
       return 0u;
     }
-    return static_cast<uint32_t>(acceleration);
+    return MotionUnitScale::toNativeAcceleration(
+        static_cast<uint32_t>(acceleration));
   };
 
   CoordinatedXyPlanner::PlanRequest request{};
-  request.deltaX = dx;
-  request.deltaY = dy;
-  request.requestedMasterRateHz = requestedRateHz;
-  request.xLimits = {sx->maxSpeedHz(), accelerationLimit(sx)};
-  request.yLimits = {sy->maxSpeedHz(), accelerationLimit(sy)};
+  request.deltaX = nativeDx;
+  request.deltaY = nativeDy;
+  request.requestedMasterRateHz =
+      MotionUnitScale::toNativeRate(requestedRateHz);
+  request.xLimits = {
+      MotionUnitScale::toNativeRate(sx->maxSpeedHz()), accelerationLimit(sx)};
+  request.yLimits = {
+      MotionUnitScale::toNativeRate(sy->maxSpeedHz()), accelerationLimit(sy)};
   request.timer = {
       gantryTimerInputHz(sx->_htim, sx->_prescaler),
       gantryTimerMaxArr(sx->_htim),
@@ -391,7 +419,9 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
   const CoordinatedXyPlanner::PlanStatus planStatus =
       CoordinatedXyPlanner::prepare(request, plan);
   if (planStatus == CoordinatedXyPlanner::PlanStatus::Immediate) {
+#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
     const bool injectionUnconsumed = _coordinatedLateInjectionArmed;
+#endif
     _coordinatedPlan = plan;
     (void)CoordinatedXyExecutor::arm(
         plan, _coordinatedCursor, _coordinatedExecutionMode);
@@ -404,12 +434,14 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
     _coordinatedProgrammedArr = 0u;
     _coordinatedPulseHighCycles = 0u;
     _resetCoordinatedInstrumentation(0u);
+#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
     if (injectionUnconsumed &&
         _coordinatedTimerScheduleMode ==
             CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm) {
       gantrySaturatingIncrement(_coordinatedLateInjectionFailureCount,
                                 _coordinatedTimerScheduleSaturationFlags);
     }
+#endif
     _coordinatedLateInjectionArmed = false;
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
     CoordinatedXyIsrInstrumentation::finishWithoutSample(
@@ -514,15 +546,11 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
   // The position and limit checks above are intentionally repeated after both
   // reservations. A legacy move may finish between planning and reservation;
   // once reserved, neither position can change before the coordinated start.
-  const int64_t reservedTargetX = static_cast<int64_t>(sx->_pos) + dx;
-  const int64_t reservedTargetY = static_cast<int64_t>(sy->_pos) + dy;
-  if (reservedTargetX < std::numeric_limits<int32_t>::min() ||
-      reservedTargetX > std::numeric_limits<int32_t>::max() ||
-      reservedTargetY < std::numeric_limits<int32_t>::min() ||
-      reservedTargetY > std::numeric_limits<int32_t>::max()) {
+  const bool positionChanged = sx->_pos != initialX || sy->_pos != initialY;
+  if (positionChanged) {
     sy->_releaseCoordinatedReservation();
     sx->_releaseCoordinatedReservation();
-    _coordinatedStartStatus = CoordinatedStartStatus::PositionOutOfRange;
+    _coordinatedStartStatus = CoordinatedStartStatus::Busy;
     return _coordinatedStartStatus;
   }
   if (sx->_isLimitAsserted() || sy->_isLimitAsserted()) {
@@ -542,11 +570,11 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
   sx->_prepareCoordinatedAxis(
       xParticipates,
       plan.xDirection == CoordinatedXyPlanner::Direction::Positive,
-      static_cast<int32_t>(reservedTargetX));
+      xMove.target);
   sy->_prepareCoordinatedAxis(
       yParticipates,
       plan.yDirection == CoordinatedXyPlanner::Direction::Positive,
-      static_cast<int32_t>(reservedTargetY));
+      yMove.target);
 
   _coordinatedPlan = plan;
   _coordinatedCursor = executorCursor;
@@ -640,12 +668,16 @@ LC_COORDINATED_HW_ALWAYS_INLINE
 void Gantry::_finishCoordinatedHardware(bool aborted,
                                         bool stepStateKnownLow,
                                         bool accountLateInjection) {
+#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
   if (accountLateInjection && _coordinatedLateInjectionArmed &&
       _coordinatedTimerScheduleMode ==
           CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm) {
     gantrySaturatingIncrement(_coordinatedLateInjectionFailureCount,
                               _coordinatedTimerScheduleSaturationFlags);
   }
+#else
+  (void)accountLateInjection;
+#endif
   gantryStopAndClearUpdateTimer(_coordinatedMasterTimer);
   if (_coordinatedY != nullptr) {
     gantryStopAndClearUpdateTimer(_coordinatedY->_htim);
@@ -742,10 +774,12 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
   g_lcCoordinatedTim2IrqEntryValid = 0u;
 #endif
   const uint32_t entryCycle = gantryCycleNow();
+#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
   const CoordinatedXyPlanner::ProfilePhase eventProfilePhase =
       ConditionalMode
           ? _coordinatedCursor.cachedEvent.phase
           : CoordinatedXyPlanner::ProfilePhase::Acceleration;
+#endif
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
   const CoordinatedXyIsrInstrumentation::Phase timingPhase =
       gantryTimingPhase(_coordinatedCursor.cachedEvent.phase);
@@ -889,6 +923,7 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
     __HAL_TIM_SET_AUTORELOAD(_coordinatedMasterTimer, tick.nextArr);
   }
 
+#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
   uint32_t intentionalWaitCycles = 0u;
   bool injectedThisCallback = false;
   const bool injectionPhaseEligible = ConditionalMode &&
@@ -954,6 +989,9 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
                                 _coordinatedTimerScheduleSaturationFlags);
     }
   }
+#else
+  const bool injectedThisCallback = false;
+#endif
 
   bool physicalEdgeEmitted = false;
   if (!completeStepMode &&
@@ -1041,6 +1079,7 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
           _coordinatedConditionalNonRearmSlackMinTicks =
               scheduleDecision.remainingTicks;
         }
+#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
         if (injectedThisCallback) {
           if (scheduleDecision.remainingTicks >
               _coordinatedLateInjectionDecisionSlackMaxTicks) {
@@ -1052,6 +1091,9 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
                                       _coordinatedTimerScheduleSaturationFlags);
           }
         }
+#else
+        (void)injectedThisCallback;
+#endif
       }
     }
     shouldRearm = scheduleDecision.sampleValid && scheduleDecision.rearm &&
@@ -1143,6 +1185,7 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
       g_lcCoordinatedTim2IrqEntryTimerCount;
   const uint32_t entryTimerArr = g_lcCoordinatedTim2IrqEntryTimerArr;
   g_lcCoordinatedTim2IrqEntryTimerValid = 0u;
+#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
   if (ConditionalMode) {
     CoordinatedXyIsrInstrumentation::recordSampleExcludingIntentionalWait(
         _coordinatedTiming,
@@ -1165,7 +1208,19 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
         tick.accountCompletePulse,
         terminal);
   }
+#else
+  CoordinatedXyIsrInstrumentation::recordSample(
+      _coordinatedTiming,
+      timingPhase,
+      entryCycle,
+      recordedExitCycle,
+      timingArr,
+      updatePending,
+      tick.accountCompletePulse,
+      terminal);
+#endif
   const uint32_t finalExitCycle = gantryCycleNow();
+#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
   if (ConditionalMode) {
     CoordinatedXyIsrInstrumentation::completeSampleTimingExcludingIntentionalWait(
         _coordinatedTiming,
@@ -1184,6 +1239,15 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
         finalExitCycle,
         terminal);
   }
+#else
+  CoordinatedXyIsrInstrumentation::completeSampleTiming(
+      _coordinatedTiming,
+      timingPhase,
+      entryCycle,
+      recordedExitCycle,
+      finalExitCycle,
+      terminal);
+#endif
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
       _coordinatedTiming,
       irqEntryValid,

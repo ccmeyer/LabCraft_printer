@@ -26,6 +26,7 @@ def test_discover_suite_entries_lists_current_manifests():
         "coordinated_xy_performance_v1",
         "coordinated_xy_x_direction_v1",
         "coordinated_xy_camera_transition_v1",
+        "coordinated_xy_production_mres3_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "refuel_vacuum_v1",
@@ -327,6 +328,27 @@ def test_coordinated_xy_mres3_revised_suites_require_strict_and_hard_masks():
         assert motion["qm"]["equals"] == 0
         assert margin["fv"]["equals"] == 0
         assert margin["hm"]["equals"] == 0
+
+
+def test_production_mres3_suite_requires_logical_conversion_and_conditional_rearm():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    manifest = entries["coordinated_xy_production_mres3_v1"].manifest
+
+    assert manifest.profile == "FULL"
+    assert manifest.selftest_args == ("--coordinated-xy-production-mres3-suite",)
+    assert required_fixture_ids(manifest) == (
+        "coordinated_xy_production_mres3_envelope_clear",
+    )
+    assert [row.test_id for row in build_test_plan_rows(manifest)] == [
+        2087, 2088, 2089, 2090
+    ]
+    assert manifest.analysis_rules["2087"]["metrics"]["i2"]["equals"] == 220000
+    assert manifest.analysis_rules["2089"]["metrics"]["rm"]["equals"] == 2
+    assert manifest.analysis_rules["2089"]["metrics"]["dc"]["equals"] == 219990
+    assert manifest.analysis_rules["2089"]["metrics"]["ci"]["equals"] == 0
+    assert manifest.analysis_rules["2089"]["metrics"]["ns"]["min"] == 1126
+    assert manifest.analysis_rules["2089"]["metrics"]["rp"]["equals"] == 0
+    assert manifest.analysis_rules["2090"]["metrics"]["lu"]["equals"] == 2
 
 
 def test_coordinated_xy_single_irq_suite_requires_complete_pulse_margin_evidence():

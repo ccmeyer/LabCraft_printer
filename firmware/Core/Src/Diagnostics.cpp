@@ -17,6 +17,7 @@
 #include "Printer.h"
 #include "PressureRegulator.h"
 #include "MotionQualificationMath.h"
+#include "MotionUnitScale.h"
 #include "NormalizedCosineProfile.h"
 #include "StepperProfileMath.h"
 #include "StepperInstrumentationReport.h"
@@ -121,7 +122,10 @@ public:
     ScopedCoordinatedXyTimerScheduleMode(
         Gantry* gantry,
         CoordinatedXyTimerSchedulePolicy::Mode mode)
-        : _gantry(gantry) {
+        : _gantry(gantry),
+          _previous(_gantry != nullptr
+                        ? _gantry->coordinatedTimerScheduleMode()
+                        : CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning) {
         _activated = _gantry != nullptr &&
             _gantry->setCoordinatedTimerScheduleModeForDiagnostics(mode);
     }
@@ -129,7 +133,7 @@ public:
     ~ScopedCoordinatedXyTimerScheduleMode() {
         if (_gantry != nullptr) {
             (void)_gantry->setCoordinatedTimerScheduleModeForDiagnostics(
-                CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning);
+                _previous);
         }
     }
 
@@ -137,6 +141,8 @@ public:
 
 private:
     Gantry* _gantry = nullptr;
+    CoordinatedXyTimerSchedulePolicy::Mode _previous =
+        CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning;
     bool _activated = false;
 };
 
@@ -238,6 +244,10 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2081u, "coord_xy_mres3_20khz_irq_path", "performance", "FULL", "explicit_selection"},
     {2082u, "coord_xy_mres3_entry_margin", "performance", "FULL", "explicit_selection"},
     {2083u, "tmc2208_mres3_configuration", "configuration", "FULL", "explicit_selection"},
+    {2087u, "coord_xy_prod_mres3_motion", "performance", "FULL", "explicit_selection"},
+    {2088u, "coord_xy_prod_mres3_irq_path", "performance", "FULL", "explicit_selection"},
+    {2089u, "coord_xy_prod_conditional_rearm", "performance", "FULL", "explicit_selection"},
+    {2090u, "tmc2208_production_mres3_config", "configuration", "FULL", "explicit_selection"},
     {2003u, "pressure_regulator_step_response_full", "pressure", "FULL", "safe_gate_or_full"},
     {2201u, "pressure_hold_leak_factory", "pressure", "FULL", "safe_gate_or_full"},
     {2202u, "pressure_target_cycle_repeatability_factory", "pressure", "FULL", "safe_gate_or_full"},
@@ -367,18 +377,23 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
         (selectedDiagnosticId == 2084u);
     const bool runCoordinatedXyMres3ConditionalRearmSuite =
         (selectedDiagnosticId == 2086u);
+    const bool runCoordinatedXyProductionMres3Suite =
+        (selectedDiagnosticId == 2097u);
     const bool runCoordinatedXyMres3Suite =
         runCoordinatedXyMres3BaselineSuite ||
         runCoordinatedXyMres3RearmSuite ||
         runCoordinatedXyMres3ConditionalRearmSuite;
     const bool collectCompletedMres3Evidence =
         runCoordinatedXyMres3BaselineSuite ||
-        runCoordinatedXyMres3ConditionalRearmSuite;
+        runCoordinatedXyMres3ConditionalRearmSuite ||
+        runCoordinatedXyProductionMres3Suite;
+    const bool runCoordinatedXyLogicalMres3Suite =
+        runCoordinatedXyMres3Suite || runCoordinatedXyProductionMres3Suite;
     const bool runCoordinatedXy40KhzSuite =
         (selectedDiagnosticId == 2077u) || runCoordinatedXyStatusSyncSuite ||
         runCoordinatedXySingleIrqSuite;
     const bool runCoordinatedXyFocusedGeometrySuite =
-        runCoordinatedXy40KhzSuite || runCoordinatedXyMres3Suite;
+        runCoordinatedXy40KhzSuite || runCoordinatedXyLogicalMres3Suite;
     const bool runCoordinatedXyDirectionSuite = (selectedDiagnosticId == 2079u);
     const bool runCoordinatedXyTransitionSuite = (selectedDiagnosticId == 2078u);
     const bool runCoordinatedXyPerformanceSuite =
@@ -4249,30 +4264,29 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr int32_t kFocusedHomePosition = 100;
                         static constexpr int32_t kFocusedAwayPosition = 20100;
                         static constexpr int32_t kFocusedReducedAwayPosition = 24100;
-                        const uint32_t kXyHomeFastHz = runCoordinatedXyMres3Suite
-                            ? 1500u : kBaselineXyHomeFastHz;
-                        const uint32_t kXyHomeSlowHz = runCoordinatedXyMres3Suite
-                            ? 500u : kBaselineXyHomeSlowHz;
-                        const uint32_t kHomeGuardMarginSteps = runCoordinatedXyMres3Suite
-                            ? 1500u : kBaselineHomeGuardMarginSteps;
-                        const uint32_t kMinimumHomeGuardSteps = runCoordinatedXyMres3Suite
-                            ? 1500u : kBaselineMinimumHomeGuardSteps;
-                        const uint32_t kXEnvelopeMaximumSteps = runCoordinatedXyMres3Suite
-                            ? 22500u : kBaselineXEnvelopeMaximumSteps;
-                        const uint32_t kYEnvelopeMaximumSteps = runCoordinatedXyMres3Suite
-                            ? 17500u : kBaselineYEnvelopeMaximumSteps;
-                        const uint32_t kZHomeFastHz = runCoordinatedXyMres3Suite
-                            ? 15000u : kBaselineZHomeFastHz;
-                        const uint32_t kZHomeSlowHz = runCoordinatedXyMres3Suite
-                            ? 1500u : kBaselineZHomeSlowHz;
-                        const uint32_t kHomeBackoffSteps = runCoordinatedXyMres3Suite
-                            ? 200u : kBaselineHomeBackoffSteps;
-                        const uint32_t kExpectedBackoffPosition = runCoordinatedXyMres3Suite
-                            ? 50u : kBaselineExpectedBackoffPosition;
-                        const uint32_t kHomeDriftLimitSteps = runCoordinatedXyMres3Suite
-                            ? 13u : kBaselineHomeDriftLimitSteps;
-                        const uint32_t kReturnErrorLimitSteps = runCoordinatedXyMres3Suite
-                            ? 5u : kBaselineReturnErrorLimitSteps;
+                        // Every self-test command remains in the historical
+                        // MRES=2 logical coordinate system. MotionUnitScale
+                        // performs the MRES=3 conversion at the motor boundary.
+                        const uint32_t kXyHomeFastHz = kBaselineXyHomeFastHz;
+                        const uint32_t kXyHomeSlowHz = kBaselineXyHomeSlowHz;
+                        const uint32_t kHomeGuardMarginSteps =
+                            kBaselineHomeGuardMarginSteps;
+                        const uint32_t kMinimumHomeGuardSteps =
+                            kBaselineMinimumHomeGuardSteps;
+                        const uint32_t kXEnvelopeMaximumSteps =
+                            kBaselineXEnvelopeMaximumSteps;
+                        const uint32_t kYEnvelopeMaximumSteps =
+                            kBaselineYEnvelopeMaximumSteps;
+                        const uint32_t kZHomeFastHz = kBaselineZHomeFastHz;
+                        const uint32_t kZHomeSlowHz = kBaselineZHomeSlowHz;
+                        const uint32_t kHomeBackoffSteps =
+                            kBaselineHomeBackoffSteps;
+                        const uint32_t kExpectedBackoffPosition =
+                            kBaselineExpectedBackoffPosition;
+                        const uint32_t kHomeDriftLimitSteps =
+                            kBaselineHomeDriftLimitSteps;
+                        const uint32_t kReturnErrorLimitSteps =
+                            kBaselineReturnErrorLimitSteps;
                         // The production two-edge path retains its established
                         // half-period cycle gates. CompleteStep has a 4,500-
                         // core-cycle full period at 40 kHz; its 3,500-cycle
@@ -4320,13 +4334,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             {{5000, 5000}, {10000, 25000}},
                             {{8916, 30500}, {500, 500}},
                         };
-                        static constexpr Pair kMres3GeometryPairs[] = {
-                            {{2500, 2500}, {12500, 2500}},
-                            {{2500, 2500}, {2500, 12500}},
-                            {{2500, 2500}, {12500, 12500}},
-                            {{2500, 2500}, {5000, 12500}},
-                            {{4458, 15250}, {250, 250}},
-                        };
                         static constexpr uint32_t kRatesHz[] = {
                             5000u, 10000u, 20000u, 30000u, 40000u};
 
@@ -4347,7 +4354,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 runCoordinatedXyMres3RearmSuite
                                     ? CoordinatedXyTimerSchedulePolicy::Mode::
                                           RearmFromActualEdge
-                                    : runCoordinatedXyMres3ConditionalRearmSuite
+                                    : (runCoordinatedXyMres3ConditionalRearmSuite ||
+                                       runCoordinatedXyProductionMres3Suite)
                                     ? CoordinatedXyTimerSchedulePolicy::Mode::
                                           ConditionalLateRearm
                                     : CoordinatedXyTimerSchedulePolicy::Mode::
@@ -4384,12 +4392,18 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               TMC2208Driver::initializationSnapshot();
                           const TMC2208Configuration::Values expected =
                               TMC2208Configuration::valuesForMres(3u);
+                          const bool scheduleModeExpected = gantry != nullptr &&
+                              gantry->coordinatedTimerScheduleMode() ==
+                                  (runCoordinatedXyProductionMres3Suite
+                                       ? CoordinatedXyTimerSchedulePolicy::Mode::
+                                             ConditionalLateRearm
+                                       : requestedTimerScheduleMode);
                           char configMetrics[160] = {};
                           const int written = snprintf(
                               configMetrics,
                               sizeof(configMetrics),
                               "mr=%u;mf=%u;dd=%u;gc=%lu;cc=%lu;tx=%lu;tf=%lu;"
-                              "ve=%u;ae=%u;ge=%u;sf=0;to=0",
+                              "ve=%u;ae=%u;lu=%lu;ge=%u;sf=0;to=0",
                               static_cast<unsigned>(driver.mres),
                               driver.multistepFilter ? 1u : 0u,
                               driver.doubleEdge ? 1u : 0u,
@@ -4398,13 +4412,19 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               (unsigned long)driver.successfulWrites,
                               (unsigned long)driver.failedWrites,
                               TMC2208Configuration::preservesMres2PhysicalRate(
-                                  20000u) ? 1u : 0u,
+                                  40000u) ? 1u : 0u,
                               TMC2208Configuration::
-                                      preservesMres2PhysicalAcceleration(70000u)
+                                      preservesMres2PhysicalAcceleration(140000u)
                                   ? 1u : 0u,
-                              1u);
+                              (unsigned long)
+                                  MotionUnitScale::logicalUnitsPerNativeStep(),
+                              scheduleModeExpected ? 1u : 0u);
+                          const bool expectedBuild =
+                              runCoordinatedXyProductionMres3Suite
+                                  ? TMC2208Configuration::isProductionMres3Build()
+                                  : TMC2208Configuration::isMres3DiagnosticBuild();
                           const bool passed =
-                              TMC2208Configuration::isMres3DiagnosticBuild() &&
+                              expectedBuild &&
                               driver.initialized &&
                               driver.mres == expected.mres &&
                               driver.multistepFilter == expected.multistepFilter &&
@@ -4412,11 +4432,17 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               driver.gconf == expected.gconf &&
                               driver.chopconf == expected.chopconf &&
                               driver.successfulWrites == 4u &&
-                              driver.failedWrites == 0u;
+                              driver.failedWrites == 0u &&
+                              MotionUnitScale::logicalUnitsPerNativeStep() == 2u &&
+                              scheduleModeExpected;
                           const bool metricsFit = written > 0 &&
                               static_cast<size_t>(written) < sizeof(configMetrics);
-                          (void)runOne(2083u,
-                                       "tmc2208_mres3_configuration",
+                          (void)runOne(
+                                       runCoordinatedXyProductionMres3Suite
+                                           ? 2090u : 2083u,
+                                       runCoordinatedXyProductionMres3Suite
+                                           ? "tmc2208_production_mres3_config"
+                                           : "tmc2208_mres3_configuration",
                                        passed && metricsFit,
                                        metricsFit
                                            ? configMetrics
@@ -4440,23 +4466,34 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             }
                             return;
                           }
-                          if (runCoordinatedXyMres3Suite) {
-                            (void)runOne(2080u,
-                                         "coord_xy_mres3_20khz_motion",
+                          if (runCoordinatedXyLogicalMres3Suite) {
+                            (void)runOne(
+                                         runCoordinatedXyProductionMres3Suite
+                                             ? 2087u : 2080u,
+                                         runCoordinatedXyProductionMres3Suite
+                                             ? "coord_xy_prod_mres3_motion"
+                                             : "coord_xy_mres3_20khz_motion",
                                          false,
                                          metrics);
                             (void)runOne(
-                                2081u,
-                                "coord_xy_mres3_20khz_irq_path",
+                                runCoordinatedXyProductionMres3Suite
+                                    ? 2088u : 2081u,
+                                runCoordinatedXyProductionMres3Suite
+                                    ? "coord_xy_prod_mres3_irq_path"
+                                    : "coord_xy_mres3_20khz_irq_path",
                                 false,
                                 "i2=0;s=0;mi=0;ph=0;pa=0;fm=0;fa=0;tf=0;pp=0;pf=0;pu=0;ps=0;sf=0;to=1");
                             (void)runOne(
-                                2082u,
-                                "coord_xy_mres3_entry_margin",
+                                runCoordinatedXyProductionMres3Suite
+                                    ? 2089u : 2082u,
+                                runCoordinatedXyProductionMres3Suite
+                                    ? "coord_xy_prod_conditional_rearm"
+                                    : "coord_xy_mres3_entry_margin",
                                 false,
                                 runCoordinatedXyMres3RearmSuite
                                     ? "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;ds=0;di=0;md=0;sl=0;rm=1;rc=0;rp=0;rd=0;sf=0;to=1"
-                                    : runCoordinatedXyMres3ConditionalRearmSuite
+                                    : (runCoordinatedXyMres3ConditionalRearmSuite ||
+                                       runCoordinatedXyProductionMres3Suite)
                                     ? "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;ds=0;di=0;md=0;sl=0;rm=2;rc=0;rp=0;rd=0;sf=0;to=1"
                                     : "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;ds=0;di=0;md=0;sl=0;rm=0;rc=0;rp=0;rd=0;sf=0;to=1");
                             if (runCoordinatedXyMres3ConditionalRearmSuite) {
@@ -4561,14 +4598,22 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           failRemaining(2080u, "mres3_build_required");
                           return finishSelfTestNow();
                         }
-                        if (runCoordinatedXyMres3Suite) {
+                        if (runCoordinatedXyProductionMres3Suite &&
+                            !TMC2208Configuration::isProductionMres3Build()) {
+                          failRemaining(2087u, "production_mres3_build_required");
+                          return finishSelfTestNow();
+                        }
+                        if (runCoordinatedXyLogicalMres3Suite) {
                           const TMC2208InitializationSnapshot driver =
                               TMC2208Driver::initializationSnapshot();
                           if (!driver.initialized || driver.mres != 3u ||
                               driver.multistepFilter || !driver.doubleEdge ||
                               driver.successfulWrites != 4u ||
                               driver.failedWrites != 0u) {
-                            failRemaining(2080u, "tmc_configuration");
+                            failRemaining(
+                                runCoordinatedXyProductionMres3Suite
+                                    ? 2087u : 2080u,
+                                "tmc_configuration");
                             return finishSelfTestNow();
                           }
                         }
@@ -4578,6 +4623,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 ? "coordinated_xy_single_irq_envelope_clear"
                             : runCoordinatedXyMres3ConditionalRearmSuite
                                 ? "coordinated_xy_mres3_conditional_rearm_envelope_clear"
+                            : runCoordinatedXyProductionMres3Suite
+                                ? "coordinated_xy_production_mres3_envelope_clear"
                             : runCoordinatedXyMres3RearmSuite
                                 ? "coordinated_xy_mres3_rearm_envelope_clear"
                             : runCoordinatedXyMres3Suite
@@ -4742,8 +4789,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                                         bool* rMoved,
                                                         bool* pressureGuard) -> MoveResult {
                           MoveResult result{};
-                          const uint32_t expectedX = absoluteDelta(start.x, target.x);
-                          const uint32_t expectedY = absoluteDelta(start.y, target.y);
+                          const uint32_t expectedX =
+                              MotionUnitScale::toNativeStepCycles(
+                                  absoluteDelta(start.x, target.x));
+                          const uint32_t expectedY =
+                              MotionUnitScale::toNativeStepCycles(
+                                  absoluteDelta(start.y, target.y));
                           const uint32_t expectedMaster =
                               expectedX > expectedY ? expectedX : expectedY;
                           const bool statusMetricsReset =
@@ -4858,6 +4909,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                           if (expectedRateHz == 0u) {
                             expectedRateHz = result.snapshot.selectedMasterRateHz;
+                          } else {
+                            expectedRateHz =
+                                MotionUnitScale::toNativeRate(expectedRateHz);
                           }
                           MoveObservation& observation = result.observation;
                           observation.expectedXSteps = expectedX;
@@ -4929,7 +4983,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           observation.minimumDeadlineSlackTicks =
                               collectCompletedMres3Evidence ? 450u : 0u;
                           observation.requireNoLateEntries =
-                              collectCompletedMres3Evidence;
+                              collectCompletedMres3Evidence &&
+                              !runCoordinatedXyProductionMres3Suite;
                           observation.terminalReason =
                               result.snapshot.terminalReason;
                           observation.endpointMatches = endpoint;
@@ -5638,7 +5693,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 sizeof(metrics),
                                 "i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"
                                 "lc=%lu;dm=%lu;ds=%lu;di=%lu;md=%lu;sl=%lu;"
-                                "rm=%u;rc=%lu;rp=%lu;rd=%lu;sm=%u;lf=%lu;"
+                                "rm=%u;dc=%lu;ci=%lu;ns=%lu;rc=%lu;rp=%lu;rd=%lu;sm=%u;lf=%lu;"
                                 "sf=%lu;to=%lu;fv=%u;tr=%u;"
                                 "la=%lu;ra=%lu;hm=%lu",
                                 (unsigned long)aggregate.timer2Callbacks,
@@ -5655,6 +5710,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 (unsigned long)aggregate.deadlineSlackMinTicks,
                                 static_cast<unsigned>(
                                     aggregate.timerScheduleMode),
+                                (unsigned long)
+                                    aggregate.conditionalDecisionCount,
+                                (unsigned long)
+                                    aggregate.conditionalDecisionMissingCount,
+                                (unsigned long)
+                                    aggregate.conditionalNonRearmSlackMinTicks,
                                 (unsigned long)aggregate.timerRearmCount,
                                 (unsigned long)aggregate.timerRearmPendingCount,
                                 (unsigned long)aggregate.timerRearmDelayMaxCycles,
@@ -5721,10 +5782,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                       aggregate.moveCount) &&
                                  aggregate.conditionalDecisionMissingCount ==
                                      0u &&
-                                 aggregate.timerRearmCount >=
-                                     aggregate.moveCount &&
                                  aggregate.timerRearmPendingCount == 0u &&
-                                 aggregate.timerRearmDelayMaxCycles > 0u &&
+                                 ((aggregate.timerRearmCount == 0u &&
+                                   aggregate.timerRearmDelayMaxCycles == 0u) ||
+                                  (aggregate.timerRearmCount > 0u &&
+                                   aggregate.timerRearmDelayMaxCycles > 0u)) &&
                                  aggregate.timerScheduleSaturationFlags == 0u)
                               : (aggregate.timerRearmCount == 0u &&
                                  aggregate.timerRearmPendingCount == 0u &&
@@ -5948,12 +6010,15 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             failRemaining(2064u, "x_direction");
                             return finishSelfTestNow();
                           }
-                          const uint32_t rateHz = runCoordinatedXyMres3Suite
-                              ? 20000u : kRatesHz[tier];
-                          const float rowAccelerationX = runCoordinatedXyMres3Suite
-                              ? 70000.0f : savedXAcceleration;
-                          const float rowAccelerationY = runCoordinatedXyMres3Suite
-                              ? 70000.0f : savedYAcceleration;
+                          const uint32_t rateHz =
+                              runCoordinatedXyLogicalMres3Suite
+                                  ? 40000u : kRatesHz[tier];
+                          const float rowAccelerationX =
+                              runCoordinatedXyLogicalMres3Suite
+                                  ? 140000.0f : savedXAcceleration;
+                          const float rowAccelerationY =
+                              runCoordinatedXyLogicalMres3Suite
+                                  ? 140000.0f : savedYAcceleration;
                           stepperX->setMaxSpeedHz(rateHz);
                           stepperY->setMaxSpeedHz(rateHz);
                           stepperX->setAccelStepsPerSec2(rowAccelerationX);
@@ -5966,8 +6031,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               ? stepperR->getPosition() : 0;
                           Aggregate aggregate{};
                           bool rowPass = true;
-                          const Pair* geometry = runCoordinatedXyMres3Suite
-                              ? kMres3GeometryPairs : kGeometryPairs;
+                          const Pair* geometry = kGeometryPairs;
                           for (uint32_t pairIndex = 0u; pairIndex < 5u;
                                ++pairIndex) {
                             const Pair& pair = geometry[pairIndex];
@@ -5995,7 +6059,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                       kMoveFailureTerminalReason);
                             }
                           }
-                          if (runCoordinatedXyMres3Suite &&
+                          if (runCoordinatedXyLogicalMres3Suite &&
                               ((stepperP != nullptr &&
                                 stepperP->getPosition() != pPositionBefore) ||
                                (stepperR != nullptr &&
@@ -6011,44 +6075,61 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                     kMoveFailureEndpoint);
                           }
                           const TestDescriptor focusedTest =
-                              runCoordinatedXyMres3Suite
+                              runCoordinatedXyLogicalMres3Suite
                                   ? TestDescriptor{
-                                        2080u,
-                                        "coord_xy_mres3_20khz_motion"}
+                                        runCoordinatedXyProductionMres3Suite
+                                            ? 2087u : 2080u,
+                                        runCoordinatedXyProductionMres3Suite
+                                            ? "coord_xy_prod_mres3_motion"
+                                            : "coord_xy_mres3_20khz_motion"}
                                   : kTests[tier];
+                          const uint32_t evidenceRateHz =
+                              runCoordinatedXyLogicalMres3Suite
+                                  ? MotionUnitScale::toNativeRate(rateHz)
+                                  : rateHz;
                           const bool emitted = emitAggregate(
                               focusedTest,
-                              rateHz,
+                              evidenceRateHz,
                               aggregate,
                               10u,
-                              runCoordinatedXyMres3Suite ? 53416u : 106832u,
-                              runCoordinatedXyMres3Suite ? 90000u : 180000u,
-                              runCoordinatedXyMres3Suite ? 110000u : 220000u,
+                              runCoordinatedXyLogicalMres3Suite ? 53416u : 106832u,
+                              runCoordinatedXyLogicalMres3Suite ? 90000u : 180000u,
+                              runCoordinatedXyLogicalMres3Suite ? 110000u : 220000u,
                               xDrift,
                               yDrift,
                               rowPass);
                           if (runCoordinatedXyFocusedGeometrySuite) {
                             (void)emitIrqPathEvidence(
                                 aggregate,
-                                runCoordinatedXyMres3Suite ? 2081u : 2072u,
-                                runCoordinatedXyMres3Suite
-                                    ? "coord_xy_mres3_20khz_irq_path"
+                                runCoordinatedXyLogicalMres3Suite
+                                    ? (runCoordinatedXyProductionMres3Suite
+                                           ? 2088u : 2081u)
+                                    : 2072u,
+                                runCoordinatedXyLogicalMres3Suite
+                                    ? (runCoordinatedXyProductionMres3Suite
+                                           ? "coord_xy_prod_mres3_irq_path"
+                                           : "coord_xy_mres3_20khz_irq_path")
                                     : "coord_xy_40khz_irq_path",
-                                runCoordinatedXyMres3Suite);
+                                runCoordinatedXyLogicalMres3Suite);
                             (void)emitEntryLatenessEvidence(
                                 aggregate,
-                                runCoordinatedXyMres3Suite ? 2082u : 2073u,
-                                runCoordinatedXyMres3Suite
-                                    ? "coord_xy_mres3_entry_margin"
+                                runCoordinatedXyLogicalMres3Suite
+                                    ? (runCoordinatedXyProductionMres3Suite
+                                           ? 2089u : 2082u)
+                                    : 2073u,
+                                runCoordinatedXyLogicalMres3Suite
+                                    ? (runCoordinatedXyProductionMres3Suite
+                                           ? "coord_xy_prod_conditional_rearm"
+                                           : "coord_xy_mres3_entry_margin")
                                     : "coord_xy_40khz_entry_lateness",
-                                runCoordinatedXyMres3Suite);
+                                runCoordinatedXyLogicalMres3Suite);
                             if (runCoordinatedXyMres3ConditionalRearmSuite) {
                               (void)emitConditionalRearmEvidence(aggregate);
                             }
                             if (runCoordinatedXySingleIrqSuite) {
                               (void)emitCompleteStepEvidence(aggregate);
                             }
-                            if (runCoordinatedXyMres3Suite) {
+                            if (runCoordinatedXyLogicalMres3Suite) {
                               (void)emitMres3Configuration();
                             }
                           }

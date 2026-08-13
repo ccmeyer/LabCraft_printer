@@ -79,12 +79,13 @@ def test_standalone_40khz_selector_reuses_only_existing_tier_four_and_exits():
     assert standalone_exit < m1_start
     assert "restoreXyRates();" in suite[standalone_exit:m1_start]
     assert "return finishSelfTestNow();" in suite[standalone_exit:m1_start]
-    assert "runCoordinatedXyMres3Suite ? 2081u : 2072u" in suite
+    assert "runCoordinatedXyProductionMres3Suite\n                                           ? 2088u : 2081u" in suite
     assert "emitIrqPathEvidence(" in suite
     assert '"ax=%lu;tf=%lu' in suite
-    assert "runCoordinatedXyMres3Suite ? 2082u : 2073u" in suite
+    assert "runCoordinatedXyProductionMres3Suite\n                                           ? 2089u : 2082u" in suite
     assert "emitEntryLatenessEvidence(" in suite
     assert '"i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"' in suite
+    assert '"rm=%u;dc=%lu;ci=%lu;ns=%lu;rc=%lu;rp=%lu;rd=%lu;sm=%u;lf=%lu;"' in suite
     assert '"lc=%lu;dm=%lu;sm=%u;lf=%lu;sf=%lu;to=%lu;"' in suite
     assert '"la=%lu;ra=%lu;hm=%lu"' in suite
     assert "captureFirstFailure(" in suite
@@ -113,7 +114,7 @@ def test_single_irq_selector_is_retired_without_changing_the_two_edge_default():
     assert retirement < fixture
 
 
-def test_mres3_diagnostic_selector_scales_geometry_rate_acceleration_and_homes():
+def test_mres3_selectors_keep_logical_commands_and_scale_at_motor_boundary():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
     orchestrator = _read("firmware/Core/Src/Orchestrator.cpp")
     config = _read("firmware/Core/Inc/TMC2208Configuration.h")
@@ -125,28 +126,63 @@ def test_mres3_diagnostic_selector_scales_geometry_rate_acceleration_and_homes()
     assert "selectedDiagnosticId == 2085u" in diagnostics
     assert "selectedDiagnosticId == 2084u" in diagnostics
     assert "selectedDiagnosticId == 2086u" in diagnostics
-    assert "runCoordinatedXy40KhzSuite || runCoordinatedXyMres3Suite" in diagnostics
+    assert "runCoordinatedXy40KhzSuite || runCoordinatedXyLogicalMres3Suite" in diagnostics
     assert '"coordinated_xy_mres3_20khz_envelope_clear"' in suite
-    assert "{{2500, 2500}, {12500, 2500}}" in suite
-    assert "{{4458, 15250}, {250, 250}}" in suite
-    assert "? 20000u : kRatesHz[tier]" in suite
-    assert "? 70000.0f : savedXAcceleration" in suite
-    assert "? 70000.0f : savedYAcceleration" in suite
-    assert "? 53416u : 106832u" in suite
-    assert "? 90000u : 180000u" in suite
-    assert "? 110000u : 220000u" in suite
+    assert "{{5000, 5000}, {25000, 5000}}" in suite
+    assert "{{8916, 30500}, {500, 500}}" in suite
+    assert "? 40000u : kRatesHz[tier]" in suite
+    assert "? 140000.0f : savedXAcceleration" in suite
+    assert "? 140000.0f : savedYAcceleration" in suite
+    assert "MotionUnitScale::toNativeStepCycles" in suite
+    assert "MotionUnitScale::toNativeRate(rateHz)" in suite
+    assert "runCoordinatedXyLogicalMres3Suite ? 53416u : 106832u" in suite
+    assert "runCoordinatedXyLogicalMres3Suite ? 90000u : 180000u" in suite
+    assert "runCoordinatedXyLogicalMres3Suite ? 110000u : 220000u" in suite
     assert "stepperP->getPosition() != pPositionBefore" in suite
     assert "stepperR->getPosition() != rPositionBefore" in suite
     assert "aggregate.deadlineSlackMinTicks >= 450u" in suite
     assert "aggregate.timer2Callbacks -\n                                     aggregate.moveCount" in suite
     assert "LC_TMC2208_DIAGNOSTIC_BUILD" in orchestrator
     assert "cmd.cmd != CMD_SELFTEST_START && cmd.cmd != CMD_DISABLE_MOTORS" in orchestrator
-    assert "#define LC_TMC2208_MRES 2" in config
+    assert "#define LC_TMC2208_MRES 3" in config
     assert "LC_TMC2208_DIAGNOSTIC_BUILD != 0 && LC_TMC2208_MRES == 3" in config
     assert "false,\n      true,\n      0x000000C1u" in config
     assert "2085 if coordinated_xy_mres3_20khz_suite" in runner
     assert "2084 if coordinated_xy_mres3_rearm_suite" in runner
     assert "2086 if coordinated_xy_mres3_conditional_rearm_suite" in runner
+    assert "2097 if coordinated_xy_production_mres3_suite" in runner
+
+
+def test_production_mres3_scales_direct_and_coordinated_motion_without_wire_changes():
+    scale = _read("firmware/Core/Inc/MotionUnitScale.h")
+    stepper = _read("firmware/Core/Src/Stepper.cpp")
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
+    orchestrator = _read("firmware/Core/Src/Orchestrator.cpp")
+
+    assert "logicalUnitsPerNativeStepForMres" in scale
+    assert "mres == 3u ? 2u : 1u" in scale
+    assert "magnitude / scale" in scale
+    assert "canonicalizeAbsoluteTarget" in scale
+
+    assert "MotionUnitScale::quantizeDisplacement(_pos, requestedDelta)" in stepper
+    assert "planInput.steps = nativeSteps" in stepper
+    assert "MotionUnitScale::toNativeRate(freqHz)" in stepper
+    assert "MotionUnitScale::toNativeAcceleration(_accel_sps2)" in stepper
+    assert "_targetPos     = quantized.target" in stepper
+    assert stepper.count("MotionUnitScale::logicalUnitsPerNativeStep()") >= 3
+    assert "MotionUnitScale::toLogicalMagnitude(nativeSteps)" in stepper
+
+    assert "MotionUnitScale::quantizeDisplacement(initialX, dx)" in gantry
+    assert "MotionUnitScale::quantizeDisplacement(initialY, dy)" in gantry
+    assert "request.deltaX = nativeDx" in gantry
+    assert "request.deltaY = nativeDy" in gantry
+    assert "xMove.target" in gantry and "yMove.target" in gantry
+    assert "TMC2208Configuration::isProductionMres3Build()" in gantry
+    assert "Mode::ConditionalLateRearm" in gantry
+    assert "#if LC_TMC2208_DIAGNOSTIC_BUILD != 0" in gantry
+
+    assert orchestrator.count("MotionUnitScale::canonicalizeAbsoluteTarget") >= 4
+    assert "end.x == actualTargetX && end.y == actualTargetY" in orchestrator
 
 
 def test_mres3_rearm_selector_is_scoped_and_rebases_after_physical_edges():
@@ -350,9 +386,9 @@ def test_performance_homing_is_step_bounded_and_preserves_failure_evidence():
     assert "kBaselineHomeGuardMarginSteps = 3000u" in suite
     assert "kBaselineXEnvelopeMaximumSteps = 45000u" in suite
     assert "kBaselineYEnvelopeMaximumSteps = 35000u" in suite
-    assert "? 1500u : kBaselineHomeGuardMarginSteps" in suite
-    assert "? 22500u : kBaselineXEnvelopeMaximumSteps" in suite
-    assert "? 17500u : kBaselineYEnvelopeMaximumSteps" in suite
+    assert "kHomeGuardMarginSteps =\n                            kBaselineHomeGuardMarginSteps" in suite
+    assert "kXEnvelopeMaximumSteps =\n                            kBaselineXEnvelopeMaximumSteps" in suite
+    assert "kYEnvelopeMaximumSteps =\n                            kBaselineYEnvelopeMaximumSteps" in suite
     assert "stepper->setHomeGuardSteps(result.guardSteps)" in suite
     assert "stepper->setHomeGuardSteps(savedGuard)" in suite
     assert "cancelActiveHomesAndWait(homeBit)" in suite

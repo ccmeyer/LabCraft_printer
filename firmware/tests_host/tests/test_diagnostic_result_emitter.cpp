@@ -298,8 +298,9 @@ TEST(DiagnosticResultEmitter, CoordinatedXyMres3DeadlineMetricsFitAtAcceptedValu
     const char metricsText[] =
         "i2=220000;s=220000;mi=0;cm=127;ca=127;pm=0;lc=0;dm=255;"
         "ds=219990;di=0;md=0;sl=450;sm=0;lf=0;sf=0;to=0;"
-        "rm=1;rc=219990;rp=0;rd=64;fv=0;tr=0;la=0;ra=0;hm=0";
-    const char name[] = "coord_xy_mres3_entry_margin";
+        "rm=2;dc=219990;ci=0;ns=1126;rc=12;rp=0;rd=64;"
+        "fv=0;tr=0;la=0;ra=0;hm=0";
+    const char name[] = "coord_xy_prod_conditional_rearm";
     CHECK_TRUE(std::strlen(name) <= DiagnosticResultEmitter::kMaxResultNameBytes);
     const size_t nameLength = std::strlen(name) >
             DiagnosticResultEmitter::kMaxResultNameBytes
@@ -332,8 +333,8 @@ TEST(DiagnosticResultEmitter, Tmc2208Mres3ConfigurationMetricsFit)
 {
     const char metricsText[] =
         "mr=3;mf=0;dd=1;gc=193;cc=855638099;tx=4;tf=0;"
-        "ve=1;ae=1;ge=1;sf=0;to=0";
-    const char name[] = "tmc2208_mres3_configuration";
+        "ve=1;ae=1;lu=2;ge=1;sf=0;to=0";
+    const char name[] = "tmc2208_production_mres3_config";
     const size_t nameLength = std::strlen(name) >
             DiagnosticResultEmitter::kMaxResultNameBytes
         ? DiagnosticResultEmitter::kMaxResultNameBytes

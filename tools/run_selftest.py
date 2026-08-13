@@ -734,11 +734,12 @@ def _operator_prompt_message(stage: str) -> str:
         "coordinated_xy_mres3_20khz_envelope_clear",
         "coordinated_xy_mres3_rearm_envelope_clear",
         "coordinated_xy_mres3_conditional_rearm_envelope_clear",
+        "coordinated_xy_production_mres3_envelope_clear",
     }:
         return (
             "Confirm both limit switches are released, the gantry is square, and the complete "
-            "XY/Z motion envelope is clear. Remove all hands before the scaled MRES=3 homes, "
-            "ten-move 20 kHz geometry row, and bounded post-row X/Y homes begin."
+            "XY/Z motion envelope is clear. Remove all hands before the logical-unit MRES=3 "
+            "homes, ten-move row (20 kHz native step cycles), and bounded post-row X/Y homes begin."
         )
     return "Confirm the operator-gated self-test step is ready to continue."
 
@@ -758,6 +759,7 @@ def _is_operator_prompt_stage(stage: str) -> bool:
         "coordinated_xy_mres3_20khz_envelope_clear",
         "coordinated_xy_mres3_rearm_envelope_clear",
         "coordinated_xy_mres3_conditional_rearm_envelope_clear",
+        "coordinated_xy_production_mres3_envelope_clear",
     }
 
 
@@ -1338,6 +1340,9 @@ def run(args: argparse.Namespace) -> int:
         coordinated_xy_mres3_conditional_rearm_suite = bool(
             getattr(args, "coordinated_xy_mres3_conditional_rearm_suite", False)
         )
+        coordinated_xy_production_mres3_suite = bool(
+            getattr(args, "coordinated_xy_production_mres3_suite", False)
+        )
         coordinated_xy_x_direction_suite = bool(
             getattr(args, "coordinated_xy_x_direction_suite", False)
         )
@@ -1352,6 +1357,7 @@ def run(args: argparse.Namespace) -> int:
             or coordinated_xy_mres3_20khz_suite
             or coordinated_xy_mres3_rearm_suite
             or coordinated_xy_mres3_conditional_rearm_suite
+            or coordinated_xy_production_mres3_suite
             or coordinated_xy_x_direction_suite
             or coordinated_xy_camera_transition_suite
         )
@@ -1363,7 +1369,7 @@ def run(args: argparse.Namespace) -> int:
         refuel_vacuum_suite = bool(getattr(args, "refuel_vacuum_suite", False))
         valve_characterization_suite = bool(getattr(args, "valve_characterization_suite", False))
         valve_gap_sweep_suite = bool(getattr(args, "valve_gap_sweep_suite", False))
-        selector = 1039 if selftest_scheduler_no_yield_suite else 1038 if selftest_scheduler_cooperative_suite else 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2086 if coordinated_xy_mres3_conditional_rearm_suite else 2084 if coordinated_xy_mres3_rearm_suite else 2085 if coordinated_xy_mres3_20khz_suite else 2075 if coordinated_xy_single_irq_suite else 2076 if coordinated_xy_status_sync_suite else 2077 if coordinated_xy_40khz_suite else 2078 if coordinated_xy_camera_transition_suite else 2079 if coordinated_xy_x_direction_suite else 2069 if coordinated_xy_performance_suite else 2059 if normal_xy_route_suite else 2049 if coordinated_xy_executor_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
+        selector = 1039 if selftest_scheduler_no_yield_suite else 1038 if selftest_scheduler_cooperative_suite else 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2097 if coordinated_xy_production_mres3_suite else 2086 if coordinated_xy_mres3_conditional_rearm_suite else 2084 if coordinated_xy_mres3_rearm_suite else 2085 if coordinated_xy_mres3_20khz_suite else 2075 if coordinated_xy_single_irq_suite else 2076 if coordinated_xy_status_sync_suite else 2077 if coordinated_xy_40khz_suite else 2078 if coordinated_xy_camera_transition_suite else 2079 if coordinated_xy_x_direction_suite else 2069 if coordinated_xy_performance_suite else 2059 if normal_xy_route_suite else 2049 if coordinated_xy_executor_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
             pressure_sweep_suite if pressure_sweep_suite is not None else (
                 CUSTOM_PRESSURE_TRACE_TEST_ID if custom_trace_config is not None else pressure_trace_test
             )
@@ -2045,6 +2051,7 @@ def main() -> int:
     selector_group.add_argument("--coordinated-xy-mres3-20khz-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-mres3-rearm-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-mres3-conditional-rearm-suite", action="store_true")
+    selector_group.add_argument("--coordinated-xy-production-mres3-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-x-direction-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-camera-transition-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-suite", action="store_true")

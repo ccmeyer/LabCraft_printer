@@ -224,7 +224,7 @@ Every milestone that touches motion must preserve these invariants:
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
-| 6. Performance and motion HIL qualification | `in_progress` | The velocity-domain correction reduced the calculated peak from 443,900 to about 131,100 steps/s2. Two watched MRES=3 free-running rows completed normally at equivalent physical speed. Revised selector `2086` then completed all ten moves and homes normally, recovered all ten injected late edges plus two naturally low-margin edges, and retained exact counts with no pending update, deadline miss, hard failure, reset, or watchdog event. | Review the successful conditional mechanism separately from the retained terminal-cycle/entry-lateness strict flags, then prepare a production-migration and qualification plan; do not change defaults directly from diagnostic evidence |
+| 6. Performance and motion HIL qualification | `in_progress` | The velocity-domain correction reduced the calculated peak from 443,900 to about 131,100 steps/s2. Watched MRES=3 rows preserved physical motion at half the native cycle rate, and revised selector `2086` recovered ten injected plus two natural low-margin edges with exact counts and no pending update, deadline miss, hard failure, reset, or watchdog event. Checkpoint A now implements the production MRES=3 logical-unit boundary and conditional rearm candidate. | Pass watched production selector `2097` and SAFE brackets before starting the independent single-axis LUT checkpoint |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
@@ -342,15 +342,14 @@ previous physical travel, nominal speed, and acceleration while reducing the
 interrupt demand. Exact diagnostic totals are 110,000 planner steps, 220,000
 rise/fall callbacks, and 219,990 nonterminal deadline samples.
 
-The diagnostic image is intentionally incompatible with ordinary MRES=2 host
-coordinates. It therefore rejects ordinary queued commands with motors
-disabled and accepts only SAFE or the scaled selectors `2085`, `2084`, and
-`2086` FULL paths. The
+The diagnostic image rejects ordinary queued commands with motors disabled and
+accepts only SAFE or selectors `2085`, `2084`, and `2086` FULL paths. Selector
+inputs now remain in the original MRES=2 logical coordinate system and are
+converted to MRES=3 native cycles at the motor boundary. The
 watched gate requires results `2080`-`2083`, zero pending and late-entry
 observations, no deadline misses, at least 450 timer ticks of post-handler
 margin, no P/R displacement, clean bounded homes, status/watchdog cadence, and
-no reset evidence. The production `Debug` image remains MRES=2, and no
-production migration is authorized until this diagnostic evidence is reviewed.
+no reset evidence.
 
 Selector `2084` is the isolated rearm-from-actual-edge experiment. It preserves
 the selector-`2085` MRES=3 geometry and two-edge executor, but after each
@@ -375,6 +374,28 @@ decisions, ten successful injected rearms, zero pending-at-rearm/missing/timeout
 saturation evidence, non-rearmed slack of at least 1,126 ticks, normal homes,
 and all existing motion, deadline, cadence, watchdog, and drift gates. A pass is
 diagnostic evidence only and does not migrate either MRES=3 or conditional mode.
+
+### Production MRES=3 and conditional-rearm checkpoint
+
+Checkpoint A changes the production `Debug` image to MRES=3 with `DEDGE=1` and
+`multistep_filt=0`, while keeping every app command, configuration value,
+stored position, target, home distance, and status field in legacy MRES=2
+logical units. `MotionUnitScale` divides native cycle count, rate, and
+acceleration by two. Odd signed displacements truncate toward zero; the target
+and returned status use the resulting reachable logical coordinate.
+
+Production coordinated XY boots in `ConditionalLateRearm` with the validated
+1,125-tick guard. The synthetic injection and intentional-wait path remain
+diagnostic-image-only. Selector `2097` runs the original logical ten-move row
+through production and emits `[2087,2088,2089,2090]`; manifest
+`coordinated_xy_production_mres3_v1` requires exact native totals, complete IRQ
+and decision coverage, no pending/deadline/reset/watchdog evidence, at least
+450 timer ticks of slack, bounded homes, and correct driver configuration.
+
+Checkpoint B migrates the normalized LUT to direct X/Y/Z single-axis motion
+only after Checkpoint A passes watched SAFE/`2097`/SAFE HIL. It is a separate
+commit, artifact, test inventory, and rollback boundary; it must not be used to
+explain or mask a Checkpoint A failure.
 
 ## Milestone 0: Baseline And Decisions
 

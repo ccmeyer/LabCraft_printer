@@ -54,6 +54,7 @@ add_executable(fw_tests
     tests/test_printer_control_policy.cpp
     tests/test_diagnostic_result_emitter.cpp
     tests/test_tmc2208_configuration.cpp
+    tests/test_motion_unit_scale.cpp
 
     # Add *selected* firmware sources here (NOT the whole firmware):
     # ../Src/protocol/ProtocolParser.cpp

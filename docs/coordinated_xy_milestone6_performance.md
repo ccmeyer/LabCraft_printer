@@ -1124,6 +1124,52 @@ conditional recovery mechanism under both deliberate and naturally low-margin
 service, but it does not by itself authorize MRES3 or conditional rearming as a
 production default.
 
+### Production MRES3 and conditional-rearm migration candidate
+
+Checkpoint A implements the reviewed production migration without changing the
+application or wire protocol. Public motion coordinates, stored positions,
+targets, speeds, accelerations, home/backoff distances, and status remain in
+legacy MRES2 logical units. The new pure `MotionUnitScale` boundary converts an
+MRES3 native DEDGE cycle to two logical units and divides native cycle rate and
+acceleration by two. Signed odd displacements truncate toward zero, and motion
+state reports the reachable logical target rather than an unreachable request.
+The conversion applies consistently to coordinated X/Y and direct X/Y/Z/P/R
+stepper paths, including dynamic rate updates, pause/resume, soft stop, homing,
+and position accounting.
+
+The production `Debug` image now programs the shared driver chain as MRES3,
+DEDGE enabled, and multistep filtering disabled. Coordinated XY boots in
+`ConditionalLateRearm` with the validated 1,125-tick guard. Synthetic late-edge
+injection and intentional-wait accounting remain compiled only in the
+`MRES3_Diagnostic` image, whose boot mode remains `FreeRunning`.
+
+Production selector `2097` runs the original logical 40 kHz/140,000-units/s2
+ten-move geometry without injection. It emits results `2087` through `2090` and
+is normalized by `coordinated_xy_production_mres3_v1`. Acceptance requires the
+expected 53,416/90,000/110,000 native X/Y/master totals, 220,000 callbacks,
+219,990 complete schedule decisions, zero pending/deadline/reset/watchdog
+evidence, at least 450 timer ticks of final slack, consistent conditional-rearm
+evidence, bounded homes, and the intended driver configuration. A clean row is
+allowed to require zero rearms; any observed rearm must have no pending-at-
+rearm event.
+
+The pre-migration rollback point is commit `8a1cd3c4` and its 351,832-byte
+production artifact, SHA-256
+`A0D40FD82EED36B8CECFF2A2B5E56499C95CF9B962029CB8D2A52F618F165A12`.
+Final candidate artifact hashes and automated-validation counts are recorded
+after the matching build. The focused motion/qualification suite passes
+135/135, the full Python suite passes 4,650 tests with 135 skipped, and firmware
+validation passes 411/411 tests with 10,213,778 checks. Both STM32
+builds complete with zero errors. The production artifact is 351,616 bytes with
+SHA-256
+`76113CB35E7806F35A15D86F9EB857140B62B76771445508E4BF3084AA5D05DA`;
+the matching diagnostic artifact is 354,016 bytes with SHA-256
+`16C7F75155BC92D23E0A8A5691A779B2D446EFE5B5A85D281A765C2AB8C95084`.
+Static stack reports show 136 bytes for the production conditional TIM2 body
+and 144 bytes for the diagnostic conditional body; the production disassembly
+contains no injection-wait helper reference. Watched SAFE/`2097`/SAFE HIL is
+mandatory before the separate single-axis LUT migration checkpoint begins.
+
 ## Rollback
 
 Immediate rollback disables coordinated instrumentation or builds with

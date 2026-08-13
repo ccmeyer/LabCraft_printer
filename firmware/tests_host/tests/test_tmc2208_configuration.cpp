@@ -21,8 +21,12 @@ TEST(TMC2208Configuration, DiagnosticValuesSelectOneThirtySecondMicrosteps) {
   UNSIGNED_LONGS_EQUAL(0x33000053u, values.chopconf);
 }
 
-TEST(TMC2208Configuration, DefaultHostBuildRemainsMres2) {
+TEST(TMC2208Configuration, DefaultProductionBuildUsesMres3) {
   const auto values = TMC2208Configuration::buildValues();
-  UNSIGNED_LONGS_EQUAL(2u, values.mres);
+  UNSIGNED_LONGS_EQUAL(3u, values.mres);
   CHECK_FALSE(TMC2208Configuration::isMres3DiagnosticBuild());
+  CHECK_TRUE(TMC2208Configuration::isProductionMres3Build());
+  CHECK_TRUE(TMC2208Configuration::preservesMres2PhysicalRate(40000u));
+  CHECK_TRUE(
+      TMC2208Configuration::preservesMres2PhysicalAcceleration(140000u));
 }

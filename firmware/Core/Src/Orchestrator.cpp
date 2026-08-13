@@ -22,6 +22,7 @@
 #include "ResetReportPolicy.h"
 #include "Logger.h"
 #include "Gantry.h"
+#include "MotionUnitScale.h"
 #include "Comm.h"
 #include "CommCodec.h"
 #include "CrashLog.h"
@@ -435,8 +436,15 @@ Orchestrator::AbsoluteXyExecutionResult Orchestrator::executeAbsoluteXy(
     uint32_t diagnosticTimeoutMs) {
   AbsoluteXyExecutionResult result{};
   const GantryPosition start = Gantry::instance()->getPosition();
-  const int64_t dxWide = static_cast<int64_t>(targetX) - start.x;
-  const int64_t dyWide = static_cast<int64_t>(targetY) - start.y;
+  int32_t actualTargetX = start.x;
+  int32_t actualTargetY = start.y;
+  const bool targetsCanonical =
+      MotionUnitScale::canonicalizeAbsoluteTarget(
+          start.x, targetX, actualTargetX) &&
+      MotionUnitScale::canonicalizeAbsoluteTarget(
+          start.y, targetY, actualTargetY);
+  const int64_t dxWide = static_cast<int64_t>(actualTargetX) - start.x;
+  const int64_t dyWide = static_cast<int64_t>(actualTargetY) - start.y;
   const auto clampDelta = [](int64_t value) -> int32_t {
     if (value < static_cast<int64_t>(INT32_MIN)) return INT32_MIN;
     if (value > static_cast<int64_t>(INT32_MAX)) return INT32_MAX;
@@ -459,7 +467,9 @@ Orchestrator::AbsoluteXyExecutionResult Orchestrator::executeAbsoluteXy(
   }
 
   sampleOrchStack(ORCH_STACK_PHASE_ABS_XY_BEFORE_MOVE);
-  result.startStatus = Gantry::instance()->moveTo(targetX, targetY, feedHz);
+  result.startStatus = targetsCanonical
+      ? Gantry::instance()->moveTo(actualTargetX, actualTargetY, feedHz)
+      : CoordinatedStartStatus::PositionOutOfRange;
   sampleOrchStack(ORCH_STACK_PHASE_ABS_XY_AFTER_MOVE);
   const bool startAccepted =
       result.startStatus == CoordinatedStartStatus::Started ||
@@ -495,12 +505,13 @@ Orchestrator::AbsoluteXyExecutionResult Orchestrator::executeAbsoluteXy(
   const bool controlInterrupted =
       _paused || _pauseRequested || _clearRequested || _shutdownRequested;
   const GantryPosition end = Gantry::instance()->getPosition();
-  result.endpointMatches = end.x == targetX && end.y == targetY;
+  result.endpointMatches = targetsCanonical &&
+      end.x == actualTargetX && end.y == actualTargetY;
   Stepper* stepperX = Stepper::stepperX();
   Stepper* stepperY = Stepper::stepperY();
   result.targetsMatch = stepperX != nullptr && stepperY != nullptr &&
-      stepperX->getTargetPosition() == targetX &&
-      stepperY->getTargetPosition() == targetY;
+      stepperX->getTargetPosition() == actualTargetX &&
+      stepperY->getTargetPosition() == actualTargetY;
 
   bool terminalCompleted = result.waitCompleted;
   bool terminalFailure = false;
@@ -561,12 +572,20 @@ Orchestrator::AbsoluteXyExecutionResult Orchestrator::executeAbsoluteXy(
 bool Orchestrator::validateResumedAbsoluteXy(int32_t targetX,
                                              int32_t targetY) {
   const GantryPosition position = Gantry::instance()->getPosition();
+  int32_t actualTargetX = position.x;
+  int32_t actualTargetY = position.y;
+  const bool targetsCanonical =
+      MotionUnitScale::canonicalizeAbsoluteTarget(
+          position.x, targetX, actualTargetX) &&
+      MotionUnitScale::canonicalizeAbsoluteTarget(
+          position.y, targetY, actualTargetY);
   Stepper* stepperX = Stepper::stepperX();
   Stepper* stepperY = Stepper::stepperY();
-  bool completed = position.x == targetX && position.y == targetY &&
+  bool completed = targetsCanonical &&
+      position.x == actualTargetX && position.y == actualTargetY &&
       stepperX != nullptr && stepperY != nullptr &&
-      stepperX->getTargetPosition() == targetX &&
-      stepperY->getTargetPosition() == targetY;
+      stepperX->getTargetPosition() == actualTargetX &&
+      stepperY->getTargetPosition() == actualTargetY;
 #if LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE != 0
   const CoordinatedXySnapshot snapshot = Gantry::instance()->coordinatedSnapshot();
   completed = completed &&

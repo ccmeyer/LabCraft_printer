@@ -1,22 +1,22 @@
 {
   "schema_version": "qualification_manifest_v0",
-  "manifest_id": "coordinated_xy_mres3_20khz_v2",
-  "name": "Coordinated XY MRES3 20 kHz Diagnostic v2",
+  "manifest_id": "coordinated_xy_production_mres3_v1",
+  "name": "Production MRES3 Conditional-Rearm Migration v1",
   "profile": "FULL",
-  "description": "Runs a diagnostic-only MRES=3 build through the ten-move coordinated-XY geometry row using legacy MRES=2 logical coordinates. Firmware converts the 40 kHz logical command to 20 kHz native STEP cycles. Revised selectors retain all completed, internally consistent moves after diagnostic-only timing failures while preserving strict FAIL acceptance.",
-  "expected_test_ids": [2080, 2081, 2082, 2083],
+  "description": "Qualifies production MRES=3 motion while keeping commands and status in legacy MRES=2 logical units. The ten-move row runs at the original logical geometry, 40 kHz logical rate, and 140,000 logical units/s2; firmware converts these to 20 kHz native STEP cycles and 70,000 native cycles/s2. Conditional late rearm is active without synthetic delay injection.",
+  "expected_test_ids": [2087, 2088, 2089, 2090],
   "enforce_expected_test_ids": true,
   "requires_operator_prompts": true,
-  "selftest_args": ["--coordinated-xy-mres3-20khz-suite"],
+  "selftest_args": ["--coordinated-xy-production-mres3-suite"],
   "fixtures": [
     {
-      "fixture_id": "coordinated_xy_mres3_20khz_envelope_clear",
-      "required_for": [2080, 2081, 2082, 2083],
-      "operator_note": "Confirm that the diagnostic MRES=3 image is flashed, both limit switches are released, the complete XY/Z envelope is clear, and the gantry is square. The selector homes Z then X/Y and submits the original logical geometry and 40 kHz logical rate; firmware converts these to half as many native STEP cycles at 20 kHz before bounded reference homes. Stop immediately for contact, abnormal sound, lost squareness, absent motion, or absent homing."
+      "fixture_id": "coordinated_xy_production_mres3_envelope_clear",
+      "required_for": [2087, 2088, 2089, 2090],
+      "operator_note": "Confirm the production image is flashed, both limit switches are released, the gantry is square, and the complete XY/Z envelope is clear. Stop immediately for contact, abnormal sound, lost squareness, absent motion or homing, reset, or watchdog evidence."
     }
   ],
   "analysis_rules": {
-    "2080": {
+    "2087": {
       "category": "performance",
       "failure_domain": "firmware_motion",
       "metrics": {
@@ -32,62 +32,48 @@
         "qm": {"maturity": "acceptance", "equals": 0},
         "pu": {"maturity": "acceptance", "equals": 0},
         "ps": {"maturity": "acceptance", "equals": 0},
-        "am": {"maturity": "acceptance", "min": 1, "max": 2025},
-        "aa": {"maturity": "acceptance", "min": 1, "max": 2025},
-        "cm": {"maturity": "acceptance", "min": 1, "max": 2025},
-        "ca": {"maturity": "acceptance", "min": 1, "max": 2025},
-        "dm": {"maturity": "acceptance", "min": 1, "max": 2025},
-        "da": {"maturity": "acceptance", "min": 1, "max": 2025},
-        "tm": {"maturity": "acceptance", "min": 1, "max": 2250},
         "de": {"maturity": "acceptance", "max": 100},
         "sg": {"maturity": "acceptance", "max": 100},
         "wd": {"maturity": "acceptance", "max": 100},
         "sa": {"maturity": "acceptance", "equals": 0},
         "wl": {"maturity": "acceptance", "equals": 0},
-        "cw": {"maturity": "acceptance", "max": 10},
         "sf": {"maturity": "acceptance", "equals": 0},
         "xd": {"maturity": "acceptance", "max": 25},
         "yd": {"maturity": "acceptance", "max": 25},
         "to": {"maturity": "acceptance", "equals": 0}
       }
     },
-    "2081": {
+    "2088": {
       "category": "performance",
       "failure_domain": "firmware_timing",
       "metrics": {
         "i2": {"maturity": "acceptance", "equals": 220000},
         "s": {"maturity": "acceptance", "equals": 220000},
         "mi": {"maturity": "acceptance", "equals": 0},
-        "ph": {"maturity": "candidate", "min": 1},
-        "pa": {"maturity": "candidate", "min": 1},
-        "fm": {"maturity": "candidate", "min": 1},
-        "fa": {"maturity": "candidate", "min": 1},
-        "ax": {"maturity": "candidate", "min": 1},
-        "tf": {"maturity": "candidate", "min": 1},
-        "pp": {"maturity": "candidate", "min": 0},
-        "pf": {"maturity": "candidate", "min": 0},
         "pu": {"maturity": "acceptance", "equals": 0},
         "ps": {"maturity": "acceptance", "equals": 0},
         "sf": {"maturity": "acceptance", "equals": 0},
         "to": {"maturity": "acceptance", "equals": 0}
       }
     },
-    "2082": {
+    "2089": {
       "category": "performance",
       "failure_domain": "firmware_timing",
       "metrics": {
         "i2": {"maturity": "acceptance", "equals": 220000},
         "s": {"maturity": "acceptance", "equals": 220000},
         "mi": {"maturity": "acceptance", "equals": 0},
-        "cm": {"maturity": "candidate", "min": 0},
-        "ca": {"maturity": "candidate", "min": 0},
-        "pm": {"maturity": "candidate", "min": 0},
-        "lc": {"maturity": "acceptance", "equals": 0},
-        "dm": {"maturity": "candidate", "min": 0},
         "ds": {"maturity": "acceptance", "equals": 219990},
         "di": {"maturity": "acceptance", "equals": 0},
         "md": {"maturity": "acceptance", "equals": 0},
         "sl": {"maturity": "acceptance", "min": 450},
+        "rm": {"maturity": "acceptance", "equals": 2},
+        "dc": {"maturity": "acceptance", "equals": 219990},
+        "ci": {"maturity": "acceptance", "equals": 0},
+        "ns": {"maturity": "acceptance", "min": 1126},
+        "rc": {"maturity": "candidate", "min": 0},
+        "rp": {"maturity": "acceptance", "equals": 0},
+        "rd": {"maturity": "candidate", "min": 0},
         "sm": {"maturity": "acceptance", "equals": 0},
         "lf": {"maturity": "acceptance", "equals": 0},
         "sf": {"maturity": "acceptance", "equals": 0},
@@ -99,7 +85,7 @@
         "ra": {"maturity": "acceptance", "equals": 0}
       }
     },
-    "2083": {
+    "2090": {
       "category": "configuration",
       "failure_domain": "firmware_driver_configuration",
       "metrics": {
@@ -112,6 +98,7 @@
         "tf": {"maturity": "acceptance", "equals": 0},
         "ve": {"maturity": "acceptance", "equals": 1},
         "ae": {"maturity": "acceptance", "equals": 1},
+        "lu": {"maturity": "acceptance", "equals": 2},
         "ge": {"maturity": "acceptance", "equals": 1},
         "sf": {"maturity": "acceptance", "equals": 0},
         "to": {"maturity": "acceptance", "equals": 0}

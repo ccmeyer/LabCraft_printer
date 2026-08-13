@@ -7,6 +7,7 @@
 
 #include "Stepper.h"
 #include "ExtiDebounce.h"
+#include "MotionUnitScale.h"
 #include "StepperProfileMath.h"
 #include "Orchestrator.h"          // for getDoneEvents()
 #include "Gantry.h"
@@ -18,8 +19,10 @@
 #include "timers.h"
 #include "stm32f4xx_hal.h"
 #include <stdint.h>
+#include <algorithm>
 #include <cstdlib>
 #include <cmath>          // for cosf()
+#include <limits>
 
 // --- Timer helpers ----------------------------------------------------------
 static inline bool is_apb2_timer(TIM_TypeDef* inst) {
@@ -183,10 +186,17 @@ void Stepper::addDriver(
 
 void Stepper::moveTo(bool sign, uint32_t newPos, uint32_t freqHz, uint32_t accelSteps) {
   // Interpret (sign,newPos) as a signed absolute position
-  int32_t target = sign ? (int32_t)newPos : -(int32_t)newPos;
-  int32_t delta  = target - _pos;
+  const int64_t targetWide = sign ? static_cast<int64_t>(newPos)
+                                  : -static_cast<int64_t>(newPos);
+  if (targetWide < std::numeric_limits<int32_t>::min() ||
+      targetWide > std::numeric_limits<int32_t>::max()) {
+    move(sign, 0u, freqHz, accelSteps);
+    return;
+  }
+  const int32_t target = static_cast<int32_t>(targetWide);
+  const int64_t deltaWide = static_cast<int64_t>(target) - _pos;
 
-  if (delta == 0) {
+  if (deltaWide == 0) {
 	if (_coordinatedReserved) return;
 	#if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
 	if (stepperInstrumentationAxis(_axis)) {
@@ -201,8 +211,9 @@ void Stepper::moveTo(bool sign, uint32_t newPos, uint32_t freqHz, uint32_t accel
 	return;
   }
 
-  const bool direction = (delta > 0);
-  const uint32_t steps = (delta > 0) ? (uint32_t)delta : (uint32_t)(-delta);
+  const bool direction = (deltaWide > 0);
+  const uint32_t steps = static_cast<uint32_t>(
+      direction ? deltaWide : -deltaWide);
   move(direction, steps, freqHz, accelSteps);
 }
 
@@ -219,8 +230,25 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
   _prepareForNewMove();
   _resetMoveLimitState();
 
-  if (steps == 0u) {
+
+  const int64_t requestedDelta = direction
+      ? static_cast<int64_t>(steps)
+      : -static_cast<int64_t>(steps);
+  const MotionUnitScale::QuantizedDisplacement quantized =
+      MotionUnitScale::quantizeDisplacement(_pos, requestedDelta);
+  if (!quantized.valid ||
+      quantized.nativeStepCycles >
+          std::numeric_limits<uint32_t>::max() / 2u) {
 	_legacyMoveStartPending = false;
+    _targetPos = _pos;
+    xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
+    return;
+  }
+
+  const uint32_t nativeSteps = quantized.nativeStepCycles;
+  if (nativeSteps == 0u) {
+	_legacyMoveStartPending = false;
+    _targetPos = _pos;
   #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
     if (stepperInstrumentationAxis(_axis)) {
       stepperEnableCycleCounter();
@@ -234,7 +262,7 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
   }
 
   // Track target position
-  _targetPos     = direction ? (_pos + (int32_t)steps) : (_pos - (int32_t)steps);
+  _targetPos     = quantized.target;
   const bool hwDir = direction ^ _invertDirection;
   _direction      = direction;
   _lastDirection  = direction;
@@ -242,22 +270,22 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
   const uint32_t tclkEff = timer_input_hz(_htim, _prescaler);
   const uint32_t maxARR  = timer_max_arr(_htim);
   StepperProfileMath::MovePlanInput planInput{};
-  planInput.steps = steps;
-  planInput.requestedHz = freqHz;
-  planInput.maxSpeedHz = _max_speed_hz;
-  planInput.accelStepsPerSec2 = _accel_sps2;
+  planInput.steps = nativeSteps;
+  planInput.requestedHz = MotionUnitScale::toNativeRate(freqHz);
+  planInput.maxSpeedHz = MotionUnitScale::toNativeRate(_max_speed_hz);
+  planInput.accelStepsPerSec2 =
+      MotionUnitScale::toNativeAcceleration(_accel_sps2);
   planInput.timerClockHz = tclkEff;
   planInput.timerMaxArr = maxARR;
   const StepperProfileMath::MovePlan plan = StepperProfileMath::planMove(planInput);
 
-  const uint32_t v_req = plan.cruiseHz;
-  _lastFreqHz = v_req;    // for pause/resume
+  _lastFreqHz = std::min(freqHz, _max_speed_hz);  // logical units for resume
   _lastAccel  = 0u;       // legacy field; not used anymore
 
   _inSoftStop = false;    // fresh move; no soft-stop armed yet
 
   // toggles: 2 per full step
-  _totalToggles     = steps * 2u;
+  _totalToggles     = nativeSteps * 2u;
   _togglesRemaining = _totalToggles;
   _togglesDone      = 0u;
 
@@ -306,7 +334,8 @@ void Stepper::setSpeedHz(uint32_t freqHz) {
   if (minTicks < 2u) minTicks = 2u;
   const uint32_t minARR = minTicks - 1u;
 
-  uint32_t newARR = arr_for_freq(tclkEff, freqHz);
+  uint32_t newARR = arr_for_freq(
+      tclkEff, MotionUnitScale::toNativeRate(freqHz));
   if (newARR < minARR) newARR = minARR;
   if (newARR > maxARR) newARR = maxARR;
 
@@ -331,6 +360,7 @@ void Stepper::_requestSoftStop()
   } else if (_softstop_accel_factor > 1.f) {
     a *= _softstop_accel_factor;
   }
+  a = MotionUnitScale::toNativeAcceleration(a);
 
   // Braking distance s = v^2/(2a)
   uint32_t s_decel = (uint32_t)std::ceil((double)v_cur * (double)v_cur / (2.0 * (double)a));
@@ -348,7 +378,8 @@ void Stepper::_requestSoftStop()
 
   // Decel shape: from current ARR to a slow floor
   const uint32_t maxARR = timer_max_arr(_htim);
-  uint32_t arr_floor    = arr_for_freq(tclkEff, _softstop_floor_hz);
+  uint32_t arr_floor = arr_for_freq(
+      tclkEff, MotionUnitScale::toNativeRate(_softstop_floor_hz));
   if (arr_floor > maxARR) arr_floor = maxARR;
 
   _targetARR = arr_now;      // start decel at current period (faster)
@@ -1041,7 +1072,9 @@ LC_COORDINATED_GPIO_OPTIMIZED
 void Stepper::_accountCoordinatedPulse()
 {
   if (!_coordinatedReserved) return;
-  _pos += _direction ? 1 : -1;
+  const int32_t logicalStep = static_cast<int32_t>(
+      MotionUnitScale::logicalUnitsPerNativeStep());
+  _pos += _direction ? logicalStep : -logicalStep;
 }
 
 LC_COORDINATED_GPIO_OPTIMIZED
@@ -1106,7 +1139,8 @@ void Stepper::pauseMove() {
 
 void Stepper::resumeMove() {
 	if (_coordinatedReserved) return;
-	uint32_t newSteps = (_togglesRemaining +1) / 2;
+	const uint32_t nativeSteps = (_togglesRemaining + 1u) / 2u;
+	const uint32_t newSteps = MotionUnitScale::toLogicalMagnitude(nativeSteps);
 	_togglesRemaining = _togglesDone = 0;
 	_accelToggles = _decelToggles = 0;
 
@@ -1147,7 +1181,9 @@ void Stepper::_stepTick() {
     // edge. Account that one completed pulse before stop() clears the toggle
     // state. If STEP is already low, no new pulse is emitted or accounted.
     if ((_togglesDone & 1u) != 0u) {
-      _pos += (_direction ? +1 : -1);
+      const int32_t logicalStep = static_cast<int32_t>(
+          MotionUnitScale::logicalUnitsPerNativeStep());
+      _pos += (_direction ? logicalStep : -logicalStep);
     }
     stop();
     _stepPort->BSRR = static_cast<uint32_t>(_stepPin) << 16u;
@@ -1236,7 +1272,9 @@ void Stepper::_stepTick() {
 
   // every two toggles = one full step
   if ((_togglesDone & 1) == 0) {
-    _pos += (_direction ? +1 : -1);
+    const int32_t logicalStep = static_cast<int32_t>(
+        MotionUnitScale::logicalUnitsPerNativeStep());
+    _pos += (_direction ? logicalStep : -logicalStep);
   }
 
   #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
