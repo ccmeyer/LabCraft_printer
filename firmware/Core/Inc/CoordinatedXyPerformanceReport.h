@@ -42,7 +42,10 @@ static constexpr uint32_t kMoveFailureEntryLateness = 1u << 29;
 
 struct Limits {
   uint32_t activeMaxCycles = 2025u;
-  uint32_t terminalMaxCycles = 2250u;
+  // Terminal cleanup runs after the final STEP edge while TIM2 is stopping,
+  // so it is not constrained by the 2,250-cycle active edge interval. Keep a
+  // separate bounded regression gate above the accepted 2,508-cycle HIL max.
+  uint32_t terminalMaxCycles = 2700u;
   uint32_t durationErrorMaxBasisPoints = 100u;
   uint32_t statusPeriodMaxMs = 100u;
   uint32_t statusWatchdogAgeMaxMs = 100u;

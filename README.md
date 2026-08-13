@@ -2662,6 +2662,12 @@ and acceleration in the historical MRES=2 logical units. Ordinary cosine
 profile X/Y/Z moves use the normalized LUT; homes, limit soft stops, P/R, and
 alternate direct profiles retain their specialized paths.
 
+The strict production timing contract keeps active callbacks at or below
+2,025 core cycles and terminal cleanup at or below 2,700 cycles. Terminal
+cleanup occurs after the final STEP edge while TIM2 is stopping; the separate
+bound is based on the accepted 2,508-cycle HIL maximum and does not relax the
+active edge deadline or the 1,125-tick rearm guard.
+
 The supported coordinated-motion selectors are now:
 
 ```bash

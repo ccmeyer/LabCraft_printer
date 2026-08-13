@@ -33,7 +33,7 @@
         "pu": {"maturity": "acceptance", "equals": 0},
         "ps": {"maturity": "acceptance", "equals": 0},
         "am": {"maturity": "acceptance", "max": 2025},
-        "tm": {"maturity": "acceptance", "max": 2250},
+        "tm": {"maturity": "acceptance", "max": 2700},
         "de": {"maturity": "acceptance", "max": 100},
         "sg": {"maturity": "acceptance", "max": 100},
         "wd": {"maturity": "acceptance", "max": 100},

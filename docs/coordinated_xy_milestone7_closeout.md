@@ -73,7 +73,7 @@ The baseline Debug ELF used 344,080 bytes text, 13,128 data, and 81,880 BSS.
 
 The current closeout build uses 312,152 bytes text, 13,128 data, and 81,680
 BSS. The production binary is 325,296 bytes with SHA-256
-`69AC8ECB3F3330DF7B8835AFD64BDA56FE73D71F2DC12F64FF945A65C8AA153F`.
+`4EEC9952F564947A5293CE6A1198DA4397A9E6D084A4E7266493F4403BE7AB4D`.
 This is a 31,928-byte binary/text reduction and a 200-byte BSS reduction from
 the accepted baseline. The fixed conditional TIM2 body has a 120-byte static
 frame; with its 24-byte dispatcher the inspected call-depth envelope is 144
@@ -97,10 +97,31 @@ git diff --check
 Final local results:
 
 - Python: 4,623 passed, 135 skipped;
-- firmware host: 396 tests, 8,723,789 checks, zero failures;
+- firmware host: 397 tests, 8,723,791 checks, zero failures;
 - Debug firmware: zero build errors (three pre-existing C++17-extension
   warnings in `callbacks.cpp`);
 - `git diff --check`: clean.
+
+## Initial watched attempt and qualification correction
+
+The first closeout artifact (`69AC8ECB...AA153F`) flashed successfully. Its
+pre-SAFE passed 30/30 at `boot=164`, `fault_ct=4`, and `wdg_ct=6`. Selector
+`2097` then completed one exact 10,000-master-step move with 4,538/4,538 IRQ
+and entry samples, zero pending updates, zero missed deadlines, 2,145 ticks of
+minimum deadline slack, correct driver configuration, and a 2,465-cycle
+terminal maximum. It failed closed before the remaining row because the
+closeout had inadvertently applied the old 2,250-cycle active-edge interval
+limit to terminal cleanup. Post-SAFE passed 30/30 with all three retained
+counters unchanged.
+
+This was a qualification-policy regression, not an executor-cost regression:
+the three retained pre-closeout production rows measured terminal maxima of
+2,496, 2,502, and 2,508 cycles, while production deliberately did not apply
+the active-edge gate after the final edge. The corrected production contract
+remains strict but uses a separate 2,700-cycle terminal-cleanup bound (15 us
+at 180 MHz), retaining margin over accepted evidence without changing motion,
+GPIO, ARR, rearm, rate, or acceleration behavior. The watched sequence must
+restart after flashing the corrected artifact recorded above.
 
 ## Watched HIL closeout
 

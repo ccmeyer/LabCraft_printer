@@ -567,7 +567,7 @@ def test_production_mres3_v2_rejects_reduced_evidence_regressions():
         (2087, "i2", 219999),
         (2087, "ok", 0),
         (2087, "pu", 1),
-        (2087, "tm", 2251),
+        (2087, "tm", 2701),
         (2087, "sf", 1),
         (2088, "s", 219999),
         (2088, "mi", 1),

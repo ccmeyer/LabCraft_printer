@@ -166,6 +166,21 @@ TEST(CoordinatedXyPerformanceReport, LateEntryGateIsExplicit) {
               CoordinatedXyPerformanceReport::kMoveFailureEntryLateness) != 0u);
 }
 
+TEST(CoordinatedXyPerformanceReport, TerminalCleanupUsesProductionBound) {
+  auto observation =
+      acceptedMove(500u, 1500u, 1500u, 20000u, 2249u, 11245u);
+  observation.requireTerminalCycleBudget = true;
+  observation.timing.terminalMaxCycles = 2508u;
+  CHECK_TRUE(CoordinatedXyPerformanceReport::movePasses(
+      observation, CoordinatedXyPerformanceReport::Limits{}));
+
+  observation.timing.terminalMaxCycles = 2701u;
+  CHECK_TRUE((CoordinatedXyPerformanceReport::moveFailureMask(
+                  observation, CoordinatedXyPerformanceReport::Limits{}) &
+              CoordinatedXyPerformanceReport::kMoveFailureTerminalCycles) !=
+             0u);
+}
+
 TEST(CoordinatedXyPerformanceReport, AggregateRequiresExactCompleteRow) {
   CoordinatedXyPerformanceReport::Aggregate aggregate{};
   const auto first =

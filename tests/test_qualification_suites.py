@@ -167,6 +167,7 @@ def test_production_mres3_suite_requires_fixed_conditional_contract():
     motion = manifest.analysis_rules["2087"]["metrics"]
     assert motion["n"]["equals"] == 10
     assert motion["i2"]["equals"] == 220000
+    assert motion["tm"]["max"] == 2700
     schedule = manifest.analysis_rules["2089"]["metrics"]
     assert schedule["dc"]["equals"] == 219990
     assert schedule["ci"]["equals"] == 0
