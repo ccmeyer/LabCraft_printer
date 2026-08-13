@@ -45,6 +45,23 @@ TEST(SelfTestSchedulingPolicy, NoYieldModeRejectsUnexpectedDelay)
     CHECK_FALSE(BuildSelfTestSchedulerResult(state, pressure, 1u, nullptr, 0u));
 }
 
+TEST(SelfTestSchedulingPolicy, CooperativeEmissionTimeSlicesWithPressureTask)
+{
+    UNSIGNED_LONGS_EQUAL(
+        SELFTEST_COOPERATIVE_EMISSION_PRIORITY,
+        SelfTestScheduling_SelectEmissionPriority(
+            SelfTestResultSchedulingMode::Cooperative, 2u));
+    UNSIGNED_LONGS_EQUAL(1u, SELFTEST_COOPERATIVE_EMISSION_PRIORITY);
+}
+
+TEST(SelfTestSchedulingPolicy, NoYieldEmissionRetainsCurrentPriority)
+{
+    UNSIGNED_LONGS_EQUAL(
+        2u,
+        SelfTestScheduling_SelectEmissionPriority(
+            SelfTestResultSchedulingMode::NoYield, 2u));
+}
+
 TEST(SelfTestSchedulingPolicy, TransmitTotalsSaturateClosed)
 {
     SelfTestSchedulingState state{};

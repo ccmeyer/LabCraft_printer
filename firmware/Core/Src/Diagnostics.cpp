@@ -44,6 +44,10 @@
 #include <cstring>
 #include <limits>
 
+#if (configUSE_PREEMPTION != 1) || (configUSE_TIME_SLICING != 1)
+#error "Cooperative self-test emission requires preemptive FreeRTOS time slicing"
+#endif
+
 #if LC_HAS_IMAGING > 0
   #include "Flash.h"
   #include "Flash.hpp"
@@ -108,6 +112,33 @@ public:
 private:
     Gantry* _gantry = nullptr;
     bool _activated = false;
+};
+
+class ScopedSelfTestEmissionPriority {
+public:
+    explicit ScopedSelfTestEmissionPriority(SelfTestResultSchedulingMode mode)
+        : _task(xTaskGetCurrentTaskHandle()),
+          _originalPriority(uxTaskPriorityGet(_task)),
+          _emissionPriority(static_cast<UBaseType_t>(
+              SelfTestScheduling_SelectEmissionPriority(
+                  mode, static_cast<uint32_t>(_originalPriority)))) {
+        if (_emissionPriority != _originalPriority) {
+            vTaskPrioritySet(_task, _emissionPriority);
+            _changed = true;
+        }
+    }
+
+    ~ScopedSelfTestEmissionPriority() {
+        if (_changed) {
+            vTaskPrioritySet(_task, _originalPriority);
+        }
+    }
+
+private:
+    TaskHandle_t _task = nullptr;
+    UBaseType_t _originalPriority = tskIDLE_PRIORITY;
+    UBaseType_t _emissionPriority = tskIDLE_PRIORITY;
+    bool _changed = false;
 };
 
 static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
@@ -359,6 +390,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         pass,
                         metrics,
                         HAL_GetTick());
+                    ScopedSelfTestEmissionPriority emissionPriority(resultSchedulingMode);
                     const uint32_t transmitStartMs = HAL_GetTick();
                     comm->sendFrame(comm->handle(), payload, payloadLen);
                     SelfTestScheduling_RecordTransmit(schedulingState,

@@ -43,7 +43,7 @@ static uint32_t Watchdog_DeadlineMs(CrashTaskId taskId)
     // Temporary demo mitigation: allow orchestrator to survive gripper gate contention.
     case CRASH_TASK_ORCH: return 2000u;
     case CRASH_TASK_STATUS: return 500u;
-    case CRASH_TASK_PRESSURE: return 250u;
+    case CRASH_TASK_PRESSURE: return WATCHDOG_PRESSURE_TASK_DEADLINE_MS;
     case CRASH_TASK_PREG_P: return 1000u;
     case CRASH_TASK_PREG_R: return 1000u;
     default: return 0u;

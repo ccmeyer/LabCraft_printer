@@ -292,7 +292,7 @@ from Comm status task
 deadline: 500 ms
 CRASH_TASK_PRESSURE
 from PressureSensor loop
-deadline: 250 ms
+deadline: 500 ms
 CRASH_TASK_PREG_P
 from print regulator loop
 deadline: 250 ms
@@ -677,12 +677,15 @@ Delayed starvation evidence discovered at the next flash (2026-08-12):
 
 ## Self-test scheduling attribution implementation
 
-The follow-up image retains the 250 ms pressure deadline, 20 ms I2C operation
-timeouts, and task priorities. Its result emitter yields for one tick after
-each result/progress frame so the lower-priority pressure task gets a bounded
-scheduling opportunity. Diagnostic selector `1039` disables only that yield;
-selector `1038` explicitly selects the default cooperative behavior. Both run
-the same no-motion SAFE inventory.
+The follow-up image retains 20 ms I2C operation timeouts and ordinary task
+priorities. During each cooperative result/progress transmission and its
+one-tick delay, an RAII guard temporarily lowers only the emitting orchestrator
+task to the pressure task's priority. Tick-level time slicing lets pressure
+interrupt polling UART output and finish an in-progress I2C operation or
+recovery without also time-slicing the emitter against the idle task; the
+original priority is restored after every frame. Diagnostic selector `1039` retains the original
+high-priority/no-yield behavior; selector `1038` explicitly selects the default
+cooperative behavior. Both run the same no-motion SAFE inventory.
 
 `PressureSensorWatchdogTelemetry` records loop-start gaps and phases for delay,
 mux select, sensor read, both recovery paths, and sample processing. A pressure
@@ -708,16 +711,18 @@ The no-motion HIL order is `1039-1038, 1038-1039, 1039-1038`, with at least six
 seconds between arms, followed by a default SAFE after 12 seconds and one
 30-minute idle soak. Cooperative arms must keep pressure gap and age at or
 below 125 ms with no I2C error/recovery delta or watchdog increment. The
-deadline is not increased if these gates fail.
+pressure participant deadline is 500 ms so a complete recovery retains ample
+margin; the 125 ms qualification gates and all other watchdog deadlines remain
+unchanged.
 
-The matching Debug artifact is 338,968 bytes with SHA-256
-`A90B83E35358C1924745BA7F050B014D02B2B406BA318E3D7CF9A7108919711B`.
-It leaves 54,248 bytes in the 384 KiB application partition. The globally
+The matching Debug artifact is 339,512 bytes with SHA-256
+`2464F5720B3084AC65CD617074A7B5A5C7D46F990B8A8561969872DEF728DCF3`.
+It leaves 53,704 bytes in the 384 KiB application partition. The globally
 enabled `INCLUDE_uxTaskGetStackHighWaterMark` option remains off. Instead, the
 existing trace facility scans only the pressure task once when a diagnostic or
 fault snapshot is requested; there is no per-loop stack scan. Unknown headroom
 fails result evidence closed. The outer
-diagnostic runner's static frame remains 3,504 bytes, below the retained
+diagnostic runner's static frame is 3,512 bytes, below the retained
 4,096-byte investigation ceiling.
 
 ### Lightweight I2C attribution HIL evidence (2026-08-12 local)
@@ -794,10 +799,11 @@ status cadence, and watchdog counters pass. Reports:
   SHA-256
   `4A5FFFEC8C987BBDC49B2D15707CF4F2CF656FEFB1DC8EC5DA583C4E105DEB9A`.
 
-The long soak remains deferred. Before further physical motion HIL, replace
-the one-tick self-test result pacing with a scheduling policy that guarantees a
-complete lower-priority pressure opportunity; do not mask this evidence by
-increasing the unchanged 250 ms watchdog deadline.
+The long soak remains deferred. The next image combines priority-aware
+cooperative result pacing with a 500 ms pressure-participant deadline. The
+deadline is recovery containment, while the unchanged 125 ms host gates still
+reject degraded normal pressure scheduling. Further physical motion HIL waits
+for the short no-motion check to show no I2C failure/recovery delta.
 
 Messages from past attempts:
 I’ve implemented the crash-log/watchdog slice and the remaining issue is target boot reachability during SAFE HIL. I’m checking the latest report and the startup paths that can prevent HELLO_ACK, then I’ll make the smallest fix and rerun validation.

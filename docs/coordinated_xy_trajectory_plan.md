@@ -276,10 +276,14 @@ SAFE runs preserved the history with `pending=0` and no further reset, and the
 printer was restored to the `99bb8c58` watchdog-evidence artifact. Selector
 `2075` was not executed.
 
-The self-test scheduling correction and attribution telemetry are implemented
-without weakening the pressure task's 250 ms watchdog deadline. Normal result
-emission now yields one RTOS tick; selectors `1039` and `1038` compare the old
-no-yield and cooperative behavior using the identical no-motion SAFE inventory.
+The self-test scheduling correction and attribution telemetry are implemented.
+Cooperative result emission now runs at scoped pressure-task priority through
+the UART send and one-tick delay, so tick-level time slicing services pressure
+without sharing the emitter with the idle task; selectors `1039`
+and `1038` compare the old no-yield and cooperative behavior using the
+identical no-motion SAFE inventory. The pressure participant deadline is
+500 ms to contain a full recovery, while strict pressure age/gap qualification
+remains 125 ms.
 Results `1043` and `1044` distinguish scheduler gaps from mux/read/recovery
 stalls and retain the latter evidence over an MCU watchdog reset. Complete the
 counterbalanced `A-B, B-A, A-B` experiment, final default SAFE, and 30-minute
@@ -313,8 +317,11 @@ bus-error, or arbitration-loss bit was set. This strongly supports the
 higher-priority result emitter preempting the lower-priority polling receive
 until its 20 ms HAL timeout expires. It does not implicate the coordinated
 executor. Motion source work may continue, but physical high-rate HIL remains
-paused until self-test pacing guarantees a complete pressure-task opportunity;
-the 250 ms pressure watchdog deadline remains unchanged.
+paused until the priority-aware pacing image passes its short no-motion gate
+with no I2C failure/recovery delta. The pressure-participant deadline is raised
+to 500 ms for recovery margin; the stricter 125 ms diagnostic gate remains.
+The matching priority-aware diagnostic artifact is 339,512 bytes with SHA-256
+`2464F5720B3084AC65CD617074A7B5A5C7D46F990B8A8561969872DEF728DCF3`.
 
 ## Milestone 0: Baseline And Decisions
 

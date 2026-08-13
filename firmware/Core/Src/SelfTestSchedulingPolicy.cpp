@@ -46,6 +46,15 @@ bool SelfTestScheduling_ShouldDelay(const SelfTestSchedulingState& state)
   return state.mode == SelfTestResultSchedulingMode::Cooperative;
 }
 
+uint32_t SelfTestScheduling_SelectEmissionPriority(
+    SelfTestResultSchedulingMode mode,
+    uint32_t currentPriority)
+{
+  return mode == SelfTestResultSchedulingMode::Cooperative
+      ? SELFTEST_COOPERATIVE_EMISSION_PRIORITY
+      : currentPriority;
+}
+
 bool BuildSelfTestSchedulerResult(const SelfTestSchedulingState& state,
                                   const PressureSensorWatchdogSnapshot& pressure,
                                   uint32_t pressureWatchdogAgeMs,

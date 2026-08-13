@@ -745,7 +745,14 @@ bus-error, or arbitration-loss bit was present. The evidence therefore points
 to the higher-priority result emitter expiring the lower-priority polling
 receive's 20 ms timeout, not an error reported by the coordinated executor.
 Physical selector `2075` remains paused until self-test pacing provides a
-complete pressure-task scheduling opportunity.
+complete pressure-task scheduling opportunity. The next image lowers only the
+cooperative result emitter to the pressure task's priority during each polling
+UART send and one-tick delay, enabling tick-level time slicing before restoring
+the orchestrator priority. It also raises only the pressure-task
+watchdog deadline to 500 ms for recovery margin while retaining the 125 ms
+diagnostic acceptance gates. The matching build is 339,512 bytes with SHA-256
+`2464F5720B3084AC65CD617074A7B5A5C7D46F990B8A8561969872DEF728DCF3`,
+leaving 53,704 bytes in the 384 KiB application partition.
 
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort

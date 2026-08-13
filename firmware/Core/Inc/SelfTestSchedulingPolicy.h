@@ -11,6 +11,8 @@ enum class SelfTestResultSchedulingMode : uint8_t {
   Cooperative = 1
 };
 
+static constexpr uint32_t SELFTEST_COOPERATIVE_EMISSION_PRIORITY = 1u;
+
 struct SelfTestSchedulingState {
   SelfTestResultSchedulingMode mode = SelfTestResultSchedulingMode::Cooperative;
   uint32_t resultFrameCount = 0u;
@@ -26,6 +28,9 @@ void SelfTestScheduling_RecordTransmit(SelfTestSchedulingState& state,
                                        uint32_t elapsedMs);
 void SelfTestScheduling_RecordDelay(SelfTestSchedulingState& state);
 bool SelfTestScheduling_ShouldDelay(const SelfTestSchedulingState& state);
+uint32_t SelfTestScheduling_SelectEmissionPriority(
+    SelfTestResultSchedulingMode mode,
+    uint32_t currentPriority);
 
 bool BuildSelfTestSchedulerResult(const SelfTestSchedulingState& state,
                                   const PressureSensorWatchdogSnapshot& pressure,

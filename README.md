@@ -2901,9 +2901,14 @@ corrupt evidence, or unexplained counter changes.
 
 ### Self-test scheduler and pressure-watchdog A/B diagnostic
 
-Self-test result and progress frames now yield the orchestrator for one RTOS
-tick after synchronous UART transmission. This is the default for SAFE, FULL,
-and focused diagnostics; it does not affect ordinary command/status traffic.
+For cooperative self-tests, each synchronous result/progress transmission and
+its one-tick delay execute under a scoped pressure-priority guard. Tick-level
+time slicing lets the pressure task interrupt polling UART transmission and
+finish an in-progress I2C transaction or recovery without time-slicing the
+emitter against the idle task. The orchestrator's original priority is restored
+after every frame. This is the default for SAFE, FULL, and focused diagnostics;
+selector `1039` retains the original high-priority/no-yield behavior, and
+ordinary command/status traffic is unchanged.
 SAFE adds result `1044 pressure_wdg_context_safe` and final result
 `1043 selftest_scheduler_safe`, so an ordinary SAFE run now reports 30 rows.
 Result `1043` records result-frame/yield counts, UART blocking time, live
@@ -2952,8 +2957,11 @@ python3 tools/compare_selftest_scheduler_ab.py \
 
 The cooperative manifest requires `rf=yc=29`, pressure gap and current age no
 greater than 125 ms, no I2C failure/recovery delta, complete unsaturated
-evidence, and clean host checks. The production pressure deadline remains
-250 ms. If MSBuild reports `FileTracker` access denied during local checks,
+evidence, and clean host checks. The pressure-sensor watchdog participant has
+a 500 ms deadline so one complete recovery retains substantial reset margin;
+the 125 ms qualification gates remain unchanged and prevent the larger
+watchdog window from accepting degraded normal scheduling. If MSBuild reports
+`FileTracker` access denied during local checks,
 rerun the firmware script from a normal non-sandboxed PowerShell session.
 
 Prerequisites:

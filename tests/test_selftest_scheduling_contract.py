@@ -18,6 +18,10 @@ def test_selftest_scheduler_selectors_and_default_cooperative_mode_are_local():
     assert "SelfTestResultSchedulingMode::NoYield" in diagnostics
     assert ": SelfTestResultSchedulingMode::Cooperative" in diagnostics
     assert "vTaskDelay(pdMS_TO_TICKS(1u))" in diagnostics
+    priority_guard = diagnostics.index("ScopedSelfTestEmissionPriority emissionPriority")
+    transmit = diagnostics.index("comm->sendFrame(comm->handle()", priority_guard)
+    delay = diagnostics.index("vTaskDelay(pdMS_TO_TICKS(1u))", transmit)
+    assert priority_guard < transmit < delay
 
 
 def test_scheduler_results_are_safe_only_and_emitted_before_done():
@@ -30,12 +34,19 @@ def test_scheduler_results_are_safe_only_and_emitted_before_done():
     assert "if (!request.fullProfile" in diagnostics[label:context]
 
 
-def test_pressure_deadline_i2c_timeout_and_task_priority_remain_unchanged():
+def test_pressure_deadline_has_recovery_margin_without_changing_i2c_or_task_priority():
     watchdog = _read("firmware/Core/Src/WatchdogSupervisor.c")
+    watchdog_header = _read("firmware/Core/Inc/WatchdogSupervisor.h")
     pressure = _read("firmware/Core/Src/PressureSensor.cpp")
-    assert "case CRASH_TASK_PRESSURE: return 250u;" in watchdog
+    scheduling = _read("firmware/Core/Inc/SelfTestSchedulingPolicy.h")
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+    assert "#define WATCHDOG_PRESSURE_TASK_DEADLINE_MS 500u" in watchdog_header
+    assert "case CRASH_TASK_PRESSURE: return WATCHDOG_PRESSURE_TASK_DEADLINE_MS;" in watchdog
     assert "constexpr uint32_t kPressureI2cTimeoutMs = 20u;" in pressure
     assert "tskIDLE_PRIORITY+1" in pressure
+    assert "SELFTEST_COOPERATIVE_EMISSION_PRIORITY = 1u" in scheduling
+    assert "configUSE_PREEMPTION != 1" in diagnostics
+    assert "configUSE_TIME_SLICING != 1" in diagnostics
 
 
 def test_pressure_stack_headroom_is_sampled_only_at_diagnostic_snapshot():
