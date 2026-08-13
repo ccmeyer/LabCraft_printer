@@ -1,0 +1,2053 @@
+{
+  "schema_version": "qualification_report_v1",
+  "manifest": {
+    "schema_version": "qualification_manifest_v0",
+    "manifest_id": "coordinated_xy_production_mres3_v1",
+    "name": "Production MRES3 Conditional-Rearm Migration v1",
+    "profile": "FULL",
+    "expected_test_ids": [
+      2087,
+      2088,
+      2089,
+      2090
+    ],
+    "fixtures": [
+      {
+        "fixture_id": "coordinated_xy_production_mres3_envelope_clear",
+        "required_for": [
+          2087,
+          2088,
+          2089,
+          2090
+        ],
+        "operator_note": "Confirm the production image is flashed, both limit switches are released, the gantry is square, and the complete XY/Z envelope is clear. Stop immediately for contact, abnormal sound, lost squareness, absent motion or homing, reset, or watchdog evidence."
+      }
+    ],
+    "enforce_expected_test_ids": true,
+    "requires_operator_prompts": true,
+    "selftest_args": [
+      "--coordinated-xy-production-mres3-suite"
+    ],
+    "required_host_checks": [],
+    "analysis_rules": {
+      "2087": {
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metrics": {
+          "hz": {
+            "maturity": "acceptance",
+            "equals": 20000
+          },
+          "n": {
+            "maturity": "acceptance",
+            "equals": 10
+          },
+          "xe": {
+            "maturity": "acceptance",
+            "equals": 53416
+          },
+          "ye": {
+            "maturity": "acceptance",
+            "equals": 90000
+          },
+          "ms": {
+            "maturity": "acceptance",
+            "equals": 110000
+          },
+          "i2": {
+            "maturity": "acceptance",
+            "equals": 220000
+          },
+          "i7": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ok": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "qf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "qm": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "pu": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ps": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "de": {
+            "maturity": "acceptance",
+            "max": 100
+          },
+          "sg": {
+            "maturity": "acceptance",
+            "max": 100
+          },
+          "wd": {
+            "maturity": "acceptance",
+            "max": 100
+          },
+          "sa": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "wl": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "xd": {
+            "maturity": "acceptance",
+            "max": 25
+          },
+          "yd": {
+            "maturity": "acceptance",
+            "max": 25
+          },
+          "to": {
+            "maturity": "acceptance",
+            "equals": 0
+          }
+        }
+      },
+      "2088": {
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metrics": {
+          "i2": {
+            "maturity": "acceptance",
+            "equals": 220000
+          },
+          "s": {
+            "maturity": "acceptance",
+            "equals": 220000
+          },
+          "mi": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "pu": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ps": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "to": {
+            "maturity": "acceptance",
+            "equals": 0
+          }
+        }
+      },
+      "2089": {
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metrics": {
+          "i2": {
+            "maturity": "acceptance",
+            "equals": 220000
+          },
+          "s": {
+            "maturity": "acceptance",
+            "equals": 220000
+          },
+          "mi": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ds": {
+            "maturity": "acceptance",
+            "equals": 219990
+          },
+          "di": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "md": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "sl": {
+            "maturity": "acceptance",
+            "min": 450
+          },
+          "rm": {
+            "maturity": "acceptance",
+            "equals": 2
+          },
+          "dc": {
+            "maturity": "acceptance",
+            "equals": 219990
+          },
+          "ci": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ns": {
+            "maturity": "acceptance",
+            "min": 1126
+          },
+          "rc": {
+            "maturity": "candidate",
+            "min": 0
+          },
+          "rp": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "rd": {
+            "maturity": "candidate",
+            "min": 0
+          },
+          "sm": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "lf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "to": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "fv": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "hm": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "tr": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "la": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ra": {
+            "maturity": "acceptance",
+            "equals": 0
+          }
+        }
+      },
+      "2090": {
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metrics": {
+          "mr": {
+            "maturity": "acceptance",
+            "equals": 3
+          },
+          "mf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "dd": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "gc": {
+            "maturity": "acceptance",
+            "equals": 193
+          },
+          "cc": {
+            "maturity": "acceptance",
+            "equals": 855638099
+          },
+          "tx": {
+            "maturity": "acceptance",
+            "equals": 4
+          },
+          "tf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ve": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "ae": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "lu": {
+            "maturity": "acceptance",
+            "equals": 2
+          },
+          "ge": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "to": {
+            "maturity": "acceptance",
+            "equals": 0
+          }
+        }
+      }
+    }
+  },
+  "machine": {
+    "machine_id": "LC-001",
+    "machine_uuid": "dc0f3c73-0eef-4298-a491-148f7ff5713e",
+    "assigned_at": "2026-08-11T19:48:35.686298Z",
+    "notes": ""
+  },
+  "run": {
+    "run_dir": "hil_reports\\qualification\\LC-001\\20260813T185935Z",
+    "raw_selftest_path": "hil_reports\\qualification\\LC-001\\20260813T185935Z\\raw_selftest.json",
+    "report_path": "hil_reports\\qualification\\LC-001\\20260813T185935Z\\report.json",
+    "summary_csv_path": "hil_reports\\qualification\\LC-001\\20260813T185935Z\\summary.csv",
+    "selftest_returncode": 0,
+    "fixture_id": "coordinated_xy_production_mres3_envelope_clear"
+  },
+  "overall_status": "fail",
+  "raw_summary": {
+    "total": 4,
+    "passed": 2,
+    "failed": 2
+  },
+  "run_id": 4236058025,
+  "profile": "FULL",
+  "started_at": "2026-08-13T18:58:05.865437Z",
+  "finished_at": "2026-08-13T18:58:37.689287Z",
+  "aborted": false,
+  "manifest_checks": {
+    "expected_test_ids": [
+      2087,
+      2088,
+      2089,
+      2090
+    ],
+    "observed_test_ids": [
+      2087,
+      2088,
+      2089,
+      2090
+    ],
+    "missing_test_ids": [],
+    "unexpected_test_ids": [],
+    "enforced": true
+  },
+  "results": [
+    {
+      "test_id": 2087,
+      "name": "coord_xy_prod_mres3_motion",
+      "pass": false,
+      "metrics": {
+        "hz": 20000,
+        "n": 10,
+        "xe": 53416,
+        "ye": 90000,
+        "ms": 110000,
+        "i2": 220000,
+        "i7": 0,
+        "ok": 0,
+        "pu": 0,
+        "ps": 0,
+        "am": 1608,
+        "aa": 1142,
+        "cm": 1451,
+        "ca": 1098,
+        "dm": 1606,
+        "da": 1155,
+        "tm": 2502,
+        "de": 0,
+        "sg": 66,
+        "wd": 64,
+        "sa": 0,
+        "wl": 0,
+        "cw": 0,
+        "qf": 10,
+        "qm": 268959744,
+        "sf": 0,
+        "xd": 4,
+        "yd": 2,
+        "to": 0
+      },
+      "timestamp": "2026-08-13T18:58:36.960644Z"
+    },
+    {
+      "test_id": 2088,
+      "name": "coord_xy_prod_mres3_irq_path",
+      "pass": true,
+      "metrics": {
+        "i2": 220000,
+        "s": 220000,
+        "mi": 0,
+        "ph": 438,
+        "pa": 431,
+        "fm": 3363,
+        "fa": 2000,
+        "ax": 2473,
+        "tf": 3363,
+        "pp": 0,
+        "pf": 0,
+        "pu": 0,
+        "ps": 0,
+        "sf": 0,
+        "to": 0
+      },
+      "timestamp": "2026-08-13T18:58:36.987816Z"
+    },
+    {
+      "test_id": 2089,
+      "name": "coord_xy_prod_conditional_rearm",
+      "pass": false,
+      "metrics": {
+        "i2": 220000,
+        "s": 220000,
+        "mi": 0,
+        "cm": 541,
+        "ca": 27,
+        "pm": 0,
+        "lc": 591,
+        "dm": 1803,
+        "ds": 219990,
+        "di": 0,
+        "md": 0,
+        "sl": 667,
+        "rm": 2,
+        "dc": 219990,
+        "ci": 0,
+        "ns": 1157,
+        "rc": 1,
+        "rp": 0,
+        "rd": 470,
+        "sm": 0,
+        "lf": 0,
+        "sf": 0,
+        "to": 0,
+        "fv": 0,
+        "tr": 0,
+        "la": 0,
+        "ra": 0,
+        "hm": 0
+      },
+      "timestamp": "2026-08-13T18:58:36.987862Z"
+    },
+    {
+      "test_id": 2090,
+      "name": "tmc2208_production_mres3_config",
+      "pass": true,
+      "metrics": {
+        "mr": 3,
+        "mf": 0,
+        "dd": 1,
+        "gc": 193,
+        "cc": 855638099,
+        "tx": 4,
+        "tf": 0,
+        "ve": 1,
+        "ae": 1,
+        "lu": 2,
+        "ge": 1,
+        "sf": 0,
+        "to": 0
+      },
+      "timestamp": "2026-08-13T18:58:37.088349Z"
+    }
+  ],
+  "host_checks": [
+    {
+      "name": "hello_ack",
+      "pass": true,
+      "details": {
+        "seq8": 1,
+        "run_id": 4236058025,
+        "timeout_ms": 8000,
+        "retry_ms": 250,
+        "retries_sent": 1,
+        "observed_uart_bytes": 128,
+        "fast_fail_on_missing_hello": false,
+        "capabilities": 15,
+        "supports_selftest_transport": true
+      },
+      "timestamp": "2026-08-13T18:58:05.908874Z"
+    },
+    {
+      "name": "selftest_start_ack",
+      "pass": true,
+      "details": {
+        "transport_mode": "queue_ack",
+        "seq8": 2,
+        "seq32": 1,
+        "run_id": 4236058025,
+        "timeout_ms": 2000,
+        "observed_cmd": 254,
+        "observed_seq8": 2,
+        "observed_seq32": 1,
+        "ack_result": "accepted",
+        "expected_seq32": null,
+        "reason": "ok"
+      },
+      "timestamp": "2026-08-13T18:58:05.923601Z"
+    },
+    {
+      "name": "goodbye_ack",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4236058025,
+        "timeout_ms": 2000
+      },
+      "timestamp": "2026-08-13T18:58:37.188616Z"
+    },
+    {
+      "name": "goodbye_done",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4236058025,
+        "timeout_ms": 5000,
+        "observed_seq32": 4236058025
+      },
+      "timestamp": "2026-08-13T18:58:37.689237Z"
+    },
+    {
+      "name": "selftest_progress_watchdog",
+      "pass": true,
+      "details": {
+        "progress_count": 34,
+        "last_progress": {
+          "kind": "progress",
+          "stage": "wait_bits_set",
+          "elapsed_ms": 31284,
+          "stk_hwm_w": 0
+        },
+        "recent_frames": [
+          {
+            "ts": "2026-08-13T18:58:05.923628Z",
+            "cmd": 254,
+            "ack_result": "accepted",
+            "ack_seq32": 1,
+            "expected_seq32": null
+          },
+          {
+            "ts": "2026-08-13T18:58:06.023915Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_production_mres3_envelope_clear"
+          },
+          {
+            "ts": "2026-08-13T18:58:06.057450Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "evap_plate_confirmed"
+          },
+          {
+            "ts": "2026-08-13T18:58:06.057490Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_performance_z_home"
+          },
+          {
+            "ts": "2026-08-13T18:58:06.157792Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T18:58:06.458416Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T18:58:06.458444Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_performance_x_home"
+          },
+          {
+            "ts": "2026-08-13T18:58:06.558713Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T18:58:07.559934Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:08.461035Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:08.661664Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T18:58:08.661689Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_performance_y_home"
+          },
+          {
+            "ts": "2026-08-13T18:58:08.661709Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T18:58:09.662940Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:10.627775Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:10.627808Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T18:58:22.270554Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_performance_post_tier_x_home"
+          },
+          {
+            "ts": "2026-08-13T18:58:22.270625Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T18:58:23.272006Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:24.273399Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:25.274789Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:26.160407Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T18:58:26.160458Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_performance_post_tier_y_home"
+          },
+          {
+            "ts": "2026-08-13T18:58:26.260832Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T18:58:27.162072Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:28.163450Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:29.164829Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:30.166221Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:31.167615Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:32.168998Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:33.170393Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:34.171809Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:35.173222Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:36.174638Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T18:58:36.934194Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T18:58:36.960590Z",
+            "cmd": 251,
+            "test_id": 2087,
+            "name": "coord_xy_prod_mres3_motion"
+          },
+          {
+            "ts": "2026-08-13T18:58:36.987788Z",
+            "cmd": 251,
+            "test_id": 2088,
+            "name": "coord_xy_prod_mres3_irq_path"
+          },
+          {
+            "ts": "2026-08-13T18:58:36.987828Z",
+            "cmd": 251,
+            "test_id": 2089,
+            "name": "coord_xy_prod_conditional_rearm"
+          },
+          {
+            "ts": "2026-08-13T18:58:37.088324Z",
+            "cmd": 251,
+            "test_id": 2090,
+            "name": "tmc2208_production_mres3_config"
+          },
+          {
+            "ts": "2026-08-13T18:58:37.088360Z",
+            "cmd": 252,
+            "run_id": 4236058025
+          }
+        ],
+        "frame_counts": {
+          "2": 183,
+          "251": 38,
+          "252": 1,
+          "254": 1
+        },
+        "progress_timeout_ms": 15000,
+        "activity_timeout_ms": 60000,
+        "status_only_timeout_ms": 120000,
+        "effective_timeout_ms": 240000,
+        "total_rx_bytes": 30513,
+        "status_frames_since_selftest": 0,
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 181,
+        "selftest_frames_seen": 39,
+        "startup_reset_report": null,
+        "reset_report": null,
+        "last_valid_frame_age_ms": 701,
+        "last_rx_byte_age_ms": 701,
+        "last_selftest_frame_age_ms": 701,
+        "timeout_reason": null
+      },
+      "timestamp": "2026-08-13T18:58:37.689274Z"
+    },
+    {
+      "name": "coordinated_xy_status_cadence",
+      "pass": true,
+      "details": {
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 181,
+        "limit_ms_exclusive": 500
+      },
+      "timestamp": "2026-08-13T18:58:37.689282Z"
+    }
+  ],
+  "analysis": {
+    "schema_version": "qualification_analysis_v1",
+    "status": "fail",
+    "items": [
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "status": "fail",
+        "severity": "error",
+        "failure_domain": "firmware_motion",
+        "message": "Raw firmware result failed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2088,
+        "name": "coord_xy_prod_mres3_irq_path",
+        "category": "performance",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "status": "fail",
+        "severity": "error",
+        "failure_domain": "firmware_timing",
+        "message": "Raw firmware result failed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "hello_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "selftest_start_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "goodbye_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "goodbye_done",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "selftest_progress_watchdog",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "coordinated_xy_status_cadence",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      }
+    ],
+    "metric_evaluations": [
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "hz",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 20000,
+        "message": "Metric within threshold: hz=20000, equals=20000.",
+        "metric_value": 20000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "n",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 10,
+        "message": "Metric within threshold: n=10, equals=10.",
+        "metric_value": 10,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "xe",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 53416,
+        "message": "Metric within threshold: xe=53416, equals=53416.",
+        "metric_value": 53416,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ye",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 90000,
+        "message": "Metric within threshold: ye=90000, equals=90000.",
+        "metric_value": 90000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ms",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 110000,
+        "message": "Metric within threshold: ms=110000, equals=110000.",
+        "metric_value": 110000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "i2",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 220000,
+        "message": "Metric within threshold: i2=220000, equals=220000.",
+        "metric_value": 220000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "i7",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: i7=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ok",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Acceptance metric outside threshold: ok=0, equals=1.",
+        "metric_value": 0,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "qf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Acceptance metric outside threshold: qf=10, equals=0.",
+        "metric_value": 10,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "qm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Acceptance metric outside threshold: qm=268959744, equals=0.",
+        "metric_value": 268959744,
+        "status": "fail",
+        "severity": "error"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "pu",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: pu=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ps",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: ps=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "de",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 100,
+        "threshold_expected": null,
+        "message": "Metric within threshold: de=0, max=100.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sg",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 100,
+        "threshold_expected": null,
+        "message": "Metric within threshold: sg=66, max=100.",
+        "metric_value": 66,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "wd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 100,
+        "threshold_expected": null,
+        "message": "Metric within threshold: wd=64, max=100.",
+        "metric_value": 64,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sa",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sa=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "wl",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: wl=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "xd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 25,
+        "threshold_expected": null,
+        "message": "Metric within threshold: xd=4, max=25.",
+        "metric_value": 4,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "yd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 25,
+        "threshold_expected": null,
+        "message": "Metric within threshold: yd=2, max=25.",
+        "metric_value": 2,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2087,
+        "name": "coord_xy_prod_mres3_motion",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "to",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: to=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2088,
+        "name": "coord_xy_prod_mres3_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "i2",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 220000,
+        "message": "Metric within threshold: i2=220000, equals=220000.",
+        "metric_value": 220000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2088,
+        "name": "coord_xy_prod_mres3_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "s",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 220000,
+        "message": "Metric within threshold: s=220000, equals=220000.",
+        "metric_value": 220000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2088,
+        "name": "coord_xy_prod_mres3_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "mi",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: mi=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2088,
+        "name": "coord_xy_prod_mres3_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "pu",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: pu=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2088,
+        "name": "coord_xy_prod_mres3_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "ps",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: ps=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2088,
+        "name": "coord_xy_prod_mres3_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2088,
+        "name": "coord_xy_prod_mres3_irq_path",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "to",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: to=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "i2",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 220000,
+        "message": "Metric within threshold: i2=220000, equals=220000.",
+        "metric_value": 220000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "s",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 220000,
+        "message": "Metric within threshold: s=220000, equals=220000.",
+        "metric_value": 220000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "mi",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: mi=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "ds",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 219990,
+        "message": "Metric within threshold: ds=219990, equals=219990.",
+        "metric_value": 219990,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "di",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: di=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "md",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: md=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "sl",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 450,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: sl=667, min=450.",
+        "metric_value": 667,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "rm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 2,
+        "message": "Metric within threshold: rm=2, equals=2.",
+        "metric_value": 2,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "dc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 219990,
+        "message": "Metric within threshold: dc=219990, equals=219990.",
+        "metric_value": 219990,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "ci",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: ci=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "ns",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 1126,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: ns=1157, min=1126.",
+        "metric_value": 1157,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "rc",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: rc=1, min=0.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "rp",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: rp=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "rd",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: rd=470, min=0.",
+        "metric_value": 470,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "sm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sm=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "lf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: lf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "to",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: to=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "fv",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: fv=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "hm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: hm=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "tr",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: tr=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "la",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: la=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2089,
+        "name": "coord_xy_prod_conditional_rearm",
+        "category": "performance",
+        "failure_domain": "firmware_timing",
+        "metric_name": "ra",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: ra=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metric_name": "mr",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 3,
+        "message": "Metric within threshold: mr=3, equals=3.",
+        "metric_value": 3,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metric_name": "mf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: mf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metric_name": "dd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: dd=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metric_name": "gc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 193,
+        "message": "Metric within threshold: gc=193, equals=193.",
+        "metric_value": 193,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metric_name": "cc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 855638099,
+        "message": "Metric within threshold: cc=855638099, equals=855638099.",
+        "metric_value": 855638099,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metric_name": "tx",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 4,
+        "message": "Metric within threshold: tx=4, equals=4.",
+        "metric_value": 4,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metric_name": "tf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: tf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metric_name": "ve",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: ve=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metric_name": "ae",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: ae=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metric_name": "lu",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 2,
+        "message": "Metric within threshold: lu=2, equals=2.",
+        "metric_value": 2,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metric_name": "ge",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: ge=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2090,
+        "name": "tmc2208_production_mres3_config",
+        "category": "configuration",
+        "failure_domain": "firmware_driver_configuration",
+        "metric_name": "to",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: to=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      }
+    ],
+    "summary": {
+      "item_count": 10,
+      "metric_evaluation_count": 64,
+      "blocking_issue_count": 5,
+      "warning_count": 0
+    },
+    "verdict": {
+      "status": "fail",
+      "blocking_issue_count": 5,
+      "warning_count": 0,
+      "reason": "One or more blocking analyzer issues were found."
+    },
+    "warnings": [],
+    "operator_notes": [
+      {
+        "fixture_id": "coordinated_xy_production_mres3_envelope_clear",
+        "required_for": [
+          2087,
+          2088,
+          2089,
+          2090
+        ],
+        "message": "Confirm the production image is flashed, both limit switches are released, the gantry is square, and the complete XY/Z envelope is clear. Stop immediately for contact, abnormal sound, lost squareness, absent motion or homing, reset, or watchdog evidence."
+      }
+    ]
+  },
+  "verdict": {
+    "status": "fail",
+    "blocking_issue_count": 5,
+    "warning_count": 0,
+    "reason": "One or more blocking analyzer issues were found."
+  },
+  "warnings": [],
+  "operator_notes": [
+    {
+      "fixture_id": "coordinated_xy_production_mres3_envelope_clear",
+      "required_for": [
+        2087,
+        2088,
+        2089,
+        2090
+      ],
+      "message": "Confirm the production image is flashed, both limit switches are released, the gantry is square, and the complete XY/Z envelope is clear. Stop immediately for contact, abnormal sound, lost squareness, absent motion or homing, reset, or watchdog evidence."
+    }
+  ],
+  "operator_interactions": []
+}

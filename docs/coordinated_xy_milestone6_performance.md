@@ -1170,6 +1170,48 @@ and 144 bytes for the diagnostic conditional body; the production disassembly
 contains no injection-wait helper reference. Watched SAFE/`2097`/SAFE HIL is
 mandatory before the separate single-axis LUT migration checkpoint begins.
 
+### Initial production-migration HIL evidence
+
+The first watched production row used implementation commit `61b175b1` and the
+351,616-byte production artifact with SHA-256
+`76113CB35E7806F35A15D86F9EB857140B62B76771445508E4BF3084AA5D05DA`.
+Its hash matched on Pi `192.168.0.33` before flashing. The operator confirmed
+the fixture before motion and reported that all ten moves and both bounded
+homes looked and sounded normal.
+
+Both SAFE brackets passed 30/30. `boot=150`, `fault_ct=4`, and `wdg_ct=6`
+remained unchanged; no current watchdog-late, reset-report, pressure-I2C, or
+bus-recovery evidence occurred. The reports are:
+
+- `hil_reports/production_mres3_pre_safe_20260813T185600Z.json`, SHA-256
+  `67A1D15EF89A916AA9DB057CFAF3DA69D6C0FADE2B3B8156B00077FFC6096232`;
+- `hil_reports/production_mres3_2097_20260813T185600Z.json`, SHA-256
+  `DDF8F2570CD730346895636A6A42D46863AB7600C8F83FDCBE6EAAF5E605D795`;
+- `hil_reports/production_mres3_post_safe_20260813T185600Z.json`, SHA-256
+  `EECE905E45E2668680899EC891C3FFCA9DD5C9D17065B79C8968C2C8F8B6AE7F`.
+
+Selector `2097` completed the exact 53,416/90,000/110,000 native
+X/Y/master-step totals and 220,000 TIM2 callbacks, with X/Y drift of 4/2
+legacy logical steps. It recorded complete IRQ and schedule-decision coverage,
+zero pending observations, zero deadline misses, zero saturation, and one
+natural conditional rearm with no pending-at-rearm event. Final deadline slack
+was 667 timer ticks and minimum non-rearmed slack was 1,157 ticks.
+
+The raw firmware result correctly preserved a FAIL but its mask
+`qm=0x10080000` exposed two acceptance-policy mismatches. Production mode was
+incorrectly held to the diagnostic selector's required synthetic injection,
+even though injection is compiled out of production. The other bit was the
+2,502-cycle terminal cleanup callback exceeding the historical 2,250-cycle
+diagnostic threshold; this callback follows the final physical STEP edge and
+has no subsequent edge deadline. The normalized v1 report at
+`hil_reports/qualification/LC-001/20260813T185935Z/report.json`, SHA-256
+`36E3401F6772FC4DF8EC2C072F91CB8866F3311CB319ED5D4B7CF574A4D26D28`,
+therefore remains FAIL. The follow-up correction is limited to production
+evidence policy: it preserves active-callback, deadline, pending, schedule,
+count, endpoint, watchdog, and saturation gates, requires injection counters
+to remain zero, and makes terminal cleanup cost non-blocking only for selector
+`2097`.
+
 ## Rollback
 
 Immediate rollback disables coordinated instrumentation or builds with
