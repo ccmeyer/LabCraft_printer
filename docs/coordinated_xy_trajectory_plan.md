@@ -224,10 +224,17 @@ Every milestone that touches motion must preserve these invariants:
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
-| 6. Performance and motion HIL qualification | `in_progress` | Checkpoint A is accepted. Checkpoint B implements the normalized LUT for ordinary direct X/Y/Z cosine moves behind independent selector `2096`; homing, P/R, coordinated XY, and alternate profiles remain isolated. | Pass automated validation and watched SAFE/`2096`/SAFE qualification |
+| 6. Performance and motion HIL qualification | `verified` | Checkpoints A and B are accepted: production MRES=3/conditional rearm and the normalized LUT for ordinary direct X/Y/Z cosine moves passed their independent watched gates. Homing, P/R, coordinated XY, and alternate profiles remain isolated. | Milestone 6 evidence complete |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
+
+Milestone 6 is complete. The next work is the separately scoped Milestone 7
+default-enablement and closeout audit: decide the legacy-gate lifetime, prune
+only genuinely dead diagnostic code, run the final FULL/motion-envelope/camera
+regression matrix, and publish the completion/rollback record. No additional
+MRES=3, conditional-rearm, or direct X/Y/Z LUT implementation change is
+required by the production migration.
 
 Stage 1 is complete at source/artifact commit `b777f993`. Its physical selector
 `2077` run covered all 440,000 callbacks without pending observations, but the
@@ -451,6 +458,27 @@ The final production artifact is 357,224 bytes, SHA-256
 `09A00B221816B73390666BB1A084EE7009DF9555072965E1F7C659B9683DF2FB`;
 the matching diagnostic artifact is 359,640 bytes, SHA-256
 `71CF16AF562D80C1B7E0801B33A80DFBF6A6BBCEF414F292704A6A80CDB4CE57`.
+
+Checkpoint B is accepted on source/artifact commit `5750b3ca`. The final
+watched bracket used:
+
+- pre-SAFE `hil_reports/direct_xyz_lut_final_pre_safe_20260813T200409Z.json`,
+  SHA-256 `55267224DCB91D726C692FF433F220C8A922F354A387C328E35E7CBFC0570A59`;
+- selector `2096` `hil_reports/direct_xyz_lut_final_2096_20260813T200409Z.json`,
+  SHA-256 `BF109C2E74EB53C34F40ADDFF5468C05C593733978C141035AA016B394F6E15F`;
+- post-SAFE `hil_reports/direct_xyz_lut_final_post_safe_20260813T200409Z.json`,
+  SHA-256 `4D6F203AB7AEF8A2A3699F350AE14E8D09C460EDF6047AA3955141D2AF4DD981`;
+- normalized report
+  `hil_reports/qualification/LC-001/20260813T200635Z/report.json`, SHA-256
+  `F5366BE042C76AA3EAAC6F73B76DDF8D7A29B43BDF185F88979D9DD04808AA34`.
+
+Both SAFE brackets passed 30/30 with `boot=162`, `fault_ct=4`, and `wdg_ct=6`
+unchanged across motion. Selector `2096` passed 5/5 with exact endpoints,
+native pulses, and cursor counts; zero pending/profile/runtime/abort/saturation/
+timeout evidence; 82 status frames; 114 ms maximum status period; 36 ms
+maximum status-watchdog age; and unchanged P/R positions. The analyzer passed
+with zero warnings or blockers. The operator confirmed that every move and
+home sequence looked and sounded normal.
 
 Checkpoint B rollback is commit `9dc66f11` and its accepted 351,856-byte
 production artifact, SHA-256
@@ -890,7 +918,7 @@ Use a clear, controlled motion envelope and begin below production speed:
 
 ## Milestone 6: Performance And Motion HIL Qualification
 
-Status: `implemented`
+Status: `verified`
 
 ### Goal
 

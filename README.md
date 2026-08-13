@@ -2993,6 +2993,22 @@ geometry, rate, or acceleration changed. The final production candidate is
 the matching diagnostic image is 359,640 bytes with SHA-256
 `71CF16AF562D80C1B7E0801B33A80DFBF6A6BBCEF414F292704A6A80CDB4CE57`.
 
+Checkpoint B is accepted on commit `5750b3ca`. Its final watched
+SAFE/`2096`/SAFE bracket passed both SAFE inventories 30/30 and the focused
+row 5/5. The row recorded exact endpoints, native pulses, and normalized cursor
+coverage; zero pending, runtime/profile, abort, saturation, timeout, reset, or
+new watchdog evidence; 82 status frames; a 114 ms maximum status period; and a
+36 ms maximum status-watchdog age. Boot/fault/watchdog counters remained
+`162/4/6`, P/R positions were unchanged, and the operator confirmed that every
+move and home looked and sounded normal. `direct_xyz_lut_v1` normalized the
+report as PASS with zero warnings or blockers. The normalized evidence is
+`hil_reports/qualification/LC-001/20260813T200635Z/report.json`, SHA-256
+`F5366BE042C76AA3EAAC6F73B76DDF8D7A29B43BDF185F88979D9DD04808AA34`.
+
+The production MRES=3, conditional late-rearm, and direct X/Y/Z LUT migration
+is complete. The remaining coordinated-motion work is the separately scoped
+Milestone 7 cleanup and full regression/closeout—not another migration change.
+
 The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is
 selector `2076`/manifest `coordinated_xy_status_sync_v1`. Every B run requires

@@ -1339,6 +1339,31 @@ is 357,224 bytes, SHA-256
 the matching diagnostic artifact is 359,640 bytes, SHA-256
 `71CF16AF562D80C1B7E0801B33A80DFBF6A6BBCEF414F292704A6A80CDB4CE57`.
 
+The exact artifact from commit `5750b3ca` passed the final watched
+SAFE/`2096`/SAFE bracket. Pre- and post-SAFE reports passed 30/30 with
+`boot=162`, `fault_ct=4`, and `wdg_ct=6` unchanged across motion. Selector
+`2096` passed 5/5 with exact endpoints, native pulse totals, normalized cursor
+coverage, zero pending/profile/runtime/abort/saturation/timeout evidence, 82
+status frames, a 114 ms maximum status period, a 36 ms maximum status-watchdog
+age, successful legacy-path pre/post homes, and no P/R displacement. The
+operator confirmed that every move and home sequence looked and sounded normal.
+
+Evidence files and hashes are:
+
+- `hil_reports/direct_xyz_lut_final_pre_safe_20260813T200409Z.json` —
+  `55267224DCB91D726C692FF433F220C8A922F354A387C328E35E7CBFC0570A59`;
+- `hil_reports/direct_xyz_lut_final_2096_20260813T200409Z.json` —
+  `BF109C2E74EB53C34F40ADDFF5468C05C593733978C141035AA016B394F6E15F`;
+- `hil_reports/direct_xyz_lut_final_post_safe_20260813T200409Z.json` —
+  `4D6F203AB7AEF8A2A3699F350AE14E8D09C460EDF6047AA3955141D2AF4DD981`;
+- `hil_reports/qualification/LC-001/20260813T200635Z/report.json` —
+  `F5366BE042C76AA3EAAC6F73B76DDF8D7A29B43BDF185F88979D9DD04808AA34`.
+
+`direct_xyz_lut_v1` normalized the row as PASS with zero warnings or blocking
+issues. Checkpoint B and Milestone 6 are accepted. Remaining work belongs to
+the separate Milestone 7 closeout/full-regression scope; it is not another
+motion-algorithm migration.
+
 ## Rollback
 
 Checkpoint B rollback is commit `9dc66f11` and its accepted 351,856-byte
