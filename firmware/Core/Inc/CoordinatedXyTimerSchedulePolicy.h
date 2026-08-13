@@ -65,11 +65,25 @@ constexpr Decision decide(Mode mode,
 constexpr bool shouldAttemptInjection(Mode mode,
                                       bool armed,
                                       bool nonterminal,
-                                      bool cruisePhase,
+                                      bool eligiblePhase,
                                       bool risingEdge,
                                       bool stepLow) {
   return mode == Mode::ConditionalLateRearm && armed && nonterminal &&
-      cruisePhase && risingEdge && stepLow;
+      eligiblePhase && risingEdge && stepLow;
+}
+
+// Prefer the first cruise event when a plateau exists. A zero-cruise profile
+// transitions directly from acceleration to deceleration, so its first
+// deceleration event is the only equivalent peak-rate injection point.
+constexpr bool isInjectionPhaseEligible(bool cruisePhase,
+                                        bool decelerationPhase,
+                                        uint32_t cruiseSteps,
+                                        uint32_t masterStepIndex,
+                                        uint32_t accelerationSteps) {
+  if (cruiseSteps != 0u) {
+    return cruisePhase;
+  }
+  return decelerationPhase && masterStepIndex == accelerationSteps;
 }
 
 constexpr uint32_t elapsedCoreCycles(uint32_t startCycle,

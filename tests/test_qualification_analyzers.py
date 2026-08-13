@@ -401,10 +401,11 @@ def test_mres3_conditional_manifest_rejects_incomplete_late_rearm_evidence():
     assert _analyze(cadence_failure, manifest)["verdict"]["status"] == "fail"
 
 
-def test_mres3_v2_manifests_reject_strict_masks_and_partial_rows():
+def test_mres3_revised_manifests_reject_strict_masks_and_partial_rows():
     for manifest_id in (
         "coordinated_xy_mres3_20khz_v2",
         "coordinated_xy_mres3_conditional_rearm_v2",
+        "coordinated_xy_mres3_conditional_rearm_v3",
     ):
         manifest = load_manifest(manifest_id)
         results = []

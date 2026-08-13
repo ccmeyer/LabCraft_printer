@@ -891,9 +891,17 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
 
   uint32_t intentionalWaitCycles = 0u;
   bool injectedThisCallback = false;
+  const bool injectionPhaseEligible = ConditionalMode &&
+      CoordinatedXyTimerSchedulePolicy::isInjectionPhaseEligible(
+          eventProfilePhase == CoordinatedXyPlanner::ProfilePhase::Cruise,
+          eventProfilePhase ==
+              CoordinatedXyPlanner::ProfilePhase::Deceleration,
+          _coordinatedPlan.cruiseSteps,
+          _coordinatedCursor.cachedEvent.masterStepIndex,
+          _coordinatedPlan.accelerationSteps);
   const bool injectionCandidate = ConditionalMode &&
       _coordinatedLateInjectionArmed && !tick.stopTimer &&
-      eventProfilePhase == CoordinatedXyPlanner::ProfilePhase::Cruise &&
+      injectionPhaseEligible &&
       status == CoordinatedXyExecutor::TickStatus::Raised &&
       (stepX || stepY);
   if (injectionCandidate) {
@@ -908,7 +916,7 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
             _coordinatedTimerScheduleMode,
             true,
             !tick.stopTimer,
-            eventProfilePhase == CoordinatedXyPlanner::ProfilePhase::Cruise,
+            injectionPhaseEligible,
             true,
             stepLow) &&
         _coordinatedMasterTimer != nullptr &&

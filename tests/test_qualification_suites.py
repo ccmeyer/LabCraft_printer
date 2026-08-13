@@ -312,12 +312,13 @@ def test_coordinated_xy_mres3_conditional_suite_requires_injected_recovery():
     assert rules["wm"]["max"] == 4500
 
 
-def test_coordinated_xy_mres3_v2_suites_require_strict_and_hard_masks():
+def test_coordinated_xy_mres3_revised_suites_require_strict_and_hard_masks():
     entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
 
     for manifest_id in (
         "coordinated_xy_mres3_20khz_v2",
         "coordinated_xy_mres3_conditional_rearm_v2",
+        "coordinated_xy_mres3_conditional_rearm_v3",
     ):
         manifest = entries[manifest_id].manifest
         motion = manifest.analysis_rules["2080"]["metrics"]

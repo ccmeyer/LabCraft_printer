@@ -2869,21 +2869,25 @@ MRES=3 ten-move row and leaves TIM2 free-running whenever a nonterminal physical
 edge has more than 1,125 timer ticks (12.5 us) before the next update. If the
 remaining margin is 1,125 ticks or less, UIF is already set, or CNT exceeds ARR,
 it rebases the timer from the actual edge. Each measured move injects one bounded
-late cruise rising edge at a target 900 ticks of slack, so the recovery branch is
-proved ten times without altering unmeasured positioning or homes. Result `2086`
+late rising edge at a target 900 ticks of slack: the first cruise rise when a
+cruise plateau exists, or the first deceleration rise at the peak when cruise
+length is zero. This exercises the recovery branch ten times without altering
+unmeasured positioning or homes. Result `2086`
 reports decision, rearm, injection, slack, wait, timeout, and saturation evidence.
 The intentional wait remains in raw IRQ and wall-duration telemetry but is
 excluded only from the executor-body phase-cost gate.
 
 ```bash
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-mres3-conditional-rearm-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_mres3_conditional_rearm.json
-python3 tools/run_qualification.py --manifest coordinated_xy_mres3_conditional_rearm_v2 --operator-prompts --fixture coordinated_xy_mres3_conditional_rearm_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_mres3_conditional_rearm.json
+python3 tools/run_qualification.py --manifest coordinated_xy_mres3_conditional_rearm_v3 --operator-prompts --fixture coordinated_xy_mres3_conditional_rearm_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_mres3_conditional_rearm.json
 ```
 
 This selector is diagnostic-only. It restores `FreeRunning` on every exit and
 does not authorize MRES=3 or conditional scheduling in production.
 
-The v2 MRES3 manifests correspond to the isolated diagnostic implementation.
+The v3 conditional manifest adds the zero-cruise peak fallback while preserving
+the v2 result schema and strict gates. The v2 MRES3 manifests correspond to the
+first isolated diagnostic implementation.
 TIM2 modes 0/1 use a nonconditional ISR specialization with no mode-2 timer
 sample, injection, decision, or intentional-wait bookkeeping. Mode 2 retains
 all of those diagnostics. Selectors `2085` and `2086` continue through the
@@ -2894,12 +2898,12 @@ first hard-stop mask as `hm` alongside `fv/tr/la/ra`. Timeouts, cancellation,
 limit/planner termination, count/endpoint/checksum/state mismatches, incomplete
 coverage, saturation, watchdog evidence, and communication/operator aborts
 still stop immediately. Selector `2084` retains its original fail-stop policy.
-The v1 manifests remain available only to normalize earlier reports.
-The isolated implementation's production artifact is 351,768 bytes with
+The v1 and v2 conditional manifests remain available to normalize earlier
+reports. The revised diagnostic's production artifact is 351,832 bytes with
 SHA-256
-`B6B0AA6F59C17F8E6886BF42B8A9F8A39CE746F472FA1EAC3DD21901C617D9CC`.
-The matching watched-test MRES=3 artifact is 352,024 bytes with SHA-256
-`99587E773C10530988BF78E7A56ED37DA5E4FE6ED717B769620162506C8720BE`.
+`A0D40FD82EED36B8CECFF2A2B5E56499C95CF9B962029CB8D2A52F618F165A12`.
+The matching watched-test MRES=3 artifact is 352,088 bytes with SHA-256
+`CE10D650BC5D4B3377FB92A997AC1C3334E494B9BC9D3817ACA7DD6B0682341E`.
 
 The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is

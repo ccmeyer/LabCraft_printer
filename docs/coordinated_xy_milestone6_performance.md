@@ -836,9 +836,11 @@ that guard, with UIF pending, or when CNT has passed ARR. Invalid timer evidence
 fails the move closed.
 
 The diagnostic arms one injection immediately before each measured move. The
-first eligible nonterminal cruise rise busy-waits toward 900 remaining timer
+first eligible nonterminal peak-rate rise busy-waits toward 900 remaining timer
 ticks, bounded by 4,500 wrap-safe DWT cycles, then emits STEP and exercises the
-same conditional decision path. Result `2086` records decision/missing counts,
+same conditional decision path. A move with a cruise plateau uses its first
+cruise rise; a zero-cruise move uses the first deceleration rise at the
+acceleration/deceleration peak. Result `2086` records decision/missing counts,
 rearms and pending-at-rearm, maximum edge-to-restart delay, injection attempts/
 failures/rearms, injected slack, non-rearmed minimum slack, maximum wait, and
 saturation/timeout. Raw IRQ and wall-duration telemetry include the deliberate
@@ -1047,9 +1049,31 @@ pairs have 10,000 master steps, so each forward and reverse leg consists of
 exactly 5,000 acceleration plus 5,000 deceleration steps and contains no
 `Cruise` event. Only the final 15,000-step pair contains a 5,000-step cruise,
 which accounts exactly for the two consumed injections. The next diagnostic
-revision should select the first cruise rising edge when cruise exists and the
-first peak/deceleration rising edge when cruise length is zero. No production
-motion change or additional watched run is authorized by this evidence alone.
+revision therefore selects the first cruise rising edge when cruise exists and
+the first peak/deceleration rising edge when cruise length is zero. This remains
+a mode-2-only diagnostic change; production motion and selectors `2084`/`2085`
+are unchanged. A new watched selector-`2086` run is required before interpreting
+conditional rearm effectiveness.
+
+### Zero-cruise injection eligibility revision
+
+The mode-2 injection policy now selects the first cruise rise when
+`cruiseSteps` is nonzero and otherwise selects only the first deceleration
+event whose master-step index equals `accelerationSteps`. Firmware host tests
+cover the plateau, zero-cruise boundary, and later-deceleration rejection. ARM
+static analysis still reports 120 bytes for the nonconditional ISR body and
+144 bytes for the conditional body; the mode-0/1 body references
+`shouldRearm()` but contains no conditional decision or injection helper.
+
+Validation passes 406/406 firmware host tests with 10,213,743 checks and
+117/117 targeted Python tests. The versioned production binary is 351,832
+bytes with SHA-256
+`A0D40FD82EED36B8CECFF2A2B5E56499C95CF9B962029CB8D2A52F618F165A12`;
+the watched-test MRES3 diagnostic binary is 352,088 bytes with SHA-256
+`CE10D650BC5D4B3377FB92A997AC1C3334E494B9BC9D3817ACA7DD6B0682341E`.
+Manifest `coordinated_xy_mres3_conditional_rearm_v3` preserves v2's strict
+metrics while documenting the zero-cruise peak fallback. A watched
+SAFE/`2086`/SAFE bracket is required before any production migration decision.
 
 ## Rollback
 

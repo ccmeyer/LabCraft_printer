@@ -192,8 +192,10 @@ def test_mres3_conditional_rearm_preserves_normal_order_and_bounds_injection():
     assert "kConditionalGuardTicks = 1125u" in policy
     assert "kInjectionTargetSlackTicks = 900u" in policy
     assert "kInjectionMaxCoreCycles = 4500u" in policy
+    assert "isInjectionPhaseEligible" in policy
     assert "armCoordinatedLateServiceInjectionForDiagnostics" in header
     assert "shouldAttemptInjection" in gantry
+    assert "_coordinatedPlan.cruiseSteps" in gantry
     assert "injectionWaitExpired" in gantry
     assert "timerCount > timerArr" in gantry
     assert "NVIC_ClearPendingIRQ(TIM2_IRQn)" in gantry

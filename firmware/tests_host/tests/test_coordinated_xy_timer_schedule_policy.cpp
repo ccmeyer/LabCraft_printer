@@ -64,6 +64,22 @@ TEST(CoordinatedXyTimerSchedulePolicy, InjectionUsesWrapSafeBound) {
       0xFFFFFF00u, 0x00001100u));
 }
 
+TEST(CoordinatedXyTimerSchedulePolicy, InjectionPrefersCruiseWhenPlateauExists) {
+  CHECK_TRUE(CoordinatedXyTimerSchedulePolicy::isInjectionPhaseEligible(
+      true, false, 5000u, 5000u, 5000u));
+  CHECK_FALSE(CoordinatedXyTimerSchedulePolicy::isInjectionPhaseEligible(
+      false, true, 5000u, 10000u, 5000u));
+}
+
+TEST(CoordinatedXyTimerSchedulePolicy, ZeroCruiseInjectsAtFirstDecelerationEvent) {
+  CHECK_FALSE(CoordinatedXyTimerSchedulePolicy::isInjectionPhaseEligible(
+      false, false, 0u, 4999u, 5000u));
+  CHECK_TRUE(CoordinatedXyTimerSchedulePolicy::isInjectionPhaseEligible(
+      false, true, 0u, 5000u, 5000u));
+  CHECK_FALSE(CoordinatedXyTimerSchedulePolicy::isInjectionPhaseEligible(
+      false, true, 0u, 5001u, 5000u));
+}
+
 TEST(CoordinatedXyTimerSchedulePolicy, RearmsOnlyAfterNonterminalPhysicalEdge) {
   using CoordinatedXyTimerSchedulePolicy::Mode;
   CHECK_FALSE(CoordinatedXyTimerSchedulePolicy::shouldRearm(
