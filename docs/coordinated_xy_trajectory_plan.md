@@ -304,12 +304,17 @@ cooperative SAFE runs passed 30/30 without a new reset and reproduced
 `h=1;r=25;x=180`: generic `HAL_ERROR` after a 25 ms receive call, followed by
 an active 180 ms read recovery. Pressure age was 218 ms against the unchanged
 250 ms deadline. Because STM32's blocking receive maps multiple internal
-causes to `HAL_ERROR`, the next diagnostic image captures `HAL_I2C_GetError()`
-as `e` in the already-failed branch without adding successful-read work. This evidence
-does not implicate the coordinated executor, but it confirms that repeated
-SAFE result emission has insufficient pressure-recovery margin. Motion source
-work may continue; watched physical high-rate HIL should retain immediate-stop
-criteria and must not be treated as FULL qualification.
+causes to `HAL_ERROR`, diagnostic commit `bb599263` captured
+`HAL_I2C_GetError()` as `e` in the already-failed branch without adding
+successful-read work. Its focused cooperative SAFE and delayed bracket again
+passed 30/30 with unchanged reset/watchdog counters and reproduced
+`h=1;r=25;x=180;e=32`. Bit 32 is `HAL_I2C_ERROR_TIMEOUT`; no acknowledge,
+bus-error, or arbitration-loss bit was set. This strongly supports the
+higher-priority result emitter preempting the lower-priority polling receive
+until its 20 ms HAL timeout expires. It does not implicate the coordinated
+executor. Motion source work may continue, but physical high-rate HIL remains
+paused until self-test pacing guarantees a complete pressure-task opportunity;
+the 250 ms pressure watchdog deadline remains unchanged.
 
 ## Milestone 0: Baseline And Decisions
 

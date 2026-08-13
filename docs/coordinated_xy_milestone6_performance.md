@@ -735,9 +735,17 @@ cooperative SAFE and its delayed-reset bracket: `HAL_ERROR` after a 25 ms
 receive, with recovery active at 180 ms and pressure age 218 ms. Both runs
 passed 30/30, retained all four watchdog participants, and left reset/fault/
 watchdog counters unchanged. Since the blocking STM32 receive maps internal
-timeout and acknowledge paths to the same outward `HAL_ERROR`, the next
-diagnostic image captures the HAL I2C error bitmask as `e` on the existing
-failure branch without adding work to successful pressure reads.
+timeout and acknowledge paths to the same outward `HAL_ERROR`, commit
+`bb599263` captured the HAL I2C error bitmask as `e` on the existing failure
+branch without adding work to successful pressure reads. Its focused
+cooperative SAFE and delayed bracket both passed 30/30, retained
+`boot=130;fault_ct=4;wdg_ct=6`, and reproduced
+`h=1;r=25;x=180;e=32`. Bit 32 is `HAL_I2C_ERROR_TIMEOUT`; no acknowledge,
+bus-error, or arbitration-loss bit was present. The evidence therefore points
+to the higher-priority result emitter expiring the lower-priority polling
+receive's 20 ms timeout, not an error reported by the coordinated executor.
+Physical selector `2075` remains paused until self-test pacing provides a
+complete pressure-task scheduling opportunity.
 
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort

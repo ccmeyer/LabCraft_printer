@@ -760,6 +760,45 @@ successful-read work and distinguishing timeout, acknowledge, bus, and
 arbitration error bits. Its short no-motion HIL result is recorded separately
 after the matching artifact is built and flashed.
 
+### HAL I2C error-mask HIL evidence (2026-08-12 local)
+
+Commit `bb599263`'s 338,968-byte artifact, SHA-256
+`A90B83E35358C1924745BA7F050B014D02B2B406BA318E3D7CF9A7108919711B`,
+was flashed once and exercised without motion, pressure targets, valves, or
+heaters. The selector-`1038` cooperative SAFE and its delayed default-SAFE
+bracket both passed 30/30. Both reported
+`pg=28;pa=218;ph=5;pha=180;re=1;bc=1;h=1;r=25;x=180;e=32;sf=0`.
+The bracket retained `boot=130;fault_ct=4;wdg_ct=6`, so the test produced no
+new reset or watchdog fault. All four participants were live and host cadence
+and progress-watchdog checks passed.
+
+`e=32` is `HAL_I2C_ERROR_TIMEOUT`; neither run set acknowledge-failure, bus-
+error, or arbitration-loss bits. Combined with the 25 ms observed duration of
+the configured 20 ms polling receive and the repeatable 180 ms recovery stretch
+during higher-priority result emission, this strongly supports scheduler
+preemption expiring the HAL polling timeout. It is not evidence of a sensor
+NACK or a physical bus fault in these runs. The one-tick cooperative delay is
+therefore insufficient to guarantee that the lower-priority pressure task can
+finish an in-progress blocking receive before result emission resumes.
+
+The strict cooperative manifest fails as designed on `pa`, `re`, `bc`, `h`,
+`r`, `x`, and `e`; evidence integrity, frame/yield counts, stack evidence,
+status cadence, and watchdog counters pass. Reports:
+
+- `hil_reports/i2c_error_bb599263_cooperative_safe.json`, SHA-256
+  `C0A86BC2958F18585A6B25FE2A6DE6635A45E361D81494ADCE963AEBC4071DD3`;
+- `hil_reports/i2c_error_bb599263_post_safe.json`, SHA-256
+  `C815C552604CA71686B18C054BE6BF5EB234A9C4EA5A764B3AE72BE0D5A71EE2`;
+- normalized report
+  `hil_reports/qualification_i2c_error_bb599263/LC-001/20260813T010139Z/report.json`,
+  SHA-256
+  `4A5FFFEC8C987BBDC49B2D15707CF4F2CF656FEFB1DC8EC5DA583C4E105DEB9A`.
+
+The long soak remains deferred. Before further physical motion HIL, replace
+the one-tick self-test result pacing with a scheduling policy that guarantees a
+complete lower-priority pressure opportunity; do not mask this evidence by
+increasing the unchanged 250 ms watchdog deadline.
+
 Messages from past attempts:
 I’ve implemented the crash-log/watchdog slice and the remaining issue is target boot reachability during SAFE HIL. I’m checking the latest report and the startup paths that can prevent HELLO_ACK, then I’ll make the smallest fix and rerun validation.
 
