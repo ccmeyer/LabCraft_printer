@@ -3,6 +3,7 @@
   "manifest_id": "coordinated_xy_mres3_20khz_v1",
   "name": "Coordinated XY MRES3 20 kHz Diagnostic v1",
   "profile": "FULL",
+  "lifecycle": "archived",
   "description": "Runs a diagnostic-only MRES=3 build through the physical-distance-equivalent ten-move coordinated-XY geometry row at 20 kHz using the production two-edge executor.",
   "expected_test_ids": [2080, 2081, 2082, 2083],
   "enforce_expected_test_ids": true,

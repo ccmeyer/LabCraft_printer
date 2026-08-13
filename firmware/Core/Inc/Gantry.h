@@ -35,10 +35,6 @@ struct CoordinatedXySnapshot {
   CoordinatedXyExecutor::State state = CoordinatedXyExecutor::State::Idle;
   CoordinatedXyExecutor::TerminalReason terminalReason =
       CoordinatedXyExecutor::TerminalReason::None;
-  CoordinatedXyExecutor::ExecutionMode executionMode =
-      CoordinatedXyExecutor::ExecutionMode::TwoEdge;
-  CoordinatedXyTimerSchedulePolicy::Mode timerScheduleMode =
-      CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning;
   uint32_t requestedXSteps = 0u;
   uint32_t requestedYSteps = 0u;
   uint32_t emittedXSteps = 0u;
@@ -57,13 +53,7 @@ struct CoordinatedXySnapshot {
   uint32_t conditionalDecisionCount = 0u;
   uint32_t conditionalDecisionMissingCount = 0u;
   uint32_t conditionalNonRearmSlackMinTicks = 0u;
-  uint32_t lateInjectionCount = 0u;
-  uint32_t lateInjectionFailureCount = 0u;
-  uint32_t lateInjectionRearmCount = 0u;
-  uint32_t lateInjectionDecisionSlackMaxTicks = 0u;
-  uint32_t lateInjectionWaitMaxCycles = 0u;
   uint32_t timerScheduleSaturationFlags = 0u;
-  uint32_t maxIsrCycles = 0u;
   uint32_t selectedMasterRateHz = 0u;
   uint32_t selectedMasterAccelerationStepsPerSec2 = 0u;
   uint32_t accelerationSteps = 0u;
@@ -71,15 +61,7 @@ struct CoordinatedXySnapshot {
   uint32_t decelerationSteps = 0u;
   bool triangular = false;
   CoordinatedXyIsrInstrumentation::Snapshot timing{};
-  uint32_t phaseMeanCycles[
-      static_cast<uint8_t>(CoordinatedXyIsrInstrumentation::Phase::Count)] = {};
-  uint32_t terminalMeanCycles = 0u;
   uint32_t durationErrorBasisPoints = 0u;
-  uint32_t minimumPulseCoreCycles = 0u;
-  uint32_t limitAbortRequestCount = 0u;
-  uint32_t rawLimitAbortCount = 0u;
-  uint32_t limitRequestRisingEdges = 0u;
-  uint32_t limitRequestFallingEdges = 0u;
   uint32_t maskChecksum = 0u;
   uint32_t arrChecksum = 0u;
   int32_t xPosition = 0;
@@ -114,21 +96,7 @@ public:
                                              int64_t dy,
                                              uint32_t requestedRateHz = 0u);
   CoordinatedXySnapshot coordinatedSnapshot() const;
-  bool setCoordinatedExecutionModeForDiagnostics(
-      CoordinatedXyExecutor::ExecutionMode mode);
-  CoordinatedXyExecutor::ExecutionMode coordinatedExecutionMode() const;
-  bool setCoordinatedTimerScheduleModeForDiagnostics(
-      CoordinatedXyTimerSchedulePolicy::Mode mode);
-  CoordinatedXyTimerSchedulePolicy::Mode coordinatedTimerScheduleMode() const;
-  bool armCoordinatedLateServiceInjectionForDiagnostics();
-  void clearCoordinatedLateServiceInjectionForDiagnostics();
-  bool requestCoordinatedCancelForDiagnostics(uint32_t& risingEdgesBefore,
-                                               uint32_t& fallingEdgesBefore);
-  bool requestCoordinatedLimitAbortForDiagnostics(Stepper::Axis axis);
-  bool requestCoordinatedLimitAbortForDiagnostics(
-      Stepper::Axis axis,
-      uint32_t& risingEdgesBefore,
-      uint32_t& fallingEdgesBefore);
+  bool requestCoordinatedLimitAbort(Stepper::Axis axis);
   static bool dispatchCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim);
   static void recordCoordinatedTim2IrqExitFromIsr(uint32_t irqExitCycle);
   static void requestCoordinatedLimitAbortFromIsr(Stepper::Axis axis);
@@ -148,21 +116,14 @@ public:
 private:
   void _pauseCoordinatedTask();
   void _resumeCoordinatedTask();
-  bool _cancelCoordinatedTask(uint32_t* risingEdgesBefore = nullptr,
-                              uint32_t* fallingEdgesBefore = nullptr);
+  bool _cancelCoordinatedTask();
   void _finishCoordinatedHardware(bool aborted,
-                                  bool stepStateKnownLow = false,
-                                  bool accountLateInjection = true);
+                                  bool stepStateKnownLow = false);
   void _finishCoordinatedFromIsr(bool aborted,
                                  BaseType_t* woken,
-                                 bool timingSampleWillFollow = false,
-                                 bool accountLateInjection = true);
-  bool _requestCoordinatedLimitAbortTask(
-      Stepper::Axis axis,
-      uint32_t* risingEdgesBefore = nullptr,
-      uint32_t* fallingEdgesBefore = nullptr);
+                                 bool timingSampleWillFollow = false);
+  bool _requestCoordinatedLimitAbortTask(Stepper::Axis axis);
   bool _handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim);
-  template <bool ConditionalMode>
 #if defined(__GNUC__) && !defined(UNIT_TEST)
   __attribute__((hot))
 #endif
@@ -181,17 +142,8 @@ private:
   CoordinatedStartStatus _coordinatedStartStatus = CoordinatedStartStatus::Disabled;
   volatile uint32_t _coordinatedTim7Interrupts = 0u;
   volatile uint32_t _coordinatedPendingUpdateCount = 0u;
-  volatile uint32_t _coordinatedMaxIsrCycles = 0u;
-  volatile uint32_t _coordinatedLimitAbortRequestCount = 0u;
-  volatile uint32_t _coordinatedRawLimitAbortCount = 0u;
-  volatile uint32_t _coordinatedLimitRequestRisingEdges = 0u;
-  volatile uint32_t _coordinatedLimitRequestFallingEdges = 0u;
   volatile uint32_t _coordinatedArrMin = 0u;
   volatile uint32_t _coordinatedArrMax = 0u;
-  CoordinatedXyExecutor::ExecutionMode _coordinatedExecutionMode =
-      CoordinatedXyExecutor::ExecutionMode::TwoEdge;
-  CoordinatedXyTimerSchedulePolicy::Mode _coordinatedTimerScheduleMode =
-      CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning;
   volatile uint32_t _coordinatedProgrammedArr = 0u;
   volatile uint32_t _coordinatedTimerRearmCount = 0u;
   volatile uint32_t _coordinatedTimerRearmPendingCount = 0u;
@@ -199,14 +151,7 @@ private:
   volatile uint32_t _coordinatedConditionalDecisionCount = 0u;
   volatile uint32_t _coordinatedConditionalDecisionMissingCount = 0u;
   volatile uint32_t _coordinatedConditionalNonRearmSlackMinTicks = 0u;
-  volatile uint32_t _coordinatedLateInjectionCount = 0u;
-  volatile uint32_t _coordinatedLateInjectionFailureCount = 0u;
-  volatile uint32_t _coordinatedLateInjectionRearmCount = 0u;
-  volatile uint32_t _coordinatedLateInjectionDecisionSlackMaxTicks = 0u;
-  volatile uint32_t _coordinatedLateInjectionWaitMaxCycles = 0u;
   volatile uint32_t _coordinatedTimerScheduleSaturationFlags = 0u;
-  volatile bool _coordinatedLateInjectionArmed = false;
-  uint32_t _coordinatedPulseHighCycles = 0u;
   CoordinatedXyIsrInstrumentation::State _coordinatedTiming{};
 
 };

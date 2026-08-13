@@ -3,6 +3,7 @@
   "manifest_id": "coordinated_xy_single_irq_v1",
   "name": "Coordinated XY One-Interrupt 40 kHz Diagnostic v1",
   "profile": "FULL",
+  "lifecycle": "archived",
   "description": "Runs the existing ten-move 40 kHz geometry row with one complete GPIO STEP pulse per TIM2 interrupt, then restores the production two-edge mode before exit.",
   "expected_test_ids": [2064, 2072, 2073, 2074],
   "enforce_expected_test_ids": true,

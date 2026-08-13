@@ -1375,3 +1375,15 @@ the accepted production MRES=3/conditional-rearm checkpoint intact.
 Immediate rollback disables coordinated instrumentation or builds with
 `LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE=0`. Full rollback restores commit
 `6814737d` and its accepted Milestone 5 binary identified above.
+
+## Milestone 7 supersession note
+
+Milestone 7 preserves this document as historical evidence but removes its
+temporary executor/schedule selectors, diagnostic MRES3 build, synthetic
+injection, status-mutex A/B mode, and compile-time legacy route. Current
+production uses fixed MRES3/DEDGE, the two-edge executor, the 1,125-tick
+conditional rearm, and the normalized direct X/Y/Z cosine LUT. Historical
+manifests are archived and may only normalize retained raw reports; they cannot
+launch current hardware. Current commands, local build measurements, rollback
+identities, and the pending closeout HIL matrix are recorded in
+`docs/coordinated_xy_milestone7_closeout.md`.

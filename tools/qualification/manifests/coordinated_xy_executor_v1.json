@@ -3,6 +3,7 @@
   "manifest_id": "coordinated_xy_executor_v1",
   "name": "Coordinated XY Executor Qualification v1",
   "profile": "FULL",
+  "lifecycle": "archived",
   "description": "Operator-gated 3 kHz loaded qualification of the gated TIM2-master coordinated XY executor, including round trips, pause/resume, cancel, injected limit aborts, legacy recovery, and teardown homing.",
   "expected_test_ids": [2040, 2041, 2042, 2043, 2044, 2045, 2046],
   "enforce_expected_test_ids": true,

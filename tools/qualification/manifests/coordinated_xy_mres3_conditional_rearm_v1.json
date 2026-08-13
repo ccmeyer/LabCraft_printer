@@ -3,6 +3,7 @@
   "manifest_id": "coordinated_xy_mres3_conditional_rearm_v1",
   "name": "Coordinated XY MRES3 Conditional Late Rearm v1",
   "profile": "FULL",
+  "lifecycle": "archived",
   "description": "Runs the MRES=3 physical-distance-equivalent ten-move row at 20 kHz, preserves free-running timing when margin is healthy, and injects one bounded late cruise rising edge per measured move to exercise conditional TIM2 rearming.",
   "expected_test_ids": [2080, 2081, 2082, 2086, 2083],
   "enforce_expected_test_ids": true,

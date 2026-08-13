@@ -177,6 +177,10 @@ def load_campaign(ref: str | Path = DEFAULT_CAMPAIGN_REF) -> QualificationCampai
             manifest = load_manifest(manifest_ref)
         except ManifestError as exc:
             raise CampaignError(f"Campaign step {idx} references invalid manifest '{manifest_ref}': {exc}") from exc
+        if manifest.lifecycle != "active":
+            raise CampaignError(
+                f"Campaign step {idx} references archived manifest '{manifest.manifest_id}'."
+            )
         fixture_id = str(raw_step.get("fixture") or "").strip() or None
         required_fixture_ids = _required_fixture_ids(manifest)
         if required_fixture_ids and fixture_id not in required_fixture_ids:

@@ -76,77 +76,6 @@ static constexpr uint16_t kTraceFrequencyHzMin = 1u;
 static constexpr uint16_t kTraceFrequencyHzMax = 50u;
 static constexpr uint32_t kTraceMaxPulseWindowMs = 10000u;
 
-class ScopedStatusMetricsSyncMode {
-public:
-    explicit ScopedStatusMetricsSyncMode(Comm::StatusMetricsSyncMode mode) {
-        Comm::resetStatusMetricsLockFailures();
-        _activated = Comm::setStatusMetricsSyncMode(mode);
-    }
-
-    ~ScopedStatusMetricsSyncMode() {
-        (void)Comm::setStatusMetricsSyncMode(
-            Comm::StatusMetricsSyncMode::CriticalSection);
-    }
-
-    bool activated() const { return _activated; }
-
-private:
-    bool _activated = false;
-};
-
-class ScopedCoordinatedXyExecutionMode {
-public:
-    ScopedCoordinatedXyExecutionMode(
-        Gantry* gantry,
-        CoordinatedXyExecutor::ExecutionMode mode)
-        : _gantry(gantry) {
-        _activated = _gantry != nullptr &&
-            _gantry->setCoordinatedExecutionModeForDiagnostics(mode);
-    }
-
-    ~ScopedCoordinatedXyExecutionMode() {
-        if (_gantry != nullptr) {
-            (void)_gantry->setCoordinatedExecutionModeForDiagnostics(
-                CoordinatedXyExecutor::ExecutionMode::TwoEdge);
-        }
-    }
-
-    bool activated() const { return _activated; }
-
-private:
-    Gantry* _gantry = nullptr;
-    bool _activated = false;
-};
-
-class ScopedCoordinatedXyTimerScheduleMode {
-public:
-    ScopedCoordinatedXyTimerScheduleMode(
-        Gantry* gantry,
-        CoordinatedXyTimerSchedulePolicy::Mode mode)
-        : _gantry(gantry),
-          _previous(_gantry != nullptr
-                        ? _gantry->coordinatedTimerScheduleMode()
-                        : CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning) {
-        _activated = _gantry != nullptr &&
-            _gantry->setCoordinatedTimerScheduleModeForDiagnostics(mode);
-    }
-
-    ~ScopedCoordinatedXyTimerScheduleMode() {
-        if (_gantry != nullptr) {
-            (void)_gantry->setCoordinatedTimerScheduleModeForDiagnostics(
-                _previous);
-        }
-    }
-
-    bool activated() const { return _activated; }
-
-private:
-    Gantry* _gantry = nullptr;
-    CoordinatedXyTimerSchedulePolicy::Mode _previous =
-        CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning;
-    bool _activated = false;
-};
-
 class ScopedSelfTestEmissionPriority {
 public:
     explicit ScopedSelfTestEmissionPriority(SelfTestResultSchedulingMode mode)
@@ -212,39 +141,7 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2024u, "motion_timing_camera_ratio", "motion", "FULL", "explicit_selection"},
     {2025u, "motion_timing_short_tri", "motion", "FULL", "explicit_selection"},
     {2030u, "profile_lut_cycle_benchmark_safe", "performance", "SAFE", "explicit_selection"},
-    {2040u, "coordinated_xy_x_only_low", "motion", "FULL", "explicit_selection"},
-    {2041u, "coordinated_xy_y_only_low", "motion", "FULL", "explicit_selection"},
-    {2042u, "coordinated_xy_equal_low", "motion", "FULL", "explicit_selection"},
-    {2043u, "coordinated_xy_asymmetric_low", "motion", "FULL", "explicit_selection"},
-    {2044u, "coordinated_xy_pause_resume", "motion", "FULL", "explicit_selection"},
-    {2045u, "coordinated_xy_cancel", "motion", "FULL", "explicit_selection"},
-    {2046u, "coordinated_xy_limit_abort", "motion", "FULL", "explicit_selection"},
-    {2050u, "normal_xy_route_x_only_low", "motion", "FULL", "explicit_selection"},
-    {2051u, "normal_xy_route_y_only_low", "motion", "FULL", "explicit_selection"},
-    {2052u, "normal_xy_route_equal_low", "motion", "FULL", "explicit_selection"},
-    {2053u, "normal_xy_route_asymmetric_low", "motion", "FULL", "explicit_selection"},
-    {2054u, "normal_xy_route_long_status", "motion", "FULL", "explicit_selection"},
-    {2055u, "normal_xy_route_control_low", "motion", "FULL", "explicit_selection"},
-    {2056u, "normal_xy_route_physical_limit", "motion", "FULL", "explicit_selection"},
-    {2057u, "normal_xy_route_legacy_smoke", "motion", "FULL", "explicit_selection"},
-    {2060u, "coordinated_xy_performance_5khz", "performance", "FULL", "explicit_selection"},
-    {2061u, "coordinated_xy_performance_10khz", "performance", "FULL", "explicit_selection"},
-    {2062u, "coordinated_xy_performance_20khz", "performance", "FULL", "explicit_selection"},
-    {2063u, "coordinated_xy_performance_30khz", "performance", "FULL", "explicit_selection"},
-    {2064u, "coordinated_xy_performance_40khz", "performance", "FULL", "explicit_selection"},
-    {2065u, "coord_xy_perf_m1_comparison", "performance", "FULL", "explicit_selection"},
-    {2066u, "coord_xy_perf_raster", "performance", "FULL", "explicit_selection"},
-    {2067u, "coord_xy_perf_camera_repeat", "performance", "FULL", "explicit_selection"},
-    {2068u, "coord_xy_perf_pressure", "performance", "FULL", "explicit_selection"},
-    {2070u, "coord_xy_perf_x_direction", "performance", "FULL", "explicit_selection"},
     {2071u, "coord_xy_camera_home_transition", "performance", "FULL", "explicit_selection"},
-    {2072u, "coord_xy_40khz_irq_path", "performance", "FULL", "explicit_selection"},
-    {2073u, "coord_xy_40khz_entry_lateness", "performance", "FULL", "explicit_selection"},
-    {2074u, "coord_xy_single_irq_pulse", "performance", "FULL", "explicit_selection"},
-    {2080u, "coord_xy_mres3_20khz_motion", "performance", "FULL", "explicit_selection"},
-    {2081u, "coord_xy_mres3_20khz_irq_path", "performance", "FULL", "explicit_selection"},
-    {2082u, "coord_xy_mres3_entry_margin", "performance", "FULL", "explicit_selection"},
-    {2083u, "tmc2208_mres3_configuration", "configuration", "FULL", "explicit_selection"},
     {2087u, "coord_xy_prod_mres3_motion", "performance", "FULL", "explicit_selection"},
     {2088u, "coord_xy_prod_mres3_irq_path", "performance", "FULL", "explicit_selection"},
     {2089u, "coord_xy_prod_conditional_rearm", "performance", "FULL", "explicit_selection"},
@@ -371,41 +268,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runMotionEnvelopeSuite = (selectedDiagnosticId == 2019u);
     const bool runMotionTimingSuite = (selectedDiagnosticId == 2029u);
     const bool runProfileLutBenchmark = (selectedDiagnosticId == 2039u);
-    const bool runCoordinatedXyExecutorSuite = (selectedDiagnosticId == 2049u);
-    const bool runNormalXyRouteSuite = (selectedDiagnosticId == 2059u);
-    const bool runCoordinatedXyStatusSyncSuite =
-        (selectedDiagnosticId == 2076u);
-    const bool runCoordinatedXySingleIrqSuite =
-        (selectedDiagnosticId == 2075u);
-    const bool runCoordinatedXyMres3BaselineSuite =
-        (selectedDiagnosticId == 2085u);
-    const bool runCoordinatedXyMres3RearmSuite =
-        (selectedDiagnosticId == 2084u);
-    const bool runCoordinatedXyMres3ConditionalRearmSuite =
-        (selectedDiagnosticId == 2086u);
     const bool runCoordinatedXyProductionMres3Suite =
         (selectedDiagnosticId == 2097u);
     const bool runDirectXyzLutSuite = (selectedDiagnosticId == 2096u);
-    const bool runCoordinatedXyMres3Suite =
-        runCoordinatedXyMres3BaselineSuite ||
-        runCoordinatedXyMres3RearmSuite ||
-        runCoordinatedXyMres3ConditionalRearmSuite;
-    const bool collectCompletedMres3Evidence =
-        runCoordinatedXyMres3BaselineSuite ||
-        runCoordinatedXyMres3ConditionalRearmSuite ||
-        runCoordinatedXyProductionMres3Suite;
-    const bool runCoordinatedXyLogicalMres3Suite =
-        runCoordinatedXyMres3Suite || runCoordinatedXyProductionMres3Suite;
-    const bool runCoordinatedXy40KhzSuite =
-        (selectedDiagnosticId == 2077u) || runCoordinatedXyStatusSyncSuite ||
-        runCoordinatedXySingleIrqSuite;
-    const bool runCoordinatedXyFocusedGeometrySuite =
-        runCoordinatedXy40KhzSuite || runCoordinatedXyLogicalMres3Suite;
-    const bool runCoordinatedXyDirectionSuite = (selectedDiagnosticId == 2079u);
     const bool runCoordinatedXyTransitionSuite = (selectedDiagnosticId == 2078u);
     const bool runCoordinatedXyPerformanceSuite =
-        (selectedDiagnosticId == 2069u) || runCoordinatedXyFocusedGeometrySuite ||
-        runCoordinatedXyDirectionSuite || runCoordinatedXyTransitionSuite;
+        runCoordinatedXyProductionMres3Suite || runCoordinatedXyTransitionSuite;
     const bool runPressureRegulatorSuite = (selectedDiagnosticId == 2299u);
     const bool runRefuelVacuumSuite = (selectedDiagnosticId == 2298u);
     const bool runValveCharacterizationSuite = (selectedDiagnosticId == 2499u);
@@ -430,7 +298,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runSinglePressureTraceSelection =
         (selectedPressureTraceTest >= 2101u) && (selectedPressureTraceTest <= 2104u);
                   auto shouldRunPressureTraceCase = [&](uint16_t testId) {
-                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runGripperSealStressSuite || runXyMotionSuite || runMotionEnvelopeSuite || runMotionTimingSuite || runDirectXyzLutSuite || runProfileLutBenchmark || runCoordinatedXyExecutorSuite || runNormalXyRouteSuite || runCoordinatedXyPerformanceSuite || runPressureRegulatorSuite || runRefuelVacuumSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
+                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runGripperSealStressSuite || runXyMotionSuite || runMotionEnvelopeSuite || runMotionTimingSuite || runDirectXyzLutSuite || runProfileLutBenchmark || runCoordinatedXyPerformanceSuite || runPressureRegulatorSuite || runRefuelVacuumSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
                       return false;
                     }
                     if (runSinglePressureTraceSelection) {
@@ -515,16 +383,6 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                     summary.aborted = aborted;
                     return summary;
                   };
-
-                  if (TMC2208Configuration::isMres3DiagnosticBuild() &&
-                      request.fullProfile && !runCoordinatedXyMres3Suite) {
-                    (void)runOne(
-                        2083u,
-                        "tmc2208_mres3_configuration",
-                        false,
-                        "gate=mres3_selector_required;mr=3;mf=0;dd=1;tx=0;tf=1;to=1");
-                    return finishSelfTestNow();
-                  }
 
                   auto maybeSendProgress = [&](const char* stage) {
                     const uint32_t nowMs = HAL_GetTick();
@@ -2825,1519 +2683,20 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         return finishSelfTestNow();
                       }
 
-                      if (runCoordinatedXyExecutorSuite) {
-#if defined(__GNUC__)
-                        auto runCoordinatedExecutorDiagnostic = [&]()
-                            __attribute__((optimize("Os"), noinline))
-                            -> DiagnosticsSummary {
-#else
-                        auto runCoordinatedExecutorDiagnostic = [&]() -> DiagnosticsSummary {
-#endif
-                        static constexpr int32_t kAnchorX = 5000;
-                        static constexpr int32_t kAnchorY = 5000;
-                        static constexpr uint32_t kCoordinatedRateHz = 3000u;
-                        static constexpr uint32_t kLegacySetupRateHz = 6000u;
-                        static constexpr uint32_t kMoveTimeoutMs = 20000u;
-                        static constexpr uint32_t kControlTimeoutMs = 3000u;
-                        static constexpr uint32_t kZHomeFastHz = 30000u;
-                        static constexpr uint32_t kZHomeSlowHz = 3000u;
-                        static constexpr uint32_t kXyHomeFastHz = 3000u;
-                        static constexpr uint32_t kXyHomeSlowHz = 1000u;
-                        static constexpr uint32_t kHomeBackoffSteps = 400u;
-                        static constexpr uint32_t kHomeTimeoutMs = 20000u;
-                        static constexpr uint32_t kControlProgressSteps = 400u;
-                        static constexpr uint32_t kPauseHoldMs = 50u;
-                        static constexpr uint32_t kIsrCycleBudget = 2250u;
-                        static constexpr uint32_t kHomeDriftLimitSteps = 25u;
-
-                        struct ExecutorTestDescriptor {
-                          uint16_t testId;
-                          const char* name;
-                        };
-                        static constexpr ExecutorTestDescriptor kExecutorTests[] = {
-                            {2040u, "coordinated_xy_x_only_low"},
-                            {2041u, "coordinated_xy_y_only_low"},
-                            {2042u, "coordinated_xy_equal_low"},
-                            {2043u, "coordinated_xy_asymmetric_low"},
-                            {2044u, "coordinated_xy_pause_resume"},
-                            {2045u, "coordinated_xy_cancel"},
-                            {2046u, "coordinated_xy_limit_abort"},
-                        };
-
-                        auto emitSkippedExecutor = [&](uint16_t firstTestId,
-                                                       const char* gate) -> bool {
-                          char metrics[128];
-                          snprintf(metrics,
-                                   sizeof(metrics),
-                                   "gate=%s;hz=3000;to=1;low=0;done=0;i7=0;pu=0",
-                                   gate);
-                          for (const ExecutorTestDescriptor& test : kExecutorTests) {
-                            if (test.testId >= firstTestId &&
-                                !runOne(test.testId, test.name, false, metrics)) {
-                              return false;
-                            }
-                          }
-                          return true;
-                        };
-
-                        Stepper* stepperX = Stepper::stepperX();
-                        Stepper* stepperY = Stepper::stepperY();
-                        Gantry* gantry = Gantry::instance();
-                        if (stepperX == nullptr || stepperY == nullptr || gantry == nullptr) {
-                          (void)emitSkippedExecutor(2040u, "motion_unavailable");
-                          return finishSelfTestNow();
-                        }
-
-                        const uint32_t savedXMaxRateHz = stepperX->maxSpeedHz();
-                        const uint32_t savedYMaxRateHz = stepperY->maxSpeedHz();
-                        auto restoreXyRates = [&]() {
-                          stepperX->setMaxSpeedHz(savedXMaxRateHz);
-                          stepperY->setMaxSpeedHz(savedYMaxRateHz);
-                        };
-                        auto moveLegacyToAnchor = [&]() -> bool {
-                          stepperX->setMaxSpeedHz(kLegacySetupRateHz);
-                          stepperY->setMaxSpeedHz(kLegacySetupRateHz);
-                          const bool reached = moveGantryToWithTimeout(
-                              kAnchorX, kAnchorY, kLegacySetupRateHz, kMoveTimeoutMs);
-                          restoreXyRates();
-                          const GantryPosition position = gantry->getPosition();
-                          return reached && position.x == kAnchorX && position.y == kAnchorY;
-                        };
-
-                        auto stateTerminal = [](CoordinatedXyExecutor::State state) {
-                          return state == CoordinatedXyExecutor::State::Completed ||
-                                 state == CoordinatedXyExecutor::State::Canceled ||
-                                 state == CoordinatedXyExecutor::State::LimitAborted ||
-                                 state == CoordinatedXyExecutor::State::Faulted;
-                        };
-                        auto waitForTerminal = [&](uint32_t timeoutMs,
-                                                   CoordinatedXySnapshot& snapshot) -> bool {
-                          const uint32_t startedMs = HAL_GetTick();
-                          const TickType_t pollTicks = msToAtLeast1Tick(2u);
-                          while ((HAL_GetTick() - startedMs) < timeoutMs) {
-                            Watchdog_CheckIn(CRASH_TASK_ORCH);
-                            snapshot = gantry->coordinatedSnapshot();
-                            if (stateTerminal(snapshot.state)) return true;
-                            if (_selfTestAbortRequested) {
-                              Gantry::cancelXYZMotors();
-                              return false;
-                            }
-                            vTaskDelay(pollTicks);
-                          }
-                          Gantry::cancelXYZMotors();
-                          snapshot = gantry->coordinatedSnapshot();
-                          return false;
-                        };
-                        auto waitForProgress = [&](uint32_t completedSteps,
-                                                   uint32_t timeoutMs,
-                                                   CoordinatedXySnapshot& snapshot) -> bool {
-                          const uint32_t startedMs = HAL_GetTick();
-                          const TickType_t pollTicks = msToAtLeast1Tick(1u);
-                          while ((HAL_GetTick() - startedMs) < timeoutMs) {
-                            Watchdog_CheckIn(CRASH_TASK_ORCH);
-                            snapshot = gantry->coordinatedSnapshot();
-                            if (snapshot.fallingEdges >= completedSteps) return true;
-                            if (stateTerminal(snapshot.state) || _selfTestAbortRequested) {
-                              return false;
-                            }
-                            vTaskDelay(pollTicks);
-                          }
-                          return false;
-                        };
-                        auto waitForState = [&](CoordinatedXyExecutor::State expected,
-                                                uint32_t timeoutMs,
-                                                CoordinatedXySnapshot& snapshot) -> bool {
-                          const uint32_t startedMs = HAL_GetTick();
-                          const TickType_t pollTicks = msToAtLeast1Tick(1u);
-                          while ((HAL_GetTick() - startedMs) < timeoutMs) {
-                            Watchdog_CheckIn(CRASH_TASK_ORCH);
-                            snapshot = gantry->coordinatedSnapshot();
-                            if (snapshot.state == expected) return true;
-                            if (stateTerminal(snapshot.state) || _selfTestAbortRequested) {
-                              return false;
-                            }
-                            vTaskDelay(pollTicks);
-                          }
-                          return false;
-                        };
-
-                        auto completedSnapshotPasses = [&](const CoordinatedXySnapshot& snapshot,
-                                                           int32_t expectedX,
-                                                           int32_t expectedY) -> bool {
-                          const uint32_t doneMask = BIT_STEPPER1_DONE | BIT_STEPPER2_DONE;
-                          return snapshot.startStatus == CoordinatedStartStatus::Started &&
-                                 snapshot.state == CoordinatedXyExecutor::State::Completed &&
-                                 snapshot.terminalReason ==
-                                     CoordinatedXyExecutor::TerminalReason::Completed &&
-                                 snapshot.emittedXSteps == snapshot.requestedXSteps &&
-                                 snapshot.emittedYSteps == snapshot.requestedYSteps &&
-                                 snapshot.timer2Interrupts == snapshot.masterSteps * 2u &&
-                                 snapshot.risingEdges == snapshot.masterSteps &&
-                                 snapshot.fallingEdges == snapshot.masterSteps &&
-                                 snapshot.timer7Interrupts == 0u &&
-                                 snapshot.pendingUpdateCount == 0u &&
-                                 snapshot.maxIsrCycles > 0u &&
-                                 snapshot.maxIsrCycles <= kIsrCycleBudget &&
-                                 snapshot.xStepLow && snapshot.yStepLow &&
-                                 !snapshot.timerOwned &&
-                                 snapshot.xPosition == expectedX &&
-                                 snapshot.yPosition == expectedY &&
-                                 snapshot.xTarget == expectedX &&
-                                 snapshot.yTarget == expectedY &&
-                                 (snapshot.doneBits & doneMask) == doneMask &&
-                                 snapshot.arrMin >= 179u &&
-                                 snapshot.arrMax >= snapshot.arrMin;
-                        };
-
-                        struct CompleteLegResult {
-                          bool started = false;
-                          bool terminal = false;
-                          bool passed = false;
-                          CoordinatedXySnapshot snapshot{};
-                        };
-                        auto runCompleteLeg = [&](int32_t dx, int32_t dy) -> CompleteLegResult {
-                          CompleteLegResult result{};
-                          const GantryPosition start = gantry->getPosition();
-                          const CoordinatedStartStatus startStatus =
-                              gantry->startCoordinatedXY(dx, dy, kCoordinatedRateHz);
-                          result.started = startStatus == CoordinatedStartStatus::Started;
-                          if (!result.started) {
-                            result.snapshot = gantry->coordinatedSnapshot();
-                            return result;
-                          }
-                          result.terminal = waitForTerminal(kMoveTimeoutMs, result.snapshot);
-                          result.passed = result.terminal && completedSnapshotPasses(
-                              result.snapshot, start.x + dx, start.y + dy);
-                          return result;
-                        };
-
-                        auto runRoundTrip = [&](uint16_t testId,
-                                                const char* name,
-                                                int32_t dx,
-                                                int32_t dy) -> bool {
-                          const GantryPosition start = gantry->getPosition();
-                          const CompleteLegResult forward = runCompleteLeg(dx, dy);
-                          CompleteLegResult reverse{};
-                          if (forward.passed) {
-                            reverse = runCompleteLeg(-dx, -dy);
-                          }
-                          const GantryPosition end = gantry->getPosition();
-                          const bool checksumMatch = forward.passed && reverse.passed &&
-                              forward.snapshot.maskChecksum == reverse.snapshot.maskChecksum &&
-                              forward.snapshot.arrChecksum == reverse.snapshot.arrChecksum;
-                          const bool returned = end.x == start.x && end.y == start.y;
-                          const bool pass = forward.passed && reverse.passed &&
-                                            checksumMatch && returned;
-                          const uint32_t maxCycles = std::max(
-                              forward.snapshot.maxIsrCycles,
-                              reverse.snapshot.maxIsrCycles);
-                          char metrics[224];
-                          const int metricsLength = snprintf(
-                              metrics,
-                              sizeof(metrics),
-                              "dx=%ld;dy=%ld;hz=%lu;xe=%lu;ye=%lu;ms=%lu;i2=%lu;i7=%lu;edge=%u;ck=%u;low=%u;done=%u;pu=%lu;cy=%lu;ret=%u;to=%u",
-                              (long)dx,
-                              (long)dy,
-                              (unsigned long)kCoordinatedRateHz,
-                              (unsigned long)(forward.snapshot.emittedXSteps + reverse.snapshot.emittedXSteps),
-                              (unsigned long)(forward.snapshot.emittedYSteps + reverse.snapshot.emittedYSteps),
-                              (unsigned long)forward.snapshot.masterSteps,
-                              (unsigned long)(forward.snapshot.timer2Interrupts + reverse.snapshot.timer2Interrupts),
-                              (unsigned long)(forward.snapshot.timer7Interrupts + reverse.snapshot.timer7Interrupts),
-                              (forward.passed && reverse.passed) ? 1u : 0u,
-                              checksumMatch ? 1u : 0u,
-                              (forward.snapshot.xStepLow && forward.snapshot.yStepLow &&
-                               reverse.snapshot.xStepLow && reverse.snapshot.yStepLow) ? 1u : 0u,
-                              ((forward.snapshot.doneBits &
-                                (BIT_STEPPER1_DONE | BIT_STEPPER2_DONE)) ==
-                                   (BIT_STEPPER1_DONE | BIT_STEPPER2_DONE) &&
-                               (reverse.snapshot.doneBits &
-                                (BIT_STEPPER1_DONE | BIT_STEPPER2_DONE)) ==
-                                   (BIT_STEPPER1_DONE | BIT_STEPPER2_DONE)) ? 1u : 0u,
-                              (unsigned long)(forward.snapshot.pendingUpdateCount + reverse.snapshot.pendingUpdateCount),
-                              (unsigned long)maxCycles,
-                              returned ? 1u : 0u,
-                              (forward.terminal && reverse.terminal) ? 0u : 1u);
-                          const bool metricsFit = metricsLength > 0 &&
-                              static_cast<size_t>(metricsLength) < sizeof(metrics);
-                          (void)runOne(testId,
-                                       name,
-                                       pass && metricsFit,
-                                       metricsFit ? metrics : "gate=metrics_overflow;to=1");
-                          return pass;
-                        };
-
-                        // This suite qualifies the coordinated executor, not
-                        // simultaneous legacy homing. Home one XY axis at a
-                        // time and at a deliberately low approach rate so the
-                        // preflight cannot recreate the interrupt saturation
-                        // that motivated the coordinated executor.
-                        auto runSequentialXyHome = [&](MotionQualificationMath::AxisHomeSample& xSample,
-                                                       MotionQualificationMath::AxisHomeSample& ySample) {
-                          sendProgressStage("coord_x_home_low");
-                          if (!runAxisHomeDiagnosticAttempt(stepperX,
-                                                            BIT_HOME_X_DONE,
-                                                            xSample,
-                                                            kXyHomeFastHz,
-                                                            kXyHomeSlowHz,
-                                                            kHomeBackoffSteps,
-                                                            kHomeTimeoutMs)) {
-                            return false;
-                          }
-                          sendProgressStage("coord_y_home_low");
-                          return runAxisHomeDiagnosticAttempt(stepperY,
-                                                              BIT_HOME_Y_DONE,
-                                                              ySample,
-                                                              kXyHomeFastHz,
-                                                              kXyHomeSlowHz,
-                                                              kHomeBackoffSteps,
-                                                              kHomeTimeoutMs);
-                        };
-
-                        // Fail closed before any motion in this suite. The
-                        // operator must manually exercise both physical XY
-                        // switches while the motors are disabled, and the MCU
-                        // must observe both the asserted and released levels.
-                        // This catches disconnected, stuck, inverted, or
-                        // mechanically unreachable inputs without moving an
-                        // axis toward a hard stop.
-                        auto runXyLimitSwitchPreflight = [&]() -> bool {
-                          if (stepperX->isBusy() || stepperY->isBusy()) return false;
-                          stepperX->disableMotor();
-                          stepperY->disableMotor();
-
-                          if (!waitForOperatorResume("coord_x_limit_press") ||
-                              !stepperX->isLimitAssertedForDiagnostics()) {
-                            return false;
-                          }
-                          if (!waitForOperatorResume("coord_x_limit_release") ||
-                              stepperX->isLimitAssertedForDiagnostics()) {
-                            return false;
-                          }
-                          if (!waitForOperatorResume("coord_y_limit_press") ||
-                              !stepperY->isLimitAssertedForDiagnostics()) {
-                            return false;
-                          }
-                          if (!waitForOperatorResume("coord_y_limit_release") ||
-                              stepperY->isLimitAssertedForDiagnostics()) {
-                            return false;
-                          }
-                          return true;
-                        };
-
-                        if (!runXyLimitSwitchPreflight()) {
-                          restoreXyRates();
-                          (void)emitSkippedExecutor(2040u, "limit_switch_preflight");
-                          return finishSelfTestNow();
-                        }
-
-                        if (!runZClearanceHomePreflight("coord_z_clearance_home",
-                                                        kZHomeFastHz,
-                                                        kZHomeSlowHz,
-                                                        kHomeBackoffSteps,
-                                                        kHomeTimeoutMs)) {
-                          restoreXyRates();
-                          (void)emitSkippedExecutor(2040u, "z_clearance_home");
-                          return finishSelfTestNow();
-                        }
-
-                        MotionQualificationMath::AxisHomeSample xHomeBefore{};
-                        MotionQualificationMath::AxisHomeSample yHomeBefore{};
-                        if (!runSequentialXyHome(xHomeBefore, yHomeBefore)) {
-                          restoreXyRates();
-                          (void)emitSkippedExecutor(2040u, "xy_home");
-                          return finishSelfTestNow();
-                        }
-                        if (savedXMaxRateHz != 40000u || savedYMaxRateHz != 40000u) {
-                          restoreXyRates();
-                          (void)emitSkippedExecutor(2040u, "max_rate_not_40000");
-                          return finishSelfTestNow();
-                        }
-                        if (!moveLegacyToAnchor()) {
-                          restoreXyRates();
-                          (void)emitSkippedExecutor(2040u, "anchor");
-                          return finishSelfTestNow();
-                        }
-
-                        bool safeToContinue = runRoundTrip(
-                            2040u, "coordinated_xy_x_only_low", 1000, 0);
-                        if (!safeToContinue) {
-                          (void)emitSkippedExecutor(2041u, "x_only_failed");
-                          restoreXyRates();
-                          return finishSelfTestNow();
-                        }
-                        safeToContinue = runRoundTrip(
-                            2041u, "coordinated_xy_y_only_low", 0, 1000);
-                        if (!safeToContinue) {
-                          (void)emitSkippedExecutor(2042u, "y_only_failed");
-                          restoreXyRates();
-                          return finishSelfTestNow();
-                        }
-                        safeToContinue = runRoundTrip(
-                            2042u, "coordinated_xy_equal_low", 1000, 1000);
-                        if (!safeToContinue) {
-                          (void)emitSkippedExecutor(2043u, "equal_failed");
-                          restoreXyRates();
-                          return finishSelfTestNow();
-                        }
-                        safeToContinue = runRoundTrip(
-                            2043u, "coordinated_xy_asymmetric_low", 500, 1500);
-                        if (!safeToContinue) {
-                          (void)emitSkippedExecutor(2044u, "asymmetric_failed");
-                          restoreXyRates();
-                          return finishSelfTestNow();
-                        }
-
-                        const GantryPosition pauseStart = gantry->getPosition();
-                        CoordinatedXySnapshot pauseProgress{};
-                        CoordinatedXySnapshot pauseFirst{};
-                        CoordinatedXySnapshot pauseSecond{};
-                        CoordinatedXySnapshot pauseForward{};
-                        const bool pauseStarted = gantry->startCoordinatedXY(
-                            2000, 1000, kCoordinatedRateHz) ==
-                            CoordinatedStartStatus::Started;
-                        const bool pauseProgressReached = pauseStarted && waitForProgress(
-                            kControlProgressSteps, kControlTimeoutMs, pauseProgress);
-                        if (pauseProgressReached) Gantry::pauseXYZMotors();
-                        const bool paused = pauseProgressReached && waitForState(
-                            CoordinatedXyExecutor::State::Paused,
-                            kControlTimeoutMs,
-                            pauseFirst);
-                        const bool pauseDelayOk = paused &&
-                            delayWithWatchdog(kPauseHoldMs, "coord_pause_hold");
-                        if (pauseDelayOk) pauseSecond = gantry->coordinatedSnapshot();
-                        const bool pauseStable = pauseDelayOk &&
-                            pauseSecond.state == CoordinatedXyExecutor::State::Paused &&
-                            pauseSecond.fallingEdges == pauseFirst.fallingEdges &&
-                            pauseSecond.risingEdges == pauseFirst.risingEdges &&
-                            pauseSecond.xPosition == pauseFirst.xPosition &&
-                            pauseSecond.yPosition == pauseFirst.yPosition &&
-                            pauseSecond.xStepLow && pauseSecond.yStepLow;
-                        if (pauseStable) Gantry::resumeXYZMotors();
-                        const bool pauseCompleted = pauseStable &&
-                            waitForTerminal(kMoveTimeoutMs, pauseForward) &&
-                            completedSnapshotPasses(
-                                pauseForward, pauseStart.x + 2000, pauseStart.y + 1000);
-                        CompleteLegResult pauseReverse{};
-                        if (pauseCompleted) pauseReverse = runCompleteLeg(-2000, -1000);
-                        const GantryPosition pauseEnd = gantry->getPosition();
-                        const bool pausePass = pauseCompleted && pauseReverse.passed &&
-                            pauseForward.maskChecksum == pauseReverse.snapshot.maskChecksum &&
-                            pauseForward.arrChecksum == pauseReverse.snapshot.arrChecksum &&
-                            pauseEnd.x == pauseStart.x && pauseEnd.y == pauseStart.y;
-                        char pauseMetrics[224];
-                        snprintf(pauseMetrics,
-                                 sizeof(pauseMetrics),
-                                 "dx=2000;dy=1000;hz=3000;pause=%u;stable=%u;resume=%u;low=%u;i7=%lu;pu=%lu;cy=%lu;ret=%u;to=%u",
-                                 paused ? 1u : 0u,
-                                 pauseStable ? 1u : 0u,
-                                 pauseCompleted ? 1u : 0u,
-                                 (pauseForward.xStepLow && pauseForward.yStepLow &&
-                                  pauseReverse.snapshot.xStepLow && pauseReverse.snapshot.yStepLow) ? 1u : 0u,
-                                 (unsigned long)(pauseForward.timer7Interrupts + pauseReverse.snapshot.timer7Interrupts),
-                                 (unsigned long)(pauseForward.pendingUpdateCount + pauseReverse.snapshot.pendingUpdateCount),
-                                 (unsigned long)std::max(pauseForward.maxIsrCycles,
-                                                         pauseReverse.snapshot.maxIsrCycles),
-                                 (pauseEnd.x == pauseStart.x && pauseEnd.y == pauseStart.y) ? 1u : 0u,
-                                 (pauseCompleted && pauseReverse.terminal) ? 0u : 1u);
-                        (void)runOne(2044u,
-                                     "coordinated_xy_pause_resume",
-                                     pausePass,
-                                     pauseMetrics);
-                        if (!pausePass) {
-                          Gantry::cancelXYZMotors();
-                          (void)emitSkippedExecutor(2045u, "pause_failed");
-                          restoreXyRates();
-                          return finishSelfTestNow();
-                        }
-
-                        const GantryPosition cancelStart = gantry->getPosition();
-                        CoordinatedXySnapshot cancelBefore{};
-                        CoordinatedXySnapshot cancelAfter{};
-                        uint32_t cancelRisingAtRequest = 0u;
-                        uint32_t cancelFallingAtRequest = 0u;
-                        const bool cancelStarted = gantry->startCoordinatedXY(
-                            2000, 1000, kCoordinatedRateHz) ==
-                            CoordinatedStartStatus::Started;
-                        const bool cancelProgress = cancelStarted && waitForProgress(
-                            kControlProgressSteps, kControlTimeoutMs, cancelBefore);
-                        const bool cancelRequested = cancelProgress &&
-                            gantry->requestCoordinatedCancelForDiagnostics(
-                                cancelRisingAtRequest,
-                                cancelFallingAtRequest);
-                        const bool cancelTerminal = cancelRequested && waitForTerminal(
-                            kControlTimeoutMs, cancelAfter);
-                        const bool cancelOutcome = cancelTerminal &&
-                            cancelAfter.state == CoordinatedXyExecutor::State::Canceled &&
-                            cancelAfter.terminalReason ==
-                                CoordinatedXyExecutor::TerminalReason::Canceled;
-                        const bool cancelLatency = cancelOutcome &&
-                            cancelAfter.fallingEdges - cancelFallingAtRequest <= 1u &&
-                            cancelAfter.risingEdges == cancelRisingAtRequest;
-                        const bool cancelRebased = cancelOutcome &&
-                            cancelAfter.xTarget == cancelAfter.xPosition &&
-                            cancelAfter.yTarget == cancelAfter.yPosition;
-                        const bool cancelPins = cancelAfter.xStepLow &&
-                                                cancelAfter.yStepLow &&
-                                                !cancelAfter.timerOwned;
-                        const bool cancelRecovered = cancelOutcome && moveLegacyToAnchor();
-                        const GantryPosition cancelEnd = gantry->getPosition();
-                        const bool cancelPass = cancelOutcome && cancelLatency &&
-                            cancelRebased && cancelPins && cancelRecovered &&
-                            cancelAfter.timer7Interrupts == 0u &&
-                            cancelAfter.pendingUpdateCount == 0u &&
-                            cancelAfter.maxIsrCycles <= kIsrCycleBudget &&
-                            cancelEnd.x == cancelStart.x && cancelEnd.y == cancelStart.y;
-                        char cancelMetrics[224];
-                        snprintf(cancelMetrics,
-                                 sizeof(cancelMetrics),
-                                 "dx=2000;dy=1000;hz=3000;cancel=%u;lat=%lu;rise=%lu;rebase=%u;low=%u;i7=%lu;pu=%lu;cy=%lu;recover=%u;to=%u",
-                                 cancelOutcome ? 1u : 0u,
-                                 (unsigned long)(cancelAfter.fallingEdges - cancelFallingAtRequest),
-                                 (unsigned long)(cancelAfter.risingEdges - cancelRisingAtRequest),
-                                 cancelRebased ? 1u : 0u,
-                                 cancelPins ? 1u : 0u,
-                                 (unsigned long)cancelAfter.timer7Interrupts,
-                                 (unsigned long)cancelAfter.pendingUpdateCount,
-                                 (unsigned long)cancelAfter.maxIsrCycles,
-                                 cancelRecovered ? 1u : 0u,
-                                 cancelTerminal ? 0u : 1u);
-                        (void)runOne(2045u,
-                                     "coordinated_xy_cancel",
-                                     cancelPass,
-                                     cancelMetrics);
-                        if (!cancelPass) {
-                          (void)emitSkippedExecutor(2046u, "cancel_failed");
-                          restoreXyRates();
-                          return finishSelfTestNow();
-                        }
-
-                        struct LimitResult {
-                          bool passed = false;
-                          uint32_t latency = 0u;
-                          uint32_t riseDelta = 0u;
-                          uint32_t maxCycles = 0u;
-                        };
-                        auto runInjectedLimit = [&](Stepper::Axis axis) -> LimitResult {
-                          LimitResult result{};
-                          CoordinatedXySnapshot before{};
-                          CoordinatedXySnapshot after{};
-                          uint32_t risingAtRequest = 0u;
-                          uint32_t fallingAtRequest = 0u;
-                          if (gantry->startCoordinatedXY(1000, 2000, kCoordinatedRateHz) !=
-                              CoordinatedStartStatus::Started ||
-                              !waitForProgress(kControlProgressSteps,
-                                               kControlTimeoutMs,
-                                               before) ||
-                              !gantry->requestCoordinatedLimitAbortForDiagnostics(
-                                  axis, risingAtRequest, fallingAtRequest) ||
-                              !waitForTerminal(kControlTimeoutMs, after)) {
-                            return result;
-                          }
-                          const CoordinatedXyExecutor::TerminalReason expectedReason =
-                              axis == Stepper::X_AXIS
-                                  ? CoordinatedXyExecutor::TerminalReason::XLimit
-                                  : CoordinatedXyExecutor::TerminalReason::YLimit;
-                          result.latency = after.fallingEdges - fallingAtRequest;
-                          result.riseDelta = after.risingEdges - risingAtRequest;
-                          result.maxCycles = after.maxIsrCycles;
-                          const bool terminal =
-                              after.state == CoordinatedXyExecutor::State::LimitAborted &&
-                              after.terminalReason == expectedReason;
-                          const bool rebased = after.xTarget == after.xPosition &&
-                                               after.yTarget == after.yPosition;
-                          const bool bounded = result.latency <= 1u &&
-                                               result.riseDelta == 0u;
-                          const bool safe = after.xStepLow && after.yStepLow &&
-                                            !after.timerOwned &&
-                                            after.timer7Interrupts == 0u &&
-                                            after.pendingUpdateCount == 0u &&
-                                            after.maxIsrCycles <= kIsrCycleBudget;
-                          result.passed = terminal && rebased && bounded && safe &&
-                                          moveLegacyToAnchor();
-                          return result;
-                        };
-
-                        const LimitResult xLimit = runInjectedLimit(Stepper::X_AXIS);
-                        const LimitResult yLimit = xLimit.passed
-                            ? runInjectedLimit(Stepper::Y_AXIS)
-                            : LimitResult{};
-
-                        MotionQualificationMath::AxisHomeSample xHomeAfter{};
-                        MotionQualificationMath::AxisHomeSample yHomeAfter{};
-                        bool teardownHome = false;
-                        if (xLimit.passed && yLimit.passed && !_selfTestAbortRequested) {
-                          sendProgressStage("coord_xy_teardown_home");
-                          teardownHome = runSequentialXyHome(xHomeAfter, yHomeAfter);
-                        }
-                        // The initial home establishes the fine-limit point as
-                        // logical zero. Its recorded pre-zero position depends
-                        // on the unknown coordinate retained across flashing,
-                        // so repeatability is the teardown trigger's distance
-                        // from that established zero reference.
-                        const uint32_t xHomeDrift = teardownHome
-                            ? MotionQualificationMath::absDiffSteps(
-                                  xHomeAfter.limitTriggerSteps, 0)
-                            : std::numeric_limits<uint32_t>::max();
-                        const uint32_t yHomeDrift = teardownHome
-                            ? MotionQualificationMath::absDiffSteps(
-                                  yHomeAfter.limitTriggerSteps, 0)
-                            : std::numeric_limits<uint32_t>::max();
-                        const bool homeDriftPass = teardownHome &&
-                            xHomeDrift <= kHomeDriftLimitSteps &&
-                            yHomeDrift <= kHomeDriftLimitSteps;
-                        const bool limitPass = xLimit.passed && yLimit.passed &&
-                                               homeDriftPass;
-                        char limitMetrics[224];
-                        snprintf(limitMetrics,
-                                 sizeof(limitMetrics),
-                                 "dx=1000;dy=2000;hz=3000;xl=%u;yl=%u;xlat=%lu;ylat=%lu;xrise=%lu;yrise=%lu;rebase=%u;low=%u;i7=0;pu=0;cy=%lu;xd=%lu;yd=%lu;home=%u;to=%u",
-                                 xLimit.passed ? 1u : 0u,
-                                 yLimit.passed ? 1u : 0u,
-                                 (unsigned long)xLimit.latency,
-                                 (unsigned long)yLimit.latency,
-                                 (unsigned long)xLimit.riseDelta,
-                                 (unsigned long)yLimit.riseDelta,
-                                 (xLimit.passed && yLimit.passed) ? 1u : 0u,
-                                 (xLimit.passed && yLimit.passed) ? 1u : 0u,
-                                 (unsigned long)std::max(xLimit.maxCycles, yLimit.maxCycles),
-                                 (unsigned long)xHomeDrift,
-                                 (unsigned long)yHomeDrift,
-                                 teardownHome ? 1u : 0u,
-                                 teardownHome ? 0u : 1u);
-                        (void)runOne(2046u,
-                                     "coordinated_xy_limit_abort",
-                                     limitPass,
-                                     limitMetrics);
-                        restoreXyRates();
-                        return finishSelfTestNow();
-                        };
-                        return runCoordinatedExecutorDiagnostic();
-                      }
-
-                      if (runNormalXyRouteSuite) {
-#if defined(__GNUC__)
-                        auto runNormalRouteDiagnostic = [&]()
-                            __attribute__((optimize("Os"), noinline))
-                            -> DiagnosticsSummary {
-#else
-                        auto runNormalRouteDiagnostic = [&]() -> DiagnosticsSummary {
-#endif
-                        static constexpr int32_t kAnchorX = 5000;
-                        static constexpr int32_t kAnchorY = 5000;
-                        static constexpr uint32_t kRouteRateHz = 3000u;
-                        static constexpr uint32_t kMoveTimeoutMs = 20000u;
-                        static constexpr uint32_t kControlTimeoutMs = 3000u;
-                        static constexpr uint32_t kZHomeFastHz = 30000u;
-                        static constexpr uint32_t kZHomeSlowHz = 3000u;
-                        static constexpr uint32_t kXyHomeFastHz = 3000u;
-                        static constexpr uint32_t kXyHomeSlowHz = 1000u;
-                        static constexpr uint32_t kHomeBackoffSteps = 400u;
-                        static constexpr uint32_t kHomeTimeoutMs = 20000u;
-                        static constexpr uint32_t kControlProgressSteps = 400u;
-                        static constexpr uint32_t kPauseHoldMs = 50u;
-                        static constexpr uint32_t kIsrCycleBudget = 2250u;
-                        static constexpr uint32_t kStatusGapLimitMs = 500u;
-                        static constexpr uint32_t kHomeDriftLimitSteps = 25u;
-                        static constexpr uint32_t kPhysicalLimitWindowSteps = 200u;
-
-                        struct RouteTestDescriptor {
-                          uint16_t testId;
-                          const char* name;
-                        };
-                        static constexpr RouteTestDescriptor kRouteTests[] = {
-                            {2050u, "normal_xy_route_x_only_low"},
-                            {2051u, "normal_xy_route_y_only_low"},
-                            {2052u, "normal_xy_route_equal_low"},
-                            {2053u, "normal_xy_route_asymmetric_low"},
-                            {2054u, "normal_xy_route_long_status"},
-                            {2055u, "normal_xy_route_control_low"},
-                            {2056u, "normal_xy_route_physical_limit"},
-                            {2057u, "normal_xy_route_legacy_smoke"},
-                        };
-
-                        auto emitSkippedRoute = [&](uint16_t firstTestId,
-                                                     const char* gate) -> bool {
-                          char metrics[128];
-                          snprintf(metrics,
-                                   sizeof(metrics),
-                                   "gate=%s;route=%u;hz=3000;to=1;low=0;i7=0;pu=0",
-                                   gate,
-                                   static_cast<unsigned>(
-                                       LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE != 0));
-                          for (const RouteTestDescriptor& test : kRouteTests) {
-                            if (test.testId >= firstTestId &&
-                                !runOne(test.testId, test.name, false, metrics)) {
-                              return false;
-                            }
-                          }
-                          return true;
-                        };
-
-                        Stepper* stepperX = Stepper::stepperX();
-                        Stepper* stepperY = Stepper::stepperY();
-                        Stepper* stepperZ = Stepper::stepperZ();
-                        Gantry* gantry = Gantry::instance();
-                        if (stepperX == nullptr || stepperY == nullptr ||
-                            stepperZ == nullptr || gantry == nullptr || comm == nullptr) {
-                          (void)emitSkippedRoute(2050u, "motion_unavailable");
-                          return finishSelfTestNow();
-                        }
-
-                        const uint32_t savedXMaxRateHz = stepperX->maxSpeedHz();
-                        const uint32_t savedYMaxRateHz = stepperY->maxSpeedHz();
-                        auto restoreXyRates = [&]() {
-                          stepperX->setMaxSpeedHz(savedXMaxRateHz);
-                          stepperY->setMaxSpeedHz(savedYMaxRateHz);
-                        };
-                        auto failRemaining = [&](uint16_t firstTestId,
-                                                 const char* gate) {
-                          Gantry::cancelXYZMotors();
-                          restoreXyRates();
-                          (void)emitSkippedRoute(firstTestId, gate);
-                        };
-
-                        auto stateTerminal = [](CoordinatedXyExecutor::State state) {
-                          return state == CoordinatedXyExecutor::State::Completed ||
-                                 state == CoordinatedXyExecutor::State::Canceled ||
-                                 state == CoordinatedXyExecutor::State::LimitAborted ||
-                                 state == CoordinatedXyExecutor::State::Faulted;
-                        };
-                        auto waitForTerminal = [&](uint32_t timeoutMs,
-                                                   CoordinatedXySnapshot& snapshot) -> bool {
-                          const uint32_t startedMs = HAL_GetTick();
-                          const TickType_t pollTicks = msToAtLeast1Tick(2u);
-                          while ((HAL_GetTick() - startedMs) < timeoutMs) {
-                            Watchdog_CheckIn(CRASH_TASK_ORCH);
-                            snapshot = gantry->coordinatedSnapshot();
-                            if (stateTerminal(snapshot.state)) return true;
-                            if (_selfTestAbortRequested) {
-                              Gantry::cancelXYZMotors();
-                              return false;
-                            }
-                            vTaskDelay(pollTicks);
-                          }
-                          Gantry::cancelXYZMotors();
-                          snapshot = gantry->coordinatedSnapshot();
-                          return false;
-                        };
-                        auto waitForProgress = [&](uint32_t completedSteps,
-                                                   uint32_t timeoutMs,
-                                                   CoordinatedXySnapshot& snapshot) -> bool {
-                          const uint32_t startedMs = HAL_GetTick();
-                          const TickType_t pollTicks = msToAtLeast1Tick(1u);
-                          while ((HAL_GetTick() - startedMs) < timeoutMs) {
-                            Watchdog_CheckIn(CRASH_TASK_ORCH);
-                            snapshot = gantry->coordinatedSnapshot();
-                            if (snapshot.fallingEdges >= completedSteps) return true;
-                            if (stateTerminal(snapshot.state) || _selfTestAbortRequested) {
-                              return false;
-                            }
-                            vTaskDelay(pollTicks);
-                          }
-                          return false;
-                        };
-                        auto waitForState = [&](CoordinatedXyExecutor::State expected,
-                                                uint32_t timeoutMs,
-                                                CoordinatedXySnapshot& snapshot) -> bool {
-                          const uint32_t startedMs = HAL_GetTick();
-                          const TickType_t pollTicks = msToAtLeast1Tick(1u);
-                          while ((HAL_GetTick() - startedMs) < timeoutMs) {
-                            Watchdog_CheckIn(CRASH_TASK_ORCH);
-                            snapshot = gantry->coordinatedSnapshot();
-                            if (snapshot.state == expected) return true;
-                            if (stateTerminal(snapshot.state) || _selfTestAbortRequested) {
-                              return false;
-                            }
-                            vTaskDelay(pollTicks);
-                          }
-                          return false;
-                        };
-
-                        auto snapshotCompleted = [&](const CoordinatedXySnapshot& snapshot,
-                                                     const Orchestrator::AbsoluteXyExecutionResult& execution,
-                                                     int32_t expectedX,
-                                                     int32_t expectedY) -> bool {
-                          return execution.startStatus == CoordinatedStartStatus::Started &&
-                              execution.disposition ==
-                                  OrchestratorCompletionPolicy::AbsXyDisposition::Completed &&
-                              execution.waitCompleted && execution.endpointMatches &&
-                              execution.targetsMatch &&
-                              snapshot.state == CoordinatedXyExecutor::State::Completed &&
-                              snapshot.terminalReason ==
-                                  CoordinatedXyExecutor::TerminalReason::Completed &&
-                              snapshot.emittedXSteps == snapshot.requestedXSteps &&
-                              snapshot.emittedYSteps == snapshot.requestedYSteps &&
-                              snapshot.timer2Interrupts == snapshot.masterSteps * 2u &&
-                              snapshot.risingEdges == snapshot.masterSteps &&
-                              snapshot.fallingEdges == snapshot.masterSteps &&
-                              snapshot.timer7Interrupts == 0u &&
-                              snapshot.pendingUpdateCount == 0u &&
-                              snapshot.maxIsrCycles > 0u &&
-                              snapshot.maxIsrCycles <= kIsrCycleBudget &&
-                              snapshot.xStepLow && snapshot.yStepLow &&
-                              !snapshot.timerOwned &&
-                              snapshot.xPosition == expectedX &&
-                              snapshot.yPosition == expectedY &&
-                              snapshot.xTarget == expectedX &&
-                              snapshot.yTarget == expectedY &&
-                              snapshot.arrMin >= 179u &&
-                              snapshot.arrMax >= snapshot.arrMin;
-                        };
-
-                        struct RouteLegResult {
-                          bool passed = false;
-                          Orchestrator::AbsoluteXyExecutionResult execution{};
-                          CoordinatedXySnapshot snapshot{};
-                        };
-                        auto runRouteLeg = [&](int32_t targetX,
-                                               int32_t targetY) -> RouteLegResult {
-                          RouteLegResult result{};
-                          result.execution = orchestrator.executeAbsoluteXy(
-                              targetX, targetY, 0u, false, kMoveTimeoutMs);
-                          result.snapshot = gantry->coordinatedSnapshot();
-                          result.passed = snapshotCompleted(
-                              result.snapshot, result.execution, targetX, targetY);
-                          return result;
-                        };
-
-                        auto runRouteRoundTrip = [&](uint16_t testId,
-                                                     const char* name,
-                                                     int32_t dx,
-                                                     int32_t dy) -> bool {
-                          const GantryPosition start = gantry->getPosition();
-                          const RouteLegResult forward = runRouteLeg(
-                              start.x + dx, start.y + dy);
-                          RouteLegResult reverse{};
-                          if (forward.passed) {
-                            reverse = runRouteLeg(start.x, start.y);
-                          }
-                          const GantryPosition end = gantry->getPosition();
-                          const bool checksumMatch = forward.passed && reverse.passed &&
-                              forward.snapshot.maskChecksum == reverse.snapshot.maskChecksum &&
-                              forward.snapshot.arrChecksum == reverse.snapshot.arrChecksum;
-                          const bool returned = end.x == start.x && end.y == start.y;
-                          const bool pass = forward.passed && reverse.passed &&
-                                            checksumMatch && returned;
-                          const uint32_t maxCycles = std::max(
-                              forward.snapshot.maxIsrCycles,
-                              reverse.snapshot.maxIsrCycles);
-                          char metrics[198];
-                          const int metricsLength = snprintf(
-                              metrics,
-                              sizeof(metrics),
-                              "dx=%ld;dy=%ld;hz=3000;route=1;xe=%lu;ye=%lu;ms=%lu;i2=%lu;i7=%lu;edge=%u;ck=%u;low=%u;done=%u;pu=%lu;cy=%lu;ep=%u;ret=%u;to=%u",
-                              (long)dx,
-                              (long)dy,
-                              (unsigned long)(forward.snapshot.emittedXSteps + reverse.snapshot.emittedXSteps),
-                              (unsigned long)(forward.snapshot.emittedYSteps + reverse.snapshot.emittedYSteps),
-                              (unsigned long)forward.snapshot.masterSteps,
-                              (unsigned long)(forward.snapshot.timer2Interrupts + reverse.snapshot.timer2Interrupts),
-                              (unsigned long)(forward.snapshot.timer7Interrupts + reverse.snapshot.timer7Interrupts),
-                              (forward.passed && reverse.passed) ? 1u : 0u,
-                              checksumMatch ? 1u : 0u,
-                              (forward.snapshot.xStepLow && forward.snapshot.yStepLow &&
-                               reverse.snapshot.xStepLow && reverse.snapshot.yStepLow) ? 1u : 0u,
-                              (forward.execution.waitCompleted && reverse.execution.waitCompleted) ? 1u : 0u,
-                              (unsigned long)(forward.snapshot.pendingUpdateCount + reverse.snapshot.pendingUpdateCount),
-                              (unsigned long)maxCycles,
-                              (forward.execution.endpointMatches && forward.execution.targetsMatch &&
-                               reverse.execution.endpointMatches && reverse.execution.targetsMatch) ? 1u : 0u,
-                              returned ? 1u : 0u,
-                              (forward.execution.waitCompleted && reverse.execution.waitCompleted) ? 0u : 1u);
-                          const bool metricsFit = metricsLength > 0 &&
-                              static_cast<size_t>(metricsLength) < sizeof(metrics);
-                          (void)runOne(testId,
-                                       name,
-                                       pass && metricsFit,
-                                       metricsFit ? metrics : "gate=metrics_overflow;to=1");
-                          return pass && metricsFit;
-                        };
-
-                        auto runSequentialXyHome = [&](MotionQualificationMath::AxisHomeSample& xSample,
-                                                       MotionQualificationMath::AxisHomeSample& ySample) {
-                          sendProgressStage("normal_route_x_home_low");
-                          if (!runAxisHomeDiagnosticAttempt(stepperX,
-                                                            BIT_HOME_X_DONE,
-                                                            xSample,
-                                                            kXyHomeFastHz,
-                                                            kXyHomeSlowHz,
-                                                            kHomeBackoffSteps,
-                                                            kHomeTimeoutMs)) {
-                            return false;
-                          }
-                          sendProgressStage("normal_route_y_home_low");
-                          return runAxisHomeDiagnosticAttempt(stepperY,
-                                                              BIT_HOME_Y_DONE,
-                                                              ySample,
-                                                              kXyHomeFastHz,
-                                                              kXyHomeSlowHz,
-                                                              kHomeBackoffSteps,
-                                                              kHomeTimeoutMs);
-                        };
-
-                        auto runXyLimitSwitchPreflight = [&]() -> bool {
-                          if (stepperX->isBusy() || stepperY->isBusy()) return false;
-                          stepperX->disableMotor();
-                          stepperY->disableMotor();
-                          if (!waitForOperatorResume("coord_x_limit_press") ||
-                              !stepperX->isLimitAssertedForDiagnostics()) return false;
-                          if (!waitForOperatorResume("coord_x_limit_release") ||
-                              stepperX->isLimitAssertedForDiagnostics()) return false;
-                          if (!waitForOperatorResume("coord_y_limit_press") ||
-                              !stepperY->isLimitAssertedForDiagnostics()) return false;
-                          if (!waitForOperatorResume("coord_y_limit_release") ||
-                              stepperY->isLimitAssertedForDiagnostics()) return false;
-                          if (!waitForOperatorResume("normal_route_envelope_clear")) {
-                            return false;
-                          }
-                          return true;
-                        };
-
-                        if (LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE == 0 ||
-                            !runXyLimitSwitchPreflight()) {
-                          failRemaining(2050u, "route_or_limit_preflight");
-                          return finishSelfTestNow();
-                        }
-                        if (!runZClearanceHomePreflight("normal_route_z_clearance_home",
-                                                        kZHomeFastHz,
-                                                        kZHomeSlowHz,
-                                                        kHomeBackoffSteps,
-                                                        kHomeTimeoutMs)) {
-                          failRemaining(2050u, "z_clearance_home");
-                          return finishSelfTestNow();
-                        }
-
-                        MotionQualificationMath::AxisHomeSample xHomeBefore{};
-                        MotionQualificationMath::AxisHomeSample yHomeBefore{};
-                        if (!runSequentialXyHome(xHomeBefore, yHomeBefore)) {
-                          failRemaining(2050u, "xy_home");
-                          return finishSelfTestNow();
-                        }
-                        if (savedXMaxRateHz != 40000u || savedYMaxRateHz != 40000u) {
-                          failRemaining(2050u, "max_rate_not_40000");
-                          return finishSelfTestNow();
-                        }
-                        stepperX->setMaxSpeedHz(kRouteRateHz);
-                        stepperY->setMaxSpeedHz(kRouteRateHz);
-                        const RouteLegResult anchor = runRouteLeg(kAnchorX, kAnchorY);
-                        if (!anchor.passed) {
-                          char anchorMetrics[198];
-                          const int anchorMetricsLength = snprintf(
-                              anchorMetrics,
-                              sizeof(anchorMetrics),
-                              "gate=anchor;ss=%u;di=%u;w=%u;ep=%u;tg=%u;st=%u;tr=%u;xe=%lu/%lu;ye=%lu/%lu;ms=%lu;i2=%lu;i7=%lu;e=%lu/%lu;pu=%lu;cy=%lu;l=%u;o=%u;a=%lu/%lu;p=%ld/%ld;t=%ld/%ld",
-                              static_cast<unsigned>(anchor.execution.startStatus),
-                              static_cast<unsigned>(anchor.execution.disposition),
-                              anchor.execution.waitCompleted ? 1u : 0u,
-                              anchor.execution.endpointMatches ? 1u : 0u,
-                              anchor.execution.targetsMatch ? 1u : 0u,
-                              static_cast<unsigned>(anchor.snapshot.state),
-                              static_cast<unsigned>(anchor.snapshot.terminalReason),
-                              (unsigned long)anchor.snapshot.emittedXSteps,
-                              (unsigned long)anchor.snapshot.requestedXSteps,
-                              (unsigned long)anchor.snapshot.emittedYSteps,
-                              (unsigned long)anchor.snapshot.requestedYSteps,
-                              (unsigned long)anchor.snapshot.masterSteps,
-                              (unsigned long)anchor.snapshot.timer2Interrupts,
-                              (unsigned long)anchor.snapshot.timer7Interrupts,
-                              (unsigned long)anchor.snapshot.risingEdges,
-                              (unsigned long)anchor.snapshot.fallingEdges,
-                              (unsigned long)anchor.snapshot.pendingUpdateCount,
-                              (unsigned long)anchor.snapshot.maxIsrCycles,
-                              (anchor.snapshot.xStepLow && anchor.snapshot.yStepLow) ? 1u : 0u,
-                              anchor.snapshot.timerOwned ? 1u : 0u,
-                              (unsigned long)anchor.snapshot.arrMin,
-                              (unsigned long)anchor.snapshot.arrMax,
-                              (long)anchor.snapshot.xPosition,
-                              (long)anchor.snapshot.yPosition,
-                              (long)anchor.snapshot.xTarget,
-                              (long)anchor.snapshot.yTarget);
-                          const bool anchorMetricsFit = anchorMetricsLength > 0 &&
-                              static_cast<size_t>(anchorMetricsLength) <
-                                  sizeof(anchorMetrics);
-                          (void)runOne(2050u,
-                                       "normal_xy_route_x_only_low",
-                                       false,
-                                       anchorMetricsFit
-                                           ? anchorMetrics
-                                           : "gate=anchor_metrics_overflow");
-                          failRemaining(2051u, "anchor");
-                          return finishSelfTestNow();
-                        }
-
-                        if (!runRouteRoundTrip(2050u,
-                                               "normal_xy_route_x_only_low",
-                                               1000,
-                                               0)) {
-                          failRemaining(2051u, "x_only_failed");
-                          return finishSelfTestNow();
-                        }
-                        if (!runRouteRoundTrip(2051u,
-                                               "normal_xy_route_y_only_low",
-                                               0,
-                                               1000)) {
-                          failRemaining(2052u, "y_only_failed");
-                          return finishSelfTestNow();
-                        }
-                        if (!runRouteRoundTrip(2052u,
-                                               "normal_xy_route_equal_low",
-                                               1000,
-                                               1000)) {
-                          failRemaining(2053u, "equal_failed");
-                          return finishSelfTestNow();
-                        }
-                        if (!runRouteRoundTrip(2053u,
-                                               "normal_xy_route_asymmetric_low",
-                                               500,
-                                               1500)) {
-                          failRemaining(2054u, "asymmetric_failed");
-                          return finishSelfTestNow();
-                        }
-
-                        Comm::resetStatusMetrics();
-                        comm->setStatusPaused(false);
-                        const RouteLegResult longForward = runRouteLeg(
-                            kAnchorX + 6000, kAnchorY + 2000);
-                        RouteLegResult longReverse{};
-                        if (longForward.passed) {
-                          longReverse = runRouteLeg(kAnchorX, kAnchorY);
-                        }
-                        uint32_t statusAgeMs = 999999u;
-                        const bool statusAgeAvailable =
-                            Watchdog_GetTaskLastSeenAgeMs(
-                                CRASH_TASK_STATUS, &statusAgeMs) != 0u;
-                        const uint32_t statusFrames =
-                            Comm::getStatusChunk0Count() + Comm::getStatusChunk1Count();
-                        const uint32_t statusGapMs = Comm::getStatusPeriodMaxMs();
-                        const uint32_t statusAlternationErrors =
-                            Comm::getStatusAlternationErrors();
-                        comm->setStatusPaused(true);
-                        const bool holdsReleased =
-                            !PressureRegulator::regP().isMotionHoldActive()
-#if LC_PRESSURE_PORTS > 1
-                            && !PressureRegulator::regR().isMotionHoldActive()
-#endif
-                            ;
-                        const bool longPass = longForward.passed && longReverse.passed &&
-                            longForward.execution.holdRequested &&
-                            longReverse.execution.holdRequested &&
-                            holdsReleased && statusFrames >= 2u &&
-                            statusGapMs < kStatusGapLimitMs && statusAgeAvailable &&
-                            statusAgeMs < kStatusGapLimitMs &&
-                            statusAlternationErrors == 0u;
-                        char longMetrics[198];
-                        const int longMetricsLength = snprintf(
-                            longMetrics,
-                            sizeof(longMetrics),
-                            "dx=6000;dy=2000;hz=3000;route=1;hold=%u;acq=%u;clean=%u;sf=%lu;sg=%lu;sa=%lu;alt=%lu;i2=%lu;i7=%lu;low=%u;pu=%lu;cy=%lu;ep=%u;ret=%u;to=%u",
-                            (longForward.execution.holdRequested &&
-                             longReverse.execution.holdRequested) ? 1u : 0u,
-                            (longForward.execution.printHoldAcquired ||
-                             longForward.execution.refuelHoldAcquired ||
-                             longReverse.execution.printHoldAcquired ||
-                             longReverse.execution.refuelHoldAcquired) ? 1u : 0u,
-                            holdsReleased ? 1u : 0u,
-                            (unsigned long)statusFrames,
-                            (unsigned long)statusGapMs,
-                            (unsigned long)statusAgeMs,
-                            (unsigned long)statusAlternationErrors,
-                            (unsigned long)(longForward.snapshot.timer2Interrupts +
-                                            longReverse.snapshot.timer2Interrupts),
-                            (unsigned long)(longForward.snapshot.timer7Interrupts +
-                                            longReverse.snapshot.timer7Interrupts),
-                            (longForward.snapshot.xStepLow && longForward.snapshot.yStepLow &&
-                             longReverse.snapshot.xStepLow && longReverse.snapshot.yStepLow) ? 1u : 0u,
-                            (unsigned long)(longForward.snapshot.pendingUpdateCount +
-                                            longReverse.snapshot.pendingUpdateCount),
-                            (unsigned long)std::max(longForward.snapshot.maxIsrCycles,
-                                                    longReverse.snapshot.maxIsrCycles),
-                            (longForward.execution.endpointMatches &&
-                             longReverse.execution.endpointMatches) ? 1u : 0u,
-                            (gantry->getPosition().x == kAnchorX &&
-                             gantry->getPosition().y == kAnchorY) ? 1u : 0u,
-                            (longForward.execution.waitCompleted &&
-                             longReverse.execution.waitCompleted) ? 0u : 1u);
-                        const bool longMetricsFit = longMetricsLength > 0 &&
-                            static_cast<size_t>(longMetricsLength) < sizeof(longMetrics);
-                        (void)runOne(2054u,
-                                     "normal_xy_route_long_status",
-                                     longPass && longMetricsFit,
-                                     longMetricsFit ? longMetrics
-                                                    : "gate=metrics_overflow;to=1");
-                        if (!longPass || !longMetricsFit) {
-                          failRemaining(2055u, "long_status_failed");
-                          return finishSelfTestNow();
-                        }
-
-                        const GantryPosition controlStart = gantry->getPosition();
-                        CoordinatedXySnapshot pauseProgress{};
-                        CoordinatedXySnapshot pauseFirst{};
-                        CoordinatedXySnapshot pauseSecond{};
-                        CoordinatedXySnapshot pauseCompleted{};
-                        const bool pauseStarted = gantry->moveTo(
-                            controlStart.x + 2000,
-                            controlStart.y + 1000,
-                            0u) == CoordinatedStartStatus::Started;
-                        const bool pauseProgressReached = pauseStarted && waitForProgress(
-                            kControlProgressSteps, kControlTimeoutMs, pauseProgress);
-                        if (pauseProgressReached) Gantry::pauseXYZMotors();
-                        const bool paused = pauseProgressReached && waitForState(
-                            CoordinatedXyExecutor::State::Paused,
-                            kControlTimeoutMs,
-                            pauseFirst);
-                        const bool pauseDelayOk = paused &&
-                            delayWithWatchdog(kPauseHoldMs, "normal_route_pause_hold");
-                        if (pauseDelayOk) pauseSecond = gantry->coordinatedSnapshot();
-                        const bool pauseStable = pauseDelayOk &&
-                            pauseSecond.state == CoordinatedXyExecutor::State::Paused &&
-                            pauseSecond.fallingEdges == pauseFirst.fallingEdges &&
-                            pauseSecond.risingEdges == pauseFirst.risingEdges &&
-                            pauseSecond.xPosition == pauseFirst.xPosition &&
-                            pauseSecond.yPosition == pauseFirst.yPosition &&
-                            pauseSecond.xStepLow && pauseSecond.yStepLow;
-                        if (pauseStable) Gantry::resumeXYZMotors();
-                        const bool pauseTerminal = pauseStable && waitForTerminal(
-                            kMoveTimeoutMs, pauseCompleted);
-                        const bool pausePass = pauseTerminal &&
-                            pauseCompleted.state == CoordinatedXyExecutor::State::Completed &&
-                            pauseCompleted.terminalReason ==
-                                CoordinatedXyExecutor::TerminalReason::Completed &&
-                            pauseCompleted.xPosition == controlStart.x + 2000 &&
-                            pauseCompleted.yPosition == controlStart.y + 1000 &&
-                            pauseCompleted.xTarget == pauseCompleted.xPosition &&
-                            pauseCompleted.yTarget == pauseCompleted.yPosition &&
-                            pauseCompleted.xStepLow && pauseCompleted.yStepLow &&
-                            !pauseCompleted.timerOwned &&
-                            pauseCompleted.timer7Interrupts == 0u &&
-                            pauseCompleted.pendingUpdateCount == 0u &&
-                            pauseCompleted.maxIsrCycles <= kIsrCycleBudget;
-                        const RouteLegResult pauseRecovery = pausePass
-                            ? runRouteLeg(controlStart.x, controlStart.y)
-                            : RouteLegResult{};
-
-                        CoordinatedXySnapshot cancelProgress{};
-                        CoordinatedXySnapshot cancelAfter{};
-                        uint32_t cancelRisingAtRequest = 0u;
-                        uint32_t cancelFallingAtRequest = 0u;
-                        const bool cancelStarted = pauseRecovery.passed &&
-                            gantry->moveTo(controlStart.x + 2000,
-                                           controlStart.y + 1000,
-                                           0u) == CoordinatedStartStatus::Started;
-                        const bool cancelProgressReached = cancelStarted && waitForProgress(
-                            kControlProgressSteps, kControlTimeoutMs, cancelProgress);
-                        const bool cancelRequested = cancelProgressReached &&
-                            gantry->requestCoordinatedCancelForDiagnostics(
-                                cancelRisingAtRequest,
-                                cancelFallingAtRequest);
-                        const bool cancelTerminal = cancelRequested && waitForTerminal(
-                            kControlTimeoutMs, cancelAfter);
-                        const bool cancelLatency = cancelTerminal &&
-                            cancelAfter.fallingEdges >= cancelFallingAtRequest &&
-                            cancelAfter.fallingEdges - cancelFallingAtRequest <= 1u &&
-                            cancelAfter.risingEdges == cancelRisingAtRequest;
-                        const bool cancelPass = cancelTerminal && cancelLatency &&
-                            cancelAfter.state == CoordinatedXyExecutor::State::Canceled &&
-                            cancelAfter.terminalReason ==
-                                CoordinatedXyExecutor::TerminalReason::Canceled &&
-                            cancelAfter.xTarget == cancelAfter.xPosition &&
-                            cancelAfter.yTarget == cancelAfter.yPosition &&
-                            cancelAfter.xStepLow && cancelAfter.yStepLow &&
-                            !cancelAfter.timerOwned &&
-                            cancelAfter.timer7Interrupts == 0u &&
-                            cancelAfter.pendingUpdateCount == 0u &&
-                            cancelAfter.maxIsrCycles <= kIsrCycleBudget;
-                        const RouteLegResult cancelRecovery = cancelPass
-                            ? runRouteLeg(controlStart.x, controlStart.y)
-                            : RouteLegResult{};
-                        const bool controlPass = pausePass && pauseRecovery.passed &&
-                                                 cancelPass && cancelRecovery.passed;
-                        char controlMetrics[198];
-                        const int controlMetricsLength = snprintf(
-                                 controlMetrics,
-                                 sizeof(controlMetrics),
-                                 "dx=2000;dy=1000;hz=3000;route=1;pause=%u;stable=%u;resume=%u;cancel=%u;lat=%lu;rise=%lu;rebase=%u;low=%u;i7=%lu;pu=%lu;cy=%lu;recover=%u;to=%u",
-                                 paused ? 1u : 0u,
-                                 pauseStable ? 1u : 0u,
-                                 pausePass ? 1u : 0u,
-                                 cancelPass ? 1u : 0u,
-                                 (unsigned long)(cancelAfter.fallingEdges >= cancelFallingAtRequest
-                                     ? cancelAfter.fallingEdges - cancelFallingAtRequest
-                                     : std::numeric_limits<uint32_t>::max()),
-                                 (unsigned long)(cancelAfter.risingEdges >= cancelRisingAtRequest
-                                     ? cancelAfter.risingEdges - cancelRisingAtRequest
-                                     : std::numeric_limits<uint32_t>::max()),
-                                 (cancelAfter.xTarget == cancelAfter.xPosition &&
-                                  cancelAfter.yTarget == cancelAfter.yPosition) ? 1u : 0u,
-                                 (pauseCompleted.xStepLow && pauseCompleted.yStepLow &&
-                                  cancelAfter.xStepLow && cancelAfter.yStepLow) ? 1u : 0u,
-                                 (unsigned long)(pauseCompleted.timer7Interrupts +
-                                                 cancelAfter.timer7Interrupts),
-                                 (unsigned long)(pauseCompleted.pendingUpdateCount +
-                                                 cancelAfter.pendingUpdateCount),
-                                 (unsigned long)std::max(pauseCompleted.maxIsrCycles,
-                                                         cancelAfter.maxIsrCycles),
-                                 (pauseRecovery.passed && cancelRecovery.passed) ? 1u : 0u,
-                                 (pauseTerminal && cancelTerminal) ? 0u : 1u);
-                        const bool controlMetricsFit = controlMetricsLength > 0 &&
-                            static_cast<size_t>(controlMetricsLength) <
-                                sizeof(controlMetrics);
-                        (void)runOne(2055u,
-                                     "normal_xy_route_control_low",
-                                     controlPass && controlMetricsFit,
-                                     controlMetricsFit ? controlMetrics
-                                                       : "gate=metrics_overflow;to=1");
-                        if (!controlPass || !controlMetricsFit) {
-                          failRemaining(2056u, "control_failed");
-                          return finishSelfTestNow();
-                        }
-
-                        struct PhysicalLimitResult {
-                          bool passed = false;
-                          uint32_t emitted = 0u;
-                          uint32_t latency = std::numeric_limits<uint32_t>::max();
-                          uint32_t riseDelta = std::numeric_limits<uint32_t>::max();
-                          uint32_t requestCount = 0u;
-                          uint32_t rawCount = 0u;
-                          uint32_t maxCycles = 0u;
-                          uint32_t drift = std::numeric_limits<uint32_t>::max();
-                          int32_t rehomeLimitSteps = 0;
-                        };
-                        auto runPhysicalLimit = [&](Stepper* stepper,
-                                                    EventBits_t homeBit,
-                                                    Stepper::Axis axis) -> PhysicalLimitResult {
-                          PhysicalLimitResult result{};
-                          MotionQualificationMath::AxisHomeSample before{};
-                          if (!runAxisHomeDiagnosticAttempt(stepper,
-                                                            homeBit,
-                                                            before,
-                                                            kXyHomeFastHz,
-                                                            kXyHomeSlowHz,
-                                                            kHomeBackoffSteps,
-                                                            kHomeTimeoutMs) ||
-                              before.finalBackoffSteps != 100 ||
-                              stepper->getPosition() != 100 ||
-                              stepper->isLimitAssertedForDiagnostics()) {
-                            return result;
-                          }
-                          const GantryPosition start = gantry->getPosition();
-                          const int32_t targetX = axis == Stepper::X_AXIS ? -100 : start.x;
-                          const int32_t targetY = axis == Stepper::Y_AXIS ? -100 : start.y;
-                          const Orchestrator::AbsoluteXyExecutionResult execution =
-                              orchestrator.executeAbsoluteXy(
-                                  targetX, targetY, 0u, false, kMoveTimeoutMs);
-                          const CoordinatedXySnapshot snapshot =
-                              gantry->coordinatedSnapshot();
-                          const CoordinatedXyExecutor::TerminalReason expectedReason =
-                              axis == Stepper::X_AXIS
-                                  ? CoordinatedXyExecutor::TerminalReason::XLimit
-                                  : CoordinatedXyExecutor::TerminalReason::YLimit;
-                          result.emitted = axis == Stepper::X_AXIS
-                              ? snapshot.emittedXSteps
-                              : snapshot.emittedYSteps;
-                          result.requestCount = snapshot.limitAbortRequestCount;
-                          result.rawCount = snapshot.rawLimitAbortCount;
-                          result.maxCycles = snapshot.maxIsrCycles;
-                          if (snapshot.fallingEdges >= snapshot.limitRequestFallingEdges) {
-                            result.latency =
-                                snapshot.fallingEdges - snapshot.limitRequestFallingEdges;
-                          }
-                          if (snapshot.risingEdges >= snapshot.limitRequestRisingEdges) {
-                            result.riseDelta =
-                                snapshot.risingEdges - snapshot.limitRequestRisingEdges;
-                          }
-                          const bool stationaryAxisDidNotMove = axis == Stepper::X_AXIS
-                              ? snapshot.emittedYSteps == 0u
-                              : snapshot.emittedXSteps == 0u;
-                          const bool terminal =
-                              execution.disposition ==
-                                  OrchestratorCompletionPolicy::AbsXyDisposition::MotionFailure &&
-                              snapshot.state == CoordinatedXyExecutor::State::LimitAborted &&
-                              snapshot.terminalReason == expectedReason;
-                          const bool safe = result.requestCount > 0u &&
-                              result.emitted <= kPhysicalLimitWindowSteps &&
-                              stationaryAxisDidNotMove &&
-                              result.latency <= 1u && result.riseDelta == 0u &&
-                              snapshot.xTarget == snapshot.xPosition &&
-                              snapshot.yTarget == snapshot.yPosition &&
-                              snapshot.xStepLow && snapshot.yStepLow &&
-                              !snapshot.timerOwned &&
-                              snapshot.timer7Interrupts == 0u &&
-                              snapshot.pendingUpdateCount == 0u &&
-                              snapshot.maxIsrCycles <= kIsrCycleBudget;
-                          MotionQualificationMath::AxisHomeSample after{};
-                          const bool rehome = terminal && safe &&
-                              runAxisHomeDiagnosticAttempt(stepper,
-                                                           homeBit,
-                                                           after,
-                                                           kXyHomeFastHz,
-                                                           kXyHomeSlowHz,
-                                                           kHomeBackoffSteps,
-                                                           kHomeTimeoutMs);
-                          result.drift = rehome
-                              ? MotionQualificationMath::absDiffSteps(
-                                    after.limitTriggerSteps,
-                                    before.limitTriggerSteps)
-                              : std::numeric_limits<uint32_t>::max();
-                          if (rehome) {
-                            result.rehomeLimitSteps = after.limitTriggerSteps;
-                          }
-                          result.passed = terminal && safe && rehome &&
-                                          result.drift <= kHomeDriftLimitSteps;
-                          return result;
-                        };
-
-                        sendProgressStage("normal_route_x_physical_limit");
-                        const PhysicalLimitResult xLimit = runPhysicalLimit(
-                            stepperX, BIT_HOME_X_DONE, Stepper::X_AXIS);
-                        PhysicalLimitResult yLimit{};
-                        if (xLimit.passed) {
-                          sendProgressStage("normal_route_y_physical_limit");
-                          yLimit = runPhysicalLimit(
-                              stepperY, BIT_HOME_Y_DONE, Stepper::Y_AXIS);
-                        }
-                        const bool physicalPass = xLimit.passed && yLimit.passed;
-                        char limitMetrics[198];
-                        const int limitMetricsLength = snprintf(
-                                 limitMetrics,
-                                 sizeof(limitMetrics),
-                                 "hz=3000;route=1;win=200;xl=%u;yl=%u;xe=%lu;ye=%lu;xlat=%lu;ylat=%lu;xrise=%lu;yrise=%lu;req=%lu;raw=%lu;rebase=%u;low=%u;i7=0;pu=0;cy=%lu;xd=%lu;yd=%lu;home=%u;to=%u",
-                                 xLimit.passed ? 1u : 0u,
-                                 yLimit.passed ? 1u : 0u,
-                                 (unsigned long)xLimit.emitted,
-                                 (unsigned long)yLimit.emitted,
-                                 (unsigned long)xLimit.latency,
-                                 (unsigned long)yLimit.latency,
-                                 (unsigned long)xLimit.riseDelta,
-                                 (unsigned long)yLimit.riseDelta,
-                                 (unsigned long)(xLimit.requestCount + yLimit.requestCount),
-                                 (unsigned long)(xLimit.rawCount + yLimit.rawCount),
-                                 physicalPass ? 1u : 0u,
-                                 physicalPass ? 1u : 0u,
-                                 (unsigned long)std::max(xLimit.maxCycles, yLimit.maxCycles),
-                                 (unsigned long)xLimit.drift,
-                                 (unsigned long)yLimit.drift,
-                                 physicalPass ? 1u : 0u,
-                                 physicalPass ? 0u : 1u);
-                        const bool limitMetricsFit = limitMetricsLength > 0 &&
-                            static_cast<size_t>(limitMetricsLength) <
-                                sizeof(limitMetrics);
-                        (void)runOne(2056u,
-                                     "normal_xy_route_physical_limit",
-                                     physicalPass && limitMetricsFit,
-                                     limitMetricsFit ? limitMetrics
-                                                     : "gate=metrics_overflow;to=1");
-                        if (!physicalPass || !limitMetricsFit) {
-                          failRemaining(2057u, "physical_limit_failed");
-                          return finishSelfTestNow();
-                        }
-
-                        const int32_t xLegacyStart = stepperX->getPosition();
-                        const int32_t yLegacyStart = stepperY->getPosition();
-                        const int32_t zLegacyStart = stepperZ->getPosition();
-                        Stepper* stepperP = Stepper::stepperP();
-                        Stepper* stepperR = Stepper::stepperR();
-                        const int32_t pStart = stepperP != nullptr
-                            ? stepperP->getPosition() : 0;
-                        const int32_t rStart = stepperR != nullptr
-                            ? stepperR->getPosition() : 0;
-                        const bool directX =
-                            moveAxisToWithTimeout(stepperX,
-                                                  BIT_STEPPER1_DONE,
-                                                  xLegacyStart + 200,
-                                                  kRouteRateHz,
-                                                  kMoveTimeoutMs) &&
-                            moveAxisToWithTimeout(stepperX,
-                                                  BIT_STEPPER1_DONE,
-                                                  xLegacyStart,
-                                                  kRouteRateHz,
-                                                  kMoveTimeoutMs);
-                        const bool directY = directX &&
-                            moveAxisToWithTimeout(stepperY,
-                                                  BIT_STEPPER2_DONE,
-                                                  yLegacyStart + 200,
-                                                  kRouteRateHz,
-                                                  kMoveTimeoutMs) &&
-                            moveAxisToWithTimeout(stepperY,
-                                                  BIT_STEPPER2_DONE,
-                                                  yLegacyStart,
-                                                  kRouteRateHz,
-                                                  kMoveTimeoutMs);
-                        const bool directZ = directY &&
-                            moveAxisToWithTimeout(stepperZ,
-                                                  BIT_STEPPER3_DONE,
-                                                  zLegacyStart + 200,
-                                                  kRouteRateHz,
-                                                  kMoveTimeoutMs) &&
-                            moveAxisToWithTimeout(stepperZ,
-                                                  BIT_STEPPER3_DONE,
-                                                  zLegacyStart,
-                                                  kRouteRateHz,
-                                                  kMoveTimeoutMs);
-                        const bool regulatorsUnchanged =
-                            (stepperP == nullptr || stepperP->getPosition() == pStart) &&
-                            (stepperR == nullptr || stepperR->getPosition() == rStart);
-                        const CoordinatedXySnapshot legacySnapshot =
-                            gantry->coordinatedSnapshot();
-                        MotionQualificationMath::AxisHomeSample xHomeAfter{};
-                        MotionQualificationMath::AxisHomeSample yHomeAfter{};
-                        sendProgressStage("normal_route_xy_teardown_home");
-                        const bool teardownHome = directZ && regulatorsUnchanged &&
-                            runSequentialXyHome(xHomeAfter, yHomeAfter);
-                        const uint32_t xTeardownDrift = teardownHome
-                            ? MotionQualificationMath::absDiffSteps(
-                                  xHomeAfter.limitTriggerSteps,
-                                  xLimit.rehomeLimitSteps)
-                            : std::numeric_limits<uint32_t>::max();
-                        const uint32_t yTeardownDrift = teardownHome
-                            ? MotionQualificationMath::absDiffSteps(
-                                  yHomeAfter.limitTriggerSteps,
-                                  yLimit.rehomeLimitSteps)
-                            : std::numeric_limits<uint32_t>::max();
-                        const bool legacyPass = directX && directY && directZ &&
-                            regulatorsUnchanged && !legacySnapshot.timerOwned &&
-                            legacySnapshot.xStepLow && legacySnapshot.yStepLow &&
-                            teardownHome &&
-                            xTeardownDrift <= kHomeDriftLimitSteps &&
-                            yTeardownDrift <= kHomeDriftLimitSteps;
-                        char legacyMetrics[198];
-                        const int legacyMetricsLength = snprintf(
-                                 legacyMetrics,
-                                 sizeof(legacyMetrics),
-                                 "hz=3000;route=1;x=%u;y=%u;z=%u;pr=%u;own=%u;low=%u;xret=%ld;yret=%ld;zret=%ld;xd=%lu;yd=%lu;home=%u;to=%u",
-                                 directX ? 1u : 0u,
-                                 directY ? 1u : 0u,
-                                 directZ ? 1u : 0u,
-                                 regulatorsUnchanged ? 1u : 0u,
-                                 legacySnapshot.timerOwned ? 1u : 0u,
-                                 (legacySnapshot.xStepLow && legacySnapshot.yStepLow) ? 1u : 0u,
-                                 (long)(stepperX->getPosition() - (teardownHome ? 100 : xLegacyStart)),
-                                 (long)(stepperY->getPosition() - (teardownHome ? 100 : yLegacyStart)),
-                                 (long)(stepperZ->getPosition() - zLegacyStart),
-                                 (unsigned long)xTeardownDrift,
-                                 (unsigned long)yTeardownDrift,
-                                 teardownHome ? 1u : 0u,
-                                 (directX && directY && directZ && teardownHome) ? 0u : 1u);
-                        const bool legacyMetricsFit = legacyMetricsLength > 0 &&
-                            static_cast<size_t>(legacyMetricsLength) <
-                                sizeof(legacyMetrics);
-                        (void)runOne(2057u,
-                                     "normal_xy_route_legacy_smoke",
-                                     legacyPass && legacyMetricsFit,
-                                     legacyMetricsFit ? legacyMetrics
-                                                      : "gate=metrics_overflow;to=1");
-                        restoreXyRates();
-                        return finishSelfTestNow();
-                        };
-                        return runNormalRouteDiagnostic();
-                      }
-
                       if (runCoordinatedXyPerformanceSuite) {
 #if defined(__GNUC__)
-                        auto runCoordinatedPerformanceDiagnostic = [&]()
+                        auto runProductionCoordinatedDiagnostic = [&]()
                             __attribute__((optimize("Os"), noinline))
                             -> DiagnosticsSummary {
 #else
-                        auto runCoordinatedPerformanceDiagnostic = [&]() -> DiagnosticsSummary {
+                        auto runProductionCoordinatedDiagnostic = [&]() -> DiagnosticsSummary {
 #endif
                         using CoordinatedXyPerformanceReport::Aggregate;
                         using CoordinatedXyPerformanceReport::Limits;
                         using CoordinatedXyPerformanceReport::MoveObservation;
 
-                        static constexpr uint32_t kMoveTimeoutMs = 30000u;
-                        static constexpr uint32_t kHomeTimeoutMs = 20000u;
-                        static constexpr uint32_t kZMoveTimeoutMs = 45000u;
-                        static constexpr uint32_t kBaselineXyHomeFastHz = 3000u;
-                        static constexpr uint32_t kBaselineXyHomeSlowHz = 1000u;
-                        static constexpr uint32_t kBoundedHomeTimeoutMs = 30000u;
-                        static constexpr uint32_t kBaselineHomeGuardMarginSteps = 3000u;
-                        static constexpr uint32_t kBaselineMinimumHomeGuardSteps = 3000u;
-                        static constexpr uint32_t kBaselineXEnvelopeMaximumSteps = 45000u;
-                        static constexpr uint32_t kBaselineYEnvelopeMaximumSteps = 35000u;
-                        static constexpr uint32_t kBaselineZHomeFastHz = 30000u;
-                        static constexpr uint32_t kBaselineZHomeSlowHz = 3000u;
-                        static constexpr uint32_t kRegHomeFastHz = 30000u;
-                        static constexpr uint32_t kRegHomeSlowHz = 3000u;
-                        static constexpr uint32_t kBaselineHomeBackoffSteps = 400u;
-                        static constexpr uint32_t kTimerClockHz = 90000000u;
-                        static constexpr uint32_t kBaselineExpectedBackoffPosition = 100u;
-                        static constexpr uint32_t kBaselineHomeDriftLimitSteps = 25u;
-                        static constexpr uint32_t kBaselineReturnErrorLimitSteps = 10u;
-                        static constexpr uint32_t kPressureSettleTimeoutMs = 8000u;
-                        static constexpr uint16_t kPressure1Raw =
-                            PressureQualificationMath::pressureRawFromPsiMilli(1000u);
-                        static constexpr uint16_t kPressure2Raw =
-                            PressureQualificationMath::pressureRawFromPsiMilli(2000u);
-                        static constexpr uint32_t kPressureGuardAbsSteps = 80000u;
-                        static constexpr uint32_t kPressureGuardDeltaSteps = 50000u;
-                        static constexpr uint32_t kFocusedNormalAcceleration = 140000u;
-                        static constexpr uint32_t kFocusedReducedAcceleration = 70000u;
-                        static constexpr int32_t kFocusedHomePosition = 100;
-                        static constexpr int32_t kFocusedAwayPosition = 20100;
-                        static constexpr int32_t kFocusedReducedAwayPosition = 24100;
-                        // Every self-test command remains in the historical
-                        // MRES=2 logical coordinate system. MotionUnitScale
-                        // performs the MRES=3 conversion at the motor boundary.
-                        const uint32_t kXyHomeFastHz = kBaselineXyHomeFastHz;
-                        const uint32_t kXyHomeSlowHz = kBaselineXyHomeSlowHz;
-                        const uint32_t kHomeGuardMarginSteps =
-                            kBaselineHomeGuardMarginSteps;
-                        const uint32_t kMinimumHomeGuardSteps =
-                            kBaselineMinimumHomeGuardSteps;
-                        const uint32_t kXEnvelopeMaximumSteps =
-                            kBaselineXEnvelopeMaximumSteps;
-                        const uint32_t kYEnvelopeMaximumSteps =
-                            kBaselineYEnvelopeMaximumSteps;
-                        const uint32_t kZHomeFastHz = kBaselineZHomeFastHz;
-                        const uint32_t kZHomeSlowHz = kBaselineZHomeSlowHz;
-                        const uint32_t kHomeBackoffSteps =
-                            kBaselineHomeBackoffSteps;
-                        const uint32_t kExpectedBackoffPosition =
-                            kBaselineExpectedBackoffPosition;
-                        const uint32_t kHomeDriftLimitSteps =
-                            kBaselineHomeDriftLimitSteps;
-                        const uint32_t kReturnErrorLimitSteps =
-                            kBaselineReturnErrorLimitSteps;
-                        // The production two-edge path retains its established
-                        // half-period cycle gates. CompleteStep has a 4,500-
-                        // core-cycle full period at 40 kHz; its 3,500-cycle
-                        // active gate preserves the independently reported
-                        // 500-timer-tick (1,000-core-cycle) minimum slack.
-                        Limits performanceLimits{};
-                        if (runCoordinatedXySingleIrqSuite) {
-                          performanceLimits.activeMaxCycles = 3500u;
-                          performanceLimits.terminalMaxCycles = 4500u;
-                        }
-                        const Comm::StatusMetricsSyncMode requestedStatusSyncMode =
-                            runCoordinatedXyStatusSyncSuite
-                                ? Comm::StatusMetricsSyncMode::TaskMutex
-                                : Comm::StatusMetricsSyncMode::CriticalSection;
-                        ScopedStatusMetricsSyncMode statusSyncGuard(
-                            requestedStatusSyncMode);
-
-                        struct TestDescriptor {
-                          uint16_t id;
-                          const char* name;
-                        };
-                        static constexpr TestDescriptor kTests[] = {
-                            {2060u, "coordinated_xy_performance_5khz"},
-                            {2061u, "coordinated_xy_performance_10khz"},
-                            {2062u, "coordinated_xy_performance_20khz"},
-                            {2063u, "coordinated_xy_performance_30khz"},
-                            {2064u, "coordinated_xy_performance_40khz"},
-                            {2065u, "coord_xy_perf_m1_comparison"},
-                            {2066u, "coord_xy_perf_raster"},
-                            {2067u, "coord_xy_perf_camera_repeat"},
-                            {2068u, "coord_xy_perf_pr"},
-                        };
-                        struct Point {
-                          int32_t x;
-                          int32_t y;
-                        };
-                        struct Pair {
-                          Point start;
-                          Point finish;
-                        };
+                        struct Point { int32_t x; int32_t y; };
+                        struct Pair { Point start; Point finish; };
                         static constexpr Pair kGeometryPairs[] = {
                             {{5000, 5000}, {25000, 5000}},
                             {{5000, 5000}, {5000, 25000}},
@@ -4345,8 +2704,23 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             {{5000, 5000}, {10000, 25000}},
                             {{8916, 30500}, {500, 500}},
                         };
-                        static constexpr uint32_t kRatesHz[] = {
-                            5000u, 10000u, 20000u, 30000u, 40000u};
+                        static constexpr uint32_t kLogicalRateHz = 40000u;
+                        static constexpr uint32_t kLogicalAcceleration = 140000u;
+                        static constexpr uint32_t kTimerClockHz = 90000000u;
+                        static constexpr uint32_t kMoveTimeoutMs = 30000u;
+                        static constexpr uint32_t kHomeTimeoutMs = 30000u;
+                        static constexpr uint32_t kHomeFastHz = 3000u;
+                        static constexpr uint32_t kHomeSlowHz = 1000u;
+                        static constexpr uint32_t kHomeBackoffSteps = 400u;
+                        static constexpr uint32_t kExpectedHomePosition = 100u;
+                        static constexpr uint32_t kHomeDriftLimitSteps = 25u;
+                        static constexpr uint32_t kReturnErrorLimitSteps = 10u;
+                        static constexpr uint32_t kHomeGuardMarginSteps = 3000u;
+                        static constexpr uint32_t kMinimumHomeGuardSteps = 3000u;
+                        static constexpr uint32_t kXEnvelopeMaximumSteps = 45000u;
+                        static constexpr uint32_t kYEnvelopeMaximumSteps = 35000u;
+                        static constexpr uint32_t kPressureGuardAbsSteps = 80000u;
+                        static constexpr uint32_t kPressureGuardDeltaSteps = 50000u;
 
                         Stepper* stepperX = Stepper::stepperX();
                         Stepper* stepperY = Stepper::stepperY();
@@ -4354,39 +2728,23 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         Stepper* stepperP = Stepper::stepperP();
                         Stepper* stepperR = Stepper::stepperR();
                         Gantry* gantry = Gantry::instance();
-                        PressureSensor* pressureSensor = PressureSensor::instance();
-                        const CoordinatedXyExecutor::ExecutionMode
-                            requestedExecutionMode =
-                                CoordinatedXyExecutor::ExecutionMode::TwoEdge;
-                        ScopedCoordinatedXyExecutionMode executionModeGuard(
-                            gantry, requestedExecutionMode);
-                        const CoordinatedXyTimerSchedulePolicy::Mode
-                            requestedTimerScheduleMode =
-                                runCoordinatedXyMres3RearmSuite
-                                    ? CoordinatedXyTimerSchedulePolicy::Mode::
-                                          RearmFromActualEdge
-                                    : (runCoordinatedXyMres3ConditionalRearmSuite ||
-                                       runCoordinatedXyProductionMres3Suite)
-                                    ? CoordinatedXyTimerSchedulePolicy::Mode::
-                                          ConditionalLateRearm
-                                    : CoordinatedXyTimerSchedulePolicy::Mode::
-                                          FreeRunning;
-                        ScopedCoordinatedXyTimerScheduleMode timerScheduleGuard(
-                            gantry, requestedTimerScheduleMode);
-
-                        const uint32_t savedXMaxRateHz =
+                        const uint32_t savedXRate =
                             stepperX != nullptr ? stepperX->maxSpeedHz() : 0u;
-                        const uint32_t savedYMaxRateHz =
+                        const uint32_t savedYRate =
                             stepperY != nullptr ? stepperY->maxSpeedHz() : 0u;
-                        const float savedXAcceleration =
-                            stepperX != nullptr ? stepperX->accelStepsPerSec2() : 0.0f;
-                        const float savedYAcceleration =
-                            stepperY != nullptr ? stepperY->accelStepsPerSec2() : 0.0f;
-                        auto restoreXyRates = [&]() {
-                          if (stepperX != nullptr) stepperX->setMaxSpeedHz(savedXMaxRateHz);
-                          if (stepperY != nullptr) stepperY->setMaxSpeedHz(savedYMaxRateHz);
-                          if (stepperX != nullptr) stepperX->setAccelStepsPerSec2(savedXAcceleration);
-                          if (stepperY != nullptr) stepperY->setAccelStepsPerSec2(savedYAcceleration);
+                        const float savedXAcceleration = stepperX != nullptr
+                            ? stepperX->accelStepsPerSec2() : 0.0f;
+                        const float savedYAcceleration = stepperY != nullptr
+                            ? stepperY->accelStepsPerSec2() : 0.0f;
+                        auto restoreMotionConfiguration = [&]() {
+                          if (stepperX != nullptr) {
+                            stepperX->setMaxSpeedHz(savedXRate);
+                            stepperX->setAccelStepsPerSec2(savedXAcceleration);
+                          }
+                          if (stepperY != nullptr) {
+                            stepperY->setMaxSpeedHz(savedYRate);
+                            stepperY->setAccelStepsPerSec2(savedYAcceleration);
+                          }
                         };
                         auto closePressurePaths = [&]() {
                           PressureRegulator::regP().pause();
@@ -4396,286 +2754,97 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           PressureRegulator::regR().closeValve();
 #endif
                         };
-                        bool focusedDirectionResultEmitted = false;
-                        bool transitionResultEmitted = false;
-                        auto emitMres3Configuration = [&]() {
-                          const TMC2208InitializationSnapshot driver =
-                              TMC2208Driver::initializationSnapshot();
-                          const TMC2208Configuration::Values expected =
-                              TMC2208Configuration::valuesForMres(3u);
-                          const bool scheduleModeExpected = gantry != nullptr &&
-                              gantry->coordinatedTimerScheduleMode() ==
-                                  (runCoordinatedXyProductionMres3Suite
-                                       ? CoordinatedXyTimerSchedulePolicy::Mode::
-                                             ConditionalLateRearm
-                                       : requestedTimerScheduleMode);
-                          char configMetrics[160] = {};
-                          const int written = snprintf(
-                              configMetrics,
-                              sizeof(configMetrics),
-                              "mr=%u;mf=%u;dd=%u;gc=%lu;cc=%lu;tx=%lu;tf=%lu;"
-                              "ve=%u;ae=%u;lu=%lu;ge=%u;sf=0;to=0",
-                              static_cast<unsigned>(driver.mres),
-                              driver.multistepFilter ? 1u : 0u,
-                              driver.doubleEdge ? 1u : 0u,
-                              (unsigned long)driver.gconf,
-                              (unsigned long)driver.chopconf,
-                              (unsigned long)driver.successfulWrites,
-                              (unsigned long)driver.failedWrites,
-                              TMC2208Configuration::preservesMres2PhysicalRate(
-                                  40000u) ? 1u : 0u,
-                              TMC2208Configuration::
-                                      preservesMres2PhysicalAcceleration(140000u)
-                                  ? 1u : 0u,
-                              (unsigned long)
-                                  MotionUnitScale::logicalUnitsPerNativeStep(),
-                              scheduleModeExpected ? 1u : 0u);
-                          const bool expectedBuild =
-                              runCoordinatedXyProductionMres3Suite
-                                  ? TMC2208Configuration::isProductionMres3Build()
-                                  : TMC2208Configuration::isMres3DiagnosticBuild();
-                          const bool passed =
-                              expectedBuild &&
-                              driver.initialized &&
-                              driver.mres == expected.mres &&
-                              driver.multistepFilter == expected.multistepFilter &&
-                              driver.doubleEdge == expected.doubleEdge &&
-                              driver.gconf == expected.gconf &&
-                              driver.chopconf == expected.chopconf &&
-                              driver.successfulWrites == 4u &&
-                              driver.failedWrites == 0u &&
-                              MotionUnitScale::logicalUnitsPerNativeStep() == 2u &&
-                              scheduleModeExpected;
-                          const bool metricsFit = written > 0 &&
-                              static_cast<size_t>(written) < sizeof(configMetrics);
-                          (void)runOne(
-                                       runCoordinatedXyProductionMres3Suite
-                                           ? 2090u : 2083u,
-                                       runCoordinatedXyProductionMres3Suite
-                                           ? "tmc2208_production_mres3_config"
-                                           : "tmc2208_mres3_configuration",
-                                       passed && metricsFit,
-                                       metricsFit
-                                           ? configMetrics
-                                           : "gate=metrics_overflow;to=1");
-                          return passed && metricsFit;
-                        };
-                        auto emitSkipped = [&](uint16_t firstId,
-                                               const char* gate) {
-                          char metrics[96];
-                          snprintf(metrics,
-                                   sizeof(metrics),
-                                   "gate=%s;hz=0;n=0;i2=0;i7=0;pu=0;wl=0;to=1",
-                                   gate);
-                          if (runCoordinatedXyTransitionSuite) {
-                            if (!transitionResultEmitted) {
-                              (void)runOne(2071u,
-                                           "coord_xy_camera_home_transition",
-                                           false,
-                                           metrics);
-                              transitionResultEmitted = true;
-                            }
-                            return;
-                          }
-                          if (runCoordinatedXyLogicalMres3Suite) {
-                            (void)runOne(
-                                         runCoordinatedXyProductionMres3Suite
-                                             ? 2087u : 2080u,
-                                         runCoordinatedXyProductionMres3Suite
-                                             ? "coord_xy_prod_mres3_motion"
-                                             : "coord_xy_mres3_20khz_motion",
-                                         false,
-                                         metrics);
-                            (void)runOne(
-                                runCoordinatedXyProductionMres3Suite
-                                    ? 2088u : 2081u,
-                                runCoordinatedXyProductionMres3Suite
-                                    ? "coord_xy_prod_mres3_irq_path"
-                                    : "coord_xy_mres3_20khz_irq_path",
-                                false,
-                                "i2=0;s=0;mi=0;ph=0;pa=0;fm=0;fa=0;tf=0;pp=0;pf=0;pu=0;ps=0;sf=0;to=1");
-                            (void)runOne(
-                                runCoordinatedXyProductionMres3Suite
-                                    ? 2089u : 2082u,
-                                runCoordinatedXyProductionMres3Suite
-                                    ? "coord_xy_prod_conditional_rearm"
-                                    : "coord_xy_mres3_entry_margin",
-                                false,
-                                runCoordinatedXyMres3RearmSuite
-                                    ? "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;ds=0;di=0;md=0;sl=0;rm=1;rc=0;rp=0;rd=0;sf=0;to=1"
-                                    : (runCoordinatedXyMres3ConditionalRearmSuite ||
-                                       runCoordinatedXyProductionMres3Suite)
-                                    ? "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;ds=0;di=0;md=0;sl=0;rm=2;rc=0;rp=0;rd=0;sf=0;to=1"
-                                    : "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;ds=0;di=0;md=0;sl=0;rm=0;rc=0;rp=0;rd=0;sf=0;to=1");
-                            if (runCoordinatedXyMres3ConditionalRearmSuite) {
-                              (void)runOne(
-                                  2086u,
-                                  "coord_xy_conditional_rearm",
-                                  false,
-                                  "rm=2;rg=1125;it=900;dc=0;mi=0;rc=0;rp=0;rd=0;ic=0;ix=0;ir=0;im=0;ns=0;wm=0;sf=0;to=1");
-                            }
-                            (void)emitMres3Configuration();
-                            return;
-                          }
-                          if (runCoordinatedXy40KhzSuite) {
-                            char entryMetrics[224] = {};
-                            const unsigned statusSyncMode = static_cast<unsigned>(
-                                Comm::getStatusMetricsSyncMode());
-                            const unsigned long lockFailures =
-                                static_cast<unsigned long>(
-                                    Comm::getStatusMetricsLockFailureCount());
-                            (void)runOne(2064u,
-                                         "coordinated_xy_performance_40khz",
-                                         false,
-                                         metrics);
-                            (void)runOne(
-                                2072u,
-                                "coord_xy_40khz_irq_path",
-                                false,
-                                "i2=0;s=0;mi=0;ph=0;pa=0;fm=0;fa=0;tf=0;pp=0;pf=0;pu=0;ps=0;sf=0;to=1");
-                            (void)runOne(
-                                2073u,
-                                "coord_xy_40khz_entry_lateness",
-                                false,
-                                (snprintf(entryMetrics,
-                                          sizeof(entryMetrics),
-                                          "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;"
-                                          "dm=0;sm=%u;lf=%lu;sf=0;to=1;"
-                                          "fv=0;tr=0;la=0;ra=0",
-                                          statusSyncMode,
-                                          lockFailures) > 0)
-                                    ? entryMetrics
-                                    : "gate=metrics_overflow;to=1");
-                            if (runCoordinatedXySingleIrqSuite) {
-                              (void)runOne(
-                                  2074u,
-                                  "coord_xy_single_irq_pulse",
-                                  false,
-                                  "em=1;ip=1;i2=0;pc=0;pn=0;px=0;pe=0;ds=0;mi=0;md=0;sl=0;pu=0;ok=0;sf=0;to=1");
-                            }
-                            return;
-                          }
-                          if (!runCoordinatedXyDirectionSuite) {
-                            for (const TestDescriptor& test : kTests) {
-                              if (test.id >= firstId) {
-                                (void)runOne(test.id, test.name, false, metrics);
-                              }
-                            }
-                          }
-                          if (!focusedDirectionResultEmitted) {
-                            (void)runOne(2070u,
-                                         "coord_xy_perf_x_direction",
-                                         false,
-                                         metrics);
-                          }
-                        };
-                        auto failRemaining = [&](uint16_t firstId,
-                                                 const char* gate) {
+                        auto finish = [&]() -> DiagnosticsSummary {
                           Gantry::cancelXYZMotors();
                           closePressurePaths();
-                          restoreXyRates();
+                          restoreMotionConfiguration();
                           comm->setStatusPaused(true);
-                          emitSkipped(firstId, gate);
+                          return finishSelfTestNow();
+                        };
+                        auto emitSkipped = [&](const char* gate) {
+                          char metrics[128] = {};
+                          (void)snprintf(metrics,
+                                         sizeof(metrics),
+                                         "gate=%s;n=0;i2=0;i7=0;pu=0;sf=0;to=1",
+                                         gate);
+                          if (runCoordinatedXyTransitionSuite) {
+                            (void)runOne(2071u,
+                                         "coord_xy_camera_home_transition",
+                                         false,
+                                         metrics);
+                            return;
+                          }
+                          (void)runOne(2087u,
+                                       "coord_xy_prod_mres3_motion",
+                                       false,
+                                       metrics);
+                          (void)runOne(2088u,
+                                       "coord_xy_prod_mres3_irq_path",
+                                       false,
+                                       "i2=0;s=0;mi=0;pu=0;ps=0;sf=0;to=1");
+                          (void)runOne(2089u,
+                                       "coord_xy_prod_conditional_rearm",
+                                       false,
+                                       "i2=0;s=0;mi=0;ds=0;di=0;md=0;sl=0;dc=0;ci=0;ns=0;rc=0;rp=0;rd=0;sf=0;to=1");
+                          (void)runOne(2090u,
+                                       "tmc2208_production_mres3_config",
+                                       false,
+                                       "mr=3;mf=0;dd=1;tx=0;tf=1;lu=2;sf=0;to=1");
                         };
 
-                        if (!statusSyncGuard.activated()) {
-                          failRemaining(2060u, "status_sync_unavailable");
-                          return finishSelfTestNow();
-                        }
-                        if (!executionModeGuard.activated()) {
-                          failRemaining(2060u, "executor_mode_unavailable");
-                          return finishSelfTestNow();
-                        }
-                        if (!timerScheduleGuard.activated()) {
-                          failRemaining(2060u, "timer_schedule_unavailable");
-                          return finishSelfTestNow();
+                        constexpr TMC2208Configuration::Values expectedDriver =
+                            TMC2208Configuration::buildValues();
+                        const TMC2208InitializationSnapshot driver =
+                            TMC2208Driver::initializationSnapshot();
+                        const bool configurationValid = stepperX != nullptr &&
+                            stepperY != nullptr && stepperZ != nullptr &&
+                            gantry != nullptr &&
+                            LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0 &&
+                            savedXRate == kLogicalRateHz &&
+                            savedYRate == kLogicalRateHz && driver.initialized &&
+                            driver.mres == expectedDriver.mres &&
+                            driver.gconf == expectedDriver.gconf &&
+                            driver.chopconf == expectedDriver.chopconf &&
+                            driver.doubleEdge && !driver.multistepFilter &&
+                            driver.successfulWrites == 4u &&
+                            driver.failedWrites == 0u &&
+                            MotionUnitScale::logicalUnitsPerNativeStep() == 2u;
+                        if (!configurationValid) {
+                          emitSkipped("configuration");
+                          return finish();
                         }
 
-                        if (runCoordinatedXySingleIrqSuite) {
-                          failRemaining(2060u, "single_irq_superseded");
-                          return finishSelfTestNow();
-                        }
-
-                        if (stepperX == nullptr || stepperY == nullptr ||
-                            stepperZ == nullptr || gantry == nullptr || comm == nullptr ||
-                            LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE == 0 ||
-                            LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE == 0 ||
-                            savedXMaxRateHz != 40000u || savedYMaxRateHz != 40000u) {
-                          failRemaining(2060u, "configuration");
-                          return finishSelfTestNow();
-                        }
-                        if (runCoordinatedXyMres3Suite &&
-                            !TMC2208Configuration::isMres3DiagnosticBuild()) {
-                          failRemaining(2080u, "mres3_build_required");
-                          return finishSelfTestNow();
-                        }
-                        if (runCoordinatedXyProductionMres3Suite &&
-                            !TMC2208Configuration::isProductionMres3Build()) {
-                          failRemaining(2087u, "production_mres3_build_required");
-                          return finishSelfTestNow();
-                        }
-                        if (runCoordinatedXyLogicalMres3Suite) {
-                          const TMC2208InitializationSnapshot driver =
-                              TMC2208Driver::initializationSnapshot();
-                          if (!driver.initialized || driver.mres != 3u ||
-                              driver.multistepFilter || !driver.doubleEdge ||
-                              driver.successfulWrites != 4u ||
-                              driver.failedWrites != 0u) {
-                            failRemaining(
-                                runCoordinatedXyProductionMres3Suite
-                                    ? 2087u : 2080u,
-                                "tmc_configuration");
-                            return finishSelfTestNow();
-                          }
-                        }
                         const char* fixtureStage = runCoordinatedXyTransitionSuite
                             ? "coordinated_xy_camera_transition_envelope_clear"
-                            : runCoordinatedXySingleIrqSuite
-                                ? "coordinated_xy_single_irq_envelope_clear"
-                            : runCoordinatedXyMres3ConditionalRearmSuite
-                                ? "coordinated_xy_mres3_conditional_rearm_envelope_clear"
-                            : runCoordinatedXyProductionMres3Suite
-                                ? "coordinated_xy_production_mres3_envelope_clear"
-                            : runCoordinatedXyMres3RearmSuite
-                                ? "coordinated_xy_mres3_rearm_envelope_clear"
-                            : runCoordinatedXyMres3Suite
-                                ? "coordinated_xy_mres3_20khz_envelope_clear"
-                            : runCoordinatedXy40KhzSuite
-                                ? "coordinated_xy_40khz_envelope_clear"
-                                : "coordinated_xy_performance_fixture_clear";
+                            : "coordinated_xy_production_mres3_envelope_clear";
                         if (!waitForOperatorResume(fixtureStage)) {
-                          failRemaining(2060u, "fixture");
-                          return finishSelfTestNow();
+                          emitSkipped("fixture");
+                          return finish();
                         }
-                        // The manual switch preflight and low-rate homing
-                        // regression passed after the bounded diagnostic-home
-                        // change. No subsequent change affects limit sampling
-                        // or homing, so the M6 selectors retain exactly one
-                        // fixture/envelope confirmation above.
                         closePressurePaths();
                         if (!runZClearanceHomePreflight(
-                                "coordinated_xy_performance_z_home",
-                                kZHomeFastHz,
-                                kZHomeSlowHz,
+                                "coordinated_xy_production_z_home",
+                                30000u,
+                                3000u,
                                 kHomeBackoffSteps,
-                                kHomeTimeoutMs)) {
-                          failRemaining(2060u, "z_home");
-                          return finishSelfTestNow();
+                                20000u)) {
+                          emitSkipped("z_home");
+                          return finish();
                         }
 
                         struct BoundedHomeResult {
                           bool passed = false;
-                          bool outerTimedOut = false;
+                          bool timedOut = false;
                           uint32_t guardSteps = 0u;
                           Stepper::HomeDiagnosticSnapshot snapshot{};
                         };
                         BoundedHomeResult lastXHome{};
                         BoundedHomeResult lastYHome{};
-                        auto runBoundedAxisHome = [&](Stepper* stepper,
-                                                      EventBits_t homeBit,
-                                                      MotionQualificationMath::AxisHomeSample& sample,
-                                                      uint32_t envelopeMaximum,
-                                                      bool positionKnown) {
+                        auto runBoundedHome = [&](Stepper* stepper,
+                                                  EventBits_t doneBit,
+                                                  MotionQualificationMath::AxisHomeSample& sample,
+                                                  uint32_t envelopeMaximum,
+                                                  bool positionKnown) {
                           BoundedHomeResult result{};
                           result.guardSteps =
                               CoordinatedXyPerformanceReport::boundedHomeGuardSteps(
@@ -4687,69 +2856,58 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           const uint32_t savedGuard = stepper->homeGuardSteps();
                           stepper->setHomeGuardSteps(result.guardSteps);
                           stepper->enableMotor();
-                          xEventGroupClearBits(_doneEvents, homeBit);
+                          xEventGroupClearBits(_doneEvents, doneBit);
                           startHomeAsync(stepper,
-                                         kXyHomeFastHz,
-                                         kXyHomeSlowHz,
+                                         kHomeFastHz,
+                                         kHomeSlowHz,
                                          kHomeBackoffSteps,
-                                         homeBit);
-                          const bool done = waitBitsWithTimeout(
-                              homeBit, kBoundedHomeTimeoutMs);
+                                         doneBit);
+                          const bool done = waitBitsWithTimeout(doneBit, kHomeTimeoutMs);
                           if (!done) {
-                            result.outerTimedOut = true;
-                            (void)cancelActiveHomesAndWait(homeBit);
+                            result.timedOut = true;
+                            (void)cancelActiveHomesAndWait(doneBit);
                           }
-                          const bool axisDone =
-                              (xEventGroupGetBits(_doneEvents) & homeBit) != 0u;
+                          const bool bitSet =
+                              (xEventGroupGetBits(_doneEvents) & doneBit) != 0u;
                           result.snapshot = stepper->getLastHomeDiagnosticSnapshot();
                           stepper->setHomeGuardSteps(savedGuard);
-                          sample.success = axisDone && result.snapshot.success;
+                          sample.success = bitSet && result.snapshot.success;
                           sample.limitTriggerSteps =
                               result.snapshot.fineLimitPositionSteps;
                           sample.finalBackoffSteps =
                               result.snapshot.finalBackoffPositionSteps;
-                          sample.moveTimeoutCount =
-                              result.snapshot.moveTimeoutCount;
+                          sample.moveTimeoutCount = result.snapshot.moveTimeoutCount;
                           result.passed = done && sample.success;
                           return result;
                         };
-                        auto runSequentialXyHome = [&](MotionQualificationMath::AxisHomeSample& x,
-                                                       MotionQualificationMath::AxisHomeSample& y,
-                                                       const char* xStage,
-                                                       const char* yStage,
-                                                       bool positionKnown) {
+                        auto runSequentialHome = [&](MotionQualificationMath::AxisHomeSample& x,
+                                                     MotionQualificationMath::AxisHomeSample& y,
+                                                     bool positionKnown) {
                           comm->setStatusPaused(false);
-                          sendProgressStage(xStage);
-                          lastXHome = runBoundedAxisHome(stepperX,
-                                                        BIT_HOME_X_DONE,
-                                                        x,
-                                                        kXEnvelopeMaximumSteps,
-                                                        positionKnown);
-                          if (!lastXHome.passed) {
-                            return false;
-                          }
-                          sendProgressStage(yStage);
-                          lastYHome = runBoundedAxisHome(stepperY,
-                                                        BIT_HOME_Y_DONE,
-                                                        y,
-                                                        kYEnvelopeMaximumSteps,
-                                                        positionKnown);
+                          sendProgressStage("coordinated_xy_production_x_home");
+                          lastXHome = runBoundedHome(stepperX,
+                                                     BIT_HOME_X_DONE,
+                                                     x,
+                                                     kXEnvelopeMaximumSteps,
+                                                     positionKnown);
+                          if (!lastXHome.passed) return false;
+                          sendProgressStage("coordinated_xy_production_y_home");
+                          lastYHome = runBoundedHome(stepperY,
+                                                     BIT_HOME_Y_DONE,
+                                                     y,
+                                                     kYEnvelopeMaximumSteps,
+                                                     positionKnown);
                           return lastYHome.passed;
                         };
                         MotionQualificationMath::AxisHomeSample xReference{};
                         MotionQualificationMath::AxisHomeSample yReference{};
-                        if (!runSequentialXyHome(
-                                xReference,
-                                yReference,
-                                "coordinated_xy_performance_x_home",
-                                "coordinated_xy_performance_y_home",
-                                false) ||
+                        if (!runSequentialHome(xReference, yReference, false) ||
                             stepperX->getPosition() !=
-                                static_cast<int32_t>(kExpectedBackoffPosition) ||
+                                static_cast<int32_t>(kExpectedHomePosition) ||
                             stepperY->getPosition() !=
-                                static_cast<int32_t>(kExpectedBackoffPosition)) {
-                          failRemaining(2060u, "xy_home");
-                          return finishSelfTestNow();
+                                static_cast<int32_t>(kExpectedHomePosition)) {
+                          emitSkipped("xy_home");
+                          return finish();
                         }
 
                         auto absoluteDelta = [](int32_t from, int32_t to) {
@@ -4762,184 +2920,44 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               ? std::numeric_limits<uint32_t>::max()
                               : (kTimerClockHz / (2u * rateHz)) - 1u;
                         };
-                        auto startArrForRate = [&](uint32_t rateHz) {
-                          return targetArrForRate(rateHz) * 5u;
-                        };
-
+                        Limits limits{};
                         struct MoveResult {
                           bool passed = false;
-                          bool canContinue = false;
-                          uint32_t failureMask = 0u;
                           MoveObservation observation{};
                           CoordinatedXySnapshot snapshot{};
                         };
-                        CoordinatedXyPerformanceReport::FailureTelemetry
-                            firstMoveFailure{};
-                        auto classifyMove = [&](MoveResult& result) {
-                          result.failureMask =
-                              CoordinatedXyPerformanceReport::moveFailureMask(
-                                  result.observation, performanceLimits);
-                          result.passed = result.failureMask == 0u;
-                          result.canContinue =
-                              CoordinatedXyPerformanceReport::
-                                  moveCanContinueAfterCompletion(
-                                      result.observation, performanceLimits);
-                          CoordinatedXyPerformanceReport::captureFirstFailure(
-                              firstMoveFailure,
-                              result.canContinue,
-                              result.snapshot.terminalReason,
-                              result.snapshot.limitAbortRequestCount,
-                              result.snapshot.rawLimitAbortCount,
-                              result.failureMask);
-                        };
-                        auto observeCompletedMove = [&](Point start,
-                                                        Point target,
-                                                        uint32_t expectedRateHz,
-                                                        bool direct,
-                                                        bool* pMoved,
-                                                        bool* rMoved,
-                                                        bool* pressureGuard) -> MoveResult {
+                        auto observeMove = [&](Point start, Point target) {
                           MoveResult result{};
-                          const uint32_t expectedX =
-                              MotionUnitScale::toNativeStepCycles(
-                                  absoluteDelta(start.x, target.x));
-                          const uint32_t expectedY =
-                              MotionUnitScale::toNativeStepCycles(
-                                  absoluteDelta(start.y, target.y));
+                          const uint32_t expectedX = MotionUnitScale::toNativeStepCycles(
+                              absoluteDelta(start.x, target.x));
+                          const uint32_t expectedY = MotionUnitScale::toNativeStepCycles(
+                              absoluteDelta(start.y, target.y));
                           const uint32_t expectedMaster =
                               expectedX > expectedY ? expectedX : expectedY;
-                          const bool statusMetricsReset =
-                              Comm::resetStatusMetrics();
+                          const bool statusReset = Comm::resetStatusMetrics();
                           comm->setStatusPaused(false);
-                          bool completed = false;
-                          bool endpoint = false;
-                          bool targets = false;
-                          bool timedOut = false;
-                          const int32_t pStart =
-                              stepperP != nullptr ? stepperP->getPosition() : 0;
-                          const int32_t rStart =
-                              stepperR != nullptr ? stepperR->getPosition() : 0;
-                          const bool injectionReady =
-                              !runCoordinatedXyMres3ConditionalRearmSuite ||
-                              gantry->
-                                  armCoordinatedLateServiceInjectionForDiagnostics();
-                          if (!injectionReady) {
-                            timedOut = true;
-                            result.snapshot = gantry->coordinatedSnapshot();
-                          } else if (direct) {
-                            xEventGroupClearBits(
-                                _doneEvents, BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
-                            const CoordinatedStartStatus status =
-                                gantry->moveTo(target.x, target.y, 0u);
-                            if (status == CoordinatedStartStatus::Started) {
-                              const uint32_t startedMs = HAL_GetTick();
-                              const TickType_t pollTicks = msToAtLeast1Tick(2u);
-                              while ((HAL_GetTick() - startedMs) < kMoveTimeoutMs) {
-                                Watchdog_CheckIn(CRASH_TASK_ORCH);
-                                maybeSendProgress("coordinated_xy_performance_move");
-                                if (pMoved != nullptr && stepperP != nullptr &&
-                                    stepperP->getPosition() != pStart) *pMoved = true;
-                                if (rMoved != nullptr && stepperR != nullptr &&
-                                    stepperR->getPosition() != rStart) *rMoved = true;
-                                if (pressureGuard != nullptr &&
-                                    stepperP != nullptr && stepperR != nullptr) {
-                                  const int32_t pNow = stepperP->getPosition();
-                                  const int32_t rNow = stepperR->getPosition();
-                                  if (absDiff32(pNow, 0) > kPressureGuardAbsSteps ||
-                                      absDiff32(rNow, 0) > kPressureGuardAbsSteps ||
-                                      absDiff32(pNow, pStart) > kPressureGuardDeltaSteps ||
-                                      absDiff32(rNow, rStart) > kPressureGuardDeltaSteps) {
-                                    *pressureGuard = true;
-                                    Gantry::cancelXYZMotors();
-                                    break;
-                                  }
-                                }
-                                const EventBits_t bits = xEventGroupGetBits(_doneEvents);
-                                if ((bits & (BIT_STEPPER1_DONE | BIT_STEPPER2_DONE)) ==
-                                    (BIT_STEPPER1_DONE | BIT_STEPPER2_DONE)) {
-                                  completed = true;
-                                  break;
-                                }
-                                if (_selfTestAbortRequested) break;
-                                vTaskDelay(pollTicks);
-                              }
-                              if (!completed) {
-                                timedOut = true;
-                                Gantry::cancelXYZMotors();
-                              }
-                            } else {
-                              timedOut = true;
-                            }
-                            result.snapshot = gantry->coordinatedSnapshot();
-                            endpoint = completed &&
-                                result.snapshot.state ==
-                                    CoordinatedXyExecutor::State::Completed &&
-                                result.snapshot.xPosition == target.x &&
-                                result.snapshot.yPosition == target.y;
-                            targets = result.snapshot.xTarget == target.x &&
-                                      result.snapshot.yTarget == target.y;
-                          } else {
-                            const Orchestrator::AbsoluteXyExecutionResult execution =
-                                orchestrator.executeAbsoluteXy(
-                                    target.x, target.y, 0u, false, kMoveTimeoutMs);
-                            result.snapshot = gantry->coordinatedSnapshot();
-                            completed = execution.waitCompleted &&
-                                execution.disposition ==
-                                    OrchestratorCompletionPolicy::AbsXyDisposition::Completed;
-                            endpoint = execution.endpointMatches &&
-                                result.snapshot.xPosition == target.x &&
-                                result.snapshot.yPosition == target.y;
-                            targets = execution.targetsMatch &&
-                                result.snapshot.xTarget == target.x &&
-                                result.snapshot.yTarget == target.y;
-                            timedOut = !execution.waitCompleted;
-                          }
-                          if (runCoordinatedXyMres3ConditionalRearmSuite) {
-                            gantry->
-                                clearCoordinatedLateServiceInjectionForDiagnostics();
-                          }
+                          const Orchestrator::AbsoluteXyExecutionResult execution =
+                              orchestrator.executeAbsoluteXy(
+                                  target.x, target.y, 0u, false, kMoveTimeoutMs);
+                          result.snapshot = gantry->coordinatedSnapshot();
                           uint32_t statusAgeMs =
                               std::numeric_limits<uint32_t>::max();
                           (void)Watchdog_GetTaskLastSeenAgeMs(
                               CRASH_TASK_STATUS, &statusAgeMs);
                           comm->setStatusPaused(true);
-                          const Comm::StatusMetricsSnapshot statusMetrics =
+                          const Comm::StatusMetricsSnapshot status =
                               Comm::getStatusMetricsSnapshot();
-                          const bool statusMetricsValid =
-                              statusMetricsReset && statusMetrics.valid &&
-                              statusMetrics.lockFailures == 0u;
-                          const uint32_t statusFrames = statusMetricsValid
-                              ? statusMetrics.chunk0Count + statusMetrics.chunk1Count
-                              : 0u;
-                          const uint32_t statusGapMs = statusMetricsValid
-                              ? statusMetrics.periodMaxMs
-                              : std::numeric_limits<uint32_t>::max();
-                          const uint32_t alternationErrors = statusMetricsValid
-                              ? statusMetrics.alternationErrors
-                              : 1u;
-
-                          if (expectedRateHz == 0u) {
-                            expectedRateHz = result.snapshot.selectedMasterRateHz;
-                          } else {
-                            expectedRateHz =
-                                MotionUnitScale::toNativeRate(expectedRateHz);
-                          }
+                          const bool statusValid = statusReset && status.valid;
+                          const uint32_t nativeRate =
+                              MotionUnitScale::toNativeRate(kLogicalRateHz);
                           MoveObservation& observation = result.observation;
                           observation.expectedXSteps = expectedX;
                           observation.expectedYSteps = expectedY;
                           observation.expectedMasterSteps = expectedMaster;
-                          observation.expectedRateHz = expectedRateHz;
-                          observation.executionMode =
-                              result.snapshot.executionMode;
-                          observation.timerScheduleMode =
-                              result.snapshot.timerScheduleMode;
-                          observation.interruptsPerMasterStep =
-                              result.snapshot.executionMode ==
-                                      CoordinatedXyExecutor::ExecutionMode::CompleteStep
-                                  ? 1u
-                                  : 2u;
-                          observation.minimumPulseCoreCycles =
-                              result.snapshot.minimumPulseCoreCycles;
+                          observation.expectedRateHz = nativeRate;
+                          observation.expectedTargetArr = targetArrForRate(nativeRate);
+                          observation.expectedStartArr =
+                              observation.expectedTargetArr * 5u;
                           observation.timerRearmCount =
                               result.snapshot.timerRearmCount;
                           observation.timerRearmPendingCount =
@@ -4952,22 +2970,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               result.snapshot.conditionalDecisionMissingCount;
                           observation.conditionalNonRearmSlackMinTicks =
                               result.snapshot.conditionalNonRearmSlackMinTicks;
-                          observation.lateInjectionCount =
-                              result.snapshot.lateInjectionCount;
-                          observation.lateInjectionFailureCount =
-                              result.snapshot.lateInjectionFailureCount;
-                          observation.lateInjectionRearmCount =
-                              result.snapshot.lateInjectionRearmCount;
-                          observation.lateInjectionDecisionSlackMaxTicks =
-                              result.snapshot.lateInjectionDecisionSlackMaxTicks;
-                          observation.lateInjectionWaitMaxCycles =
-                              result.snapshot.lateInjectionWaitMaxCycles;
                           observation.timerScheduleSaturationFlags =
                               result.snapshot.timerScheduleSaturationFlags;
-                          observation.expectedTargetArr =
-                              targetArrForRate(expectedRateHz);
-                          observation.expectedStartArr =
-                              startArrForRate(expectedRateHz);
+                          observation.terminalReason =
+                              result.snapshot.terminalReason;
                           observation.requestedXSteps =
                               result.snapshot.requestedXSteps;
                           observation.requestedYSteps =
@@ -4985,40 +2991,39 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           observation.arrMax = result.snapshot.arrMax;
                           observation.durationErrorBasisPoints =
                               result.snapshot.durationErrorBasisPoints;
-                          observation.statusPeriodMaxMs = statusGapMs;
+                          observation.statusPeriodMaxMs = statusValid
+                              ? status.periodMaxMs
+                              : std::numeric_limits<uint32_t>::max();
                           observation.statusWatchdogAgeMaxMs = statusAgeMs;
-                          observation.statusFrameCount = statusFrames;
-                          observation.statusAlternationErrors = alternationErrors;
+                          observation.statusFrameCount = statusValid
+                              ? status.chunk0Count + status.chunk1Count : 0u;
+                          observation.statusAlternationErrors = statusValid
+                              ? status.alternationErrors : 1u;
                           observation.watchdogLateCount =
                               Watchdog_GetLateTask() == CRASH_TASK_NONE ? 0u : 1u;
-                          observation.minimumDeadlineSlackTicks =
-                               collectCompletedMres3Evidence ? 450u : 0u;
-                          observation.requireLateInjectionEvidence =
-                               !runCoordinatedXyProductionMres3Suite;
-                          observation.requireTerminalCycleBudget =
-                               !runCoordinatedXyProductionMres3Suite;
-                          observation.requireNoLateEntries =
-                               collectCompletedMres3Evidence &&
-                               !runCoordinatedXyProductionMres3Suite;
-                          observation.terminalReason =
-                              result.snapshot.terminalReason;
-                          observation.endpointMatches = endpoint;
-                          observation.targetsMatch = targets;
-                          // The normal Orchestrator wait requires both bits and
-                          // clears them on exit. The direct diagnostic path also
-                          // sets completed only after observing both bits.
-                          observation.completionTogether = completed;
+                          observation.minimumDeadlineSlackTicks = 450u;
+                          observation.requireTerminalCycleBudget = true;
+                          observation.requireNoLateEntries = false;
+                          observation.endpointMatches = execution.endpointMatches &&
+                              result.snapshot.xPosition == target.x &&
+                              result.snapshot.yPosition == target.y;
+                          observation.targetsMatch = execution.targetsMatch &&
+                              result.snapshot.xTarget == target.x &&
+                              result.snapshot.yTarget == target.y;
+                          observation.completionTogether = execution.waitCompleted &&
+                              execution.disposition ==
+                                  OrchestratorCompletionPolicy::AbsXyDisposition::Completed;
                           observation.pinsLow = result.snapshot.xStepLow &&
-                                                result.snapshot.yStepLow;
+                              result.snapshot.yStepLow;
                           observation.ownershipReleased =
                               !result.snapshot.timerOwned;
                           observation.checksumMatch = true;
-                          observation.timedOut = timedOut || !completed;
+                          observation.timedOut = !execution.waitCompleted;
                           observation.timing = result.snapshot.timing;
-                          classifyMove(result);
+                          result.passed = CoordinatedXyPerformanceReport::movePasses(
+                              observation, limits);
                           return result;
                         };
-
                         auto positionTo = [&](Point target) {
                           const GantryPosition current = gantry->getPosition();
                           if (current.x == target.x && current.y == target.y) return true;
@@ -5028,567 +3033,132 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                   target.x, target.y, 0u, false, kMoveTimeoutMs);
                           const CoordinatedXySnapshot snapshot =
                               gantry->coordinatedSnapshot();
-                          // This is an unmeasured positioning leg. Require safe,
-                          // exact completion here; the following measured leg
-                          // records and gates ISR timing and pending observations.
-                          const bool passed = execution.disposition ==
+                          return execution.waitCompleted &&
+                              execution.endpointMatches && execution.targetsMatch &&
+                              execution.disposition ==
                                   OrchestratorCompletionPolicy::AbsXyDisposition::Completed &&
-                              execution.waitCompleted && execution.endpointMatches &&
-                              execution.targetsMatch &&
+                              snapshot.terminalReason ==
+                                  CoordinatedXyExecutor::TerminalReason::Completed &&
                               snapshot.pendingUpdateCount == 0u &&
                               snapshot.xStepLow && snapshot.yStepLow &&
                               !snapshot.timerOwned;
-                          uint32_t failureMask = 0u;
-                          if (execution.disposition !=
-                                  OrchestratorCompletionPolicy::
-                                      AbsXyDisposition::Completed ||
-                              snapshot.terminalReason !=
-                                  CoordinatedXyExecutor::TerminalReason::Completed) {
-                            failureMask |= CoordinatedXyPerformanceReport::
-                                kMoveFailureTerminalReason;
-                          }
-                          if (!execution.waitCompleted) {
-                            failureMask |= CoordinatedXyPerformanceReport::
-                                kMoveFailureTimedOut;
-                          }
-                          if (!execution.endpointMatches) {
-                            failureMask |= CoordinatedXyPerformanceReport::
-                                kMoveFailureEndpoint;
-                          }
-                          if (!execution.targetsMatch) {
-                            failureMask |= CoordinatedXyPerformanceReport::
-                                kMoveFailureTargets;
-                          }
-                          if (snapshot.pendingUpdateCount != 0u) {
-                            failureMask |= CoordinatedXyPerformanceReport::
-                                kMoveFailurePendingUpdate;
-                          }
-                          if (!snapshot.xStepLow || !snapshot.yStepLow) {
-                            failureMask |= CoordinatedXyPerformanceReport::
-                                kMoveFailurePins;
-                          }
-                          if (snapshot.timerOwned) {
-                            failureMask |= CoordinatedXyPerformanceReport::
-                                kMoveFailureOwnership;
-                          }
-                          CoordinatedXyPerformanceReport::captureFirstFailure(
-                              firstMoveFailure,
-                              passed,
-                              snapshot.terminalReason,
-                              snapshot.limitAbortRequestCount,
-                              snapshot.rawLimitAbortCount,
-                              failureMask);
-                          return passed;
                         };
-
-                        auto addPair = [&](Aggregate& aggregate,
-                                           const Pair& pair,
-                                           uint32_t rateHz) {
+                        auto addPair = [&](Aggregate& aggregate, const Pair& pair) {
                           if (!positionTo(pair.start)) return false;
-                          MoveResult forward = observeCompletedMove(
-                              pair.start, pair.finish, rateHz, false, nullptr, nullptr, nullptr);
-                          const bool forwardMayContinue =
-                              collectCompletedMres3Evidence
-                                  ? forward.canContinue
-                                  : forward.passed;
-                          if (!forwardMayContinue) {
+                          MoveResult forward = observeMove(pair.start, pair.finish);
+                          if (!forward.passed) {
                             CoordinatedXyPerformanceReport::addMove(
-                                aggregate,
-                                forward.observation,
-                                performanceLimits);
+                                aggregate, forward.observation, limits);
                             return false;
                           }
-                          MoveResult reverse = observeCompletedMove(
-                              pair.finish, pair.start, rateHz, false, nullptr, nullptr, nullptr);
-                          const bool checksumsMatch =
-                              forward.canContinue && reverse.canContinue &&
+                          MoveResult reverse = observeMove(pair.finish, pair.start);
+                          const bool checksumsMatch = reverse.passed &&
                               forward.snapshot.maskChecksum ==
                                   reverse.snapshot.maskChecksum &&
                               forward.snapshot.arrChecksum ==
                                   reverse.snapshot.arrChecksum;
                           forward.observation.checksumMatch = checksumsMatch;
                           reverse.observation.checksumMatch = checksumsMatch;
-                          classifyMove(forward);
-                          classifyMove(reverse);
+                          forward.passed = CoordinatedXyPerformanceReport::movePasses(
+                              forward.observation, limits);
+                          reverse.passed = CoordinatedXyPerformanceReport::movePasses(
+                              reverse.observation, limits);
                           CoordinatedXyPerformanceReport::addMove(
-                              aggregate, forward.observation, performanceLimits);
+                              aggregate, forward.observation, limits);
                           CoordinatedXyPerformanceReport::addMove(
-                              aggregate, reverse.observation, performanceLimits);
+                              aggregate, reverse.observation, limits);
                           const GantryPosition returned = gantry->getPosition();
                           const uint32_t returnError =
                               absoluteDelta(returned.x, pair.start.x) +
                               absoluteDelta(returned.y, pair.start.y);
-                          if (returnError > kReturnErrorLimitSteps) {
-                            CoordinatedXyPerformanceReport::captureFirstFailure(
-                                firstMoveFailure,
-                                false,
-                                reverse.snapshot.terminalReason,
-                                reverse.snapshot.limitAbortRequestCount,
-                                reverse.snapshot.rawLimitAbortCount,
-                                CoordinatedXyPerformanceReport::
-                                    kMoveFailureEndpoint);
-                          }
-                          const bool movesMayContinue =
-                              collectCompletedMres3Evidence
-                                  ? forward.canContinue && reverse.canContinue
-                                  : forward.passed && reverse.passed;
-                          return movesMayContinue && checksumsMatch &&
+                          return forward.passed && reverse.passed &&
+                              checksumsMatch &&
                               returnError <= kReturnErrorLimitSteps;
                         };
 
-                        auto homeAndMeasureDrift = [&](uint32_t& xDrift,
-                                                       uint32_t& yDrift,
-                                                       const char* xStage,
-                                                       const char* yStage) {
-                          MotionQualificationMath::AxisHomeSample xAfter{};
-                          MotionQualificationMath::AxisHomeSample yAfter{};
-                          const bool homed = runSequentialXyHome(
-                              xAfter, yAfter, xStage, yStage, true);
-                          // The first home establishes logical zero. Its
-                          // pre-zero trigger coordinate depends on the unknown
-                          // startup position, so later repeatability is the
-                          // fine-limit trigger's distance from zero.
-                          xDrift = homed
-                              ? MotionQualificationMath::absDiffSteps(
-                                    xAfter.limitTriggerSteps, 0)
-                              : std::numeric_limits<uint32_t>::max();
-                          yDrift = homed
-                              ? MotionQualificationMath::absDiffSteps(
-                                    yAfter.limitTriggerSteps, 0)
-                              : std::numeric_limits<uint32_t>::max();
-                          return homed && xDrift <= kHomeDriftLimitSteps &&
-                              yDrift <= kHomeDriftLimitSteps;
-                        };
+                        stepperX->setMaxSpeedHz(kLogicalRateHz);
+                        stepperY->setMaxSpeedHz(kLogicalRateHz);
+                        stepperX->setAccelStepsPerSec2(
+                            static_cast<float>(kLogicalAcceleration));
+                        stepperY->setAccelStepsPerSec2(
+                            static_cast<float>(kLogicalAcceleration));
 
-                        auto emitAggregate = [&](const TestDescriptor& test,
-                                                  uint32_t rateHz,
-                                                  Aggregate& aggregate,
-                                                  uint32_t expectedMoves,
-                                                  uint32_t expectedX,
-                                                  uint32_t expectedY,
-                                                  uint32_t expectedMaster,
-                                                  uint32_t xDrift,
-                                                  uint32_t yDrift,
-                                                  bool extraPass) {
-                          char metrics[224] = {};
-                          size_t length = 0u;
-                          if (!extraPass &&
-                              (lastXHome.guardSteps != 0u ||
-                               lastYHome.guardSteps != 0u)) {
-                            const BoundedHomeResult& failedHome =
-                                lastXHome.passed ? lastYHome : lastXHome;
-                            const int written = snprintf(
-                                metrics,
-                                sizeof(metrics),
-                                "hz=%lu;n=%lu;xe=%lu;ye=%lu;ms=%lu;i2=%lu;i7=%lu;"
-                                "hs=%ld;he=%ld;hg=%lu;hc=%lu;ha=%lu;hp=%u;ho=%u;"
-                                "hl=%u;ht=%u;qf=%lu;qm=%lu;xd=%lu;yd=%lu;to=1",
-                                (unsigned long)rateHz,
-                                (unsigned long)aggregate.moveCount,
-                                (unsigned long)aggregate.emittedXSteps,
-                                (unsigned long)aggregate.emittedYSteps,
-                                (unsigned long)aggregate.masterSteps,
-                                (unsigned long)aggregate.timer2Callbacks,
-                                (unsigned long)aggregate.timer7Callbacks,
-                                (long)failedHome.snapshot.startPositionSteps,
-                                (long)failedHome.snapshot.endPositionSteps,
-                                (unsigned long)failedHome.guardSteps,
-                                (unsigned long)failedHome.snapshot.coarseCommandSteps,
-                                (unsigned long)failedHome.snapshot.coarseAccountedSteps,
-                                static_cast<unsigned>(failedHome.snapshot.phase),
-                                static_cast<unsigned>(failedHome.snapshot.outcome),
-                                failedHome.snapshot.limitSeen ? 1u : 0u,
-                                failedHome.outerTimedOut ? 1u : 0u,
-                                (unsigned long)
-                                    aggregate.qualificationFailureMoveCount,
-                                (unsigned long)
-                                    aggregate.qualificationFailureMask,
-                                (unsigned long)xDrift,
-                                (unsigned long)yDrift);
-                            if (written > 0 &&
-                                static_cast<size_t>(written) < sizeof(metrics)) {
-                              length = static_cast<size_t>(written);
-                            }
-                          } else {
-                            length = CoordinatedXyPerformanceReport::buildMetrics(
-                                metrics,
-                                sizeof(metrics),
-                                rateHz,
-                                aggregate,
-                                xDrift,
-                                yDrift);
-                          }
-                          const size_t nameLength =
-                              std::min(std::strlen(test.name),
-                                       DiagnosticResultEmitter::kMaxResultNameBytes);
-                          const size_t metricBudget =
-                              DiagnosticResultEmitter::kResultMetricsFrameBudget -
-                              nameLength;
-                          const bool aggregatePass =
-                              CoordinatedXyPerformanceReport::aggregatePasses(
-                                  aggregate,
-                                  expectedMoves,
-                                  expectedX,
-                                  expectedY,
-                                  expectedMaster,
-                                  performanceLimits);
-                          const bool metricsFit = length > 0u && length <= metricBudget;
-                          comm->setStatusPaused(true);
-                          (void)runOne(test.id,
-                                       test.name,
-                                       aggregatePass && extraPass && metricsFit,
-                                       metricsFit ? metrics
-                                                  : "gate=metrics_overflow;to=1");
-                          return aggregatePass && extraPass && metricsFit;
-                        };
-
-                        auto runFocusedXDirectionQualification = [&]() {
-                          struct FocusCase {
-                            uint32_t rateHz;
-                            uint32_t acceleration;
-                            int32_t awayPosition;
-                          };
-                          static constexpr FocusCase kFocusCases[] = {
-                              {30000u, kFocusedNormalAcceleration,
-                               kFocusedAwayPosition},
-                              {35000u, kFocusedNormalAcceleration,
-                               kFocusedAwayPosition},
-                              {40000u, kFocusedReducedAcceleration,
-                               kFocusedReducedAwayPosition},
-                              {40000u, kFocusedNormalAcceleration,
-                               kFocusedAwayPosition},
-                          };
-                          const Point homePoint{
-                              kFocusedHomePosition, kFocusedHomePosition};
-                          uint32_t directionalDrift[8] = {
-                              std::numeric_limits<uint32_t>::max(),
-                              std::numeric_limits<uint32_t>::max(),
-                              std::numeric_limits<uint32_t>::max(),
-                              std::numeric_limits<uint32_t>::max(),
-                              std::numeric_limits<uint32_t>::max(),
-                              std::numeric_limits<uint32_t>::max(),
-                              std::numeric_limits<uint32_t>::max(),
-                              std::numeric_limits<uint32_t>::max(),
-                          };
+                        if (runCoordinatedXyTransitionSuite) {
+                          const Pair cameraPair = kGeometryPairs[4];
                           Aggregate aggregate{};
-                          bool passed = true;
-                          uint32_t failedCase = std::numeric_limits<uint32_t>::max();
-                          uint32_t failedDirection = 0u;
                           uint32_t failureStage = 0u;
-                          uint32_t moveFailureMask = 0u;
-                          lastXHome = BoundedHomeResult{};
-                          lastYHome = BoundedHomeResult{};
-
-                          for (uint32_t caseIndex = 0u;
-                               caseIndex < 4u && passed;
-                               ++caseIndex) {
-                              const FocusCase& focus = kFocusCases[caseIndex];
-                              const Point awayPoint{
-                                  focus.awayPosition, kFocusedHomePosition};
-                            for (uint32_t direction = 0u;
-                                 direction < 2u && passed;
-                                 ++direction) {
-                              const bool positive = direction == 0u;
-                              const Point start = positive ? homePoint : awayPoint;
-                              const Point target = positive ? awayPoint : homePoint;
-
-                              // All positioning legs use the already qualified
-                              // 5 kHz path. Only the measured leg uses the
-                              // case's rate, acceleration, and distance. The
-                              // reduced-acceleration case is 24,000 steps so it
-                              // reaches a real 40 kHz cruise section.
-                              stepperX->setMaxSpeedHz(5000u);
-                              stepperY->setMaxSpeedHz(5000u);
-                              stepperX->setAccelStepsPerSec2(
-                                  static_cast<float>(kFocusedNormalAcceleration));
-                              stepperY->setAccelStepsPerSec2(
-                                  static_cast<float>(kFocusedNormalAcceleration));
-                              passed = positionTo(start);
-                              if (!passed) failureStage = 1u;
-                              stepperX->setMaxSpeedHz(focus.rateHz);
-                              stepperY->setMaxSpeedHz(focus.rateHz);
-                              stepperX->setAccelStepsPerSec2(
-                                  static_cast<float>(focus.acceleration));
-                              stepperY->setAccelStepsPerSec2(
-                                  static_cast<float>(focus.acceleration));
-
-                              MoveResult measured{};
-                              if (passed) {
-                                measured = observeCompletedMove(
-                                    start,
-                                    target,
-                                    focus.rateHz,
-                                    false,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr);
-                                CoordinatedXyPerformanceReport::addMove(
-                                    aggregate,
-                                    measured.observation,
-                                    performanceLimits);
-                                passed = measured.passed;
-                                if (!passed) {
-                                  failureStage = 2u;
-                                  moveFailureMask =
-                                      CoordinatedXyPerformanceReport::moveFailureMask(
-                                          measured.observation,
-                                          performanceLimits);
-                                }
-                              }
-
-                              MotionQualificationMath::AxisHomeSample home{};
-                              if (passed) {
-                                sendProgressStage(
-                                    positive
-                                        ? "coordinated_xy_performance_x_positive_home"
-                                        : "coordinated_xy_performance_x_negative_home");
-                                lastXHome = runBoundedAxisHome(
-                                    stepperX,
-                                    BIT_HOME_X_DONE,
-                                    home,
-                                    kXEnvelopeMaximumSteps,
-                                    true);
-                                const uint32_t driftIndex =
-                                    caseIndex * 2u + direction;
-                                directionalDrift[driftIndex] = lastXHome.passed
-                                    ? MotionQualificationMath::absDiffSteps(
-                                          home.limitTriggerSteps, 0)
-                                    : std::numeric_limits<uint32_t>::max();
-                                passed = lastXHome.passed &&
-                                    directionalDrift[driftIndex] <=
-                                        kHomeDriftLimitSteps;
-                                if (!passed) failureStage = 3u;
-                              }
-                              if (!passed) {
-                                failedCase = caseIndex;
-                                failedDirection = direction + 1u;
-                              }
-                            }
-                          }
-
-                          const bool aggregatePass =
-                              CoordinatedXyPerformanceReport::aggregatePasses(
-                                  aggregate,
-                                  8u,
-                                  168000u,
-                                  0u,
-                                  168000u,
-                                  performanceLimits);
-                          passed = passed && aggregatePass;
-                          if (!passed && failureStage == 0u) failureStage = 4u;
-                          uint32_t activeMax = 0u;
-                          for (uint8_t phase = 0u; phase < 3u; ++phase) {
-                            if (aggregate.phaseMaxCycles[phase] > activeMax) {
-                              activeMax = aggregate.phaseMaxCycles[phase];
-                            }
-                          }
-                          char metrics[224] = {};
-                          int written = 0;
-                          if (passed) {
-                            written = snprintf(
-                                metrics,
-                                sizeof(metrics),
-                                "n=%lu;xe=%lu;ye=%lu;ms=%lu;i2=%lu;i7=%lu;ok=1;"
-                                "pu=%lu;am=%lu;tm=%lu;p30=%lu;n30=%lu;p35=%lu;"
-                                "n35=%lu;p4l=%lu;n4l=%lu;p40=%lu;n40=%lu;"
-                                "an=%lu;al=%lu;to=0",
-                                (unsigned long)aggregate.moveCount,
-                                (unsigned long)aggregate.emittedXSteps,
-                                (unsigned long)aggregate.emittedYSteps,
-                                (unsigned long)aggregate.masterSteps,
-                                (unsigned long)aggregate.timer2Callbacks,
-                                (unsigned long)aggregate.timer7Callbacks,
-                                (unsigned long)aggregate.pendingObservations,
-                                (unsigned long)activeMax,
-                                (unsigned long)aggregate.terminalMaxCycles,
-                                (unsigned long)directionalDrift[0],
-                                (unsigned long)directionalDrift[1],
-                                (unsigned long)directionalDrift[2],
-                                (unsigned long)directionalDrift[3],
-                                (unsigned long)directionalDrift[4],
-                                (unsigned long)directionalDrift[5],
-                                (unsigned long)directionalDrift[6],
-                                (unsigned long)directionalDrift[7],
-                                (unsigned long)kFocusedNormalAcceleration,
-                                (unsigned long)kFocusedReducedAcceleration);
-                          } else if (failureStage == 3u) {
-                            written = snprintf(
-                                metrics,
-                                sizeof(metrics),
-                                "case=%lu;dir=%lu;n=%lu;xe=%lu;ms=%lu;i2=%lu;"
-                                "hs=%ld;he=%ld;hg=%lu;hc=%lu;ha=%lu;hp=%u;ho=%u;"
-                                "hl=%u;ht=%u;pu=%lu;to=1",
-                                (unsigned long)failedCase,
-                                (unsigned long)failedDirection,
-                                (unsigned long)aggregate.moveCount,
-                                (unsigned long)aggregate.emittedXSteps,
-                                (unsigned long)aggregate.masterSteps,
-                                (unsigned long)aggregate.timer2Callbacks,
-                                (long)lastXHome.snapshot.startPositionSteps,
-                                (long)lastXHome.snapshot.endPositionSteps,
-                                (unsigned long)lastXHome.guardSteps,
-                                (unsigned long)lastXHome.snapshot.coarseCommandSteps,
-                                (unsigned long)lastXHome.snapshot.coarseAccountedSteps,
-                                static_cast<unsigned>(lastXHome.snapshot.phase),
-                                static_cast<unsigned>(lastXHome.snapshot.outcome),
-                                lastXHome.snapshot.limitSeen ? 1u : 0u,
-                                lastXHome.outerTimedOut ? 1u : 0u,
-                                (unsigned long)aggregate.pendingObservations);
-                          } else {
-                            written = snprintf(
-                                metrics,
-                                sizeof(metrics),
-                                "case=%lu;dir=%lu;fs=%lu;fm=%lu;n=%lu;xe=%lu;"
-                                "ms=%lu;i2=%lu;pu=%lu;ps=%lu;am=%lu;tm=%lu;"
-                                "de=%lu;sg=%lu;wd=%lu;sa=%lu;wl=%lu;cw=%lu;"
-                                "sf=%lu;to=1",
-                                (unsigned long)failedCase,
-                                (unsigned long)failedDirection,
-                                (unsigned long)failureStage,
-                                (unsigned long)moveFailureMask,
-                                (unsigned long)aggregate.moveCount,
-                                (unsigned long)aggregate.emittedXSteps,
-                                (unsigned long)aggregate.masterSteps,
-                                (unsigned long)aggregate.timer2Callbacks,
-                                (unsigned long)aggregate.pendingObservations,
-                                (unsigned long)aggregate.maxPendingStreak,
-                                (unsigned long)activeMax,
-                                (unsigned long)aggregate.terminalMaxCycles,
-                                (unsigned long)aggregate.durationErrorMaxBasisPoints,
-                                (unsigned long)aggregate.statusPeriodMaxMs,
-                                (unsigned long)aggregate.statusWatchdogAgeMaxMs,
-                                (unsigned long)aggregate.statusAlternationErrors,
-                                (unsigned long)aggregate.watchdogLateCount,
-                                (unsigned long)aggregate.cycleWraps,
-                                (unsigned long)aggregate.saturationFlags);
-                          }
-                          restoreXyRates();
-                          const size_t nameLength = std::min(
-                              std::strlen("coord_xy_perf_x_direction"),
-                              DiagnosticResultEmitter::kMaxResultNameBytes);
-                          const size_t metricBudget =
-                              DiagnosticResultEmitter::kResultMetricsFrameBudget -
-                              nameLength;
-                          const bool metricsFit = written > 0 &&
-                              static_cast<size_t>(written) < sizeof(metrics) &&
-                              static_cast<size_t>(written) <= metricBudget;
-                          comm->setStatusPaused(true);
-                          (void)runOne(2070u,
-                                       "coord_xy_perf_x_direction",
-                                       passed && metricsFit,
-                                       metricsFit ? metrics
-                                                  : "gate=metrics_overflow;to=1");
-                          focusedDirectionResultEmitted = true;
-                          return passed && metricsFit;
-                        };
-
-                        auto runCameraHomeTransitionQualification = [&]() {
-                          static constexpr Pair kCameraPair = {
-                              {8916, 30500}, {500, 500}};
-                          Aggregate aggregate{};
-                          bool passed = true;
-                          uint32_t failureStage = 0u;
-
-                          // Keep setup motion on the already-qualified 5 kHz
-                          // path. Only the camera-ratio round trip is measured
-                          // at 40 kHz, followed immediately by legacy X home.
                           stepperX->setMaxSpeedHz(5000u);
                           stepperY->setMaxSpeedHz(5000u);
-                          stepperX->setAccelStepsPerSec2(savedXAcceleration);
-                          stepperY->setAccelStepsPerSec2(savedYAcceleration);
-                          passed = positionTo(kCameraPair.start);
+                          bool passed = positionTo(cameraPair.start);
                           if (!passed) failureStage = 1u;
-
-                          stepperX->setMaxSpeedHz(40000u);
-                          stepperY->setMaxSpeedHz(40000u);
-                          if (passed) {
-                            passed = addPair(aggregate, kCameraPair, 40000u);
-                            if (!passed) failureStage = 2u;
+                          stepperX->setMaxSpeedHz(kLogicalRateHz);
+                          stepperY->setMaxSpeedHz(kLogicalRateHz);
+                          if (passed && !addPair(aggregate, cameraPair)) {
+                            passed = false;
+                            failureStage = 2u;
                           }
-
-                          const CoordinatedXySnapshot transitionSnapshot =
+                          const CoordinatedXySnapshot transition =
                               gantry->coordinatedSnapshot();
-                          const bool enablesAsserted =
-                              stepperX->enableOutputsAssertedForDiagnostics();
+                          const bool limitBefore =
+                              stepperX->isLimitAssertedForDiagnostics();
                           const bool transitionSafe = passed &&
-                              transitionSnapshot.xStepLow &&
-                              transitionSnapshot.yStepLow &&
-                              !transitionSnapshot.timerOwned &&
-                              transitionSnapshot.pendingUpdateCount == 0u &&
-                              transitionSnapshot.timer7Interrupts == 0u &&
-                              stepperX->getPosition() == kCameraPair.start.x &&
-                              stepperY->getPosition() == kCameraPair.start.y;
-                          if (passed && (!transitionSafe || !enablesAsserted)) {
+                              transition.xStepLow && transition.yStepLow &&
+                              !transition.timerOwned &&
+                              transition.pendingUpdateCount == 0u &&
+                              transition.timer7Interrupts == 0u &&
+                              stepperX->getPosition() == cameraPair.start.x &&
+                              stepperY->getPosition() == cameraPair.start.y &&
+                              stepperX->enableOutputsAssertedForDiagnostics();
+                          if (!transitionSafe && failureStage == 0u) {
                             passed = false;
                             failureStage = 3u;
                           }
-
-                          const bool limitBefore =
-                              stepperX->isLimitAssertedForDiagnostics();
                           MotionQualificationMath::AxisHomeSample home{};
-                          if (failureStage == 0u) {
+                          if (passed) {
                             sendProgressStage(
                                 "coordinated_xy_camera_transition_x_home");
-                            lastXHome = runBoundedAxisHome(
-                                stepperX,
-                                BIT_HOME_X_DONE,
-                                home,
-                                kXEnvelopeMaximumSteps,
-                                true);
+                            lastXHome = runBoundedHome(stepperX,
+                                                       BIT_HOME_X_DONE,
+                                                       home,
+                                                       kXEnvelopeMaximumSteps,
+                                                       true);
                             passed = lastXHome.passed;
                             if (!passed) failureStage = 4u;
                           }
-
                           const StepperIsrInstrumentation::Snapshot homeIsr =
                               stepperX->getLastMoveInstrumentationSnapshot();
                           const bool limitAfter =
                               stepperX->isLimitAssertedForDiagnostics();
-                          const bool enablesAfter =
-                              stepperX->enableOutputsAssertedForDiagnostics();
                           const uint32_t homeDrift = passed
                               ? MotionQualificationMath::absDiffSteps(
                                     home.limitTriggerSteps, 0)
                               : std::numeric_limits<uint32_t>::max();
                           const bool aggregatePass =
                               CoordinatedXyPerformanceReport::aggregatePasses(
-                                  aggregate,
-                                  2u,
-                                  16832u,
-                                  60000u,
-                                  60000u,
-                                  performanceLimits);
-                          const bool homeEvidence = passed &&
-                              aggregatePass && !limitBefore && !limitAfter &&
-                              enablesAfter && homeDrift <= kHomeDriftLimitSteps &&
+                                  aggregate, 2u, 8416u, 30000u, 30000u, limits);
+                          const bool homeEvidence = passed && aggregatePass &&
+                              !limitBefore && !limitAfter &&
+                              stepperX->enableOutputsAssertedForDiagnostics() &&
+                              homeDrift <= kHomeDriftLimitSteps &&
                               lastXHome.snapshot.phase ==
                                   Stepper::HomeDiagnosticSnapshot::Phase::FinalBackoff &&
                               lastXHome.snapshot.outcome ==
                                   HomeInterruptionPolicy::Outcome::Succeeded &&
                               lastXHome.snapshot.limitSeen &&
                               lastXHome.snapshot.endPositionSteps ==
-                                  static_cast<int32_t>(kExpectedBackoffPosition) &&
+                                  static_cast<int32_t>(kExpectedHomePosition) &&
                               homeIsr.valid && !homeIsr.active && !homeIsr.aborted &&
-                              homeIsr.totalEntries > 0u &&
-                              homeIsr.completedPulses == 100u &&
+                              homeIsr.totalEntries == 101u &&
+                              homeIsr.completedPulses == 50u &&
                               homeIsr.pendingObservations == 0u;
-                          if (!homeEvidence && failureStage == 0u) {
-                            failureStage = 5u;
-                          }
-
-                          uint32_t activeMax = 0u;
-                          for (uint8_t phase = 0u; phase < 3u; ++phase) {
-                            if (aggregate.phaseMaxCycles[phase] > activeMax) {
-                              activeMax = aggregate.phaseMaxCycles[phase];
-                            }
-                          }
+                          if (!homeEvidence && failureStage == 0u) failureStage = 5u;
                           char metrics[224] = {};
                           const int written = snprintf(
                               metrics,
                               sizeof(metrics),
-                              "fs=%lu;n=%lu;xe=%lu;ye=%lu;i2=%lu;i7=%lu;"
-                              "pu=%lu;am=%lu;tm=%lu;en=%u;sl=%u;ow=%u;lb=%u;"
-                              "hs=%ld;he=%ld;hg=%lu;hc=%lu;ha=%lu;hp=%u;ho=%u;"
-                              "hl=%u;la=%u;hi=%lu;hpc=%lu;hpu=%lu;hd=%lu;to=%u",
+                              "fs=%lu;n=%lu;xe=%lu;ye=%lu;i2=%lu;i7=%lu;pu=%lu;"
+                              "en=%u;sl=%u;ow=%u;lb=%u;hs=%ld;he=%ld;hg=%lu;"
+                              "hi=%lu;hpc=%lu;hpu=%lu;hd=%lu;sf=%lu;to=%u",
                               (unsigned long)failureStage,
                               (unsigned long)aggregate.moveCount,
                               (unsigned long)aggregate.emittedXSteps,
@@ -5596,1008 +3166,218 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               (unsigned long)aggregate.timer2Callbacks,
                               (unsigned long)aggregate.timer7Callbacks,
                               (unsigned long)aggregate.pendingObservations,
-                              (unsigned long)activeMax,
-                              (unsigned long)aggregate.terminalMaxCycles,
-                              (enablesAsserted && enablesAfter) ? 1u : 0u,
-                              (transitionSnapshot.xStepLow &&
-                               transitionSnapshot.yStepLow) ? 1u : 0u,
-                              transitionSnapshot.timerOwned ? 1u : 0u,
+                              transitionSafe ? 1u : 0u,
+                              (transition.xStepLow && transition.yStepLow) ? 1u : 0u,
+                              transition.timerOwned ? 1u : 0u,
                               limitBefore ? 1u : 0u,
                               (long)lastXHome.snapshot.startPositionSteps,
                               (long)lastXHome.snapshot.endPositionSteps,
                               (unsigned long)lastXHome.guardSteps,
-                              (unsigned long)lastXHome.snapshot.coarseCommandSteps,
-                              (unsigned long)lastXHome.snapshot.coarseAccountedSteps,
-                              static_cast<unsigned>(lastXHome.snapshot.phase),
-                              static_cast<unsigned>(lastXHome.snapshot.outcome),
-                              lastXHome.snapshot.limitSeen ? 1u : 0u,
-                              limitAfter ? 1u : 0u,
                               (unsigned long)homeIsr.totalEntries,
                               (unsigned long)homeIsr.completedPulses,
                               (unsigned long)homeIsr.pendingObservations,
                               (unsigned long)homeDrift,
+                              (unsigned long)aggregate.saturationFlags,
                               homeEvidence ? 0u : 1u);
-                          restoreXyRates();
-                          const size_t nameLength = std::min(
-                              std::strlen("coord_xy_camera_home_transition"),
-                              DiagnosticResultEmitter::kMaxResultNameBytes);
-                          const size_t metricBudget =
+                          const size_t budget =
                               DiagnosticResultEmitter::kResultMetricsFrameBudget -
-                              nameLength;
+                              std::min(std::strlen(
+                                           "coord_xy_camera_home_transition"),
+                                       DiagnosticResultEmitter::kMaxResultNameBytes);
                           const bool metricsFit = written > 0 &&
                               static_cast<size_t>(written) < sizeof(metrics) &&
-                              static_cast<size_t>(written) <= metricBudget;
-                          const bool resultPass = homeEvidence && metricsFit;
+                              static_cast<size_t>(written) <= budget;
                           comm->setStatusPaused(true);
                           (void)runOne(2071u,
                                        "coord_xy_camera_home_transition",
-                                       resultPass,
-                                       metricsFit ? metrics
-                                                  : "gate=metrics_overflow;to=1");
-                          transitionResultEmitted = true;
-                          return resultPass;
-                        };
-
-                        auto emitIrqPathEvidence = [&](const Aggregate& aggregate,
-                                                       uint16_t testId,
-                                                       const char* name,
-                                                       bool requireNoPending) {
-                          char metrics[192] = {};
-                          const int written = snprintf(
-                              metrics,
-                              sizeof(metrics),
-                              "i2=%lu;s=%lu;mi=%lu;ph=%lu;pa=%lu;fm=%lu;fa=%lu;"
-                              "ax=%lu;tf=%lu;pp=%lu;pf=%lu;pu=%lu;ps=%lu;sf=%lu;to=0",
-                              (unsigned long)aggregate.timer2Callbacks,
-                              (unsigned long)aggregate.irqPathSamples,
-                              (unsigned long)aggregate.irqPathMissing,
-                              (unsigned long)aggregate.preHandlerMaxCycles,
-                              (unsigned long)CoordinatedXyPerformanceReport::preHandlerMeanCycles(aggregate),
-                              (unsigned long)aggregate.fullIrqMaxCycles,
-                              (unsigned long)CoordinatedXyPerformanceReport::fullIrqMeanCycles(aggregate),
-                              (unsigned long)aggregate.activeFullIrqMaxCycles,
-                              (unsigned long)aggregate.terminalFullIrqMaxCycles,
-                              (unsigned long)aggregate.pendingPreHandlerMaxCycles,
-                              (unsigned long)aggregate.pendingFullIrqMaxCycles,
-                              (unsigned long)aggregate.pendingObservations,
-                              (unsigned long)aggregate.maxPendingStreak,
-                              (unsigned long)aggregate.saturationFlags);
-                          const bool evidenceComplete =
-                              aggregate.timer2Callbacks > 0u &&
-                              aggregate.irqPathSamples == aggregate.timer2Callbacks &&
-                              aggregate.irqPathMissing == 0u &&
-                              aggregate.preHandlerMaxCycles > 0u &&
-                              aggregate.fullIrqMaxCycles > 0u &&
-                              aggregate.activeFullIrqMaxCycles > 0u &&
-                              aggregate.terminalFullIrqMaxCycles > 0u &&
-                              (!requireNoPending ||
-                               (aggregate.pendingObservations == 0u &&
-                                aggregate.maxPendingStreak == 0u)) &&
-                              aggregate.saturationFlags == 0u;
-                          const size_t nameLength = std::min(
-                              std::strlen(name),
-                              DiagnosticResultEmitter::kMaxResultNameBytes);
-                          const size_t metricBudget =
-                              DiagnosticResultEmitter::kResultMetricsFrameBudget -
-                              nameLength;
-                          const bool metricsFit = written > 0 &&
-                              static_cast<size_t>(written) < sizeof(metrics) &&
-                              static_cast<size_t>(written) <= metricBudget;
-                          (void)runOne(testId,
-                                       name,
-                                       evidenceComplete && metricsFit,
-                                       metricsFit ? metrics
-                                                  : "gate=metrics_overflow;to=1");
-                          return evidenceComplete && metricsFit;
-                        };
-
-                        auto emitEntryLatenessEvidence =
-                            [&](const Aggregate& aggregate,
-                                uint16_t testId,
-                                const char* name,
-                                bool requireDeadlineMargin) {
-                          char metrics[224] = {};
-                          const unsigned statusSyncMode = static_cast<unsigned>(
-                              Comm::getStatusMetricsSyncMode());
-                          const uint32_t lockFailures =
-                              Comm::getStatusMetricsLockFailureCount();
-                          int written = 0;
-                          if (requireDeadlineMargin) {
-                            written = snprintf(
-                                metrics,
-                                sizeof(metrics),
-                                "i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"
-                                "lc=%lu;dm=%lu;ds=%lu;di=%lu;md=%lu;sl=%lu;"
-                                "rm=%u;dc=%lu;ci=%lu;ns=%lu;rc=%lu;rp=%lu;rd=%lu;sm=%u;lf=%lu;"
-                                "sf=%lu;to=%lu;fv=%u;tr=%u;"
-                                "la=%lu;ra=%lu;hm=%lu",
-                                (unsigned long)aggregate.timer2Callbacks,
-                                (unsigned long)aggregate.entryTimerSamples,
-                                (unsigned long)aggregate.entryTimerMissing,
-                                (unsigned long)aggregate.entryTimerCountMax,
-                                (unsigned long)CoordinatedXyPerformanceReport::entryTimerMeanTicks(aggregate),
-                                (unsigned long)aggregate.pendingEntryTimerCountMax,
-                                (unsigned long)aggregate.lateEntryCount,
-                                (unsigned long)aggregate.entryScheduleOverrunMaxCycles,
-                                (unsigned long)aggregate.deadlineSamples,
-                                (unsigned long)aggregate.deadlineMissing,
-                                (unsigned long)aggregate.deadlineMisses,
-                                (unsigned long)aggregate.deadlineSlackMinTicks,
-                                static_cast<unsigned>(
-                                    aggregate.timerScheduleMode),
-                                (unsigned long)
-                                    aggregate.conditionalDecisionCount,
-                                (unsigned long)
-                                    aggregate.conditionalDecisionMissingCount,
-                                (unsigned long)
-                                    aggregate.conditionalNonRearmSlackMinTicks,
-                                (unsigned long)aggregate.timerRearmCount,
-                                (unsigned long)aggregate.timerRearmPendingCount,
-                                (unsigned long)aggregate.timerRearmDelayMaxCycles,
-                                statusSyncMode,
-                                (unsigned long)lockFailures,
-                                (unsigned long)aggregate.saturationFlags,
-                                (unsigned long)aggregate.timeoutCount,
-                                firstMoveFailure.valid ? 1u : 0u,
-                                static_cast<unsigned>(
-                                    firstMoveFailure.terminalReason),
-                                (unsigned long)
-                                    firstMoveFailure.limitAbortRequestCount,
-                                (unsigned long)firstMoveFailure.rawLimitAbortCount,
-                                (unsigned long)firstMoveFailure.failureMask);
-                          } else {
-                            written = snprintf(
-                                metrics,
-                                sizeof(metrics),
-                                "i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"
-                                "lc=%lu;dm=%lu;sm=%u;lf=%lu;sf=%lu;to=%lu;"
-                                "fv=%u;tr=%u;la=%lu;ra=%lu",
-                                (unsigned long)aggregate.timer2Callbacks,
-                                (unsigned long)aggregate.entryTimerSamples,
-                                (unsigned long)aggregate.entryTimerMissing,
-                                (unsigned long)aggregate.entryTimerCountMax,
-                                (unsigned long)CoordinatedXyPerformanceReport::entryTimerMeanTicks(aggregate),
-                                (unsigned long)aggregate.pendingEntryTimerCountMax,
-                                (unsigned long)aggregate.lateEntryCount,
-                                (unsigned long)aggregate.entryScheduleOverrunMaxCycles,
-                                statusSyncMode,
-                                (unsigned long)lockFailures,
-                                (unsigned long)aggregate.saturationFlags,
-                                (unsigned long)aggregate.timeoutCount,
-                                firstMoveFailure.valid ? 1u : 0u,
-                                static_cast<unsigned>(
-                                    firstMoveFailure.terminalReason),
-                                (unsigned long)
-                                    firstMoveFailure.limitAbortRequestCount,
-                                (unsigned long)firstMoveFailure.rawLimitAbortCount);
-                          }
-                          const bool rearmSchedule =
-                              aggregate.timerScheduleMode ==
-                                  CoordinatedXyTimerSchedulePolicy::Mode::
-                                      RearmFromActualEdge;
-                          const bool conditionalSchedule =
-                              aggregate.timerScheduleMode ==
-                                  CoordinatedXyTimerSchedulePolicy::Mode::
-                                      ConditionalLateRearm;
-                          const bool scheduleEvidenceComplete = rearmSchedule
-                              ? (aggregate.interruptsPerMasterStep == 2u &&
-                                 aggregate.timer2Callbacks >=
-                                     aggregate.moveCount &&
-                                 aggregate.timerRearmCount ==
-                                     (aggregate.timer2Callbacks -
-                                      aggregate.moveCount) &&
-                                 aggregate.timerRearmPendingCount == 0u &&
-                                 aggregate.timerRearmDelayMaxCycles > 0u)
-                              : conditionalSchedule
-                              ? (aggregate.interruptsPerMasterStep == 2u &&
-                                 aggregate.timer2Callbacks >=
-                                     aggregate.moveCount &&
-                                 aggregate.conditionalDecisionCount ==
-                                     (aggregate.timer2Callbacks -
-                                      aggregate.moveCount) &&
-                                 aggregate.conditionalDecisionMissingCount ==
-                                     0u &&
-                                 aggregate.timerRearmPendingCount == 0u &&
-                                 ((aggregate.timerRearmCount == 0u &&
-                                   aggregate.timerRearmDelayMaxCycles == 0u) ||
-                                  (aggregate.timerRearmCount > 0u &&
-                                   aggregate.timerRearmDelayMaxCycles > 0u)) &&
-                                 aggregate.timerScheduleSaturationFlags == 0u)
-                              : (aggregate.timerRearmCount == 0u &&
-                                 aggregate.timerRearmPendingCount == 0u &&
-                                 aggregate.timerRearmDelayMaxCycles == 0u);
-                          const bool evidenceComplete =
-                              aggregate.timer2Callbacks > 0u &&
-                              aggregate.entryTimerSamples ==
-                                  aggregate.timer2Callbacks &&
-                              aggregate.entryTimerMissing == 0u &&
-                              lockFailures == 0u &&
-                              (!requireDeadlineMargin ||
-                               (aggregate.pendingObservations == 0u &&
-                                aggregate.maxPendingStreak == 0u &&
-                                (rearmSchedule || conditionalSchedule ||
-                                  aggregate.lateEntryCount == 0u) &&
-                                aggregate.deadlineSamples ==
-                                    (aggregate.timer2Callbacks -
-                                     aggregate.moveCount) &&
-                                aggregate.deadlineMissing == 0u &&
-                                aggregate.deadlineMisses == 0u &&
-                                aggregate.deadlineSlackMinTicks >= 450u &&
-                                scheduleEvidenceComplete &&
-                                aggregate.exactAndSafe &&
-                                !firstMoveFailure.valid)) &&
-                              aggregate.saturationFlags == 0u &&
-                              aggregate.timeoutCount == 0u;
-                          const size_t nameLength = std::min(
-                              std::strlen(name),
-                              DiagnosticResultEmitter::kMaxResultNameBytes);
-                          const size_t metricBudget =
-                              DiagnosticResultEmitter::kResultMetricsFrameBudget -
-                              nameLength;
-                          const bool metricsFit = written > 0 &&
-                              static_cast<size_t>(written) < sizeof(metrics) &&
-                              static_cast<size_t>(written) <= metricBudget;
-                          (void)runOne(testId,
-                                       name,
-                                       evidenceComplete && metricsFit,
-                                       metricsFit ? metrics
-                                                  : "gate=metrics_overflow;to=1");
-                          return evidenceComplete && metricsFit;
-                        };
-
-                        auto emitConditionalRearmEvidence =
-                            [&](const Aggregate& aggregate) {
-                          char metrics[192] = {};
-                          const int written = snprintf(
-                              metrics,
-                              sizeof(metrics),
-                              "rm=%u;rg=%lu;it=%lu;dc=%lu;mi=%lu;rc=%lu;"
-                              "rp=%lu;rd=%lu;ic=%lu;ix=%lu;ir=%lu;im=%lu;"
-                              "ns=%lu;wm=%lu;sf=%lu;to=%lu",
-                              static_cast<unsigned>(aggregate.timerScheduleMode),
-                              (unsigned long)CoordinatedXyTimerSchedulePolicy::
-                                  kConditionalGuardTicks,
-                              (unsigned long)CoordinatedXyTimerSchedulePolicy::
-                                  kInjectionTargetSlackTicks,
-                              (unsigned long)aggregate.conditionalDecisionCount,
-                              (unsigned long)
-                                  aggregate.conditionalDecisionMissingCount,
-                              (unsigned long)aggregate.timerRearmCount,
-                              (unsigned long)aggregate.timerRearmPendingCount,
-                              (unsigned long)aggregate.timerRearmDelayMaxCycles,
-                              (unsigned long)aggregate.lateInjectionCount,
-                              (unsigned long)aggregate.lateInjectionFailureCount,
-                              (unsigned long)aggregate.lateInjectionRearmCount,
-                              (unsigned long)
-                                  aggregate.lateInjectionDecisionSlackMaxTicks,
-                              (unsigned long)
-                                  aggregate.conditionalNonRearmSlackMinTicks,
-                              (unsigned long)aggregate.lateInjectionWaitMaxCycles,
-                              (unsigned long)aggregate.saturationFlags,
-                              (unsigned long)aggregate.timeoutCount);
-                          static constexpr uint32_t kExpectedDecisions = 219990u;
-                          static constexpr uint32_t kExpectedInjections = 10u;
-                          const bool evidenceComplete =
-                              aggregate.timerScheduleMode ==
-                                  CoordinatedXyTimerSchedulePolicy::Mode::
-                                      ConditionalLateRearm &&
-                              aggregate.conditionalDecisionCount ==
-                                  kExpectedDecisions &&
-                              aggregate.conditionalDecisionMissingCount == 0u &&
-                              aggregate.timerRearmCount >=
-                                  kExpectedInjections &&
-                              aggregate.timerRearmPendingCount == 0u &&
-                              aggregate.timerRearmDelayMaxCycles > 0u &&
-                              aggregate.lateInjectionCount ==
-                                  kExpectedInjections &&
-                              aggregate.lateInjectionFailureCount == 0u &&
-                              aggregate.lateInjectionRearmCount ==
-                                  kExpectedInjections &&
-                              aggregate.lateInjectionDecisionSlackMaxTicks <=
-                                  CoordinatedXyTimerSchedulePolicy::
-                                      kConditionalGuardTicks &&
-                              aggregate.conditionalNonRearmSlackMinTicks >
-                                  CoordinatedXyTimerSchedulePolicy::
-                                      kConditionalGuardTicks &&
-                              aggregate.lateInjectionWaitMaxCycles > 0u &&
-                              aggregate.lateInjectionWaitMaxCycles <=
-                                  CoordinatedXyTimerSchedulePolicy::
-                                      kInjectionMaxCoreCycles &&
-                              aggregate.saturationFlags == 0u &&
-                              aggregate.timeoutCount == 0u &&
-                              aggregate.exactAndSafe &&
-                              !firstMoveFailure.valid;
-                          const size_t nameLength = std::min(
-                              std::strlen("coord_xy_conditional_rearm"),
-                              DiagnosticResultEmitter::kMaxResultNameBytes);
-                          const size_t metricBudget =
-                              DiagnosticResultEmitter::kResultMetricsFrameBudget -
-                              nameLength;
-                          const bool metricsFit = written > 0 &&
-                              static_cast<size_t>(written) < sizeof(metrics) &&
-                              static_cast<size_t>(written) <= metricBudget;
-                          (void)runOne(
-                              2086u,
-                              "coord_xy_conditional_rearm",
-                              evidenceComplete && metricsFit,
-                              metricsFit ? metrics
-                                         : "gate=metrics_overflow;to=1");
-                          return evidenceComplete && metricsFit;
-                        };
-
-                        auto emitCompleteStepEvidence =
-                            [&](const Aggregate& aggregate) {
-                          static constexpr uint32_t kExpectedCallbacks = 220000u;
-                          static constexpr uint32_t kMinimumDeadlineSlackTicks =
-                              500u;
-                          char metrics[224] = {};
-                          const unsigned mode =
-                              static_cast<unsigned>(aggregate.executionMode);
-                          const int written = snprintf(
-                              metrics,
-                              sizeof(metrics),
-                              "em=%u;ip=%lu;i2=%lu;pc=%lu;pn=%lu;px=%lu;"
-                              "pe=%lu;ds=%lu;mi=%lu;md=%lu;sl=%lu;pu=%lu;"
-                              "ok=%u;sf=%lu;to=%lu",
-                              mode,
-                              (unsigned long)aggregate.interruptsPerMasterStep,
-                              (unsigned long)aggregate.timer2Callbacks,
-                              (unsigned long)aggregate.completeStepPulseSamples,
-                              (unsigned long)aggregate.completeStepPulseMinCycles,
-                              (unsigned long)aggregate.completeStepPulseMaxCycles,
-                              (unsigned long)aggregate.minimumPulseCoreCycles,
-                              (unsigned long)aggregate.deadlineSamples,
-                              (unsigned long)aggregate.deadlineMissing,
-                              (unsigned long)aggregate.deadlineMisses,
-                              (unsigned long)aggregate.deadlineSlackMinTicks,
-                              (unsigned long)aggregate.pendingObservations,
-                              aggregate.exactAndSafe ? 1u : 0u,
-                              (unsigned long)aggregate.saturationFlags,
-                              (unsigned long)aggregate.timeoutCount);
-                          const bool evidenceComplete =
-                              aggregate.executionMode ==
-                                  CoordinatedXyExecutor::ExecutionMode::CompleteStep &&
-                              aggregate.interruptsPerMasterStep == 1u &&
-                              aggregate.timer2Callbacks == kExpectedCallbacks &&
-                              aggregate.completeStepPulseSamples ==
-                                  kExpectedCallbacks &&
-                              aggregate.minimumPulseCoreCycles == 360u &&
-                              aggregate.completeStepPulseMinCycles >=
-                                  aggregate.minimumPulseCoreCycles &&
-                              aggregate.deadlineSamples == kExpectedCallbacks &&
-                              aggregate.deadlineMissing == 0u &&
-                              aggregate.deadlineMisses == 0u &&
-                              aggregate.deadlineSlackMinTicks >=
-                                  kMinimumDeadlineSlackTicks &&
-                              aggregate.pendingObservations == 0u &&
-                              aggregate.saturationFlags == 0u &&
-                              aggregate.timeoutCount == 0u &&
-                              aggregate.exactAndSafe;
-                          const size_t nameLength = std::min(
-                              std::strlen("coord_xy_single_irq_pulse"),
-                              DiagnosticResultEmitter::kMaxResultNameBytes);
-                          const size_t metricBudget =
-                              DiagnosticResultEmitter::kResultMetricsFrameBudget -
-                              nameLength;
-                          const bool metricsFit = written > 0 &&
-                              static_cast<size_t>(written) < sizeof(metrics) &&
-                              static_cast<size_t>(written) <= metricBudget;
-                          (void)runOne(2074u,
-                                       "coord_xy_single_irq_pulse",
-                                       evidenceComplete && metricsFit,
-                                       metricsFit ? metrics
-                                                  : "gate=metrics_overflow;to=1");
-                          return evidenceComplete && metricsFit;
-                        };
-
-                        if (runCoordinatedXyTransitionSuite) {
-                          const bool transitionPass =
-                              runCameraHomeTransitionQualification();
-                          if (!transitionPass) {
-                            failRemaining(2072u, "camera_home_transition");
-                          } else {
-                            Gantry::cancelXYZMotors();
-                            closePressurePaths();
-                            restoreXyRates();
-                          }
-                          return finishSelfTestNow();
+                                       homeEvidence && metricsFit,
+                                       metricsFit
+                                           ? metrics
+                                           : "gate=metrics_overflow;sf=1;to=1");
+                          return finish();
                         }
 
-                        if (runCoordinatedXyDirectionSuite) {
-                          const bool focusedPass =
-                              runFocusedXDirectionQualification();
-                          if (!focusedPass) {
-                            failRemaining(2071u, "x_direction");
-                          } else {
-                            Gantry::cancelXYZMotors();
-                            closePressurePaths();
-                            restoreXyRates();
+                        const int32_t pressurePStart = stepperP != nullptr
+                            ? stepperP->getPosition() : 0;
+                        const int32_t pressureRStart = stepperR != nullptr
+                            ? stepperR->getPosition() : 0;
+                        Aggregate aggregate{};
+                        bool rowPassed = true;
+                        for (const Pair& pair : kGeometryPairs) {
+                          if (!addPair(aggregate, pair)) {
+                            rowPassed = false;
+                            break;
                           }
-                          return finishSelfTestNow();
                         }
+                        uint32_t xDrift = std::numeric_limits<uint32_t>::max();
+                        uint32_t yDrift = std::numeric_limits<uint32_t>::max();
+                        if (rowPassed) {
+                          MotionQualificationMath::AxisHomeSample xAfter{};
+                          MotionQualificationMath::AxisHomeSample yAfter{};
+                          rowPassed = runSequentialHome(xAfter, yAfter, true);
+                          if (rowPassed) {
+                            xDrift = MotionQualificationMath::absDiffSteps(
+                                xAfter.limitTriggerSteps, 0);
+                            yDrift = MotionQualificationMath::absDiffSteps(
+                                yAfter.limitTriggerSteps, 0);
+                            rowPassed = xDrift <= kHomeDriftLimitSteps &&
+                                yDrift <= kHomeDriftLimitSteps;
+                          }
+                        }
+                        const bool pressureIsolated =
+                            (stepperP == nullptr ||
+                             (absDiff32(stepperP->getPosition(), pressurePStart) == 0u &&
+                              absDiff32(stepperP->getPosition(), 0) <=
+                                  kPressureGuardAbsSteps &&
+                              absDiff32(stepperP->getPosition(), pressurePStart) <=
+                                  kPressureGuardDeltaSteps)) &&
+                            (stepperR == nullptr ||
+                             (absDiff32(stepperR->getPosition(), pressureRStart) == 0u &&
+                              absDiff32(stepperR->getPosition(), 0) <=
+                                  kPressureGuardAbsSteps &&
+                              absDiff32(stepperR->getPosition(), pressureRStart) <=
+                                  kPressureGuardDeltaSteps));
+                        rowPassed = rowPassed && pressureIsolated;
 
-                        const uint32_t firstTier =
-                            runCoordinatedXyFocusedGeometrySuite ? 4u : 0u;
-                        for (uint32_t tier = firstTier; tier < 5u; ++tier) {
-                          if (tier == 4u &&
-                              !runCoordinatedXyFocusedGeometrySuite &&
-                              !runFocusedXDirectionQualification()) {
-                            failRemaining(2064u, "x_direction");
-                            return finishSelfTestNow();
-                          }
-                          const uint32_t rateHz =
-                              runCoordinatedXyLogicalMres3Suite
-                                  ? 40000u : kRatesHz[tier];
-                          const float rowAccelerationX =
-                              runCoordinatedXyLogicalMres3Suite
-                                  ? 140000.0f : savedXAcceleration;
-                          const float rowAccelerationY =
-                              runCoordinatedXyLogicalMres3Suite
-                                  ? 140000.0f : savedYAcceleration;
-                          stepperX->setMaxSpeedHz(rateHz);
-                          stepperY->setMaxSpeedHz(rateHz);
-                          stepperX->setAccelStepsPerSec2(rowAccelerationX);
-                          stepperY->setAccelStepsPerSec2(rowAccelerationY);
-                          lastXHome = BoundedHomeResult{};
-                          lastYHome = BoundedHomeResult{};
-                          const int32_t pPositionBefore = stepperP != nullptr
-                              ? stepperP->getPosition() : 0;
-                          const int32_t rPositionBefore = stepperR != nullptr
-                              ? stepperR->getPosition() : 0;
-                          Aggregate aggregate{};
-                          bool rowPass = true;
-                          const Pair* geometry = kGeometryPairs;
-                          for (uint32_t pairIndex = 0u; pairIndex < 5u;
-                               ++pairIndex) {
-                            const Pair& pair = geometry[pairIndex];
-                            if (!addPair(aggregate, pair, rateHz)) {
-                              rowPass = false;
-                              break;
-                            }
-                          }
-                          uint32_t xDrift = std::numeric_limits<uint32_t>::max();
-                          uint32_t yDrift = std::numeric_limits<uint32_t>::max();
-                          if (rowPass) {
-                            rowPass = homeAndMeasureDrift(
+                        char motionMetrics[224] = {};
+                        const size_t motionLength =
+                            CoordinatedXyPerformanceReport::buildMetrics(
+                                motionMetrics,
+                                sizeof(motionMetrics),
+                                MotionUnitScale::toNativeRate(kLogicalRateHz),
+                                aggregate,
                                 xDrift,
-                                yDrift,
-                                "coordinated_xy_performance_post_tier_x_home",
-                                "coordinated_xy_performance_post_tier_y_home");
-                            if (!rowPass) {
-                              CoordinatedXyPerformanceReport::captureFirstFailure(
-                                  firstMoveFailure,
-                                  false,
-                                  CoordinatedXyExecutor::TerminalReason::None,
-                                  0u,
-                                  0u,
-                                  CoordinatedXyPerformanceReport::
-                                      kMoveFailureTerminalReason);
-                            }
-                          }
-                          if (runCoordinatedXyLogicalMres3Suite &&
-                              ((stepperP != nullptr &&
-                                stepperP->getPosition() != pPositionBefore) ||
-                               (stepperR != nullptr &&
-                                stepperR->getPosition() != rPositionBefore))) {
-                            rowPass = false;
-                            CoordinatedXyPerformanceReport::captureFirstFailure(
-                                firstMoveFailure,
-                                false,
-                                CoordinatedXyExecutor::TerminalReason::None,
-                                0u,
-                                0u,
-                                CoordinatedXyPerformanceReport::
-                                    kMoveFailureEndpoint);
-                          }
-                          const TestDescriptor focusedTest =
-                              runCoordinatedXyLogicalMres3Suite
-                                  ? TestDescriptor{
-                                        runCoordinatedXyProductionMres3Suite
-                                            ? 2087u : 2080u,
-                                        runCoordinatedXyProductionMres3Suite
-                                            ? "coord_xy_prod_mres3_motion"
-                                            : "coord_xy_mres3_20khz_motion"}
-                                  : kTests[tier];
-                          const uint32_t evidenceRateHz =
-                              runCoordinatedXyLogicalMres3Suite
-                                  ? MotionUnitScale::toNativeRate(rateHz)
-                                  : rateHz;
-                          const bool emitted = emitAggregate(
-                              focusedTest,
-                              evidenceRateHz,
-                              aggregate,
-                              10u,
-                              runCoordinatedXyLogicalMres3Suite ? 53416u : 106832u,
-                              runCoordinatedXyLogicalMres3Suite ? 90000u : 180000u,
-                              runCoordinatedXyLogicalMres3Suite ? 110000u : 220000u,
-                              xDrift,
-                              yDrift,
-                              rowPass);
-                          if (runCoordinatedXyFocusedGeometrySuite) {
-                            (void)emitIrqPathEvidence(
-                                aggregate,
-                                runCoordinatedXyLogicalMres3Suite
-                                    ? (runCoordinatedXyProductionMres3Suite
-                                           ? 2088u : 2081u)
-                                    : 2072u,
-                                runCoordinatedXyLogicalMres3Suite
-                                    ? (runCoordinatedXyProductionMres3Suite
-                                           ? "coord_xy_prod_mres3_irq_path"
-                                           : "coord_xy_mres3_20khz_irq_path")
-                                    : "coord_xy_40khz_irq_path",
-                                runCoordinatedXyLogicalMres3Suite);
-                            (void)emitEntryLatenessEvidence(
-                                aggregate,
-                                runCoordinatedXyLogicalMres3Suite
-                                    ? (runCoordinatedXyProductionMres3Suite
-                                           ? 2089u : 2082u)
-                                    : 2073u,
-                                runCoordinatedXyLogicalMres3Suite
-                                    ? (runCoordinatedXyProductionMres3Suite
-                                           ? "coord_xy_prod_conditional_rearm"
-                                           : "coord_xy_mres3_entry_margin")
-                                    : "coord_xy_40khz_entry_lateness",
-                                runCoordinatedXyLogicalMres3Suite);
-                            if (runCoordinatedXyMres3ConditionalRearmSuite) {
-                              (void)emitConditionalRearmEvidence(aggregate);
-                            }
-                            if (runCoordinatedXySingleIrqSuite) {
-                              (void)emitCompleteStepEvidence(aggregate);
-                            }
-                            if (runCoordinatedXyLogicalMres3Suite) {
-                              (void)emitMres3Configuration();
-                            }
-                          }
-                          if (!emitted) {
-                            if (runCoordinatedXyFocusedGeometrySuite) {
-                              Gantry::cancelXYZMotors();
-                              closePressurePaths();
-                              restoreXyRates();
-                              return finishSelfTestNow();
-                            }
-                            failRemaining(static_cast<uint16_t>(2061u + tier),
-                                          "rate_tier");
-                            return finishSelfTestNow();
-                          }
-                        }
-
-                        if (runCoordinatedXyFocusedGeometrySuite) {
-                          Gantry::cancelXYZMotors();
-                          closePressurePaths();
-                          restoreXyRates();
-                          return finishSelfTestNow();
-                        }
-
-                        stepperX->setMaxSpeedHz(40000u);
-                        stepperY->setMaxSpeedHz(40000u);
-                        Aggregate m1Aggregate{};
-                        static constexpr struct {
-                          Point start;
-                          Point finish;
-                          uint32_t selectedRateHz;
-                        } kM1Moves[] = {
-                            {{2000, 2000}, {12000, 2000}, 40000u},
-                            {{12000, 2000}, {12000, 12000}, 40000u},
-                            {{12000, 12000}, {22000, 22000}, 40000u},
-                            {{8916, 30500}, {500, 500}, 40000u},
-                            {{2000, 2000}, {3000, 2000}, 11832u},
-                        };
-                        bool m1Pass = true;
-                        for (const auto& move : kM1Moves) {
-                          if (!positionTo(move.start)) {
-                            m1Pass = false;
-                            break;
-                          }
-                          MoveResult result = observeCompletedMove(
-                              move.start,
-                              move.finish,
-                              move.selectedRateHz,
-                              false,
-                              nullptr,
-                              nullptr,
-                              nullptr);
-                          CoordinatedXyPerformanceReport::addMove(
-                              m1Aggregate, result.observation, performanceLimits);
-                          if (!result.passed) {
-                            m1Pass = false;
-                            break;
-                          }
-                        }
-                        if (!emitAggregate(kTests[5],
-                                           40000u,
-                                           m1Aggregate,
-                                           5u,
-                                           29416u,
-                                           50000u,
-                                           61000u,
-                                           0u,
-                                           0u,
-                                           m1Pass)) {
-                          failRemaining(2066u, "m1_comparison");
-                          return finishSelfTestNow();
-                        }
-
-                        Aggregate rasterAggregate{};
-                        bool rasterPass = true;
-                        static constexpr Pair kAsymmetricPairs[] = {
-                            {{5000, 5000}, {15000, 25000}},
-                            {{5000, 5000}, {10000, 25000}},
-                            {{5000, 5000}, {25000, 10000}},
-                        };
-                        for (const Pair& pair : kAsymmetricPairs) {
-                          if (!addPair(rasterAggregate, pair, 40000u)) {
-                            rasterPass = false;
-                            break;
-                          }
-                        }
-                        const Point plateStart{43000, 13000};
-                        if (rasterPass) rasterPass = positionTo(plateStart);
-                        if (rasterPass) {
-                          rasterPass = moveAxisToWithTimeout(stepperZ,
-                                                             BIT_STEPPER3_DONE,
-                                                             91500,
-                                                             30000u,
-                                                             kZMoveTimeoutMs);
-                        }
-                        Point rasterCurrent = plateStart;
-                        if (rasterPass) {
-                          sendProgressStage("coordinated_xy_performance_raster");
-                          for (uint32_t row = 0u; row < 16u && rasterPass; ++row) {
-                            const int32_t x = MotionQualificationMath::interpolateEndpoint(
-                                43000, 33000, row, 16u);
-                            for (uint32_t colIndex = 0u;
-                                 colIndex < 24u && rasterPass;
-                                 ++colIndex) {
-                              const uint32_t col = (row & 1u) == 0u
-                                  ? colIndex
-                                  : 23u - colIndex;
-                              const Point target{
-                                  x,
-                                  MotionQualificationMath::interpolateEndpoint(
-                                      13000, 30000, col, 24u)};
-                              if (target.x == rasterCurrent.x &&
-                                  target.y == rasterCurrent.y) continue;
-                              MoveResult move = observeCompletedMove(
-                                  rasterCurrent,
-                                  target,
-                                  0u,
-                                  false,
-                                  nullptr,
-                                  nullptr,
-                                  nullptr);
-                              CoordinatedXyPerformanceReport::addMove(
-                                  rasterAggregate,
-                                  move.observation,
-                                  performanceLimits);
-                              rasterPass = move.passed;
-                              rasterCurrent = target;
-                            }
-                          }
-                        }
-                        if (rasterPass) {
-                          MoveResult returned = observeCompletedMove(
-                              rasterCurrent,
-                              plateStart,
-                              40000u,
-                              false,
-                              nullptr,
-                              nullptr,
-                              nullptr);
-                          CoordinatedXyPerformanceReport::addMove(
-                              rasterAggregate,
-                              returned.observation,
-                              performanceLimits);
-                          rasterPass = returned.passed;
-                        }
-                        MotionQualificationMath::AxisHomeSample zAfterRaster{};
-                        if (!_selfTestAbortRequested &&
-                            !runAxisHomeDiagnosticAttempt(stepperZ,
-                                                          BIT_HOME_Z_DONE,
-                                                          zAfterRaster,
-                                                          kZHomeFastHz,
-                                                          kZHomeSlowHz,
-                                                          kHomeBackoffSteps,
-                                                          kHomeTimeoutMs)) {
-                          rasterPass = false;
-                        }
-                        uint32_t rasterXDrift =
-                            std::numeric_limits<uint32_t>::max();
-                        uint32_t rasterYDrift =
-                            std::numeric_limits<uint32_t>::max();
-                        if (rasterPass) {
-                          rasterPass = homeAndMeasureDrift(
-                              rasterXDrift,
-                              rasterYDrift,
-                              "coordinated_xy_performance_post_raster_x_home",
-                              "coordinated_xy_performance_post_raster_y_home");
-                        }
-                        if (!emitAggregate(kTests[6],
-                                           40000u,
-                                           rasterAggregate,
-                                           390u,
-                                           90000u,
-                                           362000u,
-                                           412000u,
-                                           rasterXDrift,
-                                           rasterYDrift,
-                                           rasterPass)) {
-                          failRemaining(2067u, "raster");
-                          return finishSelfTestNow();
-                        }
-
-                        Aggregate cameraAggregate{};
-                        bool cameraPass = positionTo(kGeometryPairs[4].start);
-                        for (uint32_t cycle = 0u; cycle < 5u && cameraPass; ++cycle) {
-                          cameraPass = addPair(
-                              cameraAggregate, kGeometryPairs[4], 40000u);
-                        }
-                        if (!emitAggregate(kTests[7],
-                                           40000u,
-                                           cameraAggregate,
-                                           10u,
-                                           84160u,
-                                           300000u,
-                                           300000u,
-                                           0u,
-                                           0u,
-                                           cameraPass)) {
-                          failRemaining(2068u, "camera_repeat");
-                          return finishSelfTestNow();
-                        }
-
-                        Aggregate pressureAggregate{};
-                        bool pressurePass = pressureSensor != nullptr &&
-                            pressureSensor->numPorts() > 1u &&
-                            stepperP != nullptr && stepperR != nullptr;
-                        auto homePressureRegulators = [&]() {
-                          closePressurePaths();
-                          xEventGroupClearBits(
-                              _doneEvents, BIT_HOME_P_DONE | BIT_HOME_R_DONE);
-                          startRegHomeAsync(&PressureRegulator::regP(),
-                                            kRegHomeFastHz,
-                                            kRegHomeSlowHz,
-                                            kHomeBackoffSteps,
-                                            BIT_HOME_P_DONE);
-#if (LC_PRESSURE_PORTS > 1)
-                          startRegHomeAsync(&PressureRegulator::regR(),
-                                            kRegHomeFastHz,
-                                            kRegHomeSlowHz,
-                                            kHomeBackoffSteps,
-                                            BIT_HOME_R_DONE);
-#endif
-                          const bool done = waitBitsWithTimeout(
-                              BIT_HOME_P_DONE | BIT_HOME_R_DONE,
-                              kHomeTimeoutMs);
-                          return done && stepperP != nullptr && stepperR != nullptr &&
-                              stepperP->getLastHomeDiagnosticSnapshot().success &&
-                              stepperR->getLastHomeDiagnosticSnapshot().success;
-                        };
-                        if (pressurePass) {
-                          sendProgressStage(
-                              "coordinated_xy_performance_pressure_home");
-                          pressurePass = homePressureRegulators();
-                        }
-                        PressureRegulator& regP = PressureRegulator::regP();
-                        PressureRegulator& regR = PressureRegulator::regR();
-                        PressureWaitResult pOne{};
-                        PressureWaitResult rOne{};
-                        PressureWaitResult pFinal{};
-                        PressureWaitResult rFinal{};
-                        uint32_t rejectStartP = 0u;
-                        uint32_t rejectStartR = 0u;
-                        int32_t pGuardOrigin = 0;
-                        int32_t rGuardOrigin = 0;
-                        bool guardTripped = false;
-                        bool pForwardMoved = false;
-                        bool rForwardMoved = false;
-                        bool pReverseMoved = false;
-                        bool rReverseMoved = false;
-                        bool activeForward = false;
-                        bool activeReverse = false;
-                        bool pTwoAccepted = false;
-                        bool rTwoAccepted = false;
-                        MoveResult pressureForward{};
-                        MoveResult pressureReverse{};
-                        if (pressurePass) {
-                          regP.closeValve();
-                          regR.closeValve();
-                          regP.start();
-                          regR.start();
-                          regP.setTargetSafe(kPressure1Raw);
-                          regR.setTargetSafe(kPressure1Raw);
-                          pOne = waitPressureReady(
-                              regP, 0u, kPressure1Raw, true, kPressureSettleTimeoutMs);
-                          rOne = waitPressureReady(
-                              regR, 1u, kPressure1Raw, true, kPressureSettleTimeoutMs);
-                          pressurePass = pOne.accepted && rOne.accepted &&
-                              regP.getTarget() == kPressure1Raw &&
-                              regR.getTarget() == kPressure1Raw;
-                        }
-                        const Point pressureStart = kGeometryPairs[4].start;
-                        const Point pressureFinish = kGeometryPairs[4].finish;
-                        if (pressurePass) pressurePass = positionTo(pressureStart);
-                        PressureSensor::ControlSample pCounterStart{};
-                        PressureSensor::ControlSample rCounterStart{};
-                        if (pressurePass) {
-                          pCounterStart = pressureSensor->getControlSample(0u);
-                          rCounterStart = pressureSensor->getControlSample(1u);
-                          rejectStartP = pCounterStart.rejectCount;
-                          rejectStartR = rCounterStart.rejectCount;
-                          pGuardOrigin = stepperP->getPosition();
-                          rGuardOrigin = stepperR->getPosition();
-                          regP.setTargetSafe(kPressure2Raw);
-                          regR.setTargetSafe(kPressure2Raw);
-                          pTwoAccepted = regP.getTarget() == kPressure2Raw;
-                          rTwoAccepted = regR.getTarget() == kPressure2Raw;
-                          activeForward = regP.isActive() && regR.isActive();
-                          pressureForward = observeCompletedMove(
-                              pressureStart,
-                              pressureFinish,
-                              40000u,
-                              true,
-                              &pForwardMoved,
-                              &rForwardMoved,
-                              &guardTripped);
-                          const int32_t pNow = stepperP->getPosition();
-                          const int32_t rNow = stepperR->getPosition();
-                          guardTripped =
-                              absDiff32(pNow, 0) > kPressureGuardAbsSteps ||
-                              absDiff32(rNow, 0) > kPressureGuardAbsSteps ||
-                              absDiff32(pNow, pGuardOrigin) > kPressureGuardDeltaSteps ||
-                              absDiff32(rNow, rGuardOrigin) > kPressureGuardDeltaSteps;
-                          pressurePass = pressureForward.passed && activeForward &&
-                              pForwardMoved && rForwardMoved && !guardTripped &&
-                              pTwoAccepted && rTwoAccepted;
-                        }
-                        if (pressurePass) {
-                          pGuardOrigin = stepperP->getPosition();
-                          rGuardOrigin = stepperR->getPosition();
-                          regP.setTargetSafe(kPressure1Raw);
-                          regR.setTargetSafe(kPressure1Raw);
-                          activeReverse = regP.isActive() && regR.isActive();
-                          pressureReverse = observeCompletedMove(
-                              pressureFinish,
-                              pressureStart,
-                              40000u,
-                              true,
-                              &pReverseMoved,
-                              &rReverseMoved,
-                              &guardTripped);
-                          const int32_t pNow = stepperP->getPosition();
-                          const int32_t rNow = stepperR->getPosition();
-                          guardTripped = guardTripped ||
-                              absDiff32(pNow, 0) > kPressureGuardAbsSteps ||
-                              absDiff32(rNow, 0) > kPressureGuardAbsSteps ||
-                              absDiff32(pNow, pGuardOrigin) > kPressureGuardDeltaSteps ||
-                              absDiff32(rNow, rGuardOrigin) > kPressureGuardDeltaSteps;
-                          pressurePass = pressureReverse.passed && activeReverse &&
-                              pReverseMoved && rReverseMoved && !guardTripped;
-                        }
-                        const bool pressureChecksumsMatch =
-                            pressureForward.passed && pressureReverse.passed &&
-                            pressureForward.snapshot.maskChecksum ==
-                                pressureReverse.snapshot.maskChecksum &&
-                            pressureForward.snapshot.arrChecksum ==
-                                pressureReverse.snapshot.arrChecksum;
-                        pressureForward.observation.checksumMatch =
-                            pressureChecksumsMatch;
-                        pressureReverse.observation.checksumMatch =
-                            pressureChecksumsMatch;
-                        CoordinatedXyPerformanceReport::addMove(
-                            pressureAggregate,
-                            pressureForward.observation,
-                            performanceLimits);
-                        CoordinatedXyPerformanceReport::addMove(
-                            pressureAggregate,
-                            pressureReverse.observation,
-                            performanceLimits);
-                        pressurePass = pressurePass && pressureChecksumsMatch;
-                        if (pressurePass) {
-                          pFinal = waitPressureReady(
-                              regP, 0u, kPressure1Raw, false, kPressureSettleTimeoutMs);
-                          rFinal = waitPressureReady(
-                              regR, 1u, kPressure1Raw, false, kPressureSettleTimeoutMs);
-                          pressurePass = pFinal.accepted && rFinal.accepted &&
-                              regP.getTarget() == kPressure1Raw &&
-                              regR.getTarget() == kPressure1Raw;
-                        }
-                        const PressureSensor::ControlSample pCounterEnd =
-                            pressureSensor != nullptr && pressureSensor->numPorts() > 0u
-                            ? pressureSensor->getControlSample(0u)
-                            : PressureSensor::ControlSample{};
-                        const PressureSensor::ControlSample rCounterEnd =
-                            pressureSensor != nullptr && pressureSensor->numPorts() > 1u
-                            ? pressureSensor->getControlSample(1u)
-                            : PressureSensor::ControlSample{};
-                        const uint32_t rejectDeltaP =
-                            pCounterEnd.rejectCount >= rejectStartP
-                            ? pCounterEnd.rejectCount - rejectStartP
-                            : std::numeric_limits<uint32_t>::max();
-                        const uint32_t rejectDeltaR =
-                            rCounterEnd.rejectCount >= rejectStartR
-                            ? rCounterEnd.rejectCount - rejectStartR
-                            : std::numeric_limits<uint32_t>::max();
-                        const bool pressureFault = pressureSensor == nullptr ||
-                            pressureSensor->isSafetyFaultLatched(0u) ||
-                            pressureSensor->isSafetyFaultLatched(1u);
-                        pressurePass = pressurePass && rejectDeltaP == 0u &&
-                            rejectDeltaR == 0u && !pressureFault &&
-                            CoordinatedXyPerformanceReport::aggregatePasses(
-                                pressureAggregate,
-                                2u,
-                                16832u,
-                                60000u,
-                                60000u,
-                                performanceLimits);
-                        closePressurePaths();
-                        uint32_t finalXDrift =
-                            std::numeric_limits<uint32_t>::max();
-                        uint32_t finalYDrift =
-                            std::numeric_limits<uint32_t>::max();
-                        if (pressurePass) {
-                          pressurePass = homeAndMeasureDrift(
-                              finalXDrift,
-                              finalYDrift,
-                              "coordinated_xy_performance_final_x_home",
-                              "coordinated_xy_performance_final_y_home");
-                        }
-                        char pressureMetrics[224] = {};
-                        const int pressureLength = snprintf(
-                            pressureMetrics,
-                            sizeof(pressureMetrics),
-                            "hz=40000;n=%lu;xe=%lu;ye=%lu;ms=%lu;i2=%lu;i7=%lu;pu=%lu;ps=%lu;am=%lu;cm=%lu;dm=%lu;tm=%lu;de=%lu;sg=%lu;wd=%lu;sa=%lu;wl=%lu;cw=%lu;sf=%lu;pa=%u;ra=%u;pm=%u;rm=%u;p2=%u;r2=%u;p1=%u;r1=%u;rej=%lu;flt=%u;g=%u;xd=%lu;yd=%lu;to=%lu",
-                            (unsigned long)pressureAggregate.moveCount,
-                            (unsigned long)pressureAggregate.emittedXSteps,
-                            (unsigned long)pressureAggregate.emittedYSteps,
-                            (unsigned long)pressureAggregate.masterSteps,
-                            (unsigned long)pressureAggregate.timer2Callbacks,
-                            (unsigned long)pressureAggregate.timer7Callbacks,
-                            (unsigned long)pressureAggregate.pendingObservations,
-                            (unsigned long)pressureAggregate.maxPendingStreak,
-                            (unsigned long)pressureAggregate.phaseMaxCycles[0],
-                            (unsigned long)pressureAggregate.phaseMaxCycles[1],
-                            (unsigned long)pressureAggregate.phaseMaxCycles[2],
-                            (unsigned long)pressureAggregate.terminalMaxCycles,
-                            (unsigned long)pressureAggregate.durationErrorMaxBasisPoints,
-                            (unsigned long)pressureAggregate.statusPeriodMaxMs,
-                            (unsigned long)pressureAggregate.statusWatchdogAgeMaxMs,
-                            (unsigned long)pressureAggregate.statusAlternationErrors,
-                            (unsigned long)pressureAggregate.watchdogLateCount,
-                            (unsigned long)pressureAggregate.cycleWraps,
-                            (unsigned long)pressureAggregate.saturationFlags,
-                            activeForward ? 1u : 0u,
-                            activeReverse ? 1u : 0u,
-                            (pForwardMoved && pReverseMoved) ? 1u : 0u,
-                            (rForwardMoved && rReverseMoved) ? 1u : 0u,
-                            pTwoAccepted ? 1u : 0u,
-                            rTwoAccepted ? 1u : 0u,
-                            pFinal.accepted ? 1u : 0u,
-                            rFinal.accepted ? 1u : 0u,
-                            (unsigned long)(rejectDeltaP + rejectDeltaR),
-                            pressureFault ? 1u : 0u,
-                            guardTripped ? 1u : 0u,
-                            (unsigned long)finalXDrift,
-                            (unsigned long)finalYDrift,
-                            (unsigned long)pressureAggregate.timeoutCount);
-                        const size_t pressureBudget =
+                                yDrift);
+                        const size_t motionBudget =
                             DiagnosticResultEmitter::kResultMetricsFrameBudget -
-                            std::min(std::strlen(kTests[8].name),
+                            std::min(std::strlen("coord_xy_prod_mres3_motion"),
                                      DiagnosticResultEmitter::kMaxResultNameBytes);
-                        const bool pressureMetricsFit = pressureLength > 0 &&
-                            static_cast<size_t>(pressureLength) <= pressureBudget;
-                        (void)runOne(kTests[8].id,
-                                     kTests[8].name,
-                                     pressurePass && pressureMetricsFit,
-                                     pressureMetricsFit
-                                         ? pressureMetrics
-                                         : "gate=metrics_overflow;to=1");
-                        restoreXyRates();
-                        closePressurePaths();
-                        return finishSelfTestNow();
-                        };
-                        return runCoordinatedPerformanceDiagnostic();
-                      }
+                        const bool aggregatePassed =
+                            CoordinatedXyPerformanceReport::aggregatePasses(
+                                aggregate,
+                                10u,
+                                53416u,
+                                90000u,
+                                110000u,
+                                limits);
+                        const bool motionMetricsFit = motionLength != 0u &&
+                            motionLength <= motionBudget;
+                        comm->setStatusPaused(true);
+                        (void)runOne(2087u,
+                                     "coord_xy_prod_mres3_motion",
+                                     rowPassed && aggregatePassed && motionMetricsFit,
+                                     motionMetricsFit
+                                         ? motionMetrics
+                                         : "gate=metrics_overflow;sf=1;to=1");
 
+                        char irqMetrics[192] = {};
+                        const int irqWritten = snprintf(
+                            irqMetrics,
+                            sizeof(irqMetrics),
+                            "i2=%lu;s=%lu;mi=%lu;am=%lu;tm=%lu;fm=%lu;pu=%lu;"
+                            "ps=%lu;sf=%lu;to=%lu",
+                            (unsigned long)aggregate.timer2Callbacks,
+                            (unsigned long)aggregate.irqPathSamples,
+                            (unsigned long)aggregate.irqPathMissing,
+                            (unsigned long)aggregate.activeFullIrqMaxCycles,
+                            (unsigned long)aggregate.terminalFullIrqMaxCycles,
+                            (unsigned long)aggregate.fullIrqMaxCycles,
+                            (unsigned long)aggregate.pendingObservations,
+                            (unsigned long)aggregate.maxPendingStreak,
+                            (unsigned long)aggregate.saturationFlags,
+                            (unsigned long)aggregate.timeoutCount);
+                        const bool irqEvidence = aggregate.timer2Callbacks == 220000u &&
+                            aggregate.irqPathSamples == 220000u &&
+                            aggregate.irqPathMissing == 0u &&
+                            aggregate.pendingObservations == 0u &&
+                            aggregate.maxPendingStreak == 0u &&
+                            aggregate.saturationFlags == 0u &&
+                            aggregate.timeoutCount == 0u;
+                        (void)runOne(2088u,
+                                     "coord_xy_prod_mres3_irq_path",
+                                     rowPassed && irqEvidence && irqWritten > 0,
+                                     irqWritten > 0
+                                         ? irqMetrics
+                                         : "gate=metrics_overflow;sf=1;to=1");
+
+                        char scheduleMetrics[224] = {};
+                        const int scheduleWritten = snprintf(
+                            scheduleMetrics,
+                            sizeof(scheduleMetrics),
+                            "i2=%lu;s=%lu;mi=%lu;cm=%lu;pm=%lu;lc=%lu;dm=%lu;"
+                            "ds=%lu;di=%lu;md=%lu;sl=%lu;dc=%lu;ci=%lu;ns=%lu;"
+                            "rc=%lu;rp=%lu;rd=%lu;sf=%lu;to=%lu",
+                            (unsigned long)aggregate.timer2Callbacks,
+                            (unsigned long)aggregate.entryTimerSamples,
+                            (unsigned long)aggregate.entryTimerMissing,
+                            (unsigned long)aggregate.entryTimerCountMax,
+                            (unsigned long)aggregate.pendingEntryTimerCountMax,
+                            (unsigned long)aggregate.lateEntryCount,
+                            (unsigned long)aggregate.entryScheduleOverrunMaxCycles,
+                            (unsigned long)aggregate.deadlineSamples,
+                            (unsigned long)aggregate.deadlineMissing,
+                            (unsigned long)aggregate.deadlineMisses,
+                            (unsigned long)aggregate.deadlineSlackMinTicks,
+                            (unsigned long)aggregate.conditionalDecisionCount,
+                            (unsigned long)aggregate.conditionalDecisionMissingCount,
+                            (unsigned long)aggregate.conditionalNonRearmSlackMinTicks,
+                            (unsigned long)aggregate.timerRearmCount,
+                            (unsigned long)aggregate.timerRearmPendingCount,
+                            (unsigned long)aggregate.timerRearmDelayMaxCycles,
+                            (unsigned long)(aggregate.saturationFlags |
+                                aggregate.timerScheduleSaturationFlags),
+                            (unsigned long)aggregate.timeoutCount);
+                        const bool scheduleEvidence =
+                            aggregate.entryTimerSamples == 220000u &&
+                            aggregate.entryTimerMissing == 0u &&
+                            aggregate.deadlineSamples == 219990u &&
+                            aggregate.deadlineMissing == 0u &&
+                            aggregate.deadlineMisses == 0u &&
+                            aggregate.deadlineSlackMinTicks >= 450u &&
+                            aggregate.conditionalDecisionCount == 219990u &&
+                            aggregate.conditionalDecisionMissingCount == 0u &&
+                            aggregate.conditionalNonRearmSlackMinTicks >
+                                CoordinatedXyTimerSchedulePolicy::kConditionalGuardTicks &&
+                            aggregate.timerRearmPendingCount == 0u &&
+                            aggregate.timerScheduleSaturationFlags == 0u &&
+                            aggregate.saturationFlags == 0u &&
+                            aggregate.timeoutCount == 0u;
+                        (void)runOne(2089u,
+                                     "coord_xy_prod_conditional_rearm",
+                                     rowPassed && scheduleEvidence &&
+                                         scheduleWritten > 0,
+                                     scheduleWritten > 0
+                                         ? scheduleMetrics
+                                         : "gate=metrics_overflow;sf=1;to=1");
+
+                        char configMetrics[160] = {};
+                        const int configWritten = snprintf(
+                            configMetrics,
+                            sizeof(configMetrics),
+                            "mr=%u;mf=%u;dd=%u;gc=%lu;cc=%lu;tx=%lu;tf=%lu;"
+                            "ve=%u;ae=%u;lu=%lu;sf=0;to=0",
+                            static_cast<unsigned>(driver.mres),
+                            driver.multistepFilter ? 1u : 0u,
+                            driver.doubleEdge ? 1u : 0u,
+                            (unsigned long)driver.gconf,
+                            (unsigned long)driver.chopconf,
+                            (unsigned long)driver.successfulWrites,
+                            (unsigned long)driver.failedWrites,
+                            TMC2208Configuration::preservesMres2PhysicalRate(
+                                kLogicalRateHz) ? 1u : 0u,
+                            TMC2208Configuration::preservesMres2PhysicalAcceleration(
+                                kLogicalAcceleration) ? 1u : 0u,
+                            (unsigned long)MotionUnitScale::logicalUnitsPerNativeStep());
+                        (void)runOne(2090u,
+                                     "tmc2208_production_mres3_config",
+                                     configurationValid && configWritten > 0,
+                                     configWritten > 0
+                                         ? configMetrics
+                                         : "gate=metrics_overflow;sf=1;to=1");
+                        return finish();
+                        };
+                        return runProductionCoordinatedDiagnostic();
+                      }
                       if (runDirectXyzLutSuite) {
                         static constexpr uint32_t kRateHz = 40000u;
                         static constexpr uint32_t kMoveTimeoutMs = 20000u;
@@ -6794,8 +3574,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           const Comm::StatusMetricsSnapshot statusMetrics =
                               Comm::getStatusMetricsSnapshot();
                           directStatusEvidenceValid =
-                              directStatusEvidenceValid && statusMetrics.valid &&
-                              statusMetrics.lockFailures == 0u;
+                              directStatusEvidenceValid && statusMetrics.valid;
                           observation.statusPeriodMaxMs = statusMetrics.valid
                               ? statusMetrics.periodMaxMs
                               : std::numeric_limits<uint32_t>::max();
@@ -6957,8 +3736,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const Comm::StatusMetricsSnapshot finalStatusMetrics =
                             Comm::getStatusMetricsSnapshot();
                         directStatusEvidenceValid =
-                            directStatusEvidenceValid && finalStatusMetrics.valid &&
-                            finalStatusMetrics.lockFailures == 0u;
+                            directStatusEvidenceValid && finalStatusMetrics.valid;
                         uint32_t finalStatusAgeMs =
                             std::numeric_limits<uint32_t>::max();
                         if (Watchdog_GetTaskLastSeenAgeMs(
@@ -6996,7 +3774,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const bool isolationPass = preHomesLegacy &&
                             postHomesLegacy && zHomeOk && xyHomeOk &&
                             pDelta == 0 && rDelta == 0 &&
-                            LC_TMC2208_MRES == 3u &&
+                            TMC2208Configuration::kMres == 3u &&
                             driverConfig.doubleEdge &&
                             !driverConfig.multistepFilter &&
                             directStatusPass;
@@ -7011,7 +3789,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<unsigned>(xyHomeOk ? 1u : 0u),
                                  static_cast<long>(pDelta),
                                  static_cast<long>(rDelta),
-                                 static_cast<unsigned>(LC_TMC2208_MRES),
+                                 static_cast<unsigned>(TMC2208Configuration::kMres),
                                  static_cast<unsigned>(driverConfig.doubleEdge ? 1u : 0u),
                                  static_cast<unsigned>(driverConfig.multistepFilter ? 1u : 0u),
                                  static_cast<unsigned long>(directStatusFrames),

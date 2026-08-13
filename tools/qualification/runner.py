@@ -12,7 +12,7 @@ from typing import Callable
 
 from .artifacts import RunArtifacts, create_run_artifacts
 from .identity import DEFAULT_IDENTITY_PATH, load_or_create_identity
-from .manifest import QualificationManifest, load_manifest
+from .manifest import ManifestError, QualificationManifest, load_manifest
 from .report import write_json_atomic, write_qualification_artifacts
 from .gripper_trace_artifacts import (
     GripperTraceArtifacts,
@@ -367,6 +367,10 @@ def run_qualification(
     gripper_control: GripperControl = default_gripper_control,
 ) -> QualificationRunResult:
     manifest = load_manifest(manifest_ref)
+    if raw_report_path is None and manifest.lifecycle != "active":
+        raise ManifestError(
+            f"Qualification manifest '{manifest.manifest_id}' is archived and cannot launch hardware."
+        )
     identity = load_or_create_identity(identity_path, machine_id=machine_id)
     artifacts = create_run_artifacts(identity["machine_id"], output_root=output_root)
     interactions: list[dict] = []

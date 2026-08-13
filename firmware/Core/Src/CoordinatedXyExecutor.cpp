@@ -214,12 +214,10 @@ TickStatus applyDeferredControl(Cursor& cursor, TickResult& result) {
 }  // namespace
 
 ArmStatus arm(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
-              Cursor& cursor,
-              ExecutionMode mode) {
+              Cursor& cursor) {
   if (isActive(cursor)) return ArmStatus::Busy;
 
   cursor = Cursor{};
-  cursor.executionMode = mode;
   const TraceStatus status = CoordinatedXyPlanner::begin(plan, cursor.planner);
   if (status == TraceStatus::Complete &&
       plan.status == CoordinatedXyPlanner::PlanStatus::Immediate) {
@@ -278,8 +276,7 @@ TickStatus onTimerUpdate(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
                          Cursor& cursor,
                          TickResult& result) {
   result = TickResult{};
-  if (cursor.state != State::Running ||
-      cursor.executionMode != ExecutionMode::TwoEdge) {
+  if (cursor.state != State::Running) {
     return result.status;
   }
 
@@ -291,68 +288,10 @@ TickStatus onTimerUpdate(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
 }
 
 LC_COORDINATED_EDGE_OPTIMIZED
-TickStatus prepareCompleteStep(
-    const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
-    Cursor& cursor,
-    TickResult& result) {
-  (void)plan;
-  result = TickResult{};
-  if (cursor.state != State::Running ||
-      cursor.executionMode != ExecutionMode::CompleteStep ||
-      cursor.stepHigh) {
-    return result.status;
-  }
-  ++cursor.timerInterrupts;
-  return raiseCurrentStep(cursor, result);
-}
-
-LC_COORDINATED_EDGE_OPTIMIZED
-TickStatus commitCompleteStep(
-    const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
-    Cursor& cursor,
-    TickResult& result) {
-  result = TickResult{};
-  if (cursor.state != State::Running ||
-      cursor.executionMode != ExecutionMode::CompleteStep ||
-      !cursor.stepHigh) {
-    return result.status;
-  }
-  return completeCurrentStep(plan, cursor, result);
-}
-
-LC_COORDINATED_EDGE_OPTIMIZED
 TickStatus forcePlannerFault(Cursor& cursor, TickResult& result) {
   result = TickResult{};
   setPlannerFault(cursor, result);
   return result.status;
-}
-
-LC_COORDINATED_EDGE_OPTIMIZED
-bool fullPeriodArr(uint32_t plannerHalfPeriodArr,
-                   uint32_t timerMaxArr,
-                   uint32_t& hardwareFullPeriodArr) {
-  const uint64_t fullPeriodTicks =
-      (static_cast<uint64_t>(plannerHalfPeriodArr) + 1u) * 2u;
-  if (fullPeriodTicks == 0u ||
-      fullPeriodTicks > (static_cast<uint64_t>(timerMaxArr) + 1u)) {
-    hardwareFullPeriodArr = 0u;
-    return false;
-  }
-  hardwareFullPeriodArr = static_cast<uint32_t>(fullPeriodTicks - 1u);
-  return true;
-}
-
-uint32_t minimumPulseCoreCycles(uint32_t coreClockHz,
-                                uint32_t minimumPulseNs) {
-  if (coreClockHz == 0u || minimumPulseNs == 0u) return 0u;
-  constexpr uint64_t kNanosecondsPerSecond = 1000000000ULL;
-  const uint64_t numerator =
-      static_cast<uint64_t>(coreClockHz) * minimumPulseNs;
-  const uint64_t cycles =
-      (numerator / kNanosecondsPerSecond) +
-      ((numerator % kNanosecondsPerSecond) != 0u ? 1u : 0u);
-  if (cycles == 0u || cycles > std::numeric_limits<uint32_t>::max()) return 0u;
-  return static_cast<uint32_t>(cycles);
 }
 
 bool isActive(const Cursor& cursor) {

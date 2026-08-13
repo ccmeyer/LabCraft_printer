@@ -2,8 +2,11 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from tools.qualification import cli
 from tools.qualification import runner as qualification_runner
+from tools.qualification.manifest import ManifestError
 from tools.qualification.runner import DEFAULT_MANIFEST_REF, default_gripper_control, run_qualification
 
 
@@ -828,6 +831,37 @@ def test_qualification_can_convert_existing_raw_report_without_invoker(tmp_path)
     assert called is False
     assert result.raw_selftest_path.read_text(encoding="utf-8") == raw_path.read_text(encoding="utf-8")
     assert result.report["schema_version"] == "qualification_report_v1"
+
+
+def test_archived_manifest_refuses_hardware_launch_but_allows_raw_normalization(tmp_path):
+    manifest_path = _manifest_path(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["lifecycle"] = "archived"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    called = False
+
+    def fake_invoker(_invocation):
+        nonlocal called
+        called = True
+        return 99
+
+    common = {
+        "manifest_ref": manifest_path,
+        "machine_id": "LC-0001",
+        "identity_path": tmp_path / "local" / "machine_identity.json",
+        "output_root": tmp_path / "qualification",
+        "invoker": fake_invoker,
+    }
+    with pytest.raises(ManifestError, match="archived and cannot launch hardware"):
+        run_qualification(**common)
+
+    raw_path = tmp_path / "historical_raw.json"
+    raw_path.write_text(json.dumps(_raw_selftest()), encoding="utf-8")
+    result = run_qualification(**common, raw_report_path=raw_path)
+
+    assert result.returncode == 0
+    assert result.report["manifest"]["lifecycle"] == "archived"
+    assert called is False
 
 
 def test_gripper_seal_manifest_rejects_hardware_run_without_operator_prompts(tmp_path):

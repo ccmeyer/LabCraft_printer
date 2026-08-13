@@ -3,6 +3,7 @@
   "manifest_id": "coordinated_xy_status_sync_v1",
   "name": "Coordinated XY 40 kHz Status-Mutex Isolation v1",
   "profile": "FULL",
+  "lifecycle": "archived",
   "description": "Runs the standalone Milestone 6 40 kHz geometry row with task-mutex status-metric synchronization while retaining the critical-section production default.",
   "expected_test_ids": [2064, 2072, 2073],
   "enforce_expected_test_ids": true,

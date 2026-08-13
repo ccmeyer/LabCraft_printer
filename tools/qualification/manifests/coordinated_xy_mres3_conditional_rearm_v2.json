@@ -3,6 +3,7 @@
   "manifest_id": "coordinated_xy_mres3_conditional_rearm_v2",
   "name": "Coordinated XY MRES3 Conditional Late Rearm v2",
   "profile": "FULL",
+  "lifecycle": "archived",
   "description": "Runs the MRES=3 ten-move row using legacy logical coordinates (40 kHz logical/20 kHz native), preserves free-running timing when margin is healthy, and injects one bounded late cruise rising edge per measured move to exercise conditional TIM2 rearming. Revised selectors retain all completed, internally consistent moves after diagnostic-only timing failures while preserving strict FAIL acceptance.",
   "expected_test_ids": [2080, 2081, 2082, 2086, 2083],
   "enforce_expected_test_ids": true,

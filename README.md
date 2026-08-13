@@ -2651,6 +2651,49 @@ restoration, and a deterministic checksum. The manifest enforces the 180 MHz,
 225-cycle maximum, 4x speedup, 1,800-cycle preparation, two-tick error, and
 interrupt-restoration gates.
 
+### Coordinated XY production closeout
+
+Milestone 7 makes one coordinated-XY implementation permanent. Normal
+`ABSOLUTE_XY` commands use the fixed-point TIM2 executor with MRES=3,
+DEDGE enabled, multistep filtering disabled, two interrupts per complete STEP
+cycle, and the 1,125-tick conditional late-rearm guard. `MotionUnitScale`
+keeps application commands, stored positions, status, home distances, rates,
+and acceleration in the historical MRES=2 logical units. Ordinary cosine
+profile X/Y/Z moves use the normalized LUT; homes, limit soft stops, P/R, and
+alternate direct profiles retain their specialized paths.
+
+The supported coordinated-motion selectors are now:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-production-mres3-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_production_mres3_v2.json
+python3 tools/run_qualification.py --manifest coordinated_xy_production_mres3_v2 --operator-prompts --fixture coordinated_xy_production_mres3_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_production_mres3_v2.json
+
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --direct-xyz-lut-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/direct_xyz_lut.json
+python3 tools/run_qualification.py --manifest direct_xyz_lut_v1 --operator-prompts --fixture direct_xyz_lut_envelope_clear --machine-id LC-001 --raw-report hil_reports/direct_xyz_lut.json
+
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-camera-transition-suite --timeout-ms 180000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_camera_transition_v2.json
+python3 tools/run_qualification.py --manifest coordinated_xy_camera_transition_v2 --operator-prompts --fixture coordinated_xy_camera_transition_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_camera_transition_v2.json
+```
+
+Only the normal `Debug` firmware image is built and versioned. The former
+`MRES3_Diagnostic` configuration and its separate binary were removed. The
+headless build script exits before copying an artifact when compilation fails,
+so `firmware/artifacts/LabCraft_firmware.bin` cannot be silently replaced by a
+stale failed-build output.
+
+Superseded coordinated-XY manifests are marked `archived`. They remain usable
+with `--raw-report` to normalize retained evidence, but are hidden from the
+qualification UI, rejected by campaigns, and cannot launch hardware. Their
+old self-test selector flags are no longer accepted. The command `feedHz`
+parameter remains intentionally ignored by the current normal XY route; making
+it authoritative is a separate follow-up because it changes motion behavior.
+
+### Archived coordinated-XY development record
+
+The Milestone 4 through Milestone 6 material below is retained as the design
+and HIL history. Its diagnostic build commands and retired selector commands
+describe historical artifacts and must not be used to launch current firmware.
+
 The Milestone 4 gated coordinated-executor suite completed its corrected 3 kHz
 qualification. It remains an explicit regression suite and still requires a
 clear motion envelope plus manual verification of both limit inputs:

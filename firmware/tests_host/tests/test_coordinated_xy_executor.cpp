@@ -42,16 +42,6 @@ ExecutorCursor runningCursor(const CoordinatedXyPlan& plan) {
   return cursor;
 }
 
-ExecutorCursor runningCompleteStepCursor(const CoordinatedXyPlan& plan) {
-  ExecutorCursor cursor{};
-  CHECK_EQUAL(static_cast<int>(ArmStatus::Ready),
-              static_cast<int>(arm(
-                  plan, cursor, ExecutionMode::CompleteStep)));
-  CHECK_EQUAL(static_cast<int>(ControlDisposition::Deferred),
-              static_cast<int>(start(cursor)));
-  return cursor;
-}
-
 void runToCompletion(const CoordinatedXyPlan& plan, ExecutorCursor& cursor) {
   TickResult result{};
   while (cursor.state == State::Running) {
@@ -129,114 +119,6 @@ TEST(CoordinatedXyExecutor, EveryMagnitudePairUsesTwoEdgesPerMasterStep) {
       CHECK_FALSE(cursor.stepHigh);
     }
   }
-}
-
-TEST(CoordinatedXyExecutor, CompleteStepModeUsesOneInterruptPerMasterStep) {
-  for (int32_t x = 0; x <= 64; ++x) {
-    for (int32_t y = 0; y <= 64; ++y) {
-      if (x == 0 && y == 0) continue;
-      const CoordinatedXyPlan plan = readyPlan(x, y, 3000u);
-      ExecutorCursor cursor = runningCompleteStepCursor(plan);
-      uint32_t physicalX = 0u;
-      uint32_t physicalY = 0u;
-      TickResult prepared{};
-      TickResult committed{};
-      while (cursor.state == State::Running) {
-        CHECK_EQUAL(static_cast<int>(TickStatus::Raised),
-                    static_cast<int>(prepareCompleteStep(
-                        plan, cursor, prepared)));
-        CHECK_TRUE(cursor.stepHigh);
-        CHECK_FALSE(prepared.accountCompletePulse);
-        const StepMask physicalMask = prepared.mask;
-        const uint32_t physicalArr = prepared.arr;
-        const TickStatus status = commitCompleteStep(
-            plan, cursor, committed);
-        CHECK_TRUE(status == TickStatus::Lowered ||
-                   status == TickStatus::Completed);
-        CHECK_FALSE(cursor.stepHigh);
-        CHECK_TRUE(committed.accountCompletePulse);
-        CHECK_EQUAL(static_cast<int>(physicalMask),
-                    static_cast<int>(committed.mask));
-        UNSIGNED_LONGS_EQUAL(physicalArr, committed.arr);
-        if (contains(physicalMask, StepMask::X)) ++physicalX;
-        if (contains(physicalMask, StepMask::Y)) ++physicalY;
-      }
-      UNSIGNED_LONGS_EQUAL(plan.masterSteps, cursor.timerInterrupts);
-      UNSIGNED_LONGS_EQUAL(plan.masterSteps, cursor.risingEdges);
-      UNSIGNED_LONGS_EQUAL(plan.masterSteps, cursor.fallingEdges);
-      UNSIGNED_LONGS_EQUAL(plan.xSteps, physicalX);
-      UNSIGNED_LONGS_EQUAL(plan.ySteps, physicalY);
-      UNSIGNED_LONGS_EQUAL(plan.xSteps, cursor.xEmittedSteps);
-      UNSIGNED_LONGS_EQUAL(plan.ySteps, cursor.yEmittedSteps);
-    }
-  }
-}
-
-TEST(CoordinatedXyExecutor, CompleteStepPrepareAndCommitAreStrictlyOrdered) {
-  const CoordinatedXyPlan plan = readyPlan(4, 2, 3000u);
-  ExecutorCursor complete = runningCompleteStepCursor(plan);
-  TickResult result{};
-  CHECK_EQUAL(static_cast<int>(TickStatus::InvalidState),
-              static_cast<int>(commitCompleteStep(plan, complete, result)));
-  CHECK_EQUAL(static_cast<int>(TickStatus::InvalidState),
-              static_cast<int>(onTimerUpdate(plan, complete, result)));
-  CHECK_EQUAL(static_cast<int>(TickStatus::Raised),
-              static_cast<int>(prepareCompleteStep(plan, complete, result)));
-  CHECK_EQUAL(static_cast<int>(TickStatus::InvalidState),
-              static_cast<int>(prepareCompleteStep(plan, complete, result)));
-  CHECK_EQUAL(static_cast<int>(TickStatus::Lowered),
-              static_cast<int>(commitCompleteStep(plan, complete, result)));
-
-  ExecutorCursor twoEdge = runningCursor(plan);
-  CHECK_EQUAL(static_cast<int>(TickStatus::InvalidState),
-              static_cast<int>(prepareCompleteStep(plan, twoEdge, result)));
-  CHECK_EQUAL(static_cast<int>(TickStatus::InvalidState),
-              static_cast<int>(commitCompleteStep(plan, twoEdge, result)));
-}
-
-TEST(CoordinatedXyExecutor, CompleteStepDefersControlUntilPreparedPulseFalls) {
-  const CoordinatedXyPlan plan = readyPlan(4, 2, 3000u);
-  ExecutorCursor cursor = runningCompleteStepCursor(plan);
-  TickResult prepared{};
-  TickResult committed{};
-  CHECK_EQUAL(static_cast<int>(TickStatus::Raised),
-              static_cast<int>(prepareCompleteStep(plan, cursor, prepared)));
-  CHECK_EQUAL(static_cast<int>(ControlDisposition::Deferred),
-              static_cast<int>(requestLimitAbort(cursor, LimitAxis::Y)));
-  CHECK_EQUAL(static_cast<int>(TickStatus::LimitAborted),
-              static_cast<int>(commitCompleteStep(plan, cursor, committed)));
-  CHECK_TRUE(committed.accountCompletePulse);
-  CHECK_TRUE(committed.stopTimer);
-  CHECK_TRUE(committed.signalDone);
-  UNSIGNED_LONGS_EQUAL(1u, cursor.timerInterrupts);
-  UNSIGNED_LONGS_EQUAL(1u, cursor.risingEdges);
-  UNSIGNED_LONGS_EQUAL(1u, cursor.fallingEdges);
-  CHECK_FALSE(cursor.stepHigh);
-  CHECK_EQUAL(static_cast<int>(TerminalReason::YLimit),
-              static_cast<int>(cursor.terminalReason));
-}
-
-TEST(CoordinatedXyExecutor, FullPeriodArrConversionIsCheckedAndExact) {
-  uint32_t fullArr = 0u;
-  CHECK_TRUE(fullPeriodArr(1124u, 0xFFFFFFFFu, fullArr));
-  UNSIGNED_LONGS_EQUAL(2249u, fullArr);
-  CHECK_TRUE(fullPeriodArr(0u, 1u, fullArr));
-  UNSIGNED_LONGS_EQUAL(1u, fullArr);
-  CHECK_FALSE(fullPeriodArr(1u, 2u, fullArr));
-  UNSIGNED_LONGS_EQUAL(0u, fullArr);
-  CHECK_FALSE(fullPeriodArr(0xFFFFFFFFu, 0xFFFFFFFFu, fullArr));
-}
-
-TEST(CoordinatedXyExecutor, MinimumPulseCyclesRoundsUpWithoutFloatingPoint) {
-  UNSIGNED_LONGS_EQUAL(360u, minimumPulseCoreCycles(180000000u, 2000u));
-  UNSIGNED_LONGS_EQUAL(1u, minimumPulseCoreCycles(1000000u, 1u));
-  UNSIGNED_LONGS_EQUAL(0u, minimumPulseCoreCycles(0u, 2000u));
-  UNSIGNED_LONGS_EQUAL(0u, minimumPulseCoreCycles(180000000u, 0u));
-}
-
-TEST(CoordinatedXyExecutor, PulseElapsedCyclesIsWrapSafe) {
-  UNSIGNED_LONGS_EQUAL(48u, elapsedCoreCycles(0xFFFFFFF0u, 0x00000020u));
-  UNSIGNED_LONGS_EQUAL(360u, elapsedCoreCycles(1000u, 1360u));
 }
 
 TEST(CoordinatedXyExecutor, ReverseDirectionsDoNotChangeEdgeTrace) {
@@ -492,11 +374,6 @@ TEST(CoordinatedXyExecutor, TerminalCursorCanBeRearmedDeterministically) {
   UNSIGNED_LONGS_EQUAL(0u, cursor.timerInterrupts);
   UNSIGNED_LONGS_EQUAL(0u, cursor.xEmittedSteps);
   UNSIGNED_LONGS_EQUAL(0u, cursor.yEmittedSteps);
-}
-
-TEST(CoordinatedXyExecutor, FeatureGateDefaultsKeepNormalRoutingLegacy) {
-  LONGS_EQUAL(1, LC_COORDINATED_XY_EXECUTOR_ENABLE);
-  LONGS_EQUAL(1, LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE);
 }
 
 TEST(CoordinatedXyExecutor, ReservationPolicyRejectsEveryConflictingAxisState) {

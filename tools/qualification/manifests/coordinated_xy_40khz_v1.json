@@ -3,6 +3,7 @@
   "manifest_id": "coordinated_xy_40khz_v1",
   "name": "Coordinated XY Standalone 40 kHz Geometry v1",
   "profile": "FULL",
+  "lifecycle": "archived",
   "description": "Runs only the existing Milestone 6 40 kHz geometry row and its bounded post-row X/Y reference homes.",
   "expected_test_ids": [2064, 2072, 2073],
   "enforce_expected_test_ids": true,

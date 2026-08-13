@@ -52,7 +52,10 @@ def discover_suite_entries(root: str | Path) -> list[QualificationSuiteEntry]:
     entries: list[QualificationSuiteEntry] = []
     for manifest_path in manifest_root.glob("*.json"):
         try:
-            entries.append(QualificationSuiteEntry(manifest_path=manifest_path, manifest=load_manifest(manifest_path)))
+            manifest = load_manifest(manifest_path)
+            if manifest.lifecycle != "active":
+                continue
+            entries.append(QualificationSuiteEntry(manifest_path=manifest_path, manifest=manifest))
         except ManifestError:
             continue
     entries.sort(key=lambda item: _suite_sort_key(item.manifest.manifest_id))

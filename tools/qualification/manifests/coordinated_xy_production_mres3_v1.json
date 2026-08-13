@@ -3,6 +3,7 @@
   "manifest_id": "coordinated_xy_production_mres3_v1",
   "name": "Production MRES3 Conditional-Rearm Migration v1",
   "profile": "FULL",
+  "lifecycle": "archived",
   "description": "Qualifies production MRES=3 motion while keeping commands and status in legacy MRES=2 logical units. The ten-move row runs at the original logical geometry, 40 kHz logical rate, and 140,000 logical units/s2; firmware converts these to 20 kHz native STEP cycles and 70,000 native cycles/s2. Conditional late rearm is active without synthetic delay injection.",
   "expected_test_ids": [2087, 2088, 2089, 2090],
   "enforce_expected_test_ids": true,

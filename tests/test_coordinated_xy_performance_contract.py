@@ -1,555 +1,237 @@
+import json
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _read(path: str) -> str:
-    return (ROOT / path).read_text(encoding="utf-8")
+def _read(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_performance_suite_has_fixed_ids_selector_rates_and_fail_stop_totals():
-    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    runner = _read("tools/run_selftest.py")
-    start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
-    end = diagnostics.index("if (runMotionTimingSuite)", start)
-    suite = diagnostics[start:end]
-
-    for test_id in (*range(2060, 2069), 2070):
-        assert f"{{{test_id}u," in diagnostics
-        assert f"{test_id}u" in suite
-    assert "selectedDiagnosticId == 2069u" in diagnostics
-    assert "selectedDiagnosticId == 2076u" in diagnostics
-    assert "selectedDiagnosticId == 2077u" in diagnostics
-    assert "selectedDiagnosticId == 2075u" in diagnostics
-    assert "selectedDiagnosticId == 2085u" in diagnostics
-    assert "selectedDiagnosticId == 2079u" in diagnostics
-    assert "selectedDiagnosticId == 2078u" in diagnostics
-    assert "2069 if coordinated_xy_performance_suite" in runner
-    assert "2076 if coordinated_xy_status_sync_suite" in runner
-    assert "2077 if coordinated_xy_40khz_suite" in runner
-    assert "2075 if coordinated_xy_single_irq_suite" in runner
-    assert "2085 if coordinated_xy_mres3_20khz_suite" in runner
-    assert "2079 if coordinated_xy_x_direction_suite" in runner
-    assert "2078 if coordinated_xy_camera_transition_suite" in runner
-    assert 'add_argument("--coordinated-xy-performance-suite", action="store_true")' in runner
-    assert 'add_argument("--coordinated-xy-status-sync-suite", action="store_true")' in runner
-    assert 'add_argument("--coordinated-xy-40khz-suite", action="store_true")' in runner
-    assert 'add_argument("--coordinated-xy-single-irq-suite", action="store_true")' in runner
-    assert 'add_argument("--coordinated-xy-mres3-20khz-suite", action="store_true")' in runner
-    assert 'add_argument("--coordinated-xy-mres3-rearm-suite", action="store_true")' in runner
-    assert 'add_argument("--coordinated-xy-x-direction-suite", action="store_true")' in runner
-    assert 'add_argument("--coordinated-xy-camera-transition-suite", action="store_true")' in runner
-    assert "60000 if coordinated_xy_performance_suite else 5000" in runner
-    assert "5000u, 10000u, 20000u, 30000u, 40000u" in suite
-    assert "106832u" in suite and "180000u" in suite and "220000u" in suite
-    assert "29416u" in suite and "50000u" in suite and "61000u" in suite
-    assert "90000u" in suite and "362000u" in suite and "412000u" in suite
-    assert "84160u" in suite and "300000u" in suite
-    assert "168000u" in suite
-    assert "failRemaining" in suite
-    assert "rate_tier" in suite and "raster" in suite and "camera_repeat" in suite
-
-    position_start = suite.index("auto positionTo")
-    position_end = suite.index("auto addPair", position_start)
-    setup_positioning = suite[position_start:position_end]
-    assert "snapshot.pendingUpdateCount == 0u" in setup_positioning
-    assert "snapshot.xStepLow && snapshot.yStepLow" in setup_positioning
-    assert "!snapshot.timerOwned" in setup_positioning
-    assert "pendingObservations" not in setup_positioning
-    assert "activeMaxCycles" not in setup_positioning
-    assert "terminalMaxCycles" not in setup_positioning
+def test_schedule_policy_is_one_fixed_conditional_contract():
+    policy = _read("firmware/Core/Inc/CoordinatedXyTimerSchedulePolicy.h")
+    assert "kConditionalGuardTicks = 1125u" in policy
+    assert "remainingTicks <= kConditionalGuardTicks" in policy
+    assert "updatePending || timerCount > timerArr" in policy
+    assert "return {true, false, false, 0u}" in policy
+    for retired in (
+        "enum class Mode",
+        "FreeRunning",
+        "RearmFromActualEdge",
+        "ConditionalLateRearm",
+        "Injection",
+    ):
+        assert retired not in policy
 
 
-def test_standalone_40khz_selector_reuses_only_existing_tier_four_and_exits():
-    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
-    end = diagnostics.index("if (runMotionTimingSuite)", start)
-    suite = diagnostics[start:end]
-
-    assert "runCoordinatedXyFocusedGeometrySuite ? 4u : 0u" in suite
-    assert "!runCoordinatedXyFocusedGeometrySuite &&" in suite
-    assert '"coordinated_xy_40khz_envelope_clear"' in suite
-    assert 'runOne(2064u,\n                                         "coordinated_xy_performance_40khz"' in suite
-    standalone_exit = suite.index(
-        "if (runCoordinatedXyFocusedGeometrySuite) {",
-        suite.index("for (uint32_t tier")
-    )
-    m1_start = suite.index("Aggregate m1Aggregate")
-    assert standalone_exit < m1_start
-    assert "restoreXyRates();" in suite[standalone_exit:m1_start]
-    assert "return finishSelfTestNow();" in suite[standalone_exit:m1_start]
-    assert "runCoordinatedXyProductionMres3Suite\n                                           ? 2088u : 2081u" in suite
-    assert "emitIrqPathEvidence(" in suite
-    assert '"ax=%lu;tf=%lu' in suite
-    assert "runCoordinatedXyProductionMres3Suite\n                                           ? 2089u : 2082u" in suite
-    assert "emitEntryLatenessEvidence(" in suite
-    assert '"i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"' in suite
-    assert '"rm=%u;dc=%lu;ci=%lu;ns=%lu;rc=%lu;rp=%lu;rd=%lu;sm=%u;lf=%lu;"' in suite
-    assert '"lc=%lu;dm=%lu;sm=%u;lf=%lu;sf=%lu;to=%lu;"' in suite
-    assert '"la=%lu;ra=%lu;hm=%lu"' in suite
-    assert "captureFirstFailure(" in suite
-    assert "result.snapshot.terminalReason" in suite
-    assert "result.snapshot.limitAbortRequestCount" in suite
-    assert "result.snapshot.rawLimitAbortCount" in suite
-    assert '"coord_xy_40khz_entry_lateness",\n                                false,' in suite
-
-
-def test_single_irq_selector_is_retired_without_changing_the_two_edge_default():
-    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
-    end = diagnostics.index("if (runMotionTimingSuite)", start)
-    suite = diagnostics[start:end]
-
-    assert "runCoordinatedXySingleIrqSuite" in suite
-    assert "requestedExecutionMode =\n                                CoordinatedXyExecutor::ExecutionMode::TwoEdge" in suite
-    assert "class ScopedCoordinatedXyExecutionMode" in diagnostics
-    guard_start = diagnostics.index("class ScopedCoordinatedXyExecutionMode")
-    guard_end = diagnostics.index("static constexpr DiagnosticTestDescriptor", guard_start)
-    guard = diagnostics[guard_start:guard_end]
-    assert "~ScopedCoordinatedXyExecutionMode()" in guard
-    assert "CoordinatedXyExecutor::ExecutionMode::TwoEdge" in guard
-    retirement = suite.index('failRemaining(2060u, "single_irq_superseded")')
-    fixture = suite.index("waitForOperatorResume(fixtureStage)")
-    assert retirement < fixture
-
-
-def test_mres3_selectors_keep_logical_commands_and_scale_at_motor_boundary():
-    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    orchestrator = _read("firmware/Core/Src/Orchestrator.cpp")
+def test_production_mres3_and_motion_unit_scaling_are_fixed():
     config = _read("firmware/Core/Inc/TMC2208Configuration.h")
-    runner = _read("tools/run_selftest.py")
-    start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
-    end = diagnostics.index("if (runMotionTimingSuite)", start)
-    suite = diagnostics[start:end]
-
-    assert "selectedDiagnosticId == 2085u" in diagnostics
-    assert "selectedDiagnosticId == 2084u" in diagnostics
-    assert "selectedDiagnosticId == 2086u" in diagnostics
-    assert "runCoordinatedXy40KhzSuite || runCoordinatedXyLogicalMres3Suite" in diagnostics
-    assert '"coordinated_xy_mres3_20khz_envelope_clear"' in suite
-    assert "{{5000, 5000}, {25000, 5000}}" in suite
-    assert "{{8916, 30500}, {500, 500}}" in suite
-    assert "? 40000u : kRatesHz[tier]" in suite
-    assert "? 140000.0f : savedXAcceleration" in suite
-    assert "? 140000.0f : savedYAcceleration" in suite
-    assert "MotionUnitScale::toNativeStepCycles" in suite
-    assert "MotionUnitScale::toNativeRate(rateHz)" in suite
-    assert "runCoordinatedXyLogicalMres3Suite ? 53416u : 106832u" in suite
-    assert "runCoordinatedXyLogicalMres3Suite ? 90000u : 180000u" in suite
-    assert "runCoordinatedXyLogicalMres3Suite ? 110000u : 220000u" in suite
-    assert "stepperP->getPosition() != pPositionBefore" in suite
-    assert "stepperR->getPosition() != rPositionBefore" in suite
-    assert "aggregate.deadlineSlackMinTicks >= 450u" in suite
-    assert "aggregate.timer2Callbacks -\n                                     aggregate.moveCount" in suite
-    assert "LC_TMC2208_DIAGNOSTIC_BUILD" in orchestrator
-    assert "cmd.cmd != CMD_SELFTEST_START && cmd.cmd != CMD_DISABLE_MOTORS" in orchestrator
-    assert "#define LC_TMC2208_MRES 3" in config
-    assert "LC_TMC2208_DIAGNOSTIC_BUILD != 0 && LC_TMC2208_MRES == 3" in config
-    assert "false,\n      true,\n      0x000000C1u" in config
-    assert "2085 if coordinated_xy_mres3_20khz_suite" in runner
-    assert "2084 if coordinated_xy_mres3_rearm_suite" in runner
-    assert "2086 if coordinated_xy_mres3_conditional_rearm_suite" in runner
-    assert "2097 if coordinated_xy_production_mres3_suite" in runner
-
-
-def test_production_mres3_scales_direct_and_coordinated_motion_without_wire_changes():
     scale = _read("firmware/Core/Inc/MotionUnitScale.h")
-    stepper = _read("firmware/Core/Src/Stepper.cpp")
     gantry = _read("firmware/Core/Src/Gantry.cpp")
-    orchestrator = _read("firmware/Core/Src/Orchestrator.cpp")
+    stepper = _read("firmware/Core/Src/Stepper.cpp")
 
+    assert "kMres = 3u" in config
+    assert "doubleEdge = true" in config
+    assert "multistepFilter = false" in config
+    assert "0x30000053u" in config
+    assert "static_cast<uint32_t>(kMres) << 24u" in config
+    assert "LC_TMC2208" not in config
     assert "logicalUnitsPerNativeStepForMres" in scale
     assert "mres == 3u ? 2u : 1u" in scale
-    assert "magnitude / scale" in scale
-    assert "canonicalizeAbsoluteTarget" in scale
-
+    assert "TMC2208Configuration::kMres" in scale
+    assert "MotionUnitScale::quantizeDisplacement(initialX, dx)" in gantry
+    assert "MotionUnitScale::toNativeRate" in gantry
+    assert "MotionUnitScale::toNativeAcceleration" in gantry
     assert "MotionUnitScale::quantizeDisplacement(_pos, requestedDelta)" in stepper
-    assert "planInput.steps = nativeSteps" in stepper
     assert "MotionUnitScale::toNativeRate(freqHz)" in stepper
     assert "MotionUnitScale::toNativeAcceleration(_accel_sps2)" in stepper
-    assert "_targetPos     = quantized.target" in stepper
-    assert stepper.count("MotionUnitScale::logicalUnitsPerNativeStep()") >= 3
-    assert "MotionUnitScale::toLogicalMagnitude(nativeSteps)" in stepper
-
-    assert "MotionUnitScale::quantizeDisplacement(initialX, dx)" in gantry
-    assert "MotionUnitScale::quantizeDisplacement(initialY, dy)" in gantry
-    assert "request.deltaX = nativeDx" in gantry
-    assert "request.deltaY = nativeDy" in gantry
-    assert "xMove.target" in gantry and "yMove.target" in gantry
-    assert "TMC2208Configuration::isProductionMres3Build()" in gantry
-    assert "Mode::ConditionalLateRearm" in gantry
-    assert "#if LC_TMC2208_DIAGNOSTIC_BUILD != 0" in gantry
-
-    report_header = _read("firmware/Core/Inc/CoordinatedXyPerformanceReport.h")
-    report = _read("firmware/Core/Src/CoordinatedXyPerformanceReport.cpp")
-    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    assert "requireLateInjectionEvidence = true" in report_header
-    assert "requireTerminalCycleBudget = true" in report_header
-    assert "rearmEvidenceConsistent" in report
-    assert "injectionEvidencePasses" in report
-    assert "observation.requireTerminalCycleBudget &&" in report
-    assert "!aggregate.requireTerminalCycleBudget ||" in report
-    assert "observation.requireLateInjectionEvidence =\n" in diagnostics
-    assert "observation.requireTerminalCycleBudget =\n" in diagnostics
-    assert "!runCoordinatedXyProductionMres3Suite" in diagnostics
-
-    assert orchestrator.count("MotionUnitScale::canonicalizeAbsoluteTarget") >= 4
-    assert "end.x == actualTargetX && end.y == actualTargetY" in orchestrator
 
 
-def test_mres3_rearm_selector_is_scoped_and_rebases_after_physical_edges():
-    header = _read("firmware/Core/Inc/Gantry.h")
-    gantry = _read("firmware/Core/Src/Gantry.cpp")
-    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-
-    assert "RearmFromActualEdge = 1u" in _read(
-        "firmware/Core/Inc/CoordinatedXyTimerSchedulePolicy.h"
+def test_complete_step_injection_and_runtime_schedule_modes_are_removed():
+    files = "\n".join(
+        _read(path)
+        for path in (
+            "firmware/Core/Inc/CoordinatedXyExecutor.h",
+            "firmware/Core/Src/CoordinatedXyExecutor.cpp",
+            "firmware/Core/Inc/Gantry.h",
+            "firmware/Core/Src/Gantry.cpp",
+            "firmware/Core/Inc/CoordinatedXyIsrInstrumentation.h",
+            "firmware/Core/Src/CoordinatedXyIsrInstrumentation.cpp",
+        )
     )
-    assert "setCoordinatedTimerScheduleModeForDiagnostics" in header
-    assert "Mode::FreeRunning" in gantry
-    handler_start = gantry.index("bool Gantry::_handleCoordinatedTimerFromIsr")
-    handler_end = gantry.index(
-        "bool Gantry::dispatchCoordinatedTimerFromIsr", handler_start
-    )
-    handler = gantry[handler_start:handler_end]
-    edge = handler.index("physicalEdgeEmitted = stepX || stepY")
-    stop = handler.index("CLEAR_BIT(_coordinatedMasterTimer->Instance->CR1")
-    reset = handler.index("__HAL_TIM_SET_COUNTER(_coordinatedMasterTimer, 0u)")
-    clear_pending = handler.index("NVIC_ClearPendingIRQ(TIM2_IRQn)")
-    restart = handler.index("SET_BIT(_coordinatedMasterTimer->Instance->CR1")
-    assert edge < stop < reset < clear_pending < restart
-    assert "_coordinatedTimerRearmPendingCount" in handler
-
-    guard_start = diagnostics.index("class ScopedCoordinatedXyTimerScheduleMode")
-    guard_end = diagnostics.index("class ScopedSelfTestEmissionPriority", guard_start)
-    guard = diagnostics[guard_start:guard_end]
-    assert "Mode::FreeRunning" in guard
-    assert "~ScopedCoordinatedXyTimerScheduleMode" in guard
-    assert '"coordinated_xy_mres3_rearm_envelope_clear"' in diagnostics
-    assert "timer_schedule_unavailable" in diagnostics
+    for retired in (
+        "CompleteStep",
+        "lateInjection",
+        "intentionalWait",
+        "recordCompleteStepPulse",
+        "setCoordinatedTimerScheduleModeForDiagnostics",
+        "setCoordinatedExecutionModeForDiagnostics",
+    ):
+        assert retired not in files
 
 
-def test_mres3_conditional_rearm_preserves_normal_order_and_bounds_injection():
-    policy = _read("firmware/Core/Inc/CoordinatedXyTimerSchedulePolicy.h")
-    header = _read("firmware/Core/Inc/Gantry.h")
-    gantry = _read("firmware/Core/Src/Gantry.cpp")
-    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    runner = _read("tools/run_selftest.py")
-
-    assert "ConditionalLateRearm = 2u" in policy
-    assert "kConditionalGuardTicks = 1125u" in policy
-    assert "kInjectionTargetSlackTicks = 900u" in policy
-    assert "kInjectionMaxCoreCycles = 4500u" in policy
-    assert "isInjectionPhaseEligible" in policy
-    assert "armCoordinatedLateServiceInjectionForDiagnostics" in header
-    assert "shouldAttemptInjection" in gantry
-    assert "_coordinatedPlan.cruiseSteps" in gantry
-    assert "injectionWaitExpired" in gantry
-    assert "timerCount > timerArr" in gantry
-    assert "NVIC_ClearPendingIRQ(TIM2_IRQn)" in gantry
-    assert "intentionalWaitCycles" in gantry
-    assert '"coord_xy_conditional_rearm"' in diagnostics
-    assert "kExpectedDecisions = 219990u" in diagnostics
-    assert 'add_argument("--coordinated-xy-mres3-conditional-rearm-suite"' in runner
-
-
-def test_mres3_complete_row_collection_is_scoped_and_keeps_strict_results():
-    report = _read("firmware/Core/Src/CoordinatedXyPerformanceReport.cpp")
-    header = _read("firmware/Core/Inc/CoordinatedXyPerformanceReport.h")
-    gantry = _read("firmware/Core/Src/Gantry.cpp")
-    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-
-    assert "kMoveFailureScheduleSaturation = 1u << 29" in header
-    assert "kMoveFailureTerminalReason = 1u << 30" in header
-    assert "moveCanContinueAfterCompletion" in report
-    assert "qualificationFailureMoveCount" in report
-    assert "qualificationFailureMask" in report
-    assert '"qm=%lu;sf=%lu' in report
-    assert "collectCompletedMres3Evidence" in diagnostics
-    assert "runCoordinatedXyMres3BaselineSuite ||" in diagnostics
-    collection_start = diagnostics.index("const bool collectCompletedMres3Evidence")
-    collection_end = diagnostics.index(";", collection_start)
-    collection_scope = diagnostics[collection_start:collection_end]
-    assert "runCoordinatedXyMres3BaselineSuite" in collection_scope
-    assert "runCoordinatedXyMres3ConditionalRearmSuite" in collection_scope
-    assert "runCoordinatedXyMres3RearmSuite" not in collection_scope
-    assert "? forward.canContinue" in diagnostics
-    assert "? forward.canContinue && reverse.canContinue" in diagnostics
-    assert "aggregate,\n                                forward.observation" in diagnostics
-    assert "MoveResult reverse = observeCompletedMove" in diagnostics
-    assert "classifyMove(forward);" in diagnostics
-    assert "classifyMove(reverse);" in diagnostics
-    assert '"la=%lu;ra=%lu;hm=%lu"' in diagnostics
-
-    dispatch = gantry.index("bool Gantry::_handleCoordinatedTimerFromIsr")
-    body = gantry.index("bool Gantry::_handleCoordinatedTim2BodyFromIsr", dispatch)
-    assert dispatch < body
-    assert "_handleCoordinatedTim2BodyFromIsr<true>()" in gantry[dispatch:body]
-    assert "_handleCoordinatedTim2BodyFromIsr<false>()" in gantry[dispatch:body]
-    assert "recordSampleExcludingIntentionalWait" in gantry[body:]
-    assert "recordSample(" in gantry[body:]
-
-
-def test_status_sync_variant_is_static_bounded_and_restores_critical_mode():
+def test_status_metrics_use_one_short_critical_section_implementation():
     header = _read("firmware/Core/Inc/Comm.h")
-    comm = _read("firmware/Core/Src/Comm.cpp")
-    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-
-    assert "enum class StatusMetricsSyncMode : uint8_t" in header
-    assert "CriticalSection = 0u" in header
-    assert "TaskMutex = 1u" in header
-    assert "StaticSemaphore_t _statusMetricsMutexStorage" in header
-    assert "xSemaphoreCreateMutexStatic(&_statusMetricsMutexStorage)" in comm
-    assert "pdMS_TO_TICKS(5u)" in comm
-    assert "_statusMetricsSyncMode = StatusMetricsSyncMode::CriticalSection" in comm
-    assert "if (!guard.acquired()) return false;" in comm
-    assert "if (!guard.acquired()) return;" in comm
-    assert "if (_statusMetricsLockFailures != 0xFFFFFFFFu)" in comm
-    assert "StatusMetricsSnapshot Comm::getStatusMetricsSnapshot()" in comm
-
-    reset_start = comm.index("bool Comm::resetStatusMetrics()")
-    reset_end = comm.index("Comm::StatusMetricsSnapshot", reset_start)
-    reset = comm[reset_start:reset_end]
-    assert reset.index("if (!guard.acquired()) return false;") < reset.index(
-        "s_statusChunk0Count = 0"
-    )
-    record_start = comm.index("void Comm::recordStatusSend")
-    record_end = comm.index("void Comm::statusTask", record_start)
-    record = comm[record_start:record_end]
-    assert record.index("if (!guard.acquired()) return;") < record.index(
-        "s_statusChunk0Count++"
-    )
-
-    guard_start = diagnostics.index("class ScopedStatusMetricsSyncMode")
-    guard_end = diagnostics.index("static constexpr DiagnosticTestDescriptor", guard_start)
-    guard = diagnostics[guard_start:guard_end]
-    assert "Comm::resetStatusMetricsLockFailures();" in guard
-    assert "Comm::setStatusMetricsSyncMode(mode)" in guard
-    assert "Comm::StatusMetricsSyncMode::CriticalSection" in guard
-    assert "~ScopedStatusMetricsSyncMode()" in guard
-
-    suite_start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
-    suite_end = diagnostics.index("if (runMotionTimingSuite)", suite_start)
-    suite = diagnostics[suite_start:suite_end]
-    assert "runCoordinatedXyStatusSyncSuite" in suite
-    assert "Comm::StatusMetricsSyncMode::TaskMutex" in suite
-    assert "status_sync_unavailable" in suite
-    assert "statusMetrics.lockFailures == 0u" in suite
-    assert "lockFailures == 0u" in suite
+    source = _read("firmware/Core/Src/Comm.cpp")
+    combined = header + source
+    assert "StatusMetricsSyncMode" not in combined
+    assert "statusMetricsMutex" not in combined
+    assert "StatusMetricsGuard" in source
+    assert "taskENTER_CRITICAL" in source
+    assert "taskEXIT_CRITICAL" in source
+    assert "resetStatusMetrics" in source
+    assert "getStatusMetricsSnapshot" in source
 
 
-def test_outer_tim2_instrumentation_stays_in_generated_user_blocks_and_brackets_hal():
-    irq = _read("firmware/Core/Src/stm32f4xx_it.c")
-    gantry = _read("firmware/Core/Src/Gantry.cpp")
-    start = irq.index("void TIM2_IRQHandler(void)")
-    end = irq.index("void TIM3_IRQHandler(void)", start)
-    handler = irq[start:end]
-
-    before_start = handler.index("/* USER CODE BEGIN TIM2_IRQn 0 */")
-    before_end = handler.index("/* USER CODE END TIM2_IRQn 0 */")
-    hal = handler.index("HAL_TIM_IRQHandler(&htim2);")
-    after_start = handler.index("/* USER CODE BEGIN TIM2_IRQn 1 */")
-    after_end = handler.index("/* USER CODE END TIM2_IRQn 1 */")
-    assert before_start < before_end < hal < after_start < after_end
-    assert "g_lcCoordinatedTim2IrqEntryCycle = DWT->CYCCNT" in handler[before_start:before_end]
-    assert "g_lcCoordinatedTim2IrqEntryTimerCount = TIM2->CNT" in handler[before_start:before_end]
-    assert "g_lcCoordinatedTim2IrqEntryTimerArr = TIM2->ARR" in handler[before_start:before_end]
-    assert "g_lcCoordinatedTim2IrqEntryTimerValid = 1u" in handler[before_start:before_end]
-    assert "MX_GANTRY_RecordTim2IrqExit(DWT->CYCCNT)" in handler[after_start:after_end]
-    gantry_handler_start = gantry.index("bool Gantry::_handleCoordinatedTimerFromIsr")
-    gantry_handler_end = gantry.index("bool Gantry::dispatchCoordinatedTimerFromIsr", gantry_handler_start)
-    gantry_handler = gantry[gantry_handler_start:gantry_handler_end]
-    pending_check = gantry_handler.index("__HAL_TIM_GET_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE)")
-    consume_capture = gantry_handler.rindex("g_lcCoordinatedTim2IrqEntryTimerCount")
-    aggregate_capture = gantry_handler.rindex("beginIrqPathSample")
-    assert pending_check < consume_capture
-    assert pending_check < aggregate_capture
-    assert "completeIrqPath" in gantry
-
-
-def test_performance_suite_has_only_the_combined_fixture_prompt_after_regression():
-    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
-    end = diagnostics.index("if (runMotionTimingSuite)", start)
-    suite = diagnostics[start:end]
-
-    assert suite.count("waitForOperatorResume(") == 1
-    assert "coordinated_xy_performance_fixture_clear" in suite
-    for required in (
-        "coord_x_limit_press",
-        "coord_x_limit_release",
-        "coord_y_limit_press",
-        "coord_y_limit_release",
+def test_isr_telemetry_keeps_bounded_maxima_and_drops_experiment_sums():
+    header = _read("firmware/Core/Inc/CoordinatedXyIsrInstrumentation.h")
+    for retained in (
+        "totalCallbacks",
+        "pendingObservations",
+        "maxPendingStreak",
+        "phaseMaxCycles",
+        "terminalMaxCycles",
+        "fullIrqMaxCycles",
+        "entryTimerSamples",
+        "entryTimerMissing",
+        "entryTimerCountMax",
+        "deadlineMisses",
+        "deadlineSlackMinTicks",
+        "saturationFlags",
     ):
-        assert required not in suite
-    assert "manual switch preflight and low-rate homing" in suite
-    assert "normal_route_envelope_clear" not in suite
-
-
-def test_performance_homing_is_step_bounded_and_preserves_failure_evidence():
-    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    report_header = _read("firmware/Core/Inc/CoordinatedXyPerformanceReport.h")
-    stepper_header = _read("firmware/Core/Inc/Stepper.h")
-    start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
-    end = diagnostics.index("if (runMotionTimingSuite)", start)
-    suite = diagnostics[start:end]
-
-    assert "boundedHomeGuardSteps" in report_header
-    assert "kBaselineHomeGuardMarginSteps = 3000u" in suite
-    assert "kBaselineXEnvelopeMaximumSteps = 45000u" in suite
-    assert "kBaselineYEnvelopeMaximumSteps = 35000u" in suite
-    assert "kHomeGuardMarginSteps =\n                            kBaselineHomeGuardMarginSteps" in suite
-    assert "kXEnvelopeMaximumSteps =\n                            kBaselineXEnvelopeMaximumSteps" in suite
-    assert "kYEnvelopeMaximumSteps =\n                            kBaselineYEnvelopeMaximumSteps" in suite
-    assert "stepper->setHomeGuardSteps(result.guardSteps)" in suite
-    assert "stepper->setHomeGuardSteps(savedGuard)" in suite
-    assert "cancelActiveHomesAndWait(homeBit)" in suite
-    for field in (
-        "coarseCommandSteps",
-        "coarseAccountedSteps",
-        "moveTimeoutCount",
-        "limitSeen",
-        "limitAsserted",
+        assert retained in header
+    for removed in (
+        "phaseCycleSums",
+        "terminalCycleSum",
+        "preHandlerCycleSum",
+        "fullIrqCycleSum",
+        "entryTimerCountSum",
+        "MeanCycles",
+        "completeStepPulse",
+        "intentionalWait",
     ):
-        assert field in stepper_header
+        assert removed not in header
 
 
-def test_performance_has_direction_isolated_x_speed_and_acceleration_gate():
-    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
-    end = diagnostics.index("if (runMotionTimingSuite)", start)
-    suite = diagnostics[start:end]
-    focus_start = suite.index("auto runFocusedXDirectionQualification")
-    focus_end = suite.index("for (uint32_t tier", focus_start)
-    focus = suite[focus_start:focus_end]
-
-    assert "{30000u, kFocusedNormalAcceleration," in focus
-    assert "{35000u, kFocusedNormalAcceleration," in focus
-    assert "{40000u, kFocusedReducedAcceleration," in focus
-    assert "{40000u, kFocusedNormalAcceleration," in focus
-    assert "kFocusedAwayPosition = 20100" in suite
-    assert "kFocusedReducedAwayPosition = 24100" in suite
-    assert "aggregate,\n                                  8u,\n                                  168000u" in focus
-    assert "reaches a real 40 kHz cruise section" in focus
-    assert 'runOne(2070u,' in focus
-    assert "failureStage = 2u" in focus
-    assert "moveFailureMask(" in focus
-    assert '"case=%lu;dir=%lu;fs=%lu;fm=%lu;n=%lu;xe=%lu;"' in focus
-    assert "failureStage == 3u" in focus
-    assert 'failRemaining(2064u, "x_direction")' in suite
-    assert "if (runCoordinatedXyDirectionSuite)" in suite
-    assert "return finishSelfTestNow();" in suite[focus_end:]
-
-
-def test_performance_integration_does_not_change_limit_or_homing_semantics():
-    gantry = _read("firmware/Core/Src/Gantry.cpp")
-    handler_start = gantry.index("bool Gantry::_handleCoordinatedTimerFromIsr")
-    handler_end = gantry.index("bool Gantry::dispatchCoordinatedTimerFromIsr", handler_start)
-    handler = gantry[handler_start:handler_end]
-
-    x_limit = handler.index("_coordinatedX->_coordinatedLimitAssertedFast()")
-    y_limit = handler.index("_coordinatedY->_coordinatedLimitAssertedFast()")
-    edge = handler.index("CoordinatedXyExecutor::onTimerUpdate")
-    timing = handler.index("CoordinatedXyIsrInstrumentation::recordSample")
-    assert x_limit < edge and y_limit < edge
-    assert timing > x_limit and timing > y_limit
-    assert "startHomeAsync" not in gantry
-
-
-def test_camera_transition_diagnostic_is_single_pair_immediate_home_and_fail_stop():
-    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    stepper = _read("firmware/Core/Inc/Stepper.h")
-    start = diagnostics.index("auto runCameraHomeTransitionQualification")
-    end = diagnostics.index("if (runCoordinatedXyDirectionSuite)", start)
-    focused = diagnostics[start:end]
-
-    assert "{8916, 30500}, {500, 500}" in focused
-    assert "setMaxSpeedHz(5000u)" in focused
-    assert "setMaxSpeedHz(40000u)" in focused
-    assert "addPair(aggregate, kCameraPair, 40000u)" in focused
-    assert "enableOutputsAssertedForDiagnostics" in focused
-    assert "coordinated_xy_camera_transition_x_home" in focused
-    assert focused.index("addPair(aggregate") < focused.index("runBoundedAxisHome(")
-    assert "aggregate,\n                                  2u,\n                                  16832u,\n                                  60000u" in focused
-    assert 'runOne(2071u,' in focused
-    assert 'failRemaining(2072u, "camera_home_transition")' in focused
-    assert "_enPort->ODR" in stepper and "_enPort2->ODR" in stepper
-
-
-def test_instrumentation_hot_recording_uses_only_bounded_integer_operations():
-    source = _read("firmware/Core/Src/CoordinatedXyIsrInstrumentation.cpp")
-    assert '#pragma GCC optimize("O2")' in source
-    assert "LC_XY_ISR_INSTRUMENTATION_ALWAYS_INLINE" in source
-    assert "constexpr uint32_t kUint32Max" in source
-    record_start = source.index("void recordSample")
-    record_end = source.index("Snapshot makeSnapshot", record_start)
-    hot = source[record_start:record_end]
-
-    for forbidden in ("cos(", "float", "double", "new ", "malloc", "free(", "%", " / "):
-        assert forbidden not in hot
-    assert "saturatingIncrement" in hot
-    assert "saturatingAdd" in hot
-    assert "completeSampleTiming" in hot
-
-
-def test_performance_report_accepts_only_the_expected_single_dwt_wrap():
+def test_performance_report_is_strict_fixed_two_edge_conditional():
     header = _read("firmware/Core/Inc/CoordinatedXyPerformanceReport.h")
     source = _read("firmware/Core/Src/CoordinatedXyPerformanceReport.cpp")
+    assert "observation.expectedMasterSteps * 2u" in source
+    assert "observation.timer2Callbacks - 1u" in source
+    assert "kConditionalGuardTicks" in source
+    assert "moveCanContinueAfterCompletion" not in header + source
+    assert "qualificationFailure" not in header + source
+    assert "aggregate.exactAndSafe" in source
+    assert "kMoveFailureScheduleSaturation" in header
+    assert "kMoveFailureTerminalReason" in header
 
-    assert "uint32_t maxCycleWrapsPerMove = 1u;" in header
-    assert "timing.cycleWraps > limits.maxCycleWrapsPerMove" in source
-    assert "aggregate.cycleWraps <= aggregate.moveCount" in source
 
-
-def test_performance_completion_uses_the_all_bits_wait_result():
+def test_diagnostics_exposes_only_production_xy_direct_lut_and_camera_selectors():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    orchestrator = _read("firmware/Core/Src/Orchestrator.cpp")
+    assert "selectedDiagnosticId == 2097u" in diagnostics
+    assert "selectedDiagnosticId == 2096u" in diagnostics
+    assert "selectedDiagnosticId == 2078u" in diagnostics
+    for selector in (2049, 2059, 2069, 2075, 2076, 2077, 2079, 2084, 2085, 2086):
+        assert f"selectedDiagnosticId == {selector}u" not in diagnostics
+    assert "runProductionCoordinatedDiagnostic" in diagnostics
+    assert "runDirectXyzLutSuite" in diagnostics
+
+
+def test_production_suite_freezes_geometry_counts_and_strict_evidence():
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
     start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
-    end = diagnostics.index("if (runMotionTimingSuite)", start)
+    end = diagnostics.index("if (runDirectXyzLutSuite)", start)
     suite = diagnostics[start:end]
+    for point in (
+        "{{5000, 5000}, {25000, 5000}}",
+        "{{5000, 5000}, {5000, 25000}}",
+        "{{5000, 5000}, {25000, 25000}}",
+        "{{5000, 5000}, {10000, 25000}}",
+        "{{8916, 30500}, {500, 500}}",
+    ):
+        assert point in suite
+    assert "10u,\n                                53416u" in suite
+    assert "90000u" in suite
+    assert "110000u" in suite
+    assert "aggregate.timer2Callbacks == 220000u" in suite
+    assert "aggregate.conditionalDecisionCount == 219990u" in suite
+    assert "aggregate.timerRearmPendingCount == 0u" in suite
 
-    assert "observation.completionTogether = completed;" in suite
-    assert "xEventGroupWaitBits(\n            _doneEvents, completionBits, pdTRUE, pdTRUE" in orchestrator
 
-
-def test_performance_reference_drift_and_status_cadence_use_valid_observation_windows():
+def test_production_results_use_reduced_metric_contract():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
-    end = diagnostics.index("if (runMotionTimingSuite)", start)
-    suite = diagnostics[start:end]
-
-    drift_start = suite.index("auto homeAndMeasureDrift")
-    drift_end = suite.index("auto emitAggregate", drift_start)
-    drift = suite[drift_start:drift_end]
-    assert "xAfter.limitTriggerSteps, 0" in drift
-    assert "yAfter.limitTriggerSteps, 0" in drift
-    assert "xReference.limitTriggerSteps" not in drift
-    assert "yReference.limitTriggerSteps" not in drift
-
-    position_start = suite.index("auto positionTo")
-    position_end = suite.index("auto addPair", position_start)
-    assert "comm->setStatusPaused(false);" in suite[position_start:position_end]
-    home_start = suite.index("auto runSequentialXyHome")
-    home_end = suite.index("MotionQualificationMath::AxisHomeSample xReference", home_start)
-    assert "comm->setStatusPaused(false);" in suite[home_start:home_end]
-    emit_start = suite.index("auto emitAggregate")
-    emit_end = suite.index("for (uint32_t tier", emit_start)
-    assert "comm->setStatusPaused(true);" in suite[emit_start:emit_end]
+    for result_id in (2087, 2088, 2089, 2090):
+        assert f"runOne({result_id}u" in diagnostics
+    assert '"i2=%lu;s=%lu;mi=%lu;am=%lu;tm=%lu;fm=%lu;pu=%lu;"' in diagnostics
+    assert '"ds=%lu;di=%lu;md=%lu;sl=%lu;dc=%lu;ci=%lu;ns=%lu;"' in diagnostics
+    production_suite = diagnostics[
+        diagnostics.index("if (runCoordinatedXyPerformanceSuite)") :
+        diagnostics.index("if (runDirectXyzLutSuite)")
+    ]
+    for removed_metric in ("qf=", "qm=", "hm=", "sm=", "lf=", "ic=", "ix="):
+        assert removed_metric not in production_suite
 
 
-def test_pressure_case_uses_direct_gantry_route_and_restores_safe_paths():
+def test_camera_transition_uses_production_scaling_and_direct_home_counts():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    start = diagnostics.index("Aggregate pressureAggregate")
-    end = diagnostics.index("return finishSelfTestNow();", start)
-    pressure = diagnostics[start:end]
+    assert "aggregate, 2u, 8416u, 30000u, 30000u, limits" in diagnostics
+    assert "homeIsr.totalEntries == 101u" in diagnostics
+    assert "homeIsr.completedPulses == 50u" in diagnostics
+    assert 'runOne(2071u' in diagnostics
 
-    assert "gantry->moveTo(target.x, target.y, 0u)" in diagnostics
-    assert "regP.setTargetSafe(kPressure2Raw)" in pressure
-    assert "regR.setTargetSafe(kPressure2Raw)" in pressure
-    assert "pForwardMoved" in pressure and "rForwardMoved" in pressure
-    assert "pressureChecksumsMatch" in pressure
-    assert "rejectDeltaP == 0u" in pressure
-    assert "pressureFault" in pressure
-    assert "closePressurePaths();" in pressure
-    assert "pressureAggregate.cycleWraps" in pressure
+
+def test_active_v2_manifests_match_remaining_selectors_and_reduced_metrics():
+    production = json.loads(
+        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v2.json")
+    )
+    camera = json.loads(
+        _read("tools/qualification/manifests/coordinated_xy_camera_transition_v2.json")
+    )
+    assert production["lifecycle"] == "active"
+    assert production["expected_test_ids"] == [2087, 2088, 2089, 2090]
+    assert production["analysis_rules"]["2089"]["metrics"]["dc"]["equals"] == 219990
+    assert production["analysis_rules"]["2089"]["metrics"]["rp"]["equals"] == 0
+    assert camera["lifecycle"] == "active"
+    assert camera["analysis_rules"]["2071"]["metrics"]["xe"]["equals"] == 8416
+    assert camera["analysis_rules"]["2071"]["metrics"]["hi"]["equals"] == 101
+
+
+def test_historical_manifests_are_archived_without_deleting_catalog_data():
+    archived = (
+        "coordinated_xy_executor_v1",
+        "normal_xy_route_v1",
+        "coordinated_xy_performance_v1",
+        "coordinated_xy_40khz_v1",
+        "coordinated_xy_status_sync_v1",
+        "coordinated_xy_single_irq_v1",
+        "coordinated_xy_mres3_20khz_v1",
+        "coordinated_xy_mres3_rearm_v1",
+        "coordinated_xy_mres3_conditional_rearm_v3",
+        "coordinated_xy_production_mres3_v1",
+        "coordinated_xy_camera_transition_v1",
+    )
+    catalog = _read("tools/qualification/test_catalog.py")
+    for manifest_id in archived:
+        payload = json.loads(
+            _read(f"tools/qualification/manifests/{manifest_id}.json")
+        )
+        assert payload["lifecycle"] == "archived"
+    for test_id in (2040, 2050, 2060, 2072, 2073, 2074, 2080, 2081, 2082, 2083):
+        assert str(test_id) in catalog
+
+
+def test_diagnostic_build_configuration_and_binary_are_removed():
+    project = _read("firmware/.cproject")
+    build_script = _read("firmware/scripts/build_firmware_headless.ps1")
+    assert "MRES3_Diagnostic" not in project + build_script
+    assert not (ROOT / "firmware/artifacts/LabCraft_firmware_mres3_diagnostic.bin").exists()
+
+
+def test_headless_build_never_copies_an_artifact_after_a_failed_build():
+    build_script = _read("firmware/scripts/build_firmware_headless.ps1")
+    failure_gate = build_script.index("if ($exit -ne 0)")
+    artifact_copy = build_script.index("Copy-Item")
+
+    assert failure_gate < artifact_copy
+    assert "artifact was not updated" in build_script

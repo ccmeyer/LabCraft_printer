@@ -3,6 +3,7 @@
   "manifest_id": "coordinated_xy_mres3_conditional_rearm_v3",
   "name": "Coordinated XY MRES3 Conditional Late Rearm v3",
   "profile": "FULL",
+  "lifecycle": "archived",
   "description": "Runs the legacy MRES=2-unit ten-move row through the diagnostic image's MRES=3 unit-boundary conversion at 20 kHz native cycle rate, preserves free-running timing when margin is healthy, and injects one bounded late peak-rate rising edge per measured move to exercise conditional TIM2 rearming. A cruise profile uses its first cruise rise; a zero-cruise profile uses its first deceleration rise. Completed, internally consistent moves continue after diagnostic-only timing failures while preserving strict FAIL acceptance.",
   "expected_test_ids": [2080, 2081, 2082, 2086, 2083],
   "enforce_expected_test_ids": true,

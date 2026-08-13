@@ -166,101 +166,11 @@ Gantry::Gantry() {};
 
 void Gantry::begin() {
   _instance = this;
-  _coordinatedExecutionMode = CoordinatedXyExecutor::ExecutionMode::TwoEdge;
-  _coordinatedTimerScheduleMode =
-      TMC2208Configuration::isProductionMres3Build()
-          ? CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm
-          : CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning;
-}
-
-bool Gantry::setCoordinatedExecutionModeForDiagnostics(
-    CoordinatedXyExecutor::ExecutionMode mode) {
-  if (mode != CoordinatedXyExecutor::ExecutionMode::TwoEdge &&
-      mode != CoordinatedXyExecutor::ExecutionMode::CompleteStep) {
-    return false;
-  }
-  if (mode == CoordinatedXyExecutor::ExecutionMode::CompleteStep &&
-      !gantryCycleCounterReady()) {
-    return false;
-  }
-  taskENTER_CRITICAL();
-  Stepper* sx = Stepper::stepperX();
-  Stepper* sy = Stepper::stepperY();
-  const bool available = !_coordinatedTimerOwned &&
-      !CoordinatedXyExecutor::isActive(_coordinatedCursor) &&
-      (sx == nullptr || !sx->_coordinatedReserved) &&
-      (sy == nullptr || !sy->_coordinatedReserved);
-  if (available) {
-    _coordinatedExecutionMode = mode;
-  }
-  taskEXIT_CRITICAL();
-  return available;
-}
-
-CoordinatedXyExecutor::ExecutionMode Gantry::coordinatedExecutionMode() const {
-  taskENTER_CRITICAL();
-  const CoordinatedXyExecutor::ExecutionMode mode = _coordinatedExecutionMode;
-  taskEXIT_CRITICAL();
-  return mode;
-}
-
-bool Gantry::setCoordinatedTimerScheduleModeForDiagnostics(
-    CoordinatedXyTimerSchedulePolicy::Mode mode) {
-  if (!CoordinatedXyTimerSchedulePolicy::isValid(mode)) return false;
-  taskENTER_CRITICAL();
-  Stepper* sx = Stepper::stepperX();
-  Stepper* sy = Stepper::stepperY();
-  const bool available = !_coordinatedTimerOwned &&
-      !CoordinatedXyExecutor::isActive(_coordinatedCursor) &&
-      (sx == nullptr || !sx->_coordinatedReserved) &&
-      (sy == nullptr || !sy->_coordinatedReserved);
-  if (available) {
-    _coordinatedTimerScheduleMode = mode;
-    _coordinatedLateInjectionArmed = false;
-  }
-  taskEXIT_CRITICAL();
-  return available;
-}
-
-CoordinatedXyTimerSchedulePolicy::Mode
-Gantry::coordinatedTimerScheduleMode() const {
-  taskENTER_CRITICAL();
-  const CoordinatedXyTimerSchedulePolicy::Mode mode =
-      _coordinatedTimerScheduleMode;
-  taskEXIT_CRITICAL();
-  return mode;
-}
-
-bool Gantry::armCoordinatedLateServiceInjectionForDiagnostics() {
-#if LC_TMC2208_DIAGNOSTIC_BUILD == 0
-  return false;
-#else
-  taskENTER_CRITICAL();
-  Stepper* sx = Stepper::stepperX();
-  Stepper* sy = Stepper::stepperY();
-  const bool available =
-      _coordinatedTimerScheduleMode ==
-          CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm &&
-      !_coordinatedTimerOwned &&
-      !CoordinatedXyExecutor::isActive(_coordinatedCursor) &&
-      (sx == nullptr || !sx->_coordinatedReserved) &&
-      (sy == nullptr || !sy->_coordinatedReserved);
-  if (available) _coordinatedLateInjectionArmed = true;
-  taskEXIT_CRITICAL();
-  return available;
-#endif
-}
-
-void Gantry::clearCoordinatedLateServiceInjectionForDiagnostics() {
-  taskENTER_CRITICAL();
-  _coordinatedLateInjectionArmed = false;
-  taskEXIT_CRITICAL();
 }
 
 CoordinatedStartStatus Gantry::moveTo(int32_t x,
                                       int32_t y,
                                       uint32_t feedHz) {
-#if LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE != 0
 	(void)feedHz;
 	const GantryPosition current = getPosition();
 	int32_t canonicalX = current.x;
@@ -275,20 +185,6 @@ CoordinatedStartStatus Gantry::moveTo(int32_t x,
 	    static_cast<int64_t>(canonicalX) - current.x,
 	    static_cast<int64_t>(canonicalY) - current.y,
 	    0u);
-#else
-	const int64_t dx = static_cast<int64_t>(x) - MX_STEPPERX_GetPos();
-	const int64_t dy = static_cast<int64_t>(y) - MX_STEPPERY_GetPos();
-	if (dx < std::numeric_limits<int32_t>::min() ||
-	    dx > std::numeric_limits<int32_t>::max() ||
-	    dy < std::numeric_limits<int32_t>::min() ||
-	    dy > std::numeric_limits<int32_t>::max()) {
-	  return CoordinatedStartStatus::PositionOutOfRange;
-	}
-	return moveBy(static_cast<int32_t>(dx),
-	              static_cast<int32_t>(dy),
-	              0,
-	              feedHz);
-#endif
 }
 //----------------------------------------------------------------------
 CoordinatedStartStatus Gantry::moveBy(int32_t dx,
@@ -298,11 +194,9 @@ CoordinatedStartStatus Gantry::moveBy(int32_t dx,
   if (dz != 0 && (dx != 0 || dy != 0)) {
     return CoordinatedStartStatus::UnsupportedMixedAxis;
   }
-#if LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE != 0
   if (dz == 0) {
     return startCoordinatedXY(dx, dy, 0u);
   }
-#endif
   const uint32_t Nx = static_cast<uint32_t>(
       dx < 0 ? -static_cast<int64_t>(dx) : static_cast<int64_t>(dx));
   const uint32_t Ny = static_cast<uint32_t>(
@@ -343,13 +237,6 @@ CoordinatedStartStatus Gantry::moveBy(int32_t dx,
 CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
                                                   int64_t dy,
                                                   uint32_t requestedRateHz) {
-#if LC_COORDINATED_XY_EXECUTOR_ENABLE == 0
-  (void)dx;
-  (void)dy;
-  (void)requestedRateHz;
-  _coordinatedStartStatus = CoordinatedStartStatus::Disabled;
-  return _coordinatedStartStatus;
-#else
   Stepper* sx = Stepper::stepperX();
   Stepper* sy = Stepper::stepperY();
   Stepper* sz = Stepper::stepperZ();
@@ -419,12 +306,8 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
   const CoordinatedXyPlanner::PlanStatus planStatus =
       CoordinatedXyPlanner::prepare(request, plan);
   if (planStatus == CoordinatedXyPlanner::PlanStatus::Immediate) {
-#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
-    const bool injectionUnconsumed = _coordinatedLateInjectionArmed;
-#endif
     _coordinatedPlan = plan;
-    (void)CoordinatedXyExecutor::arm(
-        plan, _coordinatedCursor, _coordinatedExecutionMode);
+    (void)CoordinatedXyExecutor::arm(plan, _coordinatedCursor);
     sx->_targetPos = sx->_pos;
     sy->_targetPos = sy->_pos;
     _coordinatedX = sx;
@@ -432,17 +315,7 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
     _coordinatedMasterTimer = sx->_htim;
     _coordinatedTimerOwned = false;
     _coordinatedProgrammedArr = 0u;
-    _coordinatedPulseHighCycles = 0u;
     _resetCoordinatedInstrumentation(0u);
-#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
-    if (injectionUnconsumed &&
-        _coordinatedTimerScheduleMode ==
-            CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm) {
-      gantrySaturatingIncrement(_coordinatedLateInjectionFailureCount,
-                                _coordinatedTimerScheduleSaturationFlags);
-    }
-#endif
-    _coordinatedLateInjectionArmed = false;
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
     CoordinatedXyIsrInstrumentation::finishWithoutSample(
         _coordinatedTiming, gantryCycleNow(), false);
@@ -463,59 +336,20 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
     return _coordinatedStartStatus;
   }
 
-  const CoordinatedXyExecutor::ExecutionMode executionMode =
-      coordinatedExecutionMode();
-  const bool diagnosticRearmMode =
-      _coordinatedTimerScheduleMode ==
-          CoordinatedXyTimerSchedulePolicy::Mode::RearmFromActualEdge ||
-      _coordinatedTimerScheduleMode ==
-          CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm;
-  if (diagnosticRearmMode &&
-      executionMode != CoordinatedXyExecutor::ExecutionMode::TwoEdge) {
-    _coordinatedStartStatus = CoordinatedStartStatus::HardwareMismatch;
-    return _coordinatedStartStatus;
-  }
-  if (_coordinatedTimerScheduleMode ==
-          CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm &&
-      (!gantryCycleCounterReady() ||
+  if (!gantryCycleCounterReady() ||
        plan.targetArr <
-           CoordinatedXyTimerSchedulePolicy::kConditionalGuardTicks)) {
+           CoordinatedXyTimerSchedulePolicy::kConditionalGuardTicks) {
     _coordinatedStartStatus = CoordinatedStartStatus::HardwareMismatch;
-    _coordinatedLateInjectionArmed = false;
     return _coordinatedStartStatus;
-  }
-  uint32_t completeStepTargetArr = 0u;
-  uint32_t completeStepStartArr = 0u;
-  uint32_t pulseHighCycles = 0u;
-  if (executionMode == CoordinatedXyExecutor::ExecutionMode::CompleteStep) {
-    pulseHighCycles = CoordinatedXyExecutor::minimumPulseCoreCycles(
-        HAL_RCC_GetHCLKFreq(), plan.timer.minPulseNs);
-    if (!gantryCycleCounterReady() || pulseHighCycles == 0u ||
-        !CoordinatedXyExecutor::fullPeriodArr(
-            plan.targetArr, plan.timer.maxArr, completeStepTargetArr) ||
-        !CoordinatedXyExecutor::fullPeriodArr(
-            plan.startArr, plan.timer.maxArr, completeStepStartArr) ||
-        completeStepTargetArr > completeStepStartArr) {
-      _coordinatedStartStatus = CoordinatedStartStatus::HardwareMismatch;
-      return _coordinatedStartStatus;
-    }
   }
 
   CoordinatedXyExecutor::Cursor executorCursor{};
-  if (CoordinatedXyExecutor::arm(plan, executorCursor, executionMode) !=
+  if (CoordinatedXyExecutor::arm(plan, executorCursor) !=
       CoordinatedXyExecutor::ArmStatus::Ready) {
     _coordinatedStartStatus = CoordinatedStartStatus::InvalidPlan;
     return _coordinatedStartStatus;
   }
   uint32_t firstProgrammedArr = executorCursor.cachedEvent.arr;
-  if (executionMode == CoordinatedXyExecutor::ExecutionMode::CompleteStep &&
-      !CoordinatedXyExecutor::fullPeriodArr(
-          executorCursor.cachedEvent.arr,
-          plan.timer.maxArr,
-          firstProgrammedArr)) {
-    _coordinatedStartStatus = CoordinatedStartStatus::HardwareMismatch;
-    return _coordinatedStartStatus;
-  }
 
   const CoordinatedXyExecutor::AxisReservationState xReservation{
       sx->_togglesRemaining != 0u || sx->_legacyMoveStartPending,
@@ -581,7 +415,6 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
   _coordinatedX = sx;
   _coordinatedY = sy;
   _coordinatedMasterTimer = sx->_htim;
-  _coordinatedPulseHighCycles = pulseHighCycles;
   _resetCoordinatedInstrumentation(_coordinatedCursor.cachedEvent.arr);
   xEventGroupClearBits(Orchestrator::getDoneEvents(),
                        BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
@@ -616,7 +449,6 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
 
   _coordinatedStartStatus = CoordinatedStartStatus::Started;
   return _coordinatedStartStatus;
-#endif
 }
 
 void Gantry::_resetCoordinatedInstrumentation(uint32_t firstArr) {
@@ -637,17 +469,7 @@ void Gantry::_resetCoordinatedInstrumentation(uint32_t firstArr) {
   _coordinatedConditionalDecisionCount = 0u;
   _coordinatedConditionalDecisionMissingCount = 0u;
   _coordinatedConditionalNonRearmSlackMinTicks = 0u;
-  _coordinatedLateInjectionCount = 0u;
-  _coordinatedLateInjectionFailureCount = 0u;
-  _coordinatedLateInjectionRearmCount = 0u;
-  _coordinatedLateInjectionDecisionSlackMaxTicks = 0u;
-  _coordinatedLateInjectionWaitMaxCycles = 0u;
   _coordinatedTimerScheduleSaturationFlags = 0u;
-  _coordinatedMaxIsrCycles = 0u;
-  _coordinatedLimitAbortRequestCount = 0u;
-  _coordinatedRawLimitAbortCount = 0u;
-  _coordinatedLimitRequestRisingEdges = 0u;
-  _coordinatedLimitRequestFallingEdges = 0u;
   _coordinatedArrMin = firstArr;
   _coordinatedArrMax = firstArr;
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
@@ -666,18 +488,7 @@ void Gantry::_observeCoordinatedArr(uint32_t arr) {
 
 LC_COORDINATED_HW_ALWAYS_INLINE
 void Gantry::_finishCoordinatedHardware(bool aborted,
-                                        bool stepStateKnownLow,
-                                        bool accountLateInjection) {
-#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
-  if (accountLateInjection && _coordinatedLateInjectionArmed &&
-      _coordinatedTimerScheduleMode ==
-          CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm) {
-    gantrySaturatingIncrement(_coordinatedLateInjectionFailureCount,
-                              _coordinatedTimerScheduleSaturationFlags);
-  }
-#else
-  (void)accountLateInjection;
-#endif
+                                        bool stepStateKnownLow) {
   gantryStopAndClearUpdateTimer(_coordinatedMasterTimer);
   if (_coordinatedY != nullptr) {
     gantryStopAndClearUpdateTimer(_coordinatedY->_htim);
@@ -705,7 +516,6 @@ void Gantry::_finishCoordinatedHardware(bool aborted,
     }
   }
   _coordinatedTimerOwned = false;
-  if (accountLateInjection) _coordinatedLateInjectionArmed = false;
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
   g_lcCoordinatedTim2IrqTimingArmed = 0u;
   g_lcCoordinatedTim2IrqEntryValid = 0u;
@@ -715,8 +525,7 @@ void Gantry::_finishCoordinatedHardware(bool aborted,
 LC_COORDINATED_HW_ALWAYS_INLINE
 void Gantry::_finishCoordinatedFromIsr(bool aborted,
                                        BaseType_t* woken,
-                                       bool timingSampleWillFollow,
-                                       bool accountLateInjection) {
+                                       bool timingSampleWillFollow) {
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
   if (aborted) {
     CoordinatedXyIsrInstrumentation::markAborted(_coordinatedTiming);
@@ -724,7 +533,7 @@ void Gantry::_finishCoordinatedFromIsr(bool aborted,
 #endif
   // Executor terminal transitions are accepted only while STEP is already
   // low: either before a new rise or immediately after the accounted fall.
-  _finishCoordinatedHardware(aborted, true, accountLateInjection);
+  _finishCoordinatedHardware(aborted, true);
   xEventGroupSetBitsFromISR(Orchestrator::getDoneEvents(),
                             BIT_STEPPER1_DONE | BIT_STEPPER2_DONE,
                             woken);
@@ -740,10 +549,6 @@ void Gantry::_finishCoordinatedFromIsr(bool aborted,
 
 LC_COORDINATED_HW_ALWAYS_INLINE
 bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
-#if LC_COORDINATED_XY_EXECUTOR_ENABLE == 0
-  (void)htim;
-  return false;
-#else
   if (!_coordinatedTimerOwned || htim == nullptr) return false;
   if (_coordinatedY != nullptr && htim == _coordinatedY->_htim) {
     ++_coordinatedTim7Interrupts;
@@ -752,20 +557,13 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
     return true;
   }
   if (htim != _coordinatedMasterTimer) return false;
-
-  if (_coordinatedTimerScheduleMode ==
-      CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm) {
-    return _handleCoordinatedTim2BodyFromIsr<true>();
-  }
-  return _handleCoordinatedTim2BodyFromIsr<false>();
-#endif
+  return _handleCoordinatedTim2BodyFromIsr();
 }
 
 #if defined(__GNUC__) && !defined(UNIT_TEST)
 #pragma GCC push_options
 #pragma GCC optimize("O2")
 #endif
-template <bool ConditionalMode>
 bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
 
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
@@ -774,12 +572,6 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
   g_lcCoordinatedTim2IrqEntryValid = 0u;
 #endif
   const uint32_t entryCycle = gantryCycleNow();
-#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
-  const CoordinatedXyPlanner::ProfilePhase eventProfilePhase =
-      ConditionalMode
-          ? _coordinatedCursor.cachedEvent.phase
-          : CoordinatedXyPlanner::ProfilePhase::Acceleration;
-#endif
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
   const CoordinatedXyIsrInstrumentation::Phase timingPhase =
       gantryTimingPhase(_coordinatedCursor.cachedEvent.phase);
@@ -789,29 +581,17 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
       CoordinatedXyExecutor::ControlDisposition::AlreadySatisfied;
   if (_coordinatedX != nullptr &&
       _coordinatedX->_coordinatedLimitAssertedFast()) {
-    if (_coordinatedLimitAbortRequestCount == 0u) {
-      _coordinatedLimitRequestRisingEdges = _coordinatedCursor.risingEdges;
-      _coordinatedLimitRequestFallingEdges = _coordinatedCursor.fallingEdges;
-    }
-    ++_coordinatedLimitAbortRequestCount;
-    ++_coordinatedRawLimitAbortCount;
     observedLimit = CoordinatedXyExecutor::requestLimitAbort(
         _coordinatedCursor, CoordinatedXyExecutor::LimitAxis::X);
   } else if (_coordinatedY != nullptr &&
              _coordinatedY->_coordinatedLimitAssertedFast()) {
-    if (_coordinatedLimitAbortRequestCount == 0u) {
-      _coordinatedLimitRequestRisingEdges = _coordinatedCursor.risingEdges;
-      _coordinatedLimitRequestFallingEdges = _coordinatedCursor.fallingEdges;
-    }
-    ++_coordinatedLimitAbortRequestCount;
-    ++_coordinatedRawLimitAbortCount;
     observedLimit = CoordinatedXyExecutor::requestLimitAbort(
         _coordinatedCursor, CoordinatedXyExecutor::LimitAxis::Y);
   }
 
   if (observedLimit == CoordinatedXyExecutor::ControlDisposition::StopNow) {
     BaseType_t woken = pdFALSE;
-    _finishCoordinatedFromIsr(true, &woken, true, ConditionalMode);
+    _finishCoordinatedFromIsr(true, &woken, true);
     const uint32_t recordedExitCycle = gantryCycleNow();
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
     const bool entryTimerValid =
@@ -847,66 +627,15 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
         entryCycle,
         false,
         true);
-#else
-    const uint32_t finalExitCycle = recordedExitCycle;
 #endif
-    const uint32_t cycles = finalExitCycle - entryCycle;
-    if (cycles > _coordinatedMaxIsrCycles) {
-      _coordinatedMaxIsrCycles = cycles;
-    }
     portYIELD_FROM_ISR(woken);
     return true;
   }
 
   CoordinatedXyExecutor::TickResult tick{};
   CoordinatedXyExecutor::TickStatus status =
-      CoordinatedXyExecutor::TickStatus::InvalidState;
-  const bool completeStepMode = _coordinatedCursor.executionMode ==
-      CoordinatedXyExecutor::ExecutionMode::CompleteStep;
-  const bool rearmFromActualEdge = !completeStepMode &&
-      _coordinatedTimerScheduleMode ==
-          CoordinatedXyTimerSchedulePolicy::Mode::RearmFromActualEdge;
-  const bool conditionalLateRearm = ConditionalMode && !completeStepMode;
-  if (completeStepMode) {
-    CoordinatedXyExecutor::TickResult prepared{};
-    status = CoordinatedXyExecutor::prepareCompleteStep(
-        _coordinatedPlan, _coordinatedCursor, prepared);
-    tick = prepared;
-    if (status == CoordinatedXyExecutor::TickStatus::Raised) {
-      const uint8_t preparedMask = static_cast<uint8_t>(prepared.mask);
-      const bool preparedX =
-          (preparedMask & static_cast<uint8_t>(
-              CoordinatedXyPlanner::StepMask::X)) != 0u;
-      const bool preparedY =
-          (preparedMask & static_cast<uint8_t>(
-              CoordinatedXyPlanner::StepMask::Y)) != 0u;
-      if (!preparedX && !preparedY) {
-        status = CoordinatedXyExecutor::forcePlannerFault(
-            _coordinatedCursor, tick);
-      } else {
-        if (preparedX) _coordinatedX->_writeCoordinatedStep(true);
-        if (preparedY) _coordinatedY->_writeCoordinatedStep(true);
-        const uint32_t pulseStartCycle = gantryCycleNow();
-        while (static_cast<uint32_t>(gantryCycleNow() - pulseStartCycle) <
-               _coordinatedPulseHighCycles) {
-          __NOP();
-        }
-        const uint32_t pulseHighCycles =
-            static_cast<uint32_t>(gantryCycleNow() - pulseStartCycle);
-        if (preparedX) _coordinatedX->_writeCoordinatedStep(false);
-        if (preparedY) _coordinatedY->_writeCoordinatedStep(false);
-#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
-        CoordinatedXyIsrInstrumentation::recordCompleteStepPulse(
-            _coordinatedTiming, pulseHighCycles);
-#endif
-        status = CoordinatedXyExecutor::commitCompleteStep(
-            _coordinatedPlan, _coordinatedCursor, tick);
-      }
-    }
-  } else {
-    status = CoordinatedXyExecutor::onTimerUpdate(
-        _coordinatedPlan, _coordinatedCursor, tick);
-  }
+      CoordinatedXyExecutor::onTimerUpdate(
+          _coordinatedPlan, _coordinatedCursor, tick);
   _observeCoordinatedArr(tick.arr);
   const uint8_t tickMask = static_cast<uint8_t>(tick.mask);
   const bool stepX =
@@ -914,88 +643,8 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
   const bool stepY =
       (tickMask & static_cast<uint8_t>(CoordinatedXyPlanner::StepMask::Y)) != 0u;
 
-  // In rearm mode, install the following interval before the physical edge so
-  // the counter can be restarted immediately after that edge. FreeRunning
-  // retains the established edge-then-ARR ordering.
-  if (rearmFromActualEdge && tick.updateArr) {
-    _observeCoordinatedArr(tick.nextArr);
-    _coordinatedProgrammedArr = tick.nextArr;
-    __HAL_TIM_SET_AUTORELOAD(_coordinatedMasterTimer, tick.nextArr);
-  }
-
-#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
-  uint32_t intentionalWaitCycles = 0u;
-  bool injectedThisCallback = false;
-  const bool injectionPhaseEligible = ConditionalMode &&
-      CoordinatedXyTimerSchedulePolicy::isInjectionPhaseEligible(
-          eventProfilePhase == CoordinatedXyPlanner::ProfilePhase::Cruise,
-          eventProfilePhase ==
-              CoordinatedXyPlanner::ProfilePhase::Deceleration,
-          _coordinatedPlan.cruiseSteps,
-          _coordinatedCursor.cachedEvent.masterStepIndex,
-          _coordinatedPlan.accelerationSteps);
-  const bool injectionCandidate = ConditionalMode &&
-      _coordinatedLateInjectionArmed && !tick.stopTimer &&
-      injectionPhaseEligible &&
-      status == CoordinatedXyExecutor::TickStatus::Raised &&
-      (stepX || stepY);
-  if (injectionCandidate) {
-    _coordinatedLateInjectionArmed = false;
-    injectedThisCallback = true;
-    gantrySaturatingIncrement(_coordinatedLateInjectionCount,
-                              _coordinatedTimerScheduleSaturationFlags);
-    const bool stepLow = (!stepX || _coordinatedX->_coordinatedStepIsLow()) &&
-        (!stepY || _coordinatedY->_coordinatedStepIsLow());
-    const bool canWait =
-        CoordinatedXyTimerSchedulePolicy::shouldAttemptInjection(
-            _coordinatedTimerScheduleMode,
-            true,
-            !tick.stopTimer,
-            injectionPhaseEligible,
-            true,
-            stepLow) &&
-        _coordinatedMasterTimer != nullptr &&
-        _coordinatedMasterTimer->Instance != nullptr;
-    bool injectionFailed = !canWait;
-    if (canWait) {
-      const uint32_t waitStartCycle = gantryCycleNow();
-      while (true) {
-        const uint32_t timerStatus = _coordinatedMasterTimer->Instance->SR;
-        const uint32_t timerCount = _coordinatedMasterTimer->Instance->CNT;
-        const uint32_t timerArr = _coordinatedMasterTimer->Instance->ARR;
-        if ((timerStatus & TIM_SR_UIF) != 0u || timerCount > timerArr) {
-          injectionFailed = true;
-          break;
-        }
-        const uint32_t remainingTicks = (timerArr - timerCount) + 1u;
-        if (remainingTicks <=
-            CoordinatedXyTimerSchedulePolicy::kInjectionTargetSlackTicks) {
-          break;
-        }
-        if (CoordinatedXyTimerSchedulePolicy::injectionWaitExpired(
-                waitStartCycle, gantryCycleNow())) {
-          injectionFailed = true;
-          break;
-        }
-        __NOP();
-      }
-      intentionalWaitCycles = gantryCycleNow() - waitStartCycle;
-      if (intentionalWaitCycles > _coordinatedLateInjectionWaitMaxCycles) {
-        _coordinatedLateInjectionWaitMaxCycles = intentionalWaitCycles;
-      }
-    }
-    if (injectionFailed) {
-      gantrySaturatingIncrement(_coordinatedLateInjectionFailureCount,
-                                _coordinatedTimerScheduleSaturationFlags);
-    }
-  }
-#else
-  const bool injectedThisCallback = false;
-#endif
-
   bool physicalEdgeEmitted = false;
-  if (!completeStepMode &&
-      status == CoordinatedXyExecutor::TickStatus::Raised) {
+  if (status == CoordinatedXyExecutor::TickStatus::Raised) {
     if (stepX) {
       _coordinatedX->_writeCoordinatedStep(true);
     }
@@ -1004,105 +653,63 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
     }
     physicalEdgeEmitted = stepX || stepY;
   } else if (tick.accountCompletePulse) {
-    if (stepX) {
-      if (!completeStepMode) _coordinatedX->_writeCoordinatedStep(false);
-    }
-    if (stepY) {
-      if (!completeStepMode) _coordinatedY->_writeCoordinatedStep(false);
-    }
+    if (stepX) _coordinatedX->_writeCoordinatedStep(false);
+    if (stepY) _coordinatedY->_writeCoordinatedStep(false);
     physicalEdgeEmitted = stepX || stepY;
   }
   const uint32_t emittedEdgeCycle =
-      ((rearmFromActualEdge || conditionalLateRearm) && physicalEdgeEmitted)
-          ? gantryCycleNow()
-          : 0u;
+      physicalEdgeEmitted ? gantryCycleNow() : 0u;
 
-  if (!rearmFromActualEdge && tick.updateArr) {
+  if (tick.updateArr) {
     _observeCoordinatedArr(tick.nextArr);
-    uint32_t nextProgrammedArr = tick.nextArr;
-    const bool arrValid = !completeStepMode ||
-        CoordinatedXyExecutor::fullPeriodArr(
-            tick.nextArr,
-            _coordinatedPlan.timer.maxArr,
-            nextProgrammedArr);
-    if (!arrValid) {
-      status = CoordinatedXyExecutor::forcePlannerFault(
-          _coordinatedCursor, tick);
-    } else {
-      _coordinatedProgrammedArr = nextProgrammedArr;
-      __HAL_TIM_SET_AUTORELOAD(
-          _coordinatedMasterTimer, nextProgrammedArr);
-    }
+    _coordinatedProgrammedArr = tick.nextArr;
+    __HAL_TIM_SET_AUTORELOAD(_coordinatedMasterTimer, tick.nextArr);
   }
 
   BaseType_t woken = pdFALSE;
   bool updatePending = false;
   bool shouldRearm = false;
-  if (ConditionalMode) {
-    const bool timerSampleValid = _coordinatedMasterTimer != nullptr &&
-        _coordinatedMasterTimer->Instance != nullptr;
-    const uint32_t timerCount = timerSampleValid
-        ? _coordinatedMasterTimer->Instance->CNT
-        : 0u;
-    const uint32_t timerArr = timerSampleValid
-        ? _coordinatedMasterTimer->Instance->ARR
-        : 0u;
-    const bool timerUpdatePending = timerSampleValid &&
-        (_coordinatedMasterTimer->Instance->SR & TIM_SR_UIF) != 0u;
-    const CoordinatedXyTimerSchedulePolicy::Decision scheduleDecision =
-        CoordinatedXyTimerSchedulePolicy::decide(
-            _coordinatedTimerScheduleMode,
-            physicalEdgeEmitted,
-            tick.stopTimer,
-            timerSampleValid,
-            timerCount,
-            timerArr,
-            timerUpdatePending);
-    if (scheduleDecision.applicable) {
-      if (!scheduleDecision.sampleValid) {
-        gantrySaturatingIncrement(
-            _coordinatedConditionalDecisionMissingCount,
-            _coordinatedTimerScheduleSaturationFlags);
-        if (status == CoordinatedXyExecutor::TickStatus::Raised) {
-          if (stepX) _coordinatedX->_writeCoordinatedStep(false);
-          if (stepY) _coordinatedY->_writeCoordinatedStep(false);
-        }
-        status = CoordinatedXyExecutor::forcePlannerFault(
-            _coordinatedCursor, tick);
-      } else {
-        gantrySaturatingIncrement(_coordinatedConditionalDecisionCount,
-                                  _coordinatedTimerScheduleSaturationFlags);
-        if (!scheduleDecision.rearm &&
-            (_coordinatedConditionalNonRearmSlackMinTicks == 0u ||
-             scheduleDecision.remainingTicks <
-                 _coordinatedConditionalNonRearmSlackMinTicks)) {
-          _coordinatedConditionalNonRearmSlackMinTicks =
-              scheduleDecision.remainingTicks;
-        }
-#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
-        if (injectedThisCallback) {
-          if (scheduleDecision.remainingTicks >
-              _coordinatedLateInjectionDecisionSlackMaxTicks) {
-            _coordinatedLateInjectionDecisionSlackMaxTicks =
-                scheduleDecision.remainingTicks;
-          }
-          if (scheduleDecision.rearm) {
-            gantrySaturatingIncrement(_coordinatedLateInjectionRearmCount,
-                                      _coordinatedTimerScheduleSaturationFlags);
-          }
-        }
-#else
-        (void)injectedThisCallback;
-#endif
+  const bool timerSampleValid = _coordinatedMasterTimer != nullptr &&
+      _coordinatedMasterTimer->Instance != nullptr;
+  const uint32_t timerCount = timerSampleValid
+      ? _coordinatedMasterTimer->Instance->CNT
+      : 0u;
+  const uint32_t timerArr = timerSampleValid
+      ? _coordinatedMasterTimer->Instance->ARR
+      : 0u;
+  const bool timerUpdatePending = timerSampleValid &&
+      (_coordinatedMasterTimer->Instance->SR & TIM_SR_UIF) != 0u;
+  const CoordinatedXyTimerSchedulePolicy::Decision scheduleDecision =
+      CoordinatedXyTimerSchedulePolicy::decide(
+          physicalEdgeEmitted,
+          tick.stopTimer,
+          timerSampleValid,
+          timerCount,
+          timerArr,
+          timerUpdatePending);
+  if (scheduleDecision.applicable) {
+    if (!scheduleDecision.sampleValid) {
+      gantrySaturatingIncrement(
+          _coordinatedConditionalDecisionMissingCount,
+          _coordinatedTimerScheduleSaturationFlags);
+      if (status == CoordinatedXyExecutor::TickStatus::Raised) {
+        if (stepX) _coordinatedX->_writeCoordinatedStep(false);
+        if (stepY) _coordinatedY->_writeCoordinatedStep(false);
+      }
+      status = CoordinatedXyExecutor::forcePlannerFault(
+          _coordinatedCursor, tick);
+    } else {
+      gantrySaturatingIncrement(_coordinatedConditionalDecisionCount,
+                                _coordinatedTimerScheduleSaturationFlags);
+      if (!scheduleDecision.rearm &&
+          (_coordinatedConditionalNonRearmSlackMinTicks == 0u ||
+           scheduleDecision.remainingTicks <
+               _coordinatedConditionalNonRearmSlackMinTicks)) {
+        _coordinatedConditionalNonRearmSlackMinTicks =
+            scheduleDecision.remainingTicks;
       }
     }
-    shouldRearm = scheduleDecision.sampleValid && scheduleDecision.rearm &&
-        !completeStepMode;
-  } else {
-    shouldRearm = CoordinatedXyTimerSchedulePolicy::shouldRearm(
-        _coordinatedTimerScheduleMode,
-        physicalEdgeEmitted,
-        tick.stopTimer) && !completeStepMode;
+    shouldRearm = scheduleDecision.sampleValid && scheduleDecision.rearm;
   }
   if (shouldRearm) {
     // Stop the counter while rebasing it so an update cannot race the UIF
@@ -1110,43 +717,26 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
     // a bounded number of core cycles after the emitted STEP edge.
     CLEAR_BIT(_coordinatedMasterTimer->Instance->CR1, TIM_CR1_CEN);
     if (__HAL_TIM_GET_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE) != RESET) {
-      if (ConditionalMode) {
-        gantrySaturatingIncrement(_coordinatedPendingUpdateCount,
-                                  _coordinatedTimerScheduleSaturationFlags);
-        gantrySaturatingIncrement(_coordinatedTimerRearmPendingCount,
-                                  _coordinatedTimerScheduleSaturationFlags);
-      } else {
-        if (_coordinatedPendingUpdateCount !=
-            std::numeric_limits<uint32_t>::max()) {
-          ++_coordinatedPendingUpdateCount;
-        }
-        if (_coordinatedTimerRearmPendingCount !=
-            std::numeric_limits<uint32_t>::max()) {
-          ++_coordinatedTimerRearmPendingCount;
-        }
-      }
+      gantrySaturatingIncrement(_coordinatedPendingUpdateCount,
+                                _coordinatedTimerScheduleSaturationFlags);
+      gantrySaturatingIncrement(_coordinatedTimerRearmPendingCount,
+                                _coordinatedTimerScheduleSaturationFlags);
       updatePending = true;
     }
     __HAL_TIM_SET_COUNTER(_coordinatedMasterTimer, 0u);
     __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
     NVIC_ClearPendingIRQ(TIM2_IRQn);
     SET_BIT(_coordinatedMasterTimer->Instance->CR1, TIM_CR1_CEN);
-    if (ConditionalMode) {
-      gantrySaturatingIncrement(_coordinatedTimerRearmCount,
-                                _coordinatedTimerScheduleSaturationFlags);
-    } else if (_coordinatedTimerRearmCount !=
-               std::numeric_limits<uint32_t>::max()) {
-      ++_coordinatedTimerRearmCount;
-    }
+    gantrySaturatingIncrement(_coordinatedTimerRearmCount,
+                              _coordinatedTimerScheduleSaturationFlags);
     const uint32_t rearmDelayCycles = gantryCycleNow() - emittedEdgeCycle;
     if (rearmDelayCycles > _coordinatedTimerRearmDelayMaxCycles) {
       _coordinatedTimerRearmDelayMaxCycles = rearmDelayCycles;
     }
   }
 
-  // Position accounting follows the actual falling edge and, in diagnostic
-  // rearm mode, follows the timer restart so it cannot shorten the next
-  // physical edge interval.
+  // Position accounting follows the actual falling edge and any timer restart
+  // so it cannot shorten the next physical edge interval.
   if (tick.accountCompletePulse) {
     if (stepX) _coordinatedX->_accountCoordinatedPulse();
     if (stepY) _coordinatedY->_accountCoordinatedPulse();
@@ -1160,18 +750,13 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
       __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
     } else {
       const bool aborted = status != CoordinatedXyExecutor::TickStatus::Completed;
-      _finishCoordinatedFromIsr(
-          aborted, &woken, true, ConditionalMode);
+      _finishCoordinatedFromIsr(aborted, &woken, true);
     }
   } else if (!shouldRearm &&
              __HAL_TIM_GET_FLAG(
                  _coordinatedMasterTimer, TIM_FLAG_UPDATE) != RESET) {
-    if (ConditionalMode) {
-      gantrySaturatingIncrement(_coordinatedPendingUpdateCount,
-                                _coordinatedTimerScheduleSaturationFlags);
-    } else {
-      ++_coordinatedPendingUpdateCount;
-    }
+    gantrySaturatingIncrement(_coordinatedPendingUpdateCount,
+                              _coordinatedTimerScheduleSaturationFlags);
     updatePending = true;
   }
 
@@ -1185,30 +770,6 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
       g_lcCoordinatedTim2IrqEntryTimerCount;
   const uint32_t entryTimerArr = g_lcCoordinatedTim2IrqEntryTimerArr;
   g_lcCoordinatedTim2IrqEntryTimerValid = 0u;
-#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
-  if (ConditionalMode) {
-    CoordinatedXyIsrInstrumentation::recordSampleExcludingIntentionalWait(
-        _coordinatedTiming,
-        timingPhase,
-        entryCycle,
-        recordedExitCycle,
-        timingArr,
-        updatePending,
-        tick.accountCompletePulse,
-        terminal,
-        intentionalWaitCycles);
-  } else {
-    CoordinatedXyIsrInstrumentation::recordSample(
-        _coordinatedTiming,
-        timingPhase,
-        entryCycle,
-        recordedExitCycle,
-        timingArr,
-        updatePending,
-        tick.accountCompletePulse,
-        terminal);
-  }
-#else
   CoordinatedXyIsrInstrumentation::recordSample(
       _coordinatedTiming,
       timingPhase,
@@ -1218,28 +779,7 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
       updatePending,
       tick.accountCompletePulse,
       terminal);
-#endif
   const uint32_t finalExitCycle = gantryCycleNow();
-#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
-  if (ConditionalMode) {
-    CoordinatedXyIsrInstrumentation::completeSampleTimingExcludingIntentionalWait(
-        _coordinatedTiming,
-        timingPhase,
-        entryCycle,
-        recordedExitCycle,
-        finalExitCycle,
-        terminal,
-        intentionalWaitCycles);
-  } else {
-    CoordinatedXyIsrInstrumentation::completeSampleTiming(
-        _coordinatedTiming,
-        timingPhase,
-        entryCycle,
-        recordedExitCycle,
-        finalExitCycle,
-        terminal);
-  }
-#else
   CoordinatedXyIsrInstrumentation::completeSampleTiming(
       _coordinatedTiming,
       timingPhase,
@@ -1247,7 +787,6 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
       recordedExitCycle,
       finalExitCycle,
       terminal);
-#endif
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
       _coordinatedTiming,
       irqEntryValid,
@@ -1258,18 +797,10 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
       entryCycle,
       updatePending,
       terminal);
-#else
-  const uint32_t finalExitCycle = recordedExitCycle;
 #endif
-  const uint32_t cycles = finalExitCycle - entryCycle;
-  if (cycles > _coordinatedMaxIsrCycles) {
-    _coordinatedMaxIsrCycles = cycles;
-  }
   portYIELD_FROM_ISR(woken);
   return true;
 }
-template bool Gantry::_handleCoordinatedTim2BodyFromIsr<false>();
-template bool Gantry::_handleCoordinatedTim2BodyFromIsr<true>();
 #if defined(__GNUC__) && !defined(UNIT_TEST)
 #pragma GCC pop_options
 #endif
@@ -1447,31 +978,12 @@ void Gantry::_resumeCoordinatedTask() {
       CoordinatedXyExecutor::resume(_coordinatedCursor);
   if (disposition == CoordinatedXyExecutor::ControlDisposition::Deferred &&
       _coordinatedMasterTimer != nullptr) {
-    uint32_t programmedArr = _coordinatedCursor.cachedEvent.arr;
-    const bool arrValid =
-        _coordinatedCursor.executionMode !=
-            CoordinatedXyExecutor::ExecutionMode::CompleteStep ||
-        CoordinatedXyExecutor::fullPeriodArr(
-            _coordinatedCursor.cachedEvent.arr,
-            _coordinatedPlan.timer.maxArr,
-            programmedArr);
-    if (!arrValid) {
-      CoordinatedXyExecutor::TickResult fault{};
-      (void)CoordinatedXyExecutor::forcePlannerFault(
-          _coordinatedCursor, fault);
-      _finishCoordinatedHardware(true);
-#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
-      CoordinatedXyIsrInstrumentation::finishWithoutSample(
-          _coordinatedTiming, gantryCycleNow(), true);
-#endif
-      signalDone = true;
-    } else {
-      _coordinatedProgrammedArr = programmedArr;
-      __HAL_TIM_SET_AUTORELOAD(_coordinatedMasterTimer, programmedArr);
-      __HAL_TIM_SET_COUNTER(_coordinatedMasterTimer, 0u);
-      __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
-      (void)HAL_TIM_Base_Start_IT(_coordinatedMasterTimer);
-    }
+    const uint32_t programmedArr = _coordinatedCursor.cachedEvent.arr;
+    _coordinatedProgrammedArr = programmedArr;
+    __HAL_TIM_SET_AUTORELOAD(_coordinatedMasterTimer, programmedArr);
+    __HAL_TIM_SET_COUNTER(_coordinatedMasterTimer, 0u);
+    __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
+    (void)HAL_TIM_Base_Start_IT(_coordinatedMasterTimer);
   }
   taskEXIT_CRITICAL();
   if (signalDone) {
@@ -1480,16 +992,9 @@ void Gantry::_resumeCoordinatedTask() {
   }
 }
 
-bool Gantry::_cancelCoordinatedTask(uint32_t* risingEdgesBefore,
-                                    uint32_t* fallingEdgesBefore) {
+bool Gantry::_cancelCoordinatedTask() {
   bool signalDone = false;
   taskENTER_CRITICAL();
-  if (risingEdgesBefore != nullptr) {
-    *risingEdgesBefore = _coordinatedCursor.risingEdges;
-  }
-  if (fallingEdgesBefore != nullptr) {
-    *fallingEdgesBefore = _coordinatedCursor.fallingEdges;
-  }
   const CoordinatedXyExecutor::ControlDisposition disposition =
       CoordinatedXyExecutor::requestCancel(_coordinatedCursor);
   if (disposition == CoordinatedXyExecutor::ControlDisposition::StopNow) {
@@ -1509,18 +1014,10 @@ bool Gantry::_cancelCoordinatedTask(uint32_t* risingEdgesBefore,
          disposition == CoordinatedXyExecutor::ControlDisposition::StopNow;
 }
 
-bool Gantry::_requestCoordinatedLimitAbortTask(Stepper::Axis axis,
-                                                uint32_t* risingEdgesBefore,
-                                                uint32_t* fallingEdgesBefore) {
+bool Gantry::_requestCoordinatedLimitAbortTask(Stepper::Axis axis) {
   if (axis != Stepper::X_AXIS && axis != Stepper::Y_AXIS) return false;
   bool signalDone = false;
   taskENTER_CRITICAL();
-  if (risingEdgesBefore != nullptr) {
-    *risingEdgesBefore = _coordinatedCursor.risingEdges;
-  }
-  if (fallingEdgesBefore != nullptr) {
-    *fallingEdgesBefore = _coordinatedCursor.fallingEdges;
-  }
   const CoordinatedXyExecutor::ControlDisposition disposition =
       CoordinatedXyExecutor::requestLimitAbort(
           _coordinatedCursor,
@@ -1544,38 +1041,16 @@ bool Gantry::_requestCoordinatedLimitAbortTask(Stepper::Axis axis,
          disposition == CoordinatedXyExecutor::ControlDisposition::AlreadySatisfied;
 }
 
-bool Gantry::requestCoordinatedLimitAbortForDiagnostics(Stepper::Axis axis) {
+bool Gantry::requestCoordinatedLimitAbort(Stepper::Axis axis) {
   return _requestCoordinatedLimitAbortTask(axis);
 }
 
-bool Gantry::requestCoordinatedCancelForDiagnostics(
-    uint32_t& risingEdgesBefore,
-    uint32_t& fallingEdgesBefore) {
-  return _cancelCoordinatedTask(&risingEdgesBefore, &fallingEdgesBefore);
-}
-
-bool Gantry::requestCoordinatedLimitAbortForDiagnostics(
-    Stepper::Axis axis,
-    uint32_t& risingEdgesBefore,
-    uint32_t& fallingEdgesBefore) {
-  return _requestCoordinatedLimitAbortTask(
-      axis, &risingEdgesBefore, &fallingEdgesBefore);
-}
-
 void Gantry::requestCoordinatedLimitAbortFromIsr(Stepper::Axis axis) {
-#if LC_COORDINATED_XY_EXECUTOR_ENABLE != 0
   Gantry* gantry = _instance;
   if (gantry == nullptr ||
       (axis != Stepper::X_AXIS && axis != Stepper::Y_AXIS)) {
     return;
   }
-  if (gantry->_coordinatedLimitAbortRequestCount == 0u) {
-    gantry->_coordinatedLimitRequestRisingEdges =
-        gantry->_coordinatedCursor.risingEdges;
-    gantry->_coordinatedLimitRequestFallingEdges =
-        gantry->_coordinatedCursor.fallingEdges;
-  }
-  ++gantry->_coordinatedLimitAbortRequestCount;
   const CoordinatedXyExecutor::ControlDisposition requestDisposition =
       CoordinatedXyExecutor::requestLimitAbort(
           gantry->_coordinatedCursor,
@@ -1586,9 +1061,6 @@ void Gantry::requestCoordinatedLimitAbortFromIsr(Stepper::Axis axis) {
     gantry->_finishCoordinatedFromIsr(true, &woken);
     portYIELD_FROM_ISR(woken);
   }
-#else
-  (void)axis;
-#endif
 }
 
 void Gantry::pauseXYZMotors() {
@@ -1631,8 +1103,6 @@ CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
   snapshot.startStatus = _coordinatedStartStatus;
   snapshot.state = _coordinatedCursor.state;
   snapshot.terminalReason = _coordinatedCursor.terminalReason;
-  snapshot.executionMode = _coordinatedCursor.executionMode;
-  snapshot.timerScheduleMode = _coordinatedTimerScheduleMode;
   snapshot.requestedXSteps = _coordinatedPlan.xSteps;
   snapshot.requestedYSteps = _coordinatedPlan.ySteps;
   snapshot.emittedXSteps = _coordinatedCursor.xEmittedSteps;
@@ -1653,15 +1123,8 @@ CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
       _coordinatedConditionalDecisionMissingCount;
   snapshot.conditionalNonRearmSlackMinTicks =
       _coordinatedConditionalNonRearmSlackMinTicks;
-  snapshot.lateInjectionCount = _coordinatedLateInjectionCount;
-  snapshot.lateInjectionFailureCount = _coordinatedLateInjectionFailureCount;
-  snapshot.lateInjectionRearmCount = _coordinatedLateInjectionRearmCount;
-  snapshot.lateInjectionDecisionSlackMaxTicks =
-      _coordinatedLateInjectionDecisionSlackMaxTicks;
-  snapshot.lateInjectionWaitMaxCycles = _coordinatedLateInjectionWaitMaxCycles;
   snapshot.timerScheduleSaturationFlags =
       _coordinatedTimerScheduleSaturationFlags;
-  snapshot.maxIsrCycles = _coordinatedMaxIsrCycles;
   snapshot.selectedMasterRateHz = _coordinatedPlan.masterRateHz;
   snapshot.selectedMasterAccelerationStepsPerSec2 =
       _coordinatedPlan.masterAccelerationStepsPerSec2;
@@ -1671,10 +1134,6 @@ CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
   snapshot.triangular = _coordinatedPlan.triangular;
   snapshot.timing = CoordinatedXyIsrInstrumentation::makeSnapshot(
       _coordinatedTiming);
-  snapshot.limitAbortRequestCount = _coordinatedLimitAbortRequestCount;
-  snapshot.rawLimitAbortCount = _coordinatedRawLimitAbortCount;
-  snapshot.limitRequestRisingEdges = _coordinatedLimitRequestRisingEdges;
-  snapshot.limitRequestFallingEdges = _coordinatedLimitRequestFallingEdges;
   snapshot.maskChecksum = _coordinatedCursor.maskChecksum;
   snapshot.arrChecksum = _coordinatedCursor.arrChecksum;
   snapshot.timerOwned = _coordinatedTimerOwned;
@@ -1689,22 +1148,11 @@ CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
     snapshot.yStepLow = _coordinatedY->_coordinatedStepIsLow();
   }
   taskEXIT_CRITICAL();
-  for (uint8_t i = 0u;
-       i < static_cast<uint8_t>(CoordinatedXyIsrInstrumentation::Phase::Count);
-       ++i) {
-    snapshot.phaseMeanCycles[i] =
-        CoordinatedXyIsrInstrumentation::phaseMeanCycles(
-            snapshot.timing,
-            static_cast<CoordinatedXyIsrInstrumentation::Phase>(i));
-  }
-  snapshot.terminalMeanCycles =
-      CoordinatedXyIsrInstrumentation::terminalMeanCycles(snapshot.timing);
   snapshot.durationErrorBasisPoints =
       CoordinatedXyIsrInstrumentation::durationErrorBasisPoints(
           snapshot.timing,
           HAL_RCC_GetHCLKFreq(),
           _coordinatedPlan.timer.inputClockHz);
-  snapshot.minimumPulseCoreCycles = _coordinatedPulseHighCycles;
   snapshot.doneBits = static_cast<uint32_t>(
       xEventGroupGetBits(Orchestrator::getDoneEvents()));
   return snapshot;

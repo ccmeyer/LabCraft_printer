@@ -3,6 +3,7 @@
   "manifest_id": "normal_xy_route_v1",
   "name": "Normal Coordinated XY Route Qualification v1",
   "profile": "FULL",
+  "lifecycle": "archived",
   "description": "Operator-gated 3 kHz qualification of normal Gantry XY routing through the coordinated executor, including bounded physical-limit tests and legacy-axis smoke coverage.",
   "expected_test_ids": [2050, 2051, 2052, 2053, 2054, 2055, 2056, 2057],
   "enforce_expected_test_ids": true,

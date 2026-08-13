@@ -1,23 +1,24 @@
 {
   "schema_version": "qualification_manifest_v0",
-  "manifest_id": "coordinated_xy_mres3_rearm_v1",
-  "name": "Coordinated XY MRES3 Rearm-From-Actual-Edge v1",
+  "manifest_id": "coordinated_xy_production_mres3_v2",
+  "name": "Production MRES3 Conditional-Rearm v2",
   "profile": "FULL",
-  "lifecycle": "archived",
-  "description": "Runs the MRES=3 physical-distance-equivalent ten-move row at 20 kHz while rebasing TIM2 after every emitted nonterminal STEP edge. Production and selector 2085 remain free-running.",
-  "expected_test_ids": [2080, 2081, 2082, 2083],
+  "lifecycle": "active",
+  "description": "Milestone 7 production qualification for legacy logical coordinates mapped to MRES=3 native steps, fixed two-edge TIM2 execution, and conditional late rearming.",
+  "expected_test_ids": [2087, 2088, 2089, 2090],
   "enforce_expected_test_ids": true,
   "requires_operator_prompts": true,
-  "selftest_args": ["--coordinated-xy-mres3-rearm-suite"],
+  "selftest_args": ["--coordinated-xy-production-mres3-suite"],
+  "required_host_checks": ["selftest_progress_watchdog", "coordinated_xy_status_cadence"],
   "fixtures": [
     {
-      "fixture_id": "coordinated_xy_mres3_rearm_envelope_clear",
-      "required_for": [2080, 2081, 2082, 2083],
-      "operator_note": "Confirm that the diagnostic MRES=3 image is flashed, both limits are released, the complete XY/Z envelope is clear, and the gantry is square. This selector uses the already-watched MRES=3 geometry and speed but temporarily rearms TIM2 from each actual STEP edge. Stop immediately for contact, abnormal sound, lost squareness, absent motion, or absent homing."
+      "fixture_id": "coordinated_xy_production_mres3_envelope_clear",
+      "required_for": [2087, 2088, 2089, 2090],
+      "operator_note": "Confirm both limits are released, the gantry is square, and the full XY/Z envelope is clear. Stop for contact, abnormal sound, lost squareness, missing motion or home, reset, watchdog evidence, or communication loss."
     }
   ],
   "analysis_rules": {
-    "2080": {
+    "2087": {
       "category": "performance",
       "failure_domain": "firmware_motion",
       "metrics": {
@@ -31,77 +32,52 @@
         "ok": {"maturity": "acceptance", "equals": 1},
         "pu": {"maturity": "acceptance", "equals": 0},
         "ps": {"maturity": "acceptance", "equals": 0},
-        "am": {"maturity": "acceptance", "min": 1, "max": 2025},
-        "aa": {"maturity": "acceptance", "min": 1, "max": 2025},
-        "cm": {"maturity": "acceptance", "min": 1, "max": 2025},
-        "ca": {"maturity": "acceptance", "min": 1, "max": 2025},
-        "dm": {"maturity": "acceptance", "min": 1, "max": 2025},
-        "da": {"maturity": "acceptance", "min": 1, "max": 2025},
-        "tm": {"maturity": "acceptance", "min": 1, "max": 2250},
+        "am": {"maturity": "acceptance", "max": 2025},
+        "tm": {"maturity": "acceptance", "max": 2250},
         "de": {"maturity": "acceptance", "max": 100},
         "sg": {"maturity": "acceptance", "max": 100},
         "wd": {"maturity": "acceptance", "max": 100},
         "sa": {"maturity": "acceptance", "equals": 0},
         "wl": {"maturity": "acceptance", "equals": 0},
-        "cw": {"maturity": "acceptance", "max": 10},
         "sf": {"maturity": "acceptance", "equals": 0},
-        "xd": {"maturity": "acceptance", "max": 13},
-        "yd": {"maturity": "acceptance", "max": 13},
+        "xd": {"maturity": "acceptance", "max": 25},
+        "yd": {"maturity": "acceptance", "max": 25},
         "to": {"maturity": "acceptance", "equals": 0}
       }
     },
-    "2081": {
+    "2088": {
       "category": "performance",
       "failure_domain": "firmware_timing",
       "metrics": {
         "i2": {"maturity": "acceptance", "equals": 220000},
         "s": {"maturity": "acceptance", "equals": 220000},
         "mi": {"maturity": "acceptance", "equals": 0},
-        "ph": {"maturity": "candidate", "min": 1},
-        "pa": {"maturity": "candidate", "min": 1},
-        "fm": {"maturity": "candidate", "min": 1},
-        "fa": {"maturity": "candidate", "min": 1},
-        "ax": {"maturity": "candidate", "min": 1},
-        "tf": {"maturity": "candidate", "min": 1},
-        "pp": {"maturity": "candidate", "min": 0},
-        "pf": {"maturity": "candidate", "min": 0},
         "pu": {"maturity": "acceptance", "equals": 0},
         "ps": {"maturity": "acceptance", "equals": 0},
         "sf": {"maturity": "acceptance", "equals": 0},
         "to": {"maturity": "acceptance", "equals": 0}
       }
     },
-    "2082": {
+    "2089": {
       "category": "performance",
       "failure_domain": "firmware_timing",
       "metrics": {
         "i2": {"maturity": "acceptance", "equals": 220000},
         "s": {"maturity": "acceptance", "equals": 220000},
         "mi": {"maturity": "acceptance", "equals": 0},
-        "cm": {"maturity": "candidate", "min": 0},
-        "ca": {"maturity": "candidate", "min": 0},
-        "pm": {"maturity": "candidate", "min": 0},
-        "lc": {"maturity": "candidate", "min": 0},
-        "dm": {"maturity": "candidate", "min": 0},
         "ds": {"maturity": "acceptance", "equals": 219990},
         "di": {"maturity": "acceptance", "equals": 0},
         "md": {"maturity": "acceptance", "equals": 0},
         "sl": {"maturity": "acceptance", "min": 450},
-        "rm": {"maturity": "acceptance", "equals": 1},
-        "rc": {"maturity": "acceptance", "equals": 219990},
+        "dc": {"maturity": "acceptance", "equals": 219990},
+        "ci": {"maturity": "acceptance", "equals": 0},
+        "ns": {"maturity": "acceptance", "min": 1126},
         "rp": {"maturity": "acceptance", "equals": 0},
-        "rd": {"maturity": "candidate", "min": 1},
-        "sm": {"maturity": "acceptance", "equals": 0},
-        "lf": {"maturity": "acceptance", "equals": 0},
         "sf": {"maturity": "acceptance", "equals": 0},
-        "to": {"maturity": "acceptance", "equals": 0},
-        "fv": {"maturity": "acceptance", "equals": 0},
-        "tr": {"maturity": "acceptance", "equals": 0},
-        "la": {"maturity": "acceptance", "equals": 0},
-        "ra": {"maturity": "acceptance", "equals": 0}
+        "to": {"maturity": "acceptance", "equals": 0}
       }
     },
-    "2083": {
+    "2090": {
       "category": "configuration",
       "failure_domain": "firmware_driver_configuration",
       "metrics": {
@@ -114,7 +90,7 @@
         "tf": {"maturity": "acceptance", "equals": 0},
         "ve": {"maturity": "acceptance", "equals": 1},
         "ae": {"maturity": "acceptance", "equals": 1},
-        "ge": {"maturity": "acceptance", "equals": 1},
+        "lu": {"maturity": "acceptance", "equals": 2},
         "sf": {"maturity": "acceptance", "equals": 0},
         "to": {"maturity": "acceptance", "equals": 0}
       }

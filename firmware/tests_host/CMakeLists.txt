@@ -115,24 +115,6 @@ target_link_libraries(fw_tests PRIVATE
     CppUTestExt
 )
 
-# Compile the public gate contract a second time with the Milestone 5 A/B
-# rollback setting. This target has no runtime behavior; a normal-route gate
-# that cannot be overridden makes the host build fail.
-add_library(coordinated_xy_legacy_gate_compile OBJECT
-    tests/compile_coordinated_xy_legacy_gate.cpp
-)
-target_include_directories(coordinated_xy_legacy_gate_compile PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}/../Core/Inc
-)
-target_compile_definitions(coordinated_xy_legacy_gate_compile PRIVATE
-    UNIT_TEST=1
-    LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE=0
-)
-set_target_properties(coordinated_xy_legacy_gate_compile PROPERTIES
-    CXX_STANDARD 17
-    CXX_STANDARD_REQUIRED YES
-)
-
 # Verify both supported watchdog arming configurations at compile time. The
 # production build uses the default target; immediate arming remains an
 # explicit diagnostic/build override.
@@ -165,21 +147,6 @@ set_target_properties(watchdog_arm_immediate_compile PROPERTIES
     CXX_STANDARD_REQUIRED YES
 )
 
-add_library(tmc2208_mres3_diagnostic_compile OBJECT
-    tests/compile_tmc2208_configuration.cpp
-)
-target_include_directories(tmc2208_mres3_diagnostic_compile PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}/../Core/Inc
-)
-target_compile_definitions(tmc2208_mres3_diagnostic_compile PRIVATE
-    LC_TMC2208_MRES=3
-    LC_TMC2208_DIAGNOSTIC_BUILD=1
-)
-set_target_properties(tmc2208_mres3_diagnostic_compile PROPERTIES
-    CXX_STANDARD 17
-    CXX_STANDARD_REQUIRED YES
-)
-
 include(CheckCXXSourceCompiles)
 set(_watchdog_saved_required_definitions "${CMAKE_REQUIRED_DEFINITIONS}")
 set(_watchdog_saved_required_includes "${CMAKE_REQUIRED_INCLUDES}")
@@ -197,31 +164,3 @@ set(CMAKE_REQUIRED_DEFINITIONS "${_watchdog_saved_required_definitions}")
 set(CMAKE_REQUIRED_INCLUDES "${_watchdog_saved_required_includes}")
 unset(_watchdog_saved_required_definitions)
 unset(_watchdog_saved_required_includes)
-
-set(_tmc_saved_required_definitions "${CMAKE_REQUIRED_DEFINITIONS}")
-set(_tmc_saved_required_includes "${CMAKE_REQUIRED_INCLUDES}")
-set(CMAKE_REQUIRED_DEFINITIONS "-DLC_TMC2208_MRES=4")
-set(CMAKE_REQUIRED_INCLUDES "${CMAKE_CURRENT_LIST_DIR}/../Core/Inc")
-unset(TMC2208_INVALID_MRES_COMPILES CACHE)
-check_cxx_source_compiles(
-    "#include \"TMC2208Configuration.h\"\nint main() { return 0; }"
-    TMC2208_INVALID_MRES_COMPILES
-)
-if(TMC2208_INVALID_MRES_COMPILES)
-    message(FATAL_ERROR "Unsupported LC_TMC2208_MRES unexpectedly compiled")
-endif()
-set(CMAKE_REQUIRED_DEFINITIONS
-    "-DLC_TMC2208_MRES=2;-DLC_TMC2208_DIAGNOSTIC_BUILD=1"
-)
-unset(TMC2208_INVALID_DIAGNOSTIC_PAIR_COMPILES CACHE)
-check_cxx_source_compiles(
-    "#include \"TMC2208Configuration.h\"\nint main() { return 0; }"
-    TMC2208_INVALID_DIAGNOSTIC_PAIR_COMPILES
-)
-if(TMC2208_INVALID_DIAGNOSTIC_PAIR_COMPILES)
-    message(FATAL_ERROR "MRES2 diagnostic marker unexpectedly compiled")
-endif()
-set(CMAKE_REQUIRED_DEFINITIONS "${_tmc_saved_required_definitions}")
-set(CMAKE_REQUIRED_INCLUDES "${_tmc_saved_required_includes}")
-unset(_tmc_saved_required_definitions)
-unset(_tmc_saved_required_includes)

@@ -16,6 +16,7 @@ class QualificationManifest:
     manifest_id: str
     name: str
     profile: str
+    lifecycle: str
     expected_test_ids: tuple[int, ...]
     fixtures: tuple[dict[str, Any], ...]
     enforce_expected_test_ids: bool
@@ -31,6 +32,7 @@ class QualificationManifest:
             "manifest_id": self.manifest_id,
             "name": self.name,
             "profile": self.profile,
+            "lifecycle": self.lifecycle,
             "expected_test_ids": list(self.expected_test_ids),
             "fixtures": [dict(item) for item in self.fixtures],
             "enforce_expected_test_ids": bool(self.enforce_expected_test_ids),
@@ -118,6 +120,9 @@ def parse_manifest(payload: dict[str, Any]) -> QualificationManifest:
     profile = _require_string(payload, "profile").upper()
     if profile not in {"SAFE", "FULL"}:
         raise ManifestError("Manifest profile must be SAFE or FULL.")
+    lifecycle = str(payload.get("lifecycle", "active")).strip().lower()
+    if lifecycle not in {"active", "archived"}:
+        raise ManifestError("Manifest lifecycle must be active or archived.")
 
     fixtures = payload.get("fixtures", [])
     if not isinstance(fixtures, list):
@@ -157,6 +162,7 @@ def parse_manifest(payload: dict[str, Any]) -> QualificationManifest:
         manifest_id=manifest_id,
         name=name,
         profile=profile,
+        lifecycle=lifecycle,
         expected_test_ids=_parse_expected_test_ids(payload),
         fixtures=tuple(dict(item) for item in fixtures),
         enforce_expected_test_ids=enforce_expected,

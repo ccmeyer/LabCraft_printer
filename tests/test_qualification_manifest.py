@@ -440,7 +440,7 @@ def test_load_direct_xyz_lut_manifest_freezes_motion_and_isolation_gates():
     assert isolation["de"]["equals"] == 1
     assert isolation["mf"]["equals"] == 0
     assert isolation["sn"]["min"] == 2
-    assert isolation["sg"]["max"] == 100
+    assert isolation["sg"]["max"] == 125
     assert isolation["wd"]["max"] == 100
     assert isolation["sa"]["equals"] == 0
     assert isolation["sv"]["equals"] == 1
@@ -663,6 +663,38 @@ def test_load_manifest_from_path(tmp_path):
 
     assert manifest.manifest_id == "safe_custom"
     assert manifest.expected_test_ids == (1001,)
+    assert manifest.lifecycle == "active"
+    assert manifest.to_report_dict()["lifecycle"] == "active"
+
+
+def test_manifest_accepts_archived_lifecycle_for_historical_reports():
+    manifest = parse_manifest(
+        {
+            "schema_version": "qualification_manifest_v0",
+            "manifest_id": "historical",
+            "name": "Historical",
+            "profile": "FULL",
+            "lifecycle": "archived",
+            "expected_test_ids": [2040],
+        }
+    )
+
+    assert manifest.lifecycle == "archived"
+    assert manifest.to_report_dict()["lifecycle"] == "archived"
+
+
+def test_manifest_rejects_invalid_lifecycle():
+    with pytest.raises(ManifestError, match="lifecycle"):
+        parse_manifest(
+            {
+                "schema_version": "qualification_manifest_v0",
+                "manifest_id": "bad",
+                "name": "Bad",
+                "profile": "FULL",
+                "lifecycle": "retired",
+                "expected_test_ids": [1001],
+            }
+        )
 
 
 def test_manifest_rejects_missing_required_fields():

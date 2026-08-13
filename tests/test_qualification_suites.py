@@ -21,12 +21,8 @@ def test_discover_suite_entries_lists_current_manifests():
         "xy_motion_v1",
         "motion_timing_v1",
         "profile_lut_benchmark_v1",
-        "coordinated_xy_executor_v1",
-        "normal_xy_route_v1",
-        "coordinated_xy_performance_v1",
-        "coordinated_xy_x_direction_v1",
-        "coordinated_xy_camera_transition_v1",
-        "coordinated_xy_production_mres3_v1",
+        "coordinated_xy_camera_transition_v2",
+        "coordinated_xy_production_mres3_v2",
         "direct_xyz_lut_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
@@ -152,189 +148,14 @@ def test_profile_lut_benchmark_suite_is_safe_non_motion_and_exposes_cycle_gates(
     assert "Non-motion" in rows[0].evaluates
 
 
-def test_coordinated_xy_executor_suite_exposes_loaded_motion_safety_gates():
-    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    executor = entries["coordinated_xy_executor_v1"].manifest
+def test_production_mres3_suite_requires_fixed_conditional_contract():
+    entries = {
+        entry.manifest_id: entry
+        for entry in discover_suite_entries(MANIFEST_ROOT)
+    }
+    manifest = entries["coordinated_xy_production_mres3_v2"].manifest
 
-    assert executor.profile == "FULL"
-    assert executor.requires_operator_prompts is True
-    assert required_fixture_ids(executor) == ("motion_clear_envelope_v1",)
-    rows = {row.test_id: row for row in build_test_plan_rows(executor)}
-    assert list(rows) == [2040, 2041, 2042, 2043, 2044, 2045, 2046]
-    assert rows[2040].name == "Coordinated XY X-only low-rate"
-    assert rows[2043].name == "Coordinated XY asymmetric low-rate"
-    assert rows[2046].name == "Coordinated XY limit abort"
-    assert all(row.subsystem == "Motion" for row in rows.values())
-    assert "i2" in rows[2042].metrics
-    assert "stable" in rows[2044].metrics
-    assert "lat" in rows[2045].metrics
-    assert "xd" in rows[2046].metrics
-
-
-def test_normal_xy_route_suite_exposes_physical_limit_and_legacy_gates():
-    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    route = entries["normal_xy_route_v1"].manifest
-
-    assert route.profile == "FULL"
-    assert route.requires_operator_prompts is True
-    assert required_fixture_ids(route) == ("coordinated_xy_physical_limit_v1",)
-    rows = {row.test_id: row for row in build_test_plan_rows(route)}
-    assert list(rows) == list(range(2050, 2058))
-    assert rows[2050].name == "Normal XY route X-only low-rate"
-    assert rows[2054].name == "Normal XY route long status"
-    assert rows[2056].name == "Normal XY physical limit"
-    assert rows[2057].name == "Normal XY legacy smoke"
-    assert all(row.subsystem == "Motion" for row in rows.values())
-    assert "route" in rows[2050].metrics
-    assert "sg" in rows[2054].metrics
-    assert "lat" in rows[2055].metrics
-    assert "win" in rows[2056].metrics
-    assert "z" in rows[2057].metrics
-
-
-def test_coordinated_xy_performance_suite_exposes_speed_raster_and_pressure_gates():
-    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    performance = entries["coordinated_xy_performance_v1"].manifest
-
-    assert performance.profile == "FULL"
-    assert required_fixture_ids(performance) == ("pressure_closed_loop_v1",)
-    rows = {row.test_id: row for row in build_test_plan_rows(performance)}
-    assert list(rows) == [*range(2060, 2069), 2070]
-    assert rows[2060].name == "Coordinated XY 5 kHz performance"
-    assert rows[2068].name == "Coordinated XY pressure coexistence"
-    assert rows[2070].name == "Coordinated XY X-direction speed isolation"
-    assert all(row.subsystem == "System" for row in rows.values())
-    assert "am" in rows[2064].metrics
-    assert "xd" in rows[2066].metrics
-    assert "pm" in rows[2068].metrics
-    assert "p40" in rows[2070].metrics
-
-
-def test_coordinated_xy_x_direction_suite_is_a_single_focused_gate():
-    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    focused = entries["coordinated_xy_x_direction_v1"].manifest
-
-    assert focused.profile == "FULL"
-    assert required_fixture_ids(focused) == ("pressure_closed_loop_v1",)
-    rows = build_test_plan_rows(focused)
-    assert [row.test_id for row in rows] == [2070]
-    assert "p30" in rows[0].metrics
-    assert "n40" in rows[0].metrics
-
-
-def test_coordinated_xy_40khz_suite_is_only_the_existing_geometry_row():
-    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    focused = entries["coordinated_xy_40khz_v1"].manifest
-
-    assert focused.profile == "FULL"
-    assert required_fixture_ids(focused) == ("motion_clear_envelope_v1",)
-    rows = build_test_plan_rows(focused)
-    assert [row.test_id for row in rows] == [2064, 2072, 2073]
-    assert rows[0].name == "Coordinated XY 40 kHz performance"
-    assert "am" in rows[0].metrics
-    assert "xd" in rows[0].metrics
-    assert rows[1].name == "Coordinated XY 40 kHz full IRQ timing"
-    assert "fm" in rows[1].metrics
-    assert "pf" in rows[1].metrics
-    assert rows[2].name == "Coordinated XY 40 kHz entry lateness"
-    assert "pm" in rows[2].metrics
-    assert "dm" in rows[2].metrics
-
-
-def test_coordinated_xy_status_sync_suite_reuses_the_geometry_rows_with_strict_lateness():
-    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    focused = entries["coordinated_xy_status_sync_v1"].manifest
-
-    assert focused.profile == "FULL"
-    assert required_fixture_ids(focused) == ("motion_clear_envelope_v1",)
-    rows = build_test_plan_rows(focused)
-    assert [row.test_id for row in rows] == [2064, 2072, 2073]
-    assert "sm" in rows[2].metrics
-    assert "lf" in rows[2].metrics
-    rules = focused.analysis_rules["2073"]["metrics"]
-    assert rules["sm"]["equals"] == 1
-    assert rules["lf"]["equals"] == 0
-    assert rules["cm"]["max"] == 127
-    assert rules["lc"]["equals"] == 0
-    assert rules["dm"]["max"] == 255
-
-
-def test_coordinated_xy_mres3_suite_exposes_scaled_motion_and_deadline_evidence():
-    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    focused = entries["coordinated_xy_mres3_20khz_v1"].manifest
-
-    assert focused.profile == "FULL"
-    assert required_fixture_ids(focused) == (
-        "coordinated_xy_mres3_20khz_envelope_clear",
-    )
-    rows = build_test_plan_rows(focused)
-    assert [row.test_id for row in rows] == [2080, 2081, 2082, 2083]
-    assert rows[0].name == "Coordinated XY MRES3 20 kHz motion"
-    assert rows[3].name == "TMC2208 MRES3 configuration"
-    assert focused.analysis_rules["2080"]["metrics"]["hz"]["equals"] == 20000
-    assert focused.analysis_rules["2082"]["metrics"]["sl"]["min"] == 450
-    assert focused.analysis_rules["2083"]["metrics"]["mf"]["equals"] == 0
-
-
-def test_coordinated_xy_mres3_rearm_suite_requires_complete_rearm_coverage():
-    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    focused = entries["coordinated_xy_mres3_rearm_v1"].manifest
-
-    assert focused.profile == "FULL"
-    assert required_fixture_ids(focused) == (
-        "coordinated_xy_mres3_rearm_envelope_clear",
-    )
-    rows = build_test_plan_rows(focused)
-    assert [row.test_id for row in rows] == [2080, 2081, 2082, 2083]
-    rules = focused.analysis_rules["2082"]["metrics"]
-    assert rules["rm"]["equals"] == 1
-    assert rules["rc"]["equals"] == 219990
-    assert rules["rp"]["equals"] == 0
-    assert rules["lc"]["maturity"] == "candidate"
-
-
-def test_coordinated_xy_mres3_conditional_suite_requires_injected_recovery():
-    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    focused = entries["coordinated_xy_mres3_conditional_rearm_v1"].manifest
-
-    assert focused.profile == "FULL"
-    assert required_fixture_ids(focused) == (
-        "coordinated_xy_mres3_conditional_rearm_envelope_clear",
-    )
-    rows = build_test_plan_rows(focused)
-    assert [row.test_id for row in rows] == [2080, 2081, 2082, 2086, 2083]
-    rules = focused.analysis_rules["2086"]["metrics"]
-    assert rules["rm"]["equals"] == 2
-    assert rules["rg"]["equals"] == 1125
-    assert rules["dc"]["equals"] == 219990
-    assert rules["ic"]["equals"] == 10
-    assert rules["ix"]["equals"] == 0
-    assert rules["ir"]["equals"] == 10
-    assert rules["ns"]["min"] == 1126
-    assert rules["wm"]["max"] == 4500
-
-
-def test_coordinated_xy_mres3_revised_suites_require_strict_and_hard_masks():
-    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-
-    for manifest_id in (
-        "coordinated_xy_mres3_20khz_v2",
-        "coordinated_xy_mres3_conditional_rearm_v2",
-        "coordinated_xy_mres3_conditional_rearm_v3",
-    ):
-        manifest = entries[manifest_id].manifest
-        motion = manifest.analysis_rules["2080"]["metrics"]
-        margin = manifest.analysis_rules["2082"]["metrics"]
-        assert motion["qf"]["equals"] == 0
-        assert motion["qm"]["equals"] == 0
-        assert margin["fv"]["equals"] == 0
-        assert margin["hm"]["equals"] == 0
-
-
-def test_production_mres3_suite_requires_logical_conversion_and_conditional_rearm():
-    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    manifest = entries["coordinated_xy_production_mres3_v1"].manifest
-
+    assert manifest.lifecycle == "active"
     assert manifest.profile == "FULL"
     assert manifest.selftest_args == ("--coordinated-xy-production-mres3-suite",)
     assert required_fixture_ids(manifest) == (
@@ -343,13 +164,33 @@ def test_production_mres3_suite_requires_logical_conversion_and_conditional_rear
     assert [row.test_id for row in build_test_plan_rows(manifest)] == [
         2087, 2088, 2089, 2090
     ]
-    assert manifest.analysis_rules["2087"]["metrics"]["i2"]["equals"] == 220000
-    assert manifest.analysis_rules["2089"]["metrics"]["rm"]["equals"] == 2
-    assert manifest.analysis_rules["2089"]["metrics"]["dc"]["equals"] == 219990
-    assert manifest.analysis_rules["2089"]["metrics"]["ci"]["equals"] == 0
-    assert manifest.analysis_rules["2089"]["metrics"]["ns"]["min"] == 1126
-    assert manifest.analysis_rules["2089"]["metrics"]["rp"]["equals"] == 0
+    motion = manifest.analysis_rules["2087"]["metrics"]
+    assert motion["n"]["equals"] == 10
+    assert motion["i2"]["equals"] == 220000
+    schedule = manifest.analysis_rules["2089"]["metrics"]
+    assert schedule["dc"]["equals"] == 219990
+    assert schedule["ci"]["equals"] == 0
+    assert schedule["ns"]["min"] == 1126
+    assert schedule["rp"]["equals"] == 0
     assert manifest.analysis_rules["2090"]["metrics"]["lu"]["equals"] == 2
+
+
+def test_archived_coordinated_suites_are_not_discoverable():
+    entries = {entry.manifest_id for entry in discover_suite_entries(MANIFEST_ROOT)}
+    for manifest_id in (
+        "coordinated_xy_executor_v1",
+        "normal_xy_route_v1",
+        "coordinated_xy_performance_v1",
+        "coordinated_xy_40khz_v1",
+        "coordinated_xy_status_sync_v1",
+        "coordinated_xy_single_irq_v1",
+        "coordinated_xy_mres3_20khz_v2",
+        "coordinated_xy_mres3_rearm_v1",
+        "coordinated_xy_mres3_conditional_rearm_v3",
+        "coordinated_xy_production_mres3_v1",
+        "coordinated_xy_camera_transition_v1",
+    ):
+        assert manifest_id not in entries
 
 
 def test_direct_xyz_lut_suite_requires_profile_coverage_and_isolation():
@@ -376,35 +217,27 @@ def test_direct_xyz_lut_suite_requires_profile_coverage_and_isolation():
     assert "sn" not in manifest.analysis_rules["2091"]["metrics"]
 
 
-def test_coordinated_xy_single_irq_suite_requires_complete_pulse_margin_evidence():
-    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    focused = entries["coordinated_xy_single_irq_v1"].manifest
+def test_camera_transition_v2_is_single_production_scaled_gate():
+    entries = {
+        entry.manifest_id: entry
+        for entry in discover_suite_entries(MANIFEST_ROOT)
+    }
+    focused = entries["coordinated_xy_camera_transition_v2"].manifest
 
+    assert focused.lifecycle == "active"
     assert focused.profile == "FULL"
-    assert required_fixture_ids(focused) == ("motion_clear_envelope_v1",)
-    rows = build_test_plan_rows(focused)
-    assert [row.test_id for row in rows] == [2064, 2072, 2073, 2074]
-    assert rows[3].name == "Coordinated XY single-IRQ pulse margin"
-    rules = focused.analysis_rules["2074"]["metrics"]
-    assert rules["em"]["equals"] == 1
-    assert rules["ip"]["equals"] == 1
-    assert rules["pc"]["equals"] == 220000
-    assert rules["pn"]["min"] == 360
-    assert rules["ds"]["equals"] == 220000
-    assert rules["sl"]["min"] == 500
-
-
-def test_coordinated_xy_camera_transition_suite_is_single_motion_fixture_gate():
-    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    focused = entries["coordinated_xy_camera_transition_v1"].manifest
-
-    assert focused.profile == "FULL"
-    assert required_fixture_ids(focused) == ("motion_clear_envelope_v1",)
+    assert required_fixture_ids(focused) == (
+        "coordinated_xy_camera_transition_envelope_clear",
+    )
     rows = build_test_plan_rows(focused)
     assert [row.test_id for row in rows] == [2071]
     assert rows[0].name == "Coordinated XY camera/home transition"
-    assert "en" in rows[0].metrics
-    assert "hpc" in rows[0].metrics
+    rules = focused.analysis_rules["2071"]["metrics"]
+    assert rules["xe"]["equals"] == 8416
+    assert rules["ye"]["equals"] == 30000
+    assert rules["i2"]["equals"] == 60000
+    assert rules["hi"]["equals"] == 101
+    assert rules["hpc"]["equals"] == 50
 
 
 def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():

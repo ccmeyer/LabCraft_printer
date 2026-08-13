@@ -1358,11 +1358,9 @@ void Stepper::_stepTick() {
 
 // dispatch timer IRQ to correct axis
 void Stepper::dispatch(TIM_HandleTypeDef* htim) {
-#if LC_COORDINATED_XY_EXECUTOR_ENABLE != 0
   if (Gantry::dispatchCoordinatedTimerFromIsr(htim)) {
     return;
   }
-#endif
   for (int i = 0; i < NUM_AXES; ++i) {
     Stepper* s = _axes[i];
     if (s && s->_htim == htim) {
@@ -1529,7 +1527,7 @@ void Stepper::onLimitTriggered()
 
   if (_coordinatedReserved) {
     if (Gantry::instance() != nullptr) {
-      (void)Gantry::instance()->requestCoordinatedLimitAbortForDiagnostics(_axis);
+      (void)Gantry::instance()->requestCoordinatedLimitAbort(_axis);
     }
     return;
   }

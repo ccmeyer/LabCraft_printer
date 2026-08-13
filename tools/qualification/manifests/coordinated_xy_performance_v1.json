@@ -2,7 +2,8 @@
     "schema_version": "qualification_manifest_v0",
     "manifest_id": "coordinated_xy_performance_v1",
     "name": "Coordinated XY Production-Speed Qualification v1",
-    "profile": "FULL",
+  "profile": "FULL",
+  "lifecycle": "archived",
     "description": "Fail-stop 5-40 kHz qualification of the production coordinated XY route, Milestone 1 vectors, Z-up raster, repeated camera motion, and concurrent closed-loop pressure regulation.",
     "expected_test_ids": [
         2060,

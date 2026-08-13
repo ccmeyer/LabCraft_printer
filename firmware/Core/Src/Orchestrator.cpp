@@ -515,7 +515,6 @@ Orchestrator::AbsoluteXyExecutionResult Orchestrator::executeAbsoluteXy(
 
   bool terminalCompleted = result.waitCompleted;
   bool terminalFailure = false;
-#if LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE != 0
   const CoordinatedXySnapshot snapshot = Gantry::instance()->coordinatedSnapshot();
   result.terminalReason = snapshot.terminalReason;
   terminalCompleted =
@@ -524,11 +523,6 @@ Orchestrator::AbsoluteXyExecutionResult Orchestrator::executeAbsoluteXy(
   terminalFailure =
       snapshot.state == CoordinatedXyExecutor::State::LimitAborted ||
       snapshot.state == CoordinatedXyExecutor::State::Faulted;
-#else
-  result.terminalReason = terminalCompleted
-      ? CoordinatedXyExecutor::TerminalReason::Completed
-      : CoordinatedXyExecutor::TerminalReason::None;
-#endif
 
 #if (LC_PRESSURE_PORTS > 1)
   if (result.refuelHoldAcquired) {
@@ -586,12 +580,10 @@ bool Orchestrator::validateResumedAbsoluteXy(int32_t targetX,
       stepperX != nullptr && stepperY != nullptr &&
       stepperX->getTargetPosition() == actualTargetX &&
       stepperY->getTargetPosition() == actualTargetY;
-#if LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE != 0
   const CoordinatedXySnapshot snapshot = Gantry::instance()->coordinatedSnapshot();
   completed = completed &&
       snapshot.state == CoordinatedXyExecutor::State::Completed &&
       snapshot.terminalReason == CoordinatedXyExecutor::TerminalReason::Completed;
-#endif
   if (!completed) {
     latchXyMotionFailure("resume_terminal_mismatch");
   }
@@ -1187,27 +1179,6 @@ void Orchestrator::executeCommand(const Command &cmd) {
 //  _currentCmdNum = cmd.seq;
 
   // clear done‐bits
-#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
-  // Every driver shares the UART configuration, so ordinary host coordinates
-  // are unsafe while the temporary MRES=3 image is installed. Only the
-  // internally scaled self-test and motor-disable command may actuate here.
-  if (cmd.cmd != CMD_SELFTEST_START && cmd.cmd != CMD_DISABLE_MOTORS) {
-    Gantry::cancelXYZMotors();
-    Stepper::stepperX()->disableMotor();
-    Stepper::stepperY()->disableMotor();
-    Stepper::stepperZ()->disableMotor();
-    Stepper::stepperP()->disableMotor();
-#if LC_PRESSURE_PORTS > 1
-    Stepper::stepperR()->disableMotor();
-#endif
-    sampleOrchStack(ORCH_STACK_PHASE_CMD_DONE);
-    OrchestratorCompletionPolicy::retireCurrentCommand(
-        _currentCmdNum, _lastExecutedCmdNum, _lastRetiredCmdNum);
-    _hasInFlightCommand = false;
-    return;
-  }
-#endif
-
   xEventGroupClearBits(_doneEvents,
       BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_PRINT_DONE|BIT_GRIPPER_DONE|
 	  BIT_PRESSURE_P_READY | BIT_PRESSURE_R_READY);

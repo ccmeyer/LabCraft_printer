@@ -59,11 +59,6 @@ uint32_t durationCycles(const State& state) {
   return state.endCycle - state.startCycle;
 }
 
-uint32_t boundedMean(uint32_t sum, uint32_t count) {
-  if (count == 0u) return 0u;
-  return sum / count;
-}
-
 }  // namespace
 
 void reset(State& state, uint32_t startCycle) {
@@ -110,16 +105,11 @@ void recordSample(State& state,
   }
 
   const uint32_t elapsed = exitCycle - entryCycle;
-  if (elapsed > state.maxCycles) state.maxCycles = elapsed;
 
   if (terminal) {
     saturatingIncrement(state.terminalCallbacks,
                         state.saturationFlags,
                         SaturatedTerminalCallbacks);
-    saturatingAdd(state.terminalCycleSum,
-                  elapsed,
-                  state.saturationFlags,
-                  SaturatedCycleSums);
     if (elapsed > state.terminalMaxCycles) state.terminalMaxCycles = elapsed;
   } else {
     const uint8_t index = phaseIndex(phase);
@@ -127,98 +117,6 @@ void recordSample(State& state,
       saturatingIncrement(state.phaseCallbacks[index],
                           state.saturationFlags,
                           SaturatedPhaseCallbacks);
-      saturatingAdd(state.phaseCycleSums[index],
-                    elapsed,
-                    state.saturationFlags,
-                    SaturatedCycleSums);
-      if (elapsed > state.phaseMaxCycles[index]) {
-        state.phaseMaxCycles[index] = elapsed;
-      }
-    }
-  }
-
-  if (updatePending) {
-    saturatingIncrement(state.pendingObservations,
-                        state.saturationFlags,
-                        SaturatedPendingObservations);
-    saturatingIncrement(state.currentPendingStreak,
-                        state.saturationFlags,
-                        SaturatedPendingStreak);
-    if (state.currentPendingStreak > state.maxPendingStreak) {
-      state.maxPendingStreak = state.currentPendingStreak;
-    }
-  } else {
-    state.currentPendingStreak = 0u;
-  }
-
-  if (arr == kUint32Max) {
-    state.scheduledTimerTicks = kUint32Max;
-    state.saturationFlags |= SaturatedScheduledTicks;
-  } else {
-    saturatingAdd(state.scheduledTimerTicks,
-                  arr + 1u,
-                  state.saturationFlags,
-                  SaturatedScheduledTicks);
-  }
-
-  if (terminal) state.active = false;
-}
-
-void recordSampleExcludingIntentionalWait(State& state,
-                                          Phase phase,
-                                          uint32_t entryCycle,
-                                          uint32_t exitCycle,
-                                          uint32_t arr,
-                                          bool updatePending,
-                                          bool completedPulse,
-                                          bool terminal,
-                                          uint32_t intentionalWaitCycles) {
-  if (!state.valid || !state.active) return;
-
-  observeCycle(state, entryCycle);
-  observeCycle(state, exitCycle);
-  state.endCycle = exitCycle;
-
-  saturatingIncrement(
-      state.totalCallbacks, state.saturationFlags, SaturatedCallbacks);
-  if (completedPulse) {
-    saturatingIncrement(state.completedPulses,
-                        state.saturationFlags,
-                        SaturatedCompletedPulses);
-  }
-
-  const uint32_t rawElapsed = exitCycle - entryCycle;
-  const uint32_t elapsed = rawElapsed > intentionalWaitCycles
-      ? rawElapsed - intentionalWaitCycles
-      : 0u;
-  saturatingAdd(state.intentionalWaitCycleSum,
-                intentionalWaitCycles,
-                state.saturationFlags,
-                SaturatedIntentionalWaitCycles);
-  if (intentionalWaitCycles > state.intentionalWaitMaxCycles) {
-    state.intentionalWaitMaxCycles = intentionalWaitCycles;
-  }
-  if (elapsed > state.maxCycles) state.maxCycles = elapsed;
-
-  if (terminal) {
-    saturatingIncrement(state.terminalCallbacks,
-                        state.saturationFlags,
-                        SaturatedTerminalCallbacks);
-    saturatingAdd(state.terminalCycleSum,
-                  elapsed,
-                  state.saturationFlags,
-                  SaturatedCycleSums);
-    if (elapsed > state.terminalMaxCycles) state.terminalMaxCycles = elapsed;
-  } else {
-    const uint8_t index = phaseIndex(phase);
-    if (index < phaseIndex(Phase::Count)) {
-      saturatingIncrement(state.phaseCallbacks[index],
-                          state.saturationFlags,
-                          SaturatedPhaseCallbacks);
-      saturatingAdd(state.phaseCycleSums[index],
-                    elapsed,
-                    state.saturationFlags,
-                    SaturatedCycleSums);
       if (elapsed > state.phaseMaxCycles[index]) {
         state.phaseMaxCycles[index] = elapsed;
       }
@@ -264,13 +162,7 @@ void completeSampleTiming(State& state,
   const uint32_t recorded = recordedExitCycle - entryCycle;
   const uint32_t completed = finalExitCycle - entryCycle;
   if (completed <= recorded) return;
-  const uint32_t additional = completed - recorded;
-  if (completed > state.maxCycles) state.maxCycles = completed;
   if (terminal) {
-    saturatingAdd(state.terminalCycleSum,
-                  additional,
-                  state.saturationFlags,
-                  SaturatedCycleSums);
     if (completed > state.terminalMaxCycles) {
       state.terminalMaxCycles = completed;
     }
@@ -278,53 +170,6 @@ void completeSampleTiming(State& state,
   }
   const uint8_t index = phaseIndex(phase);
   if (index >= phaseIndex(Phase::Count)) return;
-  saturatingAdd(state.phaseCycleSums[index],
-                additional,
-                state.saturationFlags,
-                SaturatedCycleSums);
-  if (completed > state.phaseMaxCycles[index]) {
-    state.phaseMaxCycles[index] = completed;
-  }
-}
-
-void completeSampleTimingExcludingIntentionalWait(
-    State& state,
-    Phase phase,
-    uint32_t entryCycle,
-    uint32_t recordedExitCycle,
-    uint32_t finalExitCycle,
-    bool terminal,
-    uint32_t intentionalWaitCycles) {
-  if (!state.valid) return;
-  observeCycle(state, finalExitCycle);
-  state.endCycle = finalExitCycle;
-  const uint32_t rawRecorded = recordedExitCycle - entryCycle;
-  const uint32_t rawCompleted = finalExitCycle - entryCycle;
-  const uint32_t recorded = rawRecorded > intentionalWaitCycles
-      ? rawRecorded - intentionalWaitCycles
-      : 0u;
-  const uint32_t completed = rawCompleted > intentionalWaitCycles
-      ? rawCompleted - intentionalWaitCycles
-      : 0u;
-  if (completed <= recorded) return;
-  const uint32_t additional = completed - recorded;
-  if (completed > state.maxCycles) state.maxCycles = completed;
-  if (terminal) {
-    saturatingAdd(state.terminalCycleSum,
-                  additional,
-                  state.saturationFlags,
-                  SaturatedCycleSums);
-    if (completed > state.terminalMaxCycles) {
-      state.terminalMaxCycles = completed;
-    }
-    return;
-  }
-  const uint8_t index = phaseIndex(phase);
-  if (index >= phaseIndex(Phase::Count)) return;
-  saturatingAdd(state.phaseCycleSums[index],
-                additional,
-                state.saturationFlags,
-                SaturatedCycleSums);
   if (completed > state.phaseMaxCycles[index]) {
     state.phaseMaxCycles[index] = completed;
   }
@@ -349,10 +194,6 @@ void beginIrqPathSample(State& state,
     saturatingIncrement(state.entryTimerSamples,
                         state.saturationFlags,
                         SaturatedEntryTimerSamples);
-    saturatingAdd(state.entryTimerCountSum,
-                  entryTimerCount,
-                  state.saturationFlags,
-                  SaturatedEntryTimerCountSum);
     if (entryTimerCount > state.entryTimerCountMax) {
       state.entryTimerCountMax = entryTimerCount;
     }
@@ -404,10 +245,6 @@ void beginIrqPathSample(State& state,
                       state.saturationFlags,
                       SaturatedIrqPathSamples);
   const uint32_t preHandlerCycles = handlerEntryCycle - irqEntryCycle;
-  saturatingAdd(state.preHandlerCycleSum,
-                preHandlerCycles,
-                state.saturationFlags,
-                SaturatedCycleSums);
   if (preHandlerCycles > state.preHandlerMaxCycles) {
     state.preHandlerMaxCycles = preHandlerCycles;
   }
@@ -424,10 +261,6 @@ void beginIrqPathSample(State& state,
 void completeIrqPath(State& state, uint32_t irqExitCycle) {
   if (!state.valid || !state.irqPathSampleOpen) return;
   const uint32_t fullIrqCycles = irqExitCycle - state.irqPathEntryCycle;
-  saturatingAdd(state.fullIrqCycleSum,
-                fullIrqCycles,
-                state.saturationFlags,
-                SaturatedCycleSums);
   if (fullIrqCycles > state.fullIrqMaxCycles) {
     state.fullIrqMaxCycles = fullIrqCycles;
   }
@@ -446,20 +279,6 @@ void completeIrqPath(State& state, uint32_t irqExitCycle) {
   state.irqPathSampleOpen = false;
   state.irqPathSamplePending = false;
   state.irqPathSampleTerminal = false;
-}
-
-void recordCompleteStepPulse(State& state, uint32_t pulseHighCycles) {
-  if (!state.valid || !state.active) return;
-  const bool firstSample = state.completeStepPulseSamples == 0u;
-  saturatingIncrement(state.completeStepPulseSamples,
-                      state.saturationFlags,
-                      SaturatedCompleteStepPulseSamples);
-  if (firstSample || pulseHighCycles < state.completeStepPulseMinCycles) {
-    state.completeStepPulseMinCycles = pulseHighCycles;
-  }
-  if (pulseHighCycles > state.completeStepPulseMaxCycles) {
-    state.completeStepPulseMaxCycles = pulseHighCycles;
-  }
 }
 
 void recordTim2Deadline(State& state,
@@ -508,21 +327,16 @@ Snapshot makeSnapshot(const State& state) {
   snapshot.completedPulses = state.completedPulses;
   for (uint8_t i = 0u; i < phaseIndex(Phase::Count); ++i) {
     snapshot.phaseCallbacks[i] = state.phaseCallbacks[i];
-    snapshot.phaseCycleSums[i] = state.phaseCycleSums[i];
     snapshot.phaseMaxCycles[i] = state.phaseMaxCycles[i];
   }
   snapshot.terminalCallbacks = state.terminalCallbacks;
-  snapshot.terminalCycleSum = state.terminalCycleSum;
   snapshot.terminalMaxCycles = state.terminalMaxCycles;
-  snapshot.maxCycles = state.maxCycles;
   snapshot.pendingObservations = state.pendingObservations;
   snapshot.maxPendingStreak = state.maxPendingStreak;
   snapshot.scheduledTimerTicks = state.scheduledTimerTicks;
   snapshot.irqPathSamples = state.irqPathSamples;
   snapshot.irqPathMissing = state.irqPathMissing;
-  snapshot.preHandlerCycleSum = state.preHandlerCycleSum;
   snapshot.preHandlerMaxCycles = state.preHandlerMaxCycles;
-  snapshot.fullIrqCycleSum = state.fullIrqCycleSum;
   snapshot.fullIrqMaxCycles = state.fullIrqMaxCycles;
   snapshot.activeFullIrqMaxCycles = state.activeFullIrqMaxCycles;
   snapshot.terminalFullIrqMaxCycles = state.terminalFullIrqMaxCycles;
@@ -530,47 +344,17 @@ Snapshot makeSnapshot(const State& state) {
   snapshot.pendingFullIrqMaxCycles = state.pendingFullIrqMaxCycles;
   snapshot.entryTimerSamples = state.entryTimerSamples;
   snapshot.entryTimerMissing = state.entryTimerMissing;
-  snapshot.entryTimerCountSum = state.entryTimerCountSum;
   snapshot.entryTimerCountMax = state.entryTimerCountMax;
   snapshot.pendingEntryTimerCountMax = state.pendingEntryTimerCountMax;
   snapshot.lateEntryCount = state.lateEntryCount;
   snapshot.entryScheduleOverrunMaxCycles =
       state.entryScheduleOverrunMaxCycles;
-  snapshot.completeStepPulseSamples = state.completeStepPulseSamples;
-  snapshot.completeStepPulseMinCycles = state.completeStepPulseMinCycles;
-  snapshot.completeStepPulseMaxCycles = state.completeStepPulseMaxCycles;
   snapshot.deadlineSamples = state.deadlineSamples;
   snapshot.deadlineMissing = state.deadlineMissing;
   snapshot.deadlineMisses = state.deadlineMisses;
   snapshot.deadlineSlackMinTicks = state.deadlineSlackMinTicks;
-  snapshot.intentionalWaitCycleSum = state.intentionalWaitCycleSum;
-  snapshot.intentionalWaitMaxCycles = state.intentionalWaitMaxCycles;
   snapshot.saturationFlags = state.saturationFlags;
   return snapshot;
-}
-
-uint32_t phaseMeanCycles(const Snapshot& snapshot, Phase phase) {
-  const uint8_t index = phaseIndex(phase);
-  if (index >= phaseIndex(Phase::Count)) return 0u;
-  return boundedMean(snapshot.phaseCycleSums[index],
-                     snapshot.phaseCallbacks[index]);
-}
-
-uint32_t terminalMeanCycles(const Snapshot& snapshot) {
-  return boundedMean(snapshot.terminalCycleSum, snapshot.terminalCallbacks);
-}
-
-uint32_t preHandlerMeanCycles(const Snapshot& snapshot) {
-  return boundedMean(snapshot.preHandlerCycleSum, snapshot.irqPathSamples);
-}
-
-uint32_t fullIrqMeanCycles(const Snapshot& snapshot) {
-  return boundedMean(snapshot.fullIrqCycleSum, snapshot.irqPathSamples);
-}
-
-uint32_t entryTimerMeanTicks(const Snapshot& snapshot) {
-  return boundedMean(snapshot.entryTimerCountSum,
-                     snapshot.entryTimerSamples);
 }
 
 uint32_t durationErrorBasisPoints(const Snapshot& snapshot,

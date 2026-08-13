@@ -3,6 +3,7 @@
   "manifest_id": "coordinated_xy_mres3_20khz_v2",
   "name": "Coordinated XY MRES3 20 kHz Diagnostic v2",
   "profile": "FULL",
+  "lifecycle": "archived",
   "description": "Runs a diagnostic-only MRES=3 build through the ten-move coordinated-XY geometry row using legacy MRES=2 logical coordinates. Firmware converts the 40 kHz logical command to 20 kHz native STEP cycles. Revised selectors retain all completed, internally consistent moves after diagnostic-only timing failures while preserving strict FAIL acceptance.",
   "expected_test_ids": [2080, 2081, 2082, 2083],
   "enforce_expected_test_ids": true,

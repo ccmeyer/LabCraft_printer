@@ -92,11 +92,6 @@ inline bool tryAppendBytes(uint8_t* payload,
 //------------------------------------------------------------------------------
 // static singleton pointer
 Comm* Comm::_instance = nullptr;
-StaticSemaphore_t Comm::_statusMetricsMutexStorage{};
-SemaphoreHandle_t Comm::_statusMetricsMutex = nullptr;
-volatile Comm::StatusMetricsSyncMode Comm::_statusMetricsSyncMode =
-    Comm::StatusMetricsSyncMode::CriticalSection;
-volatile uint32_t Comm::_statusMetricsLockFailures = 0u;
 
 Comm::Comm(UART_HandleTypeDef* huart)
   : _huart(huart), _rxByte(0)
@@ -112,10 +107,6 @@ void Comm::begin() {
 
     // Create TX mutex
     _txMutex = xSemaphoreCreateMutex();
-    _statusMetricsMutex =
-        xSemaphoreCreateMutexStatic(&_statusMetricsMutexStorage);
-    _statusMetricsSyncMode = StatusMetricsSyncMode::CriticalSection;
-    _statusMetricsLockFailures = 0u;
 
     CrashLog_SetBootStage(CRASH_BOOT_STAGE_COMM_INIT);
 
@@ -448,73 +439,16 @@ static volatile uint32_t s_statusPeriodMaxMs = 0;
 static volatile uint32_t s_statusPeriodMaxJitterMs = 0;
 static volatile int s_statusLastChunk = -1;
 
-Comm::StatusMetricsGuard::StatusMetricsGuard()
-    : _mode(Comm::_statusMetricsSyncMode) {
-    if (_mode == StatusMetricsSyncMode::CriticalSection) {
-        taskENTER_CRITICAL();
-        _acquired = true;
-        return;
-    }
-
-    if (Comm::_statusMetricsMutex != nullptr &&
-        xSemaphoreTake(Comm::_statusMetricsMutex, pdMS_TO_TICKS(5u)) == pdTRUE) {
-        _acquired = true;
-        return;
-    }
-    Comm::recordStatusMetricsLockFailure();
+Comm::StatusMetricsGuard::StatusMetricsGuard() {
+    taskENTER_CRITICAL();
 }
 
 Comm::StatusMetricsGuard::~StatusMetricsGuard() {
-    if (!_acquired) return;
-    if (_mode == StatusMetricsSyncMode::CriticalSection) {
-        taskEXIT_CRITICAL();
-        return;
-    }
-    if (xSemaphoreGive(Comm::_statusMetricsMutex) != pdTRUE) {
-        Comm::recordStatusMetricsLockFailure();
-    }
-}
-
-void Comm::recordStatusMetricsLockFailure() {
-    taskENTER_CRITICAL();
-    if (_statusMetricsLockFailures != 0xFFFFFFFFu) {
-        ++_statusMetricsLockFailures;
-    }
     taskEXIT_CRITICAL();
-}
-
-bool Comm::setStatusMetricsSyncMode(StatusMetricsSyncMode mode) {
-    if (mode == StatusMetricsSyncMode::TaskMutex &&
-        _statusMetricsMutex == nullptr) {
-        recordStatusMetricsLockFailure();
-        return false;
-    }
-    taskENTER_CRITICAL();
-    _statusMetricsSyncMode = mode;
-    taskEXIT_CRITICAL();
-    return true;
-}
-
-Comm::StatusMetricsSyncMode Comm::getStatusMetricsSyncMode() {
-    return _statusMetricsSyncMode;
-}
-
-void Comm::resetStatusMetricsLockFailures() {
-    taskENTER_CRITICAL();
-    _statusMetricsLockFailures = 0u;
-    taskEXIT_CRITICAL();
-}
-
-uint32_t Comm::getStatusMetricsLockFailureCount() {
-    taskENTER_CRITICAL();
-    const uint32_t failures = _statusMetricsLockFailures;
-    taskEXIT_CRITICAL();
-    return failures;
 }
 
 bool Comm::resetStatusMetrics() {
     StatusMetricsGuard guard;
-    if (!guard.acquired()) return false;
     s_statusChunk0Count = 0;
     s_statusChunk1Count = 0;
     s_statusAlternationErrors = 0;
@@ -533,10 +467,6 @@ Comm::StatusMetricsSnapshot Comm::getStatusMetricsSnapshot() {
     uint32_t periodSamples = 0u;
     {
         StatusMetricsGuard guard;
-        if (!guard.acquired()) {
-            snapshot.lockFailures = getStatusMetricsLockFailureCount();
-            return snapshot;
-        }
         snapshot.chunk0Count = s_statusChunk0Count;
         snapshot.chunk1Count = s_statusChunk1Count;
         snapshot.alternationErrors = s_statusAlternationErrors;
@@ -544,7 +474,6 @@ Comm::StatusMetricsSnapshot Comm::getStatusMetricsSnapshot() {
         periodSamples = s_statusPeriodSamples;
         snapshot.periodMaxMs = s_statusPeriodMaxMs;
         snapshot.periodMaxJitterMs = s_statusPeriodMaxJitterMs;
-        snapshot.lockFailures = _statusMetricsLockFailures;
         snapshot.valid = true;
     }
     snapshot.periodAvgMs =
@@ -580,7 +509,6 @@ void Comm::recordStatusSend(uint8_t sentChunkValue) {
     const Chunk sentChunk = static_cast<Chunk>(sentChunkValue);
     const uint32_t now = HAL_GetTick();
     StatusMetricsGuard guard;
-    if (!guard.acquired()) return;
     if (sentChunk == CHUNK_0) {
         s_statusChunk0Count++;
     } else if (sentChunk == CHUNK_1) {

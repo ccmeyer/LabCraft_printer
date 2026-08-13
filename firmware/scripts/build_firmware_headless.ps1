@@ -14,10 +14,6 @@ if ([System.IO.Path]::GetFileName($ArtifactFileName) -ne $ArtifactFileName -or
     -not $ArtifactFileName.EndsWith(".bin", [System.StringComparison]::OrdinalIgnoreCase)) {
   throw "ArtifactFileName must be a .bin filename without a directory: $ArtifactFileName"
 }
-if ($Config -eq "MRES3_Diagnostic" -and $ArtifactFileName -eq "$ProjName.bin") {
-  throw "MRES3_Diagnostic must use a distinct ArtifactFileName"
-}
-
 if ([string]::IsNullOrWhiteSpace($ProjectDir)) {
   $ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 } else {
@@ -45,6 +41,9 @@ try {
 }
 
 Write-Host "Headless build exit code: $exit"
+if ($exit -ne 0) {
+  throw "Headless firmware build failed with exit code $exit; artifact was not updated."
+}
 
 $binPath = Join-Path $ProjectDir (Join-Path $Config "$ProjName.bin")
 if (-not (Test-Path -LiteralPath $binPath -PathType Leaf)) {

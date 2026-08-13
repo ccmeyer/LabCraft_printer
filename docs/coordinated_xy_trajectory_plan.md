@@ -1072,7 +1072,7 @@ Milestone 6 implementation record before flashing.
 
 ## Milestone 7: Default Enablement And Closeout
 
-Status: `not_started`
+Status: `implementation_complete_hil_pending`
 
 ### Goal
 
@@ -1081,19 +1081,21 @@ ownership documentation, and preserve a clear rollback story.
 
 ### Required work
 
-- Decide whether the temporary legacy build gate is removed, retained as a
-  diagnostic-only option, or retained for one release as rollback protection.
+- Remove the temporary legacy build gate and use the accepted hashed
+  source/artifact checkpoints for rollback. Completed in the closeout source.
 - Record the ignored `feedHz` behavior as a separate follow-up item; do not fold
   that behavior change into this milestone.
 - Remove dead experimental code and instrumentation that is not part of ongoing
-  diagnostics.
+  diagnostics. Completed: CompleteStep, runtime schedule modes, synthetic
+  injection/waits, task-mutex status synchronization, diagnostic MRES3 build,
+  and retired firmware selectors/host flags are absent from production.
 - Keep useful low-overhead timing/overrun counters if they provide operational
-  safety evidence.
-- Update `firmware/docs/repo_map.md` for the new trajectory/planner ownership.
-- Update firmware README material if build, diagnostic, or qualification
-  commands changed.
-- Create a completion record containing file list, test commands/results,
-  HIL report paths, remaining risks, and rollback binary/source identity.
+  safety evidence. Completed with reduced saturating callback, pending,
+  entry/deadline, conditional-rearm, duration, ownership, and cycle telemetry.
+- Update `firmware/docs/repo_map.md` and README for fixed production ownership,
+  active selectors, archived manifests, and the ignored-`feedHz` follow-up.
+- Complete `docs/coordinated_xy_milestone7_closeout.md` with local build data,
+  then add HIL paths/results in the separate evidence commit.
 
 ### Required final validation
 
@@ -1115,8 +1117,8 @@ the camera-session-to-home regression sequence.
 - Existing motion, homing, Z, and pressure regression gates pass.
 - HIL reports and build/source hashes are preserved.
 - Protocol behavior is unchanged.
-- Rollback is documented and tested by selecting or flashing the known legacy
-  path/binary.
+- Rollback is documented through the accepted hashed artifacts; no legacy
+  runtime or compile-time routing branch remains in the production source.
 
 ## Validation Command Matrix
 

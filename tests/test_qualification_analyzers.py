@@ -527,6 +527,119 @@ def test_production_mres3_manifest_rejects_conversion_or_rearm_regressions():
     assert _analyze(cadence_failure, manifest)["verdict"]["status"] == "fail"
 
 
+def test_production_mres3_v2_rejects_reduced_evidence_regressions():
+    manifest = load_manifest("coordinated_xy_production_mres3_v2")
+    results = []
+    for test_id in manifest.expected_test_ids:
+        metrics = {}
+        for metric, rule in manifest.analysis_rules[str(test_id)]["metrics"].items():
+            if "equals" in rule:
+                metrics[metric] = rule["equals"]
+            elif "min" in rule:
+                metrics[metric] = rule["min"]
+            else:
+                metrics[metric] = 0
+        results.append({
+            "test_id": test_id,
+            "name": f"production_v2_{test_id}",
+            "pass": True,
+            "metrics": metrics,
+        })
+    valid = {
+        "run_id": 2097,
+        "profile": "FULL",
+        "started_at": "2026-08-13T00:00:00Z",
+        "finished_at": "2026-08-13T00:00:10Z",
+        "aborted": False,
+        "summary": {"total": 4, "passed": 4, "failed": 0},
+        "results": results,
+        "host_checks": [
+            {"name": "selftest_progress_watchdog", "pass": True,
+             "details": {"timeout_reason": None}},
+            {"name": "coordinated_xy_status_cadence", "pass": True,
+             "details": {"status_gap_max_ms": 100}},
+        ],
+    }
+    assert _analyze(valid, manifest)["verdict"]["status"] == "pass"
+
+    for result_id, metric, value in (
+        (2087, "n", 9),
+        (2087, "i2", 219999),
+        (2087, "ok", 0),
+        (2087, "pu", 1),
+        (2087, "tm", 2251),
+        (2087, "sf", 1),
+        (2088, "s", 219999),
+        (2088, "mi", 1),
+        (2089, "ds", 219989),
+        (2089, "di", 1),
+        (2089, "md", 1),
+        (2089, "sl", 449),
+        (2089, "dc", 219989),
+        (2089, "ci", 1),
+        (2089, "ns", 1125),
+        (2089, "rp", 1),
+        (2090, "mr", 2),
+        (2090, "mf", 1),
+        (2090, "dd", 0),
+        (2090, "lu", 1),
+    ):
+        rejected = deepcopy(valid)
+        index = manifest.expected_test_ids.index(result_id)
+        rejected["results"][index]["metrics"][metric] = value
+        assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
+
+    incomplete = deepcopy(valid)
+    incomplete["results"].pop()
+    incomplete["summary"] = {"total": 3, "passed": 3, "failed": 0}
+    assert _analyze(incomplete, manifest)["verdict"]["status"] == "fail"
+
+    for host_index in range(2):
+        host_failure = deepcopy(valid)
+        host_failure["host_checks"][host_index]["pass"] = False
+        assert _analyze(host_failure, manifest)["verdict"]["status"] == "fail"
+
+
+def test_camera_transition_v2_rejects_scaled_count_and_home_regressions():
+    manifest = load_manifest("coordinated_xy_camera_transition_v2")
+    rules = manifest.analysis_rules["2071"]["metrics"]
+    metrics = {
+        name: rule.get("equals", rule.get("min", 0))
+        for name, rule in rules.items()
+    }
+    valid = {
+        "run_id": 2078,
+        "profile": "FULL",
+        "started_at": "2026-08-13T00:00:00Z",
+        "finished_at": "2026-08-13T00:00:10Z",
+        "aborted": False,
+        "summary": {"total": 1, "passed": 1, "failed": 0},
+        "results": [{
+            "test_id": 2071,
+            "name": "coord_xy_camera_home_transition",
+            "pass": True,
+            "metrics": metrics,
+        }],
+        "host_checks": [
+            {"name": "selftest_progress_watchdog", "pass": True,
+             "details": {"timeout_reason": None}},
+            {"name": "coordinated_xy_status_cadence", "pass": True,
+             "details": {"status_gap_max_ms": 100}},
+        ],
+    }
+    assert _analyze(valid, manifest)["verdict"]["status"] == "pass"
+
+    for metric, value in (
+        ("xe", 8415), ("ye", 29999), ("i2", 59999), ("pu", 1),
+        ("en", 0), ("sl", 0), ("ow", 1), ("lb", 1),
+        ("hi", 100), ("hpc", 49), ("hpu", 1), ("hd", 26),
+        ("sf", 1), ("to", 1),
+    ):
+        rejected = deepcopy(valid)
+        rejected["results"][0]["metrics"][metric] = value
+        assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
+
+
 def test_direct_xyz_lut_manifest_rejects_profile_timing_or_isolation_regressions():
     manifest = load_manifest("direct_xyz_lut_v1")
     results = []

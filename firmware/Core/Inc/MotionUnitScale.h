@@ -24,7 +24,7 @@ inline constexpr uint32_t logicalUnitsPerNativeStepForMres(uint8_t mres) {
 
 inline constexpr uint32_t logicalUnitsPerNativeStep() {
   return logicalUnitsPerNativeStepForMres(
-      static_cast<uint8_t>(LC_TMC2208_MRES));
+      TMC2208Configuration::kMres);
 }
 
 inline constexpr uint32_t toNativeStepCycles(uint32_t logicalMagnitude,

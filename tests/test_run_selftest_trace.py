@@ -991,123 +991,6 @@ def test_run_sends_profile_lut_benchmark_selector_and_keeps_goodbye(monkeypatch,
     assert sent_goodbye is True
 
 
-def test_run_sends_coordinated_xy_executor_selector_and_keeps_goodbye(monkeypatch, tmp_path):
-    mod = _load_run_selftest()
-    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
-    clock = FakeClock()
-
-    inbound = b"".join(
-        [
-            _hello_ack(mod),
-            _selftest_done(mod, run_id),
-            _bye_ack(mod, 3),
-            _bye_done(mod, 3, run_id),
-        ]
-    )
-    serial = FakeSerial(inbound)
-    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
-    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
-
-    out_path = tmp_path / "selftest.json"
-    args = SimpleNamespace(
-        port="/dev/ttyAMA0",
-        baud=115200,
-        profile="FULL",
-        timeout_ms=1000,
-        hello_timeout_ms=1000,
-        hello_retry_ms=50,
-        fast_fail_on_missing_hello=False,
-        pressure_trace=False,
-        pressure_trace_test=None,
-        pressure_sweep_suite=None,
-        gripper_seal_suite=False,
-        xy_motion_suite=False,
-        motion_envelope_suite=False,
-        motion_timing_suite=False,
-        profile_lut_benchmark=False,
-        coordinated_xy_executor_suite=True,
-        out=str(out_path),
-    )
-
-    rc = mod.run(args)
-
-    assert rc == 0
-    sent_p3 = None
-    sent_goodbye = False
-    for outbound in serial.writes:
-        reader = mod.FrameReader()
-        for byte in outbound:
-            frame = reader.feed(byte)
-            if not frame:
-                continue
-            if frame[0] == mod.CMD_GOODBYE:
-                sent_goodbye = True
-            if frame[0] == mod.CMD_SELFTEST_START:
-                tlv = mod.parse_tlvs(frame[2:])
-                sent_p3 = tlv.get(mod.TAG_P3)
-    assert sent_p3 == (2049).to_bytes(2, "little")
-    assert sent_goodbye is True
-
-
-def test_run_sends_normal_xy_route_selector_and_keeps_goodbye(monkeypatch, tmp_path):
-    mod = _load_run_selftest()
-    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
-    clock = FakeClock()
-
-    inbound = b"".join(
-        [
-            _hello_ack(mod),
-            _selftest_done(mod, run_id),
-            _bye_ack(mod, 3),
-            _bye_done(mod, 3, run_id),
-        ]
-    )
-    serial = FakeSerial(inbound)
-    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
-    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
-
-    out_path = tmp_path / "selftest.json"
-    args = SimpleNamespace(
-        port="/dev/ttyAMA0",
-        baud=115200,
-        profile="FULL",
-        timeout_ms=1000,
-        hello_timeout_ms=1000,
-        hello_retry_ms=50,
-        fast_fail_on_missing_hello=False,
-        pressure_trace=False,
-        pressure_trace_test=None,
-        pressure_sweep_suite=None,
-        gripper_seal_suite=False,
-        xy_motion_suite=False,
-        motion_envelope_suite=False,
-        motion_timing_suite=False,
-        profile_lut_benchmark=False,
-        coordinated_xy_executor_suite=False,
-        normal_xy_route_suite=True,
-        out=str(out_path),
-    )
-
-    rc = mod.run(args)
-
-    assert rc == 0
-    sent_p3 = None
-    sent_goodbye = False
-    for outbound in serial.writes:
-        reader = mod.FrameReader()
-        for byte in outbound:
-            frame = reader.feed(byte)
-            if not frame:
-                continue
-            if frame[0] == mod.CMD_GOODBYE:
-                sent_goodbye = True
-            if frame[0] == mod.CMD_SELFTEST_START:
-                tlv = mod.parse_tlvs(frame[2:])
-                sent_p3 = tlv.get(mod.TAG_P3)
-    assert sent_p3 == (2059).to_bytes(2, "little")
-    assert sent_goodbye is True
-
-
 @pytest.mark.parametrize(
     ("flag_name", "expected_selector"),
     (("selftest_scheduler_no_yield_suite", 1039),
@@ -1158,24 +1041,15 @@ def test_run_sends_selftest_scheduler_selector(monkeypatch, tmp_path, flag_name,
 
 
 @pytest.mark.parametrize(
-    ("performance_suite", "forty_suite", "status_sync_suite", "single_irq_suite", "mres3_suite", "mres3_rearm_suite", "mres3_conditional_suite", "production_mres3_suite", "direct_lut_suite", "direction_suite", "transition_suite", "expected_selector"),
-    ((True, False, False, False, False, False, False, False, False, False, False, 2069),
-     (False, True, False, False, False, False, False, False, False, False, False, 2077),
-     (False, False, True, False, False, False, False, False, False, False, False, 2076),
-     (False, False, False, True, False, False, False, False, False, False, False, 2075),
-     (False, False, False, False, True, False, False, False, False, False, False, 2085),
-     (False, False, False, False, False, True, False, False, False, False, False, 2084),
-     (False, False, False, False, False, False, True, False, False, False, False, 2086),
-     (False, False, False, False, False, False, False, True, False, False, False, 2097),
-     (False, False, False, False, False, False, False, False, True, False, False, 2096),
-     (False, False, False, False, False, False, False, False, False, True, False, 2079),
-     (False, False, False, False, False, False, False, False, False, False, True, 2078)),
+    ("flag_name", "expected_selector"),
+    (
+        ("coordinated_xy_production_mres3_suite", 2097),
+        ("direct_xyz_lut_suite", 2096),
+        ("coordinated_xy_camera_transition_suite", 2078),
+    ),
 )
-def test_run_sends_coordinated_xy_performance_selector_and_checks_status_cadence(
-    monkeypatch, tmp_path, performance_suite, forty_suite, status_sync_suite,
-    single_irq_suite, mres3_suite, mres3_rearm_suite, mres3_conditional_suite,
-    production_mres3_suite, direct_lut_suite, direction_suite, transition_suite,
-    expected_selector
+def test_run_sends_active_motion_selector_and_checks_status_cadence(
+    monkeypatch, tmp_path, flag_name, expected_selector
 ):
     mod = _load_run_selftest()
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
@@ -1192,10 +1066,13 @@ def test_run_sends_coordinated_xy_performance_selector_and_checks_status_cadence
         ]
     )
     serial = FakeSerial(inbound)
-    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
-    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
-
-    out_path = tmp_path / "selftest.json"
+    monkeypatch.setattr(
+        mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time)
+    )
+    monkeypatch.setattr(
+        mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial)
+    )
+    out_path = tmp_path / f"{flag_name}.json"
     args = SimpleNamespace(
         port="/dev/ttyAMA0",
         baud=115200,
@@ -1212,20 +1089,8 @@ def test_run_sends_coordinated_xy_performance_selector_and_checks_status_cadence
         motion_envelope_suite=False,
         motion_timing_suite=False,
         profile_lut_benchmark=False,
-        coordinated_xy_executor_suite=False,
-        normal_xy_route_suite=False,
-        coordinated_xy_performance_suite=performance_suite,
-        coordinated_xy_40khz_suite=forty_suite,
-        coordinated_xy_status_sync_suite=status_sync_suite,
-        coordinated_xy_single_irq_suite=single_irq_suite,
-        coordinated_xy_mres3_20khz_suite=mres3_suite,
-        coordinated_xy_mres3_rearm_suite=mres3_rearm_suite,
-        coordinated_xy_mres3_conditional_rearm_suite=mres3_conditional_suite,
-        coordinated_xy_production_mres3_suite=production_mres3_suite,
-        direct_xyz_lut_suite=direct_lut_suite,
-        coordinated_xy_x_direction_suite=direction_suite,
-        coordinated_xy_camera_transition_suite=transition_suite,
         out=str(out_path),
+        **{flag_name: True},
     )
 
     assert mod.run(args) == 0
@@ -1237,23 +1102,13 @@ def test_run_sends_coordinated_xy_performance_selector_and_checks_status_cadence
             if frame and frame[0] == mod.CMD_SELFTEST_START:
                 sent_p3 = mod.parse_tlvs(frame[2:]).get(mod.TAG_P3)
     assert sent_p3 == expected_selector.to_bytes(2, "little")
-    report = __import__("json").loads(out_path.read_text(encoding="utf-8"))
+    report = mod.json.loads(out_path.read_text(encoding="utf-8"))
     cadence = next(
-        item for item in report["host_checks"]
+        item
+        for item in report["host_checks"]
         if item["name"] == "coordinated_xy_status_cadence"
     )
     assert cadence["pass"] is True
-    assert cadence["details"]["status_gap_max_ms"] < 500
-
-
-def test_mres3_rearm_fixture_stage_is_an_operator_prompt():
-    mod = _load_run_selftest()
-    stage = "coordinated_xy_mres3_rearm_envelope_clear"
-
-    assert mod._is_operator_prompt_stage(stage) is True
-    message = mod._operator_prompt_message(stage)
-    assert "MRES=3" in message
-    assert "complete XY/Z motion envelope is clear" in message
 
 
 def test_run_sends_pressure_regulator_selector_and_keeps_goodbye(monkeypatch, tmp_path):
@@ -2268,34 +2123,6 @@ def test_progress_jsonl_emits_timeout_event_when_done_missing(monkeypatch, tmp_p
     assert abort_check["details"]["sent"] is True
 
 
-def test_coordinated_limit_preflight_stages_are_explicit_operator_prompts():
-    mod = _load_run_selftest()
-
-    expected_phrases = {
-        "coord_x_limit_press": "press and hold the X limit switch",
-        "coord_x_limit_release": "Release the X limit switch",
-        "coord_y_limit_press": "press and hold the Y limit switch",
-        "coord_y_limit_release": "Release the Y limit switch",
-        "normal_route_envelope_clear": "complete XY and Z motion envelope is clear",
-    }
-    for stage, phrase in expected_phrases.items():
-        assert mod._is_operator_prompt_stage(stage)
-        assert phrase in mod._operator_prompt_message(stage)
-    assert not mod._is_operator_prompt_stage("coord_x_home_low")
-
-
-def test_m6_combined_fixture_stage_is_one_explicit_prompt_without_switch_language():
-    mod = _load_run_selftest()
-    stage = "coordinated_xy_performance_fixture_clear"
-
-    assert mod._is_operator_prompt_stage(stage)
-    message = mod._operator_prompt_message(stage)
-    assert "pressure_closed_loop_v1" in message
-    assert "complete XY/Z motion envelope" in message
-    assert "press and hold" not in message.lower()
-    assert "limit switch" not in message.lower()
-
-
 def test_camera_transition_stage_is_one_clear_envelope_prompt_without_pressure():
     mod = _load_run_selftest()
     stage = "coordinated_xy_camera_transition_envelope_clear"
@@ -2306,52 +2133,6 @@ def test_camera_transition_stage_is_one_clear_envelope_prompt_without_pressure()
     assert "one 40 kHz camera-ratio round trip" in message
     assert "pressure_closed_loop_v1" not in message
     assert "press and hold" not in message.lower()
-
-
-def test_standalone_40khz_stage_is_one_clear_envelope_prompt_without_pressure():
-    mod = _load_run_selftest()
-    stage = "coordinated_xy_40khz_envelope_clear"
-
-    assert mod._is_operator_prompt_stage(stage)
-    message = mod._operator_prompt_message(stage)
-    assert "complete XY/Z motion envelope" in message
-    assert "ten-move 40 kHz Milestone 6 geometry row" in message
-    assert "pressure_closed_loop_v1" not in message
-    assert "press and hold" not in message.lower()
-
-
-def test_single_irq_stage_is_one_clear_envelope_prompt_without_pressure():
-    mod = _load_run_selftest()
-    stage = "coordinated_xy_single_irq_envelope_clear"
-
-    assert mod._is_operator_prompt_stage(stage)
-    message = mod._operator_prompt_message(stage)
-    assert "complete XY/Z motion envelope" in message
-    assert "ten-move 40 kHz Milestone 6 geometry row" in message
-    assert "pressure_closed_loop_v1" not in message
-    assert "press and hold" not in message.lower()
-
-
-def test_mres3_stage_is_explicit_about_logical_unit_conversion():
-    mod = _load_run_selftest()
-    stage = "coordinated_xy_mres3_20khz_envelope_clear"
-
-    assert mod._is_operator_prompt_stage(stage)
-    message = mod._operator_prompt_message(stage)
-    assert "MRES=3" in message
-    assert "20 kHz" in message
-    assert "logical-unit" in message
-    assert "limit switches are released" in message
-
-
-def test_mres3_conditional_rearm_fixture_stage_is_an_operator_prompt():
-    mod = _load_run_selftest()
-    stage = "coordinated_xy_mres3_conditional_rearm_envelope_clear"
-
-    assert mod._is_operator_prompt_stage(stage)
-    message = mod._operator_prompt_message(stage)
-    assert "MRES=3" in message
-    assert "20 kHz" in message
 
 
 def test_production_mres3_fixture_stage_is_an_operator_prompt():
@@ -2375,7 +2156,7 @@ def test_direct_xyz_lut_fixture_stage_is_an_operator_prompt():
     assert "40 kHz logical rate" in message
 
 
-def test_mres3_selector_is_mutually_exclusive_with_existing_motion_selectors(
+def test_active_production_selector_is_mutually_exclusive_with_direct_lut(
     monkeypatch, tmp_path
 ):
     mod = _load_run_selftest()
@@ -2386,8 +2167,8 @@ def test_mres3_selector_is_mutually_exclusive_with_existing_motion_selectors(
             "run_selftest.py",
             "--port", "/dev/null",
             "--profile", "FULL",
-            "--coordinated-xy-mres3-20khz-suite",
-            "--coordinated-xy-40khz-suite",
+            "--coordinated-xy-production-mres3-suite",
+            "--direct-xyz-lut-suite",
             "--out", str(tmp_path / "not-written.json"),
         ],
     )

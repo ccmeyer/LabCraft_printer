@@ -99,6 +99,30 @@ def test_load_campaign_rejects_unknown_child_manifest(tmp_path):
         load_campaign(path)
 
 
+def test_load_campaign_rejects_archived_child_manifest(tmp_path):
+    path = tmp_path / "archived_campaign.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "qualification_campaign_v1",
+                "campaign_id": "archived",
+                "name": "Archived",
+                "steps": [
+                    {
+                        "manifest": "coordinated_xy_mres3_20khz_v1",
+                        "fixture": "motion_clear_envelope_v1",
+                        "timeout_ms": 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CampaignError, match="archived manifest"):
+        load_campaign(path)
+
+
 def test_run_campaign_runs_steps_in_order_and_writes_parent_artifacts(tmp_path):
     calls = []
 
