@@ -138,6 +138,13 @@ uint32_t moveFailureMask(const MoveObservation& observation,
          observation.timerScheduleSaturationFlags != 0u))) {
     failures |= kMoveFailureTimerRearm;
   }
+  if (observation.timerScheduleSaturationFlags != 0u) {
+    failures |= kMoveFailureScheduleSaturation;
+  }
+  if (observation.terminalReason !=
+      CoordinatedXyExecutor::TerminalReason::Completed) {
+    failures |= kMoveFailureTerminalReason;
+  }
   if (observation.arrMin != observation.expectedTargetArr ||
       observation.arrMax != observation.expectedStartArr) {
     failures |= kMoveFailureArrRange;
@@ -162,6 +169,16 @@ uint32_t moveFailureMask(const MoveObservation& observation,
        timing.deadlineMissing != 0u || timing.deadlineMisses != 0u ||
        timing.deadlineSlackMinTicks == 0u)) {
     failures |= kMoveFailureDeadlineSlack;
+  }
+  if (!completeStepMode && observation.minimumDeadlineSlackTicks != 0u &&
+      (observation.timer2Callbacks == 0u ||
+       timing.deadlineSamples != observation.timer2Callbacks - 1u ||
+       timing.deadlineMissing != 0u || timing.deadlineMisses != 0u ||
+       timing.deadlineSlackMinTicks < observation.minimumDeadlineSlackTicks)) {
+    failures |= kMoveFailureDeadlineSlack;
+  }
+  if (observation.requireNoLateEntries && timing.lateEntryCount != 0u) {
+    failures |= kMoveFailureEntryLateness;
   }
   if (timing.pendingObservations != 0u || timing.maxPendingStreak != 0u) {
     failures |= kMoveFailurePendingUpdate;
@@ -200,21 +217,31 @@ bool movePasses(const MoveObservation& observation, const Limits& limits) {
   return moveFailureMask(observation, limits) == 0u;
 }
 
+bool moveCanContinueAfterCompletion(const MoveObservation& observation,
+                                    const Limits& limits) {
+  const uint32_t failures = moveFailureMask(observation, limits);
+  return (failures & ~kMoveCollectionSoftFailureMask) == 0u;
+}
+
 void captureFirstFailure(FailureTelemetry& telemetry,
                          bool movePassed,
                          CoordinatedXyExecutor::TerminalReason terminalReason,
                          uint32_t limitAbortRequestCount,
-                         uint32_t rawLimitAbortCount) {
+                         uint32_t rawLimitAbortCount,
+                         uint32_t failureMask) {
   if (movePassed || telemetry.valid) return;
   telemetry.valid = true;
   telemetry.terminalReason = terminalReason;
   telemetry.limitAbortRequestCount = limitAbortRequestCount;
   telemetry.rawLimitAbortCount = rawLimitAbortCount;
+  telemetry.failureMask = failureMask;
 }
 
 void addMove(Aggregate& aggregate,
              const MoveObservation& observation,
              const Limits& limits) {
+  const uint32_t qualificationFailureMask =
+      moveFailureMask(observation, limits);
   const bool firstMove = aggregate.moveCount == 0u;
   const bool modeConsistent = firstMove ||
       (aggregate.interruptsPerMasterStep ==
@@ -455,8 +482,14 @@ void addMove(Aggregate& aggregate,
   if (observation.timedOut) {
     addSaturating(aggregate.timeoutCount, 1u, aggregate.saturationFlags);
   }
+  if (qualificationFailureMask != 0u) {
+    addSaturating(aggregate.qualificationFailureMoveCount,
+                  1u,
+                  aggregate.saturationFlags);
+    aggregate.qualificationFailureMask |= qualificationFailureMask;
+  }
   aggregate.exactAndSafe = aggregate.exactAndSafe && modeConsistent &&
-      movePasses(observation, limits);
+      qualificationFailureMask == 0u;
 }
 
 uint32_t phaseMeanCycles(const Aggregate& aggregate,
@@ -573,7 +606,8 @@ size_t buildMetrics(char* out,
       capacity,
       "hz=%lu;n=%lu;xe=%lu;ye=%lu;ms=%lu;i2=%lu;i7=%lu;ok=%u;"
       "pu=%lu;ps=%lu;am=%lu;aa=%lu;cm=%lu;ca=%lu;dm=%lu;da=%lu;"
-      "tm=%lu;de=%lu;sg=%lu;wd=%lu;sa=%lu;wl=%lu;cw=%lu;sf=%lu;xd=%lu;yd=%lu;to=%lu",
+      "tm=%lu;de=%lu;sg=%lu;wd=%lu;sa=%lu;wl=%lu;cw=%lu;qf=%lu;"
+      "qm=%lu;sf=%lu;xd=%lu;yd=%lu;to=%lu",
       static_cast<unsigned long>(rateHz),
       static_cast<unsigned long>(aggregate.moveCount),
       static_cast<unsigned long>(aggregate.emittedXSteps),
@@ -600,6 +634,8 @@ size_t buildMetrics(char* out,
       static_cast<unsigned long>(aggregate.statusAlternationErrors),
       static_cast<unsigned long>(aggregate.watchdogLateCount),
       static_cast<unsigned long>(aggregate.cycleWraps),
+      static_cast<unsigned long>(aggregate.qualificationFailureMoveCount),
+      static_cast<unsigned long>(aggregate.qualificationFailureMask),
       static_cast<unsigned long>(aggregate.saturationFlags),
       static_cast<unsigned long>(xDriftSteps),
       static_cast<unsigned long>(yDriftSteps),

@@ -32,6 +32,8 @@ CoordinatedXyPerformanceReport::MoveObservation acceptedMove(
   observation.statusPeriodMaxMs = 65u;
   observation.statusWatchdogAgeMaxMs = 70u;
   observation.statusFrameCount = 3u;
+  observation.terminalReason =
+      CoordinatedXyExecutor::TerminalReason::Completed;
   observation.endpointMatches = true;
   observation.targetsMatch = true;
   observation.completionTogether = true;
@@ -235,6 +237,70 @@ TEST(CoordinatedXyPerformanceReport, ClassifiesFailedMoveGatesCompactly) {
       observation, CoordinatedXyPerformanceReport::Limits{}));
 }
 
+TEST(CoordinatedXyPerformanceReport, CompletedTimingFailuresRemainCollectible) {
+  const CoordinatedXyPerformanceReport::Limits limits{};
+  auto observation =
+      acceptedMove(20000u, 0u, 20000u, 20000u, 2249u, 11245u);
+  observation.timing.pendingObservations = 1u;
+  observation.timing.maxPendingStreak = 1u;
+  observation.timing.cycleWraps = 2u;
+  observation.timing.phaseMaxCycles[1] = 2026u;
+  observation.timing.terminalMaxCycles = 2251u;
+  observation.durationErrorBasisPoints = 101u;
+  observation.statusPeriodMaxMs = 101u;
+  observation.statusWatchdogAgeMaxMs = 101u;
+  observation.statusAlternationErrors = 1u;
+  observation.minimumDeadlineSlackTicks = 450u;
+  observation.timing.deadlineSamples = observation.timer2Callbacks - 1u;
+  observation.timing.deadlineSlackMinTicks = 449u;
+  observation.requireNoLateEntries = true;
+  observation.timing.lateEntryCount = 1u;
+
+  CHECK_FALSE(CoordinatedXyPerformanceReport::movePasses(
+      observation, limits));
+  CHECK_TRUE(CoordinatedXyPerformanceReport::moveCanContinueAfterCompletion(
+      observation, limits));
+  UNSIGNED_LONGS_EQUAL(
+      CoordinatedXyPerformanceReport::kMoveCollectionSoftFailureMask &
+          ~CoordinatedXyPerformanceReport::kMoveFailureTimerRearm,
+      CoordinatedXyPerformanceReport::moveFailureMask(observation, limits));
+
+  observation.timerRearmCount = 1u;
+  CHECK_TRUE(CoordinatedXyPerformanceReport::moveCanContinueAfterCompletion(
+      observation, limits));
+  CHECK_TRUE((CoordinatedXyPerformanceReport::moveFailureMask(
+                  observation, limits) &
+              CoordinatedXyPerformanceReport::kMoveFailureTimerRearm) != 0u);
+}
+
+TEST(CoordinatedXyPerformanceReport, IntegrityAndSafetyFailuresStopCollection) {
+  const CoordinatedXyPerformanceReport::Limits limits{};
+  auto observation =
+      acceptedMove(20000u, 0u, 20000u, 20000u, 2249u, 11245u);
+  observation.endpointMatches = false;
+  CHECK_FALSE(CoordinatedXyPerformanceReport::moveCanContinueAfterCompletion(
+      observation, limits));
+
+  observation =
+      acceptedMove(20000u, 0u, 20000u, 20000u, 2249u, 11245u);
+  observation.terminalReason =
+      CoordinatedXyExecutor::TerminalReason::PlannerFault;
+  CHECK_FALSE(CoordinatedXyPerformanceReport::moveCanContinueAfterCompletion(
+      observation, limits));
+
+  observation =
+      acceptedMove(20000u, 0u, 20000u, 20000u, 2249u, 11245u);
+  observation.timerScheduleSaturationFlags = 1u;
+  CHECK_FALSE(CoordinatedXyPerformanceReport::moveCanContinueAfterCompletion(
+      observation, limits));
+
+  observation =
+      acceptedMove(20000u, 0u, 20000u, 20000u, 2249u, 11245u);
+  observation.watchdogLateCount = 1u;
+  CHECK_FALSE(CoordinatedXyPerformanceReport::moveCanContinueAfterCompletion(
+      observation, limits));
+}
+
 TEST(CoordinatedXyPerformanceReport, FailureTelemetryIgnoresPassingMove) {
   CoordinatedXyPerformanceReport::FailureTelemetry telemetry{};
 
@@ -251,6 +317,7 @@ TEST(CoordinatedXyPerformanceReport, FailureTelemetryIgnoresPassingMove) {
       static_cast<int>(telemetry.terminalReason));
   UNSIGNED_LONGS_EQUAL(0u, telemetry.limitAbortRequestCount);
   UNSIGNED_LONGS_EQUAL(0u, telemetry.rawLimitAbortCount);
+  UNSIGNED_LONGS_EQUAL(0u, telemetry.failureMask);
 }
 
 TEST(CoordinatedXyPerformanceReport, FailureTelemetryCapturesFirstLimitAbort) {
@@ -261,13 +328,15 @@ TEST(CoordinatedXyPerformanceReport, FailureTelemetryCapturesFirstLimitAbort) {
       false,
       CoordinatedXyExecutor::TerminalReason::XLimit,
       1u,
-      2u);
+      2u,
+      CoordinatedXyPerformanceReport::kMoveFailureTerminalReason);
   CoordinatedXyPerformanceReport::captureFirstFailure(
       telemetry,
       false,
       CoordinatedXyExecutor::TerminalReason::PlannerFault,
       3u,
-      4u);
+      4u,
+      CoordinatedXyPerformanceReport::kMoveFailureTimingState);
 
   CHECK_TRUE(telemetry.valid);
   CHECK_EQUAL(
@@ -275,6 +344,9 @@ TEST(CoordinatedXyPerformanceReport, FailureTelemetryCapturesFirstLimitAbort) {
       static_cast<int>(telemetry.terminalReason));
   UNSIGNED_LONGS_EQUAL(1u, telemetry.limitAbortRequestCount);
   UNSIGNED_LONGS_EQUAL(2u, telemetry.rawLimitAbortCount);
+  UNSIGNED_LONGS_EQUAL(
+      CoordinatedXyPerformanceReport::kMoveFailureTerminalReason,
+      telemetry.failureMask);
 }
 
 TEST(CoordinatedXyPerformanceReport, RejectsEverySafetyAndTimingMismatch) {
@@ -390,9 +462,26 @@ TEST(CoordinatedXyPerformanceReport, BuildsCompactDeterministicMetrics) {
   CHECK_TRUE(length > 0u);
   STRCMP_CONTAINS("hz=40000;n=1;xe=20000;ye=5000;ms=20000;i2=40000;i7=0;ok=1", metrics);
   STRCMP_CONTAINS("pu=0;ps=0", metrics);
-  STRCMP_CONTAINS("cw=0;sf=0", metrics);
+  STRCMP_CONTAINS("cw=0;qf=0;qm=0;sf=0", metrics);
   STRCMP_CONTAINS("xd=3;yd=4;to=0", metrics);
   CHECK_TRUE(length <= 198u);
+}
+
+TEST(CoordinatedXyPerformanceReport, AggregatesStrictFailuresWithoutLosingMove) {
+  CoordinatedXyPerformanceReport::Aggregate aggregate{};
+  const CoordinatedXyPerformanceReport::Limits limits{};
+  auto observation =
+      acceptedMove(20000u, 0u, 20000u, 20000u, 2249u, 11245u);
+  observation.timing.terminalMaxCycles = 2251u;
+
+  CoordinatedXyPerformanceReport::addMove(aggregate, observation, limits);
+
+  UNSIGNED_LONGS_EQUAL(1u, aggregate.moveCount);
+  UNSIGNED_LONGS_EQUAL(1u, aggregate.qualificationFailureMoveCount);
+  UNSIGNED_LONGS_EQUAL(
+      CoordinatedXyPerformanceReport::kMoveFailureTerminalCycles,
+      aggregate.qualificationFailureMask);
+  CHECK_FALSE(aggregate.exactAndSafe);
 }
 
 TEST(CoordinatedXyPerformanceReport, LargestPlannedAggregateFitsResultFrameBudget) {
@@ -415,13 +504,15 @@ TEST(CoordinatedXyPerformanceReport, LargestPlannedAggregateFitsResultFrameBudge
   aggregate.durationErrorMaxBasisPoints = 99u;
   aggregate.statusPeriodMaxMs = 99u;
   aggregate.statusWatchdogAgeMaxMs = 99u;
+  aggregate.qualificationFailureMoveCount = 10u;
+  aggregate.qualificationFailureMask = 0xFFFFFFFFu;
   char metrics[224] = {};
 
   const size_t length = CoordinatedXyPerformanceReport::buildMetrics(
       metrics, sizeof(metrics), 40000u, aggregate, 25u, 25u);
 
   CHECK_TRUE(length > 0u);
-  CHECK_TRUE(length <= 198u);
+  CHECK_TRUE(length <= 203u);
 }
 
 TEST(CoordinatedXyPerformanceReport, RejectsAggregateExpectedCountMismatch) {

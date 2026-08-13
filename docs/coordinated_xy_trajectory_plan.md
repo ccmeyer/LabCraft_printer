@@ -927,6 +927,40 @@ powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1
 - Do not raise watchdog deadlines, suppress reset reporting, or lower speed
   silently to convert a failure into a pass.
 
+### Conditional-rearm isolation and complete-row evidence collection
+
+The revised MRES3 diagnostic keeps production/default behavior unchanged while
+separating experimental work at compile time. `_handleCoordinatedTimerFromIsr()`
+performs ownership and timer-identity checks, then dispatches modes 0/1 to a
+nonconditional specialization and mode 2 to the conditional specialization.
+Only mode 2 references the conditional timer sample, injection state, schedule
+decision counters, or intentional-wait accounting. The original instrumentation
+entry points remain the modes-0/1 path; mode 2 uses explicit wait-excluding
+variants only for executor phase cost. Raw IRQ, deadline, and duration evidence
+continues to include the injected wait.
+
+Selectors `2085` and `2086` also separate a strict qualification mask from a
+hard-stop disposition. A measured move that reaches `Completed` with exact
+endpoints, counts, callbacks, state, checksum, released ownership, low STEP
+pins, complete unsaturated evidence, and no watchdog/safety fault can continue
+after a pending, deadline, rearm, cycle-budget, entry-lateness, duration, or
+status-cadence violation. Those violations still make the result fail and are
+aggregated in `2080.qf/qm`. `2082.hm` plus `fv/tr/la/ra` describes the first
+hard stop. Unexecuted reverse legs are never aggregated. Positioning, homes,
+selector `2084`, and all production/other diagnostic routes retain fail-stop
+behavior. Version-2 manifests enforce `qf=qm=fv=hm=0`; v1 manifests remain
+unchanged for historical normalization.
+
+The exact `5a414291` baseline was rebuilt with the current CubeIDE/GCC toolchain
+to audit a stale 80-byte stack assumption. Both Debug and MRES3 configurations
+report a 128-byte coordinated handler frame. The isolated nonconditional body
+reports 120 bytes and contains no mode-2 symbols in its disassembly. With the
+24-byte inlined dispatcher, the nonconditional call-depth envelope is 144
+bytes and the 144-byte conditional body reaches 168 bytes, below both the
+256-byte diagnostic gate and the linker's 1,024-byte MSP reservation.
+Artifact hashes and final stack/call-depth measurements belong in the matching
+Milestone 6 implementation record before flashing.
+
 ## Milestone 7: Default Enablement And Closeout
 
 Status: `not_started`

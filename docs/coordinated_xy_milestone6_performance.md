@@ -890,6 +890,47 @@ the row continued. The next implementation isolates the conditional ISR body
 and lets selectors `2085`/`2086` retain a complete row after completed,
 internally consistent moves while preserving strict FAIL results.
 
+The isolation implementation separates timer ownership/identity dispatch from
+two compile-time-specialized TIM2 bodies. Modes 0/1 use the original
+instrumentation calls and contain no conditional timer sample, injection,
+schedule-decision, schedule-saturation, or intentional-wait references in ARM
+disassembly. Mode 2 alone retains those operations and uses explicitly named
+wait-excluding phase-cost helpers; full IRQ, deadline, and duration evidence
+still includes the deliberate wait. The exact `5a414291` baseline was rebuilt
+with the current CubeIDE/GCC toolchain because the planned 80-byte stack value
+was stale: both Debug and MRES3 baseline builds report a 128-byte coordinated
+handler frame. The revised build reports a 120-byte nonconditional body, a
+144-byte conditional body, and a 24-byte dispatcher. The deepest conditional
+chain is therefore 168 bytes, below the 256-byte diagnostic gate and the
+linker's 1,024-byte MSP reservation; the nonconditional chain remains 144
+bytes, the same total call-depth envelope as the rebuilt baseline handler plus
+dispatch.
+
+Selectors `2085` and `2086` now classify each measured move twice. The strict
+mask still controls PASS/FAIL and aggregates as `2080.qf` (failing move count)
+and `2080.qm` (OR-combined mask). A completed move may continue only when all
+endpoint, target, requested/emitted/master-step, callback, rate, ARR, checksum,
+execution-mode, STEP-low, ownership-release, completion, timing-coverage,
+saturation, watchdog, and terminal-reason gates are intact. Pending/deadline,
+rearm/injection, cycle-budget/wrap, entry-lateness, duration, and status-cadence
+violations remain strict failures but do not truncate the row. Result `2082.hm`
+records the first hard-stop mask, while `fv/tr/la/ra` now explicitly describe
+that first hard stop. Unexecuted reverse legs are not aggregated. Positioning,
+homes, selector `2084`, and every other motion suite retain fail-stop behavior.
+
+Version-2 manifests `coordinated_xy_mres3_20khz_v2` and
+`coordinated_xy_mres3_conditional_rearm_v2` require
+`qf=qm=fv=hm=0`; both v1 manifests remain unchanged for historical reports.
+The implementation builds with zero errors and the three existing warnings,
+passes 404/404 firmware host tests and 117/117 targeted Python tests, and keeps
+the diagnostic runner frame at 3,512 bytes. The versioned production binary is
+351,768 bytes with SHA-256
+`B6B0AA6F59C17F8E6886BF42B8A9F8A39CE746F472FA1EAC3DD21901C617D9CC`;
+the MRES3 diagnostic binary is 352,024 bytes with SHA-256
+`99587E773C10530988BF78E7A56ED37DA5E4FE6ED717B769620162506C8720BE`.
+These artifacts are candidates for the watched SAFE/`2085`/SAFE/`2086`/SAFE
+sequence, not production migration approval.
+
 The first watched selector `2085` attempt on implementation commit `4c16a50c`
 was bracketed by 30/30 SAFE passes and failed closed before the ten-move row.
 Z, X, and Y home completion bits all arrived, but the diagnostic expected a

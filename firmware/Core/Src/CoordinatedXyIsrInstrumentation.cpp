@@ -94,8 +94,85 @@ void recordSample(State& state,
                   uint32_t arr,
                   bool updatePending,
                   bool completedPulse,
-                  bool terminal,
-                  uint32_t intentionalWaitCycles) {
+                  bool terminal) {
+  if (!state.valid || !state.active) return;
+
+  observeCycle(state, entryCycle);
+  observeCycle(state, exitCycle);
+  state.endCycle = exitCycle;
+
+  saturatingIncrement(
+      state.totalCallbacks, state.saturationFlags, SaturatedCallbacks);
+  if (completedPulse) {
+    saturatingIncrement(state.completedPulses,
+                        state.saturationFlags,
+                        SaturatedCompletedPulses);
+  }
+
+  const uint32_t elapsed = exitCycle - entryCycle;
+  if (elapsed > state.maxCycles) state.maxCycles = elapsed;
+
+  if (terminal) {
+    saturatingIncrement(state.terminalCallbacks,
+                        state.saturationFlags,
+                        SaturatedTerminalCallbacks);
+    saturatingAdd(state.terminalCycleSum,
+                  elapsed,
+                  state.saturationFlags,
+                  SaturatedCycleSums);
+    if (elapsed > state.terminalMaxCycles) state.terminalMaxCycles = elapsed;
+  } else {
+    const uint8_t index = phaseIndex(phase);
+    if (index < phaseIndex(Phase::Count)) {
+      saturatingIncrement(state.phaseCallbacks[index],
+                          state.saturationFlags,
+                          SaturatedPhaseCallbacks);
+      saturatingAdd(state.phaseCycleSums[index],
+                    elapsed,
+                    state.saturationFlags,
+                    SaturatedCycleSums);
+      if (elapsed > state.phaseMaxCycles[index]) {
+        state.phaseMaxCycles[index] = elapsed;
+      }
+    }
+  }
+
+  if (updatePending) {
+    saturatingIncrement(state.pendingObservations,
+                        state.saturationFlags,
+                        SaturatedPendingObservations);
+    saturatingIncrement(state.currentPendingStreak,
+                        state.saturationFlags,
+                        SaturatedPendingStreak);
+    if (state.currentPendingStreak > state.maxPendingStreak) {
+      state.maxPendingStreak = state.currentPendingStreak;
+    }
+  } else {
+    state.currentPendingStreak = 0u;
+  }
+
+  if (arr == kUint32Max) {
+    state.scheduledTimerTicks = kUint32Max;
+    state.saturationFlags |= SaturatedScheduledTicks;
+  } else {
+    saturatingAdd(state.scheduledTimerTicks,
+                  arr + 1u,
+                  state.saturationFlags,
+                  SaturatedScheduledTicks);
+  }
+
+  if (terminal) state.active = false;
+}
+
+void recordSampleExcludingIntentionalWait(State& state,
+                                          Phase phase,
+                                          uint32_t entryCycle,
+                                          uint32_t exitCycle,
+                                          uint32_t arr,
+                                          bool updatePending,
+                                          bool completedPulse,
+                                          bool terminal,
+                                          uint32_t intentionalWaitCycles) {
   if (!state.valid || !state.active) return;
 
   observeCycle(state, entryCycle);
@@ -180,8 +257,44 @@ void completeSampleTiming(State& state,
                           uint32_t entryCycle,
                           uint32_t recordedExitCycle,
                           uint32_t finalExitCycle,
-                          bool terminal,
-                          uint32_t intentionalWaitCycles) {
+                          bool terminal) {
+  if (!state.valid) return;
+  observeCycle(state, finalExitCycle);
+  state.endCycle = finalExitCycle;
+  const uint32_t recorded = recordedExitCycle - entryCycle;
+  const uint32_t completed = finalExitCycle - entryCycle;
+  if (completed <= recorded) return;
+  const uint32_t additional = completed - recorded;
+  if (completed > state.maxCycles) state.maxCycles = completed;
+  if (terminal) {
+    saturatingAdd(state.terminalCycleSum,
+                  additional,
+                  state.saturationFlags,
+                  SaturatedCycleSums);
+    if (completed > state.terminalMaxCycles) {
+      state.terminalMaxCycles = completed;
+    }
+    return;
+  }
+  const uint8_t index = phaseIndex(phase);
+  if (index >= phaseIndex(Phase::Count)) return;
+  saturatingAdd(state.phaseCycleSums[index],
+                additional,
+                state.saturationFlags,
+                SaturatedCycleSums);
+  if (completed > state.phaseMaxCycles[index]) {
+    state.phaseMaxCycles[index] = completed;
+  }
+}
+
+void completeSampleTimingExcludingIntentionalWait(
+    State& state,
+    Phase phase,
+    uint32_t entryCycle,
+    uint32_t recordedExitCycle,
+    uint32_t finalExitCycle,
+    bool terminal,
+    uint32_t intentionalWaitCycles) {
   if (!state.valid) return;
   observeCycle(state, finalExitCycle);
   state.endCycle = finalExitCycle;

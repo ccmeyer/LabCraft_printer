@@ -86,7 +86,7 @@ def test_standalone_40khz_selector_reuses_only_existing_tier_four_and_exits():
     assert "emitEntryLatenessEvidence(" in suite
     assert '"i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"' in suite
     assert '"lc=%lu;dm=%lu;sm=%u;lf=%lu;sf=%lu;to=%lu;"' in suite
-    assert '"fv=%u;tr=%u;la=%lu;ra=%lu"' in suite
+    assert '"la=%lu;ra=%lu;hm=%lu"' in suite
     assert "captureFirstFailure(" in suite
     assert "result.snapshot.terminalReason" in suite
     assert "result.snapshot.limitAbortRequestCount" in suite
@@ -201,6 +201,43 @@ def test_mres3_conditional_rearm_preserves_normal_order_and_bounds_injection():
     assert '"coord_xy_conditional_rearm"' in diagnostics
     assert "kExpectedDecisions = 219990u" in diagnostics
     assert 'add_argument("--coordinated-xy-mres3-conditional-rearm-suite"' in runner
+
+
+def test_mres3_complete_row_collection_is_scoped_and_keeps_strict_results():
+    report = _read("firmware/Core/Src/CoordinatedXyPerformanceReport.cpp")
+    header = _read("firmware/Core/Inc/CoordinatedXyPerformanceReport.h")
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+
+    assert "kMoveFailureScheduleSaturation = 1u << 29" in header
+    assert "kMoveFailureTerminalReason = 1u << 30" in header
+    assert "moveCanContinueAfterCompletion" in report
+    assert "qualificationFailureMoveCount" in report
+    assert "qualificationFailureMask" in report
+    assert '"qm=%lu;sf=%lu' in report
+    assert "collectCompletedMres3Evidence" in diagnostics
+    assert "runCoordinatedXyMres3BaselineSuite ||" in diagnostics
+    collection_start = diagnostics.index("const bool collectCompletedMres3Evidence")
+    collection_end = diagnostics.index(";", collection_start)
+    collection_scope = diagnostics[collection_start:collection_end]
+    assert "runCoordinatedXyMres3BaselineSuite" in collection_scope
+    assert "runCoordinatedXyMres3ConditionalRearmSuite" in collection_scope
+    assert "runCoordinatedXyMres3RearmSuite" not in collection_scope
+    assert "? forward.canContinue" in diagnostics
+    assert "? forward.canContinue && reverse.canContinue" in diagnostics
+    assert "aggregate,\n                                forward.observation" in diagnostics
+    assert "MoveResult reverse = observeCompletedMove" in diagnostics
+    assert "classifyMove(forward);" in diagnostics
+    assert "classifyMove(reverse);" in diagnostics
+    assert '"la=%lu;ra=%lu;hm=%lu"' in diagnostics
+
+    dispatch = gantry.index("bool Gantry::_handleCoordinatedTimerFromIsr")
+    body = gantry.index("bool Gantry::_handleCoordinatedTim2BodyFromIsr", dispatch)
+    assert dispatch < body
+    assert "_handleCoordinatedTim2BodyFromIsr<true>()" in gantry[dispatch:body]
+    assert "_handleCoordinatedTim2BodyFromIsr<false>()" in gantry[dispatch:body]
+    assert "recordSampleExcludingIntentionalWait" in gantry[body:]
+    assert "recordSample(" in gantry[body:]
 
 
 def test_status_sync_variant_is_static_bounded_and_restores_critical_mode():

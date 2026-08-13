@@ -371,6 +371,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
         runCoordinatedXyMres3BaselineSuite ||
         runCoordinatedXyMres3RearmSuite ||
         runCoordinatedXyMres3ConditionalRearmSuite;
+    const bool collectCompletedMres3Evidence =
+        runCoordinatedXyMres3BaselineSuite ||
+        runCoordinatedXyMres3ConditionalRearmSuite;
     const bool runCoordinatedXy40KhzSuite =
         (selectedDiagnosticId == 2077u) || runCoordinatedXyStatusSyncSuite ||
         runCoordinatedXySingleIrqSuite;
@@ -4707,11 +4710,30 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                         struct MoveResult {
                           bool passed = false;
+                          bool canContinue = false;
+                          uint32_t failureMask = 0u;
                           MoveObservation observation{};
                           CoordinatedXySnapshot snapshot{};
                         };
                         CoordinatedXyPerformanceReport::FailureTelemetry
                             firstMoveFailure{};
+                        auto classifyMove = [&](MoveResult& result) {
+                          result.failureMask =
+                              CoordinatedXyPerformanceReport::moveFailureMask(
+                                  result.observation, performanceLimits);
+                          result.passed = result.failureMask == 0u;
+                          result.canContinue =
+                              CoordinatedXyPerformanceReport::
+                                  moveCanContinueAfterCompletion(
+                                      result.observation, performanceLimits);
+                          CoordinatedXyPerformanceReport::captureFirstFailure(
+                              firstMoveFailure,
+                              result.canContinue,
+                              result.snapshot.terminalReason,
+                              result.snapshot.limitAbortRequestCount,
+                              result.snapshot.rawLimitAbortCount,
+                              result.failureMask);
+                        };
                         auto observeCompletedMove = [&](Point start,
                                                         Point target,
                                                         uint32_t expectedRateHz,
@@ -4904,6 +4926,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           observation.statusAlternationErrors = alternationErrors;
                           observation.watchdogLateCount =
                               Watchdog_GetLateTask() == CRASH_TASK_NONE ? 0u : 1u;
+                          observation.minimumDeadlineSlackTicks =
+                              collectCompletedMres3Evidence ? 450u : 0u;
+                          observation.requireNoLateEntries =
+                              collectCompletedMres3Evidence;
+                          observation.terminalReason =
+                              result.snapshot.terminalReason;
                           observation.endpointMatches = endpoint;
                           observation.targetsMatch = targets;
                           // The normal Orchestrator wait requires both bits and
@@ -4917,14 +4945,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           observation.checksumMatch = true;
                           observation.timedOut = timedOut || !completed;
                           observation.timing = result.snapshot.timing;
-                          result.passed = CoordinatedXyPerformanceReport::movePasses(
-                              observation, performanceLimits);
-                          CoordinatedXyPerformanceReport::captureFirstFailure(
-                              firstMoveFailure,
-                              result.passed,
-                              result.snapshot.terminalReason,
-                              result.snapshot.limitAbortRequestCount,
-                              result.snapshot.rawLimitAbortCount);
+                          classifyMove(result);
                           return result;
                         };
 
@@ -4947,12 +4968,46 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               snapshot.pendingUpdateCount == 0u &&
                               snapshot.xStepLow && snapshot.yStepLow &&
                               !snapshot.timerOwned;
+                          uint32_t failureMask = 0u;
+                          if (execution.disposition !=
+                                  OrchestratorCompletionPolicy::
+                                      AbsXyDisposition::Completed ||
+                              snapshot.terminalReason !=
+                                  CoordinatedXyExecutor::TerminalReason::Completed) {
+                            failureMask |= CoordinatedXyPerformanceReport::
+                                kMoveFailureTerminalReason;
+                          }
+                          if (!execution.waitCompleted) {
+                            failureMask |= CoordinatedXyPerformanceReport::
+                                kMoveFailureTimedOut;
+                          }
+                          if (!execution.endpointMatches) {
+                            failureMask |= CoordinatedXyPerformanceReport::
+                                kMoveFailureEndpoint;
+                          }
+                          if (!execution.targetsMatch) {
+                            failureMask |= CoordinatedXyPerformanceReport::
+                                kMoveFailureTargets;
+                          }
+                          if (snapshot.pendingUpdateCount != 0u) {
+                            failureMask |= CoordinatedXyPerformanceReport::
+                                kMoveFailurePendingUpdate;
+                          }
+                          if (!snapshot.xStepLow || !snapshot.yStepLow) {
+                            failureMask |= CoordinatedXyPerformanceReport::
+                                kMoveFailurePins;
+                          }
+                          if (snapshot.timerOwned) {
+                            failureMask |= CoordinatedXyPerformanceReport::
+                                kMoveFailureOwnership;
+                          }
                           CoordinatedXyPerformanceReport::captureFirstFailure(
                               firstMoveFailure,
                               passed,
                               snapshot.terminalReason,
                               snapshot.limitAbortRequestCount,
-                              snapshot.rawLimitAbortCount);
+                              snapshot.rawLimitAbortCount,
+                              failureMask);
                           return passed;
                         };
 
@@ -4962,18 +5017,29 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           if (!positionTo(pair.start)) return false;
                           MoveResult forward = observeCompletedMove(
                               pair.start, pair.finish, rateHz, false, nullptr, nullptr, nullptr);
-                          MoveResult reverse{};
-                          if (forward.passed) {
-                            reverse = observeCompletedMove(
-                                pair.finish, pair.start, rateHz, false, nullptr, nullptr, nullptr);
+                          const bool forwardMayContinue =
+                              collectCompletedMres3Evidence
+                                  ? forward.canContinue
+                                  : forward.passed;
+                          if (!forwardMayContinue) {
+                            CoordinatedXyPerformanceReport::addMove(
+                                aggregate,
+                                forward.observation,
+                                performanceLimits);
+                            return false;
                           }
-                          const bool checksumsMatch = forward.passed && reverse.passed &&
+                          MoveResult reverse = observeCompletedMove(
+                              pair.finish, pair.start, rateHz, false, nullptr, nullptr, nullptr);
+                          const bool checksumsMatch =
+                              forward.canContinue && reverse.canContinue &&
                               forward.snapshot.maskChecksum ==
                                   reverse.snapshot.maskChecksum &&
                               forward.snapshot.arrChecksum ==
                                   reverse.snapshot.arrChecksum;
                           forward.observation.checksumMatch = checksumsMatch;
                           reverse.observation.checksumMatch = checksumsMatch;
+                          classifyMove(forward);
+                          classifyMove(reverse);
                           CoordinatedXyPerformanceReport::addMove(
                               aggregate, forward.observation, performanceLimits);
                           CoordinatedXyPerformanceReport::addMove(
@@ -4982,7 +5048,22 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           const uint32_t returnError =
                               absoluteDelta(returned.x, pair.start.x) +
                               absoluteDelta(returned.y, pair.start.y);
-                          return checksumsMatch && returnError <= kReturnErrorLimitSteps;
+                          if (returnError > kReturnErrorLimitSteps) {
+                            CoordinatedXyPerformanceReport::captureFirstFailure(
+                                firstMoveFailure,
+                                false,
+                                reverse.snapshot.terminalReason,
+                                reverse.snapshot.limitAbortRequestCount,
+                                reverse.snapshot.rawLimitAbortCount,
+                                CoordinatedXyPerformanceReport::
+                                    kMoveFailureEndpoint);
+                          }
+                          const bool movesMayContinue =
+                              collectCompletedMres3Evidence
+                                  ? forward.canContinue && reverse.canContinue
+                                  : forward.passed && reverse.passed;
+                          return movesMayContinue && checksumsMatch &&
+                              returnError <= kReturnErrorLimitSteps;
                         };
 
                         auto homeAndMeasureDrift = [&](uint32_t& xDrift,
@@ -5031,7 +5112,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 sizeof(metrics),
                                 "hz=%lu;n=%lu;xe=%lu;ye=%lu;ms=%lu;i2=%lu;i7=%lu;"
                                 "hs=%ld;he=%ld;hg=%lu;hc=%lu;ha=%lu;hp=%u;ho=%u;"
-                                "hl=%u;ht=%u;xd=%lu;yd=%lu;to=1",
+                                "hl=%u;ht=%u;qf=%lu;qm=%lu;xd=%lu;yd=%lu;to=1",
                                 (unsigned long)rateHz,
                                 (unsigned long)aggregate.moveCount,
                                 (unsigned long)aggregate.emittedXSteps,
@@ -5048,6 +5129,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 static_cast<unsigned>(failedHome.snapshot.outcome),
                                 failedHome.snapshot.limitSeen ? 1u : 0u,
                                 failedHome.outerTimedOut ? 1u : 0u,
+                                (unsigned long)
+                                    aggregate.qualificationFailureMoveCount,
+                                (unsigned long)
+                                    aggregate.qualificationFailureMask,
                                 (unsigned long)xDrift,
                                 (unsigned long)yDrift);
                             if (written > 0 &&
@@ -5555,7 +5640,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 "lc=%lu;dm=%lu;ds=%lu;di=%lu;md=%lu;sl=%lu;"
                                 "rm=%u;rc=%lu;rp=%lu;rd=%lu;sm=%u;lf=%lu;"
                                 "sf=%lu;to=%lu;fv=%u;tr=%u;"
-                                "la=%lu;ra=%lu",
+                                "la=%lu;ra=%lu;hm=%lu",
                                 (unsigned long)aggregate.timer2Callbacks,
                                 (unsigned long)aggregate.entryTimerSamples,
                                 (unsigned long)aggregate.entryTimerMissing,
@@ -5582,7 +5667,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                     firstMoveFailure.terminalReason),
                                 (unsigned long)
                                     firstMoveFailure.limitAbortRequestCount,
-                                (unsigned long)firstMoveFailure.rawLimitAbortCount);
+                                (unsigned long)firstMoveFailure.rawLimitAbortCount,
+                                (unsigned long)firstMoveFailure.failureMask);
                           } else {
                             written = snprintf(
                                 metrics,
@@ -5898,6 +5984,16 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 yDrift,
                                 "coordinated_xy_performance_post_tier_x_home",
                                 "coordinated_xy_performance_post_tier_y_home");
+                            if (!rowPass) {
+                              CoordinatedXyPerformanceReport::captureFirstFailure(
+                                  firstMoveFailure,
+                                  false,
+                                  CoordinatedXyExecutor::TerminalReason::None,
+                                  0u,
+                                  0u,
+                                  CoordinatedXyPerformanceReport::
+                                      kMoveFailureTerminalReason);
+                            }
                           }
                           if (runCoordinatedXyMres3Suite &&
                               ((stepperP != nullptr &&
@@ -5905,6 +6001,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                (stepperR != nullptr &&
                                 stepperR->getPosition() != rPositionBefore))) {
                             rowPass = false;
+                            CoordinatedXyPerformanceReport::captureFirstFailure(
+                                firstMoveFailure,
+                                false,
+                                CoordinatedXyExecutor::TerminalReason::None,
+                                0u,
+                                0u,
+                                CoordinatedXyPerformanceReport::
+                                    kMoveFailureEndpoint);
                           }
                           const TestDescriptor focusedTest =
                               runCoordinatedXyMres3Suite

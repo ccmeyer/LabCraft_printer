@@ -42,6 +42,22 @@ static constexpr uint32_t kMoveFailureExecutionMode = 1u << 25;
 static constexpr uint32_t kMoveFailurePulseTiming = 1u << 26;
 static constexpr uint32_t kMoveFailureDeadlineSlack = 1u << 27;
 static constexpr uint32_t kMoveFailureTimerRearm = 1u << 28;
+static constexpr uint32_t kMoveFailureScheduleSaturation = 1u << 29;
+static constexpr uint32_t kMoveFailureTerminalReason = 1u << 30;
+static constexpr uint32_t kMoveFailureEntryLateness = 1u << 31;
+
+static constexpr uint32_t kMoveCollectionSoftFailureMask =
+    kMoveFailurePendingUpdate |
+    kMoveFailureCycleWrap |
+    kMoveFailureActiveCycles |
+    kMoveFailureTerminalCycles |
+    kMoveFailureDuration |
+    kMoveFailureStatusPeriod |
+    kMoveFailureStatusWatchdog |
+    kMoveFailureStatusAlternation |
+    kMoveFailureDeadlineSlack |
+    kMoveFailureTimerRearm |
+    kMoveFailureEntryLateness;
 
 struct Limits {
   uint32_t activeMaxCycles = 2025u;
@@ -77,6 +93,8 @@ struct MoveObservation {
   uint32_t lateInjectionDecisionSlackMaxTicks = 0u;
   uint32_t lateInjectionWaitMaxCycles = 0u;
   uint32_t timerScheduleSaturationFlags = 0u;
+  CoordinatedXyExecutor::TerminalReason terminalReason =
+      CoordinatedXyExecutor::TerminalReason::None;
   uint32_t requestedXSteps = 0u;
   uint32_t requestedYSteps = 0u;
   uint32_t emittedXSteps = 0u;
@@ -93,6 +111,8 @@ struct MoveObservation {
   uint32_t statusFrameCount = 0u;
   uint32_t statusAlternationErrors = 0u;
   uint32_t watchdogLateCount = 0u;
+  uint32_t minimumDeadlineSlackTicks = 0u;
+  bool requireNoLateEntries = false;
   bool endpointMatches = false;
   bool targetsMatch = false;
   bool completionTogether = false;
@@ -109,6 +129,7 @@ struct FailureTelemetry {
       CoordinatedXyExecutor::TerminalReason::None;
   uint32_t limitAbortRequestCount = 0u;
   uint32_t rawLimitAbortCount = 0u;
+  uint32_t failureMask = 0u;
 };
 
 struct Aggregate {
@@ -180,6 +201,8 @@ struct Aggregate {
   uint32_t cycleWraps = 0u;
   uint32_t saturationFlags = 0u;
   uint32_t timeoutCount = 0u;
+  uint32_t qualificationFailureMoveCount = 0u;
+  uint32_t qualificationFailureMask = 0u;
   bool exactAndSafe = true;
 };
 
@@ -190,13 +213,16 @@ uint32_t boundedHomeGuardSteps(int32_t currentPositionSteps,
                                bool positionKnown);
 
 bool movePasses(const MoveObservation& observation, const Limits& limits);
+bool moveCanContinueAfterCompletion(const MoveObservation& observation,
+                                    const Limits& limits);
 uint32_t moveFailureMask(const MoveObservation& observation,
                          const Limits& limits);
 void captureFirstFailure(FailureTelemetry& telemetry,
                          bool movePassed,
                          CoordinatedXyExecutor::TerminalReason terminalReason,
                          uint32_t limitAbortRequestCount,
-                         uint32_t rawLimitAbortCount);
+                         uint32_t rawLimitAbortCount,
+                         uint32_t failureMask = 0u);
 void addMove(Aggregate& aggregate,
              const MoveObservation& observation,
              const Limits& limits);

@@ -104,9 +104,9 @@ TEST(CoordinatedXyIsrInstrumentation, CompletionIncludesRecorderCostInPhaseAndTe
 TEST(CoordinatedXyIsrInstrumentation, ExcludesOnlyIntentionalWaitFromPhaseCost) {
   State state{};
   CoordinatedXyIsrInstrumentation::reset(state, 100u);
-  CoordinatedXyIsrInstrumentation::recordSample(
+  CoordinatedXyIsrInstrumentation::recordSampleExcludingIntentionalWait(
       state, Phase::Cruise, 110u, 410u, 2249u, false, false, false, 200u);
-  CoordinatedXyIsrInstrumentation::completeSampleTiming(
+  CoordinatedXyIsrInstrumentation::completeSampleTimingExcludingIntentionalWait(
       state, Phase::Cruise, 110u, 410u, 460u, false, 200u);
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
       state, true, 100u, true, 2u, 2249u, 110u, false, false);

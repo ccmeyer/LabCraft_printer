@@ -401,6 +401,64 @@ def test_mres3_conditional_manifest_rejects_incomplete_late_rearm_evidence():
     assert _analyze(cadence_failure, manifest)["verdict"]["status"] == "fail"
 
 
+def test_mres3_v2_manifests_reject_strict_masks_and_partial_rows():
+    for manifest_id in (
+        "coordinated_xy_mres3_20khz_v2",
+        "coordinated_xy_mres3_conditional_rearm_v2",
+    ):
+        manifest = load_manifest(manifest_id)
+        results = []
+        for test_id in manifest.expected_test_ids:
+            metrics = {}
+            for metric, rule in manifest.analysis_rules[str(test_id)]["metrics"].items():
+                if "equals" in rule:
+                    metrics[metric] = rule["equals"]
+                elif "min" in rule:
+                    metrics[metric] = rule["min"]
+                else:
+                    metrics[metric] = 0
+            results.append({
+                "test_id": test_id,
+                "name": f"diagnostic_{test_id}",
+                "pass": True,
+                "metrics": metrics,
+            })
+        valid = {
+            "run_id": 2086,
+            "profile": "FULL",
+            "started_at": "2026-08-13T00:00:00Z",
+            "finished_at": "2026-08-13T00:00:10Z",
+            "aborted": False,
+            "summary": {"total": len(results), "passed": len(results), "failed": 0},
+            "results": results,
+            "host_checks": [
+                {"name": "coordinated_xy_status_cadence", "pass": True,
+                 "details": {"status_gap_max_ms": 100}},
+                {"name": "watchdog", "pass": True, "details": {"late": 0}},
+            ],
+        }
+        assert _analyze(valid, manifest)["verdict"]["status"] == "pass"
+
+        for result_id, metric, value in (
+            (2080, "qf", 1),
+            (2080, "qm", 1 << 19),
+            (2082, "hm", 1 << 1),
+        ):
+            rejected = deepcopy(valid)
+            index = manifest.expected_test_ids.index(result_id)
+            rejected["results"][index]["metrics"][metric] = value
+            rejected["results"][index]["pass"] = False
+            rejected["summary"] = {
+                "total": len(results), "passed": len(results) - 1, "failed": 1,
+            }
+            assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
+
+        partial = deepcopy(valid)
+        motion_index = manifest.expected_test_ids.index(2080)
+        partial["results"][motion_index]["metrics"]["n"] = 9
+        assert _analyze(partial, manifest)["verdict"]["status"] == "fail"
+
+
 def test_single_irq_manifest_requires_one_callback_and_complete_pulse_margin():
     manifest = load_manifest("coordinated_xy_single_irq_v1")
     motion = {

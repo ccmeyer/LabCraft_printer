@@ -151,15 +151,22 @@ private:
   bool _cancelCoordinatedTask(uint32_t* risingEdgesBefore = nullptr,
                               uint32_t* fallingEdgesBefore = nullptr);
   void _finishCoordinatedHardware(bool aborted,
-                                  bool stepStateKnownLow = false);
+                                  bool stepStateKnownLow = false,
+                                  bool accountLateInjection = true);
   void _finishCoordinatedFromIsr(bool aborted,
                                  BaseType_t* woken,
-                                 bool timingSampleWillFollow = false);
+                                 bool timingSampleWillFollow = false,
+                                 bool accountLateInjection = true);
   bool _requestCoordinatedLimitAbortTask(
       Stepper::Axis axis,
       uint32_t* risingEdgesBefore = nullptr,
       uint32_t* fallingEdgesBefore = nullptr);
   bool _handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim);
+  template <bool ConditionalMode>
+#if defined(__GNUC__) && !defined(UNIT_TEST)
+  __attribute__((hot))
+#endif
+  bool _handleCoordinatedTim2BodyFromIsr();
   void _resetCoordinatedInstrumentation(uint32_t firstArr);
   void _observeCoordinatedArr(uint32_t arr);
 

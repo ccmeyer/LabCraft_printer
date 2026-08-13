@@ -312,6 +312,22 @@ def test_coordinated_xy_mres3_conditional_suite_requires_injected_recovery():
     assert rules["wm"]["max"] == 4500
 
 
+def test_coordinated_xy_mres3_v2_suites_require_strict_and_hard_masks():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+
+    for manifest_id in (
+        "coordinated_xy_mres3_20khz_v2",
+        "coordinated_xy_mres3_conditional_rearm_v2",
+    ):
+        manifest = entries[manifest_id].manifest
+        motion = manifest.analysis_rules["2080"]["metrics"]
+        margin = manifest.analysis_rules["2082"]["metrics"]
+        assert motion["qf"]["equals"] == 0
+        assert motion["qm"]["equals"] == 0
+        assert margin["fv"]["equals"] == 0
+        assert margin["hm"]["equals"] == 0
+
+
 def test_coordinated_xy_single_irq_suite_requires_complete_pulse_margin_evidence():
     entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
     focused = entries["coordinated_xy_single_irq_v1"].manifest

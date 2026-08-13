@@ -158,15 +158,30 @@ void recordSample(State& state,
                   uint32_t arr,
                   bool updatePending,
                   bool completedPulse,
-                  bool terminal,
-                  uint32_t intentionalWaitCycles = 0u);
+                  bool terminal);
+void recordSampleExcludingIntentionalWait(State& state,
+                                          Phase phase,
+                                          uint32_t entryCycle,
+                                          uint32_t exitCycle,
+                                          uint32_t arr,
+                                          bool updatePending,
+                                          bool completedPulse,
+                                          bool terminal,
+                                          uint32_t intentionalWaitCycles);
 void completeSampleTiming(State& state,
                           Phase phase,
                           uint32_t entryCycle,
                           uint32_t recordedExitCycle,
                           uint32_t finalExitCycle,
-                          bool terminal,
-                          uint32_t intentionalWaitCycles = 0u);
+                          bool terminal);
+void completeSampleTimingExcludingIntentionalWait(
+    State& state,
+    Phase phase,
+    uint32_t entryCycle,
+    uint32_t recordedExitCycle,
+    uint32_t finalExitCycle,
+    bool terminal,
+    uint32_t intentionalWaitCycles);
 void beginIrqPathSample(State& state,
                         bool irqEntryValid,
                         uint32_t irqEntryCycle,

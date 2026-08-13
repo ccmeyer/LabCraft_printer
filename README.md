@@ -2822,7 +2822,7 @@ After flashing exactly
 
 ```bash
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-mres3-20khz-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_mres3_20khz.json
-python3 tools/run_qualification.py --manifest coordinated_xy_mres3_20khz_v1 --operator-prompts --fixture coordinated_xy_mres3_20khz_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_mres3_20khz.json
+python3 tools/run_qualification.py --manifest coordinated_xy_mres3_20khz_v2 --operator-prompts --fixture coordinated_xy_mres3_20khz_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_mres3_20khz.json
 ```
 
 MRES=3 selects 1/32 microsteps instead of 1/64. The selector halves every X/Y/Z
@@ -2877,15 +2877,29 @@ excluded only from the executor-body phase-cost gate.
 
 ```bash
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-mres3-conditional-rearm-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_mres3_conditional_rearm.json
-python3 tools/run_qualification.py --manifest coordinated_xy_mres3_conditional_rearm_v1 --operator-prompts --fixture coordinated_xy_mres3_conditional_rearm_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_mres3_conditional_rearm.json
+python3 tools/run_qualification.py --manifest coordinated_xy_mres3_conditional_rearm_v2 --operator-prompts --fixture coordinated_xy_mres3_conditional_rearm_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_mres3_conditional_rearm.json
 ```
 
 This selector is diagnostic-only. It restores `FreeRunning` on every exit and
 does not authorize MRES=3 or conditional scheduling in production.
-The implementation-matching production artifact is 348,984 bytes with SHA-256
-`19127B492BB8F58CE3682EA1C6899AAD1A4493C8813C70CB344B46A17AFE93BC`.
-The watched-test MRES=3 artifact is 349,240 bytes with SHA-256
-`E2CD6EF0608D452D9363E58080A20C9DBBDF70755F26904AB6DEC97695D3C2F0`.
+
+The v2 MRES3 manifests correspond to the isolated diagnostic implementation.
+TIM2 modes 0/1 use a nonconditional ISR specialization with no mode-2 timer
+sample, injection, decision, or intentional-wait bookkeeping. Mode 2 retains
+all of those diagnostics. Selectors `2085` and `2086` continue through the
+reverse leg and remaining pairs after a completed, internally consistent move
+that fails only a timing/qualification gate. The result still fails strictly:
+`2080` reports the failing-move count/mask as `qf`/`qm`, and `2082` reports the
+first hard-stop mask as `hm` alongside `fv/tr/la/ra`. Timeouts, cancellation,
+limit/planner termination, count/endpoint/checksum/state mismatches, incomplete
+coverage, saturation, watchdog evidence, and communication/operator aborts
+still stop immediately. Selector `2084` retains its original fail-stop policy.
+The v1 manifests remain available only to normalize earlier reports.
+The isolated implementation's production artifact is 351,768 bytes with
+SHA-256
+`B6B0AA6F59C17F8E6886BF42B8A9F8A39CE746F472FA1EAC3DD21901C617D9CC`.
+The matching watched-test MRES=3 artifact is 352,024 bytes with SHA-256
+`99587E773C10530988BF78E7A56ED37DA5E4FE6ED717B769620162506C8720BE`.
 
 The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is
