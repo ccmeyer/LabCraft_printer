@@ -103,6 +103,27 @@ uint32_t moveFailureMask(const MoveObservation& observation,
   const uint32_t expectedRearms = observation.timer2Callbacks == 0u
       ? 0u
       : observation.timer2Callbacks - 1u;
+  const bool conditionalRearmEvidenceInvalid =
+      (observation.timerRearmCount == 0u &&
+       observation.timerRearmDelayMaxCycles != 0u) ||
+      (observation.timerRearmCount != 0u &&
+       observation.timerRearmDelayMaxCycles == 0u);
+  const bool injectionEvidenceInvalid =
+      observation.requireLateInjectionEvidence
+          ? (observation.timerRearmCount == 0u ||
+             observation.lateInjectionCount != 1u ||
+             observation.lateInjectionFailureCount != 0u ||
+             observation.lateInjectionRearmCount != 1u ||
+             observation.lateInjectionDecisionSlackMaxTicks >
+                 CoordinatedXyTimerSchedulePolicy::kConditionalGuardTicks ||
+             observation.lateInjectionWaitMaxCycles == 0u ||
+             observation.lateInjectionWaitMaxCycles >
+                 CoordinatedXyTimerSchedulePolicy::kInjectionMaxCoreCycles)
+          : (observation.lateInjectionCount != 0u ||
+             observation.lateInjectionFailureCount != 0u ||
+             observation.lateInjectionRearmCount != 0u ||
+             observation.lateInjectionDecisionSlackMaxTicks != 0u ||
+             observation.lateInjectionWaitMaxCycles != 0u);
   if ((rearmMode &&
        (completeStepMode || observation.timerRearmCount != expectedRearms ||
          observation.timerRearmPendingCount != 0u ||
@@ -114,19 +135,11 @@ uint32_t moveFailureMask(const MoveObservation& observation,
        (completeStepMode ||
         observation.conditionalDecisionCount != expectedRearms ||
         observation.conditionalDecisionMissingCount != 0u ||
-        observation.timerRearmCount == 0u ||
         observation.timerRearmPendingCount != 0u ||
-        observation.timerRearmDelayMaxCycles == 0u ||
+        conditionalRearmEvidenceInvalid ||
         observation.conditionalNonRearmSlackMinTicks <=
             CoordinatedXyTimerSchedulePolicy::kConditionalGuardTicks ||
-        observation.lateInjectionCount != 1u ||
-        observation.lateInjectionFailureCount != 0u ||
-        observation.lateInjectionRearmCount != 1u ||
-        observation.lateInjectionDecisionSlackMaxTicks >
-            CoordinatedXyTimerSchedulePolicy::kConditionalGuardTicks ||
-        observation.lateInjectionWaitMaxCycles == 0u ||
-        observation.lateInjectionWaitMaxCycles >
-            CoordinatedXyTimerSchedulePolicy::kInjectionMaxCoreCycles ||
+        injectionEvidenceInvalid ||
         observation.timerScheduleSaturationFlags != 0u)) ||
       (!rearmMode && !conditionalMode &&
        (observation.timerRearmCount != 0u ||
@@ -190,7 +203,8 @@ uint32_t moveFailureMask(const MoveObservation& observation,
   if (activeMax(timing) > limits.activeMaxCycles) {
     failures |= kMoveFailureActiveCycles;
   }
-  if (timing.terminalMaxCycles > limits.terminalMaxCycles) {
+  if (observation.requireTerminalCycleBudget &&
+      timing.terminalMaxCycles > limits.terminalMaxCycles) {
     failures |= kMoveFailureTerminalCycles;
   }
   if (observation.durationErrorBasisPoints >

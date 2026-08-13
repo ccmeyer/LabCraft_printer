@@ -35,6 +35,7 @@
         "de": {"maturity": "acceptance", "max": 100},
         "sg": {"maturity": "acceptance", "max": 100},
         "wd": {"maturity": "acceptance", "max": 100},
+        "tm": {"maturity": "candidate", "max": 4500},
         "sa": {"maturity": "acceptance", "equals": 0},
         "wl": {"maturity": "acceptance", "equals": 0},
         "sf": {"maturity": "acceptance", "equals": 0},

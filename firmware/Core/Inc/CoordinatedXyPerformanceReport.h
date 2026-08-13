@@ -112,6 +112,14 @@ struct MoveObservation {
   uint32_t statusAlternationErrors = 0u;
   uint32_t watchdogLateCount = 0u;
   uint32_t minimumDeadlineSlackTicks = 0u;
+  // Diagnostic conditional-rearm selectors deliberately inject one late
+  // edge. Production conditional rearm compiles that mechanism out and
+  // instead requires all injection telemetry to remain zero.
+  bool requireLateInjectionEvidence = true;
+  // The terminal callback runs after the last physical STEP edge. Production
+  // qualification records its cost but relies on the preceding per-edge
+  // deadline evidence; diagnostic selectors retain the historical budget.
+  bool requireTerminalCycleBudget = true;
   bool requireNoLateEntries = false;
   bool endpointMatches = false;
   bool targetsMatch = false;

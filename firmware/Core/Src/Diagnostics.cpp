@@ -4981,10 +4981,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           observation.watchdogLateCount =
                               Watchdog_GetLateTask() == CRASH_TASK_NONE ? 0u : 1u;
                           observation.minimumDeadlineSlackTicks =
-                              collectCompletedMres3Evidence ? 450u : 0u;
+                               collectCompletedMres3Evidence ? 450u : 0u;
+                          observation.requireLateInjectionEvidence =
+                               !runCoordinatedXyProductionMres3Suite;
+                          observation.requireTerminalCycleBudget =
+                               !runCoordinatedXyProductionMres3Suite;
                           observation.requireNoLateEntries =
-                              collectCompletedMres3Evidence &&
-                              !runCoordinatedXyProductionMres3Suite;
+                               collectCompletedMres3Evidence &&
+                               !runCoordinatedXyProductionMres3Suite;
                           observation.terminalReason =
                               result.snapshot.terminalReason;
                           observation.endpointMatches = endpoint;

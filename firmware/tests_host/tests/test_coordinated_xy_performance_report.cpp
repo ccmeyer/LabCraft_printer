@@ -194,6 +194,62 @@ TEST(CoordinatedXyPerformanceReport, ConditionalModeRequiresLateInjectionEvidenc
               CoordinatedXyPerformanceReport::kMoveFailureTimerRearm) != 0u);
 }
 
+TEST(CoordinatedXyPerformanceReport, ProductionConditionalModeAcceptsNoInjectionAndOptionalNaturalRearm) {
+  auto observation =
+      acceptedMove(500u, 1500u, 1500u, 20000u, 2249u, 11245u);
+  observation.timerScheduleMode =
+      CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm;
+  observation.conditionalDecisionCount = observation.timer2Callbacks - 1u;
+  observation.conditionalNonRearmSlackMinTicks = 1126u;
+  observation.requireLateInjectionEvidence = false;
+  observation.requireTerminalCycleBudget = false;
+  observation.timing.terminalMaxCycles = 2502u;
+
+  CHECK_TRUE(CoordinatedXyPerformanceReport::movePasses(
+      observation, CoordinatedXyPerformanceReport::Limits{}));
+
+  observation.timerRearmCount = 1u;
+  observation.timerRearmDelayMaxCycles = 470u;
+  CHECK_TRUE(CoordinatedXyPerformanceReport::movePasses(
+      observation, CoordinatedXyPerformanceReport::Limits{}));
+}
+
+TEST(CoordinatedXyPerformanceReport, ProductionConditionalModeRejectsInconsistentRearmOrInjectionEvidence) {
+  auto observation =
+      acceptedMove(500u, 1500u, 1500u, 20000u, 2249u, 11245u);
+  observation.timerScheduleMode =
+      CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm;
+  observation.conditionalDecisionCount = observation.timer2Callbacks - 1u;
+  observation.conditionalNonRearmSlackMinTicks = 1126u;
+  observation.requireLateInjectionEvidence = false;
+
+  observation.timerRearmCount = 1u;
+  CHECK_TRUE((CoordinatedXyPerformanceReport::moveFailureMask(
+                  observation, CoordinatedXyPerformanceReport::Limits{}) &
+              CoordinatedXyPerformanceReport::kMoveFailureTimerRearm) != 0u);
+
+  observation.timerRearmCount = 0u;
+  observation.lateInjectionCount = 1u;
+  CHECK_TRUE((CoordinatedXyPerformanceReport::moveFailureMask(
+                  observation, CoordinatedXyPerformanceReport::Limits{}) &
+              CoordinatedXyPerformanceReport::kMoveFailureTimerRearm) != 0u);
+}
+
+TEST(CoordinatedXyPerformanceReport, ProductionTerminalPolicyStillEnforcesActiveCycleBudget) {
+  auto observation =
+      acceptedMove(500u, 1500u, 1500u, 20000u, 2249u, 11245u);
+  observation.requireTerminalCycleBudget = false;
+  observation.timing.terminalMaxCycles = 2502u;
+  CHECK_TRUE(CoordinatedXyPerformanceReport::movePasses(
+      observation, CoordinatedXyPerformanceReport::Limits{}));
+
+  observation.timing.phaseMaxCycles[1] = 2026u;
+  UNSIGNED_LONGS_EQUAL(
+      CoordinatedXyPerformanceReport::kMoveFailureActiveCycles,
+      CoordinatedXyPerformanceReport::moveFailureMask(
+          observation, CoordinatedXyPerformanceReport::Limits{}));
+}
+
 TEST(CoordinatedXyPerformanceReport, CompleteStepMoveFailsClosedOnPulseOrDeadline) {
   auto observation = acceptedCompleteStepMove(
       20000u, 5000u, 20000u, 40000u, 1124u, 5620u);

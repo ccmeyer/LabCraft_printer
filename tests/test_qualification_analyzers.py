@@ -494,6 +494,13 @@ def test_production_mres3_manifest_rejects_conversion_or_rearm_regressions():
     }
     assert _analyze(valid, manifest)["verdict"]["status"] == "pass"
 
+    terminal_cleanup_warning = deepcopy(valid)
+    motion_index = manifest.expected_test_ids.index(2087)
+    terminal_cleanup_warning["results"][motion_index]["metrics"]["tm"] = 5000
+    analyzed_warning = _analyze(terminal_cleanup_warning, manifest)
+    assert analyzed_warning["verdict"]["status"] == "pass"
+    assert analyzed_warning["verdict"]["warning_count"] >= 1
+
     for result_id, metric, value in (
         (2087, "n", 9),
         (2087, "qf", 1),

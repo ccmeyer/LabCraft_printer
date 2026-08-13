@@ -1212,6 +1212,16 @@ count, endpoint, watchdog, and saturation gates, requires injection counters
 to remain zero, and makes terminal cleanup cost non-blocking only for selector
 `2097`.
 
+That policy correction passes 414/414 firmware host tests with 10,213,784
+checks and 122/122 focused Python tests. The production conditional ISR stack
+remains 136 bytes and the diagnostic version remains 144 bytes. The corrected
+production artifact is 351,776 bytes with SHA-256
+`A2EC1334DB59190723359008A904A551FCDD9DA5ECEBE67196773954DF47BDFA`;
+the matching diagnostic artifact is 354,176 bytes with SHA-256
+`49ACC88837FADBA6C8C4D756DE965B9A0420DFADAC7916EB9BFEE42869740B7C`.
+A second watched SAFE/`2097`/SAFE bracket is required before Checkpoint A can
+pass and before any single-axis LUT work starts.
+
 ## Rollback
 
 Immediate rollback disables coordinated instrumentation or builds with

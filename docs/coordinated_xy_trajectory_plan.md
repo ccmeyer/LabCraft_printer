@@ -390,7 +390,10 @@ diagnostic-image-only. Selector `2097` runs the original logical ten-move row
 through production and emits `[2087,2088,2089,2090]`; manifest
 `coordinated_xy_production_mres3_v1` requires exact native totals, complete IRQ
 and decision coverage, no pending/deadline/reset/watchdog evidence, at least
-450 timer ticks of slack, bounded homes, and correct driver configuration.
+450 timer ticks of slack, bounded homes, and correct driver configuration. It
+requires zero synthetic-injection evidence in production. Terminal cleanup
+cost remains reported but is non-blocking because it follows the final STEP;
+active-callback cost and all physical-edge deadline gates remain strict.
 
 Checkpoint B migrates the normalized LUT to direct X/Y/Z single-axis motion
 only after Checkpoint A passes watched SAFE/`2097`/SAFE HIL. It is a separate

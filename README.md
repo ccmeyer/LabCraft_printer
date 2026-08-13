@@ -2916,11 +2916,15 @@ Production acceptance requires exact native totals and callback coverage, zero
 pending/deadline/reset/watchdog evidence, at least 450 timer ticks of deadline
 slack, consistent conditional decisions, successful bounded homes, and normal
 operator observation. Conditional rearm need not occur in a clean row; if it
-does occur, pending-at-rearm must remain zero. The production artifact is
-351,616 bytes with SHA-256
-`76113CB35E7806F35A15D86F9EB857140B62B76771445508E4BF3084AA5D05DA`;
-the matching diagnostic artifact is 354,016 bytes with SHA-256
-`16C7F75155BC92D23E0A8A5691A779B2D446EFE5B5A85D281A765C2AB8C95084`.
+does occur, pending-at-rearm must remain zero. Because synthetic injection is
+compiled out, selector `2097` requires all injection counters to remain zero.
+The terminal cleanup callback runs after the final physical STEP edge, so its
+cycle cost is retained as candidate telemetry rather than a blocking
+production gate; active callbacks and every real edge deadline remain strict.
+The corrected production artifact is 351,776 bytes with SHA-256
+`A2EC1334DB59190723359008A904A551FCDD9DA5ECEBE67196773954DF47BDFA`;
+the matching diagnostic artifact is 354,176 bytes with SHA-256
+`49ACC88837FADBA6C8C4D756DE965B9A0420DFADAC7916EB9BFEE42869740B7C`.
 
 Rollback before production HIL is the commit-`8a1cd3c4` production artifact:
 351,832 bytes, SHA-256
