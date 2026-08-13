@@ -730,7 +730,10 @@ def _operator_prompt_message(stage: str) -> str:
             "Remove all hands before automatic homing, the ten-move 40 kHz Milestone 6 geometry row, "
             "and its bounded post-row X/Y reference homes begin."
         )
-    if stage == "coordinated_xy_mres3_20khz_envelope_clear":
+    if stage in {
+        "coordinated_xy_mres3_20khz_envelope_clear",
+        "coordinated_xy_mres3_rearm_envelope_clear",
+    }:
         return (
             "Confirm both limit switches are released, the gantry is square, and the complete "
             "XY/Z motion envelope is clear. Remove all hands before the scaled MRES=3 homes, "
@@ -752,6 +755,7 @@ def _is_operator_prompt_stage(stage: str) -> bool:
         "coordinated_xy_40khz_envelope_clear",
         "coordinated_xy_single_irq_envelope_clear",
         "coordinated_xy_mres3_20khz_envelope_clear",
+        "coordinated_xy_mres3_rearm_envelope_clear",
     }
 
 

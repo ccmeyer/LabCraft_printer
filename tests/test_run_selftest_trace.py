@@ -1239,6 +1239,16 @@ def test_run_sends_coordinated_xy_performance_selector_and_checks_status_cadence
     assert cadence["details"]["status_gap_max_ms"] < 500
 
 
+def test_mres3_rearm_fixture_stage_is_an_operator_prompt():
+    mod = _load_run_selftest()
+    stage = "coordinated_xy_mres3_rearm_envelope_clear"
+
+    assert mod._is_operator_prompt_stage(stage) is True
+    message = mod._operator_prompt_message(stage)
+    assert "MRES=3" in message
+    assert "complete XY/Z motion envelope is clear" in message
+
+
 def test_run_sends_pressure_regulator_selector_and_keeps_goodbye(monkeypatch, tmp_path):
     mod = _load_run_selftest()
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
