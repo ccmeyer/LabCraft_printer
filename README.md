@@ -2929,8 +2929,11 @@ the matching diagnostic artifact is 354,272 bytes with SHA-256
 Rollback before production HIL is the commit-`8a1cd3c4` production artifact:
 351,832 bytes, SHA-256
 `A0D40FD82EED36B8CECFF2A2B5E56499C95CF9B962029CB8D2A52F618F165A12`.
-The single-axis LUT migration remains a separate checkpoint and is not started
-until this production MRES=3/conditional-rearm candidate passes watched HIL.
+The production MRES=3/conditional-rearm checkpoint passed watched
+SAFE/`2097`/SAFE with exact counts, zero X/Y drift, one clean natural rearm,
+unchanged reset/watchdog counters, and a warning-free normalized report. The
+single-axis X/Y/Z LUT migration is therefore authorized as a separate commit,
+artifact, rollback point, and watched HIL checkpoint.
 
 The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is

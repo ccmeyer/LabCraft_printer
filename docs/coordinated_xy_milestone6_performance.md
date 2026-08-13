@@ -1230,6 +1230,51 @@ the matching diagnostic artifact is 354,272 bytes with SHA-256
 A final watched SAFE/`2097`/SAFE bracket is required before Checkpoint A can
 pass and before any single-axis LUT work starts.
 
+### Accepted production-migration HIL evidence
+
+The intermediate policy artifact completed another physically normal watched
+row with exact counts and clean timing, but result `2087` remained false solely
+because the aggregate predicate still duplicated the superseded diagnostic
+assumptions. Its pre-SAFE, selector, and post-SAFE report hashes are,
+respectively, `4C37E8E86774C8532361A9E40C8CB3AC02DE37C9E1C307EBE46B23120FB776B6`,
+`2843E58D458CAD6759A3849DC1AB2A2F813F86CB2C35024BA0B2BA915ED813C0`,
+and `25CBF00135547FDD0F4E6624D83F0C13DB4BDB607D51C6C91F90840E70806452`.
+
+The accepted watched bracket used implementation commit `3c68bffa` and the
+351,856-byte production artifact with SHA-256
+`7EB588C49258F215046BB77C5E5A5518D4BCAAB550F1AFA32CB62E45E2A1A2C6`.
+The artifact hash matched on Pi `192.168.0.33` before flashing. The operator
+confirmed the fixture before motion and reported afterward that all ten moves
+and both bounded homes looked and sounded normal.
+
+Both SAFE brackets passed 30/30 with `boot=154`, `fault_ct=4`, and `wdg_ct=6`
+unchanged across the motion row. All four watchdog participants were live,
+there was no current late task or reset report, and the pressure path recorded
+zero I2C errors or recoveries. The reports are:
+
+- `hil_reports/production_mres3_final_pre_safe_20260813T191300Z.json`, SHA-256
+  `BD4B5EF5ED3EF0BB0678384E2B37AB4646BC2AF746A8F85DBB81A1076D68877D`;
+- `hil_reports/production_mres3_final_2097_20260813T191300Z.json`, SHA-256
+  `46D6B407163C096A82DD7ED93482CA6EFDDC2175FA980846CF66398CC0F5ACEF`;
+- `hil_reports/production_mres3_final_post_safe_20260813T191300Z.json`, SHA-256
+  `F0DB545F45B5C24C2A84E778127ED0764010DB2508CBDB00D0C3C271A63C6C08`.
+
+Selector `2097` passed 4/4 with exact 53,416/90,000/110,000 native
+X/Y/master-step totals, 220,000 callbacks, complete IRQ/entry/decision
+coverage, and X/Y drift of 0/0 logical steps. It recorded zero pending updates,
+deadline misses, missing samples, saturation, timeout, current watchdog, or
+hard-failure evidence. One naturally low-margin edge rearmed successfully
+(`rc=1;rp=0;rd=470`), with 626 timer ticks of final deadline slack and a
+1,150-tick minimum for every non-rearmed decision. Result `2087` reported
+`ok=1;qf=0;qm=0`, and results `2088` through `2090` also passed.
+
+Manifest `coordinated_xy_production_mres3_v1` normalized the row as PASS with
+zero warnings or blocking issues. The normalized report is
+`hil_reports/qualification/LC-001/20260813T191921Z/report.json`, SHA-256
+`72ECA00AF0E133087D44EF9B3FDC171C44449318DD22D3CFFE86AC516852A3DD`.
+Checkpoint A is accepted. This authorizes only the separately committed direct
+X/Y/Z LUT checkpoint; it does not pre-accept that checkpoint's motion behavior.
+
 ## Rollback
 
 Immediate rollback disables coordinated instrumentation or builds with
