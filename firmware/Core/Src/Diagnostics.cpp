@@ -6697,6 +6697,29 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const int32_t rStart =
                             (stepperR != nullptr) ? stepperR->getPosition() : 0;
 
+                        // Each direct move is shorter than one status cadence
+                        // interval. Keep one window open across the complete
+                        // row so evidence does not depend on cadence phase.
+                        const bool directStatusMetricsReset =
+                            Comm::resetStatusMetrics();
+                        comm->setStatusPaused(false);
+                        struct DirectStatusWindowGuard {
+                          explicit DirectStatusWindowGuard(Comm* owner)
+                              : comm(owner), active(true) {}
+                          void stop() {
+                            if (active && comm != nullptr) {
+                              comm->setStatusPaused(true);
+                              active = false;
+                            }
+                          }
+                          ~DirectStatusWindowGuard() { stop(); }
+                          Comm* comm;
+                          bool active;
+                        } statusWindow{comm};
+                        bool directStatusEvidenceValid =
+                            directStatusMetricsReset;
+                        uint32_t directStatusAgeMaxMs = 0u;
+
                         sendProgressStage("direct_xyz_lut_envelope_clear");
                         if (!runZClearanceHomePreflight("direct_lut_z_home",
                                                         kHomeFastHz,
@@ -6751,17 +6774,28 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               MotionUnitScale::toNativeStepCycles(distance);
                           observation.instrumentationRequired = instrumented;
 
-                          Comm::resetStatusMetrics();
-                          comm->setStatusPaused(false);
                           const bool completed = moveAxisToWithTimeout(
                               stepper, doneBit, target, kRateHz, kMoveTimeoutMs);
-                          observation.statusPeriodMaxMs = Comm::getStatusPeriodMaxMs();
-                          observation.statusFrameCount =
-                              Comm::getStatusChunk0Count() + Comm::getStatusChunk1Count();
-                          (void)Watchdog_GetTaskLastSeenAgeMs(
-                              CRASH_TASK_STATUS,
-                              &observation.statusWatchdogAgeMaxMs);
-                          comm->setStatusPaused(true);
+                          const Comm::StatusMetricsSnapshot statusMetrics =
+                              Comm::getStatusMetricsSnapshot();
+                          directStatusEvidenceValid =
+                              directStatusEvidenceValid && statusMetrics.valid &&
+                              statusMetrics.lockFailures == 0u;
+                          observation.statusPeriodMaxMs = statusMetrics.valid
+                              ? statusMetrics.periodMaxMs
+                              : std::numeric_limits<uint32_t>::max();
+                          observation.statusFrameCount = statusMetrics.valid
+                              ? statusMetrics.chunk0Count + statusMetrics.chunk1Count
+                              : 0u;
+                          uint32_t statusAgeMs =
+                              std::numeric_limits<uint32_t>::max();
+                          if (Watchdog_GetTaskLastSeenAgeMs(
+                                  CRASH_TASK_STATUS, &statusAgeMs) == 0u) {
+                            directStatusEvidenceValid = false;
+                          } else if (statusAgeMs > directStatusAgeMaxMs) {
+                            directStatusAgeMaxMs = statusAgeMs;
+                          }
+                          observation.statusWatchdogAgeMaxMs = statusAgeMs;
 
                           observation.timedOut = !completed;
                           observation.endpointReached =
@@ -6905,6 +6939,39 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             !stepperX->getLastDirectProfileSnapshot().selected &&
                             !stepperY->getLastDirectProfileSnapshot().selected &&
                             !stepperZ->getLastDirectProfileSnapshot().selected;
+                        const Comm::StatusMetricsSnapshot finalStatusMetrics =
+                            Comm::getStatusMetricsSnapshot();
+                        directStatusEvidenceValid =
+                            directStatusEvidenceValid && finalStatusMetrics.valid &&
+                            finalStatusMetrics.lockFailures == 0u;
+                        uint32_t finalStatusAgeMs =
+                            std::numeric_limits<uint32_t>::max();
+                        if (Watchdog_GetTaskLastSeenAgeMs(
+                                CRASH_TASK_STATUS, &finalStatusAgeMs) == 0u) {
+                          directStatusEvidenceValid = false;
+                        } else if (finalStatusAgeMs > directStatusAgeMaxMs) {
+                          directStatusAgeMaxMs = finalStatusAgeMs;
+                        }
+                        statusWindow.stop();
+                        const uint32_t directStatusFrames =
+                            finalStatusMetrics.valid
+                                ? finalStatusMetrics.chunk0Count +
+                                      finalStatusMetrics.chunk1Count
+                                : 0u;
+                        const uint32_t directStatusGapMs =
+                            finalStatusMetrics.valid
+                                ? finalStatusMetrics.periodMaxMs
+                                : std::numeric_limits<uint32_t>::max();
+                        const uint32_t directStatusAlternationErrors =
+                            finalStatusMetrics.valid
+                                ? finalStatusMetrics.alternationErrors
+                                : std::numeric_limits<uint32_t>::max();
+                        const bool directStatusPass =
+                            directStatusEvidenceValid &&
+                            directStatusFrames >= 2u &&
+                            directStatusGapMs <= 100u &&
+                            directStatusAgeMaxMs <= 100u &&
+                            directStatusAlternationErrors == 0u;
                         const int32_t pDelta = stepperP->getPosition() - pStart;
                         const int32_t rDelta = (stepperR != nullptr)
                             ? (stepperR->getPosition() - rStart)
@@ -6916,11 +6983,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             pDelta == 0 && rDelta == 0 &&
                             LC_TMC2208_MRES == 3u &&
                             driverConfig.doubleEdge &&
-                            !driverConfig.multistepFilter;
-                        char isolationMetrics[160];
-                        snprintf(isolationMetrics,
+                            !driverConfig.multistepFilter &&
+                            directStatusPass;
+                        char isolationMetrics[208];
+                        const int isolationLength = snprintf(
+                                 isolationMetrics,
                                  sizeof(isolationMetrics),
-                                 "pre=%u;post=%u;zh=%u;xyh=%u;pd=%ld;rd=%ld;mres=%u;de=%u;mf=%u;sf=0;to=0",
+                                 "pre=%u;post=%u;zh=%u;xyh=%u;pd=%ld;rd=%ld;mres=%u;de=%u;mf=%u;sn=%lu;sg=%lu;wd=%lu;sa=%lu;sv=%u;sf=0;to=0",
                                  static_cast<unsigned>(preHomesLegacy ? 1u : 0u),
                                  static_cast<unsigned>(postHomesLegacy ? 1u : 0u),
                                  static_cast<unsigned>(zHomeOk ? 1u : 0u),
@@ -6929,11 +6998,24 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                  static_cast<long>(rDelta),
                                  static_cast<unsigned>(LC_TMC2208_MRES),
                                  static_cast<unsigned>(driverConfig.doubleEdge ? 1u : 0u),
-                                 static_cast<unsigned>(driverConfig.multistepFilter ? 1u : 0u));
+                                 static_cast<unsigned>(driverConfig.multistepFilter ? 1u : 0u),
+                                 static_cast<unsigned long>(directStatusFrames),
+                                 static_cast<unsigned long>(directStatusGapMs),
+                                 static_cast<unsigned long>(directStatusAgeMaxMs),
+                                 static_cast<unsigned long>(directStatusAlternationErrors),
+                                 static_cast<unsigned>(directStatusEvidenceValid ? 1u : 0u));
+                        const size_t isolationBudget =
+                            DiagnosticResultEmitter::kResultMetricsFrameBudget -
+                            std::min(std::strlen("direct_lut_isolation"),
+                                     DiagnosticResultEmitter::kMaxResultNameBytes);
+                        const bool isolationMetricsFit = isolationLength > 0 &&
+                            static_cast<size_t>(isolationLength) <= isolationBudget;
                         (void)runOne(2095u,
                                      "direct_lut_isolation",
-                                     isolationPass,
-                                     isolationMetrics);
+                                     isolationPass && isolationMetricsFit,
+                                     isolationMetricsFit
+                                         ? isolationMetrics
+                                         : "gate=metrics_overflow;sf=1;to=1");
                         return finishSelfTestNow();
                       }
 

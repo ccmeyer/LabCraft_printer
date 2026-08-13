@@ -1314,6 +1314,23 @@ Generated stack reports are identical across configurations:
 disassembly contains the cursor call in the selected branch and retains
 `cosf()` only for the deliberately unchanged fallback profiles.
 
+The first watched implementation run passed results `2091`-`2095` with exact
+motion counts, cursor coverage, zero pending observations, X/Y active-callback
+maxima of 661/604 cycles, clean SAFE brackets, and normal operator observation.
+Normalization exposed a selector evidence defect: status reporting was reset
+and paused around each sub-second move, so neither firmware frame counts nor
+the host cadence checker observed a frame. The correction keeps one status
+window open across the complete bounded row and moves strict status evidence to
+aggregate result `2095`; its RAII guard restores paused status on every exit.
+No movement implementation, geometry, rate, or acceleration changed.
+
+After that correction, the complete automated gate again passes 160 targeted
+Python tests and 425 firmware host tests. The new production artifact is
+357,176 bytes, SHA-256
+`914753F6DB5798E5400B5A35FDACD612563D1F303709EC4118EAEE1727E4DB84`;
+the matching diagnostic artifact is 359,576 bytes, SHA-256
+`ACF6EE79874BB9EFC09CE16B2E86656A96A8435C07186A92251ED28AD0444998`.
+
 ## Rollback
 
 Checkpoint B rollback is commit `9dc66f11` and its accepted 351,856-byte

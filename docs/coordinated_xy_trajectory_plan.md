@@ -429,6 +429,24 @@ Both builds report a 128-byte `_stepTick()` static frame and a 24-byte
 ordinary X/Y/Z cosine moves call the fixed-point cursor before the retained
 legacy float branch.
 
+The first watched row on implementation commit `c96338fd` passed all five
+firmware results and produced exact motion/profile evidence with zero pending
+updates. The operator confirmed that all direct moves and home sequences looked
+and sounded normal. Pre/post SAFE both passed 30/30 with `boot=156`,
+`fault_ct=4`, and `wdg_ct=6` unchanged. Normalization nevertheless failed
+because each sub-second move reset and paused status reporting independently,
+yielding no host cadence sample. The selector-only correction uses one
+RAII-guarded status window across pre-home, all four moves, result emission,
+and teardown homes. Per-move frame counts are informational; `2095` strictly
+gates aggregate frame count, maximum gap/age, alternation, and snapshot
+validity, while the manifest requires host cadence and progress-watchdog
+checks. Motion source, geometry, rate, and acceleration are unchanged.
+
+The corrected production artifact is 357,176 bytes, SHA-256
+`914753F6DB5798E5400B5A35FDACD612563D1F303709EC4118EAEE1727E4DB84`;
+the matching diagnostic artifact is 359,576 bytes, SHA-256
+`ACF6EE79874BB9EFC09CE16B2E86656A96A8435C07186A92251ED28AD0444998`.
+
 Checkpoint B rollback is commit `9dc66f11` and its accepted 351,856-byte
 production artifact, SHA-256
 `7EB588C49258F215046BB77C5E5A5518D4BCAAB550F1AFA32CB62E45E2A1A2C6`.

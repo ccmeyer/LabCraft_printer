@@ -55,6 +55,12 @@ def test_direct_lut_selector_uses_direct_axis_ownership_and_complete_inventory()
     assert "runXyHomeDiagnosticAttempt" in body
     assert "!stepperX->getLastDirectProfileSnapshot().selected" in body
     assert "pDelta == 0 && rDelta == 0" in body
+    assert body.count("Comm::resetStatusMetrics()") == 1
+    assert "DirectStatusWindowGuard" in body
+    assert "directStatusFrames >= 2u" in body
+    assert "directStatusGapMs <= 100u" in body
+    assert 'sn=%lu;sg=%lu;wd=%lu;sa=%lu;sv=%u' in body
+    assert "isolationMetricsFit" in body
 
 
 def test_direct_lut_cli_routes_generic_selector_without_protocol_change():

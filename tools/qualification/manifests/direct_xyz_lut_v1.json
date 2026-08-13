@@ -8,6 +8,10 @@
   "enforce_expected_test_ids": true,
   "requires_operator_prompts": true,
   "selftest_args": ["--direct-xyz-lut-suite"],
+  "required_host_checks": [
+    "selftest_progress_watchdog",
+    "coordinated_xy_status_cadence"
+  ],
   "fixtures": [
     {
       "fixture_id": "direct_xyz_lut_envelope_clear",
@@ -43,8 +47,7 @@
         "tm": {"maturity": "candidate", "max": 4500},
         "sf": {"maturity": "acceptance", "equals": 0},
         "wd": {"maturity": "acceptance", "max": 100},
-        "sg": {"maturity": "acceptance", "max": 100},
-        "sn": {"maturity": "acceptance", "min": 1}
+        "sg": {"maturity": "acceptance", "max": 100}
       }
     },
     "2092": {
@@ -74,8 +77,7 @@
         "tm": {"maturity": "candidate", "max": 4500},
         "sf": {"maturity": "acceptance", "equals": 0},
         "wd": {"maturity": "acceptance", "max": 100},
-        "sg": {"maturity": "acceptance", "max": 100},
-        "sn": {"maturity": "acceptance", "min": 1}
+        "sg": {"maturity": "acceptance", "max": 100}
       }
     },
     "2093": {
@@ -105,8 +107,7 @@
         "tm": {"maturity": "acceptance", "equals": 0},
         "sf": {"maturity": "acceptance", "equals": 0},
         "wd": {"maturity": "acceptance", "max": 100},
-        "sg": {"maturity": "acceptance", "max": 100},
-        "sn": {"maturity": "acceptance", "min": 1}
+        "sg": {"maturity": "acceptance", "max": 100}
       }
     },
     "2094": {
@@ -136,8 +137,7 @@
         "tm": {"maturity": "candidate", "max": 4500},
         "sf": {"maturity": "acceptance", "equals": 0},
         "wd": {"maturity": "acceptance", "max": 100},
-        "sg": {"maturity": "acceptance", "max": 100},
-        "sn": {"maturity": "acceptance", "min": 1}
+        "sg": {"maturity": "acceptance", "max": 100}
       }
     },
     "2095": {
@@ -153,6 +153,11 @@
         "mres": {"maturity": "acceptance", "equals": 3},
         "de": {"maturity": "acceptance", "equals": 1},
         "mf": {"maturity": "acceptance", "equals": 0},
+        "sn": {"maturity": "acceptance", "min": 2},
+        "sg": {"maturity": "acceptance", "max": 100},
+        "wd": {"maturity": "acceptance", "max": 100},
+        "sa": {"maturity": "acceptance", "equals": 0},
+        "sv": {"maturity": "acceptance", "equals": 1},
         "sf": {"maturity": "acceptance", "equals": 0},
         "to": {"maturity": "acceptance", "equals": 0}
       }

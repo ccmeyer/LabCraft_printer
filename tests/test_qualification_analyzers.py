@@ -556,7 +556,8 @@ def test_direct_xyz_lut_manifest_rejects_profile_timing_or_isolation_regressions
         "host_checks": [
             {"name": "coordinated_xy_status_cadence", "pass": True,
              "details": {"status_gap_max_ms": 100}},
-            {"name": "watchdog", "pass": True, "details": {"late": 0}},
+            {"name": "selftest_progress_watchdog", "pass": True,
+             "details": {"timeout_reason": None}},
         ],
     }
     assert _analyze(valid, manifest)["verdict"]["status"] == "pass"
@@ -573,6 +574,11 @@ def test_direct_xyz_lut_manifest_rejects_profile_timing_or_isolation_regressions
         (2095, "post", 0),
         (2095, "pd", 2),
         (2095, "mres", 2),
+        (2095, "sn", 1),
+        (2095, "sg", 101),
+        (2095, "wd", 101),
+        (2095, "sa", 1),
+        (2095, "sv", 0),
     ):
         rejected = deepcopy(valid)
         index = manifest.expected_test_ids.index(result_id)

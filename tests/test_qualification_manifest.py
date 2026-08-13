@@ -421,6 +421,10 @@ def test_load_direct_xyz_lut_manifest_freezes_motion_and_isolation_gates():
     assert manifest.enforce_expected_test_ids is True
     assert manifest.requires_operator_prompts is True
     assert manifest.selftest_args == ("--direct-xyz-lut-suite",)
+    assert manifest.required_host_checks == (
+        "selftest_progress_watchdog",
+        "coordinated_xy_status_cadence",
+    )
     assert manifest.fixtures[0]["fixture_id"] == "direct_xyz_lut_envelope_clear"
     x = manifest.analysis_rules["2091"]["metrics"]
     assert x["ds"]["equals"] == 14000
@@ -435,6 +439,12 @@ def test_load_direct_xyz_lut_manifest_freezes_motion_and_isolation_gates():
     assert isolation["mres"]["equals"] == 3
     assert isolation["de"]["equals"] == 1
     assert isolation["mf"]["equals"] == 0
+    assert isolation["sn"]["min"] == 2
+    assert isolation["sg"]["max"] == 100
+    assert isolation["wd"]["max"] == 100
+    assert isolation["sa"]["equals"] == 0
+    assert isolation["sv"]["equals"] == 1
+    assert "sn" not in x
 
 
 def test_load_coordinated_xy_mres3_rearm_manifest_is_diagnostic_only():
