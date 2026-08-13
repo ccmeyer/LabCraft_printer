@@ -283,7 +283,8 @@ without sharing the emitter with the idle task; selectors `1039`
 and `1038` compare the old no-yield and cooperative behavior using the
 identical no-motion SAFE inventory. The pressure participant deadline is
 500 ms to contain a full recovery, while strict pressure age/gap qualification
-remains 125 ms.
+remains 125 ms. Cooperative result frames have a local 50 ms UART timeout to
+cover intentional time slicing; normal UART traffic remains at 25 ms.
 Results `1043` and `1044` distinguish scheduler gaps from mux/read/recovery
 stalls and retain the latter evidence over an MCU watchdog reset. Complete the
 counterbalanced `A-B, B-A, A-B` experiment, final default SAFE, and 30-minute
@@ -320,8 +321,8 @@ executor. Motion source work may continue, but physical high-rate HIL remains
 paused until the priority-aware pacing image passes its short no-motion gate
 with no I2C failure/recovery delta. The pressure-participant deadline is raised
 to 500 ms for recovery margin; the stricter 125 ms diagnostic gate remains.
-The matching priority-aware diagnostic artifact is 339,512 bytes with SHA-256
-`2464F5720B3084AC65CD617074A7B5A5C7D46F990B8A8561969872DEF728DCF3`.
+The matching priority-aware diagnostic artifact is 339,640 bytes with SHA-256
+`5A944627C3A5352F3AA1A259F86D0D202996A7FA5C78FD486CFDCB7D6BEE03D5`.
 
 ## Milestone 0: Baseline And Decisions
 

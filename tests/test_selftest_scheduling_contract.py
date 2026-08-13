@@ -19,7 +19,7 @@ def test_selftest_scheduler_selectors_and_default_cooperative_mode_are_local():
     assert ": SelfTestResultSchedulingMode::Cooperative" in diagnostics
     assert "vTaskDelay(pdMS_TO_TICKS(1u))" in diagnostics
     priority_guard = diagnostics.index("ScopedSelfTestEmissionPriority emissionPriority")
-    transmit = diagnostics.index("comm->sendFrame(comm->handle()", priority_guard)
+    transmit = diagnostics.index("comm->sendFrameWithTimeout(", priority_guard)
     delay = diagnostics.index("vTaskDelay(pdMS_TO_TICKS(1u))", transmit)
     assert priority_guard < transmit < delay
 
@@ -45,8 +45,15 @@ def test_pressure_deadline_has_recovery_margin_without_changing_i2c_or_task_prio
     assert "constexpr uint32_t kPressureI2cTimeoutMs = 20u;" in pressure
     assert "tskIDLE_PRIORITY+1" in pressure
     assert "SELFTEST_COOPERATIVE_EMISSION_PRIORITY = 1u" in scheduling
+    assert "SELFTEST_NO_YIELD_TX_TIMEOUT_MS = 25u" in scheduling
+    assert "SELFTEST_COOPERATIVE_TX_TIMEOUT_MS = 50u" in scheduling
     assert "configUSE_PREEMPTION != 1" in diagnostics
     assert "configUSE_TIME_SLICING != 1" in diagnostics
+
+    comm = _read("firmware/Core/Src/Comm.cpp")
+    normal_send = comm[comm.index("void Comm::sendFrame"):
+                       comm.index("bool Comm::sendFrameWithTimeout")]
+    assert "kCommTxTimeoutMs" in normal_send
 
 
 def test_pressure_stack_headroom_is_sampled_only_at_diagnostic_snapshot():

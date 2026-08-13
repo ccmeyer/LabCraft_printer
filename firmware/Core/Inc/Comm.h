@@ -166,6 +166,10 @@ public:
     void sendFrame(UART_HandleTypeDef* huart,
                           const uint8_t* payload,
                           size_t        len);
+    bool sendFrameWithTimeout(UART_HandleTypeDef* huart,
+                              const uint8_t* payload,
+                              size_t len,
+                              uint32_t timeoutMs);
 
     // briefly pause status spam (optional)
     void setStatusPaused(bool p);

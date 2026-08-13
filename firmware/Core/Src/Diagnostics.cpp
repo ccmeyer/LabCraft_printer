@@ -392,10 +392,15 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         HAL_GetTick());
                     ScopedSelfTestEmissionPriority emissionPriority(resultSchedulingMode);
                     const uint32_t transmitStartMs = HAL_GetTick();
-                    comm->sendFrame(comm->handle(), payload, payloadLen);
+                    const bool frameSent = comm->sendFrameWithTimeout(
+                        comm->handle(),
+                        payload,
+                        payloadLen,
+                        SelfTestScheduling_SelectTransmitTimeoutMs(
+                            resultSchedulingMode));
                     SelfTestScheduling_RecordTransmit(schedulingState,
                                                       HAL_GetTick() - transmitStartMs);
-                    if (payloadLen == 0u) {
+                    if (payloadLen == 0u || !frameSent) {
                       schedulingState.saturated = true;
                     }
                     if (SelfTestScheduling_ShouldDelay(schedulingState)) {

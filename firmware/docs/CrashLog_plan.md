@@ -683,7 +683,11 @@ one-tick delay, an RAII guard temporarily lowers only the emitting orchestrator
 task to the pressure task's priority. Tick-level time slicing lets pressure
 interrupt polling UART output and finish an in-progress I2C operation or
 recovery without also time-slicing the emitter against the idle task; the
-original priority is restored after every frame. Diagnostic selector `1039` retains the original
+original priority is restored after every frame. Cooperative self-test frames
+use a local 50 ms UART timeout because their intentional time slicing can
+exceed the ordinary 25 ms frame timeout; normal communication and selector
+`1039` retain 25 ms. Send failure latches incomplete scheduler evidence.
+Diagnostic selector `1039` retains the original
 high-priority/no-yield behavior; selector `1038` explicitly selects the default
 cooperative behavior. Both run the same no-motion SAFE inventory.
 
@@ -715,9 +719,9 @@ pressure participant deadline is 500 ms so a complete recovery retains ample
 margin; the 125 ms qualification gates and all other watchdog deadlines remain
 unchanged.
 
-The matching Debug artifact is 339,512 bytes with SHA-256
-`2464F5720B3084AC65CD617074A7B5A5C7D46F990B8A8561969872DEF728DCF3`.
-It leaves 53,704 bytes in the 384 KiB application partition. The globally
+The matching Debug artifact is 339,640 bytes with SHA-256
+`5A944627C3A5352F3AA1A259F86D0D202996A7FA5C78FD486CFDCB7D6BEE03D5`.
+It leaves 53,576 bytes in the 384 KiB application partition. The globally
 enabled `INCLUDE_uxTaskGetStackHighWaterMark` option remains off. Instead, the
 existing trace facility scans only the pressure task once when a diagnostic or
 fault snapshot is requested; there is no per-loop stack scan. Unknown headroom

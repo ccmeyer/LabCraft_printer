@@ -2906,7 +2906,10 @@ its one-tick delay execute under a scoped pressure-priority guard. Tick-level
 time slicing lets the pressure task interrupt polling UART transmission and
 finish an in-progress I2C transaction or recovery without time-slicing the
 emitter against the idle task. The orchestrator's original priority is restored
-after every frame. This is the default for SAFE, FULL, and focused diagnostics;
+after every frame. Cooperative self-test frames use a local 50 ms UART timeout
+to cover that intentional time slicing; normal communication and the no-yield
+control retain 25 ms. A failed result transmission latches incomplete evidence.
+This is the default for SAFE, FULL, and focused diagnostics;
 selector `1039` retains the original high-priority/no-yield behavior, and
 ordinary command/status traffic is unchanged.
 SAFE adds result `1044 pressure_wdg_context_safe` and final result

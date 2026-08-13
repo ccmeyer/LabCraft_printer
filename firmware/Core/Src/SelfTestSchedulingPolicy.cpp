@@ -55,6 +55,14 @@ uint32_t SelfTestScheduling_SelectEmissionPriority(
       : currentPriority;
 }
 
+uint32_t SelfTestScheduling_SelectTransmitTimeoutMs(
+    SelfTestResultSchedulingMode mode)
+{
+  return mode == SelfTestResultSchedulingMode::Cooperative
+      ? SELFTEST_COOPERATIVE_TX_TIMEOUT_MS
+      : SELFTEST_NO_YIELD_TX_TIMEOUT_MS;
+}
+
 bool BuildSelfTestSchedulerResult(const SelfTestSchedulingState& state,
                                   const PressureSensorWatchdogSnapshot& pressure,
                                   uint32_t pressureWatchdogAgeMs,

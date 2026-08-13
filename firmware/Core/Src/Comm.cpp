@@ -374,20 +374,30 @@ void Comm::sendFrame(UART_HandleTypeDef* huart,
                       const uint8_t* payload,
                       size_t        len)
 {
+    (void)sendFrameWithTimeout(huart, payload, len, kCommTxTimeoutMs);
+}
+
+bool Comm::sendFrameWithTimeout(UART_HandleTypeDef* huart,
+                                const uint8_t* payload,
+                                size_t len,
+                                uint32_t timeoutMs)
+{
     if (xSemaphoreTake(_txMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-        return; // last resort: skip; you could log here
+        return false;
     }
     if (len > 255) {
         xSemaphoreGive(_txMutex);
-        return;
+        return false;
     }
 
     uint8_t frame[2 + 255 + 2] = {0};
     const size_t frameLen = CommCodec::encodeFrame(payload, static_cast<uint8_t>(len), frame, sizeof(frame));
+    bool sent = false;
     if (frameLen > 0) {
-        (void)sendRawFrame(huart, frame, frameLen, kCommTxTimeoutMs);
+        sent = sendRawFrame(huart, frame, frameLen, timeoutMs);
     }
     xSemaphoreGive(_txMutex);
+    return sent;
 }
 
 bool Comm::sendRawFrame(UART_HandleTypeDef* huart, const uint8_t* frame, size_t len, uint32_t timeout_ms) {

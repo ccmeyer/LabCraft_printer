@@ -750,9 +750,11 @@ cooperative result emitter to the pressure task's priority during each polling
 UART send and one-tick delay, enabling tick-level time slicing before restoring
 the orchestrator priority. It also raises only the pressure-task
 watchdog deadline to 500 ms for recovery margin while retaining the 125 ms
-diagnostic acceptance gates. The matching build is 339,512 bytes with SHA-256
-`2464F5720B3084AC65CD617074A7B5A5C7D46F990B8A8561969872DEF728DCF3`,
-leaving 53,704 bytes in the 384 KiB application partition.
+diagnostic acceptance gates. A local 50 ms cooperative-frame UART timeout
+accommodates intentional time slicing while normal traffic and the no-yield
+control remain at 25 ms. The matching artifact is 339,640 bytes with SHA-256
+`5A944627C3A5352F3AA1A259F86D0D202996A7FA5C78FD486CFDCB7D6BEE03D5`,
+leaving 53,576 bytes in the 384 KiB application partition.
 
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort

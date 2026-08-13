@@ -52,6 +52,10 @@ TEST(SelfTestSchedulingPolicy, CooperativeEmissionTimeSlicesWithPressureTask)
         SelfTestScheduling_SelectEmissionPriority(
             SelfTestResultSchedulingMode::Cooperative, 2u));
     UNSIGNED_LONGS_EQUAL(1u, SELFTEST_COOPERATIVE_EMISSION_PRIORITY);
+    UNSIGNED_LONGS_EQUAL(
+        50u,
+        SelfTestScheduling_SelectTransmitTimeoutMs(
+            SelfTestResultSchedulingMode::Cooperative));
 }
 
 TEST(SelfTestSchedulingPolicy, NoYieldEmissionRetainsCurrentPriority)
@@ -60,6 +64,10 @@ TEST(SelfTestSchedulingPolicy, NoYieldEmissionRetainsCurrentPriority)
         2u,
         SelfTestScheduling_SelectEmissionPriority(
             SelfTestResultSchedulingMode::NoYield, 2u));
+    UNSIGNED_LONGS_EQUAL(
+        25u,
+        SelfTestScheduling_SelectTransmitTimeoutMs(
+            SelfTestResultSchedulingMode::NoYield));
 }
 
 TEST(SelfTestSchedulingPolicy, TransmitTotalsSaturateClosed)
