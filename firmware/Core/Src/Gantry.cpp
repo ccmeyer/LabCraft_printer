@@ -859,20 +859,14 @@ LC_COORDINATED_HW_OPTIMIZED
 void Gantry::recordCoordinatedTim2IrqExitFromIsr(uint32_t irqExitCycle) {
 #if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
   if (_instance != nullptr) {
-    const bool completeStepMode =
-        _instance->_coordinatedCursor.executionMode ==
-        CoordinatedXyExecutor::ExecutionMode::CompleteStep;
     TIM_HandleTypeDef* timer = _instance->_coordinatedMasterTimer;
-    if (completeStepMode) {
-      const bool timerValid = timer != nullptr && timer->Instance != nullptr;
-      CoordinatedXyIsrInstrumentation::recordCompleteStepDeadline(
-          _instance->_coordinatedTiming,
-          timerValid,
-          timerValid ? timer->Instance->CNT : 0u,
-          timerValid ? timer->Instance->ARR : 0u,
-          timerValid &&
-              (timer->Instance->SR & TIM_SR_UIF) != 0u);
-    }
+    const bool timerValid = timer != nullptr && timer->Instance != nullptr;
+    CoordinatedXyIsrInstrumentation::recordTim2Deadline(
+        _instance->_coordinatedTiming,
+        timerValid,
+        timerValid ? timer->Instance->CNT : 0u,
+        timerValid ? timer->Instance->ARR : 0u,
+        timerValid && (timer->Instance->SR & TIM_SR_UIF) != 0u);
     CoordinatedXyIsrInstrumentation::completeIrqPath(
         _instance->_coordinatedTiming, irqExitCycle);
   }

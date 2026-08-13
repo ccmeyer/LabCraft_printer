@@ -22,18 +22,21 @@ def test_performance_suite_has_fixed_ids_selector_rates_and_fail_stop_totals():
     assert "selectedDiagnosticId == 2076u" in diagnostics
     assert "selectedDiagnosticId == 2077u" in diagnostics
     assert "selectedDiagnosticId == 2075u" in diagnostics
+    assert "selectedDiagnosticId == 2085u" in diagnostics
     assert "selectedDiagnosticId == 2079u" in diagnostics
     assert "selectedDiagnosticId == 2078u" in diagnostics
     assert "2069 if coordinated_xy_performance_suite" in runner
     assert "2076 if coordinated_xy_status_sync_suite" in runner
     assert "2077 if coordinated_xy_40khz_suite" in runner
     assert "2075 if coordinated_xy_single_irq_suite" in runner
+    assert "2085 if coordinated_xy_mres3_20khz_suite" in runner
     assert "2079 if coordinated_xy_x_direction_suite" in runner
     assert "2078 if coordinated_xy_camera_transition_suite" in runner
     assert 'add_argument("--coordinated-xy-performance-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-status-sync-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-40khz-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-single-irq-suite", action="store_true")' in runner
+    assert 'add_argument("--coordinated-xy-mres3-20khz-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-x-direction-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-camera-transition-suite", action="store_true")' in runner
     assert "60000 if coordinated_xy_performance_suite else 5000" in runner
@@ -63,22 +66,23 @@ def test_standalone_40khz_selector_reuses_only_existing_tier_four_and_exits():
     end = diagnostics.index("if (runMotionTimingSuite)", start)
     suite = diagnostics[start:end]
 
-    assert "runCoordinatedXy40KhzSuite ? 4u : 0u" in suite
-    assert "!runCoordinatedXy40KhzSuite &&" in suite
+    assert "runCoordinatedXyFocusedGeometrySuite ? 4u : 0u" in suite
+    assert "!runCoordinatedXyFocusedGeometrySuite &&" in suite
     assert '"coordinated_xy_40khz_envelope_clear"' in suite
     assert 'runOne(2064u,\n                                         "coordinated_xy_performance_40khz"' in suite
     standalone_exit = suite.index(
-        "if (runCoordinatedXy40KhzSuite) {", suite.index("for (uint32_t tier")
+        "if (runCoordinatedXyFocusedGeometrySuite) {",
+        suite.index("for (uint32_t tier")
     )
     m1_start = suite.index("Aggregate m1Aggregate")
     assert standalone_exit < m1_start
     assert "restoreXyRates();" in suite[standalone_exit:m1_start]
     assert "return finishSelfTestNow();" in suite[standalone_exit:m1_start]
-    assert 'runOne(2072u,' in suite
-    assert "emitIrqPathEvidence(aggregate)" in suite
+    assert "runCoordinatedXyMres3Suite ? 2081u : 2072u" in suite
+    assert "emitIrqPathEvidence(" in suite
     assert '"ax=%lu;tf=%lu' in suite
-    assert 'runOne(2073u,' in suite
-    assert "emitEntryLatenessEvidence(aggregate)" in suite
+    assert "runCoordinatedXyMres3Suite ? 2082u : 2073u" in suite
+    assert "emitEntryLatenessEvidence(" in suite
     assert '"i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"' in suite
     assert '"lc=%lu;dm=%lu;sm=%u;lf=%lu;sf=%lu;to=%lu;"' in suite
     assert '"fv=%u;tr=%u;la=%lu;ra=%lu"' in suite
@@ -89,28 +93,55 @@ def test_standalone_40khz_selector_reuses_only_existing_tier_four_and_exits():
     assert '"coord_xy_40khz_entry_lateness",\n                                false,' in suite
 
 
-def test_single_irq_selector_reuses_40khz_geometry_and_restores_two_edge_mode():
+def test_single_irq_selector_is_retired_without_changing_the_two_edge_default():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
     start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
     end = diagnostics.index("if (runMotionTimingSuite)", start)
     suite = diagnostics[start:end]
 
     assert "runCoordinatedXySingleIrqSuite" in suite
-    assert "CoordinatedXyExecutor::ExecutionMode::CompleteStep" in suite
-    assert '"coordinated_xy_single_irq_envelope_clear"' in suite
+    assert "requestedExecutionMode =\n                                CoordinatedXyExecutor::ExecutionMode::TwoEdge" in suite
     assert "class ScopedCoordinatedXyExecutionMode" in diagnostics
     guard_start = diagnostics.index("class ScopedCoordinatedXyExecutionMode")
     guard_end = diagnostics.index("static constexpr DiagnosticTestDescriptor", guard_start)
     guard = diagnostics[guard_start:guard_end]
     assert "~ScopedCoordinatedXyExecutionMode()" in guard
     assert "CoordinatedXyExecutor::ExecutionMode::TwoEdge" in guard
-    assert "executor_mode_unavailable" in suite
-    assert "performanceLimits.activeMaxCycles = 3500u" in suite
-    assert "performanceLimits.terminalMaxCycles = 4500u" in suite
-    assert 'runOne(2074u,' in suite
-    assert "emitCompleteStepEvidence(aggregate)" in suite
-    assert '"em=%u;ip=%lu;i2=%lu;pc=%lu;pn=%lu;px=%lu;"' in suite
-    assert '"pe=%lu;ds=%lu;mi=%lu;md=%lu;sl=%lu;pu=%lu;"' in suite
+    retirement = suite.index('failRemaining(2060u, "single_irq_superseded")')
+    fixture = suite.index("waitForOperatorResume(fixtureStage)")
+    assert retirement < fixture
+
+
+def test_mres3_diagnostic_selector_scales_geometry_rate_acceleration_and_homes():
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+    orchestrator = _read("firmware/Core/Src/Orchestrator.cpp")
+    config = _read("firmware/Core/Inc/TMC2208Configuration.h")
+    runner = _read("tools/run_selftest.py")
+    start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")
+    end = diagnostics.index("if (runMotionTimingSuite)", start)
+    suite = diagnostics[start:end]
+
+    assert "selectedDiagnosticId == 2085u" in diagnostics
+    assert "runCoordinatedXy40KhzSuite || runCoordinatedXyMres3Suite" in diagnostics
+    assert '"coordinated_xy_mres3_20khz_envelope_clear"' in suite
+    assert "{{2500, 2500}, {12500, 2500}}" in suite
+    assert "{{4458, 15250}, {250, 250}}" in suite
+    assert "? 20000u : kRatesHz[tier]" in suite
+    assert "? 70000.0f : savedXAcceleration" in suite
+    assert "? 70000.0f : savedYAcceleration" in suite
+    assert "? 53416u : 106832u" in suite
+    assert "? 90000u : 180000u" in suite
+    assert "? 110000u : 220000u" in suite
+    assert "stepperP->getPosition() != pPositionBefore" in suite
+    assert "stepperR->getPosition() != rPositionBefore" in suite
+    assert "aggregate.deadlineSlackMinTicks >= 450u" in suite
+    assert "aggregate.timer2Callbacks -\n                                     aggregate.moveCount" in suite
+    assert "LC_TMC2208_DIAGNOSTIC_BUILD" in orchestrator
+    assert "cmd.cmd != CMD_SELFTEST_START && cmd.cmd != CMD_DISABLE_MOTORS" in orchestrator
+    assert "#define LC_TMC2208_MRES 2" in config
+    assert "LC_TMC2208_DIAGNOSTIC_BUILD != 0 && LC_TMC2208_MRES == 3" in config
+    assert "false,\n      true,\n      0x000000C1u" in config
+    assert "2085 if coordinated_xy_mres3_20khz_suite" in runner
 
 
 def test_status_sync_variant_is_static_bounded_and_restores_critical_mode():
@@ -218,9 +249,12 @@ def test_performance_homing_is_step_bounded_and_preserves_failure_evidence():
     suite = diagnostics[start:end]
 
     assert "boundedHomeGuardSteps" in report_header
-    assert "kHomeGuardMarginSteps = 3000u" in suite
-    assert "kXEnvelopeMaximumSteps = 45000u" in suite
-    assert "kYEnvelopeMaximumSteps = 35000u" in suite
+    assert "kBaselineHomeGuardMarginSteps = 3000u" in suite
+    assert "kBaselineXEnvelopeMaximumSteps = 45000u" in suite
+    assert "kBaselineYEnvelopeMaximumSteps = 35000u" in suite
+    assert "? 1500u : kBaselineHomeGuardMarginSteps" in suite
+    assert "? 22500u : kBaselineXEnvelopeMaximumSteps" in suite
+    assert "? 17500u : kBaselineYEnvelopeMaximumSteps" in suite
     assert "stepper->setHomeGuardSteps(result.guardSteps)" in suite
     assert "stepper->setHomeGuardSteps(savedGuard)" in suite
     assert "cancelActiveHomesAndWait(homeBit)" in suite

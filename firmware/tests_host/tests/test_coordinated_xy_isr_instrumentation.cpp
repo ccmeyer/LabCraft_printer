@@ -248,9 +248,9 @@ TEST(CoordinatedXyIsrInstrumentation, SaturatesInsteadOfWrapping) {
   CoordinatedXyIsrInstrumentation::recordCompleteStepPulse(state, 360u);
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
       state, true, 3u, true, 128u, 2249u, 4u, true, false);
-  CoordinatedXyIsrInstrumentation::recordCompleteStepDeadline(
+  CoordinatedXyIsrInstrumentation::recordTim2Deadline(
       state, true, 128u, 2249u, false);
-  CoordinatedXyIsrInstrumentation::recordCompleteStepDeadline(
+  CoordinatedXyIsrInstrumentation::recordTim2Deadline(
       state, false, 0u, 0u, false);
   CoordinatedXyIsrInstrumentation::completeIrqPath(state, 5u);
   state.irqPathMissing = std::numeric_limits<uint32_t>::max();
@@ -348,13 +348,13 @@ TEST(CoordinatedXyIsrInstrumentation, TracksFullIrqDeadlineSlackAndPendingMiss) 
   CoordinatedXyIsrInstrumentation::reset(state, 100u);
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
       state, true, 110u, true, 4u, 2249u, 120u, false, false);
-  CoordinatedXyIsrInstrumentation::recordCompleteStepDeadline(
+  CoordinatedXyIsrInstrumentation::recordTim2Deadline(
       state, true, 249u, 2249u, false);
   CoordinatedXyIsrInstrumentation::completeIrqPath(state, 150u);
 
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
       state, true, 200u, true, 5u, 2249u, 210u, true, false);
-  CoordinatedXyIsrInstrumentation::recordCompleteStepDeadline(
+  CoordinatedXyIsrInstrumentation::recordTim2Deadline(
       state, true, 20u, 2249u, false);
   CoordinatedXyIsrInstrumentation::completeIrqPath(state, 230u);
 
@@ -370,7 +370,7 @@ TEST(CoordinatedXyIsrInstrumentation, MissingDeadlineSampleFailsClosed) {
   CoordinatedXyIsrInstrumentation::reset(state, 100u);
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
       state, true, 110u, true, 4u, 2249u, 120u, false, false);
-  CoordinatedXyIsrInstrumentation::recordCompleteStepDeadline(
+  CoordinatedXyIsrInstrumentation::recordTim2Deadline(
       state, false, 0u, 0u, false);
   CoordinatedXyIsrInstrumentation::completeIrqPath(state, 150u);
 
@@ -384,7 +384,7 @@ TEST(CoordinatedXyIsrInstrumentation, FinalTimerUpdateFlagIsADeadlineMiss) {
   CoordinatedXyIsrInstrumentation::reset(state, 100u);
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
       state, true, 110u, true, 4u, 2249u, 120u, false, false);
-  CoordinatedXyIsrInstrumentation::recordCompleteStepDeadline(
+  CoordinatedXyIsrInstrumentation::recordTim2Deadline(
       state, true, 20u, 2249u, true);
   CoordinatedXyIsrInstrumentation::completeIrqPath(state, 150u);
 
@@ -392,4 +392,19 @@ TEST(CoordinatedXyIsrInstrumentation, FinalTimerUpdateFlagIsADeadlineMiss) {
   UNSIGNED_LONGS_EQUAL(1u, snapshot.deadlineSamples);
   UNSIGNED_LONGS_EQUAL(1u, snapshot.deadlineMisses);
   UNSIGNED_LONGS_EQUAL(0u, snapshot.deadlineSlackMinTicks);
+}
+
+TEST(CoordinatedXyIsrInstrumentation, TerminalCallbackIsNotADeadlineSample) {
+  State state{};
+  CoordinatedXyIsrInstrumentation::reset(state, 100u);
+  CoordinatedXyIsrInstrumentation::beginIrqPathSample(
+      state, true, 110u, true, 4u, 2249u, 120u, false, true);
+  CoordinatedXyIsrInstrumentation::recordTim2Deadline(
+      state, true, 20u, 2249u, false);
+  CoordinatedXyIsrInstrumentation::completeIrqPath(state, 150u);
+
+  const auto snapshot = CoordinatedXyIsrInstrumentation::makeSnapshot(state);
+  UNSIGNED_LONGS_EQUAL(0u, snapshot.deadlineSamples);
+  UNSIGNED_LONGS_EQUAL(0u, snapshot.deadlineMissing);
+  UNSIGNED_LONGS_EQUAL(0u, snapshot.deadlineMisses);
 }

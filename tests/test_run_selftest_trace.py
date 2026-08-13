@@ -1,5 +1,6 @@
 import importlib.util
 import struct
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1157,17 +1158,19 @@ def test_run_sends_selftest_scheduler_selector(monkeypatch, tmp_path, flag_name,
 
 
 @pytest.mark.parametrize(
-    ("performance_suite", "forty_suite", "status_sync_suite", "single_irq_suite", "direction_suite", "transition_suite", "expected_selector"),
-    ((True, False, False, False, False, False, 2069),
-     (False, True, False, False, False, False, 2077),
-     (False, False, True, False, False, False, 2076),
-     (False, False, False, True, False, False, 2075),
-     (False, False, False, False, True, False, 2079),
-     (False, False, False, False, False, True, 2078)),
+    ("performance_suite", "forty_suite", "status_sync_suite", "single_irq_suite", "mres3_suite", "direction_suite", "transition_suite", "expected_selector"),
+    ((True, False, False, False, False, False, False, 2069),
+     (False, True, False, False, False, False, False, 2077),
+     (False, False, True, False, False, False, False, 2076),
+     (False, False, False, True, False, False, False, 2075),
+     (False, False, False, False, True, False, False, 2085),
+     (False, False, False, False, False, True, False, 2079),
+     (False, False, False, False, False, False, True, 2078)),
 )
 def test_run_sends_coordinated_xy_performance_selector_and_checks_status_cadence(
     monkeypatch, tmp_path, performance_suite, forty_suite, status_sync_suite,
-    single_irq_suite, direction_suite, transition_suite, expected_selector
+    single_irq_suite, mres3_suite, direction_suite, transition_suite,
+    expected_selector
 ):
     mod = _load_run_selftest()
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
@@ -1210,6 +1213,7 @@ def test_run_sends_coordinated_xy_performance_selector_and_checks_status_cadence
         coordinated_xy_40khz_suite=forty_suite,
         coordinated_xy_status_sync_suite=status_sync_suite,
         coordinated_xy_single_irq_suite=single_irq_suite,
+        coordinated_xy_mres3_20khz_suite=mres3_suite,
         coordinated_xy_x_direction_suite=direction_suite,
         coordinated_xy_camera_transition_suite=transition_suite,
         out=str(out_path),
@@ -2295,3 +2299,49 @@ def test_standalone_40khz_stage_is_one_clear_envelope_prompt_without_pressure():
     assert "ten-move 40 kHz Milestone 6 geometry row" in message
     assert "pressure_closed_loop_v1" not in message
     assert "press and hold" not in message.lower()
+
+
+def test_single_irq_stage_is_one_clear_envelope_prompt_without_pressure():
+    mod = _load_run_selftest()
+    stage = "coordinated_xy_single_irq_envelope_clear"
+
+    assert mod._is_operator_prompt_stage(stage)
+    message = mod._operator_prompt_message(stage)
+    assert "complete XY/Z motion envelope" in message
+    assert "ten-move 40 kHz Milestone 6 geometry row" in message
+    assert "pressure_closed_loop_v1" not in message
+    assert "press and hold" not in message.lower()
+
+
+def test_mres3_stage_is_explicit_about_scaled_diagnostic_motion():
+    mod = _load_run_selftest()
+    stage = "coordinated_xy_mres3_20khz_envelope_clear"
+
+    assert mod._is_operator_prompt_stage(stage)
+    message = mod._operator_prompt_message(stage)
+    assert "MRES=3" in message
+    assert "20 kHz" in message
+    assert "scaled" in message
+    assert "limit switches are released" in message
+
+
+def test_mres3_selector_is_mutually_exclusive_with_existing_motion_selectors(
+    monkeypatch, tmp_path
+):
+    mod = _load_run_selftest()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_selftest.py",
+            "--port", "/dev/null",
+            "--profile", "FULL",
+            "--coordinated-xy-mres3-20khz-suite",
+            "--coordinated-xy-40khz-suite",
+            "--out", str(tmp_path / "not-written.json"),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        mod.main()
+    assert error.value.code == 2

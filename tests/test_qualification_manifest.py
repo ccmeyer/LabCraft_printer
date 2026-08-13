@@ -380,6 +380,39 @@ def test_load_coordinated_xy_status_sync_manifest_is_strict_mutex_isolation():
     assert entry["ra"]["equals"] == 0
 
 
+def test_load_coordinated_xy_mres3_manifest_is_diagnostic_only_and_strict():
+    manifest = load_manifest("coordinated_xy_mres3_20khz_v1")
+
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2080, 2081, 2082, 2083)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--coordinated-xy-mres3-20khz-suite",)
+    assert manifest.fixtures[0]["fixture_id"] == (
+        "coordinated_xy_mres3_20khz_envelope_clear"
+    )
+    motion = manifest.analysis_rules["2080"]["metrics"]
+    assert motion["hz"]["equals"] == 20000
+    assert motion["xe"]["equals"] == 53416
+    assert motion["ye"]["equals"] == 90000
+    assert motion["ms"]["equals"] == 110000
+    assert motion["i2"]["equals"] == 220000
+    assert motion["xd"]["max"] == 13
+    irq = manifest.analysis_rules["2081"]["metrics"]
+    assert irq["s"]["equals"] == 220000
+    assert irq["pu"]["equals"] == 0
+    margin = manifest.analysis_rules["2082"]["metrics"]
+    assert margin["ds"]["equals"] == 219990
+    assert margin["md"]["equals"] == 0
+    assert margin["sl"]["min"] == 450
+    driver = manifest.analysis_rules["2083"]["metrics"]
+    assert driver["mr"]["equals"] == 3
+    assert driver["mf"]["equals"] == 0
+    assert driver["dd"]["equals"] == 1
+    assert driver["cc"]["equals"] == 0x33000053
+    assert driver["tf"]["equals"] == 0
+
+
 def test_load_coordinated_xy_single_irq_manifest_is_diagnostic_only_and_strict():
     manifest = load_manifest("coordinated_xy_single_irq_v1")
 

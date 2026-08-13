@@ -171,11 +171,11 @@ void beginIrqPathSample(State& state,
                         bool terminal);
 void completeIrqPath(State& state, uint32_t irqExitCycle);
 void recordCompleteStepPulse(State& state, uint32_t pulseHighCycles);
-void recordCompleteStepDeadline(State& state,
-                                bool timerSampleValid,
-                                uint32_t timerCount,
-                                uint32_t timerArr,
-                                bool timerUpdatePending);
+void recordTim2Deadline(State& state,
+                        bool timerSampleValid,
+                        uint32_t timerCount,
+                        uint32_t timerArr,
+                        bool timerUpdatePending);
 Snapshot makeSnapshot(const State& state);
 uint32_t phaseMeanCycles(const Snapshot& snapshot, Phase phase);
 uint32_t terminalMeanCycles(const Snapshot& snapshot);

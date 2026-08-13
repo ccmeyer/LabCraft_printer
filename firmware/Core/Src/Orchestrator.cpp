@@ -27,6 +27,7 @@
 #include "CrashLog.h"
 #include "CrashLogCodec.h"
 #include "WatchdogSupervisor.h"
+#include "TMC2208Configuration.h"
 #include "cmsis_os.h"         // for portMAX_DELAY, pdTRUE, etc.
 #include "task.h"
 #include <cstdio>
@@ -1167,6 +1168,27 @@ void Orchestrator::executeCommand(const Command &cmd) {
 //  _currentCmdNum = cmd.seq;
 
   // clear done‐bits
+#if LC_TMC2208_DIAGNOSTIC_BUILD != 0
+  // Every driver shares the UART configuration, so ordinary host coordinates
+  // are unsafe while the temporary MRES=3 image is installed. Only the
+  // internally scaled self-test and motor-disable command may actuate here.
+  if (cmd.cmd != CMD_SELFTEST_START && cmd.cmd != CMD_DISABLE_MOTORS) {
+    Gantry::cancelXYZMotors();
+    Stepper::stepperX()->disableMotor();
+    Stepper::stepperY()->disableMotor();
+    Stepper::stepperZ()->disableMotor();
+    Stepper::stepperP()->disableMotor();
+#if LC_PRESSURE_PORTS > 1
+    Stepper::stepperR()->disableMotor();
+#endif
+    sampleOrchStack(ORCH_STACK_PHASE_CMD_DONE);
+    OrchestratorCompletionPolicy::retireCurrentCommand(
+        _currentCmdNum, _lastExecutedCmdNum, _lastRetiredCmdNum);
+    _hasInFlightCommand = false;
+    return;
+  }
+#endif
+
   xEventGroupClearBits(_doneEvents,
       BIT_LED_DONE|BIT_STEPPER1_DONE|BIT_STEPPER2_DONE|BIT_STEPPER3_DONE|BIT_PRINTING_DONE|BIT_FLASH_PRINT_DONE|BIT_GRIPPER_DONE|
 	  BIT_PRESSURE_P_READY | BIT_PRESSURE_R_READY);

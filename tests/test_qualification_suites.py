@@ -257,6 +257,23 @@ def test_coordinated_xy_status_sync_suite_reuses_the_geometry_rows_with_strict_l
     assert rules["dm"]["max"] == 255
 
 
+def test_coordinated_xy_mres3_suite_exposes_scaled_motion_and_deadline_evidence():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    focused = entries["coordinated_xy_mres3_20khz_v1"].manifest
+
+    assert focused.profile == "FULL"
+    assert required_fixture_ids(focused) == (
+        "coordinated_xy_mres3_20khz_envelope_clear",
+    )
+    rows = build_test_plan_rows(focused)
+    assert [row.test_id for row in rows] == [2080, 2081, 2082, 2083]
+    assert rows[0].name == "Coordinated XY MRES3 20 kHz motion"
+    assert rows[3].name == "TMC2208 MRES3 configuration"
+    assert focused.analysis_rules["2080"]["metrics"]["hz"]["equals"] == 20000
+    assert focused.analysis_rules["2082"]["metrics"]["sl"]["min"] == 450
+    assert focused.analysis_rules["2083"]["metrics"]["mf"]["equals"] == 0
+
+
 def test_coordinated_xy_single_irq_suite_requires_complete_pulse_margin_evidence():
     entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
     focused = entries["coordinated_xy_single_irq_v1"].manifest

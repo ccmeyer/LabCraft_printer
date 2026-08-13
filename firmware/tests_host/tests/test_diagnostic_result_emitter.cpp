@@ -293,6 +293,68 @@ TEST(DiagnosticResultEmitter, CoordinatedXySingleIrqMetricsFitAtSaturatedValues)
     MEMCMP_EQUAL(metricsText, &payload[metrics + 2], std::strlen(metricsText));
 }
 
+TEST(DiagnosticResultEmitter, CoordinatedXyMres3DeadlineMetricsFitAtAcceptedValues)
+{
+    const char metricsText[] =
+        "i2=220000;s=220000;mi=0;cm=127;ca=127;pm=0;lc=0;dm=255;"
+        "ds=219990;di=0;md=0;sl=450;sm=0;lf=0;sf=0;to=0;"
+        "fv=0;tr=0;la=0;ra=0";
+    const char name[] = "coord_xy_mres3_20khz_entry_margin";
+    const size_t nameLength = std::strlen(name) >
+            DiagnosticResultEmitter::kMaxResultNameBytes
+        ? DiagnosticResultEmitter::kMaxResultNameBytes
+        : std::strlen(name);
+    const size_t metricsBudget =
+        DiagnosticResultEmitter::kResultMetricsFrameBudget - nameLength;
+
+    CHECK_TRUE(std::strlen(metricsText) <= metricsBudget);
+
+    uint8_t payload[256] = {0};
+    const size_t len = DiagnosticResultEmitter::buildResultPayload(
+        payload,
+        sizeof(payload),
+        0x01u,
+        0x02u,
+        2082u,
+        name,
+        true,
+        metricsText,
+        0x04u);
+    const size_t metrics =
+        findTag(payload, len, DiagnosticResultEmitter::kTagMetrics);
+    CHECK_TRUE(metrics < len);
+    UNSIGNED_LONGS_EQUAL(std::strlen(metricsText), payload[metrics + 1]);
+    MEMCMP_EQUAL(metricsText, &payload[metrics + 2], std::strlen(metricsText));
+}
+
+TEST(DiagnosticResultEmitter, Tmc2208Mres3ConfigurationMetricsFit)
+{
+    const char metricsText[] =
+        "mr=3;mf=0;dd=1;gc=193;cc=855638099;tx=4;tf=0;"
+        "ve=1;ae=1;ge=1;sf=0;to=0";
+    const char name[] = "tmc2208_mres3_configuration";
+    const size_t nameLength = std::strlen(name) >
+            DiagnosticResultEmitter::kMaxResultNameBytes
+        ? DiagnosticResultEmitter::kMaxResultNameBytes
+        : std::strlen(name);
+    const size_t metricsBudget =
+        DiagnosticResultEmitter::kResultMetricsFrameBudget - nameLength;
+
+    CHECK_TRUE(std::strlen(metricsText) <= metricsBudget);
+    uint8_t payload[256] = {0};
+    const size_t len = DiagnosticResultEmitter::buildResultPayload(
+        payload,
+        sizeof(payload),
+        0x01u,
+        0x02u,
+        2083u,
+        name,
+        true,
+        metricsText,
+        0x04u);
+    CHECK_TRUE(len > 0u);
+}
+
 TEST(DiagnosticResultEmitter, DonePayloadPreservesCurrentLayout)
 {
     uint8_t payload[64] = {0};

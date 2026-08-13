@@ -11,7 +11,19 @@
 
 #include "stm32f4xx_hal.h"
 #include "TMC2208_bitfields.h"
+#include "TMC2208Configuration.h"
 #include <cstdint>
+
+struct TMC2208InitializationSnapshot {
+  bool initialized = false;
+  uint8_t mres = 0u;
+  bool multistepFilter = false;
+  bool doubleEdge = false;
+  uint32_t gconf = 0u;
+  uint32_t chopconf = 0u;
+  uint32_t successfulWrites = 0u;
+  uint32_t failedWrites = 0u;
+};
 
 /**
  * Simple driver for TMC2208 in UART mode.
@@ -27,14 +39,19 @@ public:
 
   static TMC2208Driver* instance();
 
-  void write(uint8_t addr, uint32_t regVal);
+  static TMC2208InitializationSnapshot initializationSnapshot();
 
-  void writeGCONF();
-  void writeCHOPCONF();
-  void writePWMCONF();
-  void writeTPWMTHRS();
+  void beginInitialization(const TMC2208Configuration::Values& configuration);
+  void finishInitialization(bool passed);
 
-  void push();
+  bool write(uint8_t addr, uint32_t regVal);
+
+  bool writeGCONF();
+  bool writeCHOPCONF();
+  bool writePWMCONF();
+  bool writeTPWMTHRS();
+
+  bool push();
 
   void I_scale_analog(bool B);
   void internal_Rsense(bool B);
@@ -70,6 +87,7 @@ public:
 
 private:
   static TMC2208Driver* _instance;
+  static TMC2208InitializationSnapshot _initializationSnapshot;
 //  void writeRegister(uint8_t reg, uint32_t val);
   uint8_t calcCRC(uint8_t datagram[], uint8_t len);
 

@@ -2803,37 +2803,47 @@ section. An exit guard restores critical-section mode on every selector-`2076`
 return path. This is an A/B diagnostic, not approval to make the mutex the
 production default.
 
-Selector `2075` evaluates a more latency-tolerant coordinated executor without
-changing normal motion. Run it only as an operator-watched diagnostic:
+Selector `2075` is now retired and fails closed with
+`gate=single_irq_superseded` before the fixture prompt or motion. The
+one-interrupt software pulse combined DEDGE's two physical edges into one
+planner event, so it was not a sound basis for validating TMC2208 operation.
 
-```bash
-python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-single-irq-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_single_irq.json
-python3 tools/run_qualification.py --manifest coordinated_xy_single_irq_v1 --operator-prompts --fixture motion_clear_envelope_v1 --machine-id LC-001 --raw-report hil_reports/coordinated_xy_single_irq.json
+The replacement diagnostic keeps the production two-edge executor and tests
+the driver-supported reduction in microstep resolution. Build the distinct
+MRES=3 image without overwriting the normal MRES=2 artifact:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File firmware/scripts/build_firmware_headless.ps1 -Config MRES3_Diagnostic -ArtifactFileName LabCraft_firmware_mres3_diagnostic.bin
 ```
 
-It reuses selector `2077`'s exact ten-move 40 kHz geometry, bounded homes,
-status traffic, watchdog gates, and results `2064`, `2072`, and `2073`. For
-this selector only, TIM2 is programmed for one full step period and the ISR
-raises the selected STEP pins, holds them high for at least 2 us using the
-already-enabled DWT cycle counter, lowers them, and commits the planner event.
-That reduces the measured geometry row from 440,000 to 220,000 TIM2 callbacks
-without changing the requested step rate, trajectory LUT, acceleration, DDA
-mask sequence, or limit checks. No interrupt masking is added around the pulse.
+After flashing exactly
+`firmware/artifacts/LabCraft_firmware_mres3_diagnostic.bin`, run only selector
+`2085` while an operator watches the clear gantry:
 
-Result `2074` reports executor mode (`em=1`), interrupts per master step
-(`ip=1`), callbacks (`i2`), pulse samples and DWT-enforced high interval
-minimum/maximum (`pc`/`pn`/`px`), required high interval (`pe`, 360 core cycles
-at 180 MHz), deadline samples/missing/misses (`ds`/`mi`/`md`), minimum
-post-handler TIM2 slack (`sl`, 90 MHz timer ticks), pending updates (`pu`),
-exact-motion status (`ok`), saturation (`sf`), and timeout (`to`). The focused
-manifest requires all 220,000 callbacks and pulse/deadline samples, no missing
-or missed deadlines, at least 500 timer ticks of remaining slack, and clean
-motion/status/watchdog/home evidence. Boot and all non-`2075` operation remain
-on the existing two-edge executor; a scope guard restores that mode on every
-exit. The post-HAL sample reads TIM2 `CNT`, `ARR`, and the update flag directly,
-so an overflow that occurs in the earlier instrumentation tail is also a
-deadline miss. This diagnostic must not become the production default before
-its HIL evidence is reviewed.
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-mres3-20khz-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_mres3_20khz.json
+python3 tools/run_qualification.py --manifest coordinated_xy_mres3_20khz_v1 --operator-prompts --fixture coordinated_xy_mres3_20khz_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_mres3_20khz.json
+```
+
+MRES=3 selects 1/32 microsteps instead of 1/64. The selector halves every X/Y/Z
+home/backoff and XY geometry coordinate, caps X/Y at 20 kHz, and uses 70,000
+microsteps/s2, preserving the prior nominal physical speed, acceleration, and
+travel. It therefore expects the same ten physical moves but 110,000 planner
+steps and 220,000 rise/fall TIM2 callbacks. Results `2080`-`2083` verify exact
+motion, complete IRQ/entry coverage, zero pending updates, 219,990 nonterminal
+deadline samples, no deadline miss, at least 450 timer ticks of post-handler
+slack, and the intended TMC configuration (`MRES=3`, `DEDGE=1`,
+`multistep_filt=0`). P/R positions must not change.
+
+The MRES=3 image is diagnostic-only. Ordinary queued commands are rejected
+with all motors disabled, ordinary FULL requests fail before motion, and only
+SAFE plus selector `2085` are supported. Boot/default builds remain MRES=2;
+MRES=3 is not a production migration until the watched HIL evidence is
+reviewed. Roll back by flashing `firmware/artifacts/LabCraft_firmware.bin`.
+The matching diagnostic artifact is 342,088 bytes with SHA-256
+`CA0F043736D8E87C94243F71D28A09DF5914E03F192CB1FA4F0B3BD0C91CCA48`;
+the production artifact is 341,832 bytes with SHA-256
+`E6DF114971CD21F7D2D18EAA12D615E4B313D802A9FDC9B8A124CA7E45527408`.
 
 The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is

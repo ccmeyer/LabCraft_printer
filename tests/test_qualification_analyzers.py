@@ -288,6 +288,64 @@ def test_status_sync_manifest_requires_complete_low_lateness_mutex_evidence():
         rejected["results"][result_index]["metrics"][metric] = value
         assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
 
+
+def test_mres3_manifest_rejects_unscaled_or_incomplete_timing_evidence():
+    manifest = load_manifest("coordinated_xy_mres3_20khz_v1")
+    valid = {
+        "run_id": 2085,
+        "profile": "FULL",
+        "started_at": "2026-08-12T00:00:00Z",
+        "finished_at": "2026-08-12T00:00:10Z",
+        "aborted": False,
+        "summary": {"total": 4, "passed": 4, "failed": 0},
+        "results": [
+            {"test_id": 2080, "name": "coord_xy_mres3_20khz_motion", "pass": True,
+             "metrics": {"hz": 20000, "n": 10, "xe": 53416, "ye": 90000,
+                         "ms": 110000, "i2": 220000, "i7": 0, "ok": 1,
+                         "pu": 0, "ps": 0, "am": 1100, "aa": 700,
+                         "cm": 900, "ca": 600, "dm": 1200, "da": 800,
+                         "tm": 2100, "de": 20, "sg": 60, "wd": 70,
+                         "sa": 0, "wl": 0, "cw": 1, "sf": 0,
+                         "xd": 4, "yd": 5, "to": 0}},
+            {"test_id": 2081, "name": "coord_xy_mres3_20khz_irq_path", "pass": True,
+             "metrics": {"i2": 220000, "s": 220000, "mi": 0,
+                         "ph": 50, "pa": 20, "fm": 1500, "fa": 900,
+                         "ax": 1450, "tf": 2200, "pp": 0, "pf": 0,
+                         "pu": 0, "ps": 0, "sf": 0, "to": 0}},
+            {"test_id": 2082, "name": "coord_xy_mres3_20khz_entry_margin", "pass": True,
+             "metrics": {"i2": 220000, "s": 220000, "mi": 0,
+                         "cm": 40, "ca": 12, "pm": 0, "lc": 0, "dm": 80,
+                         "ds": 219990, "di": 0, "md": 0, "sl": 700,
+                         "sm": 0, "lf": 0, "sf": 0, "to": 0,
+                         "fv": 0, "tr": 0, "la": 0, "ra": 0}},
+            {"test_id": 2083, "name": "tmc2208_mres3_configuration", "pass": True,
+             "metrics": {"mr": 3, "mf": 0, "dd": 1, "gc": 193,
+                         "cc": 855638099, "tx": 4, "tf": 0, "ve": 1,
+                         "ae": 1, "ge": 1, "sf": 0, "to": 0}},
+        ],
+        "host_checks": [{"name": "coordinated_xy_status_cadence", "pass": True,
+                         "details": {"status_gap_max_ms": 100}}],
+    }
+
+    assert _analyze(valid, manifest)["verdict"]["status"] == "pass"
+    mutations = (
+        (0, "hz", 40000),
+        (0, "xe", 106832),
+        (0, "pu", 1),
+        (1, "s", 219999),
+        (1, "pu", 1),
+        (2, "ds", 219989),
+        (2, "md", 1),
+        (2, "sl", 449),
+        (3, "mr", 2),
+        (3, "mf", 1),
+        (3, "tf", 1),
+    )
+    for result_index, metric, value in mutations:
+        rejected = deepcopy(valid)
+        rejected["results"][result_index]["metrics"][metric] = value
+        assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
+
     cadence_failure = deepcopy(valid)
     cadence_failure["host_checks"][0]["pass"] = False
     assert _analyze(cadence_failure, manifest)["verdict"]["status"] == "fail"

@@ -43,6 +43,7 @@ firmware/Debug/
 firmware/Release/
 firmware/Debug_Legacy/
 firmware/Release_Legacy/
+firmware/MRES3_Diagnostic/
 
 # HIL Reports
 hil_reports/

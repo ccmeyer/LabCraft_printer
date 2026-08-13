@@ -224,7 +224,7 @@ Every milestone that touches motion must preserve these invariants:
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
-| 6. Performance and motion HIL qualification | `blocked` | The velocity-domain correction reduced the calculated peak from 443,900 to about 131,100 steps/s2 and passed one guarded 40 kHz row with X=4/Y=1 drift; a diagnostic-only one-interrupt-per-step executor is implemented, but its pre-motion SAFE gate recovered a retained pressure-sensor watchdog-starvation event from the preceding no-motion self-test soak | Correct and verify the SAFE self-test scheduling starvation before running selector `2075`; FULL remains blocked |
+| 6. Performance and motion HIL qualification | `in_progress` | The velocity-domain correction reduced the calculated peak from 443,900 to about 131,100 steps/s2 and passed one guarded 40 kHz row with X=4/Y=1 drift. The self-test scheduling gate is now clear. The software single-IRQ experiment is retired; a separate MRES=3 diagnostic image keeps the two-edge executor while halving step counts, rate, and acceleration to preserve physical motion with greater interrupt margin. | Run one SAFE-bracketed, operator-watched selector `2085` at 20 kHz and review exact motion, driver configuration, deadline margin, homes, and reset/watchdog evidence before any production migration |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
@@ -329,6 +329,27 @@ zero I2C failure/recovery detail, and unchanged fault/watchdog counters. The
 matching cooperative manifest passed with no blocking issues. The self-test
 scheduling gate no longer blocks watched selector `2075`; the deferred long
 idle soak remains a separate watchdog-confidence activity.
+
+The motion experiment has since changed based on the TMC2208 interface
+semantics. Selector `2075` is retired before motion: combining a STEP rise and
+fall inside one ISR while `DEDGE=1` makes both physical edges active and is not
+equivalent to one planner step. The replacement is an explicitly separate
+`MRES3_Diagnostic` build plus selector `2085`. It retains the normal two-edge
+TIM2 executor, programs the shared driver configuration as `MRES=3` (1/32),
+`DEDGE=1`, and `multistep_filt=0`, and halves geometry, homing, backoff, rate,
+and acceleration units. The 20 kHz/70,000 microsteps/s2 row preserves the
+previous physical travel, nominal speed, and acceleration while reducing the
+interrupt demand. Exact diagnostic totals are 110,000 planner steps, 220,000
+rise/fall callbacks, and 219,990 nonterminal deadline samples.
+
+The diagnostic image is intentionally incompatible with ordinary MRES=2 host
+coordinates. It therefore rejects ordinary queued commands with motors
+disabled and accepts only SAFE or the scaled selector `2085` FULL path. The
+watched gate requires results `2080`-`2083`, zero pending and late-entry
+observations, no deadline misses, at least 450 timer ticks of post-handler
+margin, no P/R displacement, clean bounded homes, status/watchdog cadence, and
+no reset evidence. The production `Debug` image remains MRES=2, and no
+production migration is authorized until this diagnostic evidence is reviewed.
 
 ## Milestone 0: Baseline And Decisions
 

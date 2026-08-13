@@ -774,6 +774,43 @@ allowed until the obstruction is removed and the operator confirms the dual-X
 gantry, belts, rails, cable path, limit switch, and complete envelope remain
 square, clear, and mechanically normal.
 
+### MRES=3 20 kHz Diagnostic Candidate
+
+The software one-interrupt-per-step candidate is retired before further motion.
+With TMC2208 `DEDGE=1`, both STEP edges are physical microsteps; creating the
+rise and fall in one callback while committing one planner event does not keep
+software and physical displacement in the required one-to-one relationship.
+Selector `2075` now fails closed with `single_irq_superseded` before any fixture
+prompt.
+
+The replacement keeps the production two-edge executor and moves the margin
+experiment to the driver's supported microstep setting. The default `Debug`
+image remains `MRES=2` (1/64), while the separate `MRES3_Diagnostic` image is
+compiled with `MRES=3` (1/32), `DEDGE=1`, and `multistep_filt=0`. The diagnostic
+halves all X/Y geometry coordinates, X/Y/Z home and backoff units, the rate from
+40 to 20 kHz, and acceleration from 140,000 to 70,000 microsteps/s2. Physical
+travel, nominal speed, and acceleration are therefore unchanged.
+
+Selector `2085` reports `2080` motion totals, `2081` full IRQ coverage, `2082`
+entry and post-handler deadline margin, and `2083` driver initialization. The
+ten physical moves expect X=53,416, Y=90,000, master=110,000, TIM2=220,000,
+and deadline samples=219,990. Acceptance requires no pending/late entries, no
+missing or missed deadline samples, at least 450 remaining 90 MHz timer ticks,
+four successful bounded TMC UART writes, exact MRES/DEDGE/filter values, no P/R
+position change, clean bounded homes, and no reset/watchdog evidence.
+
+The diagnostic image rejects ordinary queued commands with all motors disabled
+and rejects ordinary FULL runs before motion; SAFE remains available. It is
+not a production migration. Rollback is the matching production
+`firmware/artifacts/LabCraft_firmware.bin`; the diagnostic artifact is retained
+separately as `LabCraft_firmware_mres3_diagnostic.bin`. The production image is
+341,832 bytes with SHA-256
+`E6DF114971CD21F7D2D18EAA12D615E4B313D802A9FDC9B8A124CA7E45527408`.
+The MRES=3 diagnostic image is 342,088 bytes with SHA-256
+`CA0F043736D8E87C94243F71D28A09DF5914E03F192CB1FA4F0B3BD0C91CCA48`.
+Both link with zero errors and the existing three warnings; host firmware
+validation passes 390/390 tests with 10,213,677 checks.
+
 Before source-scoped optimization, the Milestone 6 candidate added 1,800 bytes
 relative to the accepted Milestone 5 image and measured 392,800 bytes. Applying
 the GCC `Os` scope only to `Diagnostics.cpp`, while preserving the Milestone 2

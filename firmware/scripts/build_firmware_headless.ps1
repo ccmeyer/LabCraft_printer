@@ -1,13 +1,22 @@
 param(
   [string]$Config = "Debug",
   [string]$CubeIde = "C:\ST\STM32CubeIDE_1.18.1\STM32CubeIDE",
-  [string]$ProjectDir = ""
+  [string]$ProjectDir = "",
+  [string]$ArtifactFileName = "LabCraft_firmware.bin"
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $ProjName = "LabCraft_firmware"
+
+if ([System.IO.Path]::GetFileName($ArtifactFileName) -ne $ArtifactFileName -or
+    -not $ArtifactFileName.EndsWith(".bin", [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw "ArtifactFileName must be a .bin filename without a directory: $ArtifactFileName"
+}
+if ($Config -eq "MRES3_Diagnostic" -and $ArtifactFileName -eq "$ProjName.bin") {
+  throw "MRES3_Diagnostic must use a distinct ArtifactFileName"
+}
 
 if ([string]::IsNullOrWhiteSpace($ProjectDir)) {
   $ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -37,16 +46,16 @@ try {
 
 Write-Host "Headless build exit code: $exit"
 
-$bin = Get-ChildItem -Path $ProjectDir -Recurse -Filter "*.bin" |
-       Sort-Object LastWriteTime -Descending |
-       Select-Object -First 1
-
-if (-not $bin) { throw "No .bin produced under $ProjectDir" }
+$binPath = Join-Path $ProjectDir (Join-Path $Config "$ProjName.bin")
+if (-not (Test-Path -LiteralPath $binPath -PathType Leaf)) {
+  throw "Expected build output was not produced: $binPath"
+}
+$bin = Get-Item -LiteralPath $binPath
 
 $artifactDir = Join-Path $ProjectDir "artifacts"
 New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
 
-$artifactPath = Join-Path $artifactDir "$ProjName.bin"
+$artifactPath = Join-Path $artifactDir $ArtifactFileName
 if (([System.IO.Path]::GetFullPath($bin.FullName)) -ne ([System.IO.Path]::GetFullPath($artifactPath))) {
     Copy-Item $bin.FullName $artifactPath -Force
     Write-Host "Copied: $($bin.FullName) -> $artifactPath"

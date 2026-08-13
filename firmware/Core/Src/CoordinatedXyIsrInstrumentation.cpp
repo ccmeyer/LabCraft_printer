@@ -331,12 +331,15 @@ void recordCompleteStepPulse(State& state, uint32_t pulseHighCycles) {
   }
 }
 
-void recordCompleteStepDeadline(State& state,
-                                bool timerSampleValid,
-                                uint32_t timerCount,
-                                uint32_t timerArr,
-                                bool timerUpdatePending) {
+void recordTim2Deadline(State& state,
+                        bool timerSampleValid,
+                        uint32_t timerCount,
+                        uint32_t timerArr,
+                        bool timerUpdatePending) {
   if (!state.valid || !state.irqPathSampleOpen) return;
+  // A terminal callback stops the timer inside the handler. Its post-handler
+  // CNT value is therefore not a schedule-margin sample.
+  if (state.irqPathSampleTerminal) return;
   if (!timerSampleValid) {
     saturatingIncrement(state.deadlineMissing,
                         state.saturationFlags,

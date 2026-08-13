@@ -54,6 +54,7 @@ void TMC2208Driver::tpwmthrs     ( uint16_t B ) { SET_TPWM_REG(tpwmthrs); }
 
 // singleton init
 TMC2208Driver* TMC2208Driver::_instance = nullptr;
+TMC2208InitializationSnapshot TMC2208Driver::_initializationSnapshot{};
 
 TMC2208Driver::TMC2208Driver(UART_HandleTypeDef* huart)
   : _huart(huart)
@@ -74,6 +75,24 @@ TMC2208Driver* TMC2208Driver::instance() {
   return _instance;
 }
 
+TMC2208InitializationSnapshot TMC2208Driver::initializationSnapshot() {
+  return _initializationSnapshot;
+}
+
+void TMC2208Driver::beginInitialization(
+    const TMC2208Configuration::Values& configuration) {
+  _initializationSnapshot = {};
+  _initializationSnapshot.mres = configuration.mres;
+  _initializationSnapshot.multistepFilter = configuration.multistepFilter;
+  _initializationSnapshot.doubleEdge = configuration.doubleEdge;
+}
+
+void TMC2208Driver::finishInitialization(bool passed) {
+  _initializationSnapshot.gconf = GCONF_register.sr;
+  _initializationSnapshot.chopconf = CHOPCONF_register.sr;
+  _initializationSnapshot.initialized = passed;
+}
+
 uint8_t TMC2208Driver::calcCRC(uint8_t datagram[], uint8_t len) {
 	uint8_t crc = 0;
 	for (uint8_t i = 0; i < len; i++) {
@@ -91,7 +110,7 @@ uint8_t TMC2208Driver::calcCRC(uint8_t datagram[], uint8_t len) {
 	return crc;
 }
 
-void TMC2208Driver::write(uint8_t addr, uint32_t regVal) {
+bool TMC2208Driver::write(uint8_t addr, uint32_t regVal) {
 	  uint8_t pkt[8];
 	  pkt[0] = TMC2208_SYNC;             // sync + write
 	  pkt[1] = TMC2208_SLAVE;            // always 0
@@ -104,50 +123,63 @@ void TMC2208Driver::write(uint8_t addr, uint32_t regVal) {
 	  // CRC covers bytes 0..6
 	  pkt[7] = calcCRC(pkt, 7);
 
-	  HAL_UART_Transmit(_huart, pkt, sizeof(pkt), HAL_MAX_DELAY);
+	  const bool passed =
+	      HAL_UART_Transmit(_huart, pkt, sizeof(pkt), 10u) == HAL_OK;
+	  if (passed) {
+	    if (_initializationSnapshot.successfulWrites != UINT32_MAX) {
+	      ++_initializationSnapshot.successfulWrites;
+	    }
+	  } else if (_initializationSnapshot.failedWrites != UINT32_MAX) {
+	    ++_initializationSnapshot.failedWrites;
+	  }
+	  return passed;
 }
 
-void TMC2208Driver::writeGCONF() {
-	write(TMC2208_n::GCONF_t::address, GCONF_register.sr);
+bool TMC2208Driver::writeGCONF() {
+	return write(TMC2208_n::GCONF_t::address, GCONF_register.sr);
 }
 
-void TMC2208Driver::writeCHOPCONF() {
-	write(TMC2208_n::CHOPCONF_t::address, CHOPCONF_register.sr);
+bool TMC2208Driver::writeCHOPCONF() {
+	return write(TMC2208_n::CHOPCONF_t::address, CHOPCONF_register.sr);
 }
 
-void TMC2208Driver::writePWMCONF() {
-	write(TMC2208_n::PWMCONF_t::address, PWMCONF_register.sr);
+bool TMC2208Driver::writePWMCONF() {
+	return write(TMC2208_n::PWMCONF_t::address, PWMCONF_register.sr);
 }
 
-void TMC2208Driver::writeTPWMTHRS() {
-	write(TMC2208_n::TPWMTHRS_t::address, TPWMTHRS_register.sr);
+bool TMC2208Driver::writeTPWMTHRS() {
+	return write(TMC2208_n::TPWMTHRS_t::address, TPWMTHRS_register.sr);
 }
 
-void TMC2208Driver::push() {
-	writeGCONF();
-	writeCHOPCONF();
-	writePWMCONF();
-	writeTPWMTHRS();
+bool TMC2208Driver::push() {
+	const bool gconfPassed = writeGCONF();
+	const bool chopconfPassed = writeCHOPCONF();
+	const bool pwmconfPassed = writePWMCONF();
+	const bool thresholdPassed = writeTPWMTHRS();
+	return gconfPassed && chopconfPassed && pwmconfPassed && thresholdPassed;
 }
 
 extern "C" {
 
 void MX_TMC2208_Init(UART_HandleTypeDef* huart) {
 	static TMC2208Driver driver(huart);
+	const TMC2208Configuration::Values configuration =
+	    TMC2208Configuration::buildValues();
+	driver.beginInitialization(configuration);
 
 	driver.I_scale_analog(true);
 	driver.internal_Rsense(false);
 	driver.en_spreadCycle(false);
-	driver.multistep_filt(true);
+	driver.multistep_filt(configuration.multistepFilter);
 	driver.pdn_disable(true);
 	driver.mstep_reg_select(true);
 
-	driver.mres(2);
-	driver.dedge(true);
+	driver.mres(configuration.mres);
+	driver.dedge(configuration.doubleEdge);
 
 	driver.tpwmthrs(0);
 
-	driver.push();
+	driver.finishInitialization(driver.push());
 }
 
 }
