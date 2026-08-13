@@ -299,6 +299,18 @@ idle soak is deferred at the user's request; motion implementation may resume,
 but physical 40 kHz motion HIL remains gated on reviewing this short no-motion
 I2C attribution check.
 
+That short check is complete on commit `5bae8edf`. Two independently bracketed
+cooperative SAFE runs passed 30/30 without a new reset and reproduced
+`h=1;r=25;x=180`: generic `HAL_ERROR` after a 25 ms receive call, followed by
+an active 180 ms read recovery. Pressure age was 218 ms against the unchanged
+250 ms deadline. Because STM32's blocking receive maps multiple internal
+causes to `HAL_ERROR`, an error-code read in the already-failed branch is the
+remaining discriminator if exact I2C attribution is required. This evidence
+does not implicate the coordinated executor, but it confirms that repeated
+SAFE result emission has insufficient pressure-recovery margin. Motion source
+work may continue; watched physical high-rate HIL should retain immediate-stop
+criteria and must not be treated as FULL qualification.
+
 ## Milestone 0: Baseline And Decisions
 
 Status: `verified`

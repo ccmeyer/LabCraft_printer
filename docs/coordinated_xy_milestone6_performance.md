@@ -729,6 +729,15 @@ unchanged. A short no-motion SAFE check should classify the observed recovery
 as HAL error/busy/timeout before watched selector `2075` motion is run; the
 long idle soak remains deferred at the user's request.
 
+The short check subsequently reproduced `h=1;r=25;x=180` in both the focused
+cooperative SAFE and its delayed-reset bracket: `HAL_ERROR` after a 25 ms
+receive, with recovery active at 180 ms and pressure age 218 ms. Both runs
+passed 30/30, retained all four watchdog participants, and left reset/fault/
+watchdog counters unchanged. Since the blocking STM32 receive maps internal
+timeout and acknowledge paths to the same outward `HAL_ERROR`, capture of the
+HAL I2C error bitmask on the existing failure branch is needed only if the
+exact electrical versus preemption cause must be resolved before motion HIL.
+
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort
 terminal measured 2,349 cycles versus the retained 2,250-cycle gate; cancel

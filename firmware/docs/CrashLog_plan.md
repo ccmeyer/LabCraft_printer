@@ -718,6 +718,45 @@ fails result evidence closed. The outer
 diagnostic runner's static frame remains 3,504 bytes, below the retained
 4,096-byte investigation ceiling.
 
+### Lightweight I2C attribution HIL evidence (2026-08-12 local)
+
+Commit `5bae8edf`'s 338,768-byte artifact, SHA-256
+`220B93804445B99F1E116B9FA41CA87794C711B8B135BA7EAFE53AD4EA2E7906`,
+was flashed once and exercised without motion, pressure targets, valves, or
+heaters. One selector-`1038` cooperative SAFE and its delayed-reset bracket
+both passed 30/30 with all four watchdog participants live, complete 29/29
+cooperative yields, passing host cadence, no in-run reset, and unchanged
+`boot=128;fault_ct=4;wdg_ct=6` counters.
+
+Both runs reproduced the same pressure read failure. The focused arm reported
+`pg=39;pa=218;ph=5;pha=180;se=0;re=1;bc=1;h=1;r=25;x=180;hw=169;sf=0`;
+the bracket reported the same `h=1;r=25;x=180` with `pg=28`, `pa=218`, and
+`hw=167`. Thus the STM32 HAL call returned the generic `HAL_ERROR` after 25 ms
+and the pressure task was still in read recovery at 180 ms. The receive API
+maps several internal causes, including its timeout helpers, to `HAL_ERROR`,
+so `h=1` alone cannot distinguish acknowledge failure, timeout, or another
+I2C error bit. The 25 ms elapsed call versus the configured 20 ms timeout is
+consistent with the lower-priority polling call being preempted, but is not
+standalone proof of the internal HAL error cause.
+
+The cooperative manifest fails intentionally on `pa`, `re`, `bc`, `h`, `r`,
+and `x`; its scheduling-frame, stack, status-cadence, and watchdog-integrity
+gates pass. Report evidence:
+
+- `hil_reports/i2c_5bae8edf_cooperative_safe.json`, SHA-256
+  `2478DAE3980F84A604B34897AD09E1EBED9AE9A1219E39AEE922618054505B03`;
+- `hil_reports/i2c_5bae8edf_post_safe.json`, SHA-256
+  `020CD7695A4FF1F77A5995F70609BF7D174F712F9E6C965EF8A5A4031893AB1C`;
+- normalized report
+  `hil_reports/qualification_i2c_5bae8edf/LC-001/20260813T004639Z/report.json`,
+  SHA-256
+  `32F573E15E3789AA00EE63553A058D0692886FECEFF58A05DBF1C8A5D798CF68`.
+
+The long idle soak remains deferred. The next smallest attribution, if needed,
+is to copy `HAL_I2C_GetError()` only inside the existing failed-read branch;
+that adds no successful-read work and distinguishes timeout, acknowledge,
+bus, and arbitration error bits.
+
 Messages from past attempts:
 I’ve implemented the crash-log/watchdog slice and the remaining issue is target boot reachability during SAFE HIL. I’m checking the latest report and the startup paths that can prevent HELLO_ACK, then I’ll make the smallest fix and rerun validation.
 
