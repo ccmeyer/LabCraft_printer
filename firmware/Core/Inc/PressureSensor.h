@@ -133,7 +133,7 @@ private:
     HAL_StatusTypeDef selectPort(uint8_t port);
 
     /// do the actual I2C read of 4 bytes into raw, decode into float
-    uint16_t readSensorRaw(uint8_t port, bool* readOk);
+    uint16_t readSensorRaw(uint8_t port, HAL_StatusTypeDef* readStatus);
 
     static constexpr uint8_t SAFETY_HITS = 3;   // consecutive samples over limit (~15 ms at 5 ms/sample)
     bool     _safetyEnabled = true;

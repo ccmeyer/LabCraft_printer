@@ -50,6 +50,23 @@ def test_pressure_stack_headroom_is_sampled_only_at_diagnostic_snapshot():
     assert "vTaskGetInfo" in snapshot
 
 
+def test_i2c_failure_timing_is_lightweight_and_failure_only():
+    pressure = _read("firmware/Core/Src/PressureSensor.cpp")
+    loop = pressure[pressure.index("void PressureSensor::taskLoop()"):
+                    pressure.index("uint16_t PressureSensor::readSensorRaw")]
+    receive = loop.index("readSensorRaw(port, &readStatus)")
+    failure = loop.index("if (readStatus != HAL_OK)", receive)
+    detail = loop.index("PressureSensorWatchdogTelemetry_NoteReadFailure", failure)
+    assert "const uint32_t readStartMs = HAL_GetTick();" in loop[:receive]
+    assert "const uint32_t readElapsedMs = HAL_GetTick() - readStartMs;" in loop[receive:failure]
+    assert receive < failure < detail
+    assert "Logger::instance" not in loop[failure:detail]
+
+    telemetry = _read("firmware/Core/Inc/PressureSensorWatchdogTelemetry.h")
+    assert "PRESSURE_SENSOR_WDG_RECOVERY_DELAY_TICKS 20u" in telemetry
+    assert "PRESSURE_SENSOR_WDG_DURATION_MAX_MS 65535u" in telemetry
+
+
 def test_pressure_fault_snapshot_is_captured_before_crash_record():
     watchdog = _read("firmware/Core/Src/WatchdogSupervisor.c")
     capture = watchdog.index("CrashLog_CapturePressureSensorContext(&pressureContext)")

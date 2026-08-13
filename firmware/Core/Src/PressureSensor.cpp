@@ -80,6 +80,8 @@ PressureSensor* PressureSensor::instance() {
 // call this once, right after MX_I2C#_Init() but before any I²C traffic
 void PressureSensor::I2C1_BusRecovery()
 {
+  static_assert(PRESSURE_SENSOR_WDG_RECOVERY_DELAY_TICKS == ((9u * 2u) + 2u),
+                "recovery delay telemetry must match the GPIO recovery sequence");
   // fetch the pins from your singleton
   auto *self = PressureSensor::instance();
 
@@ -191,14 +193,23 @@ void PressureSensor::taskLoop() {
     	}
 
         // 2) grab a raw reading and validate it for control use
-        bool readOk = false;
+        HAL_StatusTypeDef readStatus = HAL_OK;
         setTelemetryPhase(PRESSURE_SENSOR_WDG_PHASE_READ_SENSOR);
-        uint16_t raw = readSensorRaw(port, &readOk);
-        if (!readOk) {
-          PressureSensorWatchdogTelemetry_NoteReadFailure(&g_pressureWatchdogTelemetry);
+        const uint32_t readStartMs = HAL_GetTick();
+        uint16_t raw = readSensorRaw(port, &readStatus);
+        const uint32_t readElapsedMs = HAL_GetTick() - readStartMs;
+        if (readStatus != HAL_OK) {
+          PressureSensorWatchdogTelemetry_NoteReadFailure(
+              &g_pressureWatchdogTelemetry,
+              static_cast<uint8_t>(readStatus),
+              readElapsedMs);
           setTelemetryPhase(PRESSURE_SENSOR_WDG_PHASE_RECOVER_READ);
           noteTelemetryRecovery();
+          PressureSensorWatchdogTelemetry_NoteReadRecoveryStart(
+              &g_pressureWatchdogTelemetry, HAL_GetTick());
           I2C1_BusRecovery();
+          PressureSensorWatchdogTelemetry_NoteReadRecoveryComplete(
+              &g_pressureWatchdogTelemetry, HAL_GetTick());
         }
         setTelemetryPhase(PRESSURE_SENSOR_WDG_PHASE_PROCESS_SAMPLE);
         PressureRegulatorMath::ValidationConfig cfg{};
@@ -303,14 +314,14 @@ HAL_StatusTypeDef PressureSensor::selectPort(uint8_t port) {
 #endif
 }
 
-uint16_t PressureSensor::readSensorRaw(uint8_t port, bool* readOk) {
+uint16_t PressureSensor::readSensorRaw(uint8_t port, HAL_StatusTypeDef* readStatus) {
   uint8_t buf[4];
   HAL_StatusTypeDef st = HAL_I2C_Master_Receive(_hi2c, _sensorAddr << 1, buf, 4, kPressureI2cTimeoutMs);
   if (st != HAL_OK) {
-    if (readOk != nullptr) *readOk = false;
+    if (readStatus != nullptr) *readStatus = st;
     return _controlSample[port].raw;
   }
-  if (readOk != nullptr) *readOk = true;
+  if (readStatus != nullptr) *readStatus = HAL_OK;
   uint8_t p1 = buf[0], p2 = buf[1];
   uint16_t raw = (uint16_t(p1 & 0x3F) << 8) | p2;
   return raw;

@@ -21,9 +21,14 @@ TEST(SelfTestSchedulingPolicy, CooperativeModeRequiresOneDelayPerFrame)
     PressureSensorWatchdogSnapshot pressure{};
     pressure.valid = 1u;
     pressure.stackHighWaterWords = 100u;
+    pressure.readFailureCount = 1u;
+    pressure.lastReadHalStatus = 2u;
+    pressure.lastFailedReadDurationMs = 1u;
+    pressure.readRecoveryDurationMs = 24u;
     char metrics[208];
     CHECK_TRUE(BuildSelfTestSchedulerResult(state, pressure, 5u, metrics, sizeof(metrics)));
     CHECK_TRUE(std::strstr(metrics, "sm=1;rf=1;yc=1") != nullptr);
+    CHECK_TRUE(std::strstr(metrics, ";h=2;r=1;x=24;") != nullptr);
 }
 
 TEST(SelfTestSchedulingPolicy, NoYieldModeRejectsUnexpectedDelay)
@@ -61,8 +66,13 @@ TEST(SelfTestSchedulingPolicy, PressureContextIsRequiredOnlyForPendingPressureFa
     context.valid = 1u;
     context.watchdogAgeMs = 300u;
     context.stackHighWaterWords = 100u;
+    context.readFailureCount = 1u;
+    context.lastReadHalStatus = 3u;
+    context.lastFailedReadDurationMs = 20u;
+    context.readRecoveryDurationMs = 270u;
     CHECK_TRUE(BuildPressureSensorWatchdogContextResult(true, true, context,
                                                         metrics, sizeof(metrics)));
+    CHECK_TRUE(std::strstr(metrics, ";h=3;r=20;x=270;") != nullptr);
 }
 
 TEST(SelfTestSchedulingPolicy, UnknownStackHeadroomFailsEvidenceClosed)
@@ -83,6 +93,20 @@ TEST(SelfTestSchedulingPolicy, UnknownStackHeadroomFailsEvidenceClosed)
                                                          metrics, sizeof(metrics)));
 }
 
+TEST(SelfTestSchedulingPolicy, InvalidHalFailureDetailFailsEvidenceClosed)
+{
+    SelfTestSchedulingState state{};
+    SelfTestScheduling_Init(state, SelfTestResultSchedulingMode::Cooperative);
+    PressureSensorWatchdogSnapshot pressure{};
+    pressure.valid = 1u;
+    pressure.stackHighWaterWords = 100u;
+    pressure.readFailureCount = 1u;
+    pressure.lastReadHalStatus = 0u;
+    char metrics[208];
+    CHECK_FALSE(BuildSelfTestSchedulerResult(state, pressure, 5u, metrics, sizeof(metrics)));
+    CHECK_TRUE(std::strstr(metrics, "sf=1") != nullptr);
+}
+
 TEST(SelfTestSchedulingPolicy, DiagnosticMetricsFitResultFrameBudget)
 {
     SelfTestSchedulingState state{};
@@ -100,6 +124,9 @@ TEST(SelfTestSchedulingPolicy, DiagnosticMetricsFitResultFrameBudget)
     pressure.selectFailureCount = UINT32_MAX;
     pressure.readFailureCount = UINT32_MAX;
     pressure.recoveryCount = UINT32_MAX;
+    pressure.lastReadHalStatus = 3u;
+    pressure.lastFailedReadDurationMs = PRESSURE_SENSOR_WDG_DURATION_MAX_MS;
+    pressure.readRecoveryDurationMs = PRESSURE_SENSOR_WDG_DURATION_MAX_MS;
     pressure.stackHighWaterWords = UINT32_MAX - 1u;
     char metrics[208];
     CHECK_TRUE(BuildSelfTestSchedulerResult(state, pressure, UINT32_MAX, metrics, sizeof(metrics)));

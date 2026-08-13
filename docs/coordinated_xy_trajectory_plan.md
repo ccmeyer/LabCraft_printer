@@ -287,6 +287,18 @@ idle soak before restarting the watched, SAFE-bracketed selector `2075` gate.
 Do not promote the one-interrupt executor or resume FULL qualification until
 that evidence is reviewed.
 
+The completed counterbalanced run attributed two pressure-watchdog resets to
+the no-yield self-test emitter: each retained context was in the ordinary delay
+phase at 252 ms with no I2C error or recovery. All cooperative arms yielded
+29/29 frames, held the run-local pressure gap to 28 ms, and caused no reset,
+but each observed one read recovery and therefore missed the strict pressure
+margin gate. Lightweight follow-up fields now distinguish HAL error/busy/
+timeout (`h`), failed receive duration (`r`), and recovery wall duration (`x`)
+without changing the pressure deadline or recovery sequence. The 30-minute
+idle soak is deferred at the user's request; motion implementation may resume,
+but physical 40 kHz motion HIL remains gated on reviewing this short no-motion
+I2C attribution check.
+
 ## Milestone 0: Baseline And Decisions
 
 Status: `verified`

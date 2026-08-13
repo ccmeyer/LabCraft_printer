@@ -253,6 +253,9 @@ static void Watchdog_Task(void* argument)
         pressureContext.loopCount = livePressure.loopCount;
         pressureContext.stackHighWaterWords = livePressure.stackHighWaterWords;
         pressureContext.snapshotTickMs = livePressure.snapshotTickMs;
+        pressureContext.lastReadHalStatus = livePressure.lastReadHalStatus;
+        pressureContext.lastFailedReadDurationMs = livePressure.lastFailedReadDurationMs;
+        pressureContext.readRecoveryDurationMs = livePressure.readRecoveryDurationMs;
         CrashLog_CapturePressureSensorContext(&pressureContext);
       } else {
         CrashLog_CapturePressureSensorContext(NULL);

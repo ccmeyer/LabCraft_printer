@@ -692,15 +692,25 @@ backup-domain version remain unchanged. SAFE rows `1044` and `1043` expose the
 retained context and live scheduler window; prior versioned FULL/focused
 qualification manifests remain unchanged.
 
+The follow-up lightweight I2C attribution adds the last failed-read HAL status
+(`h`: 1 error, 2 busy, 3 timeout), failed receive duration `r`, and active or
+last completed read-recovery wall duration `x` to the live and retained
+snapshots. The retained pressure-context version is 2. Recovery continues to
+request exactly 20 one-tick delays; comparing `x` with 20 ticks separates the
+known delay budget from combined scheduler/GPIO/HAL stretch without enabling
+continuous RTOS tracing. Successful reads pay only two tick reads and one
+subtraction. All telemetry-state writes, recovery timing, and retained-context
+updates remain on failure, diagnostic snapshot, or fault paths.
+
 The no-motion HIL order is `1039-1038, 1038-1039, 1039-1038`, with at least six
 seconds between arms, followed by a default SAFE after 12 seconds and one
 30-minute idle soak. Cooperative arms must keep pressure gap and age at or
 below 125 ms with no I2C error/recovery delta or watchdog increment. The
 deadline is not increased if these gates fail.
 
-The matching Debug artifact is 337,984 bytes with SHA-256
-`894BACF36E088FEAD500E26D8B45274F56355C8F3F98E9DDA29047087883F7C6`.
-It leaves 55,232 bytes in the 384 KiB application partition. The globally
+The matching Debug artifact is 338,768 bytes with SHA-256
+`220B93804445B99F1E116B9FA41CA87794C711B8B135BA7EAFE53AD4EA2E7906`.
+It leaves 54,448 bytes in the 384 KiB application partition. The globally
 enabled `INCLUDE_uxTaskGetStackHighWaterMark` option remains off. Instead, the
 existing trace facility scans only the pressure task once when a diagnostic or
 fault snapshot is requested; there is no per-loop stack scan. Unknown headroom

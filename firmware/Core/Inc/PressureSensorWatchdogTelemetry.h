@@ -8,8 +8,10 @@ extern "C" {
 #endif
 
 #define PRESSURE_SENSOR_WDG_AGE_UNKNOWN 0xFFFFFFFFu
+#define PRESSURE_SENSOR_WDG_DURATION_MAX_MS 65535u
+#define PRESSURE_SENSOR_WDG_RECOVERY_DELAY_TICKS 20u
 #define PRESSURE_SENSOR_WDG_RETAINED_MAGIC 0x50535744u
-#define PRESSURE_SENSOR_WDG_RETAINED_VERSION 1u
+#define PRESSURE_SENSOR_WDG_RETAINED_VERSION 2u
 
 typedef enum {
   PRESSURE_SENSOR_WDG_PHASE_UNINITIALIZED = 0,
@@ -29,6 +31,10 @@ typedef struct {
   uint8_t diagnosticWindowActive;
   uint8_t hasLoopStart;
   uint8_t hasLoopComplete;
+  uint8_t readRecoveryActive;
+  uint8_t readRecoveryStartedInDiagnostic;
+  uint8_t lastReadHalStatus;
+  uint8_t diagnosticLastReadHalStatus;
   uint8_t reserved[2];
   uint32_t phaseStartMs;
   uint32_t lastLoopStartMs;
@@ -44,6 +50,11 @@ typedef struct {
   uint32_t diagnosticReadFailureStart;
   uint32_t diagnosticRecoveryStart;
   uint32_t stackHighWaterWords;
+  uint32_t lastFailedReadDurationMs;
+  uint32_t lastReadRecoveryDurationMs;
+  uint32_t diagnosticLastFailedReadDurationMs;
+  uint32_t diagnosticLastReadRecoveryDurationMs;
+  uint32_t readRecoveryStartMs;
 } PressureSensorWatchdogState;
 
 typedef struct {
@@ -60,6 +71,10 @@ typedef struct {
   uint32_t recoveryCount;
   uint32_t stackHighWaterWords;
   uint32_t snapshotTickMs;
+  uint8_t lastReadHalStatus;
+  uint8_t reserved[3];
+  uint32_t lastFailedReadDurationMs;
+  uint32_t readRecoveryDurationMs;
 } PressureSensorWatchdogSnapshot;
 
 typedef struct {
@@ -77,6 +92,10 @@ typedef struct {
   uint32_t loopCount;
   uint32_t stackHighWaterWords;
   uint32_t snapshotTickMs;
+  uint8_t lastReadHalStatus;
+  uint8_t reserved2[3];
+  uint32_t lastFailedReadDurationMs;
+  uint32_t readRecoveryDurationMs;
 } PressureSensorWatchdogResetContext;
 
 typedef struct {
@@ -98,8 +117,14 @@ void PressureSensorWatchdogTelemetry_NoteLoopStart(PressureSensorWatchdogState* 
 void PressureSensorWatchdogTelemetry_NoteLoopComplete(PressureSensorWatchdogState* state,
                                                      uint32_t nowMs);
 void PressureSensorWatchdogTelemetry_NoteSelectFailure(PressureSensorWatchdogState* state);
-void PressureSensorWatchdogTelemetry_NoteReadFailure(PressureSensorWatchdogState* state);
+void PressureSensorWatchdogTelemetry_NoteReadFailure(PressureSensorWatchdogState* state,
+                                                     uint8_t halStatus,
+                                                     uint32_t elapsedMs);
 void PressureSensorWatchdogTelemetry_NoteRecovery(PressureSensorWatchdogState* state);
+void PressureSensorWatchdogTelemetry_NoteReadRecoveryStart(PressureSensorWatchdogState* state,
+                                                           uint32_t nowMs);
+void PressureSensorWatchdogTelemetry_NoteReadRecoveryComplete(PressureSensorWatchdogState* state,
+                                                              uint32_t nowMs);
 void PressureSensorWatchdogTelemetry_SetStackHighWater(PressureSensorWatchdogState* state,
                                                       uint32_t words);
 void PressureSensorWatchdogTelemetry_GetSnapshot(const PressureSensorWatchdogState* state,

@@ -721,10 +721,13 @@ contact, abnormal sound, lost squareness, limit anomalies, incomplete motion,
 reset/watchdog evidence, missing telemetry, or any deadline miss. This is an
 experimental candidate, not production enablement.
 
-The subsequent self-test scheduling/pressure-attribution image includes this
-same selector `2075` implementation and is 337,984 bytes with SHA-256
-`894BACF36E088FEAD500E26D8B45274F56355C8F3F98E9DDA29047087883F7C6`.
-It must complete the no-motion scheduler A/B gate before `2075` is run.
+The subsequent lightweight I2C-attribution image includes this same selector
+`2075` implementation and is 338,768 bytes with SHA-256
+`220B93804445B99F1E116B9FA41CA87794C711B8B135BA7EAFE53AD4EA2E7906`.
+It leaves the pressure deadline, recovery sequence, and normal motion path
+unchanged. A short no-motion SAFE check should classify the observed recovery
+as HAL error/busy/timeout before watched selector `2075` motion is run; the
+long idle soak remains deferred at the user's request.
 
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort
