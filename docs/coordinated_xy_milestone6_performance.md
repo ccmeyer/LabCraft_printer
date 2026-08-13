@@ -1075,6 +1075,55 @@ Manifest `coordinated_xy_mres3_conditional_rearm_v3` preserves v2's strict
 metrics while documenting the zero-cruise peak fallback. A watched
 SAFE/`2086`/SAFE bracket is required before any production migration decision.
 
+### Zero-cruise conditional-rearm HIL evidence
+
+The watched run used implementation commit `16a40dff` and the 352,088-byte
+MRES3 diagnostic artifact with SHA-256
+`CE10D650BC5D4B3377FB92A997AC1C3334E494B9BC9D3817ACA7DD6B0682341E`.
+Its hash matched on Pi `192.168.0.33` before flashing. The operator confirmed
+that the envelope was clear and both limits were released before the run, then
+reported that all movement and homing looked and sounded normal.
+
+Both SAFE brackets passed 30/30. `boot=148`, `fault_ct=4`, and `wdg_ct=6`
+remained unchanged across the motion row; all four watchdog participants were
+live, `late_task=none`, and no reset report, pressure I2C failure, or bus
+recovery occurred. The bracket reports are:
+
+- `hil_reports/conditional_rearm_peak_pre_safe_20260813T171500Z.json`, SHA-256
+  `A07DA5F7D552CFDD65444DF096105C0257D6637B3EBE76391F08D6BA94A614A6`;
+- `hil_reports/conditional_rearm_peak_final_safe_20260813T171900Z.json`,
+  SHA-256
+  `3C735960013DA640B8DE695FD863353E2FBF30D45AC33A7E8AF4853C016076DE`.
+
+Selector `2086` completed all ten moves, the reverse legs, and both bounded
+homes. It reported the exact `53,416/90,000/110,000` X/Y/master totals,
+220,000 TIM2 callbacks, 219,990 valid conditional decisions, zero missing
+samples, zero pending observations, zero pending-at-rearm events, zero deadline
+misses, zero saturation/timeout, X/Y drift of 1/0 step, and no hard failure
+(`fv=hm=0`). All ten one-shots were consumed and rearmed successfully:
+`ic=10;ix=0;ir=10`, with `im=813`, `wm=1813`, and `rd=491`. The total
+`rc=12` shows that the conditional policy also recovered two naturally
+low-margin edges. Every non-rearmed edge retained more than the guard
+(`ns=1134` versus the required 1,126), and final deadline slack was 592 ticks.
+
+The raw report is
+`hil_reports/conditional_rearm_peak_2086_20260813T171700Z.json`, SHA-256
+`9D9A923D8119229F6D0330D61D887B261FC0E6844E0DEFF7CE7DB080AE374AB4`.
+The v3 normalized report is
+`hil_reports/qualification/LC-001/20260813T171625Z/report.json`, SHA-256
+`F4490FF4832EB6BEE530A3E1AD9446EF3A6289D8D18EF4F5FC5E4855B3EC9112`.
+
+Normalization correctly remains FAIL because the complete-row firmware result
+retains strict diagnostic failures: `qf=10;qm=2148007936` (`0x80080000`) for
+terminal-cycle cost and explicit entry lateness. The maximum terminal callback
+was 2,640 core cycles versus the 2,250-cycle strict gate; entry evidence was
+`cm=549;lc=543;dm=3380`. Those failures are not injection failures: every v3
+conditional metric met its manifest threshold, and the injection-specific mask
+bit seen in the prior v2 report is now absent. This evidence validates the
+conditional recovery mechanism under both deliberate and naturally low-margin
+service, but it does not by itself authorize MRES3 or conditional rearming as a
+production default.
+
 ## Rollback
 
 Immediate rollback disables coordinated instrumentation or builds with
