@@ -2913,15 +2913,18 @@ the watchdog identifies the pressure task as late. A context is required only
 for a still-pending pressure watchdog fault under the same firmware image;
 power cycles and flashing a different image may invalidate `.noinit`.
 
-Both rows also report lightweight I2C failure detail as `h`, `r`, and `x`:
+Both rows also report lightweight I2C failure detail as `h`, `r`, `x`, and `e`:
 `h=0` means no failed read in the current diagnostic window, while `1`, `2`,
 and `3` are the STM32 HAL `ERROR`, `BUSY`, and `TIMEOUT` results; `r` is the
 failed receive call's elapsed milliseconds; and `x` is the active or most
-recent read-recovery wall time. The recovery sequence intentionally requests
+recent read-recovery wall time. `e` is the failure-only result of
+`HAL_I2C_GetError()`: timeout is 32, acknowledge failure 4, bus error 1, and
+arbitration loss 2; combined errors are bitwise sums. The recovery sequence intentionally requests
 20 one-tick delays, so `max(0, x-20)` includes scheduling stretch plus its
 small GPIO and HAL reinitialization cost. This is not continuous task tracing.
 The successful read path adds only two `HAL_GetTick()` reads and a subtraction;
-detail-state writes occur only after an I2C read failure. No UART logging,
+the error-mask read and detail-state writes occur only after an I2C read
+failure. Durations saturate and fail evidence closed above 999 ms. No UART logging,
 mutex, allocation, new delay, or stack scan was added to the pressure loop.
 The global `INCLUDE_uxTaskGetStackHighWaterMark` setting remains disabled.
 

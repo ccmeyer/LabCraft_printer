@@ -23,12 +23,13 @@ TEST(SelfTestSchedulingPolicy, CooperativeModeRequiresOneDelayPerFrame)
     pressure.stackHighWaterWords = 100u;
     pressure.readFailureCount = 1u;
     pressure.lastReadHalStatus = 2u;
+    pressure.lastReadHalError = 0x20u;
     pressure.lastFailedReadDurationMs = 1u;
     pressure.readRecoveryDurationMs = 24u;
     char metrics[208];
     CHECK_TRUE(BuildSelfTestSchedulerResult(state, pressure, 5u, metrics, sizeof(metrics)));
     CHECK_TRUE(std::strstr(metrics, "sm=1;rf=1;yc=1") != nullptr);
-    CHECK_TRUE(std::strstr(metrics, ";h=2;r=1;x=24;") != nullptr);
+    CHECK_TRUE(std::strstr(metrics, ";h=2;r=1;x=24;e=32;") != nullptr);
 }
 
 TEST(SelfTestSchedulingPolicy, NoYieldModeRejectsUnexpectedDelay)
@@ -68,11 +69,12 @@ TEST(SelfTestSchedulingPolicy, PressureContextIsRequiredOnlyForPendingPressureFa
     context.stackHighWaterWords = 100u;
     context.readFailureCount = 1u;
     context.lastReadHalStatus = 3u;
+    context.lastReadHalError = 4u;
     context.lastFailedReadDurationMs = 20u;
     context.readRecoveryDurationMs = 270u;
     CHECK_TRUE(BuildPressureSensorWatchdogContextResult(true, true, context,
                                                         metrics, sizeof(metrics)));
-    CHECK_TRUE(std::strstr(metrics, ";h=3;r=20;x=270;") != nullptr);
+    CHECK_TRUE(std::strstr(metrics, ";h=3;r=20;x=270;e=4;") != nullptr);
 }
 
 TEST(SelfTestSchedulingPolicy, UnknownStackHeadroomFailsEvidenceClosed)
@@ -107,6 +109,21 @@ TEST(SelfTestSchedulingPolicy, InvalidHalFailureDetailFailsEvidenceClosed)
     CHECK_TRUE(std::strstr(metrics, "sf=1") != nullptr);
 }
 
+TEST(SelfTestSchedulingPolicy, UnknownHalErrorBitsFailEvidenceClosed)
+{
+    SelfTestSchedulingState state{};
+    SelfTestScheduling_Init(state, SelfTestResultSchedulingMode::Cooperative);
+    PressureSensorWatchdogSnapshot pressure{};
+    pressure.valid = 1u;
+    pressure.stackHighWaterWords = 100u;
+    pressure.readFailureCount = 1u;
+    pressure.lastReadHalStatus = 1u;
+    pressure.lastReadHalError = PRESSURE_SENSOR_WDG_HAL_ERROR_VALID_MASK + 1u;
+    char metrics[208];
+    CHECK_FALSE(BuildSelfTestSchedulerResult(state, pressure, 5u, metrics, sizeof(metrics)));
+    CHECK_TRUE(std::strstr(metrics, "sf=1") != nullptr);
+}
+
 TEST(SelfTestSchedulingPolicy, DiagnosticMetricsFitResultFrameBudget)
 {
     SelfTestSchedulingState state{};
@@ -125,6 +142,7 @@ TEST(SelfTestSchedulingPolicy, DiagnosticMetricsFitResultFrameBudget)
     pressure.readFailureCount = UINT32_MAX;
     pressure.recoveryCount = UINT32_MAX;
     pressure.lastReadHalStatus = 3u;
+    pressure.lastReadHalError = PRESSURE_SENSOR_WDG_HAL_ERROR_VALID_MASK;
     pressure.lastFailedReadDurationMs = PRESSURE_SENSOR_WDG_DURATION_MAX_MS;
     pressure.readRecoveryDurationMs = PRESSURE_SENSOR_WDG_DURATION_MAX_MS;
     pressure.stackHighWaterWords = UINT32_MAX - 1u;

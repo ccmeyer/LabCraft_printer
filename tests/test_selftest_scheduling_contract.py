@@ -64,7 +64,8 @@ def test_i2c_failure_timing_is_lightweight_and_failure_only():
 
     telemetry = _read("firmware/Core/Inc/PressureSensorWatchdogTelemetry.h")
     assert "PRESSURE_SENSOR_WDG_RECOVERY_DELAY_TICKS 20u" in telemetry
-    assert "PRESSURE_SENSOR_WDG_DURATION_MAX_MS 65535u" in telemetry
+    assert "PRESSURE_SENSOR_WDG_DURATION_MAX_MS 999u" in telemetry
+    assert "const uint32_t readHalError = HAL_I2C_GetError(_hi2c);" in loop[failure:]
 
 
 def test_pressure_fault_snapshot_is_captured_before_crash_record():

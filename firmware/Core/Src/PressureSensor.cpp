@@ -199,10 +199,12 @@ void PressureSensor::taskLoop() {
         uint16_t raw = readSensorRaw(port, &readStatus);
         const uint32_t readElapsedMs = HAL_GetTick() - readStartMs;
         if (readStatus != HAL_OK) {
+          const uint32_t readHalError = HAL_I2C_GetError(_hi2c);
           PressureSensorWatchdogTelemetry_NoteReadFailure(
               &g_pressureWatchdogTelemetry,
               static_cast<uint8_t>(readStatus),
-              readElapsedMs);
+              readElapsedMs,
+              readHalError);
           setTelemetryPhase(PRESSURE_SENSOR_WDG_PHASE_RECOVER_READ);
           noteTelemetryRecovery();
           PressureSensorWatchdogTelemetry_NoteReadRecoveryStart(

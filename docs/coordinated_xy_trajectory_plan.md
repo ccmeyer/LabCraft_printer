@@ -304,8 +304,8 @@ cooperative SAFE runs passed 30/30 without a new reset and reproduced
 `h=1;r=25;x=180`: generic `HAL_ERROR` after a 25 ms receive call, followed by
 an active 180 ms read recovery. Pressure age was 218 ms against the unchanged
 250 ms deadline. Because STM32's blocking receive maps multiple internal
-causes to `HAL_ERROR`, an error-code read in the already-failed branch is the
-remaining discriminator if exact I2C attribution is required. This evidence
+causes to `HAL_ERROR`, the next diagnostic image captures `HAL_I2C_GetError()`
+as `e` in the already-failed branch without adding successful-read work. This evidence
 does not implicate the coordinated executor, but it confirms that repeated
 SAFE result emission has insufficient pressure-recovery margin. Motion source
 work may continue; watched physical high-rate HIL should retain immediate-stop

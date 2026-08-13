@@ -74,6 +74,7 @@ uint32_t PressureSensorWatchdogTelemetry_BeginWindow(PressureSensorWatchdogState
   state->diagnosticLastReadHalStatus = 0u;
   state->diagnosticLastFailedReadDurationMs = 0u;
   state->diagnosticLastReadRecoveryDurationMs = 0u;
+  state->diagnosticLastReadHalError = 0u;
   endUpdate(state);
   return 1u;
 }
@@ -127,15 +128,18 @@ void PressureSensorWatchdogTelemetry_NoteSelectFailure(PressureSensorWatchdogSta
 
 void PressureSensorWatchdogTelemetry_NoteReadFailure(PressureSensorWatchdogState* state,
                                                      uint8_t halStatus,
-                                                     uint32_t elapsedMs)
+                                                     uint32_t elapsedMs,
+                                                     uint32_t halError)
 {
   if (state == 0) return;
   beginUpdate(state);
   incrementSaturating(&state->readFailureCount, &state->saturated);
   state->lastReadHalStatus = halStatus;
+  state->lastReadHalError = halError;
   state->lastFailedReadDurationMs = boundedDuration(elapsedMs, &state->saturated);
   if (state->diagnosticWindowActive != 0u) {
     state->diagnosticLastReadHalStatus = halStatus;
+    state->diagnosticLastReadHalError = halError;
     state->diagnosticLastFailedReadDurationMs = state->lastFailedReadDurationMs;
   }
   endUpdate(state);
@@ -217,6 +221,7 @@ void PressureSensorWatchdogTelemetry_GetSnapshot(const PressureSensorWatchdogSta
     out->readFailureCount = state->readFailureCount - state->diagnosticReadFailureStart;
     out->recoveryCount = state->recoveryCount - state->diagnosticRecoveryStart;
     out->lastReadHalStatus = state->diagnosticLastReadHalStatus;
+    out->lastReadHalError = state->diagnosticLastReadHalError;
     out->lastFailedReadDurationMs = state->diagnosticLastFailedReadDurationMs;
     out->readRecoveryDurationMs = state->diagnosticLastReadRecoveryDurationMs;
   } else {
@@ -226,6 +231,7 @@ void PressureSensorWatchdogTelemetry_GetSnapshot(const PressureSensorWatchdogSta
     out->readFailureCount = state->readFailureCount;
     out->recoveryCount = state->recoveryCount;
     out->lastReadHalStatus = state->lastReadHalStatus;
+    out->lastReadHalError = state->lastReadHalError;
     out->lastFailedReadDurationMs = state->lastFailedReadDurationMs;
     out->readRecoveryDurationMs = state->lastReadRecoveryDurationMs;
   }
@@ -282,6 +288,7 @@ uint32_t PressureSensorWatchdogTelemetry_ChecksumResetContext(
   hash = hashU32(hash, context->stackHighWaterWords);
   hash = hashU32(hash, context->snapshotTickMs);
   hash = hashByte(hash, context->lastReadHalStatus);
+  hash = hashU32(hash, context->lastReadHalError);
   hash = hashU32(hash, context->lastFailedReadDurationMs);
   return hashU32(hash, context->readRecoveryDurationMs);
 }

@@ -20,12 +20,12 @@ def _report(mode: int, *, pg: int, pa: int = 5, watchdog_count: int = 0):
         {"test_id": 1041, "name": "crash_record_retained_safe", "pass": True,
          "metrics": {"boot": 1, "fault_ct": watchdog_count, "wdg_ct": watchdog_count}},
         {"test_id": 1044, "name": "pressure_wdg_context_safe", "pass": True,
-         "metrics": {"v": 0, "h": 0, "r": 0, "x": 0, "sf": 0}},
+         "metrics": {"v": 0, "h": 0, "r": 0, "x": 0, "e": 0, "sf": 0}},
         {"test_id": 1043, "name": "selftest_scheduler_safe", "pass": True,
          "metrics": {"sm": mode, "rf": 29, "yc": 0 if mode == 0 else 29,
                      "txm": 20, "txt": 500, "pg": pg, "pa": pa, "ph": 1,
                      "pha": 2, "se": 0, "re": 0, "bc": 0,
-                     "h": 0, "r": 0, "x": 0, "hw": 100, "sf": 0}},
+                     "h": 0, "r": 0, "x": 0, "e": 0, "hw": 100, "sf": 0}},
     ])
     return {
         "profile": "SAFE", "aborted": False,
@@ -91,7 +91,7 @@ def test_final_safe_closes_delayed_reset_attribution_for_last_b_arm():
 @pytest.mark.parametrize(
     ("metric", "value"),
     (("sm", 0), ("rf", 28), ("yc", 28), ("pg", 126), ("pa", 126),
-     ("se", 1), ("re", 1), ("bc", 1), ("h", 1), ("r", 1), ("x", 1),
+     ("se", 1), ("re", 1), ("bc", 1), ("h", 1), ("r", 1), ("x", 1), ("e", 32),
      ("hw", 4294967295), ("sf", 1)),
 )
 def test_cooperative_manifest_rejects_strict_gate_violations(metric, value):

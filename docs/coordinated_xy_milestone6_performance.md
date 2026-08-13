@@ -722,11 +722,12 @@ reset/watchdog evidence, missing telemetry, or any deadline miss. This is an
 experimental candidate, not production enablement.
 
 The subsequent lightweight I2C-attribution image includes this same selector
-`2075` implementation and is 338,768 bytes with SHA-256
-`220B93804445B99F1E116B9FA41CA87794C711B8B135BA7EAFE53AD4EA2E7906`.
+`2075` implementation and is 338,968 bytes with SHA-256
+`A90B83E35358C1924745BA7F050B014D02B2B406BA318E3D7CF9A7108919711B`.
 It leaves the pressure deadline, recovery sequence, and normal motion path
 unchanged. A short no-motion SAFE check should classify the observed recovery
-as HAL error/busy/timeout before watched selector `2075` motion is run; the
+using the failure-only HAL result and I2C error mask before watched selector
+`2075` motion is run; the
 long idle soak remains deferred at the user's request.
 
 The short check subsequently reproduced `h=1;r=25;x=180` in both the focused
@@ -734,9 +735,9 @@ cooperative SAFE and its delayed-reset bracket: `HAL_ERROR` after a 25 ms
 receive, with recovery active at 180 ms and pressure age 218 ms. Both runs
 passed 30/30, retained all four watchdog participants, and left reset/fault/
 watchdog counters unchanged. Since the blocking STM32 receive maps internal
-timeout and acknowledge paths to the same outward `HAL_ERROR`, capture of the
-HAL I2C error bitmask on the existing failure branch is needed only if the
-exact electrical versus preemption cause must be resolved before motion HIL.
+timeout and acknowledge paths to the same outward `HAL_ERROR`, the next
+diagnostic image captures the HAL I2C error bitmask as `e` on the existing
+failure branch without adding work to successful pressure reads.
 
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort

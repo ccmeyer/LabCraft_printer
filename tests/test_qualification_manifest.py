@@ -22,6 +22,7 @@ def test_load_selftest_scheduler_manifests():
     assert cooperative.analysis_rules["1043"]["metrics"]["pg"]["max"] == 125
     assert cooperative.analysis_rules["1043"]["metrics"]["h"]["equals"] == 0
     assert cooperative.analysis_rules["1043"]["metrics"]["x"]["equals"] == 0
+    assert cooperative.analysis_rules["1043"]["metrics"]["e"]["equals"] == 0
 
 
 def test_load_builtin_factory_acceptance_manifest():

@@ -8,10 +8,11 @@ extern "C" {
 #endif
 
 #define PRESSURE_SENSOR_WDG_AGE_UNKNOWN 0xFFFFFFFFu
-#define PRESSURE_SENSOR_WDG_DURATION_MAX_MS 65535u
+#define PRESSURE_SENSOR_WDG_DURATION_MAX_MS 999u
 #define PRESSURE_SENSOR_WDG_RECOVERY_DELAY_TICKS 20u
+#define PRESSURE_SENSOR_WDG_HAL_ERROR_VALID_MASK 0x000001FFu
 #define PRESSURE_SENSOR_WDG_RETAINED_MAGIC 0x50535744u
-#define PRESSURE_SENSOR_WDG_RETAINED_VERSION 2u
+#define PRESSURE_SENSOR_WDG_RETAINED_VERSION 3u
 
 typedef enum {
   PRESSURE_SENSOR_WDG_PHASE_UNINITIALIZED = 0,
@@ -55,6 +56,8 @@ typedef struct {
   uint32_t diagnosticLastFailedReadDurationMs;
   uint32_t diagnosticLastReadRecoveryDurationMs;
   uint32_t readRecoveryStartMs;
+  uint32_t lastReadHalError;
+  uint32_t diagnosticLastReadHalError;
 } PressureSensorWatchdogState;
 
 typedef struct {
@@ -75,6 +78,7 @@ typedef struct {
   uint8_t reserved[3];
   uint32_t lastFailedReadDurationMs;
   uint32_t readRecoveryDurationMs;
+  uint32_t lastReadHalError;
 } PressureSensorWatchdogSnapshot;
 
 typedef struct {
@@ -96,6 +100,7 @@ typedef struct {
   uint8_t reserved2[3];
   uint32_t lastFailedReadDurationMs;
   uint32_t readRecoveryDurationMs;
+  uint32_t lastReadHalError;
 } PressureSensorWatchdogResetContext;
 
 typedef struct {
@@ -119,7 +124,8 @@ void PressureSensorWatchdogTelemetry_NoteLoopComplete(PressureSensorWatchdogStat
 void PressureSensorWatchdogTelemetry_NoteSelectFailure(PressureSensorWatchdogState* state);
 void PressureSensorWatchdogTelemetry_NoteReadFailure(PressureSensorWatchdogState* state,
                                                      uint8_t halStatus,
-                                                     uint32_t elapsedMs);
+                                                     uint32_t elapsedMs,
+                                                     uint32_t halError);
 void PressureSensorWatchdogTelemetry_NoteRecovery(PressureSensorWatchdogState* state);
 void PressureSensorWatchdogTelemetry_NoteReadRecoveryStart(PressureSensorWatchdogState* state,
                                                            uint32_t nowMs);

@@ -256,6 +256,7 @@ static void Watchdog_Task(void* argument)
         pressureContext.lastReadHalStatus = livePressure.lastReadHalStatus;
         pressureContext.lastFailedReadDurationMs = livePressure.lastFailedReadDurationMs;
         pressureContext.readRecoveryDurationMs = livePressure.readRecoveryDurationMs;
+        pressureContext.lastReadHalError = livePressure.lastReadHalError;
         CrashLog_CapturePressureSensorContext(&pressureContext);
       } else {
         CrashLog_CapturePressureSensorContext(NULL);

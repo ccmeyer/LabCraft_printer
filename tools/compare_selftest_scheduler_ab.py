@@ -73,6 +73,7 @@ def compare_reports(
             "read_hal_status": _integer(metrics.get("h"), -1),
             "read_call_ms": _integer(metrics.get("r"), -1),
             "recovery_elapsed_ms": _integer(metrics.get("x"), -1),
+            "hal_error_mask": _integer(metrics.get("e"), -1),
             "stack_headroom": _integer(metrics.get("hw"), -1),
             "saturated": _integer(metrics.get("sf"), 1),
             "progress_watchdog_pass": _host_check_pass(report, "selftest_progress_watchdog"),
@@ -86,6 +87,7 @@ def compare_reports(
             "retained_read_hal_status": _integer(retained_metrics.get("h"), 0),
             "retained_read_call_ms": _integer(retained_metrics.get("r"), 0),
             "retained_recovery_elapsed_ms": _integer(retained_metrics.get("x"), 0),
+            "retained_hal_error_mask": _integer(retained_metrics.get("e"), 0),
             "boot": _integer(crash_metrics.get("boot"), -1),
             "fault_count": _integer(crash_metrics.get("fault_ct"), -1),
             "watchdog_count": _integer(crash_metrics.get("wdg_ct"), -1),
@@ -114,6 +116,7 @@ def compare_reports(
                 "retained_select_errors", "retained_read_errors", "retained_recoveries",
                 "retained_read_hal_status", "retained_read_call_ms",
                 "retained_recovery_elapsed_ms",
+                "retained_hal_error_mask",
             ):
                 arms[index - 1][key] = arms[index][key]
 
@@ -141,6 +144,7 @@ def compare_reports(
                 "retained_read_errors": "re", "retained_recoveries": "bc",
                 "retained_read_hal_status": "h", "retained_read_call_ms": "r",
                 "retained_recovery_elapsed_ms": "x",
+                "retained_hal_error_mask": "e",
             }
             for arm_key, metric_key in mapping.items():
                 arms[-1][arm_key] = _integer(final_context_metrics.get(metric_key), 0)
@@ -161,6 +165,7 @@ def compare_reports(
                 and arm["read_hal_status"] == 0
                 and arm["read_call_ms"] == 0
                 and arm["recovery_elapsed_ms"] == 0
+                and arm["hal_error_mask"] == 0
                 and 1 <= arm["stack_headroom"] < 0xFFFFFFFF
                 and arm["saturated"] == 0
                 and arm["progress_watchdog_pass"]
@@ -209,7 +214,7 @@ def compare_reports(
 
 def _markdown(comparison: dict[str, Any]) -> str:
     lines = [
-        "| Arm | Mode | Complete | pg ms | pa ms | tx max/total ms | I2C S/R/B | HAL/read/recovery ms | Host WDG/status | WDT reset | B strict |",
+        "| Arm | Mode | Complete | pg ms | pa ms | tx max/total ms | I2C S/R/B | HAL/error/read/recovery ms | Host WDG/status | WDT reset | B strict |",
         "|---:|:---:|:---:|---:|---:|:---:|:---:|:---:|:---:|:---:|:---:|",
     ]
     for arm in comparison["arms"]:
@@ -218,7 +223,8 @@ def _markdown(comparison: dict[str, Any]) -> str:
             f"| {arm['arm']} | {arm['label']} | {'yes' if arm['complete'] else 'no'} | "
             f"{arm['pg']} | {arm['pa']} | {arm['txm']}/{arm['txt']} | "
             f"{arm['select_errors']}/{arm['read_errors']}/{arm['recoveries']} | "
-            f"{arm['read_hal_status']}/{arm['read_call_ms']}/{arm['recovery_elapsed_ms']} | "
+            f"{arm['read_hal_status']}/{arm['hal_error_mask']}/"
+            f"{arm['read_call_ms']}/{arm['recovery_elapsed_ms']} | "
             f"{'yes' if arm['progress_watchdog_pass'] else 'no'}/"
             f"{'yes' if arm['status_cadence_pass'] else 'no'} | "
             f"{'yes' if arm['watchdog_reset_attributed'] else 'no'} | {strict} |"

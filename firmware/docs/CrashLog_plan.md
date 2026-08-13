@@ -693,9 +693,11 @@ retained context and live scheduler window; prior versioned FULL/focused
 qualification manifests remain unchanged.
 
 The follow-up lightweight I2C attribution adds the last failed-read HAL status
-(`h`: 1 error, 2 busy, 3 timeout), failed receive duration `r`, and active or
-last completed read-recovery wall duration `x` to the live and retained
-snapshots. The retained pressure-context version is 2. Recovery continues to
+(`h`: 1 error, 2 busy, 3 timeout), failed receive duration `r`, active or
+last completed read-recovery wall duration `x`, and `HAL_I2C_GetError()` mask
+`e` to the live and retained snapshots. The retained pressure-context version
+is 3. Error-mask capture occurs only after a failed receive and before recovery
+can reset the peripheral state. Recovery continues to
 request exactly 20 one-tick delays; comparing `x` with 20 ticks separates the
 known delay budget from combined scheduler/GPIO/HAL stretch without enabling
 continuous RTOS tracing. Successful reads pay only two tick reads and one
@@ -708,9 +710,9 @@ seconds between arms, followed by a default SAFE after 12 seconds and one
 below 125 ms with no I2C error/recovery delta or watchdog increment. The
 deadline is not increased if these gates fail.
 
-The matching Debug artifact is 338,768 bytes with SHA-256
-`220B93804445B99F1E116B9FA41CA87794C711B8B135BA7EAFE53AD4EA2E7906`.
-It leaves 54,448 bytes in the 384 KiB application partition. The globally
+The matching Debug artifact is 338,968 bytes with SHA-256
+`A90B83E35358C1924745BA7F050B014D02B2B406BA318E3D7CF9A7108919711B`.
+It leaves 54,248 bytes in the 384 KiB application partition. The globally
 enabled `INCLUDE_uxTaskGetStackHighWaterMark` option remains off. Instead, the
 existing trace facility scans only the pressure task once when a diagnostic or
 fault snapshot is requested; there is no per-loop stack scan. Unknown headroom
@@ -752,10 +754,11 @@ gates pass. Report evidence:
   SHA-256
   `32F573E15E3789AA00EE63553A058D0692886FECEFF58A05DBF1C8A5D798CF68`.
 
-The long idle soak remains deferred. The next smallest attribution, if needed,
-is to copy `HAL_I2C_GetError()` only inside the existing failed-read branch;
-that adds no successful-read work and distinguishes timeout, acknowledge,
-bus, and arbitration error bits.
+The long idle soak remains deferred. This diagnostic image copies
+`HAL_I2C_GetError()` only inside the existing failed-read branch, adding no
+successful-read work and distinguishing timeout, acknowledge, bus, and
+arbitration error bits. Its short no-motion HIL result is recorded separately
+after the matching artifact is built and flashed.
 
 Messages from past attempts:
 I’ve implemented the crash-log/watchdog slice and the remaining issue is target boot reachability during SAFE HIL. I’m checking the latest report and the startup paths that can prevent HELLO_ACK, then I’ll make the smallest fix and rerun validation.
