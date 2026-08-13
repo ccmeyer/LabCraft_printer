@@ -356,6 +356,24 @@ TEST(DiagnosticResultEmitter, Tmc2208Mres3ConfigurationMetricsFit)
     CHECK_TRUE(len > 0u);
 }
 
+TEST(DiagnosticResultEmitter, ConditionalRearmMetricsFit)
+{
+    const char metricsText[] =
+        "rm=2;rg=1125;it=900;dc=219990;mi=0;rc=10;rp=0;rd=64;"
+        "ic=10;ix=0;ir=10;im=900;ns=1126;wm=4500;sf=0;to=0";
+    const char name[] = "coord_xy_conditional_rearm";
+    const size_t nameLength = std::strlen(name) >
+            DiagnosticResultEmitter::kMaxResultNameBytes
+        ? DiagnosticResultEmitter::kMaxResultNameBytes
+        : std::strlen(name);
+    CHECK_TRUE(std::strlen(metricsText) <=
+        DiagnosticResultEmitter::kResultMetricsFrameBudget - nameLength);
+    uint8_t payload[256] = {0};
+    CHECK_TRUE(DiagnosticResultEmitter::buildResultPayload(
+        payload, sizeof(payload), 1u, 2u, 2086u, name, true,
+        metricsText, 4u) > 0u);
+}
+
 TEST(DiagnosticResultEmitter, DonePayloadPreservesCurrentLayout)
 {
     uint8_t payload[64] = {0};

@@ -2837,7 +2837,7 @@ slack, and the intended TMC configuration (`MRES=3`, `DEDGE=1`,
 
 The MRES=3 image is diagnostic-only. Ordinary queued commands are rejected
 with all motors disabled, ordinary FULL requests fail before motion, and only
-SAFE plus selectors `2085` and `2084` are supported. Boot/default builds remain MRES=2;
+SAFE plus selectors `2085`, `2084`, and `2086` are supported. Boot/default builds remain MRES=2;
 MRES=3 is not a production migration until the watched HIL evidence is
 reviewed. Roll back by flashing `firmware/artifacts/LabCraft_firmware.bin`.
 The matching rearm-capable diagnostic artifact is 344,128 bytes with SHA-256
@@ -2863,6 +2863,29 @@ complete deadline coverage, no missed deadline, and at least 450 timer ticks
 of post-handler slack. Entry lateness (`cm`, `lc`, and `dm`) remains visible but
 is diagnostic rather than a failure: rearming is intended to tolerate it.
 Selector `2085`, boot, and the production image remain free-running.
+
+Selector `2086` is the conditional late-only rearm diagnostic. It runs the same
+MRES=3 ten-move row and leaves TIM2 free-running whenever a nonterminal physical
+edge has more than 1,125 timer ticks (12.5 us) before the next update. If the
+remaining margin is 1,125 ticks or less, UIF is already set, or CNT exceeds ARR,
+it rebases the timer from the actual edge. Each measured move injects one bounded
+late cruise rising edge at a target 900 ticks of slack, so the recovery branch is
+proved ten times without altering unmeasured positioning or homes. Result `2086`
+reports decision, rearm, injection, slack, wait, timeout, and saturation evidence.
+The intentional wait remains in raw IRQ and wall-duration telemetry but is
+excluded only from the executor-body phase-cost gate.
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-mres3-conditional-rearm-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_mres3_conditional_rearm.json
+python3 tools/run_qualification.py --manifest coordinated_xy_mres3_conditional_rearm_v1 --operator-prompts --fixture coordinated_xy_mres3_conditional_rearm_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_mres3_conditional_rearm.json
+```
+
+This selector is diagnostic-only. It restores `FreeRunning` on every exit and
+does not authorize MRES=3 or conditional scheduling in production.
+The implementation-matching production artifact is 348,984 bytes with SHA-256
+`19127B492BB8F58CE3682EA1C6899AAD1A4493C8813C70CB344B46A17AFE93BC`.
+The watched-test MRES=3 artifact is 349,240 bytes with SHA-256
+`E2CD6EF0608D452D9363E58080A20C9DBBDF70755F26904AB6DEC97695D3C2F0`.
 
 The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is

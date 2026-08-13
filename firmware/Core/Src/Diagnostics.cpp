@@ -365,9 +365,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
         (selectedDiagnosticId == 2085u);
     const bool runCoordinatedXyMres3RearmSuite =
         (selectedDiagnosticId == 2084u);
+    const bool runCoordinatedXyMres3ConditionalRearmSuite =
+        (selectedDiagnosticId == 2086u);
     const bool runCoordinatedXyMres3Suite =
         runCoordinatedXyMres3BaselineSuite ||
-        runCoordinatedXyMres3RearmSuite;
+        runCoordinatedXyMres3RearmSuite ||
+        runCoordinatedXyMres3ConditionalRearmSuite;
     const bool runCoordinatedXy40KhzSuite =
         (selectedDiagnosticId == 2077u) || runCoordinatedXyStatusSyncSuite ||
         runCoordinatedXySingleIrqSuite;
@@ -4341,6 +4344,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 runCoordinatedXyMres3RearmSuite
                                     ? CoordinatedXyTimerSchedulePolicy::Mode::
                                           RearmFromActualEdge
+                                    : runCoordinatedXyMres3ConditionalRearmSuite
+                                    ? CoordinatedXyTimerSchedulePolicy::Mode::
+                                          ConditionalLateRearm
                                     : CoordinatedXyTimerSchedulePolicy::Mode::
                                           FreeRunning;
                         ScopedCoordinatedXyTimerScheduleMode timerScheduleGuard(
@@ -4447,7 +4453,16 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 false,
                                 runCoordinatedXyMres3RearmSuite
                                     ? "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;ds=0;di=0;md=0;sl=0;rm=1;rc=0;rp=0;rd=0;sf=0;to=1"
+                                    : runCoordinatedXyMres3ConditionalRearmSuite
+                                    ? "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;ds=0;di=0;md=0;sl=0;rm=2;rc=0;rp=0;rd=0;sf=0;to=1"
                                     : "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;ds=0;di=0;md=0;sl=0;rm=0;rc=0;rp=0;rd=0;sf=0;to=1");
+                            if (runCoordinatedXyMres3ConditionalRearmSuite) {
+                              (void)runOne(
+                                  2086u,
+                                  "coord_xy_conditional_rearm",
+                                  false,
+                                  "rm=2;rg=1125;it=900;dc=0;mi=0;rc=0;rp=0;rd=0;ic=0;ix=0;ir=0;im=0;ns=0;wm=0;sf=0;to=1");
+                            }
                             (void)emitMres3Configuration();
                             return;
                           }
@@ -4558,6 +4573,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             ? "coordinated_xy_camera_transition_envelope_clear"
                             : runCoordinatedXySingleIrqSuite
                                 ? "coordinated_xy_single_irq_envelope_clear"
+                            : runCoordinatedXyMres3ConditionalRearmSuite
+                                ? "coordinated_xy_mres3_conditional_rearm_envelope_clear"
                             : runCoordinatedXyMres3RearmSuite
                                 ? "coordinated_xy_mres3_rearm_envelope_clear"
                             : runCoordinatedXyMres3Suite
@@ -4718,7 +4735,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               stepperP != nullptr ? stepperP->getPosition() : 0;
                           const int32_t rStart =
                               stepperR != nullptr ? stepperR->getPosition() : 0;
-                          if (direct) {
+                          const bool injectionReady =
+                              !runCoordinatedXyMres3ConditionalRearmSuite ||
+                              gantry->
+                                  armCoordinatedLateServiceInjectionForDiagnostics();
+                          if (!injectionReady) {
+                            timedOut = true;
+                            result.snapshot = gantry->coordinatedSnapshot();
+                          } else if (direct) {
                             xEventGroupClearBits(
                                 _doneEvents, BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
                             const CoordinatedStartStatus status =
@@ -4786,6 +4810,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 result.snapshot.yTarget == target.y;
                             timedOut = !execution.waitCompleted;
                           }
+                          if (runCoordinatedXyMres3ConditionalRearmSuite) {
+                            gantry->
+                                clearCoordinatedLateServiceInjectionForDiagnostics();
+                          }
                           uint32_t statusAgeMs =
                               std::numeric_limits<uint32_t>::max();
                           (void)Watchdog_GetTaskLastSeenAgeMs(
@@ -4831,6 +4859,24 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               result.snapshot.timerRearmPendingCount;
                           observation.timerRearmDelayMaxCycles =
                               result.snapshot.timerRearmDelayMaxCycles;
+                          observation.conditionalDecisionCount =
+                              result.snapshot.conditionalDecisionCount;
+                          observation.conditionalDecisionMissingCount =
+                              result.snapshot.conditionalDecisionMissingCount;
+                          observation.conditionalNonRearmSlackMinTicks =
+                              result.snapshot.conditionalNonRearmSlackMinTicks;
+                          observation.lateInjectionCount =
+                              result.snapshot.lateInjectionCount;
+                          observation.lateInjectionFailureCount =
+                              result.snapshot.lateInjectionFailureCount;
+                          observation.lateInjectionRearmCount =
+                              result.snapshot.lateInjectionRearmCount;
+                          observation.lateInjectionDecisionSlackMaxTicks =
+                              result.snapshot.lateInjectionDecisionSlackMaxTicks;
+                          observation.lateInjectionWaitMaxCycles =
+                              result.snapshot.lateInjectionWaitMaxCycles;
+                          observation.timerScheduleSaturationFlags =
+                              result.snapshot.timerScheduleSaturationFlags;
                           observation.expectedTargetArr =
                               targetArrForRate(expectedRateHz);
                           observation.expectedStartArr =
@@ -5567,6 +5613,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               aggregate.timerScheduleMode ==
                                   CoordinatedXyTimerSchedulePolicy::Mode::
                                       RearmFromActualEdge;
+                          const bool conditionalSchedule =
+                              aggregate.timerScheduleMode ==
+                                  CoordinatedXyTimerSchedulePolicy::Mode::
+                                      ConditionalLateRearm;
                           const bool scheduleEvidenceComplete = rearmSchedule
                               ? (aggregate.interruptsPerMasterStep == 2u &&
                                  aggregate.timer2Callbacks >=
@@ -5576,6 +5626,20 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                       aggregate.moveCount) &&
                                  aggregate.timerRearmPendingCount == 0u &&
                                  aggregate.timerRearmDelayMaxCycles > 0u)
+                              : conditionalSchedule
+                              ? (aggregate.interruptsPerMasterStep == 2u &&
+                                 aggregate.timer2Callbacks >=
+                                     aggregate.moveCount &&
+                                 aggregate.conditionalDecisionCount ==
+                                     (aggregate.timer2Callbacks -
+                                      aggregate.moveCount) &&
+                                 aggregate.conditionalDecisionMissingCount ==
+                                     0u &&
+                                 aggregate.timerRearmCount >=
+                                     aggregate.moveCount &&
+                                 aggregate.timerRearmPendingCount == 0u &&
+                                 aggregate.timerRearmDelayMaxCycles > 0u &&
+                                 aggregate.timerScheduleSaturationFlags == 0u)
                               : (aggregate.timerRearmCount == 0u &&
                                  aggregate.timerRearmPendingCount == 0u &&
                                  aggregate.timerRearmDelayMaxCycles == 0u);
@@ -5588,8 +5652,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               (!requireDeadlineMargin ||
                                (aggregate.pendingObservations == 0u &&
                                 aggregate.maxPendingStreak == 0u &&
-                                (rearmSchedule ||
-                                 aggregate.lateEntryCount == 0u) &&
+                                (rearmSchedule || conditionalSchedule ||
+                                  aggregate.lateEntryCount == 0u) &&
                                 aggregate.deadlineSamples ==
                                     (aggregate.timer2Callbacks -
                                      aggregate.moveCount) &&
@@ -5615,6 +5679,86 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                        evidenceComplete && metricsFit,
                                        metricsFit ? metrics
                                                   : "gate=metrics_overflow;to=1");
+                          return evidenceComplete && metricsFit;
+                        };
+
+                        auto emitConditionalRearmEvidence =
+                            [&](const Aggregate& aggregate) {
+                          char metrics[192] = {};
+                          const int written = snprintf(
+                              metrics,
+                              sizeof(metrics),
+                              "rm=%u;rg=%lu;it=%lu;dc=%lu;mi=%lu;rc=%lu;"
+                              "rp=%lu;rd=%lu;ic=%lu;ix=%lu;ir=%lu;im=%lu;"
+                              "ns=%lu;wm=%lu;sf=%lu;to=%lu",
+                              static_cast<unsigned>(aggregate.timerScheduleMode),
+                              (unsigned long)CoordinatedXyTimerSchedulePolicy::
+                                  kConditionalGuardTicks,
+                              (unsigned long)CoordinatedXyTimerSchedulePolicy::
+                                  kInjectionTargetSlackTicks,
+                              (unsigned long)aggregate.conditionalDecisionCount,
+                              (unsigned long)
+                                  aggregate.conditionalDecisionMissingCount,
+                              (unsigned long)aggregate.timerRearmCount,
+                              (unsigned long)aggregate.timerRearmPendingCount,
+                              (unsigned long)aggregate.timerRearmDelayMaxCycles,
+                              (unsigned long)aggregate.lateInjectionCount,
+                              (unsigned long)aggregate.lateInjectionFailureCount,
+                              (unsigned long)aggregate.lateInjectionRearmCount,
+                              (unsigned long)
+                                  aggregate.lateInjectionDecisionSlackMaxTicks,
+                              (unsigned long)
+                                  aggregate.conditionalNonRearmSlackMinTicks,
+                              (unsigned long)aggregate.lateInjectionWaitMaxCycles,
+                              (unsigned long)aggregate.saturationFlags,
+                              (unsigned long)aggregate.timeoutCount);
+                          static constexpr uint32_t kExpectedDecisions = 219990u;
+                          static constexpr uint32_t kExpectedInjections = 10u;
+                          const bool evidenceComplete =
+                              aggregate.timerScheduleMode ==
+                                  CoordinatedXyTimerSchedulePolicy::Mode::
+                                      ConditionalLateRearm &&
+                              aggregate.conditionalDecisionCount ==
+                                  kExpectedDecisions &&
+                              aggregate.conditionalDecisionMissingCount == 0u &&
+                              aggregate.timerRearmCount >=
+                                  kExpectedInjections &&
+                              aggregate.timerRearmPendingCount == 0u &&
+                              aggregate.timerRearmDelayMaxCycles > 0u &&
+                              aggregate.lateInjectionCount ==
+                                  kExpectedInjections &&
+                              aggregate.lateInjectionFailureCount == 0u &&
+                              aggregate.lateInjectionRearmCount ==
+                                  kExpectedInjections &&
+                              aggregate.lateInjectionDecisionSlackMaxTicks <=
+                                  CoordinatedXyTimerSchedulePolicy::
+                                      kConditionalGuardTicks &&
+                              aggregate.conditionalNonRearmSlackMinTicks >
+                                  CoordinatedXyTimerSchedulePolicy::
+                                      kConditionalGuardTicks &&
+                              aggregate.lateInjectionWaitMaxCycles > 0u &&
+                              aggregate.lateInjectionWaitMaxCycles <=
+                                  CoordinatedXyTimerSchedulePolicy::
+                                      kInjectionMaxCoreCycles &&
+                              aggregate.saturationFlags == 0u &&
+                              aggregate.timeoutCount == 0u &&
+                              aggregate.exactAndSafe &&
+                              !firstMoveFailure.valid;
+                          const size_t nameLength = std::min(
+                              std::strlen("coord_xy_conditional_rearm"),
+                              DiagnosticResultEmitter::kMaxResultNameBytes);
+                          const size_t metricBudget =
+                              DiagnosticResultEmitter::kResultMetricsFrameBudget -
+                              nameLength;
+                          const bool metricsFit = written > 0 &&
+                              static_cast<size_t>(written) < sizeof(metrics) &&
+                              static_cast<size_t>(written) <= metricBudget;
+                          (void)runOne(
+                              2086u,
+                              "coord_xy_conditional_rearm",
+                              evidenceComplete && metricsFit,
+                              metricsFit ? metrics
+                                         : "gate=metrics_overflow;to=1");
                           return evidenceComplete && metricsFit;
                         };
 
@@ -5794,6 +5938,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                     ? "coord_xy_mres3_entry_margin"
                                     : "coord_xy_40khz_entry_lateness",
                                 runCoordinatedXyMres3Suite);
+                            if (runCoordinatedXyMres3ConditionalRearmSuite) {
+                              (void)emitConditionalRearmEvidence(aggregate);
+                            }
                             if (runCoordinatedXySingleIrqSuite) {
                               (void)emitCompleteStepEvidence(aggregate);
                             }

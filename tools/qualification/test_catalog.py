@@ -88,6 +88,7 @@ TEST_CATALOG: dict[int, TestCatalogEntry] = {
     2081: TestCatalogEntry(2081, "Coordinated XY MRES3 20 kHz IRQ path", "Full two-edge TIM2 IRQ coverage and pending-update evidence for the diagnostic MRES=3 geometry row."),
     2082: TestCatalogEntry(2082, "Coordinated XY MRES3 20 kHz deadline margin", "TIM2 entry-lateness, deadline margin, and diagnostic rearm-from-actual-edge coverage at the 20 kHz step-event rate."),
     2083: TestCatalogEntry(2083, "TMC2208 MRES3 configuration", "Readback-independent evidence that the diagnostic image initialized the shared TMC2208 UART configuration for MRES=3, DEDGE enabled, and multistep filtering disabled."),
+    2086: TestCatalogEntry(2086, "Coordinated XY conditional late rearm", "Diagnostic-only TIM2 decisions, injected late-edge recovery, non-rearmed slack, and schedule-policy saturation evidence."),
     2201: TestCatalogEntry(2201, "Pressure hold leak", "Closed-loop pressure decay and correction effort."),
     2202: TestCatalogEntry(2202, "Pressure target cycling", "Repeated low/high target settling and pressure span."),
     2203: TestCatalogEntry(2203, "Pressure hysteresis", "Regulator motor repeatability and hysteresis span."),

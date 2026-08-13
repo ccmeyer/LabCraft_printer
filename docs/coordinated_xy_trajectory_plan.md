@@ -224,7 +224,7 @@ Every milestone that touches motion must preserve these invariants:
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
-| 6. Performance and motion HIL qualification | `in_progress` | The velocity-domain correction reduced the calculated peak from 443,900 to about 131,100 steps/s2 and passed one guarded 40 kHz row with X=4/Y=1 drift. The self-test scheduling gate is now clear. The software single-IRQ experiment is retired; a separate MRES=3 diagnostic image keeps the two-edge executor while halving step counts, rate, and acceleration to preserve physical motion with greater interrupt margin. | Run one SAFE-bracketed, operator-watched selector `2085` at 20 kHz and review exact motion, driver configuration, deadline margin, homes, and reset/watchdog evidence before any production migration |
+| 6. Performance and motion HIL qualification | `in_progress` | The velocity-domain correction reduced the calculated peak from 443,900 to about 131,100 steps/s2. Two watched MRES=3 free-running rows completed all ten moves and homes normally at equivalent physical speed with complete callbacks and no pending/deadline misses. Unconditional rearm proved too disruptive, so selector `2086` now limits rearming to genuinely late edges and injects one bounded late cruise rise per measured move. | Run SAFE, unchanged selector `2085`, SAFE, then operator-watched selector `2086` and final SAFE on the exact MRES3 diagnostic artifact; review motion, injected recovery, non-rearmed slack, homes, cadence, and reset/watchdog evidence before any production migration |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
@@ -344,7 +344,8 @@ rise/fall callbacks, and 219,990 nonterminal deadline samples.
 
 The diagnostic image is intentionally incompatible with ordinary MRES=2 host
 coordinates. It therefore rejects ordinary queued commands with motors
-disabled and accepts only SAFE or the scaled selectors `2085` and `2084` FULL paths. The
+disabled and accepts only SAFE or the scaled selectors `2085`, `2084`, and
+`2086` FULL paths. The
 watched gate requires results `2080`-`2083`, zero pending and late-entry
 observations, no deadline misses, at least 450 timer ticks of post-handler
 margin, no P/R displacement, clean bounded homes, status/watchdog cadence, and
@@ -361,6 +362,18 @@ free-running default. The diagnostic gate requires `rc=219990`, `rp=0`, full
 deadline coverage, no deadline miss, and at least 450 timer ticks of remaining
 margin; the historical entry-lateness count remains reported rather than being
 used as a rejection gate. No production migration is authorized by this test.
+
+Selector `2086` adds a conditional late-only mode without changing the
+free-running default or selector `2084`. After each nonterminal physical edge it
+samples CNT/ARR/UIF and rebases only at 1,125 timer ticks of remaining margin or
+less, on pending UIF, or on CNT beyond ARR. One first-cruise rising edge per
+measured move is intentionally delayed toward 900 ticks of margin with a
+4,500-core-cycle bound. The five-result inventory is
+`[2080, 2081, 2082, 2086, 2083]`; strict acceptance requires 219,990 complete
+decisions, ten successful injected rearms, zero pending-at-rearm/missing/timeout/
+saturation evidence, non-rearmed slack of at least 1,126 ticks, normal homes,
+and all existing motion, deadline, cadence, watchdog, and drift gates. A pass is
+diagnostic evidence only and does not migrate either MRES=3 or conditional mode.
 
 ## Milestone 0: Baseline And Decisions
 

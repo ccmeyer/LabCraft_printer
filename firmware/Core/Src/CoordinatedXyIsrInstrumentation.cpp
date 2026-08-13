@@ -94,7 +94,8 @@ void recordSample(State& state,
                   uint32_t arr,
                   bool updatePending,
                   bool completedPulse,
-                  bool terminal) {
+                  bool terminal,
+                  uint32_t intentionalWaitCycles) {
   if (!state.valid || !state.active) return;
 
   observeCycle(state, entryCycle);
@@ -109,7 +110,17 @@ void recordSample(State& state,
                         SaturatedCompletedPulses);
   }
 
-  const uint32_t elapsed = exitCycle - entryCycle;
+  const uint32_t rawElapsed = exitCycle - entryCycle;
+  const uint32_t elapsed = rawElapsed > intentionalWaitCycles
+      ? rawElapsed - intentionalWaitCycles
+      : 0u;
+  saturatingAdd(state.intentionalWaitCycleSum,
+                intentionalWaitCycles,
+                state.saturationFlags,
+                SaturatedIntentionalWaitCycles);
+  if (intentionalWaitCycles > state.intentionalWaitMaxCycles) {
+    state.intentionalWaitMaxCycles = intentionalWaitCycles;
+  }
   if (elapsed > state.maxCycles) state.maxCycles = elapsed;
 
   if (terminal) {
@@ -169,12 +180,19 @@ void completeSampleTiming(State& state,
                           uint32_t entryCycle,
                           uint32_t recordedExitCycle,
                           uint32_t finalExitCycle,
-                          bool terminal) {
+                          bool terminal,
+                          uint32_t intentionalWaitCycles) {
   if (!state.valid) return;
   observeCycle(state, finalExitCycle);
   state.endCycle = finalExitCycle;
-  const uint32_t recorded = recordedExitCycle - entryCycle;
-  const uint32_t completed = finalExitCycle - entryCycle;
+  const uint32_t rawRecorded = recordedExitCycle - entryCycle;
+  const uint32_t rawCompleted = finalExitCycle - entryCycle;
+  const uint32_t recorded = rawRecorded > intentionalWaitCycles
+      ? rawRecorded - intentionalWaitCycles
+      : 0u;
+  const uint32_t completed = rawCompleted > intentionalWaitCycles
+      ? rawCompleted - intentionalWaitCycles
+      : 0u;
   if (completed <= recorded) return;
   const uint32_t additional = completed - recorded;
   if (completed > state.maxCycles) state.maxCycles = completed;
@@ -412,6 +430,8 @@ Snapshot makeSnapshot(const State& state) {
   snapshot.deadlineMissing = state.deadlineMissing;
   snapshot.deadlineMisses = state.deadlineMisses;
   snapshot.deadlineSlackMinTicks = state.deadlineSlackMinTicks;
+  snapshot.intentionalWaitCycleSum = state.intentionalWaitCycleSum;
+  snapshot.intentionalWaitMaxCycles = state.intentionalWaitMaxCycles;
   snapshot.saturationFlags = state.saturationFlags;
   return snapshot;
 }

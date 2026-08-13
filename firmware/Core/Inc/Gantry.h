@@ -54,6 +54,15 @@ struct CoordinatedXySnapshot {
   uint32_t timerRearmCount = 0u;
   uint32_t timerRearmPendingCount = 0u;
   uint32_t timerRearmDelayMaxCycles = 0u;
+  uint32_t conditionalDecisionCount = 0u;
+  uint32_t conditionalDecisionMissingCount = 0u;
+  uint32_t conditionalNonRearmSlackMinTicks = 0u;
+  uint32_t lateInjectionCount = 0u;
+  uint32_t lateInjectionFailureCount = 0u;
+  uint32_t lateInjectionRearmCount = 0u;
+  uint32_t lateInjectionDecisionSlackMaxTicks = 0u;
+  uint32_t lateInjectionWaitMaxCycles = 0u;
+  uint32_t timerScheduleSaturationFlags = 0u;
   uint32_t maxIsrCycles = 0u;
   uint32_t selectedMasterRateHz = 0u;
   uint32_t selectedMasterAccelerationStepsPerSec2 = 0u;
@@ -111,6 +120,8 @@ public:
   bool setCoordinatedTimerScheduleModeForDiagnostics(
       CoordinatedXyTimerSchedulePolicy::Mode mode);
   CoordinatedXyTimerSchedulePolicy::Mode coordinatedTimerScheduleMode() const;
+  bool armCoordinatedLateServiceInjectionForDiagnostics();
+  void clearCoordinatedLateServiceInjectionForDiagnostics();
   bool requestCoordinatedCancelForDiagnostics(uint32_t& risingEdgesBefore,
                                                uint32_t& fallingEdgesBefore);
   bool requestCoordinatedLimitAbortForDiagnostics(Stepper::Axis axis);
@@ -178,6 +189,16 @@ private:
   volatile uint32_t _coordinatedTimerRearmCount = 0u;
   volatile uint32_t _coordinatedTimerRearmPendingCount = 0u;
   volatile uint32_t _coordinatedTimerRearmDelayMaxCycles = 0u;
+  volatile uint32_t _coordinatedConditionalDecisionCount = 0u;
+  volatile uint32_t _coordinatedConditionalDecisionMissingCount = 0u;
+  volatile uint32_t _coordinatedConditionalNonRearmSlackMinTicks = 0u;
+  volatile uint32_t _coordinatedLateInjectionCount = 0u;
+  volatile uint32_t _coordinatedLateInjectionFailureCount = 0u;
+  volatile uint32_t _coordinatedLateInjectionRearmCount = 0u;
+  volatile uint32_t _coordinatedLateInjectionDecisionSlackMaxTicks = 0u;
+  volatile uint32_t _coordinatedLateInjectionWaitMaxCycles = 0u;
+  volatile uint32_t _coordinatedTimerScheduleSaturationFlags = 0u;
+  volatile bool _coordinatedLateInjectionArmed = false;
   uint32_t _coordinatedPulseHighCycles = 0u;
   CoordinatedXyIsrInstrumentation::State _coordinatedTiming{};
 

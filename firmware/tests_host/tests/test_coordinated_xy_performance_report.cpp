@@ -163,6 +163,35 @@ TEST(CoordinatedXyPerformanceReport, RearmModeRequiresEveryNonterminalCallback) 
               CoordinatedXyPerformanceReport::kMoveFailureTimerRearm) != 0u);
 }
 
+TEST(CoordinatedXyPerformanceReport, ConditionalModeRequiresLateInjectionEvidence) {
+  auto observation =
+      acceptedMove(500u, 1500u, 1500u, 20000u, 2249u, 11245u);
+  observation.timerScheduleMode =
+      CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm;
+  observation.conditionalDecisionCount = observation.timer2Callbacks - 1u;
+  observation.timerRearmCount = 1u;
+  observation.timerRearmDelayMaxCycles = 24u;
+  observation.conditionalNonRearmSlackMinTicks = 1126u;
+  observation.lateInjectionCount = 1u;
+  observation.lateInjectionRearmCount = 1u;
+  observation.lateInjectionDecisionSlackMaxTicks = 905u;
+  observation.lateInjectionWaitMaxCycles = 2800u;
+  observation.timing.intentionalWaitCycleSum = 2800u;
+  observation.timing.intentionalWaitMaxCycles = 2800u;
+  CHECK_TRUE(CoordinatedXyPerformanceReport::movePasses(
+      observation, CoordinatedXyPerformanceReport::Limits{}));
+
+  observation.lateInjectionRearmCount = 0u;
+  CHECK_TRUE((CoordinatedXyPerformanceReport::moveFailureMask(
+                  observation, CoordinatedXyPerformanceReport::Limits{}) &
+              CoordinatedXyPerformanceReport::kMoveFailureTimerRearm) != 0u);
+  observation.lateInjectionRearmCount = 1u;
+  observation.conditionalNonRearmSlackMinTicks = 1125u;
+  CHECK_TRUE((CoordinatedXyPerformanceReport::moveFailureMask(
+                  observation, CoordinatedXyPerformanceReport::Limits{}) &
+              CoordinatedXyPerformanceReport::kMoveFailureTimerRearm) != 0u);
+}
+
 TEST(CoordinatedXyPerformanceReport, CompleteStepMoveFailsClosedOnPulseOrDeadline) {
   auto observation = acceptedCompleteStepMove(
       20000u, 5000u, 20000u, 40000u, 1124u, 5620u);

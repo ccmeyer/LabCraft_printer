@@ -101,6 +101,26 @@ TEST(CoordinatedXyIsrInstrumentation, CompletionIncludesRecorderCostInPhaseAndTe
   UNSIGNED_LONGS_EQUAL(200u, snapshot.durationCycles);
 }
 
+TEST(CoordinatedXyIsrInstrumentation, ExcludesOnlyIntentionalWaitFromPhaseCost) {
+  State state{};
+  CoordinatedXyIsrInstrumentation::reset(state, 100u);
+  CoordinatedXyIsrInstrumentation::recordSample(
+      state, Phase::Cruise, 110u, 410u, 2249u, false, false, false, 200u);
+  CoordinatedXyIsrInstrumentation::completeSampleTiming(
+      state, Phase::Cruise, 110u, 410u, 460u, false, 200u);
+  CoordinatedXyIsrInstrumentation::beginIrqPathSample(
+      state, true, 100u, true, 2u, 2249u, 110u, false, false);
+  CoordinatedXyIsrInstrumentation::completeIrqPath(state, 460u);
+
+  const auto snapshot = CoordinatedXyIsrInstrumentation::makeSnapshot(state);
+  UNSIGNED_LONGS_EQUAL(150u, snapshot.phaseCycleSums[1]);
+  UNSIGNED_LONGS_EQUAL(150u, snapshot.phaseMaxCycles[1]);
+  UNSIGNED_LONGS_EQUAL(200u, snapshot.intentionalWaitCycleSum);
+  UNSIGNED_LONGS_EQUAL(200u, snapshot.intentionalWaitMaxCycles);
+  UNSIGNED_LONGS_EQUAL(360u, snapshot.fullIrqMaxCycles);
+  UNSIGNED_LONGS_EQUAL(360u, snapshot.durationCycles);
+}
+
 TEST(CoordinatedXyIsrInstrumentation, TracksOuterIrqPathAndCorrelatesPendingSample) {
   State state{};
   CoordinatedXyIsrInstrumentation::reset(state, 100u);

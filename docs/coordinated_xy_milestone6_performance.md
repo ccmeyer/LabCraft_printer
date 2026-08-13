@@ -826,6 +826,40 @@ the MRES=3 diagnostic artifact is 344,128 bytes with SHA-256
 `132EC3AF0F900D3E4E22616C2D7B311765D085144EBF2E9AE42A7E004B4F0758`.
 Firmware host validation passes 394/394 tests with 10,213,693 checks.
 
+### Conditional late-only rearm diagnostic
+
+Selector `2086` retains selector `2085`'s MRES=3 geometry, two-edge execution,
+20 kHz rate, 70,000 microsteps/s2 acceleration, and bounded homes. It adds
+`ConditionalLateRearm=2`: TIM2 remains free-running above 1,125 ticks of
+remaining margin and is rebased from the actual emitted edge only at or below
+that guard, with UIF pending, or when CNT has passed ARR. Invalid timer evidence
+fails the move closed.
+
+The diagnostic arms one injection immediately before each measured move. The
+first eligible nonterminal cruise rise busy-waits toward 900 remaining timer
+ticks, bounded by 4,500 wrap-safe DWT cycles, then emits STEP and exercises the
+same conditional decision path. Result `2086` records decision/missing counts,
+rearms and pending-at-rearm, maximum edge-to-restart delay, injection attempts/
+failures/rearms, injected slack, non-rearmed minimum slack, maximum wait, and
+saturation/timeout. Raw IRQ and wall-duration telemetry include the deliberate
+wait; only the executor phase-cost value subtracts the measured wait. Passing
+HIL is not production authorization.
+
+The implementation-matching production artifact is 348,984 bytes with SHA-256
+`19127B492BB8F58CE3682EA1C6899AAD1A4493C8813C70CB344B46A17AFE93BC`.
+The MRES=3 diagnostic artifact selected for watched HIL is 349,240 bytes with
+SHA-256
+`E2CD6EF0608D452D9363E58080A20C9DBBDF70755F26904AB6DEC97695D3C2F0`.
+The source identity is the containing implementation commit based on baseline
+`5a414291`; HIL evidence must record the resolved full commit before flashing.
+The Debug stack-usage report measures a 160-byte static frame for the
+coordinated TIM2 handler (up from the previously recorded 80 bytes) and a
+3,872-byte frame for the localized self-test routine. The handler remains below
+the linker's 1,024-byte minimum interrupt-stack reservation, and the self-test
+routine remains below its existing 4,096-byte frame gate. These measurements
+must be reconsidered before any production migration; they are not evidence of
+watched-HIL behavior.
+
 The first watched selector `2085` attempt on implementation commit `4c16a50c`
 was bracketed by 30/30 SAFE passes and failed closed before the ten-move row.
 Z, X, and Y home completion bits all arrived, but the diagnostic expected a

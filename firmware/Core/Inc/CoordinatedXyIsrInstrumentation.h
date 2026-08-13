@@ -40,6 +40,7 @@ enum SaturationFlag : uint32_t {
   SaturatedDeadlineSamples = 1u << 16u,
   SaturatedDeadlineMissing = 1u << 17u,
   SaturatedDeadlineMisses = 1u << 18u,
+  SaturatedIntentionalWaitCycles = 1u << 19u,
 };
 
 struct State {
@@ -87,6 +88,8 @@ struct State {
   uint32_t deadlineMissing = 0u;
   uint32_t deadlineMisses = 0u;
   uint32_t deadlineSlackMinTicks = 0u;
+  uint32_t intentionalWaitCycleSum = 0u;
+  uint32_t intentionalWaitMaxCycles = 0u;
   bool entryScheduleReferenceValid = false;
   uint32_t previousIrqEntryCycle = 0u;
   bool irqPathSampleOpen = false;
@@ -140,6 +143,8 @@ struct Snapshot {
   uint32_t deadlineMissing = 0u;
   uint32_t deadlineMisses = 0u;
   uint32_t deadlineSlackMinTicks = 0u;
+  uint32_t intentionalWaitCycleSum = 0u;
+  uint32_t intentionalWaitMaxCycles = 0u;
   uint32_t saturationFlags = SaturatedNone;
 };
 
@@ -153,13 +158,15 @@ void recordSample(State& state,
                   uint32_t arr,
                   bool updatePending,
                   bool completedPulse,
-                  bool terminal);
+                  bool terminal,
+                  uint32_t intentionalWaitCycles = 0u);
 void completeSampleTiming(State& state,
                           Phase phase,
                           uint32_t entryCycle,
                           uint32_t recordedExitCycle,
                           uint32_t finalExitCycle,
-                          bool terminal);
+                          bool terminal,
+                          uint32_t intentionalWaitCycles = 0u);
 void beginIrqPathSample(State& state,
                         bool irqEntryValid,
                         uint32_t irqEntryCycle,

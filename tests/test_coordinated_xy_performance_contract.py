@@ -124,6 +124,7 @@ def test_mres3_diagnostic_selector_scales_geometry_rate_acceleration_and_homes()
 
     assert "selectedDiagnosticId == 2085u" in diagnostics
     assert "selectedDiagnosticId == 2084u" in diagnostics
+    assert "selectedDiagnosticId == 2086u" in diagnostics
     assert "runCoordinatedXy40KhzSuite || runCoordinatedXyMres3Suite" in diagnostics
     assert '"coordinated_xy_mres3_20khz_envelope_clear"' in suite
     assert "{{2500, 2500}, {12500, 2500}}" in suite
@@ -145,6 +146,7 @@ def test_mres3_diagnostic_selector_scales_geometry_rate_acceleration_and_homes()
     assert "false,\n      true,\n      0x000000C1u" in config
     assert "2085 if coordinated_xy_mres3_20khz_suite" in runner
     assert "2084 if coordinated_xy_mres3_rearm_suite" in runner
+    assert "2086 if coordinated_xy_mres3_conditional_rearm_suite" in runner
 
 
 def test_mres3_rearm_selector_is_scoped_and_rebases_after_physical_edges():
@@ -177,6 +179,28 @@ def test_mres3_rearm_selector_is_scoped_and_rebases_after_physical_edges():
     assert "~ScopedCoordinatedXyTimerScheduleMode" in guard
     assert '"coordinated_xy_mres3_rearm_envelope_clear"' in diagnostics
     assert "timer_schedule_unavailable" in diagnostics
+
+
+def test_mres3_conditional_rearm_preserves_normal_order_and_bounds_injection():
+    policy = _read("firmware/Core/Inc/CoordinatedXyTimerSchedulePolicy.h")
+    header = _read("firmware/Core/Inc/Gantry.h")
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+    runner = _read("tools/run_selftest.py")
+
+    assert "ConditionalLateRearm = 2u" in policy
+    assert "kConditionalGuardTicks = 1125u" in policy
+    assert "kInjectionTargetSlackTicks = 900u" in policy
+    assert "kInjectionMaxCoreCycles = 4500u" in policy
+    assert "armCoordinatedLateServiceInjectionForDiagnostics" in header
+    assert "shouldAttemptInjection" in gantry
+    assert "injectionWaitExpired" in gantry
+    assert "timerCount > timerArr" in gantry
+    assert "NVIC_ClearPendingIRQ(TIM2_IRQn)" in gantry
+    assert "intentionalWaitCycles" in gantry
+    assert '"coord_xy_conditional_rearm"' in diagnostics
+    assert "kExpectedDecisions = 219990u" in diagnostics
+    assert 'add_argument("--coordinated-xy-mres3-conditional-rearm-suite"' in runner
 
 
 def test_status_sync_variant_is_static_bounded_and_restores_critical_mode():

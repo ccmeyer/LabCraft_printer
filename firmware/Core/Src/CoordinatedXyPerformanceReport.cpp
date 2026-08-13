@@ -98,17 +98,44 @@ uint32_t moveFailureMask(const MoveObservation& observation,
   }
   const bool rearmMode = observation.timerScheduleMode ==
       CoordinatedXyTimerSchedulePolicy::Mode::RearmFromActualEdge;
+  const bool conditionalMode = observation.timerScheduleMode ==
+      CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm;
   const uint32_t expectedRearms = observation.timer2Callbacks == 0u
       ? 0u
       : observation.timer2Callbacks - 1u;
   if ((rearmMode &&
        (completeStepMode || observation.timerRearmCount != expectedRearms ||
+         observation.timerRearmPendingCount != 0u ||
+         observation.timerRearmDelayMaxCycles == 0u ||
+         observation.conditionalDecisionCount != 0u ||
+         observation.conditionalDecisionMissingCount != 0u ||
+         observation.lateInjectionCount != 0u)) ||
+      (conditionalMode &&
+       (completeStepMode ||
+        observation.conditionalDecisionCount != expectedRearms ||
+        observation.conditionalDecisionMissingCount != 0u ||
+        observation.timerRearmCount == 0u ||
         observation.timerRearmPendingCount != 0u ||
-        observation.timerRearmDelayMaxCycles == 0u)) ||
-      (!rearmMode &&
+        observation.timerRearmDelayMaxCycles == 0u ||
+        observation.conditionalNonRearmSlackMinTicks <=
+            CoordinatedXyTimerSchedulePolicy::kConditionalGuardTicks ||
+        observation.lateInjectionCount != 1u ||
+        observation.lateInjectionFailureCount != 0u ||
+        observation.lateInjectionRearmCount != 1u ||
+        observation.lateInjectionDecisionSlackMaxTicks >
+            CoordinatedXyTimerSchedulePolicy::kConditionalGuardTicks ||
+        observation.lateInjectionWaitMaxCycles == 0u ||
+        observation.lateInjectionWaitMaxCycles >
+            CoordinatedXyTimerSchedulePolicy::kInjectionMaxCoreCycles ||
+        observation.timerScheduleSaturationFlags != 0u)) ||
+      (!rearmMode && !conditionalMode &&
        (observation.timerRearmCount != 0u ||
-        observation.timerRearmPendingCount != 0u ||
-        observation.timerRearmDelayMaxCycles != 0u))) {
+         observation.timerRearmPendingCount != 0u ||
+         observation.timerRearmDelayMaxCycles != 0u ||
+         observation.conditionalDecisionCount != 0u ||
+         observation.conditionalDecisionMissingCount != 0u ||
+         observation.lateInjectionCount != 0u ||
+         observation.timerScheduleSaturationFlags != 0u))) {
     failures |= kMoveFailureTimerRearm;
   }
   if (observation.arrMin != observation.expectedTargetArr ||
@@ -213,6 +240,40 @@ void addMove(Aggregate& aggregate,
     aggregate.timerRearmDelayMaxCycles =
         observation.timerRearmDelayMaxCycles;
   }
+  addSaturating(aggregate.conditionalDecisionCount,
+                observation.conditionalDecisionCount,
+                aggregate.saturationFlags);
+  addSaturating(aggregate.conditionalDecisionMissingCount,
+                observation.conditionalDecisionMissingCount,
+                aggregate.saturationFlags);
+  if (observation.conditionalNonRearmSlackMinTicks != 0u &&
+      (aggregate.conditionalNonRearmSlackMinTicks == 0u ||
+       observation.conditionalNonRearmSlackMinTicks <
+           aggregate.conditionalNonRearmSlackMinTicks)) {
+    aggregate.conditionalNonRearmSlackMinTicks =
+        observation.conditionalNonRearmSlackMinTicks;
+  }
+  addSaturating(aggregate.lateInjectionCount,
+                observation.lateInjectionCount,
+                aggregate.saturationFlags);
+  addSaturating(aggregate.lateInjectionFailureCount,
+                observation.lateInjectionFailureCount,
+                aggregate.saturationFlags);
+  addSaturating(aggregate.lateInjectionRearmCount,
+                observation.lateInjectionRearmCount,
+                aggregate.saturationFlags);
+  if (observation.lateInjectionDecisionSlackMaxTicks >
+      aggregate.lateInjectionDecisionSlackMaxTicks) {
+    aggregate.lateInjectionDecisionSlackMaxTicks =
+        observation.lateInjectionDecisionSlackMaxTicks;
+  }
+  if (observation.lateInjectionWaitMaxCycles >
+      aggregate.lateInjectionWaitMaxCycles) {
+    aggregate.lateInjectionWaitMaxCycles =
+        observation.lateInjectionWaitMaxCycles;
+  }
+  aggregate.timerScheduleSaturationFlags |=
+      observation.timerScheduleSaturationFlags;
   addSaturating(aggregate.moveCount, 1u, aggregate.saturationFlags);
   addSaturating(aggregate.expectedXSteps,
                 observation.expectedXSteps,
@@ -349,6 +410,14 @@ void addMove(Aggregate& aggregate,
     aggregate.deadlineSlackMinTicks =
         observation.timing.deadlineSlackMinTicks;
   }
+  addSaturating(aggregate.intentionalWaitCycleSum,
+                observation.timing.intentionalWaitCycleSum,
+                aggregate.saturationFlags);
+  if (observation.timing.intentionalWaitMaxCycles >
+      aggregate.intentionalWaitMaxCycles) {
+    aggregate.intentionalWaitMaxCycles =
+        observation.timing.intentionalWaitMaxCycles;
+  }
   addSaturating(aggregate.pendingObservations,
                 observation.timing.pendingObservations,
                 aggregate.saturationFlags);
@@ -380,6 +449,9 @@ void addMove(Aggregate& aggregate,
                 observation.timing.cycleWraps,
                 aggregate.saturationFlags);
   aggregate.saturationFlags |= observation.timing.saturationFlags;
+  if (observation.timerScheduleSaturationFlags != 0u) {
+    aggregate.saturationFlags |= 0x40000000u;
+  }
   if (observation.timedOut) {
     addSaturating(aggregate.timeoutCount, 1u, aggregate.saturationFlags);
   }
@@ -446,13 +518,34 @@ bool aggregatePasses(const Aggregate& aggregate,
         aggregate.timerRearmPendingCount == 0u &&
         aggregate.timerRearmDelayMaxCycles == 0u) ||
        (aggregate.timerScheduleMode ==
-            CoordinatedXyTimerSchedulePolicy::Mode::RearmFromActualEdge &&
+             CoordinatedXyTimerSchedulePolicy::Mode::RearmFromActualEdge &&
         aggregate.interruptsPerMasterStep == 2u &&
         aggregate.timer2Callbacks >= aggregate.moveCount &&
         aggregate.timerRearmCount ==
             (aggregate.timer2Callbacks - aggregate.moveCount) &&
         aggregate.timerRearmPendingCount == 0u &&
-        aggregate.timerRearmDelayMaxCycles > 0u)) &&
+        aggregate.timerRearmDelayMaxCycles > 0u) ||
+       (aggregate.timerScheduleMode ==
+            CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm &&
+        aggregate.interruptsPerMasterStep == 2u &&
+        aggregate.timer2Callbacks >= aggregate.moveCount &&
+        aggregate.conditionalDecisionCount ==
+            (aggregate.timer2Callbacks - aggregate.moveCount) &&
+        aggregate.conditionalDecisionMissingCount == 0u &&
+        aggregate.timerRearmCount >= aggregate.moveCount &&
+        aggregate.timerRearmPendingCount == 0u &&
+        aggregate.timerRearmDelayMaxCycles > 0u &&
+        aggregate.lateInjectionCount == aggregate.moveCount &&
+        aggregate.lateInjectionFailureCount == 0u &&
+        aggregate.lateInjectionRearmCount == aggregate.moveCount &&
+        aggregate.lateInjectionDecisionSlackMaxTicks <=
+            CoordinatedXyTimerSchedulePolicy::kConditionalGuardTicks &&
+        aggregate.conditionalNonRearmSlackMinTicks >
+            CoordinatedXyTimerSchedulePolicy::kConditionalGuardTicks &&
+        aggregate.lateInjectionWaitMaxCycles > 0u &&
+        aggregate.lateInjectionWaitMaxCycles <=
+            CoordinatedXyTimerSchedulePolicy::kInjectionMaxCoreCycles &&
+        aggregate.timerScheduleSaturationFlags == 0u)) &&
       aggregate.pendingObservations == 0u &&
       aggregate.maxPendingStreak == 0u &&
       aggregate.saturationFlags == 0u && aggregate.timeoutCount == 0u &&
