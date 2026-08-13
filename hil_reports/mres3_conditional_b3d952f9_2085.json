@@ -1,0 +1,442 @@
+{
+  "run_id": 4225978198,
+  "profile": "FULL",
+  "started_at": "2026-08-13T16:10:06.038269Z",
+  "finished_at": "2026-08-13T16:10:20.398058Z",
+  "aborted": false,
+  "summary": {
+    "total": 4,
+    "passed": 2,
+    "failed": 2
+  },
+  "results": [
+    {
+      "test_id": 2080,
+      "name": "coord_xy_mres3_20khz_motion",
+      "pass": false,
+      "metrics": {
+        "hz": 20000,
+        "n": 2,
+        "xe": 10000,
+        "ye": 0,
+        "ms": 10000,
+        "i2": 20000,
+        "i7": 0,
+        "ok": 0,
+        "pu": 0,
+        "ps": 0,
+        "am": 1439,
+        "aa": 1069,
+        "cm": 0,
+        "ca": 0,
+        "dm": 1428,
+        "da": 1056,
+        "tm": 2412,
+        "de": 0,
+        "sg": 66,
+        "wd": 56,
+        "sa": 0,
+        "wl": 0,
+        "cw": 0,
+        "sf": 0,
+        "xd": 4294967295,
+        "yd": 4294967295,
+        "to": 0
+      },
+      "timestamp": "2026-08-13T16:10:19.670752Z"
+    },
+    {
+      "test_id": 2081,
+      "name": "coord_xy_mres3_20khz_irq_path",
+      "pass": true,
+      "metrics": {
+        "i2": 20000,
+        "s": 20000,
+        "mi": 0,
+        "ph": 408,
+        "pa": 400,
+        "fm": 3273,
+        "fa": 1915,
+        "ax": 2298,
+        "tf": 3273,
+        "pp": 0,
+        "pf": 0,
+        "pu": 0,
+        "ps": 0,
+        "sf": 0,
+        "to": 0
+      },
+      "timestamp": "2026-08-13T16:10:19.696209Z"
+    },
+    {
+      "test_id": 2082,
+      "name": "coord_xy_mres3_entry_margin",
+      "pass": false,
+      "metrics": {
+        "i2": 20000,
+        "s": 20000,
+        "mi": 0,
+        "cm": 557,
+        "ca": 27,
+        "pm": 0,
+        "lc": 29,
+        "dm": 1061,
+        "ds": 19999,
+        "di": 0,
+        "md": 0,
+        "sl": 679,
+        "rm": 0,
+        "rc": 0,
+        "rp": 0,
+        "rd": 0,
+        "sm": 0,
+        "lf": 0,
+        "sf": 0,
+        "to": 0,
+        "fv": 1,
+        "tr": 1,
+        "la": 0,
+        "ra": 0
+      },
+      "timestamp": "2026-08-13T16:10:19.797039Z"
+    },
+    {
+      "test_id": 2083,
+      "name": "tmc2208_mres3_configuration",
+      "pass": true,
+      "metrics": {
+        "mr": 3,
+        "mf": 0,
+        "dd": 1,
+        "gc": 193,
+        "cc": 855638099,
+        "tx": 4,
+        "tf": 0,
+        "ve": 1,
+        "ae": 1,
+        "ge": 1,
+        "sf": 0,
+        "to": 0
+      },
+      "timestamp": "2026-08-13T16:10:19.797068Z"
+    }
+  ],
+  "host_checks": [
+    {
+      "name": "hello_ack",
+      "pass": true,
+      "details": {
+        "seq8": 1,
+        "run_id": 4225978198,
+        "timeout_ms": 8000,
+        "retry_ms": 250,
+        "retries_sent": 1,
+        "observed_uart_bytes": 128,
+        "fast_fail_on_missing_hello": false,
+        "capabilities": 15,
+        "supports_selftest_transport": true
+      },
+      "timestamp": "2026-08-13T16:10:06.078413Z"
+    },
+    {
+      "name": "selftest_start_ack",
+      "pass": true,
+      "details": {
+        "transport_mode": "queue_ack",
+        "seq8": 2,
+        "seq32": 1,
+        "run_id": 4225978198,
+        "timeout_ms": 2000,
+        "observed_cmd": 254,
+        "observed_seq8": 2,
+        "observed_seq32": 1,
+        "ack_result": "accepted",
+        "expected_seq32": null,
+        "reason": "ok"
+      },
+      "timestamp": "2026-08-13T16:10:06.093226Z"
+    },
+    {
+      "name": "goodbye_ack",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4225978198,
+        "timeout_ms": 2000
+      },
+      "timestamp": "2026-08-13T16:10:19.897343Z"
+    },
+    {
+      "name": "goodbye_done",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4225978198,
+        "timeout_ms": 5000,
+        "observed_seq32": 4225978198
+      },
+      "timestamp": "2026-08-13T16:10:20.398007Z"
+    },
+    {
+      "name": "selftest_progress_watchdog",
+      "pass": true,
+      "details": {
+        "progress_count": 22,
+        "last_progress": {
+          "kind": "progress",
+          "stage": "wait_bits_set",
+          "elapsed_ms": 12215,
+          "stk_hwm_w": 0
+        },
+        "recent_frames": [
+          {
+            "ts": "2026-08-13T16:10:06.093261Z",
+            "cmd": 254,
+            "ack_result": "accepted",
+            "ack_seq32": 1,
+            "expected_seq32": null
+          },
+          {
+            "ts": "2026-08-13T16:10:06.193547Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_mres3_20khz_envelope_clear"
+          },
+          {
+            "ts": "2026-08-13T16:10:06.227056Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "evap_plate_confirmed"
+          },
+          {
+            "ts": "2026-08-13T16:10:06.227095Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_performance_z_home"
+          },
+          {
+            "ts": "2026-08-13T16:10:06.327407Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T16:10:06.610678Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T16:10:06.610711Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_performance_x_home"
+          },
+          {
+            "ts": "2026-08-13T16:10:06.710987Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T16:10:07.612165Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T16:10:08.613449Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T16:10:09.614724Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T16:10:10.615908Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T16:10:11.617310Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T16:10:12.618764Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T16:10:13.620230Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T16:10:14.621689Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T16:10:15.623197Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T16:10:15.864490Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T16:10:15.864540Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_performance_y_home"
+          },
+          {
+            "ts": "2026-08-13T16:10:15.964927Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T16:10:16.866222Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T16:10:17.867677Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T16:10:18.238456Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T16:10:19.670702Z",
+            "cmd": 251,
+            "test_id": 2080,
+            "name": "coord_xy_mres3_20khz_motion"
+          },
+          {
+            "ts": "2026-08-13T16:10:19.696182Z",
+            "cmd": 251,
+            "test_id": 2081,
+            "name": "coord_xy_mres3_20khz_irq_path"
+          },
+          {
+            "ts": "2026-08-13T16:10:19.797005Z",
+            "cmd": 251,
+            "test_id": 2082,
+            "name": "coord_xy_mres3_entry_margin"
+          },
+          {
+            "ts": "2026-08-13T16:10:19.797049Z",
+            "cmd": 251,
+            "test_id": 2083,
+            "name": "tmc2208_mres3_configuration"
+          },
+          {
+            "ts": "2026-08-13T16:10:19.797078Z",
+            "cmd": 252,
+            "run_id": 4225978198
+          }
+        ],
+        "frame_counts": {
+          "2": 24,
+          "251": 26,
+          "252": 1,
+          "254": 1
+        },
+        "progress_timeout_ms": 15000,
+        "activity_timeout_ms": 60000,
+        "status_only_timeout_ms": 120000,
+        "effective_timeout_ms": 240000,
+        "total_rx_bytes": 6377,
+        "status_frames_since_selftest": 0,
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 22,
+        "selftest_frames_seen": 27,
+        "startup_reset_report": null,
+        "reset_report": null,
+        "last_valid_frame_age_ms": 701,
+        "last_rx_byte_age_ms": 701,
+        "last_selftest_frame_age_ms": 701,
+        "timeout_reason": null
+      },
+      "timestamp": "2026-08-13T16:10:20.398046Z"
+    },
+    {
+      "name": "coordinated_xy_status_cadence",
+      "pass": true,
+      "details": {
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 22,
+        "limit_ms_exclusive": 500
+      },
+      "timestamp": "2026-08-13T16:10:20.398054Z"
+    }
+  ],
+  "startup_reset_report": null,
+  "reset_report": null
+}

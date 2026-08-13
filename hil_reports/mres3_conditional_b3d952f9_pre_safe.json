@@ -1,0 +1,757 @@
+{
+  "run_id": 4225941501,
+  "profile": "SAFE",
+  "started_at": "2026-08-13T16:09:29.341109Z",
+  "finished_at": "2026-08-13T16:09:30.807438Z",
+  "aborted": false,
+  "summary": {
+    "total": 30,
+    "passed": 30,
+    "failed": 0
+  },
+  "results": [
+    {
+      "test_id": 1001,
+      "name": "comm_crc_known_vector",
+      "pass": true,
+      "metrics": {
+        "crc": 19255
+      },
+      "timestamp": "2026-08-13T16:09:29.446344Z"
+    },
+    {
+      "test_id": 1002,
+      "name": "comm_frame_roundtrip",
+      "pass": true,
+      "metrics": {
+        "frame_len": 12
+      },
+      "timestamp": "2026-08-13T16:09:29.474457Z"
+    },
+    {
+      "test_id": 1010,
+      "name": "session_hello_ack",
+      "pass": true,
+      "metrics": {
+        "ack_cmd": 244,
+        "seq8_match": 1,
+        "seq32_match": 1
+      },
+      "timestamp": "2026-08-13T16:09:29.474476Z"
+    },
+    {
+      "test_id": 1011,
+      "name": "session_goodbye_ack",
+      "pass": true,
+      "metrics": {
+        "ack_cmd": 246,
+        "seq8_match": 1,
+        "seq32_match": 1
+      },
+      "timestamp": "2026-08-13T16:09:29.474525Z"
+    },
+    {
+      "test_id": 1012,
+      "name": "session_goodbye_done",
+      "pass": true,
+      "metrics": {
+        "done_cmd": 248,
+        "seq8_match": 1,
+        "seq32_match": 1
+      },
+      "timestamp": "2026-08-13T16:09:29.558676Z"
+    },
+    {
+      "test_id": 1003,
+      "name": "status_frame_shape",
+      "pass": true,
+      "metrics": {
+        "tag_count": 18,
+        "has_seq32": 0,
+        "chunk0_seen": 2,
+        "chunk1_seen": 2
+      },
+      "timestamp": "2026-08-13T16:09:29.748284Z"
+    },
+    {
+      "test_id": 1013,
+      "name": "clear_queue_ack",
+      "pass": true,
+      "metrics": {
+        "ack_cmd": 247,
+        "seq8_match": 1,
+        "seq32_match": 1,
+        "queue_depth_after_clear": 0
+      },
+      "timestamp": "2026-08-13T16:09:29.774119Z"
+    },
+    {
+      "test_id": 1020,
+      "name": "status_chunk_alternation_safe",
+      "pass": true,
+      "metrics": {
+        "chunk0_seen": 2,
+        "chunk1_seen": 2,
+        "alternation_errors": 0
+      },
+      "timestamp": "2026-08-13T16:09:29.774135Z"
+    },
+    {
+      "test_id": 1021,
+      "name": "status_cadence_safe",
+      "pass": true,
+      "metrics": {
+        "period_ms_avg": 64,
+        "period_ms_max_jitter": 14
+      },
+      "timestamp": "2026-08-13T16:09:29.810622Z"
+    },
+    {
+      "test_id": 1004,
+      "name": "uptime_counter_read",
+      "pass": true,
+      "metrics": {
+        "delta_ms": 10
+      },
+      "timestamp": "2026-08-13T16:09:29.810635Z"
+    },
+    {
+      "test_id": 1005,
+      "name": "flash_config_readonly",
+      "pass": true,
+      "metrics": {
+        "flash_delay_us": 1000,
+        "flash_width_ns": 2000,
+        "flash_width_min_ns": 100,
+        "flash_width_max_ns": 5000,
+        "ft_acc": 0,
+        "ft_ign_dis": 0,
+        "ft_ign_fault": 0,
+        "ft_ign_busy": 0,
+        "ft_ign_low": 0,
+        "ft_rel_to": 0,
+        "ft_ack_to": 0,
+        "ft_print_to": 0,
+        "ext_count": 0
+      },
+      "timestamp": "2026-08-13T16:09:29.837241Z"
+    },
+    {
+      "test_id": 1007,
+      "name": "flash_imaging_burst_diag_safe",
+      "pass": true,
+      "metrics": {
+        "skipped_no_flash_task": 1,
+        "cycles_req": 5,
+        "cycles_started": 0,
+        "cycles_timeout": 0,
+        "ext_delta": 0,
+        "flash_ack_delta": 0,
+        "flash_task_wake_delta": 0,
+        "flash_task_done_delta": 0,
+        "ft_acc_delta": 0,
+        "ft_ign_dis_delta": 0
+      },
+      "timestamp": "2026-08-13T16:09:29.863496Z"
+    },
+    {
+      "test_id": 1006,
+      "name": "fw_build_info",
+      "pass": true,
+      "metrics": {
+        "version_len": 20,
+        "build_epoch": "Aug 13 2026 09:03:25"
+      },
+      "timestamp": "2026-08-13T16:09:29.863522Z"
+    },
+    {
+      "test_id": 1030,
+      "name": "uart_recovery_after_noise_safe",
+      "pass": true,
+      "metrics": {
+        "noise_bytes_injected": 4,
+        "frames_recovered": 2,
+        "crc_mismatch_count": 1,
+        "length_reject_count": 1
+      },
+      "timestamp": "2026-08-13T16:09:29.892990Z"
+    },
+    {
+      "test_id": 1040,
+      "name": "rtos_memory_headroom_safe",
+      "pass": true,
+      "metrics": {
+        "heap_now": 11152,
+        "heap_min": 11152,
+        "stk_min": 178,
+        "stk_task": "Pressure",
+        "task_n": 14,
+        "task_total": 14,
+        "task_cap": 32,
+        "core_miss": 0,
+        "preg_n": 2,
+        "trunc": 0,
+        "stk_ovf": 0,
+        "prnt_hwm_words": 184,
+        "flashmon_hwm_words": 0,
+        "flashmon_present": 0
+      },
+      "timestamp": "2026-08-13T16:09:29.919313Z"
+    },
+    {
+      "test_id": 1041,
+      "name": "crash_record_retained_safe",
+      "pass": true,
+      "metrics": {
+        "pending": 0,
+        "sticky": 1,
+        "fault": "wdt",
+        "task": "orch",
+        "reset": "soft",
+        "boot": 144,
+        "fault_ct": 4,
+        "wdg_ct": 6,
+        "sticky_ct": 143,
+        "raw_sr": 3,
+        "boot_stage": "comm_rearm",
+        "wdg_late": "press"
+      },
+      "timestamp": "2026-08-13T16:09:29.946411Z"
+    },
+    {
+      "test_id": 1042,
+      "name": "watchdog_supervisor_safe",
+      "pass": true,
+      "metrics": {
+        "enabled": 1,
+        "arm_result": "armed",
+        "timeout_ms": 4000,
+        "init_timeout_ms": 20,
+        "req_n": 4,
+        "live_n": 4,
+        "late_task": "none",
+        "raw_sr": 3,
+        "sticky_ct": 1,
+        "recovery_boot": 1
+      },
+      "timestamp": "2026-08-13T16:09:29.946437Z"
+    },
+    {
+      "test_id": 2001,
+      "name": "motion_home_cycle_full",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "motion": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T16:09:29.972393Z"
+    },
+    {
+      "test_id": 2002,
+      "name": "motion_absolute_move_bounds_full",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "motion": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T16:09:29.972416Z"
+    },
+    {
+      "test_id": 2007,
+      "name": "motion_home_repeatability_factor",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "motion": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T16:09:29.999061Z"
+    },
+    {
+      "test_id": 2008,
+      "name": "motion_pattern_return_factory",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "motion": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T16:09:29.999083Z"
+    },
+    {
+      "test_id": 2003,
+      "name": "pressure_regulator_step_response",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "pressure": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T16:09:30.025530Z"
+    },
+    {
+      "test_id": 2201,
+      "name": "pressure_hold_leak_factory",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "pressure": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T16:09:30.025551Z"
+    },
+    {
+      "test_id": 2202,
+      "name": "pressure_target_cycle_repeatabil",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "pressure": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T16:09:30.053063Z"
+    },
+    {
+      "test_id": 2203,
+      "name": "pressure_motor_position_hysteres",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "pressure": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T16:09:30.053084Z"
+    },
+    {
+      "test_id": 2004,
+      "name": "valve_actuation_sequence_full",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "valves": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T16:09:30.077820Z"
+    },
+    {
+      "test_id": 2005,
+      "name": "print_refuel_pulse_integrity_ful",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "pulses": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T16:09:30.077842Z"
+    },
+    {
+      "test_id": 2006,
+      "name": "emergency_abort_and_safe_stop_fu",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "abort": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T16:09:30.106213Z"
+    },
+    {
+      "test_id": 1044,
+      "name": "pressure_wdg_context_safe",
+      "pass": true,
+      "metrics": {
+        "v": 0,
+        "ex": 0,
+        "pa": 4294967295,
+        "ph": 0,
+        "pha": 4294967295,
+        "la": 4294967295,
+        "pg": 0,
+        "se": 0,
+        "re": 0,
+        "bc": 0,
+        "lp": 0,
+        "h": 0,
+        "r": 0,
+        "x": 0,
+        "e": 0,
+        "hw": 0,
+        "tk": 0,
+        "sf": 0
+      },
+      "timestamp": "2026-08-13T16:09:30.106235Z"
+    },
+    {
+      "test_id": 1043,
+      "name": "selftest_scheduler_safe",
+      "pass": true,
+      "metrics": {
+        "sm": 1,
+        "rf": 29,
+        "yc": 29,
+        "txm": 26,
+        "txt": 376,
+        "pg": 14,
+        "pa": 2,
+        "ph": 1,
+        "pha": 1,
+        "la": 1,
+        "se": 0,
+        "re": 0,
+        "bc": 0,
+        "h": 0,
+        "r": 0,
+        "x": 0,
+        "e": 0,
+        "hw": 178,
+        "sf": 0
+      },
+      "timestamp": "2026-08-13T16:09:30.206613Z"
+    }
+  ],
+  "host_checks": [
+    {
+      "name": "hello_ack",
+      "pass": true,
+      "details": {
+        "seq8": 1,
+        "run_id": 4225941501,
+        "timeout_ms": 8000,
+        "retry_ms": 250,
+        "retries_sent": 1,
+        "observed_uart_bytes": 256,
+        "fast_fail_on_missing_hello": false,
+        "capabilities": 15,
+        "supports_selftest_transport": true
+      },
+      "timestamp": "2026-08-13T16:09:29.421521Z"
+    },
+    {
+      "name": "selftest_start_ack",
+      "pass": true,
+      "details": {
+        "transport_mode": "queue_ack",
+        "seq8": 2,
+        "seq32": 1,
+        "run_id": 4225941501,
+        "timeout_ms": 2000,
+        "observed_cmd": 254,
+        "observed_seq8": 2,
+        "observed_seq32": 1,
+        "ack_result": "accepted",
+        "expected_seq32": null,
+        "reason": "ok"
+      },
+      "timestamp": "2026-08-13T16:09:29.446268Z"
+    },
+    {
+      "name": "goodbye_ack",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4225941501,
+        "timeout_ms": 2000
+      },
+      "timestamp": "2026-08-13T16:09:30.306814Z"
+    },
+    {
+      "name": "goodbye_done",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4225941501,
+        "timeout_ms": 5000,
+        "observed_seq32": 4225941501
+      },
+      "timestamp": "2026-08-13T16:09:30.807407Z"
+    },
+    {
+      "name": "selftest_progress_watchdog",
+      "pass": true,
+      "details": {
+        "progress_count": 0,
+        "last_progress": {},
+        "recent_frames": [
+          {
+            "ts": "2026-08-13T16:09:29.446318Z",
+            "cmd": 254,
+            "ack_result": "accepted",
+            "ack_seq32": 1,
+            "expected_seq32": null
+          },
+          {
+            "ts": "2026-08-13T16:09:29.446328Z",
+            "cmd": 251,
+            "test_id": 1001,
+            "name": "comm_crc_known_vector"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.474446Z",
+            "cmd": 251,
+            "test_id": 1002,
+            "name": "comm_frame_roundtrip"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.474465Z",
+            "cmd": 251,
+            "test_id": 1010,
+            "name": "session_hello_ack"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.474514Z",
+            "cmd": 251,
+            "test_id": 1011,
+            "name": "session_goodbye_ack"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.558664Z",
+            "cmd": 251,
+            "test_id": 1012,
+            "name": "session_goodbye_done"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.748274Z",
+            "cmd": 251,
+            "test_id": 1003,
+            "name": "status_frame_shape"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.774107Z",
+            "cmd": 251,
+            "test_id": 1013,
+            "name": "clear_queue_ack"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.774127Z",
+            "cmd": 251,
+            "test_id": 1020,
+            "name": "status_chunk_alternation_safe"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.810614Z",
+            "cmd": 251,
+            "test_id": 1021,
+            "name": "status_cadence_safe"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.810629Z",
+            "cmd": 251,
+            "test_id": 1004,
+            "name": "uptime_counter_read"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.837219Z",
+            "cmd": 251,
+            "test_id": 1005,
+            "name": "flash_config_readonly"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.863481Z",
+            "cmd": 251,
+            "test_id": 1007,
+            "name": "flash_imaging_burst_diag_safe"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.863503Z",
+            "cmd": 251,
+            "test_id": 1006,
+            "name": "fw_build_info"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.892980Z",
+            "cmd": 251,
+            "test_id": 1030,
+            "name": "uart_recovery_after_noise_safe"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.919283Z",
+            "cmd": 251,
+            "test_id": 1040,
+            "name": "rtos_memory_headroom_safe"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.946375Z",
+            "cmd": 251,
+            "test_id": 1041,
+            "name": "crash_record_retained_safe"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.946418Z",
+            "cmd": 251,
+            "test_id": 1042,
+            "name": "watchdog_supervisor_safe"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.972375Z",
+            "cmd": 251,
+            "test_id": 2001,
+            "name": "motion_home_cycle_full"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.972400Z",
+            "cmd": 251,
+            "test_id": 2002,
+            "name": "motion_absolute_move_bounds_full"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.999041Z",
+            "cmd": 251,
+            "test_id": 2007,
+            "name": "motion_home_repeatability_factor"
+          },
+          {
+            "ts": "2026-08-13T16:09:29.999068Z",
+            "cmd": 251,
+            "test_id": 2008,
+            "name": "motion_pattern_return_factory"
+          },
+          {
+            "ts": "2026-08-13T16:09:30.025513Z",
+            "cmd": 251,
+            "test_id": 2003,
+            "name": "pressure_regulator_step_response"
+          },
+          {
+            "ts": "2026-08-13T16:09:30.025537Z",
+            "cmd": 251,
+            "test_id": 2201,
+            "name": "pressure_hold_leak_factory"
+          },
+          {
+            "ts": "2026-08-13T16:09:30.053046Z",
+            "cmd": 251,
+            "test_id": 2202,
+            "name": "pressure_target_cycle_repeatabil"
+          },
+          {
+            "ts": "2026-08-13T16:09:30.053069Z",
+            "cmd": 251,
+            "test_id": 2203,
+            "name": "pressure_motor_position_hysteres"
+          },
+          {
+            "ts": "2026-08-13T16:09:30.077804Z",
+            "cmd": 251,
+            "test_id": 2004,
+            "name": "valve_actuation_sequence_full"
+          },
+          {
+            "ts": "2026-08-13T16:09:30.077827Z",
+            "cmd": 251,
+            "test_id": 2005,
+            "name": "print_refuel_pulse_integrity_ful"
+          },
+          {
+            "ts": "2026-08-13T16:09:30.106196Z",
+            "cmd": 251,
+            "test_id": 2006,
+            "name": "emergency_abort_and_safe_stop_fu"
+          },
+          {
+            "ts": "2026-08-13T16:09:30.106220Z",
+            "cmd": 251,
+            "test_id": 1044,
+            "name": "pressure_wdg_context_safe"
+          },
+          {
+            "ts": "2026-08-13T16:09:30.206589Z",
+            "cmd": 251,
+            "test_id": 1043,
+            "name": "selftest_scheduler_safe"
+          },
+          {
+            "ts": "2026-08-13T16:09:30.206621Z",
+            "cmd": 252,
+            "run_id": 4225941501
+          }
+        ],
+        "frame_counts": {
+          "2": 6,
+          "251": 30,
+          "252": 1,
+          "254": 1
+        },
+        "progress_timeout_ms": 15000,
+        "activity_timeout_ms": 60000,
+        "status_only_timeout_ms": 120000,
+        "effective_timeout_ms": 240000,
+        "total_rx_bytes": 4429,
+        "status_frames_since_selftest": 0,
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 4,
+        "selftest_frames_seen": 31,
+        "startup_reset_report": {
+          "reset_seq32": 4225941501,
+          "reset_cause": 3,
+          "reset_flags": 5,
+          "last_fault": 9,
+          "last_task": 2,
+          "boot_count": 144,
+          "fault_count": 4,
+          "watchdog_count": 6,
+          "watchdog_sticky_count": 143,
+          "watchdog_raw_sr": 3,
+          "uptime_ms": 136501,
+          "boot_stage": 11,
+          "recovery_boot": 1,
+          "fault_stage": 7,
+          "watchdog_late_task": 4,
+          "active_command": 250,
+          "regulator_context": null,
+          "fault_context": null
+        },
+        "reset_report": null,
+        "last_valid_frame_age_ms": 701,
+        "last_rx_byte_age_ms": 701,
+        "last_selftest_frame_age_ms": 701,
+        "timeout_reason": null
+      },
+      "timestamp": "2026-08-13T16:09:30.807434Z"
+    }
+  ],
+  "startup_reset_report": {
+    "reset_seq32": 4225941501,
+    "reset_cause": 3,
+    "reset_flags": 5,
+    "last_fault": 9,
+    "last_task": 2,
+    "boot_count": 144,
+    "fault_count": 4,
+    "watchdog_count": 6,
+    "watchdog_sticky_count": 143,
+    "watchdog_raw_sr": 3,
+    "uptime_ms": 136501,
+    "boot_stage": 11,
+    "recovery_boot": 1,
+    "fault_stage": 7,
+    "watchdog_late_task": 4,
+    "active_command": 250,
+    "regulator_context": null,
+    "fault_context": null
+  },
+  "reset_report": null
+}

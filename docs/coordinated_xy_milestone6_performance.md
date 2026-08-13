@@ -860,6 +860,36 @@ routine remains below its existing 4,096-byte frame gate. These measurements
 must be reconsidered before any production migration; they are not evidence of
 watched-HIL behavior.
 
+The first watched control run of this image used source commit `b3d952f9` and
+the exact MRES=3 artifact above. Pre- and post-motion SAFE both passed 30/30
+with unchanged `boot=144;fault_ct=4;wdg_ct=6`, four live watchdog participants,
+and zero new pressure I2C error/recovery evidence. Selector `2085` completed its
+initial homes and the first two measured X moves exactly (10,000 master steps,
+20,000 TIM2 callbacks, zero pending/deadline misses, `tr=1`, `la=ra=0`), then
+failed closed because the terminal callback measured 2,412 cycles against the
+retained 2,250-cycle ceiling. The operator confirmed that all observed homes
+and both moves looked and sounded normal. Selector `2086` was not run.
+
+Retained evidence:
+
+- pre-SAFE: `hil_reports/mres3_conditional_b3d952f9_pre_safe.json`, SHA-256
+  `5E380A2CD386B02474391BB3BFE0848CEDB0F801D4D67AF39A2A45AE8C81FDFA`;
+- focused control: `hil_reports/mres3_conditional_b3d952f9_2085.json`, SHA-256
+  `B12D07E1499ABFD79BE0861D748BB96C670FDEA9F1F5730257D3F8149A71B7DA`;
+- post-SAFE: `hil_reports/mres3_conditional_b3d952f9_post_2085_safe.json`,
+  SHA-256
+  `2A4190D9E00B95921A565DC7231959A7930CA64155B8ED1C5B83DA98CA35D4AD`;
+- normalized failure:
+  `hil_reports/qualification/LC-001/20260813T161121Z/report.json`, SHA-256
+  `1E789139203E8D0E454F4A22DB45EC5911D9F599C48F6C29602E989BE693FF4B`.
+
+This result is attributed to diagnostic-path contamination, not a physical
+abort: mode-2 locals and intentional-wait accounting were compiled into the
+common handler and the strict qualification verdict also controlled whether
+the row continued. The next implementation isolates the conditional ISR body
+and lets selectors `2085`/`2086` retain a complete row after completed,
+internally consistent moves while preserving strict FAIL results.
+
 The first watched selector `2085` attempt on implementation commit `4c16a50c`
 was bracketed by 30/30 SAFE passes and failed closed before the ten-move row.
 Z, X, and Y home completion bits all arrived, but the diagnostic expected a
