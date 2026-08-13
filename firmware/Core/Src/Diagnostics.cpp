@@ -443,6 +443,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                     return runPressureDiagnosticsByFlag;
                   };
 
+                  bool resumeStatusAfterEmission = false;
                   auto sendResult = [&](uint16_t testId, const char* name, bool pass, const char* metrics) {
                     // Keep status spam suppressed for the whole self-test window.
                     comm->setStatusPaused(true);
@@ -473,6 +474,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                     if (SelfTestScheduling_ShouldDelay(schedulingState)) {
                       vTaskDelay(pdMS_TO_TICKS(1u));
                       SelfTestScheduling_RecordDelay(schedulingState);
+                    }
+                    if (resumeStatusAfterEmission) {
+                      comm->setStatusPaused(false);
                     }
                   };
 					  auto runOne = [&](uint16_t testId, const char* name, bool pass, const char* metrics) {
@@ -6702,20 +6706,24 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         // row so evidence does not depend on cadence phase.
                         const bool directStatusMetricsReset =
                             Comm::resetStatusMetrics();
-                        comm->setStatusPaused(false);
                         struct DirectStatusWindowGuard {
-                          explicit DirectStatusWindowGuard(Comm* owner)
-                              : comm(owner), active(true) {}
+                          DirectStatusWindowGuard(Comm* owner, bool& resume)
+                              : comm(owner), resumeAfterEmission(&resume), active(true) {
+                            *resumeAfterEmission = true;
+                            comm->setStatusPaused(false);
+                          }
                           void stop() {
                             if (active && comm != nullptr) {
+                              *resumeAfterEmission = false;
                               comm->setStatusPaused(true);
                               active = false;
                             }
                           }
                           ~DirectStatusWindowGuard() { stop(); }
                           Comm* comm;
+                          bool* resumeAfterEmission;
                           bool active;
-                        } statusWindow{comm};
+                        } statusWindow{comm, resumeStatusAfterEmission};
                         bool directStatusEvidenceValid =
                             directStatusMetricsReset;
                         uint32_t directStatusAgeMaxMs = 0u;

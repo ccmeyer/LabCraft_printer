@@ -2977,15 +2977,18 @@ The first watched `2096` row on commit `c96338fd` completed 5/5 firmware
 results with exact endpoints, pulses, cursor coverage, zero pending updates,
 and normal operator-observed moves and homes. Its host cadence check failed
 because the selector reset and paused status metrics around each sub-second
-move; no individual window happened to contain a status frame. This was an
-evidence-window defect, not a motion failure. The corrected selector keeps one
-RAII-guarded status window open across the complete row, reports aggregate
-cadence in `2095`, and requires both the progress-watchdog and host-cadence
-checks. It does not alter motion code or geometry. The corrected production
-candidate is 357,176 bytes with SHA-256
-`914753F6DB5798E5400B5A35FDACD612563D1F303709EC4118EAEE1727E4DB84`;
-the matching diagnostic image is 359,576 bytes with SHA-256
-`ACF6EE79874BB9EFC09CE16B2E86656A96A8435C07186A92251ED28AD0444998`.
+move; no individual window happened to contain a status frame. One aggregate
+RAII-guarded window removed those per-move resets, but a second row showed that
+the shared self-test result/progress emitter also reasserted the status pause
+after every frame. The final selector-scoped correction resumes status after
+each such emission only while the `2096` evidence window is active. Aggregate
+result `2095` gates cadence and the host requires both progress-watchdog and
+status-cadence checks. These were evidence-path defects; no motion code,
+geometry, rate, or acceleration changed. The final production candidate is
+357,224 bytes with SHA-256
+`C6C40A2D1B23FB6109B035CBAB3DB263CF23F8CE0B739D78E570EEF66F160710`;
+the matching diagnostic image is 359,640 bytes with SHA-256
+`CEC7FF802CCE3A9D36AC30FE47A2C198289E67BFCF585AC97B445A8A2A80AE2F`.
 
 The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is

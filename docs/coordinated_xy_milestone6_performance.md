@@ -1319,17 +1319,22 @@ motion counts, cursor coverage, zero pending observations, X/Y active-callback
 maxima of 661/604 cycles, clean SAFE brackets, and normal operator observation.
 Normalization exposed a selector evidence defect: status reporting was reset
 and paused around each sub-second move, so neither firmware frame counts nor
-the host cadence checker observed a frame. The correction keeps one status
-window open across the complete bounded row and moves strict status evidence to
-aggregate result `2095`; its RAII guard restores paused status on every exit.
-No movement implementation, geometry, rate, or acceleration changed.
+the host cadence checker observed a frame. An aggregate window removed the
+per-move resets, but the next watched row still produced no status frames. Code
+tracing then established the complete cause: the common self-test
+progress/result emitter reasserted the status pause after every frame. The
+final selector-scoped correction keeps one status window open across the row
+and resumes it after each common emission only while selector `2096` is active;
+its RAII guard restores paused status on every exit. Strict status evidence is
+reported in aggregate result `2095`. No movement implementation, geometry,
+rate, or acceleration changed.
 
-After that correction, the complete automated gate again passes 160 targeted
-Python tests and 425 firmware host tests. The new production artifact is
-357,176 bytes, SHA-256
-`914753F6DB5798E5400B5A35FDACD612563D1F303709EC4118EAEE1727E4DB84`;
-the matching diagnostic artifact is 359,576 bytes, SHA-256
-`ACF6EE79874BB9EFC09CE16B2E86656A96A8435C07186A92251ED28AD0444998`.
+After the final correction, the complete automated gate again passes 160
+targeted Python tests and 425 firmware host tests. The final production artifact
+is 357,224 bytes, SHA-256
+`C6C40A2D1B23FB6109B035CBAB3DB263CF23F8CE0B739D78E570EEF66F160710`;
+the matching diagnostic artifact is 359,640 bytes, SHA-256
+`CEC7FF802CCE3A9D36AC30FE47A2C198289E67BFCF585AC97B445A8A2A80AE2F`.
 
 ## Rollback
 

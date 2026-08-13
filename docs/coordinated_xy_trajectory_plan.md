@@ -435,17 +435,20 @@ updates. The operator confirmed that all direct moves and home sequences looked
 and sounded normal. Pre/post SAFE both passed 30/30 with `boot=156`,
 `fault_ct=4`, and `wdg_ct=6` unchanged. Normalization nevertheless failed
 because each sub-second move reset and paused status reporting independently,
-yielding no host cadence sample. The selector-only correction uses one
-RAII-guarded status window across pre-home, all four moves, result emission,
-and teardown homes. Per-move frame counts are informational; `2095` strictly
-gates aggregate frame count, maximum gap/age, alternation, and snapshot
-validity, while the manifest requires host cadence and progress-watchdog
-checks. Motion source, geometry, rate, and acceleration are unchanged.
+yielding no host cadence sample. A second watched row proved that one aggregate
+window alone was insufficient: the shared self-test progress/result emitter
+reasserted the status pause on every frame. The final selector-only correction
+keeps the aggregate RAII window and resumes status after each shared emission
+only while that window is active. Per-move frame counts are informational;
+`2095` strictly gates aggregate frame count, maximum gap/age, alternation, and
+snapshot validity, while the manifest requires host cadence and
+progress-watchdog checks. Motion source, geometry, rate, and acceleration are
+unchanged.
 
-The corrected production artifact is 357,176 bytes, SHA-256
-`914753F6DB5798E5400B5A35FDACD612563D1F303709EC4118EAEE1727E4DB84`;
-the matching diagnostic artifact is 359,576 bytes, SHA-256
-`ACF6EE79874BB9EFC09CE16B2E86656A96A8435C07186A92251ED28AD0444998`.
+The final production artifact is 357,224 bytes, SHA-256
+`C6C40A2D1B23FB6109B035CBAB3DB263CF23F8CE0B739D78E570EEF66F160710`;
+the matching diagnostic artifact is 359,640 bytes, SHA-256
+`CEC7FF802CCE3A9D36AC30FE47A2C198289E67BFCF585AC97B445A8A2A80AE2F`.
 
 Checkpoint B rollback is commit `9dc66f11` and its accepted 351,856-byte
 production artifact, SHA-256
