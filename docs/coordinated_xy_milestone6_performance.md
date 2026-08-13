@@ -986,6 +986,71 @@ candidate still leaves 69,640 bytes in the application partition. The 4,096
 byte stack-frame ceiling is unchanged. These corrected ceilings apply to this
 safety investigation and are not permission for unrelated future growth.
 
+## Conditional-rearm isolation complete-row HIL
+
+The watched isolation run used implementation commit `5edf68ea` and the
+352,024-byte MRES=3 diagnostic artifact with SHA-256
+`99587E773C10530988BF78E7A56ED37DA5E4FE6ED717B769620162506C8720BE`.
+The independently confirmed fixture remained clear for both selectors, and
+the operator reported that every move and all homing in both rows looked and
+sounded normal.
+
+All three SAFE brackets passed 30/30. Throughout the sequence the retained
+counters stayed at `boot=146;fault_ct=4;wdg_ct=6`, all four watchdog
+participants were live with `late_task=none`, and no new reset report, pressure
+I2C failure, or pressure-bus recovery appeared. The SAFE reports are:
+
+- `hil_reports/conditional_rearm_isolation_pre_safe_20260813T165300Z.json`,
+  SHA-256
+  `3E90B7D376B8D6507B0FB4C9B27ECA10103AC25F3D8C446399DE21DCD6B3128E`;
+- `hil_reports/conditional_rearm_isolation_post_2085_safe_20260813T165800Z.json`,
+  SHA-256
+  `9925D379E0595BA9F7A2C417C89FF3A72E61F6BEFA35BC83236CC4C336181E3D`;
+- `hil_reports/conditional_rearm_isolation_final_safe_20260813T170300Z.json`,
+  SHA-256
+  `749E5E062505E90974B2F6DD27685BFBDA778E3EE4E003F1C8E998746A9822C0`.
+
+Selector `2085` retained the complete free-running control row: 10 moves,
+exact `53,416/90,000/110,000` X/Y/master totals, 220,000 TIM2 callbacks,
+zero pending observations, zero deadline misses, zero saturation or timeout,
+and final X/Y drift of 1/2 steps. Its strict result remains FAIL with
+`qf=10;qm=2148007936` (`0x80080000`): terminal-cycle cost plus the explicit
+entry-lateness diagnostic. The maximum terminal cost was 2,380 core cycles,
+`lc=446`, `cm=626` timer ticks, and `dm=1199` core cycles. `fv=hm=0`
+confirms that no hard failure occurred. The raw report is
+`hil_reports/conditional_rearm_isolation_2085_20260813T165600Z.json`, SHA-256
+`BF58FA00D180979C4FCFA72E077755E629189330CC1943F4DA305902B8894032`.
+The v2 normalized report at
+`hil_reports/qualification/LC-001/20260813T165830Z/report.json`, SHA-256
+`61BAE08094AEC99A2260CC9413C4C7967C63E5BA45C75259E659133803DF7276`,
+correctly remains FAIL while retaining the complete row.
+
+Selector `2086` also retained the complete conditional row with the same exact
+step/callback totals, zero pending observations, zero deadline misses, zero
+saturation or timeout, and final X/Y drift of 2/0 steps. Its strict result is
+`qf=10;qm=2416443392` (`0x90080000`): the same terminal/entry diagnostics plus
+the injection/rearm evidence gate. Two injections executed and rearmed with
+`im=811`, `rc=ir=2`, `rp=0`, `rd=474`, and every ordinary non-rearm decision
+retained at least 1,146 timer ticks. Eight armed injections were unconsumed,
+giving `ic=2;ix=8`; `fv=hm=0` again confirms no hard failure. The raw report is
+`hil_reports/conditional_rearm_isolation_2086_20260813T170100Z.json`, SHA-256
+`DF3B990CB753099B41BC92A817C55B2867F5CB3DF858EF8B4ACB000CDD13128B`.
+The v2 normalized report at
+`hil_reports/qualification/LC-001/20260813T170100Z/report.json`, SHA-256
+`A59B2D8D86EA9F1C839BF8C5FFA148554F2E3B74D3DCBE3589444A5F7F023A81`,
+correctly remains FAIL.
+
+The eight unconsumed injections are explained by the diagnostic's phase gate,
+not by eight wait-loop or rearm failures. At 20 kHz and 70,000 steps/s^2, the
+profile requires exactly 5,000 acceleration steps. The first four geometry
+pairs have 10,000 master steps, so each forward and reverse leg consists of
+exactly 5,000 acceleration plus 5,000 deceleration steps and contains no
+`Cruise` event. Only the final 15,000-step pair contains a 5,000-step cruise,
+which accounts exactly for the two consumed injections. The next diagnostic
+revision should select the first cruise rising edge when cruise exists and the
+first peak/deceleration rising edge when cruise length is zero. No production
+motion change or additional watched run is authorized by this evidence alone.
+
 ## Rollback
 
 Immediate rollback disables coordinated instrumentation or builds with
