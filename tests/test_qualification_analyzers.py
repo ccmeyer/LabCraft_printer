@@ -575,7 +575,7 @@ def test_direct_xyz_lut_manifest_rejects_profile_timing_or_isolation_regressions
         (2095, "pd", 2),
         (2095, "mres", 2),
         (2095, "sn", 1),
-        (2095, "sg", 101),
+        (2095, "sg", 126),
         (2095, "wd", 101),
         (2095, "sa", 1),
         (2095, "sv", 0),

@@ -59,7 +59,9 @@ def test_direct_lut_selector_uses_direct_axis_ownership_and_complete_inventory()
     assert "DirectStatusWindowGuard" in body
     assert "statusWindow{comm, resumeStatusAfterEmission}" in body
     assert "directStatusFrames >= 2u" in body
-    assert "directStatusGapMs <= 100u" in body
+    assert "kStatusPeriodLimitMs = 125u" in body
+    assert "directStatusGapMs <= kStatusPeriodLimitMs" in body
+    assert "directStatusAgeMaxMs <= 100u" in body
     assert 'sn=%lu;sg=%lu;wd=%lu;sa=%lu;sv=%u' in body
     assert "isolationMetricsFit" in body
     emitter = diagnostics[

@@ -1327,14 +1327,17 @@ final selector-scoped correction keeps one status window open across the row
 and resumes it after each common emission only while selector `2096` is active;
 its RAII guard restores paused status on every exit. Strict status evidence is
 reported in aggregate result `2095`. No movement implementation, geometry,
-rate, or acceleration changed.
+rate, or acceleration changed. The status-period gate is 125 ms: status is
+nominally scheduled every 50 ms, and a measured result transmission can hold
+the UART for up to 26 ms and skip one slot. The independent watchdog-age gate
+remains 100 ms.
 
 After the final correction, the complete automated gate again passes 160
 targeted Python tests and 425 firmware host tests. The final production artifact
 is 357,224 bytes, SHA-256
-`C6C40A2D1B23FB6109B035CBAB3DB263CF23F8CE0B739D78E570EEF66F160710`;
+`09A00B221816B73390666BB1A084EE7009DF9555072965E1F7C659B9683DF2FB`;
 the matching diagnostic artifact is 359,640 bytes, SHA-256
-`CEC7FF802CCE3A9D36AC30FE47A2C198289E67BFCF585AC97B445A8A2A80AE2F`.
+`71CF16AF562D80C1B7E0801B33A80DFBF6A6BBCEF414F292704A6A80CDB4CE57`.
 
 ## Rollback
 

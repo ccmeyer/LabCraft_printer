@@ -6607,6 +6607,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr uint32_t kHomeTimeoutMs = 20000u;
                         static constexpr uint32_t kCruiseDistance = 14000u;
                         static constexpr uint32_t kTriangularDistance = 2000u;
+                        // Status is nominally emitted every 50 ms. A generic
+                        // diagnostic frame may hold the UART for roughly
+                        // 26 ms and intentionally pauses status, so allow one
+                        // skipped status-task slot plus bounded scheduling
+                        // jitter without weakening the 100 ms watchdog-age
+                        // gate below.
+                        static constexpr uint32_t kStatusPeriodLimitMs = 125u;
                         static constexpr int32_t kSafeXMax = 45000;
                         static constexpr int32_t kSafeYMax = 35000;
                         static constexpr int32_t kSafeZMax = 80000;
@@ -6977,7 +6984,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const bool directStatusPass =
                             directStatusEvidenceValid &&
                             directStatusFrames >= 2u &&
-                            directStatusGapMs <= 100u &&
+                            directStatusGapMs <= kStatusPeriodLimitMs &&
                             directStatusAgeMaxMs <= 100u &&
                             directStatusAlternationErrors == 0u;
                         const int32_t pDelta = stepperP->getPosition() - pStart;

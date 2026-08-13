@@ -370,6 +370,8 @@ def test_direct_xyz_lut_suite_requires_profile_coverage_and_isolation():
     assert manifest.analysis_rules["2095"]["metrics"]["post"]["equals"] == 1
     assert manifest.analysis_rules["2095"]["metrics"]["pd"]["equals"] == 0
     assert manifest.analysis_rules["2095"]["metrics"]["sn"]["min"] == 2
+    assert manifest.analysis_rules["2095"]["metrics"]["sg"]["max"] == 125
+    assert manifest.analysis_rules["2095"]["metrics"]["wd"]["max"] == 100
     assert manifest.analysis_rules["2095"]["metrics"]["sv"]["equals"] == 1
     assert "sn" not in manifest.analysis_rules["2091"]["metrics"]
 

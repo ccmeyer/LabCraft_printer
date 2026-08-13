@@ -442,13 +442,15 @@ keeps the aggregate RAII window and resumes status after each shared emission
 only while that window is active. Per-move frame counts are informational;
 `2095` strictly gates aggregate frame count, maximum gap/age, alternation, and
 snapshot validity, while the manifest requires host cadence and
-progress-watchdog checks. Motion source, geometry, rate, and acceleration are
-unchanged.
+progress-watchdog checks. The selector allows a 125 ms maximum status period
+to cover one nominal 50 ms status slot skipped by a measured result-frame UART
+hold of up to 26 ms, while retaining the 100 ms watchdog-age gate. Motion
+source, geometry, rate, and acceleration are unchanged.
 
 The final production artifact is 357,224 bytes, SHA-256
-`C6C40A2D1B23FB6109B035CBAB3DB263CF23F8CE0B739D78E570EEF66F160710`;
+`09A00B221816B73390666BB1A084EE7009DF9555072965E1F7C659B9683DF2FB`;
 the matching diagnostic artifact is 359,640 bytes, SHA-256
-`CEC7FF802CCE3A9D36AC30FE47A2C198289E67BFCF585AC97B445A8A2A80AE2F`.
+`71CF16AF562D80C1B7E0801B33A80DFBF6A6BBCEF414F292704A6A80CDB4CE57`.
 
 Checkpoint B rollback is commit `9dc66f11` and its accepted 351,856-byte
 production artifact, SHA-256

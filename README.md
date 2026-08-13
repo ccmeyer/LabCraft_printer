@@ -2983,12 +2983,15 @@ the shared self-test result/progress emitter also reasserted the status pause
 after every frame. The final selector-scoped correction resumes status after
 each such emission only while the `2096` evidence window is active. Aggregate
 result `2095` gates cadence and the host requires both progress-watchdog and
-status-cadence checks. These were evidence-path defects; no motion code,
+status-cadence checks. Its status-period limit is 125 ms because the nominal
+50 ms status task can legitimately miss one slot while a measured result frame
+holds the UART for up to 26 ms; watchdog age remains limited to 100 ms. These
+were evidence-path defects; no motion code,
 geometry, rate, or acceleration changed. The final production candidate is
 357,224 bytes with SHA-256
-`C6C40A2D1B23FB6109B035CBAB3DB263CF23F8CE0B739D78E570EEF66F160710`;
+`09A00B221816B73390666BB1A084EE7009DF9555072965E1F7C659B9683DF2FB`;
 the matching diagnostic image is 359,640 bytes with SHA-256
-`CEC7FF802CCE3A9D36AC30FE47A2C198289E67BFCF585AC97B445A8A2A80AE2F`.
+`71CF16AF562D80C1B7E0801B33A80DFBF6A6BBCEF414F292704A6A80CDB4CE57`.
 
 The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is
