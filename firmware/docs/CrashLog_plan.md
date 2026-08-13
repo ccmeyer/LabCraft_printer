@@ -809,6 +809,48 @@ deadline is recovery containment, while the unchanged 125 ms host gates still
 reject degraded normal pressure scheduling. Further physical motion HIL waits
 for the short no-motion check to show no I2C failure/recovery delta.
 
+### Priority-aware self-test pacing HIL evidence (2026-08-12 local)
+
+The first priority-aware candidate, commit `4a4dbb3e`, immediately removed the
+pressure failure: its focused and delayed SAFE runs reported `pg=7;pa=2` with
+`se=re=bc=h=r=x=e=0` and unchanged `fault_ct=4;wdg_ct=6`. It was rejected
+because lowering the emitter extended `txm` to 26 ms against the ordinary
+25 ms UART timeout, dropping result IDs `1006` and `1007`; normalization
+correctly failed the incomplete 28-row report. This candidate was not used for
+the proceed decision.
+
+Corrective commit `47098e14` routes only self-test result/progress frames
+through the failure-reporting 50 ms send path. Its 339,640-byte artifact has
+SHA-256
+`5A944627C3A5352F3AA1A259F86D0D202996A7FA5C78FD486CFDCB7D6BEE03D5`.
+The selector-`1038` cooperative SAFE and delayed default-SAFE bracket each
+delivered all 30 expected rows and passed 30/30. The focused arm reported
+`rf=yc=29;txm=26;pg=13;pa=2;se=re=bc=h=r=x=e=0;hw=178;sf=0`; the bracket
+reported `pg=7;pa=2` with the same zero failure/recovery detail. Both retained
+`boot=134;fault_ct=4;wdg_ct=6`, all four watchdog participants were live, and
+host progress/cadence checks passed. The cooperative manifest normalized to
+pass with zero blocking issues and zero warnings.
+
+Evidence:
+
+- rejected intermediate focused report
+  `hil_reports/selftest_pacing_4a4dbb3e_cooperative_safe.json`, SHA-256
+  `8EA4488C6AD973E9C0117B56D4E9152C829E0C4BDB2CB26176FC929420474044`;
+- accepted focused report
+  `hil_reports/selftest_pacing_47098e14_cooperative_safe.json`, SHA-256
+  `7F3876A104BDFBBEBDD17795344139CFDB6ACCD24FD19CE54D265AE471C6193F`;
+- accepted delayed bracket
+  `hil_reports/selftest_pacing_47098e14_post_safe.json`, SHA-256
+  `71BCEE702F672805E3D085DA8CCC18566C6E062F6795356A85DF3F4BC74FCBC2`;
+- accepted normalized report
+  `hil_reports/qualification_selftest_pacing_47098e14/LC-001/20260813T012211Z/report.json`,
+  SHA-256
+  `B3D73FF02E9108C11178926F2C4D9EB810971BD6BBE1F78038C8162CB9696D9B`.
+
+The short no-motion pressure/scheduler gate is now clear. The deferred long
+soak remains separate; watched coordinated-motion HIL may resume with its
+existing mechanical immediate-stop criteria and independent SAFE brackets.
+
 Messages from past attempts:
 I’ve implemented the crash-log/watchdog slice and the remaining issue is target boot reachability during SAFE HIL. I’m checking the latest report and the startup paths that can prevent HELLO_ACK, then I’ll make the smallest fix and rerun validation.
 

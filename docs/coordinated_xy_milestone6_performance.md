@@ -756,6 +756,13 @@ control remain at 25 ms. The matching artifact is 339,640 bytes with SHA-256
 `5A944627C3A5352F3AA1A259F86D0D202996A7FA5C78FD486CFDCB7D6BEE03D5`,
 leaving 53,576 bytes in the 384 KiB application partition.
 
+Commit `47098e14`'s focused cooperative SAFE and delayed bracket both delivered
+all 30 rows, passed 30/30, retained `fault_ct=4;wdg_ct=6`, and reported
+`rf=yc=29`, `pg=13/7`, `pa=2/2`, and `se=re=bc=h=r=x=e=0`. The cooperative
+manifest passed with zero blocking issues. The self-test scheduling gate is
+therefore cleared for the next watched, independently SAFE-bracketed selector
+`2075` motion run; the long idle soak remains deferred and separate.
+
 The preceding low-rate normal-route regression completed all five ordinary
 motion rows exactly. Its control row failed only because the instrumented abort
 terminal measured 2,349 cycles versus the retained 2,250-cycle gate; cancel

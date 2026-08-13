@@ -1,0 +1,1652 @@
+{
+  "schema_version": "qualification_report_v1",
+  "manifest": {
+    "schema_version": "qualification_manifest_v0",
+    "manifest_id": "selftest_scheduler_cooperative_v1",
+    "name": "Self-Test Scheduler Cooperative Diagnostic v1",
+    "profile": "SAFE",
+    "expected_test_ids": [
+      1001,
+      1002,
+      1010,
+      1011,
+      1012,
+      1003,
+      1013,
+      1020,
+      1021,
+      1004,
+      1005,
+      1007,
+      1006,
+      1030,
+      1040,
+      1041,
+      1042,
+      2001,
+      2002,
+      2007,
+      2008,
+      2003,
+      2201,
+      2202,
+      2203,
+      2004,
+      2005,
+      2006,
+      1044,
+      1043
+    ],
+    "fixtures": [],
+    "enforce_expected_test_ids": true,
+    "requires_operator_prompts": false,
+    "selftest_args": [
+      "--selftest-scheduler-cooperative-suite"
+    ],
+    "required_host_checks": [
+      "selftest_progress_watchdog",
+      "selftest_scheduler_status_cadence"
+    ],
+    "analysis_rules": {
+      "1043": {
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metrics": {
+          "sm": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "rf": {
+            "maturity": "acceptance",
+            "equals": 29
+          },
+          "yc": {
+            "maturity": "acceptance",
+            "equals": 29
+          },
+          "txm": {
+            "maturity": "candidate",
+            "min": 0
+          },
+          "pg": {
+            "maturity": "acceptance",
+            "min": 0,
+            "max": 125
+          },
+          "pa": {
+            "maturity": "acceptance",
+            "min": 0,
+            "max": 125
+          },
+          "se": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "re": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "bc": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "h": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "r": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "x": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "e": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "hw": {
+            "maturity": "acceptance",
+            "min": 1,
+            "max": 4294967294
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          }
+        }
+      },
+      "1044": {
+        "category": "watchdog",
+        "failure_domain": "firmware_evidence",
+        "metrics": {
+          "v": {
+            "maturity": "candidate",
+            "min": 0,
+            "max": 1
+          },
+          "h": {
+            "maturity": "candidate",
+            "min": 0,
+            "max": 3
+          },
+          "r": {
+            "maturity": "candidate",
+            "min": 0,
+            "max": 999
+          },
+          "x": {
+            "maturity": "candidate",
+            "min": 0,
+            "max": 999
+          },
+          "e": {
+            "maturity": "candidate",
+            "min": 0,
+            "max": 511
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          }
+        }
+      }
+    }
+  },
+  "machine": {
+    "machine_id": "LC-001",
+    "machine_uuid": "dc0f3c73-0eef-4298-a491-148f7ff5713e",
+    "assigned_at": "2026-08-11T19:48:35.686298Z",
+    "notes": ""
+  },
+  "run": {
+    "run_dir": "hil_reports\\qualification_selftest_pacing_4a4dbb3e\\LC-001\\20260813T011650Z",
+    "raw_selftest_path": "hil_reports\\qualification_selftest_pacing_4a4dbb3e\\LC-001\\20260813T011650Z\\raw_selftest.json",
+    "report_path": "hil_reports\\qualification_selftest_pacing_4a4dbb3e\\LC-001\\20260813T011650Z\\report.json",
+    "summary_csv_path": "hil_reports\\qualification_selftest_pacing_4a4dbb3e\\LC-001\\20260813T011650Z\\summary.csv",
+    "selftest_returncode": 0,
+    "fixture_id": null
+  },
+  "overall_status": "fail",
+  "raw_summary": {
+    "total": 30,
+    "passed": 30,
+    "failed": 0
+  },
+  "run_id": 4172322802,
+  "profile": "SAFE",
+  "started_at": "2026-08-13T01:15:50.642380Z",
+  "finished_at": "2026-08-13T01:15:52.074993Z",
+  "aborted": false,
+  "manifest_checks": {
+    "expected_test_ids": [
+      1001,
+      1002,
+      1003,
+      1004,
+      1005,
+      1006,
+      1007,
+      1010,
+      1011,
+      1012,
+      1013,
+      1020,
+      1021,
+      1030,
+      1040,
+      1041,
+      1042,
+      1043,
+      1044,
+      2001,
+      2002,
+      2003,
+      2004,
+      2005,
+      2006,
+      2007,
+      2008,
+      2201,
+      2202,
+      2203
+    ],
+    "observed_test_ids": [
+      1001,
+      1002,
+      1003,
+      1004,
+      1005,
+      1010,
+      1011,
+      1012,
+      1013,
+      1020,
+      1021,
+      1030,
+      1040,
+      1041,
+      1042,
+      1043,
+      1044,
+      2001,
+      2002,
+      2003,
+      2004,
+      2005,
+      2006,
+      2007,
+      2008,
+      2201,
+      2202,
+      2203
+    ],
+    "missing_test_ids": [
+      1006,
+      1007
+    ],
+    "unexpected_test_ids": [],
+    "enforced": true
+  },
+  "results": [
+    {
+      "test_id": 1001,
+      "name": "comm_crc_known_vector",
+      "pass": true,
+      "metrics": {
+        "crc": 19255
+      },
+      "timestamp": "2026-08-13T01:15:50.716622Z"
+    },
+    {
+      "test_id": 1002,
+      "name": "comm_frame_roundtrip",
+      "pass": true,
+      "metrics": {
+        "frame_len": 12
+      },
+      "timestamp": "2026-08-13T01:15:50.743417Z"
+    },
+    {
+      "test_id": 1010,
+      "name": "session_hello_ack",
+      "pass": true,
+      "metrics": {
+        "ack_cmd": 244,
+        "seq8_match": 1,
+        "seq32_match": 1
+      },
+      "timestamp": "2026-08-13T01:15:50.743435Z"
+    },
+    {
+      "test_id": 1011,
+      "name": "session_goodbye_ack",
+      "pass": true,
+      "metrics": {
+        "ack_cmd": 246,
+        "seq8_match": 1,
+        "seq32_match": 1
+      },
+      "timestamp": "2026-08-13T01:15:50.743483Z"
+    },
+    {
+      "test_id": 1012,
+      "name": "session_goodbye_done",
+      "pass": true,
+      "metrics": {
+        "done_cmd": 248,
+        "seq8_match": 1,
+        "seq32_match": 1
+      },
+      "timestamp": "2026-08-13T01:15:50.830863Z"
+    },
+    {
+      "test_id": 1003,
+      "name": "status_frame_shape",
+      "pass": true,
+      "metrics": {
+        "tag_count": 18,
+        "has_seq32": 0,
+        "chunk0_seen": 2,
+        "chunk1_seen": 2
+      },
+      "timestamp": "2026-08-13T01:15:51.016385Z"
+    },
+    {
+      "test_id": 1013,
+      "name": "clear_queue_ack",
+      "pass": true,
+      "metrics": {
+        "ack_cmd": 247,
+        "seq8_match": 1,
+        "seq32_match": 1,
+        "queue_depth_after_clear": 0
+      },
+      "timestamp": "2026-08-13T01:15:51.041889Z"
+    },
+    {
+      "test_id": 1020,
+      "name": "status_chunk_alternation_safe",
+      "pass": true,
+      "metrics": {
+        "chunk0_seen": 2,
+        "chunk1_seen": 2,
+        "alternation_errors": 0
+      },
+      "timestamp": "2026-08-13T01:15:51.041905Z"
+    },
+    {
+      "test_id": 1021,
+      "name": "status_cadence_safe",
+      "pass": true,
+      "metrics": {
+        "period_ms_avg": 64,
+        "period_ms_max_jitter": 15
+      },
+      "timestamp": "2026-08-13T01:15:51.078364Z"
+    },
+    {
+      "test_id": 1004,
+      "name": "uptime_counter_read",
+      "pass": true,
+      "metrics": {
+        "delta_ms": 10
+      },
+      "timestamp": "2026-08-13T01:15:51.078377Z"
+    },
+    {
+      "test_id": 1005,
+      "name": "flash_config_readonly",
+      "pass": true,
+      "metrics": {
+        "flash_delay_us": 1000,
+        "flash_width_ns": 2000,
+        "flash_width_min_ns": 100,
+        "flash_width_max_ns": 5000,
+        "ft_acc": 0,
+        "ft_ign_dis": 0,
+        "ft_ign_fault": 0,
+        "ft_ign_busy": 0,
+        "ft_ign_low": 0,
+        "ft_rel_to": 0,
+        "ft_ack_to": 0,
+        "ft_print_to": 0,
+        "ext_count": 0
+      },
+      "timestamp": "2026-08-13T01:15:51.104939Z"
+    },
+    {
+      "test_id": 1030,
+      "name": "uart_recovery_after_noise_safe",
+      "pass": true,
+      "metrics": {
+        "noise_bytes_injected": 4,
+        "frames_recovered": 2,
+        "crc_mismatch_count": 1,
+        "length_reject_count": 1
+      },
+      "timestamp": "2026-08-13T01:15:51.160648Z"
+    },
+    {
+      "test_id": 1040,
+      "name": "rtos_memory_headroom_safe",
+      "pass": true,
+      "metrics": {
+        "heap_now": 11144,
+        "heap_min": 11144,
+        "stk_min": 177,
+        "stk_task": "Pressure",
+        "task_n": 14,
+        "task_total": 14,
+        "task_cap": 32,
+        "core_miss": 0,
+        "preg_n": 2,
+        "trunc": 0,
+        "stk_ovf": 0,
+        "prnt_hwm_words": 184,
+        "flashmon_hwm_words": 0,
+        "flashmon_present": 0
+      },
+      "timestamp": "2026-08-13T01:15:51.186943Z"
+    },
+    {
+      "test_id": 1041,
+      "name": "crash_record_retained_safe",
+      "pass": true,
+      "metrics": {
+        "pending": 0,
+        "sticky": 1,
+        "fault": "wdt",
+        "task": "orch",
+        "reset": "soft",
+        "boot": 132,
+        "fault_ct": 4,
+        "wdg_ct": 6,
+        "sticky_ct": 131,
+        "raw_sr": 3,
+        "boot_stage": "comm_rearm",
+        "wdg_late": "press"
+      },
+      "timestamp": "2026-08-13T01:15:51.214034Z"
+    },
+    {
+      "test_id": 1042,
+      "name": "watchdog_supervisor_safe",
+      "pass": true,
+      "metrics": {
+        "enabled": 1,
+        "arm_result": "armed",
+        "timeout_ms": 4000,
+        "init_timeout_ms": 20,
+        "req_n": 4,
+        "live_n": 4,
+        "late_task": "none",
+        "raw_sr": 3,
+        "sticky_ct": 1,
+        "recovery_boot": 1
+      },
+      "timestamp": "2026-08-13T01:15:51.214061Z"
+    },
+    {
+      "test_id": 2001,
+      "name": "motion_home_cycle_full",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "motion": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T01:15:51.240010Z"
+    },
+    {
+      "test_id": 2002,
+      "name": "motion_absolute_move_bounds_full",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "motion": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T01:15:51.240031Z"
+    },
+    {
+      "test_id": 2007,
+      "name": "motion_home_repeatability_factor",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "motion": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T01:15:51.266665Z"
+    },
+    {
+      "test_id": 2008,
+      "name": "motion_pattern_return_factory",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "motion": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T01:15:51.266686Z"
+    },
+    {
+      "test_id": 2003,
+      "name": "pressure_regulator_step_response",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "pressure": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T01:15:51.293116Z"
+    },
+    {
+      "test_id": 2201,
+      "name": "pressure_hold_leak_factory",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "pressure": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T01:15:51.293137Z"
+    },
+    {
+      "test_id": 2202,
+      "name": "pressure_target_cycle_repeatabil",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "pressure": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T01:15:51.320658Z"
+    },
+    {
+      "test_id": 2203,
+      "name": "pressure_motor_position_hysteres",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "pressure": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T01:15:51.320678Z"
+    },
+    {
+      "test_id": 2004,
+      "name": "valve_actuation_sequence_full",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "valves": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T01:15:51.345413Z"
+    },
+    {
+      "test_id": 2005,
+      "name": "print_refuel_pulse_integrity_ful",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "pulses": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T01:15:51.345434Z"
+    },
+    {
+      "test_id": 2006,
+      "name": "emergency_abort_and_safe_stop_fu",
+      "pass": true,
+      "metrics": {
+        "profile": "SAFE",
+        "executed": 0,
+        "fixture_required": 1,
+        "abort": 0,
+        "gate": "safe_only"
+      },
+      "timestamp": "2026-08-13T01:15:51.373807Z"
+    },
+    {
+      "test_id": 1044,
+      "name": "pressure_wdg_context_safe",
+      "pass": true,
+      "metrics": {
+        "v": 0,
+        "ex": 0,
+        "pa": 4294967295,
+        "ph": 0,
+        "pha": 4294967295,
+        "la": 4294967295,
+        "pg": 0,
+        "se": 0,
+        "re": 0,
+        "bc": 0,
+        "lp": 0,
+        "h": 0,
+        "r": 0,
+        "x": 0,
+        "e": 0,
+        "hw": 0,
+        "tk": 0,
+        "sf": 0
+      },
+      "timestamp": "2026-08-13T01:15:51.373830Z"
+    },
+    {
+      "test_id": 1043,
+      "name": "selftest_scheduler_safe",
+      "pass": true,
+      "metrics": {
+        "sm": 1,
+        "rf": 29,
+        "yc": 29,
+        "txm": 26,
+        "txt": 377,
+        "pg": 7,
+        "pa": 2,
+        "ph": 1,
+        "pha": 1,
+        "la": 1,
+        "se": 0,
+        "re": 0,
+        "bc": 0,
+        "h": 0,
+        "r": 0,
+        "x": 0,
+        "e": 0,
+        "hw": 177,
+        "sf": 0
+      },
+      "timestamp": "2026-08-13T01:15:51.474186Z"
+    }
+  ],
+  "host_checks": [
+    {
+      "name": "hello_ack",
+      "pass": true,
+      "details": {
+        "seq8": 1,
+        "run_id": 4172322802,
+        "timeout_ms": 8000,
+        "retry_ms": 250,
+        "retries_sent": 1,
+        "observed_uart_bytes": 256,
+        "fast_fail_on_missing_hello": false,
+        "capabilities": 15,
+        "supports_selftest_transport": true
+      },
+      "timestamp": "2026-08-13T01:15:50.699133Z"
+    },
+    {
+      "name": "selftest_start_ack",
+      "pass": true,
+      "details": {
+        "transport_mode": "queue_ack",
+        "seq8": 2,
+        "seq32": 1,
+        "run_id": 4172322802,
+        "timeout_ms": 2000,
+        "observed_cmd": 254,
+        "observed_seq8": 2,
+        "observed_seq32": 1,
+        "ack_result": "accepted",
+        "expected_seq32": null,
+        "reason": "ok"
+      },
+      "timestamp": "2026-08-13T01:15:50.716560Z"
+    },
+    {
+      "name": "goodbye_ack",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4172322802,
+        "timeout_ms": 2000
+      },
+      "timestamp": "2026-08-13T01:15:51.574376Z"
+    },
+    {
+      "name": "goodbye_done",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4172322802,
+        "timeout_ms": 5000,
+        "observed_seq32": 4172322802
+      },
+      "timestamp": "2026-08-13T01:15:52.074958Z"
+    },
+    {
+      "name": "selftest_progress_watchdog",
+      "pass": true,
+      "details": {
+        "progress_count": 0,
+        "last_progress": {},
+        "recent_frames": [
+          {
+            "ts": "2026-08-13T01:15:50.716596Z",
+            "cmd": 254,
+            "ack_result": "accepted",
+            "ack_seq32": 1,
+            "expected_seq32": null
+          },
+          {
+            "ts": "2026-08-13T01:15:50.716606Z",
+            "cmd": 251,
+            "test_id": 1001,
+            "name": "comm_crc_known_vector"
+          },
+          {
+            "ts": "2026-08-13T01:15:50.743406Z",
+            "cmd": 251,
+            "test_id": 1002,
+            "name": "comm_frame_roundtrip"
+          },
+          {
+            "ts": "2026-08-13T01:15:50.743425Z",
+            "cmd": 251,
+            "test_id": 1010,
+            "name": "session_hello_ack"
+          },
+          {
+            "ts": "2026-08-13T01:15:50.743472Z",
+            "cmd": 251,
+            "test_id": 1011,
+            "name": "session_goodbye_ack"
+          },
+          {
+            "ts": "2026-08-13T01:15:50.830851Z",
+            "cmd": 251,
+            "test_id": 1012,
+            "name": "session_goodbye_done"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.016373Z",
+            "cmd": 251,
+            "test_id": 1003,
+            "name": "status_frame_shape"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.041878Z",
+            "cmd": 251,
+            "test_id": 1013,
+            "name": "clear_queue_ack"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.041897Z",
+            "cmd": 251,
+            "test_id": 1020,
+            "name": "status_chunk_alternation_safe"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.078355Z",
+            "cmd": 251,
+            "test_id": 1021,
+            "name": "status_cadence_safe"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.078371Z",
+            "cmd": 251,
+            "test_id": 1004,
+            "name": "uptime_counter_read"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.104922Z",
+            "cmd": 251,
+            "test_id": 1005,
+            "name": "flash_config_readonly"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.160638Z",
+            "cmd": 251,
+            "test_id": 1030,
+            "name": "uart_recovery_after_noise_safe"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.186915Z",
+            "cmd": 251,
+            "test_id": 1040,
+            "name": "rtos_memory_headroom_safe"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.213997Z",
+            "cmd": 251,
+            "test_id": 1041,
+            "name": "crash_record_retained_safe"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.214041Z",
+            "cmd": 251,
+            "test_id": 1042,
+            "name": "watchdog_supervisor_safe"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.239992Z",
+            "cmd": 251,
+            "test_id": 2001,
+            "name": "motion_home_cycle_full"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.240016Z",
+            "cmd": 251,
+            "test_id": 2002,
+            "name": "motion_absolute_move_bounds_full"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.266647Z",
+            "cmd": 251,
+            "test_id": 2007,
+            "name": "motion_home_repeatability_factor"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.266671Z",
+            "cmd": 251,
+            "test_id": 2008,
+            "name": "motion_pattern_return_factory"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.293099Z",
+            "cmd": 251,
+            "test_id": 2003,
+            "name": "pressure_regulator_step_response"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.293122Z",
+            "cmd": 251,
+            "test_id": 2201,
+            "name": "pressure_hold_leak_factory"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.320641Z",
+            "cmd": 251,
+            "test_id": 2202,
+            "name": "pressure_target_cycle_repeatabil"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.320664Z",
+            "cmd": 251,
+            "test_id": 2203,
+            "name": "pressure_motor_position_hysteres"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.345396Z",
+            "cmd": 251,
+            "test_id": 2004,
+            "name": "valve_actuation_sequence_full"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.345419Z",
+            "cmd": 251,
+            "test_id": 2005,
+            "name": "print_refuel_pulse_integrity_ful"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.373785Z",
+            "cmd": 251,
+            "test_id": 2006,
+            "name": "emergency_abort_and_safe_stop_fu"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.373814Z",
+            "cmd": 251,
+            "test_id": 1044,
+            "name": "pressure_wdg_context_safe"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.474169Z",
+            "cmd": 251,
+            "test_id": 1043,
+            "name": "selftest_scheduler_safe"
+          },
+          {
+            "ts": "2026-08-13T01:15:51.474193Z",
+            "cmd": 252,
+            "run_id": 4172322802
+          }
+        ],
+        "frame_counts": {
+          "2": 5,
+          "251": 28,
+          "252": 1,
+          "254": 1
+        },
+        "progress_timeout_ms": 15000,
+        "activity_timeout_ms": 60000,
+        "status_only_timeout_ms": 120000,
+        "effective_timeout_ms": 240000,
+        "total_rx_bytes": 4418,
+        "status_frames_since_selftest": 0,
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 3,
+        "selftest_frames_seen": 29,
+        "startup_reset_report": {
+          "reset_seq32": 4172322802,
+          "reset_cause": 3,
+          "reset_flags": 5,
+          "last_fault": 9,
+          "last_task": 2,
+          "boot_count": 132,
+          "fault_count": 4,
+          "watchdog_count": 6,
+          "watchdog_sticky_count": 131,
+          "watchdog_raw_sr": 3,
+          "uptime_ms": 136501,
+          "boot_stage": 11,
+          "recovery_boot": 1,
+          "fault_stage": 7,
+          "watchdog_late_task": 4,
+          "active_command": 250,
+          "regulator_context": null,
+          "fault_context": null
+        },
+        "reset_report": null,
+        "last_valid_frame_age_ms": 701,
+        "last_rx_byte_age_ms": 701,
+        "last_selftest_frame_age_ms": 701,
+        "timeout_reason": null
+      },
+      "timestamp": "2026-08-13T01:15:52.074985Z"
+    },
+    {
+      "name": "selftest_scheduler_status_cadence",
+      "pass": true,
+      "details": {
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 3,
+        "limit_ms_exclusive": 500
+      },
+      "timestamp": "2026-08-13T01:15:52.074990Z"
+    }
+  ],
+  "analysis": {
+    "schema_version": "qualification_analysis_v1",
+    "status": "fail",
+    "items": [
+      {
+        "item_kind": "manifest_check",
+        "status": "fail",
+        "severity": "error",
+        "failure_domain": "infrastructure",
+        "message": "Missing expected self-test IDs: [1006, 1007].",
+        "missing_test_ids": [
+          1006,
+          1007
+        ]
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1001,
+        "name": "comm_crc_known_vector",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1002,
+        "name": "comm_frame_roundtrip",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1010,
+        "name": "session_hello_ack",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1011,
+        "name": "session_goodbye_ack",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1012,
+        "name": "session_goodbye_done",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1003,
+        "name": "status_frame_shape",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1013,
+        "name": "clear_queue_ack",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1020,
+        "name": "status_chunk_alternation_safe",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1021,
+        "name": "status_cadence_safe",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1004,
+        "name": "uptime_counter_read",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1005,
+        "name": "flash_config_readonly",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1030,
+        "name": "uart_recovery_after_noise_safe",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1040,
+        "name": "rtos_memory_headroom_safe",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1041,
+        "name": "crash_record_retained_safe",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1042,
+        "name": "watchdog_supervisor_safe",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2001,
+        "name": "motion_home_cycle_full",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2002,
+        "name": "motion_absolute_move_bounds_full",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2007,
+        "name": "motion_home_repeatability_factor",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2008,
+        "name": "motion_pattern_return_factory",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2003,
+        "name": "pressure_regulator_step_response",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2201,
+        "name": "pressure_hold_leak_factory",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2202,
+        "name": "pressure_target_cycle_repeatabil",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2203,
+        "name": "pressure_motor_position_hysteres",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2004,
+        "name": "valve_actuation_sequence_full",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2005,
+        "name": "print_refuel_pulse_integrity_ful",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2006,
+        "name": "emergency_abort_and_safe_stop_fu",
+        "category": "unknown",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1044,
+        "name": "pressure_wdg_context_safe",
+        "category": "watchdog",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "hello_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "selftest_start_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "goodbye_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "goodbye_done",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "selftest_progress_watchdog",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "selftest_scheduler_status_cadence",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      }
+    ],
+    "metric_evaluations": [
+      {
+        "item_kind": "metric",
+        "test_id": 1044,
+        "name": "pressure_wdg_context_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_evidence",
+        "metric_name": "v",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": 1,
+        "threshold_expected": null,
+        "message": "Metric within threshold: v=0, min=0, max=1.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1044,
+        "name": "pressure_wdg_context_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_evidence",
+        "metric_name": "h",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": 3,
+        "threshold_expected": null,
+        "message": "Metric within threshold: h=0, min=0, max=3.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1044,
+        "name": "pressure_wdg_context_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_evidence",
+        "metric_name": "r",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": 999,
+        "threshold_expected": null,
+        "message": "Metric within threshold: r=0, min=0, max=999.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1044,
+        "name": "pressure_wdg_context_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_evidence",
+        "metric_name": "x",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": 999,
+        "threshold_expected": null,
+        "message": "Metric within threshold: x=0, min=0, max=999.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1044,
+        "name": "pressure_wdg_context_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_evidence",
+        "metric_name": "e",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": 511,
+        "threshold_expected": null,
+        "message": "Metric within threshold: e=0, min=0, max=511.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1044,
+        "name": "pressure_wdg_context_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_evidence",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "sm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: sm=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "rf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 29,
+        "message": "Metric within threshold: rf=29, equals=29.",
+        "metric_value": 29,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "yc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 29,
+        "message": "Metric within threshold: yc=29, equals=29.",
+        "metric_value": 29,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "txm",
+        "threshold_maturity": "candidate",
+        "threshold_min": 0,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: txm=26, min=0.",
+        "metric_value": 26,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "pg",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 0,
+        "threshold_max": 125,
+        "threshold_expected": null,
+        "message": "Metric within threshold: pg=7, min=0, max=125.",
+        "metric_value": 7,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "pa",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 0,
+        "threshold_max": 125,
+        "threshold_expected": null,
+        "message": "Metric within threshold: pa=2, min=0, max=125.",
+        "metric_value": 2,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "se",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: se=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "re",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: re=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "bc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: bc=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "h",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: h=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "r",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: r=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "x",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: x=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "e",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: e=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "hw",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 1,
+        "threshold_max": 4294967294,
+        "threshold_expected": null,
+        "message": "Metric within threshold: hw=177, min=1, max=4294967294.",
+        "metric_value": 177,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 1043,
+        "name": "selftest_scheduler_safe",
+        "category": "watchdog",
+        "failure_domain": "firmware_scheduling",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      }
+    ],
+    "summary": {
+      "item_count": 35,
+      "metric_evaluation_count": 21,
+      "blocking_issue_count": 1,
+      "warning_count": 0
+    },
+    "verdict": {
+      "status": "fail",
+      "blocking_issue_count": 1,
+      "warning_count": 0,
+      "reason": "One or more blocking analyzer issues were found."
+    },
+    "warnings": [],
+    "operator_notes": []
+  },
+  "verdict": {
+    "status": "fail",
+    "blocking_issue_count": 1,
+    "warning_count": 0,
+    "reason": "One or more blocking analyzer issues were found."
+  },
+  "warnings": [],
+  "operator_notes": [],
+  "operator_interactions": []
+}

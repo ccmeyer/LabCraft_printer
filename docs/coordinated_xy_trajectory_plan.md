@@ -323,6 +323,12 @@ with no I2C failure/recovery delta. The pressure-participant deadline is raised
 to 500 ms for recovery margin; the stricter 125 ms diagnostic gate remains.
 The matching priority-aware diagnostic artifact is 339,640 bytes with SHA-256
 `5A944627C3A5352F3AA1A259F86D0D202996A7FA5C78FD486CFDCB7D6BEE03D5`.
+Commit `47098e14`'s focused cooperative SAFE and delayed bracket both passed
+30/30 with complete result inventories, `rf=yc=29`, `pg=13/7`, `pa=2/2`,
+zero I2C failure/recovery detail, and unchanged fault/watchdog counters. The
+matching cooperative manifest passed with no blocking issues. The self-test
+scheduling gate no longer blocks watched selector `2075`; the deferred long
+idle soak remains a separate watchdog-confidence activity.
 
 ## Milestone 0: Baseline And Decisions
 
