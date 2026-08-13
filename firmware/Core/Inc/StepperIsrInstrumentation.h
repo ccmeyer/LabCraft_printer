@@ -24,7 +24,11 @@ enum SaturationFlag : uint32_t {
   SaturatedCompletedPulses = (1u << 2),
   SaturatedPendingObservations = (1u << 3),
   SaturatedPendingStreak = (1u << 4),
-  SaturatedCycleWraps = (1u << 5)
+  SaturatedCycleWraps = (1u << 5),
+  SaturatedFullIrqSamples = (1u << 6),
+  SaturatedMissingFullIrqSamples = (1u << 7),
+  SaturatedDeadlineSamples = (1u << 8),
+  SaturatedDeadlineMisses = (1u << 9)
 };
 
 struct State {
@@ -43,6 +47,14 @@ struct State {
   uint32_t pendingObservations = 0u;
   uint32_t currentPendingStreak = 0u;
   uint32_t maxPendingStreak = 0u;
+  uint32_t fullIrqSamples = 0u;
+  uint32_t missingFullIrqSamples = 0u;
+  uint32_t fullIrqActiveMaxCycles = 0u;
+  uint32_t fullIrqTerminalMaxCycles = 0u;
+  uint32_t entryTimerCountMax = 0u;
+  uint32_t deadlineSamples = 0u;
+  uint32_t deadlineMisses = 0u;
+  uint32_t minimumDeadlineSlackCycles = UINT32_MAX;
   uint32_t saturationFlags = SaturatedNone;
 };
 
@@ -61,6 +73,14 @@ struct Snapshot {
   uint32_t completedPulses = 0u;
   uint32_t pendingObservations = 0u;
   uint32_t maxPendingStreak = 0u;
+  uint32_t fullIrqSamples = 0u;
+  uint32_t missingFullIrqSamples = 0u;
+  uint32_t fullIrqActiveMaxCycles = 0u;
+  uint32_t fullIrqTerminalMaxCycles = 0u;
+  uint32_t entryTimerCountMax = 0u;
+  uint32_t deadlineSamples = 0u;
+  uint32_t deadlineMisses = 0u;
+  uint32_t minimumDeadlineSlackCycles = UINT32_MAX;
   uint32_t saturationFlags = SaturatedNone;
 };
 
@@ -80,6 +100,18 @@ void recordSample(State& state,
                   bool updatePending,
                   bool completedPulse,
                   bool moveComplete);
+void recordFullIrqSample(State& state,
+                         bool entryValid,
+                         uint32_t entryCycle,
+                         uint32_t exitCycle,
+                         bool timerSampleValid,
+                         uint32_t entryTimerCount,
+                         uint32_t entryTimerArr,
+                         bool postTimerSampleValid,
+                         uint32_t postTimerCount,
+                         uint32_t postTimerArr,
+                         bool updatePendingAfter,
+                         bool terminalCallback);
 Snapshot makeSnapshot(const State& state);
 
 } // namespace StepperIsrInstrumentation

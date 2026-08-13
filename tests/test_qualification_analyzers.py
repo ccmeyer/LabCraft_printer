@@ -773,6 +773,56 @@ def test_direct_xyz_lut_manifest_rejects_profile_timing_or_isolation_regressions
     incomplete["summary"] = {"total": 4, "passed": 4, "failed": 0}
     assert _analyze(incomplete, manifest)["verdict"]["status"] == "fail"
 
+
+def test_z_speed_ladder_manifest_rejects_incomplete_or_late_evidence():
+    manifest = load_manifest("z_speed_ladder_v1")
+    results = []
+    for test_id in manifest.expected_test_ids:
+        metrics = {}
+        for metric, rule in manifest.analysis_rules[str(test_id)]["metrics"].items():
+            if "equals" in rule:
+                metrics[metric] = rule["equals"]
+            elif "min" in rule:
+                metrics[metric] = rule["min"]
+            else:
+                metrics[metric] = 0
+        results.append({"test_id": test_id, "name": f"z_ladder_{test_id}",
+                        "pass": True, "metrics": metrics})
+    valid = {
+        "run_id": 2199, "profile": "FULL",
+        "started_at": "2026-08-13T00:00:00Z",
+        "finished_at": "2026-08-13T00:01:00Z",
+        "aborted": False,
+        "summary": {"total": 5, "passed": 5, "failed": 0},
+        "results": results,
+        "host_checks": [
+            {"name": "coordinated_xy_status_cadence", "pass": True, "details": {}},
+            {"name": "selftest_progress_watchdog", "pass": True, "details": {}},
+        ],
+    }
+    assert _analyze(valid, manifest)["verdict"]["status"] == "pass"
+
+    for result_id, metric, value in (
+        (2190, "s", 479405),
+        (2191, "po", 1),
+        (2192, "dm", 1),
+        (2193, "sl", 449),
+        (2193, "cw", 7),
+        (2193, "fm", 2251),
+        (2193, "to", 1),
+        (2194, "ok", 3),
+        (2194, "re", 1),
+    ):
+        rejected = deepcopy(valid)
+        index = manifest.expected_test_ids.index(result_id)
+        rejected["results"][index]["metrics"][metric] = value
+        assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
+
+    incomplete = deepcopy(valid)
+    incomplete["results"] = incomplete["results"][:-1]
+    incomplete["summary"] = {"total": 4, "passed": 4, "failed": 0}
+    assert _analyze(incomplete, manifest)["verdict"]["status"] == "fail"
+
 def test_single_irq_manifest_requires_one_callback_and_complete_pulse_margin():
     manifest = load_manifest("coordinated_xy_single_irq_v1")
     motion = {

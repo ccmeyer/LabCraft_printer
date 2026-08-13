@@ -82,6 +82,15 @@ static inline bool stepperInstrumentationAxis(Stepper::Axis axis)
 {
   return axis == Stepper::X_AXIS || axis == Stepper::Y_AXIS;
 }
+
+extern "C" {
+volatile uint8_t g_lcStepperZTim10IrqTimingArmed = 0u;
+volatile uint8_t g_lcStepperZTim10IrqEntryValid = 0u;
+volatile uint8_t g_lcStepperZTim10IrqEntryTimerValid = 0u;
+volatile uint32_t g_lcStepperZTim10IrqEntryCycle = 0u;
+volatile uint32_t g_lcStepperZTim10IrqEntryTimerCount = 0u;
+volatile uint32_t g_lcStepperZTim10IrqEntryTimerArr = 0u;
+}
 #endif
 
 static TickType_t stepperMsToAtLeast1Tick(uint32_t ms)
@@ -148,6 +157,86 @@ StepperIsrInstrumentation::Snapshot Stepper::getLastMoveInstrumentationSnapshot(
   #else
   return StepperIsrInstrumentation::Snapshot{};
   #endif
+}
+
+bool Stepper::armZSpeedDiagnosticInstrumentation()
+{
+#if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+  if (_axis != Z_AXIS || !stepperCycleCounterReady()) {
+    return false;
+  }
+  taskENTER_CRITICAL();
+  const bool idle = _togglesRemaining == 0u && !_coordinatedReserved &&
+      !_legacyMoveStartPending && !_homeSequenceActive;
+  if (idle) {
+    _zDiagnosticInstrumentationArmed = true;
+  }
+  taskEXIT_CRITICAL();
+  return idle;
+#else
+  return false;
+#endif
+}
+
+void Stepper::disarmZSpeedDiagnosticInstrumentation()
+{
+#if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+  taskENTER_CRITICAL();
+  _zDiagnosticInstrumentationArmed = false;
+  _isrInstrumentationActiveForMove = false;
+  g_lcStepperZTim10IrqTimingArmed = 0u;
+  g_lcStepperZTim10IrqEntryValid = 0u;
+  g_lcStepperZTim10IrqEntryTimerValid = 0u;
+  taskEXIT_CRITICAL();
+#endif
+}
+
+void Stepper::recordTim10IrqExitFromIsr(uint32_t irqExitCycle)
+{
+#if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+  Stepper* const z = Stepper::stepperZ();
+  if (z == nullptr || !z->_isrInstrumentationActiveForMove) {
+    g_lcStepperZTim10IrqEntryValid = 0u;
+    g_lcStepperZTim10IrqEntryTimerValid = 0u;
+    return;
+  }
+  const bool entryValid = g_lcStepperZTim10IrqEntryValid != 0u;
+  const bool timerValid = g_lcStepperZTim10IrqEntryTimerValid != 0u;
+  const uint32_t entryCycle = g_lcStepperZTim10IrqEntryCycle;
+  const uint32_t timerCount = g_lcStepperZTim10IrqEntryTimerCount;
+  const uint32_t timerArr = g_lcStepperZTim10IrqEntryTimerArr;
+  g_lcStepperZTim10IrqEntryValid = 0u;
+  g_lcStepperZTim10IrqEntryTimerValid = 0u;
+  const bool updatePending =
+      (__HAL_TIM_GET_FLAG(z->_htim, TIM_FLAG_UPDATE) != RESET);
+  const bool terminal = !z->_isrInstrumentation.active;
+  const bool postTimerValid = z->_htim != nullptr &&
+      z->_htim->Instance != nullptr;
+  StepperIsrInstrumentation::recordFullIrqSample(
+      z->_isrInstrumentation,
+      entryValid,
+      entryCycle,
+      irqExitCycle,
+      timerValid,
+      timerCount,
+      timerArr,
+      postTimerValid,
+      postTimerValid ? z->_htim->Instance->CNT : 0u,
+      postTimerValid ? z->_htim->Instance->ARR : 0u,
+      updatePending,
+      terminal);
+  if (terminal) {
+    g_lcStepperZTim10IrqTimingArmed = 0u;
+    z->_isrInstrumentationActiveForMove = false;
+  }
+#else
+  (void)irqExitCycle;
+#endif
+}
+
+extern "C" void MX_STEPPERZ_RecordTim10IrqExit(uint32_t irqExitCycle)
+{
+  Stepper::recordTim10IrqExitFromIsr(irqExitCycle);
 }
 
 MotionLimitDebouncePolicy::Snapshot Stepper::getLimitDebounceSnapshot() const
@@ -248,6 +337,10 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
   _prepareForNewMove();
   _resetMoveLimitState();
   DirectStepperProfile::reset(_directProfileState);
+  #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+  _isrInstrumentationActiveForMove = stepperInstrumentationAxis(_axis) ||
+      (_axis == Z_AXIS && _zDiagnosticInstrumentationArmed);
+  #endif
 
   const int64_t requestedDelta = direction
       ? static_cast<int64_t>(steps)
@@ -367,9 +460,14 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
   __HAL_TIM_SET_COUNTER   (_htim, 0);
   __HAL_TIM_CLEAR_FLAG    (_htim, TIM_FLAG_UPDATE);
   #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
-  if (stepperInstrumentationAxis(_axis)) {
+  if (_isrInstrumentationActiveForMove) {
     stepperEnableCycleCounter();
     StepperIsrInstrumentation::reset(_isrInstrumentation, stepperCycleNow());
+    if (_axis == Z_AXIS) {
+      g_lcStepperZTim10IrqEntryValid = 0u;
+      g_lcStepperZTim10IrqEntryTimerValid = 0u;
+      g_lcStepperZTim10IrqTimingArmed = 1u;
+    }
   }
   #endif
   HAL_TIM_Base_Start_IT(_htim);
@@ -882,9 +980,13 @@ void Stepper::stop() {
   DirectStepperProfile::abort(_directProfileState);
 
   #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
-  if (stepperInstrumentationAxis(_axis) && _isrInstrumentation.active) {
+  if (_isrInstrumentationActiveForMove && _isrInstrumentation.active) {
     StepperIsrInstrumentation::finishWithoutSample(
         _isrInstrumentation, stepperCycleNow(), true);
+  }
+  if (_axis == Z_AXIS) {
+    g_lcStepperZTim10IrqTimingArmed = 0u;
+    _isrInstrumentationActiveForMove = false;
   }
   #endif
 
@@ -1199,7 +1301,7 @@ void Stepper::cancelMove() {
   // stop *and* clear all counts
   if (!_htim || _togglesRemaining == 0 || _coordinatedReserved) return;
   #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
-  if (stepperInstrumentationAxis(_axis)) {
+  if (_isrInstrumentationActiveForMove) {
     StepperIsrInstrumentation::markAborted(_isrInstrumentation);
   }
   #endif
@@ -1210,7 +1312,7 @@ void Stepper::cancelMove() {
 
 void Stepper::_stepTick() {
   #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
-  const bool instrumentThisAxis = stepperInstrumentationAxis(_axis);
+  const bool instrumentThisAxis = _isrInstrumentationActiveForMove;
   const uint32_t instrumentationEntryCycle = instrumentThisAxis ? stepperCycleNow() : 0u;
   #endif
 

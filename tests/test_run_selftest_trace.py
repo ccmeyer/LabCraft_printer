@@ -1045,6 +1045,7 @@ def test_run_sends_selftest_scheduler_selector(monkeypatch, tmp_path, flag_name,
     (
         ("coordinated_xy_production_mres3_suite", 2097),
         ("direct_xyz_lut_suite", 2096),
+        ("z_speed_ladder_suite", 2199),
         ("coordinated_xy_camera_transition_suite", 2078),
     ),
 )
@@ -2154,6 +2155,19 @@ def test_direct_xyz_lut_fixture_stage_is_an_operator_prompt():
     assert "direct X/Y/Z motion envelope" in message
     assert "14,000-unit move" in message
     assert "40 kHz logical rate" in message
+
+
+def test_z_speed_ladder_stages_are_operator_prompts():
+    mod = _load_run_selftest()
+    initial = "z_speed_ladder_envelope_clear"
+    assert mod._is_operator_prompt_stage(initial)
+    assert "Z=100..80000" in mod._operator_prompt_message(initial)
+    for rate in (40, 50, 60):
+        stage = f"z_speed_ladder_{rate}khz_confirm"
+        assert mod._is_operator_prompt_stage(stage)
+        message = mod._operator_prompt_message(stage)
+        assert f"{rate} kHz" in message
+        assert "previous Z tier completed" in message
 
 
 def test_active_production_selector_is_mutually_exclusive_with_direct_lut(

@@ -139,3 +139,46 @@ TEST(StepperIsrInstrumentation, FinishWithoutSampleRecordsAbort)
     UNSIGNED_LONGS_EQUAL(75u, static_cast<uint32_t>(snapshot.durationCycles));
     UNSIGNED_LONGS_EQUAL(0u, snapshot.totalEntries);
 }
+
+TEST(StepperIsrInstrumentation, RecordsCompleteTim10IrqAndDeadlineSlack)
+{
+    State state{};
+    StepperIsrInstrumentation::reset(state, 100u);
+    StepperIsrInstrumentation::recordFullIrqSample(
+        state, true, 1000u, 1300u, true, 100u, 999u,
+        true, 200u, 999u, false, false);
+    StepperIsrInstrumentation::recordFullIrqSample(
+        state, true, 2000u, 2500u, true, 400u, 999u,
+        true, 450u, 999u, false, true);
+
+    const auto snapshot = StepperIsrInstrumentation::makeSnapshot(state);
+    UNSIGNED_LONGS_EQUAL(2u, snapshot.fullIrqSamples);
+    UNSIGNED_LONGS_EQUAL(0u, snapshot.missingFullIrqSamples);
+    UNSIGNED_LONGS_EQUAL(300u, snapshot.fullIrqActiveMaxCycles);
+    UNSIGNED_LONGS_EQUAL(500u, snapshot.fullIrqTerminalMaxCycles);
+    UNSIGNED_LONGS_EQUAL(400u, snapshot.entryTimerCountMax);
+    UNSIGNED_LONGS_EQUAL(1u, snapshot.deadlineSamples);
+    UNSIGNED_LONGS_EQUAL(0u, snapshot.deadlineMisses);
+    UNSIGNED_LONGS_EQUAL(1600u, snapshot.minimumDeadlineSlackCycles);
+}
+
+TEST(StepperIsrInstrumentation, RejectsMissingInvalidAndLateTim10Samples)
+{
+    State state{};
+    StepperIsrInstrumentation::reset(state, 0u);
+    StepperIsrInstrumentation::recordFullIrqSample(
+        state, false, 0u, 0u, false, 0u, 0u,
+        false, 0u, 0u, false, false);
+    StepperIsrInstrumentation::recordFullIrqSample(
+        state, true, 100u, 120u, true, 11u, 10u,
+        true, 0u, 10u, false, false);
+    StepperIsrInstrumentation::recordFullIrqSample(
+        state, true, 0xFFFFFFF0u, 0x20u, true, 0u, 20u,
+        true, 2u, 20u, true, false);
+
+    const auto snapshot = StepperIsrInstrumentation::makeSnapshot(state);
+    UNSIGNED_LONGS_EQUAL(2u, snapshot.fullIrqSamples);
+    UNSIGNED_LONGS_EQUAL(2u, snapshot.missingFullIrqSamples);
+    UNSIGNED_LONGS_EQUAL(1u, snapshot.deadlineSamples);
+    UNSIGNED_LONGS_EQUAL(1u, snapshot.deadlineMisses);
+}

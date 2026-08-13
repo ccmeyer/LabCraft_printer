@@ -153,6 +153,9 @@ public:
 
   HomeDiagnosticSnapshot getLastHomeDiagnosticSnapshot() const { return _homeDiagnosticSnapshot; }
   StepperIsrInstrumentation::Snapshot getLastMoveInstrumentationSnapshot() const;
+  bool armZSpeedDiagnosticInstrumentation();
+  void disarmZSpeedDiagnosticInstrumentation();
+  static void recordTim10IrqExitFromIsr(uint32_t irqExitCycle);
   DirectStepperProfile::Snapshot getLastDirectProfileSnapshot() const {
     return DirectStepperProfile::snapshot(_directProfileState);
   }
@@ -329,6 +332,8 @@ private:
   HomeDiagnosticSnapshot _homeDiagnosticSnapshot{};
   #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
   StepperIsrInstrumentation::State _isrInstrumentation{};
+  volatile bool _zDiagnosticInstrumentationArmed = false;
+  volatile bool _isrInstrumentationActiveForMove = false;
   #endif
 
   struct LimitStableSample {

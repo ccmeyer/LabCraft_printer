@@ -252,6 +252,19 @@ normal sound, motion, squareness, and homing. A visibly slow opening segment
 in selector `2078` was consistent with its bounded initial homing/positioning
 phase; exact motion and transition telemetry passed.
 
+### Post-closeout Z speed characterization
+
+Milestone 7 leaves the app's ordinary Z request at 30 kHz logical rate and
+the firmware cap at 60 kHz. Selector `2199` is the separate, watched path for
+deciding whether that ordinary request can safely increase. It reuses the
+qualified long-Z anchor and endpoints, applies the production MRES=3 and
+normalized-LUT implementation, and tests 30/40/50/60 kHz in order with an
+operator gate before each increase. Only the six measured legs in a tier arm
+TIM10 entry/full-IRQ/deadline telemetry; setup moves and homes retain their
+production behavior. A passing ladder is characterization evidence, not an
+automatic app/default-speed change. Any production Z-speed change requires a
+separate reviewed change and regression qualification.
+
 Raw evidence (path, SHA-256):
 
 | Evidence | SHA-256 |

@@ -722,6 +722,22 @@ def _operator_prompt_message(stage: str) -> str:
             "The firmware will home Z and XY, run one 14,000-unit move on each axis plus one "
             "2,000-unit triangular X move at the production 40 kHz logical rate, then home again."
         )
+    if stage == "z_speed_ladder_envelope_clear":
+        return (
+            "Confirm the production firmware is flashed, every limit switch is released, and the "
+            "XY anchor (43000,13000) plus the complete Z=100..80000 travel volume are clear. "
+            "The firmware will home Z and XY, move to the long-Z anchor, and begin the 30 kHz tier."
+        )
+    if stage in {
+        "z_speed_ladder_40khz_confirm",
+        "z_speed_ladder_50khz_confirm",
+        "z_speed_ladder_60khz_confirm",
+    }:
+        rate = stage.split("_")[3].replace("khz", " kHz")
+        return (
+            f"The previous Z tier completed. Confirm motion and homing looked and sounded normal, "
+            f"the travel volume remains clear, and you are ready for the {rate} logical-rate tier."
+        )
     return "Confirm the operator-gated self-test step is ready to continue."
 
 
@@ -735,6 +751,10 @@ def _is_operator_prompt_stage(stage: str) -> bool:
         "coordinated_xy_camera_transition_envelope_clear",
         "coordinated_xy_production_mres3_envelope_clear",
         "direct_xyz_lut_envelope_clear",
+        "z_speed_ladder_envelope_clear",
+        "z_speed_ladder_40khz_confirm",
+        "z_speed_ladder_50khz_confirm",
+        "z_speed_ladder_60khz_confirm",
     }
 
 
@@ -1298,12 +1318,16 @@ def run(args: argparse.Namespace) -> int:
         direct_xyz_lut_suite = bool(
             getattr(args, "direct_xyz_lut_suite", False)
         )
+        z_speed_ladder_suite = bool(
+            getattr(args, "z_speed_ladder_suite", False)
+        )
         coordinated_xy_camera_transition_suite = bool(
             getattr(args, "coordinated_xy_camera_transition_suite", False)
         )
         coordinated_xy_performance_diagnostic = bool(
             coordinated_xy_production_mres3_suite
             or direct_xyz_lut_suite
+            or z_speed_ladder_suite
             or coordinated_xy_camera_transition_suite
         )
         status_cadence_diagnostic = bool(
@@ -1314,7 +1338,7 @@ def run(args: argparse.Namespace) -> int:
         refuel_vacuum_suite = bool(getattr(args, "refuel_vacuum_suite", False))
         valve_characterization_suite = bool(getattr(args, "valve_characterization_suite", False))
         valve_gap_sweep_suite = bool(getattr(args, "valve_gap_sweep_suite", False))
-        selector = 1039 if selftest_scheduler_no_yield_suite else 1038 if selftest_scheduler_cooperative_suite else 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2096 if direct_xyz_lut_suite else 2097 if coordinated_xy_production_mres3_suite else 2078 if coordinated_xy_camera_transition_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
+        selector = 1039 if selftest_scheduler_no_yield_suite else 1038 if selftest_scheduler_cooperative_suite else 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2199 if z_speed_ladder_suite else 2096 if direct_xyz_lut_suite else 2097 if coordinated_xy_production_mres3_suite else 2078 if coordinated_xy_camera_transition_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
             pressure_sweep_suite if pressure_sweep_suite is not None else (
                 CUSTOM_PRESSURE_TRACE_TEST_ID if custom_trace_config is not None else pressure_trace_test
             )
@@ -1989,6 +2013,7 @@ def main() -> int:
     selector_group.add_argument("--selftest-scheduler-cooperative-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-production-mres3-suite", action="store_true")
     selector_group.add_argument("--direct-xyz-lut-suite", action="store_true")
+    selector_group.add_argument("--z-speed-ladder-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-camera-transition-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-stress-suite", action="store_true")

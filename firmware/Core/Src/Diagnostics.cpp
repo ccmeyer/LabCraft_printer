@@ -22,6 +22,7 @@
 #include "NormalizedCosineProfile.h"
 #include "StepperProfileMath.h"
 #include "StepperInstrumentationReport.h"
+#include "ZAxisSpeedLadderReport.h"
 #include "PressureRegulatorMath.h"
 #include "PressureQualificationMath.h"
 #include "GripperSealQualificationMath.h"
@@ -152,6 +153,11 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2093u, "direct_lut_z_cruise", "performance", "FULL", "explicit_selection"},
     {2094u, "direct_lut_x_triangular", "performance", "FULL", "explicit_selection"},
     {2095u, "direct_lut_isolation", "configuration", "FULL", "explicit_selection"},
+    {2190u, "z_speed_ladder_30khz", "performance", "FULL", "explicit_selection"},
+    {2191u, "z_speed_ladder_40khz", "performance", "FULL", "explicit_selection"},
+    {2192u, "z_speed_ladder_50khz", "performance", "FULL", "explicit_selection"},
+    {2193u, "z_speed_ladder_60khz", "performance", "FULL", "explicit_selection"},
+    {2194u, "z_speed_ladder_summary", "configuration", "FULL", "explicit_selection"},
     {2003u, "pressure_regulator_step_response_full", "pressure", "FULL", "safe_gate_or_full"},
     {2201u, "pressure_hold_leak_factory", "pressure", "FULL", "safe_gate_or_full"},
     {2202u, "pressure_target_cycle_repeatability_factory", "pressure", "FULL", "safe_gate_or_full"},
@@ -272,6 +278,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runCoordinatedXyProductionMres3Suite =
         (selectedDiagnosticId == 2097u);
     const bool runDirectXyzLutSuite = (selectedDiagnosticId == 2096u);
+    const bool runZSpeedLadderSuite = (selectedDiagnosticId == 2199u);
     const bool runCoordinatedXyTransitionSuite = (selectedDiagnosticId == 2078u);
     const bool runCoordinatedXyPerformanceSuite =
         runCoordinatedXyProductionMres3Suite || runCoordinatedXyTransitionSuite;
@@ -299,7 +306,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runSinglePressureTraceSelection =
         (selectedPressureTraceTest >= 2101u) && (selectedPressureTraceTest <= 2104u);
                   auto shouldRunPressureTraceCase = [&](uint16_t testId) {
-                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runGripperSealStressSuite || runXyMotionSuite || runMotionEnvelopeSuite || runMotionTimingSuite || runDirectXyzLutSuite || runProfileLutBenchmark || runCoordinatedXyPerformanceSuite || runPressureRegulatorSuite || runRefuelVacuumSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
+                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runGripperSealStressSuite || runXyMotionSuite || runMotionEnvelopeSuite || runMotionTimingSuite || runDirectXyzLutSuite || runZSpeedLadderSuite || runProfileLutBenchmark || runCoordinatedXyPerformanceSuite || runPressureRegulatorSuite || runRefuelVacuumSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
                       return false;
                     }
                     if (runSinglePressureTraceSelection) {
@@ -3487,6 +3494,389 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         };
                         return runProductionCoordinatedDiagnostic();
                       }
+                      if (runZSpeedLadderSuite) {
+                        static constexpr uint32_t kRatesHz[] = {
+                            30000u, 40000u, 50000u, 60000u};
+                        static constexpr uint16_t kResultIds[] = {
+                            2190u, 2191u, 2192u, 2193u};
+                        static constexpr const char* kResultNames[] = {
+                            "z_speed_ladder_30khz",
+                            "z_speed_ladder_40khz",
+                            "z_speed_ladder_50khz",
+                            "z_speed_ladder_60khz"};
+                        static constexpr const char* kTierPrompts[] = {
+                            nullptr,
+                            "z_speed_ladder_40khz_confirm",
+                            "z_speed_ladder_50khz_confirm",
+                            "z_speed_ladder_60khz_confirm"};
+                        static constexpr int32_t kAnchorX = 43000;
+                        static constexpr int32_t kAnchorY = 13000;
+                        static constexpr int32_t kZMaximum = 80000;
+                        static constexpr int32_t kExpectedReference = 100;
+                        static constexpr uint32_t kAnchorFeedHz = 6000u;
+                        static constexpr uint32_t kAnchorTimeoutMs = 12000u;
+                        static constexpr uint32_t kMoveTimeoutMs = 45000u;
+                        static constexpr uint32_t kHomeFastHz = 30000u;
+                        static constexpr uint32_t kHomeSlowHz = 3000u;
+                        static constexpr uint32_t kHomeBackoffSteps = 400u;
+                        static constexpr uint32_t kHomeTimeoutMs = 20000u;
+                        static constexpr uint32_t kExpectedLogicalDistance = 479400u;
+                        static constexpr uint32_t kExpectedNativePulses = 239700u;
+                        static constexpr uint32_t kExpectedCallbacks = 479406u;
+                        static constexpr uint32_t kExpectedDeadlineSamples = 479400u;
+
+                        Stepper* const stepperZ = Stepper::stepperZ();
+                        Stepper* const stepperX = Stepper::stepperX();
+                        Stepper* const stepperY = Stepper::stepperY();
+                        Stepper* const stepperP = Stepper::stepperP();
+                        Stepper* const stepperR = Stepper::stepperR();
+                        if (stepperZ == nullptr || stepperX == nullptr ||
+                            stepperY == nullptr || stepperP == nullptr ||
+                            Gantry::instance() == nullptr) {
+                          for (uint32_t index = 0u; index < 4u; ++index) {
+                            (void)runOne(kResultIds[index], kResultNames[index], false,
+                                         "gate=motion_unavailable;sk=1;sf=1;to=0");
+                          }
+                          (void)runOne(2194u, "z_speed_ladder_summary", false,
+                                       "n=4;ok=0;last=0;zh=0;xyh=0;ax=43000;ay=13000;zr=0;pd=0;rd=0;mr=3;de=1;mf=0;pv=0;se=0;re=0;bc=0;is=1;sf=1;to=0");
+                          return finishSelfTestNow();
+                        }
+
+                        struct ZProfileRestoreGuard {
+                          Stepper* z;
+                          Stepper::AccelProfile profile;
+                          uint32_t maximumRate;
+                          float acceleration;
+                          ~ZProfileRestoreGuard() {
+                            z->disarmZSpeedDiagnosticInstrumentation();
+                            z->setAccelProfile(profile);
+                            z->setMaxSpeedHz(maximumRate);
+                            z->setAccelStepsPerSec2(acceleration);
+                          }
+                        } profileGuard{stepperZ,
+                                       stepperZ->accelProfile(),
+                                       stepperZ->maxSpeedHz(),
+                                       stepperZ->accelStepsPerSec2()};
+                        stepperZ->setAccelProfile(Stepper::PROFILE_SCURVE_COSINE);
+                        stepperZ->setMaxSpeedHz(60000u);
+                        stepperZ->setAccelStepsPerSec2(140000.0f);
+
+                        const int32_t pStart = stepperP->getPosition();
+                        const int32_t rStart = stepperR != nullptr
+                            ? stepperR->getPosition() : 0;
+                        ZAxisSpeedLadderReport::TierObservation tiers[4]{};
+                        for (uint32_t index = 0u; index < 4u; ++index) {
+                          tiers[index].rateHz = kRatesHz[index];
+                        }
+
+                        auto emitTier = [&](uint32_t index) {
+                          char metrics[224] = {};
+                          const size_t length =
+                              ZAxisSpeedLadderReport::buildMetrics(
+                                  metrics, sizeof(metrics), tiers[index]);
+                          const size_t budget =
+                              DiagnosticResultEmitter::kResultMetricsFrameBudget -
+                              std::min(std::strlen(kResultNames[index]),
+                                       DiagnosticResultEmitter::kMaxResultNameBytes);
+                          const bool fits = length != 0u && length <= budget;
+                          const bool passes = fits &&
+                              ZAxisSpeedLadderReport::tierPasses(
+                                  tiers[index],
+                                  kExpectedLogicalDistance,
+                                  kExpectedNativePulses,
+                                  kExpectedCallbacks,
+                                  kExpectedDeadlineSamples);
+                          return runOne(kResultIds[index],
+                                        kResultNames[index],
+                                        passes,
+                                        fits ? metrics
+                                             : "gate=metrics_overflow;sk=1;sf=1;to=0") &&
+                              passes;
+                        };
+
+                        auto emitRemainingSkipped = [&](uint32_t firstIndex,
+                                                        const char* gate) {
+                          for (uint32_t index = firstIndex; index < 4u; ++index) {
+                            tiers[index].skipped = true;
+                            char metrics[96] = {};
+                            snprintf(metrics, sizeof(metrics),
+                                     "gate=%s;hz=%lu;rep=0;sk=1;sf=0;to=0",
+                                     gate,
+                                     static_cast<unsigned long>(kRatesHz[index]));
+                            (void)runOne(kResultIds[index],
+                                         kResultNames[index], false, metrics);
+                          }
+                        };
+
+                        bool setupOk = waitForOperatorResume(
+                            "z_speed_ladder_envelope_clear");
+                        MotionQualificationMath::AxisHomeSample zSettle{};
+                        MotionQualificationMath::AxisHomeSample zReference{};
+                        MotionQualificationMath::AxisHomeSample xReference{};
+                        MotionQualificationMath::AxisHomeSample yReference{};
+                        if (setupOk) {
+                          setupOk = runAxisHomeDiagnosticAttempt(
+                              stepperZ, BIT_HOME_Z_DONE, zSettle,
+                              kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps,
+                              kHomeTimeoutMs);
+                        }
+                        if (setupOk) {
+                          setupOk = runXyHomeDiagnosticAttempt(
+                              xReference, yReference,
+                              kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps,
+                              kHomeTimeoutMs);
+                        }
+                        if (setupOk) {
+                          setupOk = moveGantryToWithTimeout(
+                              kAnchorX, kAnchorY, kAnchorFeedHz,
+                              kAnchorTimeoutMs);
+                        }
+                        if (setupOk) {
+                          setupOk = runAxisHomeDiagnosticAttempt(
+                              stepperZ, BIT_HOME_Z_DONE, zReference,
+                              kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps,
+                              kHomeTimeoutMs);
+                        }
+                        setupOk = setupOk &&
+                            zReference.finalBackoffSteps == kExpectedReference;
+
+                        uint32_t passedTiers = 0u;
+                        uint32_t lastRateHz = 0u;
+                        bool timedOut = false;
+                        bool ladderOk = setupOk;
+                        for (uint32_t tierIndex = 0u;
+                             tierIndex < 4u && ladderOk;
+                             ++tierIndex) {
+                          if (kTierPrompts[tierIndex] != nullptr &&
+                              !waitForOperatorResume(kTierPrompts[tierIndex])) {
+                            ladderOk = false;
+                            break;
+                          }
+
+                          ZAxisSpeedLadderReport::TierObservation& tier =
+                              tiers[tierIndex];
+                          const bool statusReset = Comm::resetStatusMetrics();
+                          resumeStatusAfterEmission = true;
+                          comm->setStatusPaused(false);
+                          MotionQualificationMath::AxisHomeSample homes[
+                              ZAxisSpeedLadderReport::kRequiredRepetitions]{};
+                          bool tierMotionOk = statusReset;
+
+                          auto runMeasuredLeg = [&](int32_t target) {
+                            const MotionLimitDebouncePolicy::Snapshot limitBefore =
+                                stepperZ->getLimitDebounceSnapshot();
+                            const int32_t start = stepperZ->getPosition();
+                            const uint32_t logicalDistance =
+                                MotionQualificationMath::absDiffSteps(start, target);
+                            const uint32_t nativePulses =
+                                MotionUnitScale::toNativeStepCycles(logicalDistance);
+                            ZAxisSpeedLadderReport::MoveObservation observation{};
+                            observation.logicalDistance = logicalDistance;
+                            observation.expectedNativePulses = nativePulses;
+                            if (!stepperZ->armZSpeedDiagnosticInstrumentation()) {
+                              observation.timedOut = true;
+                              ZAxisSpeedLadderReport::accumulateMove(tier, observation);
+                              return false;
+                            }
+                            const bool completed = moveAxisToWithTimeout(
+                                stepperZ, BIT_STEPPER3_DONE, target,
+                                kRatesHz[tierIndex], kMoveTimeoutMs);
+                            observation.timedOut = !completed;
+                            observation.endpointReached = completed &&
+                                stepperZ->getPosition() == target;
+                            observation.profile =
+                                stepperZ->getLastDirectProfileSnapshot();
+                            observation.timing =
+                                stepperZ->getLastMoveInstrumentationSnapshot();
+                            stepperZ->disarmZSpeedDiagnosticInstrumentation();
+                            const MotionLimitDebouncePolicy::Snapshot limitAfter =
+                                stepperZ->getLimitDebounceSnapshot();
+                            const uint32_t confirmations =
+                                MotionLimitDebouncePolicy::counterDelta(
+                                    limitBefore.confirmationCount,
+                                    limitAfter.confirmationCount);
+                            if (tier.limitConfirmations >
+                                std::numeric_limits<uint32_t>::max() -
+                                    confirmations) {
+                              tier.limitConfirmations =
+                                  std::numeric_limits<uint32_t>::max();
+                              tier.saturationFlags |= (1u << 29);
+                            } else {
+                              tier.limitConfirmations += confirmations;
+                            }
+                            tier.limitPending =
+                                tier.limitPending || limitAfter.pending;
+                            ZAxisSpeedLadderReport::accumulateMove(tier, observation);
+                            return completed && observation.endpointReached;
+                          };
+
+                          for (uint32_t repetition = 0u;
+                               repetition <
+                                   ZAxisSpeedLadderReport::kRequiredRepetitions;
+                               ++repetition) {
+                            sendProgressStage("z_speed_ladder_travel");
+                            bool repetitionOk = runMeasuredLeg(kZMaximum);
+                            if (repetitionOk) {
+                              repetitionOk = runMeasuredLeg(kExpectedReference);
+                            }
+                            const uint32_t returnError =
+                                MotionQualificationMath::absDiffSteps(
+                                    stepperZ->getPosition(), kExpectedReference);
+                            if (returnError > tier.returnErrorSteps) {
+                              tier.returnErrorSteps = returnError;
+                            }
+                            const bool homeOk = !_selfTestAbortRequested &&
+                                runAxisHomeDiagnosticAttempt(
+                                    stepperZ, BIT_HOME_Z_DONE,
+                                    homes[repetition],
+                                    kHomeFastHz, kHomeSlowHz,
+                                    kHomeBackoffSteps, kHomeTimeoutMs);
+                            const uint32_t drift =
+                                MotionQualificationMath::absDiffSteps(
+                                    homes[repetition].limitTriggerSteps,
+                                    zReference.limitTriggerSteps);
+                            if (drift > tier.homeDriftSteps) {
+                              tier.homeDriftSteps = drift;
+                            }
+                            if (repetitionOk && homeOk) {
+                              ++tier.completedRepetitions;
+                            } else {
+                              tierMotionOk = false;
+                              timedOut = timedOut || !repetitionOk || !homeOk;
+                              break;
+                            }
+                          }
+
+                          const MotionQualificationMath::AxisHomeStats homeStats =
+                              MotionQualificationMath::summarizeAxisHomeSamples(
+                                  homes,
+                                  tier.completedRepetitions,
+                                  kExpectedReference);
+                          tier.homeSpanSteps = homeStats.limitTriggerSpanSteps;
+                          if (homeStats.returnErrorMaxSteps >
+                              tier.returnErrorSteps) {
+                            tier.returnErrorSteps =
+                                homeStats.returnErrorMaxSteps;
+                          }
+                          if (tier.callbacks >= tier.fullIrqSamples) {
+                            tier.missingFullIrqSamples +=
+                                tier.callbacks - tier.fullIrqSamples;
+                          } else {
+                            tier.saturationFlags |= (1u << 30);
+                          }
+
+                          const Comm::StatusMetricsSnapshot status =
+                              Comm::getStatusMetricsSnapshot();
+                          uint32_t statusAgeMs =
+                              std::numeric_limits<uint32_t>::max();
+                          const bool statusAgeValid =
+                              Watchdog_GetTaskLastSeenAgeMs(
+                                  CRASH_TASK_STATUS, &statusAgeMs) != 0u;
+                          tier.statusEvidenceValid =
+                              statusReset && status.valid && statusAgeValid;
+                          tier.statusPeriodMaxMs = status.valid
+                              ? status.periodMaxMs
+                              : std::numeric_limits<uint32_t>::max();
+                          tier.statusWatchdogAgeMaxMs = statusAgeMs;
+                          tier.statusAlternationErrors = status.valid
+                              ? status.alternationErrors
+                              : std::numeric_limits<uint32_t>::max();
+                          resumeStatusAfterEmission = false;
+                          comm->setStatusPaused(true);
+
+                          const bool tierPass = tierMotionOk &&
+                              ZAxisSpeedLadderReport::tierPasses(
+                                  tier,
+                                  kExpectedLogicalDistance,
+                                  kExpectedNativePulses,
+                                  kExpectedCallbacks,
+                                  kExpectedDeadlineSamples);
+                          if (!emitTier(tierIndex)) {
+                            if (tierPass) {
+                              return finishSelfTestNow();
+                            }
+                            ladderOk = false;
+                            break;
+                          }
+                          ++passedTiers;
+                          lastRateHz = kRatesHz[tierIndex];
+                        }
+
+                        if (!ladderOk) {
+                          uint32_t firstSkipped = passedTiers;
+                          if (firstSkipped < 4u &&
+                              tiers[firstSkipped].logicalDistance != 0u) {
+                            ++firstSkipped;
+                          }
+                          emitRemainingSkipped(firstSkipped,
+                                               setupOk ? "prior_tier" : "setup");
+                        }
+
+                        MotionQualificationMath::AxisHomeSample zFinal{};
+                        MotionQualificationMath::AxisHomeSample xFinal{};
+                        MotionQualificationMath::AxisHomeSample yFinal{};
+                        const bool zHomeOk = !_selfTestAbortRequested &&
+                            runAxisHomeDiagnosticAttempt(
+                                stepperZ, BIT_HOME_Z_DONE, zFinal,
+                                kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps,
+                                kHomeTimeoutMs);
+                        const bool xyHomeOk = !_selfTestAbortRequested &&
+                            runXyHomeDiagnosticAttempt(
+                                xFinal, yFinal,
+                                kHomeFastHz, kHomeSlowHz,
+                                kHomeBackoffSteps, kHomeTimeoutMs);
+                        constexpr TMC2208Configuration::Values driverConfig =
+                            TMC2208Configuration::buildValues();
+                        const int32_t pDelta = stepperP->getPosition() - pStart;
+                        const int32_t rDelta = stepperR != nullptr
+                            ? stepperR->getPosition() - rStart : 0;
+                        PressureSensorWatchdogSnapshot pressureSnapshot{};
+                        const bool pressureEvidenceValid =
+                            PressureSensorWatchdog_GetSnapshot(
+                                &pressureSnapshot) != 0u &&
+                            pressureSnapshot.valid != 0u;
+                        const bool pressureEvidencePass =
+                            pressureEvidenceValid &&
+                            pressureSnapshot.saturated == 0u &&
+                            pressureSnapshot.selectFailureCount == 0u &&
+                            pressureSnapshot.readFailureCount == 0u &&
+                            pressureSnapshot.recoveryCount == 0u;
+                        const bool summaryPass = ladderOk && passedTiers == 4u &&
+                            zHomeOk && xyHomeOk && pDelta == 0 && rDelta == 0 &&
+                            TMC2208Configuration::kMres == 3u &&
+                            driverConfig.doubleEdge &&
+                            !driverConfig.multistepFilter &&
+                            pressureEvidencePass && !timedOut;
+                        char summaryMetrics[224] = {};
+                        snprintf(summaryMetrics, sizeof(summaryMetrics),
+                                 "n=4;ok=%lu;last=%lu;zh=%u;xyh=%u;ax=%ld;ay=%ld;zr=%ld;pd=%ld;rd=%ld;mr=%u;de=%u;mf=%u;pv=%u;se=%lu;re=%lu;bc=%lu;is=%u;sf=0;to=%u",
+                                 static_cast<unsigned long>(passedTiers),
+                                 static_cast<unsigned long>(lastRateHz),
+                                 zHomeOk ? 1u : 0u,
+                                 xyHomeOk ? 1u : 0u,
+                                 static_cast<long>(kAnchorX),
+                                 static_cast<long>(kAnchorY),
+                                 static_cast<long>(zReference.finalBackoffSteps),
+                                 static_cast<long>(pDelta),
+                                 static_cast<long>(rDelta),
+                                 static_cast<unsigned>(TMC2208Configuration::kMres),
+                                 driverConfig.doubleEdge ? 1u : 0u,
+                                 driverConfig.multistepFilter ? 1u : 0u,
+                                 pressureEvidenceValid ? 1u : 0u,
+                                 static_cast<unsigned long>(
+                                     pressureSnapshot.selectFailureCount),
+                                 static_cast<unsigned long>(
+                                     pressureSnapshot.readFailureCount),
+                                 static_cast<unsigned long>(
+                                     pressureSnapshot.recoveryCount),
+                                 static_cast<unsigned>(
+                                     pressureSnapshot.saturated),
+                                 timedOut ? 1u : 0u);
+                        (void)runOne(2194u, "z_speed_ladder_summary",
+                                     summaryPass, summaryMetrics);
+                        return finishSelfTestNow();
+                      }
+
                       if (runDirectXyzLutSuite) {
                         static constexpr uint32_t kRateHz = 40000u;
                         static constexpr uint32_t kMoveTimeoutMs = 20000u;

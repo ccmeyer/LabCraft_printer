@@ -24,6 +24,7 @@ def test_discover_suite_entries_lists_current_manifests():
         "coordinated_xy_camera_transition_v2",
         "coordinated_xy_production_mres3_v3",
         "direct_xyz_lut_v1",
+        "z_speed_ladder_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "refuel_vacuum_v1",
@@ -222,6 +223,30 @@ def test_direct_xyz_lut_suite_requires_profile_coverage_and_isolation():
     assert manifest.analysis_rules["2095"]["metrics"]["wd"]["max"] == 100
     assert manifest.analysis_rules["2095"]["metrics"]["sv"]["equals"] == 1
     assert "sn" not in manifest.analysis_rules["2091"]["metrics"]
+
+
+def test_z_speed_ladder_suite_exposes_four_tiers_and_timing_gates():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    manifest = entries["z_speed_ladder_v1"].manifest
+
+    assert manifest.profile == "FULL"
+    assert manifest.selftest_args == ("--z-speed-ladder-suite",)
+    assert required_fixture_ids(manifest) == ("z_speed_ladder_envelope_clear",)
+    assert [row.test_id for row in build_test_plan_rows(manifest)] == [
+        2190, 2191, 2192, 2193, 2194
+    ]
+    for test_id, rate in zip(range(2190, 2194), (30000, 40000, 50000, 60000)):
+        metrics = manifest.analysis_rules[str(test_id)]["metrics"]
+        assert metrics["hz"]["equals"] == rate
+        assert metrics["cb"]["equals"] == 479406
+        assert metrics["s"]["equals"] == 479406
+        assert metrics["ds"]["equals"] == 479400
+        assert metrics["sl"]["min"] == 450
+        assert metrics["cw"]["max"] == 6
+        assert metrics["fm"]["max"] == 2250
+    assert manifest.analysis_rules["2194"]["metrics"]["last"]["equals"] == 60000
+    assert manifest.analysis_rules["2194"]["metrics"]["pv"]["equals"] == 1
+    assert manifest.analysis_rules["2194"]["metrics"]["re"]["equals"] == 0
 
 
 def test_camera_transition_v2_is_single_production_scaled_gate():
