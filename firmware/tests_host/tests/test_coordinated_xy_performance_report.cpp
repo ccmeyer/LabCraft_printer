@@ -250,6 +250,32 @@ TEST(CoordinatedXyPerformanceReport, ProductionTerminalPolicyStillEnforcesActive
           observation, CoordinatedXyPerformanceReport::Limits{}));
 }
 
+TEST(CoordinatedXyPerformanceReport, ProductionPolicyAlsoAppliesToAggregateAcceptance) {
+  auto observation =
+      acceptedMove(500u, 1500u, 1500u, 20000u, 2249u, 11245u);
+  observation.timerScheduleMode =
+      CoordinatedXyTimerSchedulePolicy::Mode::ConditionalLateRearm;
+  observation.conditionalDecisionCount = observation.timer2Callbacks - 1u;
+  observation.conditionalNonRearmSlackMinTicks = 1126u;
+  observation.requireLateInjectionEvidence = false;
+  observation.requireTerminalCycleBudget = false;
+  observation.timing.terminalMaxCycles = 2502u;
+
+  CoordinatedXyPerformanceReport::Aggregate aggregate{};
+  const CoordinatedXyPerformanceReport::Limits limits{};
+  CoordinatedXyPerformanceReport::addMove(aggregate, observation, limits);
+  CHECK_TRUE(CoordinatedXyPerformanceReport::aggregatePasses(
+      aggregate, 1u, 500u, 1500u, 1500u, limits));
+
+  observation.timerRearmCount = 1u;
+  observation.timerRearmDelayMaxCycles = 470u;
+  CoordinatedXyPerformanceReport::Aggregate rearmedAggregate{};
+  CoordinatedXyPerformanceReport::addMove(
+      rearmedAggregate, observation, limits);
+  CHECK_TRUE(CoordinatedXyPerformanceReport::aggregatePasses(
+      rearmedAggregate, 1u, 500u, 1500u, 1500u, limits));
+}
+
 TEST(CoordinatedXyPerformanceReport, CompleteStepMoveFailsClosedOnPulseOrDeadline) {
   auto observation = acceptedCompleteStepMove(
       20000u, 5000u, 20000u, 40000u, 1124u, 5620u);

@@ -1212,14 +1212,22 @@ count, endpoint, watchdog, and saturation gates, requires injection counters
 to remain zero, and makes terminal cleanup cost non-blocking only for selector
 `2097`.
 
-That policy correction passes 414/414 firmware host tests with 10,213,784
-checks and 122/122 focused Python tests. The production conditional ISR stack
-remains 136 bytes and the diagnostic version remains 144 bytes. The corrected
-production artifact is 351,776 bytes with SHA-256
-`A2EC1334DB59190723359008A904A551FCDD9DA5ECEBE67196773954DF47BDFA`;
-the matching diagnostic artifact is 354,176 bytes with SHA-256
-`49ACC88837FADBA6C8C4D756DE965B9A0420DFADAC7916EB9BFEE42869740B7C`.
-A second watched SAFE/`2097`/SAFE bracket is required before Checkpoint A can
+The first correction made every per-move mask clean on a second watched row,
+but its aggregate pass predicate duplicated the old injection and terminal
+assumptions. That row still completed with exact counts, X/Y drift of 2/0,
+zero pending/deadline/reset/watchdog evidence, and one clean natural rearm;
+post-SAFE again passed 30/30 with unchanged counters. The final correction
+centralizes injection/rearm validation so per-move and aggregate policies use
+the same helper and carries the two selector policy flags into the aggregate.
+
+The final policy passes 415/415 firmware host tests with 10,213,786 checks and
+the focused Python tests. The production conditional ISR stack remains 136
+bytes and the diagnostic version remains 144 bytes. The corrected production
+artifact is 351,856 bytes with SHA-256
+`7EB588C49258F215046BB77C5E5A5518D4BCAAB550F1AFA32CB62E45E2A1A2C6`;
+the matching diagnostic artifact is 354,272 bytes with SHA-256
+`FBF650E6C6B309885FD4205C79C0613C2F129F822A6222ED7C12A418AD47B15B`.
+A final watched SAFE/`2097`/SAFE bracket is required before Checkpoint A can
 pass and before any single-axis LUT work starts.
 
 ## Rollback

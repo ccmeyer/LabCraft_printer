@@ -211,6 +211,8 @@ struct Aggregate {
   uint32_t timeoutCount = 0u;
   uint32_t qualificationFailureMoveCount = 0u;
   uint32_t qualificationFailureMask = 0u;
+  bool requireLateInjectionEvidence = true;
+  bool requireTerminalCycleBudget = true;
   bool exactAndSafe = true;
 };
 

@@ -2921,10 +2921,10 @@ compiled out, selector `2097` requires all injection counters to remain zero.
 The terminal cleanup callback runs after the final physical STEP edge, so its
 cycle cost is retained as candidate telemetry rather than a blocking
 production gate; active callbacks and every real edge deadline remain strict.
-The corrected production artifact is 351,776 bytes with SHA-256
-`A2EC1334DB59190723359008A904A551FCDD9DA5ECEBE67196773954DF47BDFA`;
-the matching diagnostic artifact is 354,176 bytes with SHA-256
-`49ACC88837FADBA6C8C4D756DE965B9A0420DFADAC7916EB9BFEE42869740B7C`.
+The corrected production artifact is 351,856 bytes with SHA-256
+`7EB588C49258F215046BB77C5E5A5518D4BCAAB550F1AFA32CB62E45E2A1A2C6`;
+the matching diagnostic artifact is 354,272 bytes with SHA-256
+`FBF650E6C6B309885FD4205C79C0613C2F129F822A6222ED7C12A418AD47B15B`.
 
 Rollback before production HIL is the commit-`8a1cd3c4` production artifact:
 351,832 bytes, SHA-256

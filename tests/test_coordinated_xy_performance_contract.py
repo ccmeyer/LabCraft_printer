@@ -186,9 +186,10 @@ def test_production_mres3_scales_direct_and_coordinated_motion_without_wire_chan
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
     assert "requireLateInjectionEvidence = true" in report_header
     assert "requireTerminalCycleBudget = true" in report_header
-    assert "conditionalRearmEvidenceInvalid" in report
-    assert "injectionEvidenceInvalid" in report
+    assert "rearmEvidenceConsistent" in report
+    assert "injectionEvidencePasses" in report
     assert "observation.requireTerminalCycleBudget &&" in report
+    assert "!aggregate.requireTerminalCycleBudget ||" in report
     assert "observation.requireLateInjectionEvidence =\n" in diagnostics
     assert "observation.requireTerminalCycleBudget =\n" in diagnostics
     assert "!runCoordinatedXyProductionMres3Suite" in diagnostics
