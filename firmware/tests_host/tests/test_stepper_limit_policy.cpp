@@ -72,6 +72,14 @@ TEST(StepperLimitPolicyHelpers, ReleaseSearchGuardScalesFromBackoffSteps)
     LONGS_EQUAL(16000L, static_cast<long>(StepperLimitPolicy::releaseSearchGuardSteps(1000u)));
 }
 
+TEST(StepperLimitPolicyHelpers, FinalHomeBackoffPreservesConfiguredPhysicalScale)
+{
+    LONGS_EQUAL(100L, static_cast<long>(StepperLimitPolicy::finalHomeBackoffSteps(400u)));
+    LONGS_EQUAL(50L, static_cast<long>(StepperLimitPolicy::finalHomeBackoffSteps(200u)));
+    LONGS_EQUAL(1L, static_cast<long>(StepperLimitPolicy::finalHomeBackoffSteps(0u)));
+    LONGS_EQUAL(1L, static_cast<long>(StepperLimitPolicy::finalHomeBackoffSteps(3u)));
+}
+
 TEST(StepperLimitPolicyHelpers, MoveGenerationWrapsWithoutUsingZero)
 {
     LONGS_EQUAL(1L, static_cast<long>(StepperLimitPolicy::nextMoveGeneration(0u)));

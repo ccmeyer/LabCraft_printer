@@ -636,7 +636,9 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   _homeDiagnosticSnapshot.fineLimitPositionSteps = _pos;
   _pos = 0;
   _softstop_accel_override_sps2 = 0.f;
-  if (!runMoveAndWait(!_homeTowardLimitDir, 100u, slowHz).completed) {
+  const uint32_t finalBackoffSteps =
+      StepperLimitPolicy::finalHomeBackoffSteps(backoffSteps);
+  if (!runMoveAndWait(!_homeTowardLimitDir, finalBackoffSteps, slowHz).completed) {
     return finishOutcome(cancellationRequested() ? Outcome::Canceled : Outcome::Failed);
   }
   if (canceledWithRestore()) {

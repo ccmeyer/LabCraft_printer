@@ -2840,10 +2840,10 @@ with all motors disabled, ordinary FULL requests fail before motion, and only
 SAFE plus selector `2085` are supported. Boot/default builds remain MRES=2;
 MRES=3 is not a production migration until the watched HIL evidence is
 reviewed. Roll back by flashing `firmware/artifacts/LabCraft_firmware.bin`.
-The matching diagnostic artifact is 342,088 bytes with SHA-256
-`CA0F043736D8E87C94243F71D28A09DF5914E03F192CB1FA4F0B3BD0C91CCA48`;
-the production artifact is 341,832 bytes with SHA-256
-`E6DF114971CD21F7D2D18EAA12D615E4B313D802A9FDC9B8A124CA7E45527408`.
+The matching diagnostic artifact is 342,128 bytes with SHA-256
+`D65899BFDF804EB7C3F6D5C6914F8BEB08E5E7724450C2F3AA63DBBD5C5CBCAC`;
+the production artifact is 341,872 bytes with SHA-256
+`BEC990A915EB527BE331BD1D1B7B1153BFC497BA4F7EE2D11BCF9A434DE3B814`.
 
 The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is

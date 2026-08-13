@@ -212,7 +212,7 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2074u, "coord_xy_single_irq_pulse", "performance", "FULL", "explicit_selection"},
     {2080u, "coord_xy_mres3_20khz_motion", "performance", "FULL", "explicit_selection"},
     {2081u, "coord_xy_mres3_20khz_irq_path", "performance", "FULL", "explicit_selection"},
-    {2082u, "coord_xy_mres3_20khz_entry_margin", "performance", "FULL", "explicit_selection"},
+    {2082u, "coord_xy_mres3_entry_margin", "performance", "FULL", "explicit_selection"},
     {2083u, "tmc2208_mres3_configuration", "configuration", "FULL", "explicit_selection"},
     {2003u, "pressure_regulator_step_response_full", "pressure", "FULL", "safe_gate_or_full"},
     {2201u, "pressure_hold_leak_factory", "pressure", "FULL", "safe_gate_or_full"},
@@ -4405,7 +4405,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 "i2=0;s=0;mi=0;ph=0;pa=0;fm=0;fa=0;tf=0;pp=0;pf=0;pu=0;ps=0;sf=0;to=1");
                             (void)runOne(
                                 2082u,
-                                "coord_xy_mres3_20khz_entry_margin",
+                                "coord_xy_mres3_entry_margin",
                                 false,
                                 "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;ds=0;di=0;md=0;sl=0;sf=0;to=1");
                             (void)emitMres3Configuration();
@@ -5713,7 +5713,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 aggregate,
                                 runCoordinatedXyMres3Suite ? 2082u : 2073u,
                                 runCoordinatedXyMres3Suite
-                                    ? "coord_xy_mres3_20khz_entry_margin"
+                                    ? "coord_xy_mres3_entry_margin"
                                     : "coord_xy_40khz_entry_lateness",
                                 runCoordinatedXyMres3Suite);
                             if (runCoordinatedXySingleIrqSuite) {

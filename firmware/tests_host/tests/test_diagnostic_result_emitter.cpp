@@ -299,7 +299,8 @@ TEST(DiagnosticResultEmitter, CoordinatedXyMres3DeadlineMetricsFitAtAcceptedValu
         "i2=220000;s=220000;mi=0;cm=127;ca=127;pm=0;lc=0;dm=255;"
         "ds=219990;di=0;md=0;sl=450;sm=0;lf=0;sf=0;to=0;"
         "fv=0;tr=0;la=0;ra=0";
-    const char name[] = "coord_xy_mres3_20khz_entry_margin";
+    const char name[] = "coord_xy_mres3_entry_margin";
+    CHECK_TRUE(std::strlen(name) <= DiagnosticResultEmitter::kMaxResultNameBytes);
     const size_t nameLength = std::strlen(name) >
             DiagnosticResultEmitter::kMaxResultNameBytes
         ? DiagnosticResultEmitter::kMaxResultNameBytes

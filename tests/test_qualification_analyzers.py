@@ -312,7 +312,7 @@ def test_mres3_manifest_rejects_unscaled_or_incomplete_timing_evidence():
                          "ph": 50, "pa": 20, "fm": 1500, "fa": 900,
                          "ax": 1450, "tf": 2200, "pp": 0, "pf": 0,
                          "pu": 0, "ps": 0, "sf": 0, "to": 0}},
-            {"test_id": 2082, "name": "coord_xy_mres3_20khz_entry_margin", "pass": True,
+            {"test_id": 2082, "name": "coord_xy_mres3_entry_margin", "pass": True,
              "metrics": {"i2": 220000, "s": 220000, "mi": 0,
                          "cm": 40, "ca": 12, "pm": 0, "lc": 0, "dm": 80,
                          "ds": 219990, "di": 0, "md": 0, "sl": 700,

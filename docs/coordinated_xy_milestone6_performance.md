@@ -804,12 +804,48 @@ and rejects ordinary FULL runs before motion; SAFE remains available. It is
 not a production migration. Rollback is the matching production
 `firmware/artifacts/LabCraft_firmware.bin`; the diagnostic artifact is retained
 separately as `LabCraft_firmware_mres3_diagnostic.bin`. The production image is
-341,832 bytes with SHA-256
-`E6DF114971CD21F7D2D18EAA12D615E4B313D802A9FDC9B8A124CA7E45527408`.
-The MRES=3 diagnostic image is 342,088 bytes with SHA-256
-`CA0F043736D8E87C94243F71D28A09DF5914E03F192CB1FA4F0B3BD0C91CCA48`.
+341,872 bytes with SHA-256
+`BEC990A915EB527BE331BD1D1B7B1153BFC497BA4F7EE2D11BCF9A434DE3B814`.
+The MRES=3 diagnostic image is 342,128 bytes with SHA-256
+`D65899BFDF804EB7C3F6D5C6914F8BEB08E5E7724450C2F3AA63DBBD5C5CBCAC`.
 Both link with zero errors and the existing three warnings; host firmware
-validation passes 390/390 tests with 10,213,677 checks.
+validation passes 391/391 tests with 10,213,682 checks.
+
+The first watched selector `2085` attempt on implementation commit `4c16a50c`
+was bracketed by 30/30 SAFE passes and failed closed before the ten-move row.
+Z, X, and Y home completion bits all arrived, but the diagnostic expected a
+50-microstep final home backoff while `Stepper::home()` still commanded its
+historical hard-coded 100 microsteps. The final backoff is now derived as one
+quarter of the existing `backoffSteps` argument. Production's 400-microstep
+configuration therefore remains exactly 100, while the MRES=3 diagnostic's
+200 becomes the physically equivalent 50. The initial focused report is
+`hil_reports/mres3_20khz_4c16a50c_focused.json`, SHA-256
+`C6E5962216BB802BC8D232B1B85584EE1C6AE151087969B1FA838B0EFD4E3516`.
+
+The corrected image's watched run is bracketed by
+`hil_reports/mres3_20khz_d65899bf_pre_safe.json` and
+`hil_reports/mres3_20khz_d65899bf_post_safe.json`, both 30/30 with unchanged
+`fault_ct=4;wdg_ct=6`, four live watchdog participants, and no pressure I2C
+error or recovery evidence. Their SHA-256 values are
+`8D8250E5EB85E3237433E1C85B3E61D9FB73E27AF754A18D6AF5CF6471CB3C55`
+and
+`37321C43A3A4098ECC73B311614F4F263768ED6838A818F42C36A206846ED12B`.
+The focused raw report
+`hil_reports/mres3_20khz_d65899bf_focused.json`, SHA-256
+`CA800875EAC1494C6485D5B39C30D1E84017A5ECB179F0BA2B841F0B2CEAE798`,
+passes results `2080`, `2081`, and `2083`: exact 10-move geometry and
+53,416/90,000/110,000 step totals, complete 220,000-callback coverage, zero
+pending observations, zero deadline misses, 850 timer ticks minimum rearm
+slack, clean homes with X/Y drift 2/1, clean host cadence, and the intended
+MRES/DEDGE/filter configuration. Result `2082` fails only the retained
+128-tick entry diagnostic: `lc=457`, `cm=559`, and `dm=1073`. The normalized
+report at `hil_reports/qualification/LC-001/20260813T035720Z/report.json`,
+SHA-256
+`79F5356953429E8353E53BD7C2345255AF9B1C5EC0E9850C24EC98B4C491C9B8`,
+therefore remains FAIL with exactly two blocking items: the raw `2082` result
+and `lc != 0`. Do not relabel this run as a strict pass or migrate MRES=3 until
+the diagnostic acceptance policy is reviewed against the measured zero-miss
+rearm margin and the operator's physical observation is recorded.
 
 Before source-scoped optimization, the Milestone 6 candidate added 1,800 bytes
 relative to the accepted Milestone 5 image and measured 392,800 bytes. Applying

@@ -27,6 +27,12 @@ constexpr uint32_t normalizeBackoffSteps(uint32_t backoffSteps)
   return (backoffSteps == 0u) ? 1u : backoffSteps;
 }
 
+constexpr uint32_t finalHomeBackoffSteps(uint32_t backoffSteps)
+{
+  const uint32_t scaled = normalizeBackoffSteps(backoffSteps) / 4u;
+  return (scaled == 0u) ? 1u : scaled;
+}
+
 constexpr PullMode resolvePullMode(PullMode requested, bool activeHigh)
 {
   if (requested != PullMode::Auto) {
