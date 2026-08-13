@@ -1158,22 +1158,23 @@ def test_run_sends_selftest_scheduler_selector(monkeypatch, tmp_path, flag_name,
 
 
 @pytest.mark.parametrize(
-    ("performance_suite", "forty_suite", "status_sync_suite", "single_irq_suite", "mres3_suite", "mres3_rearm_suite", "mres3_conditional_suite", "production_mres3_suite", "direction_suite", "transition_suite", "expected_selector"),
-    ((True, False, False, False, False, False, False, False, False, False, 2069),
-     (False, True, False, False, False, False, False, False, False, False, 2077),
-     (False, False, True, False, False, False, False, False, False, False, 2076),
-     (False, False, False, True, False, False, False, False, False, False, 2075),
-     (False, False, False, False, True, False, False, False, False, False, 2085),
-     (False, False, False, False, False, True, False, False, False, False, 2084),
-     (False, False, False, False, False, False, True, False, False, False, 2086),
-     (False, False, False, False, False, False, False, True, False, False, 2097),
-     (False, False, False, False, False, False, False, False, True, False, 2079),
-     (False, False, False, False, False, False, False, False, False, True, 2078)),
+    ("performance_suite", "forty_suite", "status_sync_suite", "single_irq_suite", "mres3_suite", "mres3_rearm_suite", "mres3_conditional_suite", "production_mres3_suite", "direct_lut_suite", "direction_suite", "transition_suite", "expected_selector"),
+    ((True, False, False, False, False, False, False, False, False, False, False, 2069),
+     (False, True, False, False, False, False, False, False, False, False, False, 2077),
+     (False, False, True, False, False, False, False, False, False, False, False, 2076),
+     (False, False, False, True, False, False, False, False, False, False, False, 2075),
+     (False, False, False, False, True, False, False, False, False, False, False, 2085),
+     (False, False, False, False, False, True, False, False, False, False, False, 2084),
+     (False, False, False, False, False, False, True, False, False, False, False, 2086),
+     (False, False, False, False, False, False, False, True, False, False, False, 2097),
+     (False, False, False, False, False, False, False, False, True, False, False, 2096),
+     (False, False, False, False, False, False, False, False, False, True, False, 2079),
+     (False, False, False, False, False, False, False, False, False, False, True, 2078)),
 )
 def test_run_sends_coordinated_xy_performance_selector_and_checks_status_cadence(
     monkeypatch, tmp_path, performance_suite, forty_suite, status_sync_suite,
     single_irq_suite, mres3_suite, mres3_rearm_suite, mres3_conditional_suite,
-    production_mres3_suite, direction_suite, transition_suite,
+    production_mres3_suite, direct_lut_suite, direction_suite, transition_suite,
     expected_selector
 ):
     mod = _load_run_selftest()
@@ -1221,6 +1222,7 @@ def test_run_sends_coordinated_xy_performance_selector_and_checks_status_cadence
         coordinated_xy_mres3_rearm_suite=mres3_rearm_suite,
         coordinated_xy_mres3_conditional_rearm_suite=mres3_conditional_suite,
         coordinated_xy_production_mres3_suite=production_mres3_suite,
+        direct_xyz_lut_suite=direct_lut_suite,
         coordinated_xy_x_direction_suite=direction_suite,
         coordinated_xy_camera_transition_suite=transition_suite,
         out=str(out_path),
@@ -2360,6 +2362,17 @@ def test_production_mres3_fixture_stage_is_an_operator_prompt():
     message = mod._operator_prompt_message(stage)
     assert "MRES=3" in message
     assert "20 kHz" in message
+
+
+def test_direct_xyz_lut_fixture_stage_is_an_operator_prompt():
+    mod = _load_run_selftest()
+    stage = "direct_xyz_lut_envelope_clear"
+
+    assert mod._is_operator_prompt_stage(stage)
+    message = mod._operator_prompt_message(stage)
+    assert "direct X/Y/Z motion envelope" in message
+    assert "14,000-unit move" in message
+    assert "40 kHz logical rate" in message
 
 
 def test_mres3_selector_is_mutually_exclusive_with_existing_motion_selectors(

@@ -27,6 +27,7 @@ def test_discover_suite_entries_lists_current_manifests():
         "coordinated_xy_x_direction_v1",
         "coordinated_xy_camera_transition_v1",
         "coordinated_xy_production_mres3_v1",
+        "direct_xyz_lut_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "refuel_vacuum_v1",
@@ -349,6 +350,25 @@ def test_production_mres3_suite_requires_logical_conversion_and_conditional_rear
     assert manifest.analysis_rules["2089"]["metrics"]["ns"]["min"] == 1126
     assert manifest.analysis_rules["2089"]["metrics"]["rp"]["equals"] == 0
     assert manifest.analysis_rules["2090"]["metrics"]["lu"]["equals"] == 2
+
+
+def test_direct_xyz_lut_suite_requires_profile_coverage_and_isolation():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    manifest = entries["direct_xyz_lut_v1"].manifest
+
+    assert manifest.profile == "FULL"
+    assert manifest.selftest_args == ("--direct-xyz-lut-suite",)
+    assert required_fixture_ids(manifest) == ("direct_xyz_lut_envelope_clear",)
+    assert [row.test_id for row in build_test_plan_rows(manifest)] == [
+        2091, 2092, 2093, 2094, 2095
+    ]
+    assert manifest.analysis_rules["2091"]["metrics"]["np"]["equals"] == 7000
+    assert manifest.analysis_rules["2091"]["metrics"]["dc"]["equals"] == 5715
+    assert manifest.analysis_rules["2093"]["metrics"]["en"]["equals"] == 0
+    assert manifest.analysis_rules["2094"]["metrics"]["ai"]["equals"] == 1000
+    assert manifest.analysis_rules["2095"]["metrics"]["pre"]["equals"] == 1
+    assert manifest.analysis_rules["2095"]["metrics"]["post"]["equals"] == 1
+    assert manifest.analysis_rules["2095"]["metrics"]["pd"]["equals"] == 0
 
 
 def test_coordinated_xy_single_irq_suite_requires_complete_pulse_margin_evidence():

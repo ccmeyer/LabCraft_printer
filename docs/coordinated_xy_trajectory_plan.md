@@ -224,7 +224,7 @@ Every milestone that touches motion must preserve these invariants:
 | 3. Pure coordinated XY planner | `verified` | DDA path and exact pulse counts proven on host | Exhaustive geometry tests pass |
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
-| 6. Performance and motion HIL qualification | `in_progress` | Checkpoint A is accepted: production MRES=3 logical units and conditional rearm passed watched SAFE/`2097`/SAFE, exact counts, zero drift, clean reset/watchdog/pressure evidence, and normalized qualification without warnings. | Implement and independently qualify the direct X/Y/Z LUT checkpoint |
+| 6. Performance and motion HIL qualification | `in_progress` | Checkpoint A is accepted. Checkpoint B implements the normalized LUT for ordinary direct X/Y/Z cosine moves behind independent selector `2096`; homing, P/R, coordinated XY, and alternate profiles remain isolated. | Pass automated validation and watched SAFE/`2096`/SAFE qualification |
 | 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
 
 ## Next Planned Action
@@ -399,6 +399,39 @@ Checkpoint B migrates the normalized LUT to direct X/Y/Z single-axis motion
 only after Checkpoint A passes watched SAFE/`2097`/SAFE HIL. It is a separate
 commit, artifact, test inventory, and rollback boundary; it must not be used to
 explain or mask a Checkpoint A failure.
+
+The Checkpoint B implementation preserves the existing direct-stepper toggle
+phase boundaries while replacing per-callback floating-point cosine evaluation
+with a pure fixed-point cursor. It selects the cursor only for ordinary X/Y/Z
+cosine moves while `_homeSequenceActive` is false. P/R axes, homing, limit
+soft-stop reshaping, coordinated XY, dynamic-rate fallback, and linear/min-jerk
+profiles remain on their established paths. Cursor preparation is completed in
+task context before motor enable, and invalid preparation fails closed. Runtime
+state inconsistency completes an already-high pulse low when necessary and
+stops without emitting a new untrusted edge.
+
+Selector `2096` and manifest `direct_xyz_lut_v1` are the independent acceptance
+gate. They exercise cruise-capable direct X/Y/Z moves and a short triangular X
+move at the production logical rate, require exact native pulse and profile
+cursor coverage, retain X/Y active/terminal ISR timing separately, keep status
+and watchdog checks live, and verify pre/post homes did not select the LUT and
+P/R positions did not change. Checkpoint A remains the rollback boundary until
+this watched SAFE/`2096`/SAFE bracket passes.
+
+Pre-HIL validation passed 160 targeted Python tests and the complete firmware
+gate (425 host tests, 10,213,905 checks, Debug link with zero errors). The
+production candidate is 356,824 bytes, SHA-256
+`954B39FC4F0F01A0A3FFAB7E639EE48127FFC2034E1C946F732AB9B7E38ABC44`;
+the matching diagnostic image is 359,224 bytes, SHA-256
+`7D61C356EAC3A73EA369A2C1CAF5923D2F6A3184FC43C956BCC3466C5C5007B4`.
+Both builds report a 128-byte `_stepTick()` static frame and a 24-byte
+`DirectStepperProfile::nextSample()` frame. Disassembly confirms that selected
+ordinary X/Y/Z cosine moves call the fixed-point cursor before the retained
+legacy float branch.
+
+Checkpoint B rollback is commit `9dc66f11` and its accepted 351,856-byte
+production artifact, SHA-256
+`7EB588C49258F215046BB77C5E5A5518D4BCAAB550F1AFA32CB62E45E2A1A2C6`.
 
 ## Milestone 0: Baseline And Decisions
 

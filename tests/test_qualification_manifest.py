@@ -413,6 +413,30 @@ def test_load_coordinated_xy_mres3_manifest_is_diagnostic_only_and_strict():
     assert driver["tf"]["equals"] == 0
 
 
+def test_load_direct_xyz_lut_manifest_freezes_motion_and_isolation_gates():
+    manifest = load_manifest("direct_xyz_lut_v1")
+
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2091, 2092, 2093, 2094, 2095)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--direct-xyz-lut-suite",)
+    assert manifest.fixtures[0]["fixture_id"] == "direct_xyz_lut_envelope_clear"
+    x = manifest.analysis_rules["2091"]["metrics"]
+    assert x["ds"]["equals"] == 14000
+    assert x["nm"]["equals"] == 1
+    assert x["ac"]["equals"] == x["ai"]["equals"]
+    assert x["dc"]["equals"] == x["di"]["equals"] - 1
+    assert x["mx"]["max"] == 2250
+    z = manifest.analysis_rules["2093"]["metrics"]
+    assert z["np"]["equals"] == 7000
+    assert z["en"]["equals"] == 0
+    isolation = manifest.analysis_rules["2095"]["metrics"]
+    assert isolation["mres"]["equals"] == 3
+    assert isolation["de"]["equals"] == 1
+    assert isolation["mf"]["equals"] == 0
+
+
 def test_load_coordinated_xy_mres3_rearm_manifest_is_diagnostic_only():
     manifest = load_manifest("coordinated_xy_mres3_rearm_v1")
 

@@ -9,6 +9,7 @@
 #define INC_STEPPER_H_
 
 #include "BoardConfig.h"
+#include "DirectStepperProfile.h"
 #include "HomeInterruptionPolicy.h"
 #include "StepperLimitPolicy.h"
 #include "StepperIsrInstrumentation.h"
@@ -151,6 +152,9 @@ public:
 
   HomeDiagnosticSnapshot getLastHomeDiagnosticSnapshot() const { return _homeDiagnosticSnapshot; }
   StepperIsrInstrumentation::Snapshot getLastMoveInstrumentationSnapshot() const;
+  DirectStepperProfile::Snapshot getLastDirectProfileSnapshot() const {
+    return DirectStepperProfile::snapshot(_directProfileState);
+  }
   bool isLimitAssertedForDiagnostics() const { return _isLimitAsserted(); }
   bool enableOutputsAssertedForDiagnostics() const {
     if (_enPort == nullptr || (_enPort->ODR & _enPin) != 0u) return false;
@@ -254,6 +258,7 @@ private:
   uint32_t _startARR    = 0;
   uint32_t _targetARR   = 0;
   int32_t  _deltaARR    = 0;       // may be negative
+  DirectStepperProfile::State _directProfileState{};
 
   // Save last move
   bool     _lastDirection  = true;

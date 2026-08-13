@@ -198,6 +198,7 @@ void Stepper::moveTo(bool sign, uint32_t newPos, uint32_t freqHz, uint32_t accel
 
   if (deltaWide == 0) {
 	if (_coordinatedReserved) return;
+	DirectStepperProfile::reset(_directProfileState);
 	#if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
 	if (stepperInstrumentationAxis(_axis)) {
 	  stepperEnableCycleCounter();
@@ -229,7 +230,7 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
 
   _prepareForNewMove();
   _resetMoveLimitState();
-
+  DirectStepperProfile::reset(_directProfileState);
 
   const int64_t requestedDelta = direction
       ? static_cast<int64_t>(steps)
@@ -293,15 +294,35 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
   _decelToggles = plan.decelToggles;
   _legacyMoveStartPending = false;
 
+  _targetARR = plan.targetArr;
+  _startARR = plan.startArr;
+
+  const bool useNormalizedCosineProfile =
+      (_axis == X_AXIS || _axis == Y_AXIS || _axis == Z_AXIS) &&
+      !_homeSequenceActive &&
+      _profile == PROFILE_SCURVE_COSINE;
+  if (useNormalizedCosineProfile &&
+      !DirectStepperProfile::prepare(_directProfileState,
+                                     _totalToggles,
+                                     _accelToggles,
+                                     _decelToggles,
+                                     _startARR,
+                                     _targetARR,
+                                     plan.minArr,
+                                     maxARR)) {
+    _togglesRemaining = 0u;
+    _togglesDone = 0u;
+    _targetPos = _pos;
+    xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
+    return;
+  }
+
   // ---------- GPIO DIR/EN ----------
   HAL_GPIO_WritePin(_dirPort,  _dirPin,  hwDir ? GPIO_PIN_SET : GPIO_PIN_RESET);
   if (_dualDriver) HAL_GPIO_WritePin(_dirPort2, _dirPin2, hwDir ? GPIO_PIN_SET : GPIO_PIN_RESET);
 
   HAL_GPIO_WritePin(_enPort,   _enPin,   GPIO_PIN_RESET);
   if (_dualDriver) HAL_GPIO_WritePin(_enPort2, _enPin2, GPIO_PIN_RESET);
-
-  _targetARR = plan.targetArr;
-  _startARR = plan.startArr;
 
   // Linear fallback slope (kept for completeness; S-curve below uses _start/_target)
   const uint32_t Aeff = (_accelToggles ? _accelToggles : 1u);
@@ -340,11 +361,19 @@ void Stepper::setSpeedHz(uint32_t freqHz) {
   if (newARR > maxARR) newARR = maxARR;
 
   _targetARR = newARR;
+  // The normalized cursor is immutable after preparation. Dynamic rate
+  // changes are used by P/R today; if one is ever applied to X/Y/Z, retain
+  // the established behavior by falling back to the legacy calculation.
+  DirectStepperProfile::abort(_directProfileState);
 }
 
 void Stepper::_requestSoftStop()
 {
   if (_togglesRemaining == 0 || _inSoftStop) return;
+
+  // Limit braking reshapes the remaining move and therefore cannot continue
+  // an immutable cursor prepared for the original endpoint.
+  DirectStepperProfile::abort(_directProfileState);
 
   const uint32_t tclkEff = timer_input_hz(_htim, _prescaler);
 
@@ -847,6 +876,7 @@ void Stepper::stop() {
   if (!_htim || _coordinatedReserved) return;
 
   HAL_TIM_Base_Stop_IT(_htim);
+  DirectStepperProfile::abort(_directProfileState);
 
   #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
   if (stepperInstrumentationAxis(_axis) && _isrInstrumentation.active) {
@@ -1022,6 +1052,7 @@ void Stepper::_prepareCoordinatedAxis(bool participating,
 
   _prepareForNewMove();
   _resetMoveLimitState();
+  DirectStepperProfile::reset(_directProfileState);
   _writeCoordinatedStep(false);
   _targetPos = targetPosition;
   _direction = direction;
@@ -1139,6 +1170,7 @@ void Stepper::pauseMove() {
 
 void Stepper::resumeMove() {
 	if (_coordinatedReserved) return;
+	DirectStepperProfile::abort(_directProfileState);
 	const uint32_t nativeSteps = (_togglesRemaining + 1u) / 2u;
 	const uint32_t newSteps = MotionUnitScale::toLogicalMagnitude(nativeSteps);
 	_togglesRemaining = _togglesDone = 0;
@@ -1157,6 +1189,7 @@ void Stepper::cancelMove() {
   #endif
   _togglesRemaining = 0;
   _inSoftStop = false;
+  DirectStepperProfile::abort(_directProfileState);
 }
 
 void Stepper::_stepTick() {
@@ -1208,6 +1241,9 @@ void Stepper::_stepTick() {
 
   if (rem == 0) {
     // complete
+    if (_directProfileState.selected && _directProfileState.active) {
+      (void)DirectStepperProfile::finish(_directProfileState);
+    }
     HAL_TIM_Base_Stop_IT(_htim);
 
     // signal orchestrator
@@ -1242,7 +1278,33 @@ void Stepper::_stepTick() {
 
   // choose period
   int32_t arr;
-  if (done < _accelToggles) {
+  if (_directProfileState.selected && _directProfileState.active) {
+    DirectStepperProfile::Sample sample{};
+    if (!DirectStepperProfile::nextSample(
+            _directProfileState, done, rem, sample)) {
+      // A corrupt cursor must not emit an edge using untrusted timing. If the
+      // prior callback raised STEP, finish that pulse low and account it once
+      // before failing the move closed.
+      if ((done & 1u) != 0u) {
+        const int32_t logicalStep = static_cast<int32_t>(
+            MotionUnitScale::logicalUnitsPerNativeStep());
+        _pos += (_direction ? logicalStep : -logicalStep);
+      }
+      _targetPos = _pos;
+      stop();
+      _stepPort->BSRR = static_cast<uint32_t>(_stepPin) << 16u;
+      if (_dualDriver) {
+        _stepPort2->BSRR = static_cast<uint32_t>(_stepPin2) << 16u;
+      }
+      BaseType_t woken = pdFALSE;
+      xEventGroupSetBitsFromISR(
+          Orchestrator::getDoneEvents(), _doneBit, &woken);
+      portYIELD_FROM_ISR(woken);
+      return;
+    }
+    arr = static_cast<int32_t>(sample.arr);
+  }
+  else if (done < _accelToggles) {
     float t    = float(done) / float(_accelToggles);    // 0…1
     float e    = ease01(t);
     arr        = _startARR + int32_t((float(_targetARR) - float(_startARR)) * e);

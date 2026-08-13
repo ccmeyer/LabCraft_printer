@@ -32,6 +32,8 @@ add_executable(fw_tests
     tests/test_selftest_scheduling_policy.cpp
     tests/test_motion_qualification_math.cpp
     tests/test_stepper_profile_math.cpp
+    tests/test_direct_stepper_profile.cpp
+    tests/test_direct_stepper_profile_report.cpp
     tests/test_normalized_cosine_profile.cpp
     tests/test_coordinated_xy_planner.cpp
     tests/test_coordinated_xy_executor.cpp
@@ -78,6 +80,8 @@ add_executable(fw_tests
     ../Core/Src/ValvePulseQualificationMath.cpp
     ../Core/Src/MotionQualificationMath.cpp
     ../Core/Src/StepperProfileMath.cpp
+    ../Core/Src/DirectStepperProfile.cpp
+    ../Core/Src/DirectStepperProfileReport.cpp
     ../Core/Src/NormalizedCosineProfile.cpp
     ../Core/Src/CoordinatedXyPlanner.cpp
     ../Core/Src/CoordinatedXyExecutor.cpp

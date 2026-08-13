@@ -7,6 +7,7 @@
 #include "Diagnostics.h"
 #include "CrashWatchdogSelfTestPolicy.h"
 #include "DiagnosticResultEmitter.h"
+#include "DirectStepperProfileReport.h"
 #include "Orchestrator.h"
 #include "OrchestratorCompletionPolicy.h"
 #include "OrchestratorDecode.h"
@@ -248,6 +249,11 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2088u, "coord_xy_prod_mres3_irq_path", "performance", "FULL", "explicit_selection"},
     {2089u, "coord_xy_prod_conditional_rearm", "performance", "FULL", "explicit_selection"},
     {2090u, "tmc2208_production_mres3_config", "configuration", "FULL", "explicit_selection"},
+    {2091u, "direct_lut_x_cruise", "performance", "FULL", "explicit_selection"},
+    {2092u, "direct_lut_y_cruise", "performance", "FULL", "explicit_selection"},
+    {2093u, "direct_lut_z_cruise", "performance", "FULL", "explicit_selection"},
+    {2094u, "direct_lut_x_triangular", "performance", "FULL", "explicit_selection"},
+    {2095u, "direct_lut_isolation", "configuration", "FULL", "explicit_selection"},
     {2003u, "pressure_regulator_step_response_full", "pressure", "FULL", "safe_gate_or_full"},
     {2201u, "pressure_hold_leak_factory", "pressure", "FULL", "safe_gate_or_full"},
     {2202u, "pressure_target_cycle_repeatability_factory", "pressure", "FULL", "safe_gate_or_full"},
@@ -379,6 +385,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
         (selectedDiagnosticId == 2086u);
     const bool runCoordinatedXyProductionMres3Suite =
         (selectedDiagnosticId == 2097u);
+    const bool runDirectXyzLutSuite = (selectedDiagnosticId == 2096u);
     const bool runCoordinatedXyMres3Suite =
         runCoordinatedXyMres3BaselineSuite ||
         runCoordinatedXyMres3RearmSuite ||
@@ -423,7 +430,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runSinglePressureTraceSelection =
         (selectedPressureTraceTest >= 2101u) && (selectedPressureTraceTest <= 2104u);
                   auto shouldRunPressureTraceCase = [&](uint16_t testId) {
-                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runGripperSealStressSuite || runXyMotionSuite || runMotionEnvelopeSuite || runMotionTimingSuite || runProfileLutBenchmark || runCoordinatedXyExecutorSuite || runNormalXyRouteSuite || runCoordinatedXyPerformanceSuite || runPressureRegulatorSuite || runRefuelVacuumSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
+                    if (runPressureSweepCore || runPressureSweepExtended || runPressureSweepFocused || runPressureSweepMicro || runGripperSealSuite || runGripperSealStressSuite || runXyMotionSuite || runMotionEnvelopeSuite || runMotionTimingSuite || runDirectXyzLutSuite || runProfileLutBenchmark || runCoordinatedXyExecutorSuite || runNormalXyRouteSuite || runCoordinatedXyPerformanceSuite || runPressureRegulatorSuite || runRefuelVacuumSuite || runValveCharacterizationSuite || runValveGapSweepSuite) {
                       return false;
                     }
                     if (runSinglePressureTraceSelection) {
@@ -6585,6 +6592,349 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         return finishSelfTestNow();
                         };
                         return runCoordinatedPerformanceDiagnostic();
+                      }
+
+                      if (runDirectXyzLutSuite) {
+                        static constexpr uint32_t kRateHz = 40000u;
+                        static constexpr uint32_t kMoveTimeoutMs = 20000u;
+                        static constexpr uint32_t kHomeFastHz = 30000u;
+                        static constexpr uint32_t kHomeSlowHz = 3000u;
+                        static constexpr uint32_t kHomeBackoffSteps = 400u;
+                        static constexpr uint32_t kHomeTimeoutMs = 20000u;
+                        static constexpr uint32_t kCruiseDistance = 14000u;
+                        static constexpr uint32_t kTriangularDistance = 2000u;
+                        static constexpr int32_t kSafeXMax = 45000;
+                        static constexpr int32_t kSafeYMax = 35000;
+                        static constexpr int32_t kSafeZMax = 80000;
+
+                        struct DirectTestDescriptor {
+                          uint16_t id;
+                          const char* name;
+                        };
+                        static constexpr DirectTestDescriptor kTests[] = {
+                            {2091u, "direct_lut_x_cruise"},
+                            {2092u, "direct_lut_y_cruise"},
+                            {2093u, "direct_lut_z_cruise"},
+                            {2094u, "direct_lut_x_triangular"},
+                            {2095u, "direct_lut_isolation"},
+                        };
+
+                        auto emitSkipped = [&](uint16_t firstId,
+                                               const char* gate) -> bool {
+                          char metrics[112];
+                          snprintf(metrics,
+                                   sizeof(metrics),
+                                   "gate=%s;to=1;ep=0;nm=0;co=0;pf=1;rf=0;ab=0;sf=0",
+                                   gate);
+                          for (const auto& test : kTests) {
+                            if (test.id >= firstId &&
+                                !runOne(test.id, test.name, false, metrics)) {
+                              return false;
+                            }
+                          }
+                          return true;
+                        };
+
+                        Stepper* stepperX = Stepper::stepperX();
+                        Stepper* stepperY = Stepper::stepperY();
+                        Stepper* stepperZ = Stepper::stepperZ();
+                        Stepper* stepperP = Stepper::stepperP();
+                        Stepper* stepperR = Stepper::stepperR();
+                        if (stepperX == nullptr || stepperY == nullptr ||
+                            stepperZ == nullptr || stepperP == nullptr ||
+                            Gantry::instance() == nullptr) {
+                          (void)emitSkipped(2091u, "motion_unavailable");
+                          return finishSelfTestNow();
+                        }
+
+                        struct ProfileRestoreGuard {
+                          Stepper* x;
+                          Stepper* y;
+                          Stepper* z;
+                          Stepper::AccelProfile xp;
+                          Stepper::AccelProfile yp;
+                          Stepper::AccelProfile zp;
+                          uint32_t xMax;
+                          uint32_t yMax;
+                          uint32_t zMax;
+                          float xAccel;
+                          float yAccel;
+                          float zAccel;
+                          ~ProfileRestoreGuard() {
+                            x->setAccelProfile(xp);
+                            y->setAccelProfile(yp);
+                            z->setAccelProfile(zp);
+                            x->setMaxSpeedHz(xMax);
+                            y->setMaxSpeedHz(yMax);
+                            z->setMaxSpeedHz(zMax);
+                            x->setAccelStepsPerSec2(xAccel);
+                            y->setAccelStepsPerSec2(yAccel);
+                            z->setAccelStepsPerSec2(zAccel);
+                          }
+                        } profileGuard{stepperX,
+                                       stepperY,
+                                       stepperZ,
+                                       stepperX->accelProfile(),
+                                       stepperY->accelProfile(),
+                                       stepperZ->accelProfile(),
+                                       stepperX->maxSpeedHz(),
+                                       stepperY->maxSpeedHz(),
+                                       stepperZ->maxSpeedHz(),
+                                       stepperX->accelStepsPerSec2(),
+                                       stepperY->accelStepsPerSec2(),
+                                       stepperZ->accelStepsPerSec2()};
+                        stepperX->setAccelProfile(Stepper::PROFILE_SCURVE_COSINE);
+                        stepperY->setAccelProfile(Stepper::PROFILE_SCURVE_COSINE);
+                        stepperZ->setAccelProfile(Stepper::PROFILE_SCURVE_COSINE);
+                        stepperX->setMaxSpeedHz(kRateHz);
+                        stepperY->setMaxSpeedHz(kRateHz);
+                        stepperZ->setMaxSpeedHz(kRateHz);
+                        stepperX->setAccelStepsPerSec2(140000.0f);
+                        stepperY->setAccelStepsPerSec2(140000.0f);
+                        stepperZ->setAccelStepsPerSec2(140000.0f);
+
+                        const int32_t pStart = stepperP->getPosition();
+                        const int32_t rStart =
+                            (stepperR != nullptr) ? stepperR->getPosition() : 0;
+
+                        sendProgressStage("direct_xyz_lut_envelope_clear");
+                        if (!runZClearanceHomePreflight("direct_lut_z_home",
+                                                        kHomeFastHz,
+                                                        kHomeSlowHz,
+                                                        kHomeBackoffSteps,
+                                                        kHomeTimeoutMs)) {
+                          (void)emitSkipped(2091u, "z_home");
+                          return finishSelfTestNow();
+                        }
+                        MotionQualificationMath::AxisHomeSample xHome{};
+                        MotionQualificationMath::AxisHomeSample yHome{};
+                        sendProgressStage("direct_lut_xy_home");
+                        if (!runXyHomeDiagnosticAttempt(xHome,
+                                                        yHome,
+                                                        kHomeFastHz,
+                                                        kHomeSlowHz,
+                                                        kHomeBackoffSteps,
+                                                        kHomeTimeoutMs)) {
+                          (void)emitSkipped(2091u, "xy_home");
+                          return finishSelfTestNow();
+                        }
+
+                        const bool preHomesLegacy =
+                            !stepperX->getLastDirectProfileSnapshot().selected &&
+                            !stepperY->getLastDirectProfileSnapshot().selected &&
+                            !stepperZ->getLastDirectProfileSnapshot().selected;
+
+                        struct DirectMoveResult {
+                          bool emitted = false;
+                          bool safeToContinue = false;
+                        };
+
+                        auto runDirectMove = [&](uint16_t testId,
+                                                 const char* name,
+                                                 Stepper* stepper,
+                                                 EventBits_t doneBit,
+                                                 uint8_t axis,
+                                                 int32_t target,
+                                                 bool instrumented) -> DirectMoveResult {
+                          DirectMoveResult result{};
+                          const int32_t start = stepper->getPosition();
+                          const int64_t deltaWide =
+                              static_cast<int64_t>(target) - start;
+                          const uint32_t distance = static_cast<uint32_t>(
+                              deltaWide < 0 ? -deltaWide : deltaWide);
+
+                          DirectStepperProfileReport::MoveObservation observation{};
+                          observation.axis = axis;
+                          observation.logicalDistance = distance;
+                          observation.effectiveRateHz = kRateHz;
+                          observation.expectedNativePulses =
+                              MotionUnitScale::toNativeStepCycles(distance);
+                          observation.instrumentationRequired = instrumented;
+
+                          Comm::resetStatusMetrics();
+                          comm->setStatusPaused(false);
+                          const bool completed = moveAxisToWithTimeout(
+                              stepper, doneBit, target, kRateHz, kMoveTimeoutMs);
+                          observation.statusPeriodMaxMs = Comm::getStatusPeriodMaxMs();
+                          observation.statusFrameCount =
+                              Comm::getStatusChunk0Count() + Comm::getStatusChunk1Count();
+                          (void)Watchdog_GetTaskLastSeenAgeMs(
+                              CRASH_TASK_STATUS,
+                              &observation.statusWatchdogAgeMaxMs);
+                          comm->setStatusPaused(true);
+
+                          observation.timedOut = !completed;
+                          observation.endpointReached =
+                              completed && stepper->getPosition() == target;
+                          observation.profile =
+                              stepper->getLastDirectProfileSnapshot();
+                          if (instrumented) {
+                            observation.instrumentation =
+                                stepper->getLastMoveInstrumentationSnapshot();
+                          }
+
+                          char metrics[208] = {0};
+                          const size_t metricsLength =
+                              DirectStepperProfileReport::buildMetrics(
+                                  metrics, sizeof(metrics), observation);
+                          const size_t metricsBudget =
+                              DiagnosticResultEmitter::kResultMetricsFrameBudget -
+                              std::min(std::strlen(name),
+                                       DiagnosticResultEmitter::kMaxResultNameBytes);
+                          const bool metricsFit = metricsLength != 0u &&
+                              metricsLength <= metricsBudget;
+                          const bool passed = metricsFit &&
+                              DirectStepperProfileReport::movePasses(observation);
+                          result.safeToContinue = completed &&
+                              observation.endpointReached &&
+                              !observation.profile.prepareFailed &&
+                              !observation.profile.runtimeFailed &&
+                              !observation.profile.aborted;
+                          result.emitted = runOne(
+                              testId,
+                              name,
+                              passed,
+                              metricsFit
+                                  ? metrics
+                                  : "gate=metrics_overflow;to=1;ep=0;nm=0;co=0;pf=1;rf=0;ab=0;sf=0");
+                          return result;
+                        };
+
+                        const int32_t xStart = stepperX->getPosition();
+                        const int32_t xTarget = xStart +
+                            static_cast<int32_t>(kCruiseDistance);
+                        if (xStart < 0 || xTarget > kSafeXMax) {
+                          (void)emitSkipped(2091u, "x_envelope");
+                          return finishSelfTestNow();
+                        }
+                        DirectMoveResult moveResult = runDirectMove(
+                            2091u,
+                            "direct_lut_x_cruise",
+                            stepperX,
+                            BIT_STEPPER1_DONE,
+                            static_cast<uint8_t>(Stepper::X_AXIS),
+                            xTarget,
+                            true);
+                        if (!moveResult.emitted) return finishSelfTestNow();
+                        if (!moveResult.safeToContinue) {
+                          (void)emitSkipped(2092u, "x_move");
+                          return finishSelfTestNow();
+                        }
+
+                        const int32_t yStart = stepperY->getPosition();
+                        const int32_t yTarget = yStart +
+                            static_cast<int32_t>(kCruiseDistance);
+                        if (yStart < 0 || yTarget > kSafeYMax) {
+                          (void)emitSkipped(2092u, "y_envelope");
+                          return finishSelfTestNow();
+                        }
+                        moveResult = runDirectMove(
+                            2092u,
+                            "direct_lut_y_cruise",
+                            stepperY,
+                            BIT_STEPPER2_DONE,
+                            static_cast<uint8_t>(Stepper::Y_AXIS),
+                            yTarget,
+                            true);
+                        if (!moveResult.emitted) return finishSelfTestNow();
+                        if (!moveResult.safeToContinue) {
+                          (void)emitSkipped(2093u, "y_move");
+                          return finishSelfTestNow();
+                        }
+
+                        const int32_t zStart = stepperZ->getPosition();
+                        const int32_t zTarget = zStart +
+                            static_cast<int32_t>(kCruiseDistance);
+                        if (zStart < 0 || zTarget > kSafeZMax) {
+                          (void)emitSkipped(2093u, "z_envelope");
+                          return finishSelfTestNow();
+                        }
+                        moveResult = runDirectMove(
+                            2093u,
+                            "direct_lut_z_cruise",
+                            stepperZ,
+                            BIT_STEPPER3_DONE,
+                            static_cast<uint8_t>(Stepper::Z_AXIS),
+                            zTarget,
+                            false);
+                        if (!moveResult.emitted) return finishSelfTestNow();
+                        if (!moveResult.safeToContinue) {
+                          (void)emitSkipped(2094u, "z_move");
+                          return finishSelfTestNow();
+                        }
+
+                        const int32_t triangularTarget = stepperX->getPosition() +
+                            static_cast<int32_t>(kTriangularDistance);
+                        if (triangularTarget > kSafeXMax) {
+                          (void)emitSkipped(2094u, "tri_envelope");
+                          return finishSelfTestNow();
+                        }
+                        moveResult = runDirectMove(
+                            2094u,
+                            "direct_lut_x_triangular",
+                            stepperX,
+                            BIT_STEPPER1_DONE,
+                            static_cast<uint8_t>(Stepper::X_AXIS),
+                            triangularTarget,
+                            true);
+                        if (!moveResult.emitted) return finishSelfTestNow();
+                        if (!moveResult.safeToContinue) {
+                          (void)emitSkipped(2095u, "tri_move");
+                          return finishSelfTestNow();
+                        }
+
+                        MotionQualificationMath::AxisHomeSample zTeardown{};
+                        const bool zHomeOk = runAxisHomeDiagnosticAttempt(
+                            stepperZ,
+                            BIT_HOME_Z_DONE,
+                            zTeardown,
+                            kHomeFastHz,
+                            kHomeSlowHz,
+                            kHomeBackoffSteps,
+                            kHomeTimeoutMs);
+                        MotionQualificationMath::AxisHomeSample xTeardown{};
+                        MotionQualificationMath::AxisHomeSample yTeardown{};
+                        const bool xyHomeOk = runXyHomeDiagnosticAttempt(
+                            xTeardown,
+                            yTeardown,
+                            kHomeFastHz,
+                            kHomeSlowHz,
+                            kHomeBackoffSteps,
+                            kHomeTimeoutMs);
+                        const bool postHomesLegacy =
+                            !stepperX->getLastDirectProfileSnapshot().selected &&
+                            !stepperY->getLastDirectProfileSnapshot().selected &&
+                            !stepperZ->getLastDirectProfileSnapshot().selected;
+                        const int32_t pDelta = stepperP->getPosition() - pStart;
+                        const int32_t rDelta = (stepperR != nullptr)
+                            ? (stepperR->getPosition() - rStart)
+                            : 0;
+                        constexpr TMC2208Configuration::Values driverConfig =
+                            TMC2208Configuration::buildValues();
+                        const bool isolationPass = preHomesLegacy &&
+                            postHomesLegacy && zHomeOk && xyHomeOk &&
+                            pDelta == 0 && rDelta == 0 &&
+                            LC_TMC2208_MRES == 3u &&
+                            driverConfig.doubleEdge &&
+                            !driverConfig.multistepFilter;
+                        char isolationMetrics[160];
+                        snprintf(isolationMetrics,
+                                 sizeof(isolationMetrics),
+                                 "pre=%u;post=%u;zh=%u;xyh=%u;pd=%ld;rd=%ld;mres=%u;de=%u;mf=%u;sf=0;to=0",
+                                 static_cast<unsigned>(preHomesLegacy ? 1u : 0u),
+                                 static_cast<unsigned>(postHomesLegacy ? 1u : 0u),
+                                 static_cast<unsigned>(zHomeOk ? 1u : 0u),
+                                 static_cast<unsigned>(xyHomeOk ? 1u : 0u),
+                                 static_cast<long>(pDelta),
+                                 static_cast<long>(rDelta),
+                                 static_cast<unsigned>(LC_TMC2208_MRES),
+                                 static_cast<unsigned>(driverConfig.doubleEdge ? 1u : 0u),
+                                 static_cast<unsigned>(driverConfig.multistepFilter ? 1u : 0u));
+                        (void)runOne(2095u,
+                                     "direct_lut_isolation",
+                                     isolationPass,
+                                     isolationMetrics);
+                        return finishSelfTestNow();
                       }
 
                       if (runMotionTimingSuite) {

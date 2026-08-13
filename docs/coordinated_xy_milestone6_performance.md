@@ -1275,7 +1275,52 @@ zero warnings or blocking issues. The normalized report is
 Checkpoint A is accepted. This authorizes only the separately committed direct
 X/Y/Z LUT checkpoint; it does not pre-accept that checkpoint's motion behavior.
 
+### Direct X/Y/Z normalized-LUT migration candidate
+
+Checkpoint B adds a pure `DirectStepperProfile` adapter around the qualified
+`NormalizedCosineProfile`. It preserves the independent Stepper engine's
+existing acceleration/cruise/deceleration toggle boundaries, including the
+strict deceleration boundary, while replacing per-interrupt cosine and float
+interpolation for ordinary X/Y/Z cosine moves with bounded fixed-point cursor
+updates. Preparation happens before motor enable. Invalid preparation or
+runtime cursor state fails the affected direct move closed.
+
+The scope intentionally excludes coordinated XY, all home moves while
+`_homeSequenceActive` is set, limit soft-stop reshaping, P/R motion, dynamic
+rate fallback, and the linear/min-jerk profile choices. Logical coordinates,
+position/status units, target rates, acceleration, MRES=3 conversion, GPIO,
+interrupt priorities, and wire framing do not change.
+
+Production selector `2096` emits `2091`-`2095` and is normalized by
+`direct_xyz_lut_v1`. It first homes Z and XY, then directly exercises a
+14,000-logical-unit cruise-capable move on X, Y, and Z and a 2,000-unit
+triangular X move at 40 kHz logical rate/140,000 logical units/s2. It requires
+exact native pulse and cursor coverage, zero X/Y pending/saturation evidence,
+bounded active ISR cost, live status/watchdog cadence, successful teardown
+homes that remain on the legacy profile path, unchanged P/R positions, and the
+production MRES=3/DEDGE/multistep-filter configuration. Watched
+SAFE/`2096`/SAFE HIL remains mandatory before Checkpoint B is accepted.
+
+Pre-HIL automated evidence is complete: 160 targeted Python qualification
+tests passed; the full firmware gate passed 425 host tests and 10,213,905
+checks; Debug and MRES3 diagnostic images linked with zero errors. The Debug
+candidate is 356,824 bytes with SHA-256
+`954B39FC4F0F01A0A3FFAB7E639EE48127FFC2034E1C946F732AB9B7E38ABC44`.
+The matching diagnostic image is 359,224 bytes with SHA-256
+`7D61C356EAC3A73EA369A2C1CAF5923D2F6A3184FC43C956BCC3466C5C5007B4`.
+Generated stack reports are identical across configurations:
+`Stepper::_stepTick()` is 128 bytes, `DirectStepperProfile::nextSample()` and
+`finish()` are 24 bytes each, and `prepare()` is 72 bytes. The linked
+disassembly contains the cursor call in the selected branch and retains
+`cosf()` only for the deliberately unchanged fallback profiles.
+
 ## Rollback
+
+Checkpoint B rollback is commit `9dc66f11` and its accepted 351,856-byte
+production artifact, SHA-256
+`7EB588C49258F215046BB77C5E5A5518D4BCAAB550F1AFA32CB62E45E2A1A2C6`.
+Revert only the direct-profile checkpoint and flash that artifact; this keeps
+the accepted production MRES=3/conditional-rearm checkpoint intact.
 
 Immediate rollback disables coordinated instrumentation or builds with
 `LC_COORDINATED_XY_NORMAL_ROUTE_ENABLE=0`. Full rollback restores commit

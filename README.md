@@ -2935,6 +2935,44 @@ unchanged reset/watchdog counters, and a warning-free normalized report. The
 single-axis X/Y/Z LUT migration is therefore authorized as a separate commit,
 artifact, rollback point, and watched HIL checkpoint.
 
+Checkpoint B now routes ordinary direct X/Y/Z moves using the cosine profile
+through the same fixed-point normalized LUT as coordinated XY. The boundary is
+deliberately narrow: direct homing and limit soft-stop moves, P/R motion,
+coordinated XY, and the linear/min-jerk profile choices retain their existing
+paths. App commands, opcodes, positions, targets, speeds, and acceleration stay
+in legacy logical units. Invalid cursor preparation fails before motor enable;
+an inconsistent runtime cursor stops the affected direct move without emitting
+another untrusted edge.
+
+Production selector `2096` provides the independent Checkpoint B HIL gate:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL \
+  --direct-xyz-lut-suite --timeout-ms 240000 \
+  --status-only-timeout-ms 120000 \
+  --out hil_reports/direct_xyz_lut.json
+python3 tools/run_qualification.py --manifest direct_xyz_lut_v1 \
+  --operator-prompts --fixture direct_xyz_lut_envelope_clear \
+  --machine-id LC-001 --raw-report hil_reports/direct_xyz_lut.json
+```
+
+The selector homes Z and XY, runs a 14,000-logical-unit cruise-capable move on
+X, Y, and Z plus a 2,000-unit triangular X move at the 40 kHz logical rate,
+then homes again. Results `2091`-`2094` require exact MRES=3 native pulse and
+LUT cursor coverage; `2095` requires both home sets to remain on the legacy
+path, no P/R displacement, and the production MRES=3/DEDGE/filter settings.
+This is a watched FULL motion selector and requires both switches released and
+the complete direct X/Y/Z envelope clear.
+
+The pre-HIL Checkpoint B production candidate is 356,824 bytes with SHA-256
+`954B39FC4F0F01A0A3FFAB7E639EE48127FFC2034E1C946F732AB9B7E38ABC44`;
+the matching diagnostic artifact is 359,224 bytes with SHA-256
+`7D61C356EAC3A73EA369A2C1CAF5923D2F6A3184FC43C956BCC3466C5C5007B4`.
+Targeted qualification tests pass 160/160 and the complete firmware gate passes
+425/425 host tests plus both linked builds. Generated stack-use evidence reports
+128 bytes for `Stepper::_stepTick()` and 24 bytes for the fixed-point sample
+helper, within the existing 1,024-byte interrupt-stack reservation.
+
 The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is
 selector `2076`/manifest `coordinated_xy_status_sync_v1`. Every B run requires
