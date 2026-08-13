@@ -123,6 +123,41 @@ at 180 MHz), retaining margin over accepted evidence without changing motion,
 GPIO, ARR, rearm, rate, or acceleration behavior. The watched sequence must
 restart after flashing the corrected artifact recorded above.
 
+## Corrected-artifact transient limit stop
+
+The corrected `9afc8a76` artifact was 325,296 bytes with SHA-256
+`4EEC9952F564947A5293CE6A1198DA4397A9E6D084A4E7266493F4403BE7AB4D`.
+Its pre-SAFE passed 30/30 at `boot=166`, `fault_ct=4`, and `wdg_ct=6`.
+Selector `2097` then stopped during the final reverse leg after completing
+9 full moves and part of the tenth: X emitted 51,656 of 53,416 expected native
+cycles, Y emitted 83,726 of 90,000, and TIM2 recorded 207,452 of 220,000
+callbacks. The partial X/Y counts retain the exact commanded diagonal ratio.
+Timing remained bounded (`pu=0`, `sl=671`, `ns=1151`, and `tm=2437`) and no
+reset report was observed. The operator reported normal sound and motion before
+the stop, with both physical limit switches released and no obstruction near
+either switch. Post-SAFE again passed 30/30 with the same retained counters.
+
+The production snapshot did not retain the terminal reason or raw/debounced
+limit counts, so this run cannot prove which input requested the stop. The
+existing firmware does, however, abort coordinated motion on the first raw X
+or Y limit sample before the configured 15 ms software debounce can run. The
+next production revision therefore treats this run as evidence for consistent
+continuous limit confirmation and explicit limit attribution, not as evidence
+for weakening any motion-timing gate.
+
+Retained evidence:
+
+- pre-SAFE `hil_reports/m7_closeout_20260813T214143Z_pre_safe.json`, SHA-256
+  `9BE761F4864855B5A52986D5B3055426C2FC067E5902C6E4E3B5EC826597DDC4`;
+- focused `hil_reports/m7_closeout_20260813T214143Z_2097.json`, SHA-256
+  `2910A9889BC20346D978C6154047BAB0F36D336589B01FF5AAADD20EA9417C64`;
+- post-SAFE `hil_reports/m7_closeout_20260813T214143Z_post2097_safe.json`,
+  SHA-256
+  `E1350482DED158871B433F8B61107BDA87305E0DEC14440537B14AF4A897F65F`;
+- normalized report `hil_reports/qualification/LC-001/20260813T214543Z/report.json`,
+  SHA-256
+  `71551B2CFBDBD8B7519216DBC2C651BABBEE0FC84B5DB368113AA955278AE790`.
+
 ## Watched HIL closeout
 
 Flash the exact closeout artifact once. SAFE-bracket every motion suite and
