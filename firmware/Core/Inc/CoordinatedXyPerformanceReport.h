@@ -3,6 +3,7 @@
 
 #include "CoordinatedXyExecutor.h"
 #include "CoordinatedXyIsrInstrumentation.h"
+#include "CoordinatedXyTimerSchedulePolicy.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -40,6 +41,7 @@ static constexpr uint32_t kMoveFailureWatchdogLate = 1u << 24;
 static constexpr uint32_t kMoveFailureExecutionMode = 1u << 25;
 static constexpr uint32_t kMoveFailurePulseTiming = 1u << 26;
 static constexpr uint32_t kMoveFailureDeadlineSlack = 1u << 27;
+static constexpr uint32_t kMoveFailureTimerRearm = 1u << 28;
 
 struct Limits {
   uint32_t activeMaxCycles = 2025u;
@@ -60,7 +62,12 @@ struct MoveObservation {
   uint32_t interruptsPerMasterStep = 2u;
   CoordinatedXyExecutor::ExecutionMode executionMode =
       CoordinatedXyExecutor::ExecutionMode::TwoEdge;
+  CoordinatedXyTimerSchedulePolicy::Mode timerScheduleMode =
+      CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning;
   uint32_t minimumPulseCoreCycles = 0u;
+  uint32_t timerRearmCount = 0u;
+  uint32_t timerRearmPendingCount = 0u;
+  uint32_t timerRearmDelayMaxCycles = 0u;
   uint32_t requestedXSteps = 0u;
   uint32_t requestedYSteps = 0u;
   uint32_t emittedXSteps = 0u;
@@ -108,7 +115,12 @@ struct Aggregate {
   uint32_t interruptsPerMasterStep = 0u;
   CoordinatedXyExecutor::ExecutionMode executionMode =
       CoordinatedXyExecutor::ExecutionMode::TwoEdge;
+  CoordinatedXyTimerSchedulePolicy::Mode timerScheduleMode =
+      CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning;
   uint32_t minimumPulseCoreCycles = 0u;
+  uint32_t timerRearmCount = 0u;
+  uint32_t timerRearmPendingCount = 0u;
+  uint32_t timerRearmDelayMaxCycles = 0u;
   uint32_t phaseCallbacks[static_cast<uint8_t>(CoordinatedXyIsrInstrumentation::Phase::Count)] = {};
   uint32_t phaseCycleSums[static_cast<uint8_t>(CoordinatedXyIsrInstrumentation::Phase::Count)] = {};
   uint32_t phaseMaxCycles[static_cast<uint8_t>(CoordinatedXyIsrInstrumentation::Phase::Count)] = {};

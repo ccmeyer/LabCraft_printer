@@ -141,6 +141,28 @@ TEST(CoordinatedXyPerformanceReport, AcceptsCompleteStepMoveWithOneInterrupt) {
           observation, CoordinatedXyPerformanceReport::Limits{}));
 }
 
+TEST(CoordinatedXyPerformanceReport, RearmModeRequiresEveryNonterminalCallback) {
+  auto observation =
+      acceptedMove(500u, 1500u, 1500u, 20000u, 2249u, 11245u);
+  observation.timerScheduleMode =
+      CoordinatedXyTimerSchedulePolicy::Mode::RearmFromActualEdge;
+  observation.timerRearmCount = observation.timer2Callbacks - 1u;
+  observation.timerRearmDelayMaxCycles = 24u;
+  CHECK_TRUE(CoordinatedXyPerformanceReport::movePasses(
+      observation, CoordinatedXyPerformanceReport::Limits{}));
+
+  --observation.timerRearmCount;
+  CHECK_TRUE((CoordinatedXyPerformanceReport::moveFailureMask(
+                  observation, CoordinatedXyPerformanceReport::Limits{}) &
+              CoordinatedXyPerformanceReport::kMoveFailureTimerRearm) != 0u);
+
+  ++observation.timerRearmCount;
+  observation.timerRearmPendingCount = 1u;
+  CHECK_TRUE((CoordinatedXyPerformanceReport::moveFailureMask(
+                  observation, CoordinatedXyPerformanceReport::Limits{}) &
+              CoordinatedXyPerformanceReport::kMoveFailureTimerRearm) != 0u);
+}
+
 TEST(CoordinatedXyPerformanceReport, CompleteStepMoveFailsClosedOnPulseOrDeadline) {
   auto observation = acceptedCompleteStepMove(
       20000u, 5000u, 20000u, 40000u, 1124u, 5620u);

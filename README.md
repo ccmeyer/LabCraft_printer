@@ -2837,13 +2837,32 @@ slack, and the intended TMC configuration (`MRES=3`, `DEDGE=1`,
 
 The MRES=3 image is diagnostic-only. Ordinary queued commands are rejected
 with all motors disabled, ordinary FULL requests fail before motion, and only
-SAFE plus selector `2085` are supported. Boot/default builds remain MRES=2;
+SAFE plus selectors `2085` and `2084` are supported. Boot/default builds remain MRES=2;
 MRES=3 is not a production migration until the watched HIL evidence is
 reviewed. Roll back by flashing `firmware/artifacts/LabCraft_firmware.bin`.
-The matching diagnostic artifact is 342,128 bytes with SHA-256
-`D65899BFDF804EB7C3F6D5C6914F8BEB08E5E7724450C2F3AA63DBBD5C5CBCAC`;
-the production artifact is 341,872 bytes with SHA-256
-`BEC990A915EB527BE331BD1D1B7B1153BFC497BA4F7EE2D11BCF9A434DE3B814`.
+The matching rearm-capable diagnostic artifact is 344,128 bytes with SHA-256
+`132EC3AF0F900D3E4E22616C2D7B311765D085144EBF2E9AE42A7E004B4F0758`;
+the production artifact is 343,872 bytes with SHA-256
+`2A90E15E2561684EB4C7B8D135D6CB8428F8F817FA29034AF593849B5D2C87A9`.
+
+Selector `2084` runs the same scaled MRES=3 row but temporarily changes TIM2
+from free-running scheduling to rearm-from-actual-edge scheduling:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-mres3-rearm-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_mres3_rearm.json
+python3 tools/run_qualification.py --manifest coordinated_xy_mres3_rearm_v1 --operator-prompts --fixture coordinated_xy_mres3_rearm_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_mres3_rearm.json
+```
+
+For each nonterminal rise or fall, it installs the following ARR, emits the
+STEP edge, stops TIM2, records any already-pending update, resets `CNT`, clears
+the peripheral and NVIC pending state, and restarts the timer. This stretches a
+late interval instead of compressing the next one. Result `2082` adds `rm`
+(mode), `rc` (rearm count), `rp` (pending at rearm), and `rd` (maximum
+edge-to-restart core cycles). Acceptance requires `rm=1`, `rc=219990`, `rp=0`,
+complete deadline coverage, no missed deadline, and at least 450 timer ticks
+of post-handler slack. Entry lateness (`cm`, `lc`, and `dm`) remains visible but
+is diagnostic rather than a failure: rearming is intended to tolerate it.
+Selector `2085`, boot, and the production image remain free-running.
 
 The approved comparison is three SAFE-bracketed pairs in order `A-B`, `B-A`,
 `A-B`, where A is selector `2077`/manifest `coordinated_xy_40khz_v1` and B is

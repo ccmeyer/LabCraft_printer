@@ -86,7 +86,7 @@ TEST_CATALOG: dict[int, TestCatalogEntry] = {
     2074: TestCatalogEntry(2074, "Coordinated XY single-IRQ pulse margin", "One-interrupt-per-step mode, STEP-high width, complete callback coverage, and remaining TIM2 deadline slack."),
     2080: TestCatalogEntry(2080, "Coordinated XY MRES3 20 kHz motion", "Diagnostic MRES=3 ten-move geometry row with half-scaled coordinates and exact physical-distance-equivalent step totals."),
     2081: TestCatalogEntry(2081, "Coordinated XY MRES3 20 kHz IRQ path", "Full two-edge TIM2 IRQ coverage and pending-update evidence for the diagnostic MRES=3 geometry row."),
-    2082: TestCatalogEntry(2082, "Coordinated XY MRES3 20 kHz deadline margin", "TIM2 entry-lateness and rearm-deadline margin evidence at the diagnostic 20 kHz step-event rate."),
+    2082: TestCatalogEntry(2082, "Coordinated XY MRES3 20 kHz deadline margin", "TIM2 entry-lateness, deadline margin, and diagnostic rearm-from-actual-edge coverage at the 20 kHz step-event rate."),
     2083: TestCatalogEntry(2083, "TMC2208 MRES3 configuration", "Readback-independent evidence that the diagnostic image initialized the shared TMC2208 UART configuration for MRES=3, DEDGE enabled, and multistep filtering disabled."),
     2201: TestCatalogEntry(2201, "Pressure hold leak", "Closed-loop pressure decay and correction effort."),
     2202: TestCatalogEntry(2202, "Pressure target cycling", "Repeated low/high target settling and pressure span."),

@@ -344,12 +344,23 @@ rise/fall callbacks, and 219,990 nonterminal deadline samples.
 
 The diagnostic image is intentionally incompatible with ordinary MRES=2 host
 coordinates. It therefore rejects ordinary queued commands with motors
-disabled and accepts only SAFE or the scaled selector `2085` FULL path. The
+disabled and accepts only SAFE or the scaled selectors `2085` and `2084` FULL paths. The
 watched gate requires results `2080`-`2083`, zero pending and late-entry
 observations, no deadline misses, at least 450 timer ticks of post-handler
 margin, no P/R displacement, clean bounded homes, status/watchdog cadence, and
 no reset evidence. The production `Debug` image remains MRES=2, and no
 production migration is authorized until this diagnostic evidence is reviewed.
+
+Selector `2084` is the isolated rearm-from-actual-edge experiment. It preserves
+the selector-`2085` MRES=3 geometry and two-edge executor, but after each
+nonterminal physical STEP edge it stops TIM2, records any pending update,
+resets CNT, clears peripheral/NVIC pending state, and restarts the timer. Late
+service therefore lengthens the current schedule instead of shortening the
+following interval. The mode is scoped to the request and always restores the
+free-running default. The diagnostic gate requires `rc=219990`, `rp=0`, full
+deadline coverage, no deadline miss, and at least 450 timer ticks of remaining
+margin; the historical entry-lateness count remains reported rather than being
+used as a rejection gate. No production migration is authorized by this test.
 
 ## Milestone 0: Baseline And Decisions
 

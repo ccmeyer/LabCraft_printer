@@ -96,6 +96,21 @@ uint32_t moveFailureMask(const MoveObservation& observation,
   if (completeStepMode != (observation.interruptsPerMasterStep == 1u)) {
     failures |= kMoveFailureExecutionMode;
   }
+  const bool rearmMode = observation.timerScheduleMode ==
+      CoordinatedXyTimerSchedulePolicy::Mode::RearmFromActualEdge;
+  const uint32_t expectedRearms = observation.timer2Callbacks == 0u
+      ? 0u
+      : observation.timer2Callbacks - 1u;
+  if ((rearmMode &&
+       (completeStepMode || observation.timerRearmCount != expectedRearms ||
+        observation.timerRearmPendingCount != 0u ||
+        observation.timerRearmDelayMaxCycles == 0u)) ||
+      (!rearmMode &&
+       (observation.timerRearmCount != 0u ||
+        observation.timerRearmPendingCount != 0u ||
+        observation.timerRearmDelayMaxCycles != 0u))) {
+    failures |= kMoveFailureTimerRearm;
+  }
   if (observation.arrMin != observation.expectedTargetArr ||
       observation.arrMax != observation.expectedStartArr) {
     failures |= kMoveFailureArrRange;
@@ -178,12 +193,25 @@ void addMove(Aggregate& aggregate,
       (aggregate.interruptsPerMasterStep ==
            observation.interruptsPerMasterStep &&
        aggregate.executionMode == observation.executionMode &&
+       aggregate.timerScheduleMode == observation.timerScheduleMode &&
        aggregate.minimumPulseCoreCycles ==
            observation.minimumPulseCoreCycles);
   if (firstMove) {
     aggregate.interruptsPerMasterStep = observation.interruptsPerMasterStep;
     aggregate.executionMode = observation.executionMode;
+    aggregate.timerScheduleMode = observation.timerScheduleMode;
     aggregate.minimumPulseCoreCycles = observation.minimumPulseCoreCycles;
+  }
+  addSaturating(aggregate.timerRearmCount,
+                observation.timerRearmCount,
+                aggregate.saturationFlags);
+  addSaturating(aggregate.timerRearmPendingCount,
+                observation.timerRearmPendingCount,
+                aggregate.saturationFlags);
+  if (observation.timerRearmDelayMaxCycles >
+      aggregate.timerRearmDelayMaxCycles) {
+    aggregate.timerRearmDelayMaxCycles =
+        observation.timerRearmDelayMaxCycles;
   }
   addSaturating(aggregate.moveCount, 1u, aggregate.saturationFlags);
   addSaturating(aggregate.expectedXSteps,
@@ -412,6 +440,19 @@ bool aggregatePasses(const Aggregate& aggregate,
       aggregate.timer2Callbacks ==
           (expectedMasterSteps * aggregate.interruptsPerMasterStep) &&
       aggregate.timer7Callbacks == 0u &&
+      ((aggregate.timerScheduleMode ==
+            CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning &&
+        aggregate.timerRearmCount == 0u &&
+        aggregate.timerRearmPendingCount == 0u &&
+        aggregate.timerRearmDelayMaxCycles == 0u) ||
+       (aggregate.timerScheduleMode ==
+            CoordinatedXyTimerSchedulePolicy::Mode::RearmFromActualEdge &&
+        aggregate.interruptsPerMasterStep == 2u &&
+        aggregate.timer2Callbacks >= aggregate.moveCount &&
+        aggregate.timerRearmCount ==
+            (aggregate.timer2Callbacks - aggregate.moveCount) &&
+        aggregate.timerRearmPendingCount == 0u &&
+        aggregate.timerRearmDelayMaxCycles > 0u)) &&
       aggregate.pendingObservations == 0u &&
       aggregate.maxPendingStreak == 0u &&
       aggregate.saturationFlags == 0u && aggregate.timeoutCount == 0u &&

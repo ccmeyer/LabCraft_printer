@@ -116,6 +116,30 @@ private:
     bool _activated = false;
 };
 
+class ScopedCoordinatedXyTimerScheduleMode {
+public:
+    ScopedCoordinatedXyTimerScheduleMode(
+        Gantry* gantry,
+        CoordinatedXyTimerSchedulePolicy::Mode mode)
+        : _gantry(gantry) {
+        _activated = _gantry != nullptr &&
+            _gantry->setCoordinatedTimerScheduleModeForDiagnostics(mode);
+    }
+
+    ~ScopedCoordinatedXyTimerScheduleMode() {
+        if (_gantry != nullptr) {
+            (void)_gantry->setCoordinatedTimerScheduleModeForDiagnostics(
+                CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning);
+        }
+    }
+
+    bool activated() const { return _activated; }
+
+private:
+    Gantry* _gantry = nullptr;
+    bool _activated = false;
+};
+
 class ScopedSelfTestEmissionPriority {
 public:
     explicit ScopedSelfTestEmissionPriority(SelfTestResultSchedulingMode mode)
@@ -337,8 +361,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
         (selectedDiagnosticId == 2076u);
     const bool runCoordinatedXySingleIrqSuite =
         (selectedDiagnosticId == 2075u);
-    const bool runCoordinatedXyMres3Suite =
+    const bool runCoordinatedXyMres3BaselineSuite =
         (selectedDiagnosticId == 2085u);
+    const bool runCoordinatedXyMres3RearmSuite =
+        (selectedDiagnosticId == 2084u);
+    const bool runCoordinatedXyMres3Suite =
+        runCoordinatedXyMres3BaselineSuite ||
+        runCoordinatedXyMres3RearmSuite;
     const bool runCoordinatedXy40KhzSuite =
         (selectedDiagnosticId == 2077u) || runCoordinatedXyStatusSyncSuite ||
         runCoordinatedXySingleIrqSuite;
@@ -4307,6 +4336,15 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 CoordinatedXyExecutor::ExecutionMode::TwoEdge;
                         ScopedCoordinatedXyExecutionMode executionModeGuard(
                             gantry, requestedExecutionMode);
+                        const CoordinatedXyTimerSchedulePolicy::Mode
+                            requestedTimerScheduleMode =
+                                runCoordinatedXyMres3RearmSuite
+                                    ? CoordinatedXyTimerSchedulePolicy::Mode::
+                                          RearmFromActualEdge
+                                    : CoordinatedXyTimerSchedulePolicy::Mode::
+                                          FreeRunning;
+                        ScopedCoordinatedXyTimerScheduleMode timerScheduleGuard(
+                            gantry, requestedTimerScheduleMode);
 
                         const uint32_t savedXMaxRateHz =
                             stepperX != nullptr ? stepperX->maxSpeedHz() : 0u;
@@ -4407,7 +4445,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 2082u,
                                 "coord_xy_mres3_entry_margin",
                                 false,
-                                "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;ds=0;di=0;md=0;sl=0;sf=0;to=1");
+                                runCoordinatedXyMres3RearmSuite
+                                    ? "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;ds=0;di=0;md=0;sl=0;rm=1;rc=0;rp=0;rd=0;sf=0;to=1"
+                                    : "i2=0;s=0;mi=0;cm=0;ca=0;pm=0;lc=0;dm=0;ds=0;di=0;md=0;sl=0;rm=0;rc=0;rp=0;rd=0;sf=0;to=1");
                             (void)emitMres3Configuration();
                             return;
                           }
@@ -4480,6 +4520,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           failRemaining(2060u, "executor_mode_unavailable");
                           return finishSelfTestNow();
                         }
+                        if (!timerScheduleGuard.activated()) {
+                          failRemaining(2060u, "timer_schedule_unavailable");
+                          return finishSelfTestNow();
+                        }
 
                         if (runCoordinatedXySingleIrqSuite) {
                           failRemaining(2060u, "single_irq_superseded");
@@ -4514,6 +4558,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             ? "coordinated_xy_camera_transition_envelope_clear"
                             : runCoordinatedXySingleIrqSuite
                                 ? "coordinated_xy_single_irq_envelope_clear"
+                            : runCoordinatedXyMres3RearmSuite
+                                ? "coordinated_xy_mres3_rearm_envelope_clear"
                             : runCoordinatedXyMres3Suite
                                 ? "coordinated_xy_mres3_20khz_envelope_clear"
                             : runCoordinatedXy40KhzSuite
@@ -4770,6 +4816,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           observation.expectedRateHz = expectedRateHz;
                           observation.executionMode =
                               result.snapshot.executionMode;
+                          observation.timerScheduleMode =
+                              result.snapshot.timerScheduleMode;
                           observation.interruptsPerMasterStep =
                               result.snapshot.executionMode ==
                                       CoordinatedXyExecutor::ExecutionMode::CompleteStep
@@ -4777,6 +4825,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                   : 2u;
                           observation.minimumPulseCoreCycles =
                               result.snapshot.minimumPulseCoreCycles;
+                          observation.timerRearmCount =
+                              result.snapshot.timerRearmCount;
+                          observation.timerRearmPendingCount =
+                              result.snapshot.timerRearmPendingCount;
+                          observation.timerRearmDelayMaxCycles =
+                              result.snapshot.timerRearmDelayMaxCycles;
                           observation.expectedTargetArr =
                               targetArrForRate(expectedRateHz);
                           observation.expectedStartArr =
@@ -5453,7 +5507,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 sizeof(metrics),
                                 "i2=%lu;s=%lu;mi=%lu;cm=%lu;ca=%lu;pm=%lu;"
                                 "lc=%lu;dm=%lu;ds=%lu;di=%lu;md=%lu;sl=%lu;"
-                                "sm=%u;lf=%lu;sf=%lu;to=%lu;fv=%u;tr=%u;"
+                                "rm=%u;rc=%lu;rp=%lu;rd=%lu;sm=%u;lf=%lu;"
+                                "sf=%lu;to=%lu;fv=%u;tr=%u;"
                                 "la=%lu;ra=%lu",
                                 (unsigned long)aggregate.timer2Callbacks,
                                 (unsigned long)aggregate.entryTimerSamples,
@@ -5467,6 +5522,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 (unsigned long)aggregate.deadlineMissing,
                                 (unsigned long)aggregate.deadlineMisses,
                                 (unsigned long)aggregate.deadlineSlackMinTicks,
+                                static_cast<unsigned>(
+                                    aggregate.timerScheduleMode),
+                                (unsigned long)aggregate.timerRearmCount,
+                                (unsigned long)aggregate.timerRearmPendingCount,
+                                (unsigned long)aggregate.timerRearmDelayMaxCycles,
                                 statusSyncMode,
                                 (unsigned long)lockFailures,
                                 (unsigned long)aggregate.saturationFlags,
@@ -5503,6 +5563,22 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                     firstMoveFailure.limitAbortRequestCount,
                                 (unsigned long)firstMoveFailure.rawLimitAbortCount);
                           }
+                          const bool rearmSchedule =
+                              aggregate.timerScheduleMode ==
+                                  CoordinatedXyTimerSchedulePolicy::Mode::
+                                      RearmFromActualEdge;
+                          const bool scheduleEvidenceComplete = rearmSchedule
+                              ? (aggregate.interruptsPerMasterStep == 2u &&
+                                 aggregate.timer2Callbacks >=
+                                     aggregate.moveCount &&
+                                 aggregate.timerRearmCount ==
+                                     (aggregate.timer2Callbacks -
+                                      aggregate.moveCount) &&
+                                 aggregate.timerRearmPendingCount == 0u &&
+                                 aggregate.timerRearmDelayMaxCycles > 0u)
+                              : (aggregate.timerRearmCount == 0u &&
+                                 aggregate.timerRearmPendingCount == 0u &&
+                                 aggregate.timerRearmDelayMaxCycles == 0u);
                           const bool evidenceComplete =
                               aggregate.timer2Callbacks > 0u &&
                               aggregate.entryTimerSamples ==
@@ -5512,13 +5588,15 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               (!requireDeadlineMargin ||
                                (aggregate.pendingObservations == 0u &&
                                 aggregate.maxPendingStreak == 0u &&
-                                aggregate.lateEntryCount == 0u &&
+                                (rearmSchedule ||
+                                 aggregate.lateEntryCount == 0u) &&
                                 aggregate.deadlineSamples ==
                                     (aggregate.timer2Callbacks -
                                      aggregate.moveCount) &&
                                 aggregate.deadlineMissing == 0u &&
                                 aggregate.deadlineMisses == 0u &&
                                 aggregate.deadlineSlackMinTicks >= 450u &&
+                                scheduleEvidenceComplete &&
                                 aggregate.exactAndSafe &&
                                 !firstMoveFailure.valid)) &&
                               aggregate.saturationFlags == 0u &&

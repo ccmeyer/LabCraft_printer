@@ -811,6 +811,21 @@ The MRES=3 diagnostic image is 342,128 bytes with SHA-256
 Both link with zero errors and the existing three warnings; host firmware
 validation passes 391/391 tests with 10,213,682 checks.
 
+The next diagnostic image adds selector `2084` without changing selector
+`2085` or the boot/production default. `2084` runs the identical MRES=3 row but
+rebases TIM2 after every actual nonterminal STEP edge, so late service stretches
+the schedule instead of causing a shortened catch-up interval. It records the
+mode (`rm`), complete rearm count (`rc`), pending-at-rearm count (`rp`), and
+maximum edge-to-restart delay (`rd`). Any missing rearm, pending collision,
+deadline miss, incomplete evidence, or margin below 450 timer ticks fails
+closed. Entry `cm/lc/dm` remains visible but is not a failure gate for this
+robustness experiment. The free-running default is restored on every exit.
+The rearm-capable production artifact is 343,872 bytes with SHA-256
+`2A90E15E2561684EB4C7B8D135D6CB8428F8F817FA29034AF593849B5D2C87A9`;
+the MRES=3 diagnostic artifact is 344,128 bytes with SHA-256
+`132EC3AF0F900D3E4E22616C2D7B311765D085144EBF2E9AE42A7E004B4F0758`.
+Firmware host validation passes 394/394 tests with 10,213,693 checks.
+
 The first watched selector `2085` attempt on implementation commit `4c16a50c`
 was bracketed by 30/30 SAFE passes and failed closed before the ten-move row.
 Z, X, and Y home completion bits all arrived, but the diagnostic expected a

@@ -155,6 +155,8 @@ Gantry::Gantry() {};
 void Gantry::begin() {
   _instance = this;
   _coordinatedExecutionMode = CoordinatedXyExecutor::ExecutionMode::TwoEdge;
+  _coordinatedTimerScheduleMode =
+      CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning;
 }
 
 bool Gantry::setCoordinatedExecutionModeForDiagnostics(
@@ -184,6 +186,32 @@ bool Gantry::setCoordinatedExecutionModeForDiagnostics(
 CoordinatedXyExecutor::ExecutionMode Gantry::coordinatedExecutionMode() const {
   taskENTER_CRITICAL();
   const CoordinatedXyExecutor::ExecutionMode mode = _coordinatedExecutionMode;
+  taskEXIT_CRITICAL();
+  return mode;
+}
+
+bool Gantry::setCoordinatedTimerScheduleModeForDiagnostics(
+    CoordinatedXyTimerSchedulePolicy::Mode mode) {
+  if (!CoordinatedXyTimerSchedulePolicy::isValid(mode)) return false;
+  taskENTER_CRITICAL();
+  Stepper* sx = Stepper::stepperX();
+  Stepper* sy = Stepper::stepperY();
+  const bool available = !_coordinatedTimerOwned &&
+      !CoordinatedXyExecutor::isActive(_coordinatedCursor) &&
+      (sx == nullptr || !sx->_coordinatedReserved) &&
+      (sy == nullptr || !sy->_coordinatedReserved);
+  if (available) {
+    _coordinatedTimerScheduleMode = mode;
+  }
+  taskEXIT_CRITICAL();
+  return available;
+}
+
+CoordinatedXyTimerSchedulePolicy::Mode
+Gantry::coordinatedTimerScheduleMode() const {
+  taskENTER_CRITICAL();
+  const CoordinatedXyTimerSchedulePolicy::Mode mode =
+      _coordinatedTimerScheduleMode;
   taskEXIT_CRITICAL();
   return mode;
 }
@@ -364,6 +392,12 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
 
   const CoordinatedXyExecutor::ExecutionMode executionMode =
       coordinatedExecutionMode();
+  if (_coordinatedTimerScheduleMode ==
+          CoordinatedXyTimerSchedulePolicy::Mode::RearmFromActualEdge &&
+      executionMode != CoordinatedXyExecutor::ExecutionMode::TwoEdge) {
+    _coordinatedStartStatus = CoordinatedStartStatus::HardwareMismatch;
+    return _coordinatedStartStatus;
+  }
   uint32_t completeStepTargetArr = 0u;
   uint32_t completeStepStartArr = 0u;
   uint32_t pulseHighCycles = 0u;
@@ -515,6 +549,9 @@ void Gantry::_resetCoordinatedInstrumentation(uint32_t firstArr) {
 #endif
   _coordinatedTim7Interrupts = 0u;
   _coordinatedPendingUpdateCount = 0u;
+  _coordinatedTimerRearmCount = 0u;
+  _coordinatedTimerRearmPendingCount = 0u;
+  _coordinatedTimerRearmDelayMaxCycles = 0u;
   _coordinatedMaxIsrCycles = 0u;
   _coordinatedLimitAbortRequestCount = 0u;
   _coordinatedRawLimitAbortCount = 0u;
@@ -701,6 +738,9 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
       CoordinatedXyExecutor::TickStatus::InvalidState;
   const bool completeStepMode = _coordinatedCursor.executionMode ==
       CoordinatedXyExecutor::ExecutionMode::CompleteStep;
+  const bool rearmFromActualEdge = !completeStepMode &&
+      _coordinatedTimerScheduleMode ==
+          CoordinatedXyTimerSchedulePolicy::Mode::RearmFromActualEdge;
   if (completeStepMode) {
     CoordinatedXyExecutor::TickResult prepared{};
     status = CoordinatedXyExecutor::prepareCompleteStep(
@@ -748,6 +788,16 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
   const bool stepY =
       (tickMask & static_cast<uint8_t>(CoordinatedXyPlanner::StepMask::Y)) != 0u;
 
+  // In rearm mode, install the following interval before the physical edge so
+  // the counter can be restarted immediately after that edge. FreeRunning
+  // retains the established edge-then-ARR ordering.
+  if (rearmFromActualEdge && tick.updateArr) {
+    _observeCoordinatedArr(tick.nextArr);
+    _coordinatedProgrammedArr = tick.nextArr;
+    __HAL_TIM_SET_AUTORELOAD(_coordinatedMasterTimer, tick.nextArr);
+  }
+
+  bool physicalEdgeEmitted = false;
   if (!completeStepMode &&
       status == CoordinatedXyExecutor::TickStatus::Raised) {
     if (stepX) {
@@ -756,18 +806,20 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
     if (stepY) {
       _coordinatedY->_writeCoordinatedStep(true);
     }
+    physicalEdgeEmitted = stepX || stepY;
   } else if (tick.accountCompletePulse) {
     if (stepX) {
       if (!completeStepMode) _coordinatedX->_writeCoordinatedStep(false);
-      _coordinatedX->_accountCoordinatedPulse();
     }
     if (stepY) {
       if (!completeStepMode) _coordinatedY->_writeCoordinatedStep(false);
-      _coordinatedY->_accountCoordinatedPulse();
     }
+    physicalEdgeEmitted = stepX || stepY;
   }
+  const uint32_t emittedEdgeCycle =
+      (rearmFromActualEdge && physicalEdgeEmitted) ? gantryCycleNow() : 0u;
 
-  if (tick.updateArr) {
+  if (!rearmFromActualEdge && tick.updateArr) {
     _observeCoordinatedArr(tick.nextArr);
     uint32_t nextProgrammedArr = tick.nextArr;
     const bool arrValid = !completeStepMode ||
@@ -789,6 +841,46 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
   bool updatePending = false;
   const bool terminal = tick.stopTimer &&
       status != CoordinatedXyExecutor::TickStatus::Paused;
+  const bool shouldRearm = CoordinatedXyTimerSchedulePolicy::shouldRearm(
+      _coordinatedTimerScheduleMode, physicalEdgeEmitted, tick.stopTimer) &&
+      !completeStepMode;
+  if (shouldRearm) {
+    // Stop the counter while rebasing it so an update cannot race the UIF
+    // observation/clear sequence. The next interval begins when CEN is set,
+    // a bounded number of core cycles after the emitted STEP edge.
+    CLEAR_BIT(_coordinatedMasterTimer->Instance->CR1, TIM_CR1_CEN);
+    if (__HAL_TIM_GET_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE) != RESET) {
+      if (_coordinatedPendingUpdateCount !=
+          std::numeric_limits<uint32_t>::max()) {
+        ++_coordinatedPendingUpdateCount;
+      }
+      if (_coordinatedTimerRearmPendingCount !=
+          std::numeric_limits<uint32_t>::max()) {
+        ++_coordinatedTimerRearmPendingCount;
+      }
+      updatePending = true;
+    }
+    __HAL_TIM_SET_COUNTER(_coordinatedMasterTimer, 0u);
+    __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
+    NVIC_ClearPendingIRQ(TIM2_IRQn);
+    SET_BIT(_coordinatedMasterTimer->Instance->CR1, TIM_CR1_CEN);
+    if (_coordinatedTimerRearmCount != std::numeric_limits<uint32_t>::max()) {
+      ++_coordinatedTimerRearmCount;
+    }
+    const uint32_t rearmDelayCycles = gantryCycleNow() - emittedEdgeCycle;
+    if (rearmDelayCycles > _coordinatedTimerRearmDelayMaxCycles) {
+      _coordinatedTimerRearmDelayMaxCycles = rearmDelayCycles;
+    }
+  }
+
+  // Position accounting follows the actual falling edge and, in diagnostic
+  // rearm mode, follows the timer restart so it cannot shorten the next
+  // physical edge interval.
+  if (tick.accountCompletePulse) {
+    if (stepX) _coordinatedX->_accountCoordinatedPulse();
+    if (stepY) _coordinatedY->_accountCoordinatedPulse();
+  }
+
   if (tick.stopTimer) {
     if (status == CoordinatedXyExecutor::TickStatus::Paused) {
       HAL_TIM_Base_Stop_IT(_coordinatedMasterTimer);
@@ -797,7 +889,9 @@ bool Gantry::_handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim) {
       const bool aborted = status != CoordinatedXyExecutor::TickStatus::Completed;
       _finishCoordinatedFromIsr(aborted, &woken, true);
     }
-  } else if (__HAL_TIM_GET_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE) != RESET) {
+  } else if (!shouldRearm &&
+             __HAL_TIM_GET_FLAG(
+                 _coordinatedMasterTimer, TIM_FLAG_UPDATE) != RESET) {
     ++_coordinatedPendingUpdateCount;
     updatePending = true;
   }
@@ -1209,6 +1303,7 @@ CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
   snapshot.state = _coordinatedCursor.state;
   snapshot.terminalReason = _coordinatedCursor.terminalReason;
   snapshot.executionMode = _coordinatedCursor.executionMode;
+  snapshot.timerScheduleMode = _coordinatedTimerScheduleMode;
   snapshot.requestedXSteps = _coordinatedPlan.xSteps;
   snapshot.requestedYSteps = _coordinatedPlan.ySteps;
   snapshot.emittedXSteps = _coordinatedCursor.xEmittedSteps;
@@ -1221,6 +1316,9 @@ CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
   snapshot.arrMin = _coordinatedArrMin;
   snapshot.arrMax = _coordinatedArrMax;
   snapshot.pendingUpdateCount = _coordinatedPendingUpdateCount;
+  snapshot.timerRearmCount = _coordinatedTimerRearmCount;
+  snapshot.timerRearmPendingCount = _coordinatedTimerRearmPendingCount;
+  snapshot.timerRearmDelayMaxCycles = _coordinatedTimerRearmDelayMaxCycles;
   snapshot.maxIsrCycles = _coordinatedMaxIsrCycles;
   snapshot.selectedMasterRateHz = _coordinatedPlan.masterRateHz;
   snapshot.selectedMasterAccelerationStepsPerSec2 =

@@ -35,6 +35,7 @@ add_executable(fw_tests
     tests/test_normalized_cosine_profile.cpp
     tests/test_coordinated_xy_planner.cpp
     tests/test_coordinated_xy_executor.cpp
+    tests/test_coordinated_xy_timer_schedule_policy.cpp
     tests/test_coordinated_xy_isr_instrumentation.cpp
     tests/test_coordinated_xy_performance_report.cpp
     tests/test_stepper_isr_instrumentation.cpp

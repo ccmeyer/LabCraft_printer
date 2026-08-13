@@ -413,6 +413,27 @@ def test_load_coordinated_xy_mres3_manifest_is_diagnostic_only_and_strict():
     assert driver["tf"]["equals"] == 0
 
 
+def test_load_coordinated_xy_mres3_rearm_manifest_is_diagnostic_only():
+    manifest = load_manifest("coordinated_xy_mres3_rearm_v1")
+
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2080, 2081, 2082, 2083)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--coordinated-xy-mres3-rearm-suite",)
+    assert manifest.fixtures[0]["fixture_id"] == (
+        "coordinated_xy_mres3_rearm_envelope_clear"
+    )
+    margin = manifest.analysis_rules["2082"]["metrics"]
+    assert margin["rm"]["equals"] == 1
+    assert margin["rc"]["equals"] == 219990
+    assert margin["rp"]["equals"] == 0
+    assert margin["rd"]["min"] == 1
+    assert margin["lc"]["maturity"] == "candidate"
+    assert margin["md"]["equals"] == 0
+    assert margin["sl"]["min"] == 450
+
+
 def test_load_coordinated_xy_single_irq_manifest_is_diagnostic_only_and_strict():
     manifest = load_manifest("coordinated_xy_single_irq_v1")
 

@@ -12,6 +12,7 @@
 #include "Stepper.h"
 #include "CoordinatedXyExecutor.h"
 #include "CoordinatedXyIsrInstrumentation.h"
+#include "CoordinatedXyTimerSchedulePolicy.h"
 
 struct GantryPosition {
   int32_t x, y, z;
@@ -36,6 +37,8 @@ struct CoordinatedXySnapshot {
       CoordinatedXyExecutor::TerminalReason::None;
   CoordinatedXyExecutor::ExecutionMode executionMode =
       CoordinatedXyExecutor::ExecutionMode::TwoEdge;
+  CoordinatedXyTimerSchedulePolicy::Mode timerScheduleMode =
+      CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning;
   uint32_t requestedXSteps = 0u;
   uint32_t requestedYSteps = 0u;
   uint32_t emittedXSteps = 0u;
@@ -48,6 +51,9 @@ struct CoordinatedXySnapshot {
   uint32_t arrMin = 0u;
   uint32_t arrMax = 0u;
   uint32_t pendingUpdateCount = 0u;
+  uint32_t timerRearmCount = 0u;
+  uint32_t timerRearmPendingCount = 0u;
+  uint32_t timerRearmDelayMaxCycles = 0u;
   uint32_t maxIsrCycles = 0u;
   uint32_t selectedMasterRateHz = 0u;
   uint32_t selectedMasterAccelerationStepsPerSec2 = 0u;
@@ -102,6 +108,9 @@ public:
   bool setCoordinatedExecutionModeForDiagnostics(
       CoordinatedXyExecutor::ExecutionMode mode);
   CoordinatedXyExecutor::ExecutionMode coordinatedExecutionMode() const;
+  bool setCoordinatedTimerScheduleModeForDiagnostics(
+      CoordinatedXyTimerSchedulePolicy::Mode mode);
+  CoordinatedXyTimerSchedulePolicy::Mode coordinatedTimerScheduleMode() const;
   bool requestCoordinatedCancelForDiagnostics(uint32_t& risingEdgesBefore,
                                                uint32_t& fallingEdgesBefore);
   bool requestCoordinatedLimitAbortForDiagnostics(Stepper::Axis axis);
@@ -163,7 +172,12 @@ private:
   volatile uint32_t _coordinatedArrMax = 0u;
   CoordinatedXyExecutor::ExecutionMode _coordinatedExecutionMode =
       CoordinatedXyExecutor::ExecutionMode::TwoEdge;
+  CoordinatedXyTimerSchedulePolicy::Mode _coordinatedTimerScheduleMode =
+      CoordinatedXyTimerSchedulePolicy::Mode::FreeRunning;
   volatile uint32_t _coordinatedProgrammedArr = 0u;
+  volatile uint32_t _coordinatedTimerRearmCount = 0u;
+  volatile uint32_t _coordinatedTimerRearmPendingCount = 0u;
+  volatile uint32_t _coordinatedTimerRearmDelayMaxCycles = 0u;
   uint32_t _coordinatedPulseHighCycles = 0u;
   CoordinatedXyIsrInstrumentation::State _coordinatedTiming{};
 

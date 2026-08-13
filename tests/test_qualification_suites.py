@@ -274,6 +274,23 @@ def test_coordinated_xy_mres3_suite_exposes_scaled_motion_and_deadline_evidence(
     assert focused.analysis_rules["2083"]["metrics"]["mf"]["equals"] == 0
 
 
+def test_coordinated_xy_mres3_rearm_suite_requires_complete_rearm_coverage():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    focused = entries["coordinated_xy_mres3_rearm_v1"].manifest
+
+    assert focused.profile == "FULL"
+    assert required_fixture_ids(focused) == (
+        "coordinated_xy_mres3_rearm_envelope_clear",
+    )
+    rows = build_test_plan_rows(focused)
+    assert [row.test_id for row in rows] == [2080, 2081, 2082, 2083]
+    rules = focused.analysis_rules["2082"]["metrics"]
+    assert rules["rm"]["equals"] == 1
+    assert rules["rc"]["equals"] == 219990
+    assert rules["rp"]["equals"] == 0
+    assert rules["lc"]["maturity"] == "candidate"
+
+
 def test_coordinated_xy_single_irq_suite_requires_complete_pulse_margin_evidence():
     entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
     focused = entries["coordinated_xy_single_irq_v1"].manifest

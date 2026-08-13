@@ -37,6 +37,7 @@ def test_performance_suite_has_fixed_ids_selector_rates_and_fail_stop_totals():
     assert 'add_argument("--coordinated-xy-40khz-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-single-irq-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-mres3-20khz-suite", action="store_true")' in runner
+    assert 'add_argument("--coordinated-xy-mres3-rearm-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-x-direction-suite", action="store_true")' in runner
     assert 'add_argument("--coordinated-xy-camera-transition-suite", action="store_true")' in runner
     assert "60000 if coordinated_xy_performance_suite else 5000" in runner
@@ -122,6 +123,7 @@ def test_mres3_diagnostic_selector_scales_geometry_rate_acceleration_and_homes()
     suite = diagnostics[start:end]
 
     assert "selectedDiagnosticId == 2085u" in diagnostics
+    assert "selectedDiagnosticId == 2084u" in diagnostics
     assert "runCoordinatedXy40KhzSuite || runCoordinatedXyMres3Suite" in diagnostics
     assert '"coordinated_xy_mres3_20khz_envelope_clear"' in suite
     assert "{{2500, 2500}, {12500, 2500}}" in suite
@@ -142,6 +144,39 @@ def test_mres3_diagnostic_selector_scales_geometry_rate_acceleration_and_homes()
     assert "LC_TMC2208_DIAGNOSTIC_BUILD != 0 && LC_TMC2208_MRES == 3" in config
     assert "false,\n      true,\n      0x000000C1u" in config
     assert "2085 if coordinated_xy_mres3_20khz_suite" in runner
+    assert "2084 if coordinated_xy_mres3_rearm_suite" in runner
+
+
+def test_mres3_rearm_selector_is_scoped_and_rebases_after_physical_edges():
+    header = _read("firmware/Core/Inc/Gantry.h")
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+
+    assert "RearmFromActualEdge = 1u" in _read(
+        "firmware/Core/Inc/CoordinatedXyTimerSchedulePolicy.h"
+    )
+    assert "setCoordinatedTimerScheduleModeForDiagnostics" in header
+    assert "Mode::FreeRunning" in gantry
+    handler_start = gantry.index("bool Gantry::_handleCoordinatedTimerFromIsr")
+    handler_end = gantry.index(
+        "bool Gantry::dispatchCoordinatedTimerFromIsr", handler_start
+    )
+    handler = gantry[handler_start:handler_end]
+    edge = handler.index("physicalEdgeEmitted = stepX || stepY")
+    stop = handler.index("CLEAR_BIT(_coordinatedMasterTimer->Instance->CR1")
+    reset = handler.index("__HAL_TIM_SET_COUNTER(_coordinatedMasterTimer, 0u)")
+    clear_pending = handler.index("NVIC_ClearPendingIRQ(TIM2_IRQn)")
+    restart = handler.index("SET_BIT(_coordinatedMasterTimer->Instance->CR1")
+    assert edge < stop < reset < clear_pending < restart
+    assert "_coordinatedTimerRearmPendingCount" in handler
+
+    guard_start = diagnostics.index("class ScopedCoordinatedXyTimerScheduleMode")
+    guard_end = diagnostics.index("class ScopedSelfTestEmissionPriority", guard_start)
+    guard = diagnostics[guard_start:guard_end]
+    assert "Mode::FreeRunning" in guard
+    assert "~ScopedCoordinatedXyTimerScheduleMode" in guard
+    assert '"coordinated_xy_mres3_rearm_envelope_clear"' in diagnostics
+    assert "timer_schedule_unavailable" in diagnostics
 
 
 def test_status_sync_variant_is_static_bounded_and_restores_critical_mode():
