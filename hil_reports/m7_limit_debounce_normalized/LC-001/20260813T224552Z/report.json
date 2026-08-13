@@ -1,0 +1,2980 @@
+{
+  "schema_version": "qualification_report_v1",
+  "manifest": {
+    "schema_version": "qualification_manifest_v0",
+    "manifest_id": "direct_xyz_lut_v1",
+    "name": "Production Direct X/Y/Z Normalized LUT v1",
+    "profile": "FULL",
+    "lifecycle": "active",
+    "expected_test_ids": [
+      2091,
+      2092,
+      2093,
+      2094,
+      2095
+    ],
+    "fixtures": [
+      {
+        "fixture_id": "direct_xyz_lut_envelope_clear",
+        "required_for": [
+          2091,
+          2092,
+          2093,
+          2094,
+          2095
+        ],
+        "operator_note": "Confirm the production image is flashed, both limit switches are released, and the direct X/Y/Z envelope is clear. Firmware homes Z and XY, makes one 14,000-logical-unit move on each axis and one 2,000-unit triangular X move at 40 kHz logical rate, then homes again. Stop for contact, abnormal sound, missing motion/home, reset, or watchdog evidence."
+      }
+    ],
+    "enforce_expected_test_ids": true,
+    "requires_operator_prompts": true,
+    "selftest_args": [
+      "--direct-xyz-lut-suite"
+    ],
+    "required_host_checks": [
+      "selftest_progress_watchdog",
+      "coordinated_xy_status_cadence"
+    ],
+    "analysis_rules": {
+      "2091": {
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metrics": {
+          "ax": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ds": {
+            "maturity": "acceptance",
+            "equals": 14000
+          },
+          "hz": {
+            "maturity": "acceptance",
+            "equals": 40000
+          },
+          "np": {
+            "maturity": "acceptance",
+            "equals": 7000
+          },
+          "to": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ep": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "nm": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "co": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "pf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "rf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ab": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "tt": {
+            "maturity": "acceptance",
+            "equals": 14000
+          },
+          "ai": {
+            "maturity": "acceptance",
+            "equals": 5716
+          },
+          "ac": {
+            "maturity": "acceptance",
+            "equals": 5716
+          },
+          "di": {
+            "maturity": "acceptance",
+            "equals": 5716
+          },
+          "dc": {
+            "maturity": "acceptance",
+            "equals": 5715
+          },
+          "en": {
+            "maturity": "acceptance",
+            "equals": 14001
+          },
+          "pc": {
+            "maturity": "acceptance",
+            "equals": 7000
+          },
+          "po": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "mx": {
+            "maturity": "acceptance",
+            "max": 2250
+          },
+          "tm": {
+            "maturity": "candidate",
+            "max": 4500
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "wd": {
+            "maturity": "acceptance",
+            "max": 100
+          },
+          "sg": {
+            "maturity": "acceptance",
+            "max": 125
+          }
+        }
+      },
+      "2092": {
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metrics": {
+          "ax": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "ds": {
+            "maturity": "acceptance",
+            "equals": 14000
+          },
+          "hz": {
+            "maturity": "acceptance",
+            "equals": 40000
+          },
+          "np": {
+            "maturity": "acceptance",
+            "equals": 7000
+          },
+          "to": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ep": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "nm": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "co": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "pf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "rf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ab": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "tt": {
+            "maturity": "acceptance",
+            "equals": 14000
+          },
+          "ai": {
+            "maturity": "acceptance",
+            "equals": 5716
+          },
+          "ac": {
+            "maturity": "acceptance",
+            "equals": 5716
+          },
+          "di": {
+            "maturity": "acceptance",
+            "equals": 5716
+          },
+          "dc": {
+            "maturity": "acceptance",
+            "equals": 5715
+          },
+          "en": {
+            "maturity": "acceptance",
+            "equals": 14001
+          },
+          "pc": {
+            "maturity": "acceptance",
+            "equals": 7000
+          },
+          "po": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "mx": {
+            "maturity": "acceptance",
+            "max": 2250
+          },
+          "tm": {
+            "maturity": "candidate",
+            "max": 4500
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "wd": {
+            "maturity": "acceptance",
+            "max": 100
+          },
+          "sg": {
+            "maturity": "acceptance",
+            "max": 125
+          }
+        }
+      },
+      "2093": {
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metrics": {
+          "ax": {
+            "maturity": "acceptance",
+            "equals": 2
+          },
+          "ds": {
+            "maturity": "acceptance",
+            "equals": 14000
+          },
+          "hz": {
+            "maturity": "acceptance",
+            "equals": 40000
+          },
+          "np": {
+            "maturity": "acceptance",
+            "equals": 7000
+          },
+          "to": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ep": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "nm": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "co": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "pf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "rf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ab": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "tt": {
+            "maturity": "acceptance",
+            "equals": 14000
+          },
+          "ai": {
+            "maturity": "acceptance",
+            "equals": 5716
+          },
+          "ac": {
+            "maturity": "acceptance",
+            "equals": 5716
+          },
+          "di": {
+            "maturity": "acceptance",
+            "equals": 5716
+          },
+          "dc": {
+            "maturity": "acceptance",
+            "equals": 5715
+          },
+          "en": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "pc": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "po": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "mx": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "tm": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "wd": {
+            "maturity": "acceptance",
+            "max": 100
+          },
+          "sg": {
+            "maturity": "acceptance",
+            "max": 125
+          }
+        }
+      },
+      "2094": {
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metrics": {
+          "ax": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ds": {
+            "maturity": "acceptance",
+            "equals": 2000
+          },
+          "hz": {
+            "maturity": "acceptance",
+            "equals": 40000
+          },
+          "np": {
+            "maturity": "acceptance",
+            "equals": 1000
+          },
+          "to": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ep": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "nm": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "co": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "pf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "rf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "ab": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "tt": {
+            "maturity": "acceptance",
+            "equals": 2000
+          },
+          "ai": {
+            "maturity": "acceptance",
+            "equals": 1000
+          },
+          "ac": {
+            "maturity": "acceptance",
+            "equals": 1000
+          },
+          "di": {
+            "maturity": "acceptance",
+            "equals": 1000
+          },
+          "dc": {
+            "maturity": "acceptance",
+            "equals": 999
+          },
+          "en": {
+            "maturity": "acceptance",
+            "equals": 2001
+          },
+          "pc": {
+            "maturity": "acceptance",
+            "equals": 1000
+          },
+          "po": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "mx": {
+            "maturity": "acceptance",
+            "max": 2250
+          },
+          "tm": {
+            "maturity": "candidate",
+            "max": 4500
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "wd": {
+            "maturity": "acceptance",
+            "max": 100
+          },
+          "sg": {
+            "maturity": "acceptance",
+            "max": 125
+          }
+        }
+      },
+      "2095": {
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metrics": {
+          "pre": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "post": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "zh": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "xyh": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "pd": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "rd": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "mres": {
+            "maturity": "acceptance",
+            "equals": 3
+          },
+          "de": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "mf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "sn": {
+            "maturity": "acceptance",
+            "min": 2
+          },
+          "sg": {
+            "maturity": "acceptance",
+            "max": 125
+          },
+          "wd": {
+            "maturity": "acceptance",
+            "max": 100
+          },
+          "sa": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "sv": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "to": {
+            "maturity": "acceptance",
+            "equals": 0
+          }
+        }
+      }
+    }
+  },
+  "machine": {
+    "machine_id": "LC-001",
+    "machine_uuid": "dc0f3c73-0eef-4298-a491-148f7ff5713e",
+    "assigned_at": "2026-08-11T19:48:35.686298Z",
+    "notes": ""
+  },
+  "run": {
+    "run_dir": "hil_reports\\m7_limit_debounce_normalized\\LC-001\\20260813T224552Z",
+    "raw_selftest_path": "hil_reports\\m7_limit_debounce_normalized\\LC-001\\20260813T224552Z\\raw_selftest.json",
+    "report_path": "hil_reports\\m7_limit_debounce_normalized\\LC-001\\20260813T224552Z\\report.json",
+    "summary_csv_path": "hil_reports\\m7_limit_debounce_normalized\\LC-001\\20260813T224552Z\\summary.csv",
+    "selftest_returncode": 0,
+    "fixture_id": null
+  },
+  "overall_status": "pass",
+  "raw_summary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0
+  },
+  "run_id": 4249694377,
+  "profile": "FULL",
+  "started_at": "2026-08-13T22:45:22.217574Z",
+  "finished_at": "2026-08-13T22:45:28.586828Z",
+  "aborted": false,
+  "manifest_checks": {
+    "expected_test_ids": [
+      2091,
+      2092,
+      2093,
+      2094,
+      2095
+    ],
+    "observed_test_ids": [
+      2091,
+      2092,
+      2093,
+      2094,
+      2095
+    ],
+    "missing_test_ids": [],
+    "unexpected_test_ids": [],
+    "enforced": true
+  },
+  "results": [
+    {
+      "test_id": 2091,
+      "name": "direct_lut_x_cruise",
+      "pass": true,
+      "metrics": {
+        "ax": 0,
+        "ds": 14000,
+        "hz": 40000,
+        "np": 7000,
+        "to": 0,
+        "ep": 1,
+        "nm": 1,
+        "co": 1,
+        "pf": 0,
+        "rf": 0,
+        "ab": 0,
+        "tt": 14000,
+        "ai": 5716,
+        "ac": 5716,
+        "di": 5716,
+        "dc": 5715,
+        "en": 14001,
+        "pc": 7000,
+        "po": 0,
+        "mx": 773,
+        "tm": 1693,
+        "sf": 0,
+        "wd": 11,
+        "sg": 114,
+        "sn": 23
+      },
+      "timestamp": "2026-08-13T22:45:23.839506Z"
+    },
+    {
+      "test_id": 2092,
+      "name": "direct_lut_y_cruise",
+      "pass": true,
+      "metrics": {
+        "ax": 1,
+        "ds": 14000,
+        "hz": 40000,
+        "np": 7000,
+        "to": 0,
+        "ep": 1,
+        "nm": 1,
+        "co": 1,
+        "pf": 0,
+        "rf": 0,
+        "ab": 0,
+        "tt": 14000,
+        "ai": 5716,
+        "ac": 5716,
+        "di": 5716,
+        "dc": 5715,
+        "en": 14001,
+        "pc": 7000,
+        "po": 0,
+        "mx": 799,
+        "tm": 1690,
+        "sf": 0,
+        "wd": 25,
+        "sg": 114,
+        "sn": 33
+      },
+      "timestamp": "2026-08-13T22:45:24.487930Z"
+    },
+    {
+      "test_id": 2093,
+      "name": "direct_lut_z_cruise",
+      "pass": true,
+      "metrics": {
+        "ax": 2,
+        "ds": 14000,
+        "hz": 40000,
+        "np": 7000,
+        "to": 0,
+        "ep": 1,
+        "nm": 1,
+        "co": 1,
+        "pf": 0,
+        "rf": 0,
+        "ab": 0,
+        "tt": 14000,
+        "ai": 5716,
+        "ac": 5716,
+        "di": 5716,
+        "dc": 5715,
+        "en": 0,
+        "pc": 0,
+        "po": 0,
+        "mx": 0,
+        "tm": 0,
+        "sf": 0,
+        "wd": 5,
+        "sg": 114,
+        "sn": 42
+      },
+      "timestamp": "2026-08-13T22:45:25.163000Z"
+    },
+    {
+      "test_id": 2094,
+      "name": "direct_lut_x_triangular",
+      "pass": true,
+      "metrics": {
+        "ax": 0,
+        "ds": 2000,
+        "hz": 40000,
+        "np": 1000,
+        "to": 0,
+        "ep": 1,
+        "nm": 1,
+        "co": 1,
+        "pf": 0,
+        "rf": 0,
+        "ab": 0,
+        "tt": 2000,
+        "ai": 1000,
+        "ac": 1000,
+        "di": 1000,
+        "dc": 999,
+        "en": 2001,
+        "pc": 1000,
+        "po": 0,
+        "mx": 773,
+        "tm": 1690,
+        "sf": 0,
+        "wd": 12,
+        "sg": 114,
+        "sn": 46
+      },
+      "timestamp": "2026-08-13T22:45:25.416509Z"
+    },
+    {
+      "test_id": 2095,
+      "name": "direct_lut_isolation",
+      "pass": true,
+      "metrics": {
+        "pre": 1,
+        "post": 1,
+        "zh": 1,
+        "xyh": 1,
+        "pd": 0,
+        "rd": 0,
+        "mres": 3,
+        "de": 1,
+        "mf": 0,
+        "sn": 87,
+        "sg": 114,
+        "wd": 25,
+        "sa": 0,
+        "sv": 1,
+        "sf": 0,
+        "to": 0
+      },
+      "timestamp": "2026-08-13T22:45:28.086007Z"
+    }
+  ],
+  "host_checks": [
+    {
+      "name": "hello_ack",
+      "pass": true,
+      "details": {
+        "seq8": 1,
+        "run_id": 4249694377,
+        "timeout_ms": 8000,
+        "retry_ms": 250,
+        "retries_sent": 1,
+        "observed_uart_bytes": 128,
+        "fast_fail_on_missing_hello": false,
+        "capabilities": 15,
+        "supports_selftest_transport": true
+      },
+      "timestamp": "2026-08-13T22:45:22.289483Z"
+    },
+    {
+      "name": "selftest_start_ack",
+      "pass": true,
+      "details": {
+        "transport_mode": "queue_ack",
+        "seq8": 2,
+        "seq32": 1,
+        "run_id": 4249694377,
+        "timeout_ms": 2000,
+        "observed_cmd": 254,
+        "observed_seq8": 2,
+        "observed_seq32": 1,
+        "ack_result": "accepted",
+        "expected_seq32": null,
+        "reason": "ok"
+      },
+      "timestamp": "2026-08-13T22:45:22.303224Z"
+    },
+    {
+      "name": "goodbye_ack",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4249694377,
+        "timeout_ms": 2000
+      },
+      "timestamp": "2026-08-13T22:45:28.186282Z"
+    },
+    {
+      "name": "goodbye_done",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4249694377,
+        "timeout_ms": 5000,
+        "observed_seq32": 4249694377
+      },
+      "timestamp": "2026-08-13T22:45:28.586763Z"
+    },
+    {
+      "name": "selftest_progress_watchdog",
+      "pass": true,
+      "details": {
+        "progress_count": 21,
+        "last_progress": {
+          "kind": "progress",
+          "stage": "wait_bits_set",
+          "elapsed_ms": 5717,
+          "stk_hwm_w": 0
+        },
+        "recent_frames": [
+          {
+            "ts": "2026-08-13T22:45:22.303261Z",
+            "cmd": 254,
+            "ack_result": "accepted",
+            "ack_seq32": 1,
+            "expected_seq32": null
+          },
+          {
+            "ts": "2026-08-13T22:45:22.329460Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "direct_xyz_lut_envelope_clear"
+          },
+          {
+            "ts": "2026-08-13T22:45:22.329655Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "direct_lut_z_home"
+          },
+          {
+            "ts": "2026-08-13T22:45:22.419050Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:22.777164Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:22.777196Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "direct_lut_xy_home"
+          },
+          {
+            "ts": "2026-08-13T22:45:22.777218Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:23.180995Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:23.281432Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:23.839448Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:23.839481Z",
+            "cmd": 251,
+            "test_id": 2091,
+            "name": "direct_lut_x_cruise"
+          },
+          {
+            "ts": "2026-08-13T22:45:23.919592Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:24.487878Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:24.487906Z",
+            "cmd": 251,
+            "test_id": 2092,
+            "name": "direct_lut_y_cruise"
+          },
+          {
+            "ts": "2026-08-13T22:45:24.588341Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:25.124696Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:25.162974Z",
+            "cmd": 251,
+            "test_id": 2093,
+            "name": "direct_lut_z_cruise"
+          },
+          {
+            "ts": "2026-08-13T22:45:25.163008Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:25.385336Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:25.416485Z",
+            "cmd": 251,
+            "test_id": 2094,
+            "name": "direct_lut_x_triangular"
+          },
+          {
+            "ts": "2026-08-13T22:45:25.416517Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:26.436884Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:45:26.590593Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:26.679501Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:27.692572Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:45:27.985495Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:28.085976Z",
+            "cmd": 251,
+            "test_id": 2095,
+            "name": "direct_lut_isolation"
+          },
+          {
+            "ts": "2026-08-13T22:45:28.086019Z",
+            "cmd": 252,
+            "run_id": 4249694377
+          }
+        ],
+        "frame_counts": {
+          "2": 88,
+          "251": 26,
+          "252": 1,
+          "254": 1
+        },
+        "progress_timeout_ms": 15000,
+        "activity_timeout_ms": 120000,
+        "status_only_timeout_ms": 120000,
+        "effective_timeout_ms": 240000,
+        "total_rx_bytes": 15662,
+        "status_frames_since_selftest": 0,
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 77,
+        "selftest_frames_seen": 27,
+        "startup_reset_report": null,
+        "reset_report": null,
+        "last_valid_frame_age_ms": 601,
+        "last_rx_byte_age_ms": 601,
+        "last_selftest_frame_age_ms": 601,
+        "timeout_reason": null
+      },
+      "timestamp": "2026-08-13T22:45:28.586815Z"
+    },
+    {
+      "name": "coordinated_xy_status_cadence",
+      "pass": true,
+      "details": {
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 77,
+        "limit_ms_exclusive": 500
+      },
+      "timestamp": "2026-08-13T22:45:28.586823Z"
+    }
+  ],
+  "analysis": {
+    "schema_version": "qualification_analysis_v1",
+    "status": "pass",
+    "items": [
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "hello_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "selftest_start_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "goodbye_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "goodbye_done",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "selftest_progress_watchdog",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "coordinated_xy_status_cadence",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      }
+    ],
+    "metric_evaluations": [
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ax",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: ax=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ds",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 14000,
+        "message": "Metric within threshold: ds=14000, equals=14000.",
+        "metric_value": 14000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "hz",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 40000,
+        "message": "Metric within threshold: hz=40000, equals=40000.",
+        "metric_value": 40000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "np",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 7000,
+        "message": "Metric within threshold: np=7000, equals=7000.",
+        "metric_value": 7000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "to",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: to=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ep",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: ep=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "nm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: nm=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "co",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: co=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "pf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: pf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "rf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: rf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ab",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: ab=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "tt",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 14000,
+        "message": "Metric within threshold: tt=14000, equals=14000.",
+        "metric_value": 14000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ai",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 5716,
+        "message": "Metric within threshold: ai=5716, equals=5716.",
+        "metric_value": 5716,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ac",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 5716,
+        "message": "Metric within threshold: ac=5716, equals=5716.",
+        "metric_value": 5716,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "di",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 5716,
+        "message": "Metric within threshold: di=5716, equals=5716.",
+        "metric_value": 5716,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "dc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 5715,
+        "message": "Metric within threshold: dc=5715, equals=5715.",
+        "metric_value": 5715,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "en",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 14001,
+        "message": "Metric within threshold: en=14001, equals=14001.",
+        "metric_value": 14001,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "pc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 7000,
+        "message": "Metric within threshold: pc=7000, equals=7000.",
+        "metric_value": 7000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "po",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: po=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "mx",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 2250,
+        "threshold_expected": null,
+        "message": "Metric within threshold: mx=773, max=2250.",
+        "metric_value": 773,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "tm",
+        "threshold_maturity": "candidate",
+        "threshold_min": null,
+        "threshold_max": 4500,
+        "threshold_expected": null,
+        "message": "Metric within threshold: tm=1693, max=4500.",
+        "metric_value": 1693,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "wd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 100,
+        "threshold_expected": null,
+        "message": "Metric within threshold: wd=11, max=100.",
+        "metric_value": 11,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2091,
+        "name": "direct_lut_x_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sg",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 125,
+        "threshold_expected": null,
+        "message": "Metric within threshold: sg=114, max=125.",
+        "metric_value": 114,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ax",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: ax=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ds",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 14000,
+        "message": "Metric within threshold: ds=14000, equals=14000.",
+        "metric_value": 14000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "hz",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 40000,
+        "message": "Metric within threshold: hz=40000, equals=40000.",
+        "metric_value": 40000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "np",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 7000,
+        "message": "Metric within threshold: np=7000, equals=7000.",
+        "metric_value": 7000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "to",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: to=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ep",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: ep=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "nm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: nm=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "co",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: co=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "pf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: pf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "rf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: rf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ab",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: ab=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "tt",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 14000,
+        "message": "Metric within threshold: tt=14000, equals=14000.",
+        "metric_value": 14000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ai",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 5716,
+        "message": "Metric within threshold: ai=5716, equals=5716.",
+        "metric_value": 5716,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ac",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 5716,
+        "message": "Metric within threshold: ac=5716, equals=5716.",
+        "metric_value": 5716,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "di",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 5716,
+        "message": "Metric within threshold: di=5716, equals=5716.",
+        "metric_value": 5716,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "dc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 5715,
+        "message": "Metric within threshold: dc=5715, equals=5715.",
+        "metric_value": 5715,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "en",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 14001,
+        "message": "Metric within threshold: en=14001, equals=14001.",
+        "metric_value": 14001,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "pc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 7000,
+        "message": "Metric within threshold: pc=7000, equals=7000.",
+        "metric_value": 7000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "po",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: po=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "mx",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 2250,
+        "threshold_expected": null,
+        "message": "Metric within threshold: mx=799, max=2250.",
+        "metric_value": 799,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "tm",
+        "threshold_maturity": "candidate",
+        "threshold_min": null,
+        "threshold_max": 4500,
+        "threshold_expected": null,
+        "message": "Metric within threshold: tm=1690, max=4500.",
+        "metric_value": 1690,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "wd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 100,
+        "threshold_expected": null,
+        "message": "Metric within threshold: wd=25, max=100.",
+        "metric_value": 25,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2092,
+        "name": "direct_lut_y_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sg",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 125,
+        "threshold_expected": null,
+        "message": "Metric within threshold: sg=114, max=125.",
+        "metric_value": 114,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ax",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 2,
+        "message": "Metric within threshold: ax=2, equals=2.",
+        "metric_value": 2,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ds",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 14000,
+        "message": "Metric within threshold: ds=14000, equals=14000.",
+        "metric_value": 14000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "hz",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 40000,
+        "message": "Metric within threshold: hz=40000, equals=40000.",
+        "metric_value": 40000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "np",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 7000,
+        "message": "Metric within threshold: np=7000, equals=7000.",
+        "metric_value": 7000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "to",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: to=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ep",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: ep=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "nm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: nm=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "co",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: co=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "pf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: pf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "rf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: rf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ab",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: ab=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "tt",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 14000,
+        "message": "Metric within threshold: tt=14000, equals=14000.",
+        "metric_value": 14000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ai",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 5716,
+        "message": "Metric within threshold: ai=5716, equals=5716.",
+        "metric_value": 5716,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ac",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 5716,
+        "message": "Metric within threshold: ac=5716, equals=5716.",
+        "metric_value": 5716,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "di",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 5716,
+        "message": "Metric within threshold: di=5716, equals=5716.",
+        "metric_value": 5716,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "dc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 5715,
+        "message": "Metric within threshold: dc=5715, equals=5715.",
+        "metric_value": 5715,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "en",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: en=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "pc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: pc=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "po",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: po=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "mx",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: mx=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "tm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: tm=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "wd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 100,
+        "threshold_expected": null,
+        "message": "Metric within threshold: wd=5, max=100.",
+        "metric_value": 5,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2093,
+        "name": "direct_lut_z_cruise",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sg",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 125,
+        "threshold_expected": null,
+        "message": "Metric within threshold: sg=114, max=125.",
+        "metric_value": 114,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ax",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: ax=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ds",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 2000,
+        "message": "Metric within threshold: ds=2000, equals=2000.",
+        "metric_value": 2000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "hz",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 40000,
+        "message": "Metric within threshold: hz=40000, equals=40000.",
+        "metric_value": 40000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "np",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1000,
+        "message": "Metric within threshold: np=1000, equals=1000.",
+        "metric_value": 1000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "to",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: to=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ep",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: ep=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "nm",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: nm=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "co",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: co=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "pf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: pf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "rf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: rf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ab",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: ab=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "tt",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 2000,
+        "message": "Metric within threshold: tt=2000, equals=2000.",
+        "metric_value": 2000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ai",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1000,
+        "message": "Metric within threshold: ai=1000, equals=1000.",
+        "metric_value": 1000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ac",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1000,
+        "message": "Metric within threshold: ac=1000, equals=1000.",
+        "metric_value": 1000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "di",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1000,
+        "message": "Metric within threshold: di=1000, equals=1000.",
+        "metric_value": 1000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "dc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 999,
+        "message": "Metric within threshold: dc=999, equals=999.",
+        "metric_value": 999,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "en",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 2001,
+        "message": "Metric within threshold: en=2001, equals=2001.",
+        "metric_value": 2001,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "pc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1000,
+        "message": "Metric within threshold: pc=1000, equals=1000.",
+        "metric_value": 1000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "po",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: po=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "mx",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 2250,
+        "threshold_expected": null,
+        "message": "Metric within threshold: mx=773, max=2250.",
+        "metric_value": 773,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "tm",
+        "threshold_maturity": "candidate",
+        "threshold_min": null,
+        "threshold_max": 4500,
+        "threshold_expected": null,
+        "message": "Metric within threshold: tm=1690, max=4500.",
+        "metric_value": 1690,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "wd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 100,
+        "threshold_expected": null,
+        "message": "Metric within threshold: wd=12, max=100.",
+        "metric_value": 12,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2094,
+        "name": "direct_lut_x_triangular",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sg",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 125,
+        "threshold_expected": null,
+        "message": "Metric within threshold: sg=114, max=125.",
+        "metric_value": 114,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "pre",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: pre=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "post",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: post=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "zh",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: zh=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "xyh",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: xyh=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "pd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: pd=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "rd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: rd=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "mres",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 3,
+        "message": "Metric within threshold: mres=3, equals=3.",
+        "metric_value": 3,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "de",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: de=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "mf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: mf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sn",
+        "threshold_maturity": "acceptance",
+        "threshold_min": 2,
+        "threshold_max": null,
+        "threshold_expected": null,
+        "message": "Metric within threshold: sn=87, min=2.",
+        "metric_value": 87,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sg",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 125,
+        "threshold_expected": null,
+        "message": "Metric within threshold: sg=114, max=125.",
+        "metric_value": 114,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "wd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 100,
+        "threshold_expected": null,
+        "message": "Metric within threshold: wd=25, max=100.",
+        "metric_value": 25,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sa",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sa=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sv",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: sv=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2095,
+        "name": "direct_lut_isolation",
+        "category": "configuration",
+        "failure_domain": "firmware_motion",
+        "metric_name": "to",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: to=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      }
+    ],
+    "summary": {
+      "item_count": 11,
+      "metric_evaluation_count": 112,
+      "blocking_issue_count": 0,
+      "warning_count": 0
+    },
+    "verdict": {
+      "status": "pass",
+      "blocking_issue_count": 0,
+      "warning_count": 0,
+      "reason": "No blocking analyzer issues."
+    },
+    "warnings": [],
+    "operator_notes": [
+      {
+        "fixture_id": "direct_xyz_lut_envelope_clear",
+        "required_for": [
+          2091,
+          2092,
+          2093,
+          2094,
+          2095
+        ],
+        "message": "Confirm the production image is flashed, both limit switches are released, and the direct X/Y/Z envelope is clear. Firmware homes Z and XY, makes one 14,000-logical-unit move on each axis and one 2,000-unit triangular X move at 40 kHz logical rate, then homes again. Stop for contact, abnormal sound, missing motion/home, reset, or watchdog evidence."
+      }
+    ]
+  },
+  "verdict": {
+    "status": "pass",
+    "blocking_issue_count": 0,
+    "warning_count": 0,
+    "reason": "No blocking analyzer issues."
+  },
+  "warnings": [],
+  "operator_notes": [
+    {
+      "fixture_id": "direct_xyz_lut_envelope_clear",
+      "required_for": [
+        2091,
+        2092,
+        2093,
+        2094,
+        2095
+      ],
+      "message": "Confirm the production image is flashed, both limit switches are released, and the direct X/Y/Z envelope is clear. Firmware homes Z and XY, makes one 14,000-logical-unit move on each axis and one 2,000-unit triangular X move at 40 kHz logical rate, then homes again. Stop for contact, abnormal sound, missing motion/home, reset, or watchdog evidence."
+    }
+  ],
+  "operator_interactions": []
+}

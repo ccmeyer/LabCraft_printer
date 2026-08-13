@@ -1,0 +1,486 @@
+{
+  "run_id": 4249694377,
+  "profile": "FULL",
+  "started_at": "2026-08-13T22:45:22.217574Z",
+  "finished_at": "2026-08-13T22:45:28.586828Z",
+  "aborted": false,
+  "summary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0
+  },
+  "results": [
+    {
+      "test_id": 2091,
+      "name": "direct_lut_x_cruise",
+      "pass": true,
+      "metrics": {
+        "ax": 0,
+        "ds": 14000,
+        "hz": 40000,
+        "np": 7000,
+        "to": 0,
+        "ep": 1,
+        "nm": 1,
+        "co": 1,
+        "pf": 0,
+        "rf": 0,
+        "ab": 0,
+        "tt": 14000,
+        "ai": 5716,
+        "ac": 5716,
+        "di": 5716,
+        "dc": 5715,
+        "en": 14001,
+        "pc": 7000,
+        "po": 0,
+        "mx": 773,
+        "tm": 1693,
+        "sf": 0,
+        "wd": 11,
+        "sg": 114,
+        "sn": 23
+      },
+      "timestamp": "2026-08-13T22:45:23.839506Z"
+    },
+    {
+      "test_id": 2092,
+      "name": "direct_lut_y_cruise",
+      "pass": true,
+      "metrics": {
+        "ax": 1,
+        "ds": 14000,
+        "hz": 40000,
+        "np": 7000,
+        "to": 0,
+        "ep": 1,
+        "nm": 1,
+        "co": 1,
+        "pf": 0,
+        "rf": 0,
+        "ab": 0,
+        "tt": 14000,
+        "ai": 5716,
+        "ac": 5716,
+        "di": 5716,
+        "dc": 5715,
+        "en": 14001,
+        "pc": 7000,
+        "po": 0,
+        "mx": 799,
+        "tm": 1690,
+        "sf": 0,
+        "wd": 25,
+        "sg": 114,
+        "sn": 33
+      },
+      "timestamp": "2026-08-13T22:45:24.487930Z"
+    },
+    {
+      "test_id": 2093,
+      "name": "direct_lut_z_cruise",
+      "pass": true,
+      "metrics": {
+        "ax": 2,
+        "ds": 14000,
+        "hz": 40000,
+        "np": 7000,
+        "to": 0,
+        "ep": 1,
+        "nm": 1,
+        "co": 1,
+        "pf": 0,
+        "rf": 0,
+        "ab": 0,
+        "tt": 14000,
+        "ai": 5716,
+        "ac": 5716,
+        "di": 5716,
+        "dc": 5715,
+        "en": 0,
+        "pc": 0,
+        "po": 0,
+        "mx": 0,
+        "tm": 0,
+        "sf": 0,
+        "wd": 5,
+        "sg": 114,
+        "sn": 42
+      },
+      "timestamp": "2026-08-13T22:45:25.163000Z"
+    },
+    {
+      "test_id": 2094,
+      "name": "direct_lut_x_triangular",
+      "pass": true,
+      "metrics": {
+        "ax": 0,
+        "ds": 2000,
+        "hz": 40000,
+        "np": 1000,
+        "to": 0,
+        "ep": 1,
+        "nm": 1,
+        "co": 1,
+        "pf": 0,
+        "rf": 0,
+        "ab": 0,
+        "tt": 2000,
+        "ai": 1000,
+        "ac": 1000,
+        "di": 1000,
+        "dc": 999,
+        "en": 2001,
+        "pc": 1000,
+        "po": 0,
+        "mx": 773,
+        "tm": 1690,
+        "sf": 0,
+        "wd": 12,
+        "sg": 114,
+        "sn": 46
+      },
+      "timestamp": "2026-08-13T22:45:25.416509Z"
+    },
+    {
+      "test_id": 2095,
+      "name": "direct_lut_isolation",
+      "pass": true,
+      "metrics": {
+        "pre": 1,
+        "post": 1,
+        "zh": 1,
+        "xyh": 1,
+        "pd": 0,
+        "rd": 0,
+        "mres": 3,
+        "de": 1,
+        "mf": 0,
+        "sn": 87,
+        "sg": 114,
+        "wd": 25,
+        "sa": 0,
+        "sv": 1,
+        "sf": 0,
+        "to": 0
+      },
+      "timestamp": "2026-08-13T22:45:28.086007Z"
+    }
+  ],
+  "host_checks": [
+    {
+      "name": "hello_ack",
+      "pass": true,
+      "details": {
+        "seq8": 1,
+        "run_id": 4249694377,
+        "timeout_ms": 8000,
+        "retry_ms": 250,
+        "retries_sent": 1,
+        "observed_uart_bytes": 128,
+        "fast_fail_on_missing_hello": false,
+        "capabilities": 15,
+        "supports_selftest_transport": true
+      },
+      "timestamp": "2026-08-13T22:45:22.289483Z"
+    },
+    {
+      "name": "selftest_start_ack",
+      "pass": true,
+      "details": {
+        "transport_mode": "queue_ack",
+        "seq8": 2,
+        "seq32": 1,
+        "run_id": 4249694377,
+        "timeout_ms": 2000,
+        "observed_cmd": 254,
+        "observed_seq8": 2,
+        "observed_seq32": 1,
+        "ack_result": "accepted",
+        "expected_seq32": null,
+        "reason": "ok"
+      },
+      "timestamp": "2026-08-13T22:45:22.303224Z"
+    },
+    {
+      "name": "goodbye_ack",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4249694377,
+        "timeout_ms": 2000
+      },
+      "timestamp": "2026-08-13T22:45:28.186282Z"
+    },
+    {
+      "name": "goodbye_done",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4249694377,
+        "timeout_ms": 5000,
+        "observed_seq32": 4249694377
+      },
+      "timestamp": "2026-08-13T22:45:28.586763Z"
+    },
+    {
+      "name": "selftest_progress_watchdog",
+      "pass": true,
+      "details": {
+        "progress_count": 21,
+        "last_progress": {
+          "kind": "progress",
+          "stage": "wait_bits_set",
+          "elapsed_ms": 5717,
+          "stk_hwm_w": 0
+        },
+        "recent_frames": [
+          {
+            "ts": "2026-08-13T22:45:22.303261Z",
+            "cmd": 254,
+            "ack_result": "accepted",
+            "ack_seq32": 1,
+            "expected_seq32": null
+          },
+          {
+            "ts": "2026-08-13T22:45:22.329460Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "direct_xyz_lut_envelope_clear"
+          },
+          {
+            "ts": "2026-08-13T22:45:22.329655Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "direct_lut_z_home"
+          },
+          {
+            "ts": "2026-08-13T22:45:22.419050Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:22.777164Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:22.777196Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "direct_lut_xy_home"
+          },
+          {
+            "ts": "2026-08-13T22:45:22.777218Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:23.180995Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:23.281432Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:23.839448Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:23.839481Z",
+            "cmd": 251,
+            "test_id": 2091,
+            "name": "direct_lut_x_cruise"
+          },
+          {
+            "ts": "2026-08-13T22:45:23.919592Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:24.487878Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:24.487906Z",
+            "cmd": 251,
+            "test_id": 2092,
+            "name": "direct_lut_y_cruise"
+          },
+          {
+            "ts": "2026-08-13T22:45:24.588341Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:25.124696Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:25.162974Z",
+            "cmd": 251,
+            "test_id": 2093,
+            "name": "direct_lut_z_cruise"
+          },
+          {
+            "ts": "2026-08-13T22:45:25.163008Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:25.385336Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:25.416485Z",
+            "cmd": 251,
+            "test_id": 2094,
+            "name": "direct_lut_x_triangular"
+          },
+          {
+            "ts": "2026-08-13T22:45:25.416517Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:26.436884Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:45:26.590593Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:26.679501Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:45:27.692572Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:45:27.985495Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:45:28.085976Z",
+            "cmd": 251,
+            "test_id": 2095,
+            "name": "direct_lut_isolation"
+          },
+          {
+            "ts": "2026-08-13T22:45:28.086019Z",
+            "cmd": 252,
+            "run_id": 4249694377
+          }
+        ],
+        "frame_counts": {
+          "2": 88,
+          "251": 26,
+          "252": 1,
+          "254": 1
+        },
+        "progress_timeout_ms": 15000,
+        "activity_timeout_ms": 120000,
+        "status_only_timeout_ms": 120000,
+        "effective_timeout_ms": 240000,
+        "total_rx_bytes": 15662,
+        "status_frames_since_selftest": 0,
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 77,
+        "selftest_frames_seen": 27,
+        "startup_reset_report": null,
+        "reset_report": null,
+        "last_valid_frame_age_ms": 601,
+        "last_rx_byte_age_ms": 601,
+        "last_selftest_frame_age_ms": 601,
+        "timeout_reason": null
+      },
+      "timestamp": "2026-08-13T22:45:28.586815Z"
+    },
+    {
+      "name": "coordinated_xy_status_cadence",
+      "pass": true,
+      "details": {
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 77,
+        "limit_ms_exclusive": 500
+      },
+      "timestamp": "2026-08-13T22:45:28.586823Z"
+    }
+  ],
+  "startup_reset_report": null,
+  "reset_report": null
+}

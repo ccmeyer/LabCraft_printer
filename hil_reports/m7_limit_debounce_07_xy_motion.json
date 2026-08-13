@@ -1,0 +1,672 @@
+{
+  "run_id": 4249935331,
+  "profile": "FULL",
+  "started_at": "2026-08-13T22:49:23.171923Z",
+  "finished_at": "2026-08-13T22:50:18.785405Z",
+  "aborted": false,
+  "summary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0
+  },
+  "results": [
+    {
+      "test_id": 2010,
+      "name": "motion_xy_long_travel_factory",
+      "pass": true,
+      "metrics": {
+        "rep": 3,
+        "ref": 2,
+        "pts": 5,
+        "xmax": 44000,
+        "ymax": 34000,
+        "dx": 43900,
+        "dy": 33500,
+        "x_span": 4,
+        "y_span": 2,
+        "x_drift": 4,
+        "y_drift": 4,
+        "x_ret": 0,
+        "y_ret": 0,
+        "ret_err": 0,
+        "move_to": 0,
+        "home_to": 0,
+        "guard": 0,
+        "bound": 0
+      },
+      "timestamp": "2026-08-13T22:49:44.931025Z"
+    },
+    {
+      "test_id": 2011,
+      "name": "motion_xy_raster_repeatability_f",
+      "pass": true,
+      "metrics": {
+        "rep": 2,
+        "ref": 2,
+        "rows": 8,
+        "cols": 12,
+        "step": 400,
+        "moves": 194,
+        "xmax": 7400,
+        "ymax": 3800,
+        "dx": 4400,
+        "dy": 2800,
+        "x_span": 6,
+        "y_span": 2,
+        "x_drift": 8,
+        "y_drift": 4,
+        "x_ret": 0,
+        "y_ret": 0,
+        "ret_err": 0,
+        "move_to": 0,
+        "home_to": 0,
+        "guard": 0,
+        "bound": 0
+      },
+      "timestamp": "2026-08-13T22:50:18.184432Z"
+    }
+  ],
+  "host_checks": [
+    {
+      "name": "hello_ack",
+      "pass": true,
+      "details": {
+        "seq8": 1,
+        "run_id": 4249935331,
+        "timeout_ms": 8000,
+        "retry_ms": 250,
+        "retries_sent": 1,
+        "observed_uart_bytes": 128,
+        "fast_fail_on_missing_hello": false,
+        "capabilities": 15,
+        "supports_selftest_transport": true
+      },
+      "timestamp": "2026-08-13T22:49:23.251977Z"
+    },
+    {
+      "name": "selftest_start_ack",
+      "pass": true,
+      "details": {
+        "transport_mode": "queue_ack",
+        "seq8": 2,
+        "seq32": 1,
+        "run_id": 4249935331,
+        "timeout_ms": 2000,
+        "observed_cmd": 254,
+        "observed_seq8": 2,
+        "observed_seq32": 1,
+        "ack_result": "accepted",
+        "expected_seq32": null,
+        "reason": "ok"
+      },
+      "timestamp": "2026-08-13T22:49:23.266600Z"
+    },
+    {
+      "name": "goodbye_ack",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4249935331,
+        "timeout_ms": 2000
+      },
+      "timestamp": "2026-08-13T22:50:18.284705Z"
+    },
+    {
+      "name": "goodbye_done",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4249935331,
+        "timeout_ms": 5000,
+        "observed_seq32": 4249935331
+      },
+      "timestamp": "2026-08-13T22:50:18.785354Z"
+    },
+    {
+      "name": "selftest_progress_watchdog",
+      "pass": true,
+      "details": {
+        "progress_count": 461,
+        "last_progress": {
+          "kind": "progress",
+          "stage": "wait_bits_set",
+          "elapsed_ms": 55313,
+          "stk_hwm_w": 0
+        },
+        "recent_frames": [
+          {
+            "ts": "2026-08-13T22:50:12.412073Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:12.612730Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:12.612763Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:12.713327Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:12.713360Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:12.914021Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:12.914057Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.014619Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.014655Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.215369Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.215404Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.315968Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.316003Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.516707Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.516741Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.617305Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.617339Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.818040Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.818074Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.918646Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:13.918693Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:14.119409Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:14.119447Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:14.220016Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:14.220051Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:14.420748Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:14.420784Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:14.521347Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:14.521382Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:14.722075Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:14.722109Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:14.822672Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:14.822707Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.023405Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.023441Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.124007Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.124040Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.324729Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.324763Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.425324Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.425359Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.626048Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.626082Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.726645Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.726678Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.927371Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:15.927406Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:16.027970Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:16.028008Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:16.228691Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:16.228726Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:16.329289Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:16.329323Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:16.530001Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:16.530037Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:16.630399Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:16.730747Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:16.831322Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:16.831356Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:17.232293Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:17.232329Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:50:18.083701Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:50:18.184394Z",
+            "cmd": 251,
+            "test_id": 2011,
+            "name": "motion_xy_raster_repeatability_f"
+          },
+          {
+            "ts": "2026-08-13T22:50:18.184444Z",
+            "cmd": 252,
+            "run_id": 4249935331
+          }
+        ],
+        "frame_counts": {
+          "2": 1,
+          "251": 463,
+          "252": 1,
+          "254": 1
+        },
+        "progress_timeout_ms": 60000,
+        "activity_timeout_ms": 120000,
+        "status_only_timeout_ms": 120000,
+        "effective_timeout_ms": 300000,
+        "total_rx_bytes": 50616,
+        "status_frames_since_selftest": 0,
+        "status_gap_max_ms": 0,
+        "status_gap_samples": 0,
+        "selftest_frames_seen": 464,
+        "startup_reset_report": null,
+        "reset_report": null,
+        "last_valid_frame_age_ms": 701,
+        "last_rx_byte_age_ms": 701,
+        "last_selftest_frame_age_ms": 701,
+        "timeout_reason": null
+      },
+      "timestamp": "2026-08-13T22:50:18.785399Z"
+    }
+  ],
+  "startup_reset_report": null,
+  "reset_report": null
+}

@@ -2,9 +2,8 @@
 
 ## Status
 
-Implementation and local validation are complete. Watched HIL is required
-before this milestone is accepted; its reports will be added in a separate
-evidence commit.
+Milestone 7 is accepted. Implementation, local validation, and the complete
+watched HIL sequence passed on the exact production artifact recorded below.
 
 ## Fixed production contract
 
@@ -218,6 +217,72 @@ Run in order:
 Acceptance requires exact logical endpoints/native pulses, bounded home drift,
 complete timing evidence, no pending-at-rearm, saturation, timeout, reset, or
 watchdog increment, passing status cadence, and normal operator observation.
+
+### Accepted debounce qualification
+
+The watched closeout ran on source commit `8f9ef80a` using the normal Debug
+production image, 325,496 bytes, SHA-256
+`E12F9519498B84AC3913F1C6E0DDD56666A9443F9E43D868B7C9B576041523ED`.
+The Pi independently verified that hash before flashing. The source tree had
+only the excluded generated
+`firmware/.settings/language.settings.xml` change; no source or artifact
+change was present.
+
+The complete sequence passed:
+
+- initial, inter-suite, and final SAFE brackets all passed 30/30;
+- selector `2097` passed 5/5 with exact 53,416 X, 90,000 Y, 110,000
+  master-step, and 220,000 TIM2-callback totals;
+- result `2098` observed one Y candidate and rejected it before confirmation
+  (`yc=1;yr=1;yf=0;yp=0`), while X remained clear and the row completed;
+- selector `2096` passed all five direct X/Y/Z LUT rows;
+- selector `2078` passed its exact 60,000-callback camera/home transition;
+- `xy_motion_v1` passed three long-travel repetitions and two raster
+  repetitions (194 raster moves), with maximum X/Y drift of 8/4 steps;
+- `motion_envelope_v1` passed reverse, diagonal, 387-move plate raster, three
+  Z long-travel repetitions, and already-triggered-home rows;
+- general FULL passed 28/28, including four-axis homing and XY home
+  repeatability; and
+- the final SAFE retained `boot=168`, `fault_ct=4`, and `wdg_ct=6`, with all
+  four watchdog participants live, no current late task, and no reset report.
+
+All five focused reports normalized as `pass` with zero blocking issues and
+zero warnings. The operator was present for every motion suite and reported
+normal sound, motion, squareness, and homing. A visibly slow opening segment
+in selector `2078` was consistent with its bounded initial homing/positioning
+phase; exact motion and transition telemetry passed.
+
+Raw evidence (path, SHA-256):
+
+| Evidence | SHA-256 |
+| --- | --- |
+| `hil_reports/m7_limit_debounce_00_pre_safe.json` | `498B672DF7F71168A04B934649310FDF48395FD5CE3381FE4602FC5DE3336E1C` |
+| `hil_reports/m7_limit_debounce_01_coord_2097.json` | `121C59F3DAF9F3962E5900C5BE272C11F5BC4A0E7F6E22FFA5EA3AC83047512F` |
+| `hil_reports/m7_limit_debounce_02_post_2097_safe.json` | `E0723C7EAC40A92B131F4D03DFB9CDE4768311E069BFD463C0BFA9BA4276DA48` |
+| `hil_reports/m7_limit_debounce_03_direct_2096.json` | `61CD1676E03BD7EC608E5DF0F1D48626C3FCDD971D1196704E04B3C6C021935B` |
+| `hil_reports/m7_limit_debounce_04_post_2096_safe.json` | `55C2AA7E955A4A7F7DB9484A12368D074DA26FB8A8D3E5ECECC126A777E48AEC` |
+| `hil_reports/m7_limit_debounce_05_camera_2078.json` | `F98A9D552DED304931F5D60860D33C31527F162F5109B8AD4D92FB6642E76319` |
+| `hil_reports/m7_limit_debounce_06_post_2078_safe.json` | `FEE7ADD95037C4202BC16D22F3921E5D4F7A2EFC7E238D5B6A46AFA0AEC9C280` |
+| `hil_reports/m7_limit_debounce_07_xy_motion.json` | `863D1CA2B65C30166B5D31FE006791F4AD16DB762BDA2D4933A8F439F48FAA9C` |
+| `hil_reports/m7_limit_debounce_08_post_xy_motion_safe.json` | `ACCE6ACDD96E51BB8AA0A21649AB494E350D898B8122463327696D573F8EB422` |
+| `hil_reports/m7_limit_debounce_09_motion_envelope.json` | `FB499002BA60584A5CB7578AC21609902493B813745808F0CF0BD9614A6FF814` |
+| `hil_reports/m7_limit_debounce_10_post_motion_envelope_safe.json` | `B86E86F5B823B9B2C7946BA708BFCAC831AFA173C25C1841F3F012779FA89C13` |
+| `hil_reports/m7_limit_debounce_11_general_full.json` | `9B4F408CD5ACFB19927D931BCB293F8E131CA1BE6241D48FB9522E1609DC8389` |
+| `hil_reports/m7_limit_debounce_12_final_safe.json` | `04F33C7901848E381766DCC3AFA75F1E018062E5D71E4B6262C3D8804AA763C2` |
+
+Normalized reports are retained below
+`hil_reports/m7_limit_debounce_normalized/LC-001/` at timestamps
+`20260813T224449Z`, `20260813T224552Z`, `20260813T224636Z`,
+`20260813T225037Z`, and `20260813T225425Z` for `2097`, `2096`, `2078`,
+`xy_motion_v1`, and `motion_envelope_v1`, respectively. Their `report.json`
+SHA-256 values are, in that order:
+
+- `F7A12A14A98DB9135221CAD23831091625CD7440A9261743532C6399534CEA53`;
+- `B72E8C306574764133BDD7F9BDD3942798A1E7B1F0BDB7B88C4EC7C059CCBD62`;
+- `4FE53BD58E89F3741C448827E53CA01B023619B3C69DCBCA5D8B066B5C341526`;
+- `50501BDFC43E45E02C76EB4124603EDCF1035B8C99102812E3F8A82D2DF73FD6`;
+  and
+- `F9A7755E9F08084C85D68595E0380604135ED4BDB135F844CF8883E301F9560F`.
 
 ## Rollback
 

@@ -225,16 +225,17 @@ Every milestone that touches motion must preserve these invariants:
 | 4. Shared XY executor behind a gate | `verified` | Gated TIM2 executor passes 3 kHz loaded integration without normal routing | Build, SAFE, low-rate motion, pause/cancel/limit, and qualified visual gates pass |
 | 5. Route normal Gantry XY motion | `verified` | Route-enabled candidate passes SAFE, loaded 3 kHz normal-route, M4 regression, physical-limit, and pressure gates | Milestone 5 evidence complete; production-speed use remains blocked on Milestone 6 |
 | 6. Performance and motion HIL qualification | `verified` | Checkpoints A and B are accepted: production MRES=3/conditional rearm and the normalized LUT for ordinary direct X/Y/Z cosine moves passed their independent watched gates. Homing, P/R, coordinated XY, and alternate profiles remain isolated. | Milestone 6 evidence complete |
-| 7. Default enablement and closeout | `not_started` | Legacy fallback decision, docs, and completion record finalized | Full firmware and HIL gates pass |
+| 7. Default enablement and closeout | `verified` | Production MRES=3, normalized LUT motion, fixed conditional rearm, and continuous 15 ms motion-limit confirmation passed the complete watched closeout | Milestone 7 evidence complete |
 
 ## Next Planned Action
 
-Milestone 6 is complete. The next work is the separately scoped Milestone 7
-default-enablement and closeout audit: decide the legacy-gate lifetime, prune
-only genuinely dead diagnostic code, run the final FULL/motion-envelope/camera
-regression matrix, and publish the completion/rollback record. No additional
-MRES=3, conditional-rearm, or direct X/Y/Z LUT implementation change is
-required by the production migration.
+Milestone 7 is complete. The production path and rollback record are fixed,
+obsolete diagnostic branches are removed, and the full watched
+SAFE/coordinated/direct/camera/XY/envelope/FULL matrix is retained in
+`docs/coordinated_xy_milestone7_closeout.md`. The one rejected Y-limit
+candidate in the accepted `2097` row provides direct evidence that continuous
+15 ms confirmation prevented the earlier transient abort without hiding a
+confirmed limit.
 
 Stage 1 is complete at source/artifact commit `b777f993`. Its physical selector
 `2077` run covered all 440,000 callbacks without pending observations, but the

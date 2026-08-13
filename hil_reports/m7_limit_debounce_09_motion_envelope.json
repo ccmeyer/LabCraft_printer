@@ -1,0 +1,740 @@
+{
+  "run_id": 4250059344,
+  "profile": "FULL",
+  "started_at": "2026-08-13T22:51:27.184182Z",
+  "finished_at": "2026-08-13T22:54:05.547052Z",
+  "aborted": false,
+  "summary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0
+  },
+  "results": [
+    {
+      "test_id": 2012,
+      "name": "motion_xy_reverse_travel_factory",
+      "pass": true,
+      "metrics": {
+        "rep": 3,
+        "ref": 2,
+        "pts": 5,
+        "xmax": 44000,
+        "ymax": 34000,
+        "dx": 43900,
+        "dy": 33500,
+        "x_span": 4,
+        "y_span": 2,
+        "x_drift": 4,
+        "y_drift": 2,
+        "x_ret": 0,
+        "y_ret": 0,
+        "ret_err": 0,
+        "move_to": 0,
+        "home_to": 0,
+        "guard": 0,
+        "bound": 0
+      },
+      "timestamp": "2026-08-13T22:51:47.600293Z"
+    },
+    {
+      "test_id": 2013,
+      "name": "motion_xy_diagonal_factory",
+      "pass": true,
+      "metrics": {
+        "rep": 3,
+        "ref": 2,
+        "pts": 5,
+        "xmax": 44000,
+        "ymax": 34000,
+        "dx": 43900,
+        "dy": 33500,
+        "x_span": 2,
+        "y_span": 0,
+        "x_drift": 2,
+        "y_drift": 0,
+        "x_ret": 0,
+        "y_ret": 0,
+        "ret_err": 0,
+        "move_to": 0,
+        "home_to": 0,
+        "guard": 0,
+        "bound": 0
+      },
+      "timestamp": "2026-08-13T22:52:09.095370Z"
+    },
+    {
+      "test_id": 2014,
+      "name": "motion_384_plate_raster_factory",
+      "pass": true,
+      "metrics": {
+        "pc": 1,
+        "pz": 91500,
+        "z_to": 0,
+        "z_home_to": 0,
+        "rep": 1,
+        "ref": 2,
+        "rows": 16,
+        "cols": 24,
+        "moves": 387,
+        "x_span": 0,
+        "y_span": 0,
+        "x_drift": 4,
+        "y_drift": 6,
+        "x_ret": 0,
+        "y_ret": 0,
+        "ret_err": 0,
+        "move_to": 0,
+        "home_to": 0,
+        "guard": 0,
+        "bound": 0
+      },
+      "timestamp": "2026-08-13T22:53:38.342912Z"
+    },
+    {
+      "test_id": 2015,
+      "name": "motion_z_long_travel_factory",
+      "pass": true,
+      "metrics": {
+        "rep": 3,
+        "ref": 2,
+        "anchor_x": 43000,
+        "anchor_y": 13000,
+        "xy_to": 0,
+        "zhz": 30000,
+        "zcap": 60000,
+        "zacc": 140000,
+        "zmax": 80000,
+        "dz": 79900,
+        "z_span": 2,
+        "z_drift": 2,
+        "z_ret": 0,
+        "ret_err": 0,
+        "move_to": 0,
+        "home_to": 0,
+        "guard": 0,
+        "bound": 0
+      },
+      "timestamp": "2026-08-13T22:53:58.931206Z"
+    },
+    {
+      "test_id": 2016,
+      "name": "motion_limit_triggered_home_fact",
+      "pass": true,
+      "metrics": {
+        "axis": "xyz",
+        "offset": 200,
+        "x_span": 0,
+        "y_span": 0,
+        "z_span": 0,
+        "x_drift": 2,
+        "y_drift": 0,
+        "z_drift": 0,
+        "move_to": 0,
+        "home_to": 0,
+        "limit_start": 0
+      },
+      "timestamp": "2026-08-13T22:54:04.946072Z"
+    }
+  ],
+  "host_checks": [
+    {
+      "name": "hello_ack",
+      "pass": true,
+      "details": {
+        "seq8": 1,
+        "run_id": 4250059344,
+        "timeout_ms": 8000,
+        "retry_ms": 250,
+        "retries_sent": 1,
+        "observed_uart_bytes": 128,
+        "fast_fail_on_missing_hello": false,
+        "capabilities": 15,
+        "supports_selftest_transport": true
+      },
+      "timestamp": "2026-08-13T22:51:27.224579Z"
+    },
+    {
+      "name": "selftest_start_ack",
+      "pass": true,
+      "details": {
+        "transport_mode": "queue_ack",
+        "seq8": 2,
+        "seq32": 1,
+        "run_id": 4250059344,
+        "timeout_ms": 2000,
+        "observed_cmd": 254,
+        "observed_seq8": 2,
+        "observed_seq32": 1,
+        "ack_result": "accepted",
+        "expected_seq32": null,
+        "reason": "ok"
+      },
+      "timestamp": "2026-08-13T22:51:27.239343Z"
+    },
+    {
+      "name": "goodbye_ack",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4250059344,
+        "timeout_ms": 2000
+      },
+      "timestamp": "2026-08-13T22:54:05.046337Z"
+    },
+    {
+      "name": "goodbye_done",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4250059344,
+        "timeout_ms": 5000,
+        "observed_seq32": 4250059344
+      },
+      "timestamp": "2026-08-13T22:54:05.546992Z"
+    },
+    {
+      "name": "selftest_progress_watchdog",
+      "pass": true,
+      "details": {
+        "progress_count": 984,
+        "last_progress": {
+          "kind": "progress",
+          "stage": "wait_bits_set",
+          "elapsed_ms": 159137,
+          "stk_hwm_w": 0
+        },
+        "recent_frames": [
+          {
+            "ts": "2026-08-13T22:53:40.283175Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "z_long_reference_home"
+          },
+          {
+            "ts": "2026-08-13T22:53:40.383552Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:53:40.684058Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:53:40.684095Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "z_long_travel"
+          },
+          {
+            "ts": "2026-08-13T22:53:40.784457Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:53:41.685711Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:53:42.687107Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:53:43.588665Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:53:43.588721Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:53:44.590117Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:53:45.591531Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:53:46.392940Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:53:46.392991Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:53:46.757887Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:53:46.757925Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "z_long_travel"
+          },
+          {
+            "ts": "2026-08-13T22:53:46.858290Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:53:47.759597Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:53:48.760986Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:53:49.662508Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:53:49.662558Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:53:50.663953Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:53:51.665351Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:53:52.466738Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:53:52.466782Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:53:52.831645Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:53:52.831682Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "z_long_travel"
+          },
+          {
+            "ts": "2026-08-13T22:53:52.932047Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:53:53.833292Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:53:54.834682Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:53:55.736194Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:53:55.736237Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:53:56.737601Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:53:57.738981Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:53:58.540392Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:53:58.540441Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:53:58.903246Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:53:58.931172Z",
+            "cmd": 251,
+            "test_id": 2015,
+            "name": "motion_z_long_travel_factory"
+          },
+          {
+            "ts": "2026-08-13T22:53:58.931219Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "triggered_limit_home"
+          },
+          {
+            "ts": "2026-08-13T22:53:59.031807Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "triggered_home_x"
+          },
+          {
+            "ts": "2026-08-13T22:53:59.031842Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:54:00.033173Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:54:00.934430Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:54:01.235283Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:54:01.235326Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:54:01.335925Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:54:01.335961Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:54:01.973739Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:54:01.973790Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "triggered_home_y"
+          },
+          {
+            "ts": "2026-08-13T22:54:02.074162Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:54:02.975403Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:54:03.168137Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:54:03.168173Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:54:03.268758Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:54:03.268793Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:54:03.870167Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:54:03.870233Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "triggered_home_z"
+          },
+          {
+            "ts": "2026-08-13T22:54:03.870271Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:54:04.244191Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:54:04.244237Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:54:04.244271Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:54:04.344650Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:54:04.845482Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:54:04.946037Z",
+            "cmd": 251,
+            "test_id": 2016,
+            "name": "motion_limit_triggered_home_fact"
+          },
+          {
+            "ts": "2026-08-13T22:54:04.946086Z",
+            "cmd": 252,
+            "run_id": 4250059344
+          }
+        ],
+        "frame_counts": {
+          "2": 1,
+          "251": 989,
+          "252": 1,
+          "254": 1
+        },
+        "progress_timeout_ms": 60000,
+        "activity_timeout_ms": 120000,
+        "status_only_timeout_ms": 120000,
+        "effective_timeout_ms": 420000,
+        "total_rx_bytes": 108488,
+        "status_frames_since_selftest": 0,
+        "status_gap_max_ms": 0,
+        "status_gap_samples": 0,
+        "selftest_frames_seen": 990,
+        "startup_reset_report": null,
+        "reset_report": null,
+        "last_valid_frame_age_ms": 701,
+        "last_rx_byte_age_ms": 701,
+        "last_selftest_frame_age_ms": 701,
+        "timeout_reason": null
+      },
+      "timestamp": "2026-08-13T22:54:05.547044Z"
+    }
+  ],
+  "startup_reset_report": null,
+  "reset_report": null
+}

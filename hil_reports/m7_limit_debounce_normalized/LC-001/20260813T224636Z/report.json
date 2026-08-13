@@ -1,0 +1,868 @@
+{
+  "schema_version": "qualification_report_v1",
+  "manifest": {
+    "schema_version": "qualification_manifest_v0",
+    "manifest_id": "coordinated_xy_camera_transition_v2",
+    "name": "Production Camera/Home Transition v2",
+    "profile": "FULL",
+    "lifecycle": "active",
+    "expected_test_ids": [
+      2071
+    ],
+    "fixtures": [
+      {
+        "fixture_id": "coordinated_xy_camera_transition_envelope_clear",
+        "required_for": [
+          2071
+        ],
+        "operator_note": "Confirm both limits are released and the complete XY/Z envelope is clear. The suite homes Z and XY, runs one production camera-ratio round trip, and immediately performs a bounded X home."
+      }
+    ],
+    "enforce_expected_test_ids": true,
+    "requires_operator_prompts": true,
+    "selftest_args": [
+      "--coordinated-xy-camera-transition-suite"
+    ],
+    "required_host_checks": [
+      "selftest_progress_watchdog",
+      "coordinated_xy_status_cadence"
+    ],
+    "analysis_rules": {
+      "2071": {
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metrics": {
+          "fs": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "n": {
+            "maturity": "acceptance",
+            "equals": 2
+          },
+          "xe": {
+            "maturity": "acceptance",
+            "equals": 8416
+          },
+          "ye": {
+            "maturity": "acceptance",
+            "equals": 30000
+          },
+          "i2": {
+            "maturity": "acceptance",
+            "equals": 60000
+          },
+          "i7": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "pu": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "en": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "sl": {
+            "maturity": "acceptance",
+            "equals": 1
+          },
+          "ow": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "lb": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "hs": {
+            "maturity": "acceptance",
+            "equals": 8916
+          },
+          "he": {
+            "maturity": "acceptance",
+            "equals": 100
+          },
+          "hg": {
+            "maturity": "acceptance",
+            "equals": 11916
+          },
+          "hi": {
+            "maturity": "acceptance",
+            "equals": 101
+          },
+          "hpc": {
+            "maturity": "acceptance",
+            "equals": 50
+          },
+          "hpu": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "hd": {
+            "maturity": "acceptance",
+            "max": 25
+          },
+          "sf": {
+            "maturity": "acceptance",
+            "equals": 0
+          },
+          "to": {
+            "maturity": "acceptance",
+            "equals": 0
+          }
+        }
+      }
+    }
+  },
+  "machine": {
+    "machine_id": "LC-001",
+    "machine_uuid": "dc0f3c73-0eef-4298-a491-148f7ff5713e",
+    "assigned_at": "2026-08-11T19:48:35.686298Z",
+    "notes": ""
+  },
+  "run": {
+    "run_dir": "hil_reports\\m7_limit_debounce_normalized\\LC-001\\20260813T224636Z",
+    "raw_selftest_path": "hil_reports\\m7_limit_debounce_normalized\\LC-001\\20260813T224636Z\\raw_selftest.json",
+    "report_path": "hil_reports\\m7_limit_debounce_normalized\\LC-001\\20260813T224636Z\\report.json",
+    "summary_csv_path": "hil_reports\\m7_limit_debounce_normalized\\LC-001\\20260813T224636Z\\summary.csv",
+    "selftest_returncode": 0,
+    "fixture_id": null
+  },
+  "overall_status": "pass",
+  "raw_summary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0
+  },
+  "run_id": 4249732936,
+  "profile": "FULL",
+  "started_at": "2026-08-13T22:46:00.776455Z",
+  "finished_at": "2026-08-13T22:46:16.155863Z",
+  "aborted": false,
+  "manifest_checks": {
+    "expected_test_ids": [
+      2071
+    ],
+    "observed_test_ids": [
+      2071
+    ],
+    "missing_test_ids": [],
+    "unexpected_test_ids": [],
+    "enforced": true
+  },
+  "results": [
+    {
+      "test_id": 2071,
+      "name": "coord_xy_camera_home_transition",
+      "pass": true,
+      "metrics": {
+        "fs": 0,
+        "n": 2,
+        "xe": 8416,
+        "ye": 30000,
+        "i2": 60000,
+        "i7": 0,
+        "pu": 0,
+        "en": 1,
+        "sl": 1,
+        "ow": 0,
+        "lb": 0,
+        "hs": 8916,
+        "he": 100,
+        "hg": 11916,
+        "hi": 101,
+        "hpc": 50,
+        "hpu": 0,
+        "hd": 2,
+        "sf": 0,
+        "to": 0
+      },
+      "timestamp": "2026-08-13T22:46:15.655044Z"
+    }
+  ],
+  "host_checks": [
+    {
+      "name": "hello_ack",
+      "pass": true,
+      "details": {
+        "seq8": 1,
+        "run_id": 4249732936,
+        "timeout_ms": 8000,
+        "retry_ms": 250,
+        "retries_sent": 1,
+        "observed_uart_bytes": 128,
+        "fast_fail_on_missing_hello": false,
+        "capabilities": 15,
+        "supports_selftest_transport": true
+      },
+      "timestamp": "2026-08-13T22:46:00.848201Z"
+    },
+    {
+      "name": "selftest_start_ack",
+      "pass": true,
+      "details": {
+        "transport_mode": "queue_ack",
+        "seq8": 2,
+        "seq32": 1,
+        "run_id": 4249732936,
+        "timeout_ms": 2000,
+        "observed_cmd": 254,
+        "observed_seq8": 2,
+        "observed_seq32": 1,
+        "ack_result": "accepted",
+        "expected_seq32": null,
+        "reason": "ok"
+      },
+      "timestamp": "2026-08-13T22:46:00.862916Z"
+    },
+    {
+      "name": "goodbye_ack",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4249732936,
+        "timeout_ms": 2000
+      },
+      "timestamp": "2026-08-13T22:46:15.755323Z"
+    },
+    {
+      "name": "goodbye_done",
+      "pass": true,
+      "details": {
+        "seq8": 3,
+        "run_id": 4249732936,
+        "timeout_ms": 5000,
+        "observed_seq32": 4249732936
+      },
+      "timestamp": "2026-08-13T22:46:16.155812Z"
+    },
+    {
+      "name": "selftest_progress_watchdog",
+      "pass": true,
+      "details": {
+        "progress_count": 17,
+        "last_progress": {
+          "kind": "progress",
+          "stage": "wait_bits_set",
+          "elapsed_ms": 14803,
+          "stk_hwm_w": 0
+        },
+        "recent_frames": [
+          {
+            "ts": "2026-08-13T22:46:00.862957Z",
+            "cmd": 254,
+            "ack_result": "accepted",
+            "ack_seq32": 1,
+            "expected_seq32": null
+          },
+          {
+            "ts": "2026-08-13T22:46:00.963282Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_camera_transition_envelope_clear"
+          },
+          {
+            "ts": "2026-08-13T22:46:00.997111Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "evap_plate_confirmed"
+          },
+          {
+            "ts": "2026-08-13T22:46:00.997156Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_production_z_home"
+          },
+          {
+            "ts": "2026-08-13T22:46:01.097462Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:46:01.398089Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:46:01.398117Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_production_x_home"
+          },
+          {
+            "ts": "2026-08-13T22:46:01.498384Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:46:02.399510Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:46:02.499932Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_production_y_home"
+          },
+          {
+            "ts": "2026-08-13T22:46:02.499957Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:46:03.145094Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:46:11.714744Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "coordinated_xy_camera_transition_x_home"
+          },
+          {
+            "ts": "2026-08-13T22:46:11.714812Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_enter"
+          },
+          {
+            "ts": "2026-08-13T22:46:12.716160Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:46:13.617451Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:46:14.618855Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits"
+          },
+          {
+            "ts": "2026-08-13T22:46:15.554423Z",
+            "cmd": 251,
+            "test_id": 0,
+            "name": "selftest_progress",
+            "progress": true,
+            "stage": "wait_bits_set"
+          },
+          {
+            "ts": "2026-08-13T22:46:15.655000Z",
+            "cmd": 251,
+            "test_id": 2071,
+            "name": "coord_xy_camera_home_transition"
+          },
+          {
+            "ts": "2026-08-13T22:46:15.655059Z",
+            "cmd": 252,
+            "run_id": 4249732936
+          }
+        ],
+        "frame_counts": {
+          "2": 135,
+          "251": 18,
+          "252": 1,
+          "254": 1
+        },
+        "progress_timeout_ms": 15000,
+        "activity_timeout_ms": 120000,
+        "status_only_timeout_ms": 120000,
+        "effective_timeout_ms": 240000,
+        "total_rx_bytes": 21242,
+        "status_frames_since_selftest": 0,
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 133,
+        "selftest_frames_seen": 19,
+        "startup_reset_report": null,
+        "reset_report": null,
+        "last_valid_frame_age_ms": 601,
+        "last_rx_byte_age_ms": 601,
+        "last_selftest_frame_age_ms": 601,
+        "timeout_reason": null
+      },
+      "timestamp": "2026-08-13T22:46:16.155850Z"
+    },
+    {
+      "name": "coordinated_xy_status_cadence",
+      "pass": true,
+      "details": {
+        "status_gap_max_ms": 100,
+        "status_gap_samples": 133,
+        "limit_ms_exclusive": 500
+      },
+      "timestamp": "2026-08-13T22:46:16.155858Z"
+    }
+  ],
+  "analysis": {
+    "schema_version": "qualification_analysis_v1",
+    "status": "pass",
+    "items": [
+      {
+        "item_kind": "firmware_result",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Raw firmware result passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "hello_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "selftest_start_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "goodbye_ack",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "goodbye_done",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "selftest_progress_watchdog",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      },
+      {
+        "item_kind": "host_check",
+        "name": "coordinated_xy_status_cadence",
+        "status": "pass",
+        "severity": "info",
+        "failure_domain": "none",
+        "message": "Host check passed."
+      }
+    ],
+    "metric_evaluations": [
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "fs",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: fs=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "n",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 2,
+        "message": "Metric within threshold: n=2, equals=2.",
+        "metric_value": 2,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "xe",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 8416,
+        "message": "Metric within threshold: xe=8416, equals=8416.",
+        "metric_value": 8416,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ye",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 30000,
+        "message": "Metric within threshold: ye=30000, equals=30000.",
+        "metric_value": 30000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "i2",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 60000,
+        "message": "Metric within threshold: i2=60000, equals=60000.",
+        "metric_value": 60000,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "i7",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: i7=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "pu",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: pu=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "en",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: en=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sl",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 1,
+        "message": "Metric within threshold: sl=1, equals=1.",
+        "metric_value": 1,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "ow",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: ow=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "lb",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: lb=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "hs",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 8916,
+        "message": "Metric within threshold: hs=8916, equals=8916.",
+        "metric_value": 8916,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "he",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 100,
+        "message": "Metric within threshold: he=100, equals=100.",
+        "metric_value": 100,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "hg",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 11916,
+        "message": "Metric within threshold: hg=11916, equals=11916.",
+        "metric_value": 11916,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "hi",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 101,
+        "message": "Metric within threshold: hi=101, equals=101.",
+        "metric_value": 101,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "hpc",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 50,
+        "message": "Metric within threshold: hpc=50, equals=50.",
+        "metric_value": 50,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "hpu",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: hpu=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "hd",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": 25,
+        "threshold_expected": null,
+        "message": "Metric within threshold: hd=2, max=25.",
+        "metric_value": 2,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "sf",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: sf=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      },
+      {
+        "item_kind": "metric",
+        "test_id": 2071,
+        "name": "coord_xy_camera_home_transition",
+        "category": "performance",
+        "failure_domain": "firmware_motion",
+        "metric_name": "to",
+        "threshold_maturity": "acceptance",
+        "threshold_min": null,
+        "threshold_max": null,
+        "threshold_expected": 0,
+        "message": "Metric within threshold: to=0, equals=0.",
+        "metric_value": 0,
+        "status": "pass",
+        "severity": "info"
+      }
+    ],
+    "summary": {
+      "item_count": 7,
+      "metric_evaluation_count": 20,
+      "blocking_issue_count": 0,
+      "warning_count": 0
+    },
+    "verdict": {
+      "status": "pass",
+      "blocking_issue_count": 0,
+      "warning_count": 0,
+      "reason": "No blocking analyzer issues."
+    },
+    "warnings": [],
+    "operator_notes": [
+      {
+        "fixture_id": "coordinated_xy_camera_transition_envelope_clear",
+        "required_for": [
+          2071
+        ],
+        "message": "Confirm both limits are released and the complete XY/Z envelope is clear. The suite homes Z and XY, runs one production camera-ratio round trip, and immediately performs a bounded X home."
+      }
+    ]
+  },
+  "verdict": {
+    "status": "pass",
+    "blocking_issue_count": 0,
+    "warning_count": 0,
+    "reason": "No blocking analyzer issues."
+  },
+  "warnings": [],
+  "operator_notes": [
+    {
+      "fixture_id": "coordinated_xy_camera_transition_envelope_clear",
+      "required_for": [
+        2071
+      ],
+      "message": "Confirm both limits are released and the complete XY/Z envelope is clear. The suite homes Z and XY, runs one production camera-ratio round trip, and immediately performs a bounded X home."
+    }
+  ],
+  "operator_interactions": []
+}
