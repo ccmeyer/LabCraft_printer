@@ -96,10 +96,8 @@ public:
                                              int64_t dy,
                                              uint32_t requestedRateHz = 0u);
   CoordinatedXySnapshot coordinatedSnapshot() const;
-  bool requestCoordinatedLimitAbort(Stepper::Axis axis);
   static bool dispatchCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim);
   static void recordCoordinatedTim2IrqExitFromIsr(uint32_t irqExitCycle);
-  static void requestCoordinatedLimitAbortFromIsr(Stepper::Axis axis);
 
   static void pauseXYZMotors();
   static void resumeXYZMotors();
@@ -122,7 +120,6 @@ private:
   void _finishCoordinatedFromIsr(bool aborted,
                                  BaseType_t* woken,
                                  bool timingSampleWillFollow = false);
-  bool _requestCoordinatedLimitAbortTask(Stepper::Axis axis);
   bool _handleCoordinatedTimerFromIsr(TIM_HandleTypeDef* htim);
 #if defined(__GNUC__) && !defined(UNIT_TEST)
   __attribute__((hot))

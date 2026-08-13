@@ -22,7 +22,7 @@ def test_discover_suite_entries_lists_current_manifests():
         "motion_timing_v1",
         "profile_lut_benchmark_v1",
         "coordinated_xy_camera_transition_v2",
-        "coordinated_xy_production_mres3_v2",
+        "coordinated_xy_production_mres3_v3",
         "direct_xyz_lut_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
@@ -153,7 +153,7 @@ def test_production_mres3_suite_requires_fixed_conditional_contract():
         entry.manifest_id: entry
         for entry in discover_suite_entries(MANIFEST_ROOT)
     }
-    manifest = entries["coordinated_xy_production_mres3_v2"].manifest
+    manifest = entries["coordinated_xy_production_mres3_v3"].manifest
 
     assert manifest.lifecycle == "active"
     assert manifest.profile == "FULL"
@@ -162,7 +162,7 @@ def test_production_mres3_suite_requires_fixed_conditional_contract():
         "coordinated_xy_production_mres3_envelope_clear",
     )
     assert [row.test_id for row in build_test_plan_rows(manifest)] == [
-        2087, 2088, 2089, 2090
+        2087, 2088, 2089, 2090, 2098
     ]
     motion = manifest.analysis_rules["2087"]["metrics"]
     assert motion["n"]["equals"] == 10
@@ -174,6 +174,11 @@ def test_production_mres3_suite_requires_fixed_conditional_contract():
     assert schedule["ns"]["min"] == 1126
     assert schedule["rp"]["equals"] == 0
     assert manifest.analysis_rules["2090"]["metrics"]["lu"]["equals"] == 2
+    debounce = manifest.analysis_rules["2098"]["metrics"]
+    assert debounce["db"]["equals"] == 15
+    assert debounce["tv"]["equals"] == 1
+    assert debounce["xf"]["equals"] == 0
+    assert debounce["yf"]["equals"] == 0
 
 
 def test_archived_coordinated_suites_are_not_discoverable():
@@ -189,6 +194,7 @@ def test_archived_coordinated_suites_are_not_discoverable():
         "coordinated_xy_mres3_rearm_v1",
         "coordinated_xy_mres3_conditional_rearm_v3",
         "coordinated_xy_production_mres3_v1",
+        "coordinated_xy_production_mres3_v2",
         "coordinated_xy_camera_transition_v1",
     ):
         assert manifest_id not in entries

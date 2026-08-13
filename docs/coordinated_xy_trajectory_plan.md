@@ -1120,6 +1120,25 @@ the camera-session-to-home regression sequence.
 - Rollback is documented through the accepted hashed artifacts; no legacy
   runtime or compile-time routing branch remains in the production source.
 
+## Milestone 7 motion-limit debounce revision
+
+The production executor and direct Stepper paths now share a fixed continuous
+15 ms motion-limit confirmation policy. Raw EXTI edges only mask/rearm and
+start candidates. X/Y coordinated TIM2 and X/Y/Z/P/R direct timer callbacks
+sample the raw input, reject any candidate that releases before the threshold,
+and perform the existing safe-edge stop only after confirmation. Stationary
+coordinated startup repeats the same check after axis reservation. Moving away
+from an asserted home switch is allowed, but a full 15 ms released interval is
+required before the next approach. DWT timing is wrap-safe and missing timing
+fails safe by confirming an assertion immediately.
+
+Production selector `2097` adds result `2098` and active manifest
+`coordinated_xy_production_mres3_v3`. Rejected transients remain accepted and
+visible; confirmed or pending X/Y assertions, invalid timing, saturation,
+timeout, or an abnormal coordinated terminal reason fail closed. The v2
+manifest remains archived for normalization of the retained pre-debounce HIL
+reports.
+
 ## Validation Command Matrix
 
 Before editing firmware in any milestone, read `firmware/AGENTS.md` and list the

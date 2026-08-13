@@ -1,11 +1,11 @@
 {
   "schema_version": "qualification_manifest_v0",
-  "manifest_id": "coordinated_xy_production_mres3_v2",
-  "name": "Production MRES3 Conditional-Rearm v2",
+  "manifest_id": "coordinated_xy_production_mres3_v3",
+  "name": "Production MRES3 Conditional-Rearm and Limit Debounce v3",
   "profile": "FULL",
-  "lifecycle": "archived",
-  "description": "Milestone 7 production qualification for legacy logical coordinates mapped to MRES=3 native steps, fixed two-edge TIM2 execution, and conditional late rearming.",
-  "expected_test_ids": [2087, 2088, 2089, 2090],
+  "lifecycle": "active",
+  "description": "Milestone 7 production qualification for legacy logical coordinates mapped to MRES=3 native steps, fixed two-edge TIM2 execution, conditional late rearming, and continuous 15 ms X/Y motion-limit confirmation.",
+  "expected_test_ids": [2087, 2088, 2089, 2090, 2098],
   "enforce_expected_test_ids": true,
   "requires_operator_prompts": true,
   "selftest_args": ["--coordinated-xy-production-mres3-suite"],
@@ -13,8 +13,8 @@
   "fixtures": [
     {
       "fixture_id": "coordinated_xy_production_mres3_envelope_clear",
-      "required_for": [2087, 2088, 2089, 2090],
-      "operator_note": "Confirm both limits are released, the gantry is square, and the full XY/Z envelope is clear. Stop for contact, abnormal sound, lost squareness, missing motion or home, reset, watchdog evidence, or communication loss."
+      "required_for": [2087, 2088, 2089, 2090, 2098],
+      "operator_note": "Confirm both limits are released, the gantry is square, and the full XY/Z envelope is clear. Stop for contact, abnormal sound, lost squareness, excessive travel, missing motion or home, reset, watchdog evidence, or communication loss."
     }
   ],
   "analysis_rules": {
@@ -91,6 +91,23 @@
         "ve": {"maturity": "acceptance", "equals": 1},
         "ae": {"maturity": "acceptance", "equals": 1},
         "lu": {"maturity": "acceptance", "equals": 2},
+        "sf": {"maturity": "acceptance", "equals": 0},
+        "to": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "2098": {
+      "category": "safety",
+      "failure_domain": "firmware_motion_limit",
+      "metrics": {
+        "db": {"maturity": "acceptance", "equals": 15},
+        "n": {"maturity": "acceptance", "equals": 10},
+        "xf": {"maturity": "acceptance", "equals": 0},
+        "xp": {"maturity": "acceptance", "equals": 0},
+        "yf": {"maturity": "acceptance", "equals": 0},
+        "yp": {"maturity": "acceptance", "equals": 0},
+        "tv": {"maturity": "acceptance", "equals": 1},
+        "tf": {"maturity": "acceptance", "equals": 0},
+        "tr": {"maturity": "acceptance", "equals": 1},
         "sf": {"maturity": "acceptance", "equals": 0},
         "to": {"maturity": "acceptance", "equals": 0}
       }

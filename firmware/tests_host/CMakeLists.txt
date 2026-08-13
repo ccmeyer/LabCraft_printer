@@ -43,6 +43,7 @@ add_executable(fw_tests
     tests/test_stepper_isr_instrumentation.cpp
     tests/test_stepper_instrumentation_report.cpp
     tests/test_stepper_limit_policy.cpp
+    tests/test_motion_limit_debounce_policy.cpp
     tests/test_exti_debounce.cpp
     tests/test_crash_log_codec.cpp
     tests/test_crash_fault_context.cpp

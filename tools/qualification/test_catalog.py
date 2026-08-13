@@ -93,6 +93,7 @@ TEST_CATALOG: dict[int, TestCatalogEntry] = {
     2088: TestCatalogEntry(2088, "Production MRES3 IRQ path", "Full two-edge TIM2 IRQ coverage for production MRES=3 coordinated motion."),
     2089: TestCatalogEntry(2089, "Production conditional late rearm", "Production conditional-rearm decisions, deadline margin, and recovered late-service evidence without synthetic injection."),
     2090: TestCatalogEntry(2090, "Production TMC2208 MRES3 configuration", "Production MRES=3, DEDGE, multistep-filter, and legacy logical-unit conversion evidence."),
+    2098: TestCatalogEntry(2098, "Coordinated XY motion-limit debounce", "Continuous 15 ms X/Y motion-limit confirmation, transient rejection, timebase, and terminal-reason evidence."),
     2091: TestCatalogEntry(2091, "Direct X normalized LUT", "Ordinary direct X cruise-capable motion using the fixed-point normalized cosine profile with exact native pulses and ISR timing."),
     2092: TestCatalogEntry(2092, "Direct Y normalized LUT", "Ordinary direct Y cruise-capable motion using the fixed-point normalized cosine profile with exact native pulses and ISR timing."),
     2093: TestCatalogEntry(2093, "Direct Z normalized LUT", "Ordinary direct Z cruise-capable motion using the fixed-point normalized cosine profile and exact endpoint evidence."),

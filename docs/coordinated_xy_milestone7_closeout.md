@@ -57,12 +57,47 @@ maxima, duration, ownership, STEP-low state, DWT wraps, and saturation.
 Production result IDs are:
 
 - `2097` selector -> `2087` motion, `2088` IRQ path, `2089` conditional
-  schedule, `2090` driver configuration;
+  schedule, `2090` driver configuration, and `2098` continuous motion-limit
+  debounce attribution;
 - `2096` selector -> `2091` through `2095` direct X/Y/Z LUT regression;
 - `2078` selector -> `2071` production camera-ratio/home transition.
 
-Active manifests are `coordinated_xy_production_mres3_v2`,
+Active manifests are `coordinated_xy_production_mres3_v3`,
 `direct_xyz_lut_v1`, and `coordinated_xy_camera_transition_v2`.
+
+## Continuous motion-limit confirmation revision
+
+The transient-stop evidence above exposed that raw X/Y samples could bypass
+the configured debounce. Production now uses one fixed 15 ms policy for all
+Stepper endstops X/Y/Z/P/R. Raw EXTI handlers mask/rearm their line and start a
+candidate but never latch a hit, stop an axis, or request a coordinated abort.
+The active axis timer ISR samples the GPIO; a release rejects the candidate,
+while an uninterrupted assertion confirms at the 15 ms DWT-cycle boundary.
+Confirmed direct and coordinated stops retain the established safe-edge
+cleanup so STEP is low and completed pulses are accounted exactly.
+
+Moving away from an already asserted home switch remains allowed. The switch
+must then remain continuously released for 15 ms before another approach.
+Coordinated startup performs the same stationary confirmation both before and
+after reserving X/Y. DWT arithmetic is wrap-safe; an unavailable DWT confirms
+an asserted input immediately and causes result `2098` to fail its timebase
+gate. Z remains active-high with no internal pull. PG13/PG14 keep their
+separate existing 15 ms pressure-regulator debounce.
+
+Result `2098` reports X/Y candidates, rejected transients, confirmations and
+pending state, timebase validity/failures, first abnormal terminal reason,
+saturation, and timeout. Candidates and rejected transients are informational;
+confirmed or unresolved inputs during the motion row fail qualification.
+Manifest v2 is archived for historical normalization and v3 is the only live
+production coordinated manifest.
+
+The debounce revision uses 312,352 bytes text, 13,128 data, and 81,864 BSS.
+Its versioned production binary is 325,496 bytes with SHA-256
+`E12F9519498B84AC3913F1C6E0DDD56666A9443F9E43D868B7C9B576041523ED`.
+The 200-byte binary and 184-byte BSS increases hold the bounded policy and five
+per-axis states. The inspected coordinated ISR remains a 120-byte body plus a
+24-byte optimized debounce helper, preserving the 144-byte call-depth
+envelope. Obsolete immediate-limit ISR/task APIs are absent from the ELF.
 
 ## Build and size record
 
@@ -71,8 +106,8 @@ The accepted parent baseline is commit `a9c8bcde`. Its production artifact was
 `09A00B221816B73390666BB1A084EE7009DF9555072965E1F7C659B9683DF2FB`.
 The baseline Debug ELF used 344,080 bytes text, 13,128 data, and 81,880 BSS.
 
-The current closeout build uses 312,152 bytes text, 13,128 data, and 81,680
-BSS. The production binary is 325,296 bytes with SHA-256
+The pre-debounce closeout build uses 312,152 bytes text, 13,128 data, and 81,680
+BSS. Its production binary is 325,296 bytes with SHA-256
 `4EEC9952F564947A5293CE6A1198DA4397A9E6D084A4E7266493F4403BE7AB4D`.
 This is a 31,928-byte binary/text reduction and a 200-byte BSS reduction from
 the accepted baseline. The fixed conditional TIM2 body has a 120-byte static
@@ -96,8 +131,8 @@ git diff --check
 
 Final local results:
 
-- Python: 4,623 passed, 135 skipped;
-- firmware host: 397 tests, 8,723,791 checks, zero failures;
+- Python: 4,625 passed, 135 skipped;
+- firmware host: 400 tests, 8,723,795 checks, zero failures;
 - Debug firmware: zero build errors (three pre-existing C++17-extension
   warnings in `callbacks.cpp`);
 - `git diff --check`: clean.
@@ -167,7 +202,7 @@ abort, reset, watchdog increment, incomplete telemetry, or communication loss.
 Run in order:
 
 1. SAFE (30/30).
-2. Selector `2097`, manifest `coordinated_xy_production_mres3_v2`.
+2. Selector `2097`, manifest `coordinated_xy_production_mres3_v3`.
 3. SAFE.
 4. Selector `2096`, manifest `direct_xyz_lut_v1`.
 5. SAFE.
@@ -185,6 +220,12 @@ complete timing evidence, no pending-at-rearm, saturation, timeout, reset, or
 watchdog increment, passing status cadence, and normal operator observation.
 
 ## Rollback
+
+The immediate debounce-revision rollback is source commit `9afc8a76` and its
+325,296-byte artifact, SHA-256
+`4EEC9952F564947A5293CE6A1198DA4397A9E6D084A4E7266493F4403BE7AB4D`.
+That rollback restores the prior raw-limit bypass and is for recovery only,
+not an accepted production closeout.
 
 Immediate rollback is commit `5750b3ca` and its accepted 357,224-byte artifact,
 SHA-256

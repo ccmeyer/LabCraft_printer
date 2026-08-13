@@ -331,7 +331,28 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
     _coordinatedStartStatus = CoordinatedStartStatus::InvalidPlan;
     return _coordinatedStartStatus;
   }
-  if (sx->_isLimitAsserted() || sy->_isLimitAsserted()) {
+  const bool xParticipates = plan.xSteps != 0u;
+  const bool yParticipates = plan.ySteps != 0u;
+  const bool xDirection =
+      plan.xDirection == CoordinatedXyPlanner::Direction::Positive;
+  const bool yDirection =
+      plan.yDirection == CoordinatedXyPlanner::Direction::Positive;
+  auto limitBlocksStart = [](Stepper* stepper,
+                             bool participates,
+                             bool direction) {
+    if (participates && direction != stepper->_homeTowardLimitDir &&
+        stepper->_isLimitAsserted()) {
+      return false;
+    }
+    if (participates && direction == stepper->_homeTowardLimitDir &&
+        stepper->_limitDebounceIgnoreUntilRelease &&
+        !stepper->_confirmReleasedForNextApproach(nullptr)) {
+      return true;
+    }
+    return stepper->_sampleLimitStable(nullptr).stable;
+  };
+  if (limitBlocksStart(sx, xParticipates, xDirection) ||
+      limitBlocksStart(sy, yParticipates, yDirection)) {
     _coordinatedStartStatus = CoordinatedStartStatus::LimitAsserted;
     return _coordinatedStartStatus;
   }
@@ -387,7 +408,8 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
     _coordinatedStartStatus = CoordinatedStartStatus::Busy;
     return _coordinatedStartStatus;
   }
-  if (sx->_isLimitAsserted() || sy->_isLimitAsserted()) {
+  if (limitBlocksStart(sx, xParticipates, xDirection) ||
+      limitBlocksStart(sy, yParticipates, yDirection)) {
     sy->_releaseCoordinatedReservation();
     sx->_releaseCoordinatedReservation();
     _coordinatedStartStatus = CoordinatedStartStatus::LimitAsserted;
@@ -399,15 +421,13 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
   __HAL_TIM_CLEAR_FLAG(sx->_htim, TIM_FLAG_UPDATE);
   __HAL_TIM_CLEAR_FLAG(sy->_htim, TIM_FLAG_UPDATE);
 
-  const bool xParticipates = plan.xSteps != 0u;
-  const bool yParticipates = plan.ySteps != 0u;
   sx->_prepareCoordinatedAxis(
       xParticipates,
-      plan.xDirection == CoordinatedXyPlanner::Direction::Positive,
+      xDirection,
       xMove.target);
   sy->_prepareCoordinatedAxis(
       yParticipates,
-      plan.yDirection == CoordinatedXyPlanner::Direction::Positive,
+      yDirection,
       yMove.target);
 
   _coordinatedPlan = plan;
@@ -579,12 +599,34 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
 #endif
   CoordinatedXyExecutor::ControlDisposition observedLimit =
       CoordinatedXyExecutor::ControlDisposition::AlreadySatisfied;
-  if (_coordinatedX != nullptr &&
-      _coordinatedX->_coordinatedLimitAssertedFast()) {
+  bool xLimitConfirmed = false;
+  bool yLimitConfirmed = false;
+  if (_coordinatedX != nullptr) {
+    const bool asserted = _coordinatedX->_coordinatedLimitAssertedFast();
+    if (asserted ||
+        _coordinatedX->_limitDebounceState.phase ==
+            MotionLimitDebouncePolicy::Phase::Pending ||
+        _coordinatedX->_limitDebounceIgnoreUntilRelease) {
+      _coordinatedX->_observeLimitLevelFromIsr(asserted, entryCycle);
+    }
+    xLimitConfirmed = _coordinatedX->_takeConfirmedLimitFromIsr();
+  }
+  if (_coordinatedY != nullptr) {
+    const bool asserted = _coordinatedY->_coordinatedLimitAssertedFast();
+    if (asserted ||
+        _coordinatedY->_limitDebounceState.phase ==
+            MotionLimitDebouncePolicy::Phase::Pending ||
+        _coordinatedY->_limitDebounceIgnoreUntilRelease) {
+      _coordinatedY->_observeLimitLevelFromIsr(asserted, entryCycle);
+    }
+    if (!xLimitConfirmed) {
+      yLimitConfirmed = _coordinatedY->_takeConfirmedLimitFromIsr();
+    }
+  }
+  if (xLimitConfirmed) {
     observedLimit = CoordinatedXyExecutor::requestLimitAbort(
         _coordinatedCursor, CoordinatedXyExecutor::LimitAxis::X);
-  } else if (_coordinatedY != nullptr &&
-             _coordinatedY->_coordinatedLimitAssertedFast()) {
+  } else if (yLimitConfirmed) {
     observedLimit = CoordinatedXyExecutor::requestLimitAbort(
         _coordinatedCursor, CoordinatedXyExecutor::LimitAxis::Y);
   }
@@ -1012,55 +1054,6 @@ bool Gantry::_cancelCoordinatedTask() {
   }
   return disposition == CoordinatedXyExecutor::ControlDisposition::Deferred ||
          disposition == CoordinatedXyExecutor::ControlDisposition::StopNow;
-}
-
-bool Gantry::_requestCoordinatedLimitAbortTask(Stepper::Axis axis) {
-  if (axis != Stepper::X_AXIS && axis != Stepper::Y_AXIS) return false;
-  bool signalDone = false;
-  taskENTER_CRITICAL();
-  const CoordinatedXyExecutor::ControlDisposition disposition =
-      CoordinatedXyExecutor::requestLimitAbort(
-          _coordinatedCursor,
-          axis == Stepper::X_AXIS ? CoordinatedXyExecutor::LimitAxis::X
-                                  : CoordinatedXyExecutor::LimitAxis::Y);
-  if (disposition == CoordinatedXyExecutor::ControlDisposition::StopNow) {
-    _finishCoordinatedHardware(true);
-#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
-    CoordinatedXyIsrInstrumentation::finishWithoutSample(
-        _coordinatedTiming, gantryCycleNow(), true);
-#endif
-    signalDone = true;
-  }
-  taskEXIT_CRITICAL();
-  if (signalDone) {
-    xEventGroupSetBits(Orchestrator::getDoneEvents(),
-                       BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
-  }
-  return disposition == CoordinatedXyExecutor::ControlDisposition::Deferred ||
-         disposition == CoordinatedXyExecutor::ControlDisposition::StopNow ||
-         disposition == CoordinatedXyExecutor::ControlDisposition::AlreadySatisfied;
-}
-
-bool Gantry::requestCoordinatedLimitAbort(Stepper::Axis axis) {
-  return _requestCoordinatedLimitAbortTask(axis);
-}
-
-void Gantry::requestCoordinatedLimitAbortFromIsr(Stepper::Axis axis) {
-  Gantry* gantry = _instance;
-  if (gantry == nullptr ||
-      (axis != Stepper::X_AXIS && axis != Stepper::Y_AXIS)) {
-    return;
-  }
-  const CoordinatedXyExecutor::ControlDisposition requestDisposition =
-      CoordinatedXyExecutor::requestLimitAbort(
-          gantry->_coordinatedCursor,
-          axis == Stepper::X_AXIS ? CoordinatedXyExecutor::LimitAxis::X
-                                  : CoordinatedXyExecutor::LimitAxis::Y);
-  if (requestDisposition == CoordinatedXyExecutor::ControlDisposition::StopNow) {
-    BaseType_t woken = pdFALSE;
-    gantry->_finishCoordinatedFromIsr(true, &woken);
-    portYIELD_FROM_ISR(woken);
-  }
 }
 
 void Gantry::pauseXYZMotors() {

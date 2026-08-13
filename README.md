@@ -2662,6 +2662,16 @@ and acceleration in the historical MRES=2 logical units. Ordinary cosine
 profile X/Y/Z moves use the normalized LUT; homes, limit soft stops, P/R, and
 alternate direct profiles retain their specialized paths.
 
+All X/Y/Z/P/R motion limit inputs use the same continuous 15 ms confirmation
+policy. A raw EXTI edge starts and temporarily masks a candidate; it cannot
+stop motion. The active axis timer (or coordinated TIM2) samples the level and
+stops only after 15 ms of uninterrupted assertion, at a STEP-low boundary. A
+release rejects the candidate and the next assertion must serve a full new
+window. DWT supplies wrap-safe timing; if that timebase is unavailable, an
+asserted input confirms immediately as the fail-safe behavior. Z retains its
+active-high/no-pull electrical configuration. The pressure-regulator PG13/PG14
+inner switches keep their existing independent 15 ms deferred notification.
+
 The strict production timing contract keeps active callbacks at or below
 2,025 core cycles and terminal cleanup at or below 2,700 cycles. Terminal
 cleanup occurs after the final STEP edge while TIM2 is stopping; the separate
@@ -2671,8 +2681,8 @@ active edge deadline or the 1,125-tick rearm guard.
 The supported coordinated-motion selectors are now:
 
 ```bash
-python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-production-mres3-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_production_mres3_v2.json
-python3 tools/run_qualification.py --manifest coordinated_xy_production_mres3_v2 --operator-prompts --fixture coordinated_xy_production_mres3_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_production_mres3_v2.json
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-production-mres3-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_production_mres3_v3.json
+python3 tools/run_qualification.py --manifest coordinated_xy_production_mres3_v3 --operator-prompts --fixture coordinated_xy_production_mres3_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_production_mres3_v3.json
 
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --direct-xyz-lut-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/direct_xyz_lut.json
 python3 tools/run_qualification.py --manifest direct_xyz_lut_v1 --operator-prompts --fixture direct_xyz_lut_envelope_clear --machine-id LC-001 --raw-report hil_reports/direct_xyz_lut.json

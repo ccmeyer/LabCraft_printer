@@ -11,6 +11,7 @@
 #include "BoardConfig.h"
 #include "DirectStepperProfile.h"
 #include "HomeInterruptionPolicy.h"
+#include "MotionLimitDebouncePolicy.h"
 #include "StepperLimitPolicy.h"
 #include "StepperIsrInstrumentation.h"
 #include "stm32f4xx_hal.h"
@@ -156,6 +157,8 @@ public:
     return DirectStepperProfile::snapshot(_directProfileState);
   }
   bool isLimitAssertedForDiagnostics() const { return _isLimitAsserted(); }
+  MotionLimitDebouncePolicy::Snapshot getLimitDebounceSnapshot() const;
+  bool limitDebounceTimebaseValid() const { return _limitDebounceTimebaseValid; }
   bool enableOutputsAssertedForDiagnostics() const {
     if (_enPort == nullptr || (_enPort->ODR & _enPin) != 0u) return false;
     return !_dualDriver ||
@@ -164,17 +167,11 @@ public:
 
 
   void configureLimitPin(GPIO_TypeDef* port, uint16_t pin);
-  /// Call this once (from your Init wrapper) to attach a switch
+  /// Attach a switch using the fixed production 15 ms confirmation policy.
   void attachLimitSwitch(GPIO_TypeDef* port,
                          uint16_t      pin,
-                         TickType_t    debounceMs = 10,
-						 bool          activeHigh = true,
+                         bool          activeHigh = true,
                          StepperLimitPolicy::PullMode pullMode = StepperLimitPolicy::PullMode::Auto);
-
-  void setHomeHardStopOnLimit(bool enabled) { _homeHardStopOnLimit = enabled; }
-
-  /// Called once we’ve confirmed the switch really is closed
-  void onLimitTriggered();
 
   // static helper to route the EXTI callback into the right Stepper
   static void handleExtiFromIsr(uint16_t pin);
@@ -320,19 +317,24 @@ private:
   volatile uint32_t _limitDropCount = 0u;
   volatile uint32_t _moveGeneration = 0u;
   volatile uint32_t _debounceArmedGeneration = 0u;
+  MotionLimitDebouncePolicy::State _limitDebounceState{};
+  uint32_t _limitDebounceCycles = 0u;
+  bool _limitDebounceTimebaseValid = false;
+  volatile bool _limitDebounceIgnoreUntilRelease = false;
+  volatile bool _limitReleasePending = false;
+  volatile uint32_t _limitReleaseStartCycle = 0u;
 
   bool     _homeTowardLimitDir = false;     // default; set per-axis in init
   uint32_t _homeGuardSteps     = 300000;    // large but finite
-  bool     _homeHardStopOnLimit = false;
   HomeDiagnosticSnapshot _homeDiagnosticSnapshot{};
   #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
   StepperIsrInstrumentation::State _isrInstrumentation{};
   #endif
 
   struct LimitStableSample {
-    bool asserted = false;
-    uint8_t assertedCount = 0u;
-    uint8_t sampleCount = 0u;
+    bool stable = false;
+    bool timebaseValid = false;
+    uint32_t elapsedCycles = 0u;
   };
 
   // ISR entrypoint
@@ -340,15 +342,18 @@ private:
   void _maskExtiLineFromIsr();
   void _unmaskExtiLineFromIsr();
   void _unmaskExtiLine();
-  void _onLimitTriggeredFromIsr(BaseType_t* pxHigherPriorityTaskWoken);
   void _prepareForNewMove();
+  void _observeLimitLevelFromIsr(bool asserted, uint32_t nowCycle);
+  bool _takeConfirmedLimitFromIsr();
+  bool _stopForConfirmedLimitFromIsr();
+  void _observeLimitLevelFromTask(bool asserted, uint32_t nowCycle);
+  bool _confirmReleasedForNextApproach(
+      const HomeInterruptionPolicy::CancellationToken* cancelToken = nullptr);
+  LimitStableSample _sampleLimitLevelStable(
+      bool assertedLevel,
+      const HomeInterruptionPolicy::CancellationToken* cancelToken = nullptr);
   LimitStableSample _sampleLimitStable(
-      const HomeInterruptionPolicy::CancellationToken* cancelToken = nullptr) const;
-  bool _waitUntilDoneForHomeMove(
-      bool direction,
-      uint32_t timeoutMs,
-      const HomeInterruptionPolicy::CancellationToken* cancelToken);
-  bool _stopHomeMoveFromLevelPoll();
+      const HomeInterruptionPolicy::CancellationToken* cancelToken = nullptr);
   bool _backOffLimitUntilReleased(uint32_t chunkSteps,
                                   uint32_t freqHz,
                                   uint32_t releaseGuardSteps,

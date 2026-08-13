@@ -161,7 +161,7 @@ def test_production_suite_freezes_geometry_counts_and_strict_evidence():
 
 def test_production_results_use_reduced_metric_contract():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    for result_id in (2087, 2088, 2089, 2090):
+    for result_id in (2087, 2088, 2089, 2090, 2098):
         assert f"runOne({result_id}u" in diagnostics
     assert '"i2=%lu;s=%lu;mi=%lu;am=%lu;tm=%lu;fm=%lu;pu=%lu;"' in diagnostics
     assert '"ds=%lu;di=%lu;md=%lu;sl=%lu;dc=%lu;ci=%lu;ns=%lu;"' in diagnostics
@@ -173,6 +173,40 @@ def test_production_results_use_reduced_metric_contract():
         assert removed_metric not in production_suite
 
 
+def test_motion_limits_share_fixed_fifteen_ms_confirmation_without_raw_stop():
+    policy = _read("firmware/Core/Inc/MotionLimitDebouncePolicy.h")
+    header = _read("firmware/Core/Inc/Stepper.h")
+    stepper = _read("firmware/Core/Src/Stepper.cpp")
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
+    pressure = _read("firmware/Core/Src/PressureRegulator.cpp")
+
+    assert "kDebounceMs = 15u" in policy
+    assert "enum class Phase" in policy
+    assert "Idle = 0u" in policy
+    assert "Pending = 1u" in policy
+    assert "Confirmed = 2u" in policy
+    assert "TickType_t    debounceMs" not in header
+    assert '"LmtDbnc",\n    stepperMsToAtLeast1Tick(MotionLimitDebouncePolicy::kDebounceMs)' in stepper
+    assert "s1.attachLimitSwitch(GPIOG, GPIO_PIN_6);" in stepper
+    assert "s2.attachLimitSwitch(GPIOG, GPIO_PIN_9);" in stepper
+    assert "s4.attachLimitSwitch(GPIOG, GPIO_PIN_11);" in stepper
+    assert "s5.attachLimitSwitch(GPIOG, GPIO_PIN_12);" in stepper
+    assert "GPIO_PIN_10,\n                       true,\n                       StepperLimitPolicy::PullMode::None" in stepper
+
+    raw_exti = stepper[
+        stepper.index("void Stepper::_onRawLimitInterruptFromIsr()") :
+        stepper.index("void Stepper::handleExtiFromIsr", stepper.index("void Stepper::_onRawLimitInterruptFromIsr()"))
+    ]
+    assert "_limitSeenThisMove = true" not in raw_exti
+    assert "requestCoordinatedLimitAbort" not in raw_exti
+    assert "stop()" not in raw_exti
+    assert "_observeLimitLevelFromIsr" in raw_exti
+    assert "_takeConfirmedLimitFromIsr" in stepper
+    assert "_takeConfirmedLimitFromIsr" in gantry
+    assert "_coordinatedLimitAssertedFast())" not in gantry
+    assert "pdMS_TO_TICKS(15)" in pressure
+
+
 def test_camera_transition_uses_production_scaling_and_direct_home_counts():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
     assert "aggregate, 2u, 8416u, 30000u, 30000u, limits" in diagnostics
@@ -181,17 +215,26 @@ def test_camera_transition_uses_production_scaling_and_direct_home_counts():
     assert 'runOne(2071u' in diagnostics
 
 
-def test_active_v2_manifests_match_remaining_selectors_and_reduced_metrics():
+def test_active_v3_manifest_adds_limit_debounce_and_archives_v2():
     production = json.loads(
+        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v3.json")
+    )
+    production_v2 = json.loads(
         _read("tools/qualification/manifests/coordinated_xy_production_mres3_v2.json")
     )
     camera = json.loads(
         _read("tools/qualification/manifests/coordinated_xy_camera_transition_v2.json")
     )
     assert production["lifecycle"] == "active"
-    assert production["expected_test_ids"] == [2087, 2088, 2089, 2090]
+    assert production_v2["lifecycle"] == "archived"
+    assert production["expected_test_ids"] == [2087, 2088, 2089, 2090, 2098]
     assert production["analysis_rules"]["2089"]["metrics"]["dc"]["equals"] == 219990
     assert production["analysis_rules"]["2089"]["metrics"]["rp"]["equals"] == 0
+    debounce = production["analysis_rules"]["2098"]["metrics"]
+    assert debounce["db"]["equals"] == 15
+    assert debounce["xf"]["equals"] == 0
+    assert debounce["yf"]["equals"] == 0
+    assert debounce["tv"]["equals"] == 1
     assert camera["lifecycle"] == "active"
     assert camera["analysis_rules"]["2071"]["metrics"]["xe"]["equals"] == 8416
     assert camera["analysis_rules"]["2071"]["metrics"]["hi"]["equals"] == 101
@@ -209,6 +252,7 @@ def test_historical_manifests_are_archived_without_deleting_catalog_data():
         "coordinated_xy_mres3_rearm_v1",
         "coordinated_xy_mres3_conditional_rearm_v3",
         "coordinated_xy_production_mres3_v1",
+        "coordinated_xy_production_mres3_v2",
         "coordinated_xy_camera_transition_v1",
     )
     catalog = _read("tools/qualification/test_catalog.py")

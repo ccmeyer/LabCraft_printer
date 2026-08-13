@@ -12,11 +12,6 @@ enum class PullMode : uint32_t {
   Auto = 0xFFFFFFFFu
 };
 
-enum class LatchedLimitAction : uint8_t {
-  ConfirmLater = 0,
-  HardStopNow
-};
-
 constexpr uint32_t nextMoveGeneration(uint32_t currentGeneration)
 {
   return (currentGeneration == 0xFFFFFFFFu) ? 1u : (currentGeneration + 1u);
@@ -46,27 +41,6 @@ constexpr bool homeLimitDetected(bool limitSeenLatched, bool limitCurrentlyAsser
   return limitSeenLatched || limitCurrentlyAsserted;
 }
 
-constexpr bool stableLimitAsserted(uint8_t assertedSamples,
-                                   uint8_t sampleCount,
-                                   uint8_t requiredAssertedSamples)
-{
-  return (sampleCount != 0u) &&
-         (requiredAssertedSamples != 0u) &&
-         (assertedSamples >= requiredAssertedSamples);
-}
-
-constexpr bool shouldPollHomeLimitLevel(bool moveDirection, bool homeTowardLimitDirection)
-{
-  return moveDirection == homeTowardLimitDirection;
-}
-
-constexpr bool homeLevelPollConfirmed(uint8_t assertedStreak,
-                                      uint8_t requiredAssertedSamples)
-{
-  return (requiredAssertedSamples != 0u) &&
-         (assertedStreak >= requiredAssertedSamples);
-}
-
 constexpr uint32_t releaseSearchGuardSteps(uint32_t backoffSteps)
 {
   const uint32_t chunk = normalizeBackoffSteps(backoffSteps);
@@ -87,16 +61,6 @@ constexpr bool shouldApplyDebounceCallback(uint32_t armedGeneration,
                                            uint32_t currentGeneration)
 {
   return (armedGeneration != 0u) && (armedGeneration == currentGeneration);
-}
-
-constexpr LatchedLimitAction decideLatchedLimitAction(bool moveActive,
-                                                      bool homeSoftStopEnabled,
-                                                      bool hardStopOnHomeHit)
-{
-  if (!moveActive || !homeSoftStopEnabled || !hardStopOnHomeHit) {
-    return LatchedLimitAction::ConfirmLater;
-  }
-  return LatchedLimitAction::HardStopNow;
 }
 
 }  // namespace StepperLimitPolicy

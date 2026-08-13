@@ -600,6 +600,76 @@ def test_production_mres3_v2_rejects_reduced_evidence_regressions():
         assert _analyze(host_failure, manifest)["verdict"]["status"] == "fail"
 
 
+def test_production_mres3_v3_rejects_limit_debounce_regressions():
+    manifest = load_manifest("coordinated_xy_production_mres3_v3")
+    results = []
+    for test_id in manifest.expected_test_ids:
+        metrics = {}
+        for metric, rule in manifest.analysis_rules[str(test_id)]["metrics"].items():
+            if "equals" in rule:
+                metrics[metric] = rule["equals"]
+            elif "min" in rule:
+                metrics[metric] = rule["min"]
+            else:
+                metrics[metric] = 0
+        results.append({
+            "test_id": test_id,
+            "name": f"production_v3_{test_id}",
+            "pass": True,
+            "metrics": metrics,
+        })
+    valid = {
+        "run_id": 2097,
+        "profile": "FULL",
+        "started_at": "2026-08-13T00:00:00Z",
+        "finished_at": "2026-08-13T00:00:10Z",
+        "aborted": False,
+        "summary": {"total": 5, "passed": 5, "failed": 0},
+        "results": results,
+        "host_checks": [
+            {"name": "selftest_progress_watchdog", "pass": True,
+             "details": {"timeout_reason": None}},
+            {"name": "coordinated_xy_status_cadence", "pass": True,
+             "details": {"status_gap_max_ms": 100}},
+        ],
+    }
+    assert _analyze(valid, manifest)["verdict"]["status"] == "pass"
+
+    # Candidates and rejected electrical transients are retained evidence,
+    # not qualification failures.
+    informational = deepcopy(valid)
+    debounce_index = manifest.expected_test_ids.index(2098)
+    informational["results"][debounce_index]["metrics"]["xc"] = 2
+    informational["results"][debounce_index]["metrics"]["xr"] = 2
+    assert _analyze(informational, manifest)["verdict"]["status"] == "pass"
+
+    for metric, value in (
+        ("n", 9),
+        ("xf", 1),
+        ("xp", 1),
+        ("yf", 1),
+        ("yp", 1),
+        ("tv", 0),
+        ("tf", 1),
+        ("tr", 2),
+        ("sf", 1),
+        ("to", 1),
+    ):
+        rejected = deepcopy(valid)
+        rejected["results"][debounce_index]["metrics"][metric] = value
+        assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
+
+    incomplete = deepcopy(valid)
+    incomplete["results"].pop()
+    incomplete["summary"] = {"total": 4, "passed": 4, "failed": 0}
+    assert _analyze(incomplete, manifest)["verdict"]["status"] == "fail"
+
+    for host_index in range(2):
+        host_failure = deepcopy(valid)
+        host_failure["host_checks"][host_index]["pass"] = False
+        assert _analyze(host_failure, manifest)["verdict"]["status"] == "fail"
+
+
 def test_camera_transition_v2_rejects_scaled_count_and_home_regressions():
     manifest = load_manifest("coordinated_xy_camera_transition_v2")
     rules = manifest.analysis_rules["2071"]["metrics"]

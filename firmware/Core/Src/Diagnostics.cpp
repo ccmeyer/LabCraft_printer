@@ -146,6 +146,7 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2088u, "coord_xy_prod_mres3_irq_path", "performance", "FULL", "explicit_selection"},
     {2089u, "coord_xy_prod_conditional_rearm", "performance", "FULL", "explicit_selection"},
     {2090u, "tmc2208_production_mres3_config", "configuration", "FULL", "explicit_selection"},
+    {2098u, "coord_xy_limit_debounce", "safety", "FULL", "explicit_selection"},
     {2091u, "direct_lut_x_cruise", "performance", "FULL", "explicit_selection"},
     {2092u, "direct_lut_y_cruise", "performance", "FULL", "explicit_selection"},
     {2093u, "direct_lut_z_cruise", "performance", "FULL", "explicit_selection"},
@@ -2790,6 +2791,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                        "tmc2208_production_mres3_config",
                                        false,
                                        "mr=3;mf=0;dd=1;tx=0;tf=1;lu=2;sf=0;to=1");
+                          (void)runOne(2098u,
+                                       "coord_xy_limit_debounce",
+                                       false,
+                                       "db=15;xc=0;xr=0;xf=0;xp=0;yc=0;yr=0;yf=0;yp=0;tv=0;tf=0;tr=0;sf=0;to=1");
                         };
 
                         constexpr TMC2208Configuration::Values expectedDriver =
@@ -2909,6 +2914,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           emitSkipped("xy_home");
                           return finish();
                         }
+                        const MotionLimitDebouncePolicy::Snapshot xDebounceBefore =
+                            stepperX->getLimitDebounceSnapshot();
+                        const MotionLimitDebouncePolicy::Snapshot yDebounceBefore =
+                            stepperY->getLimitDebounceSnapshot();
 
                         auto absoluteDelta = [](int32_t from, int32_t to) {
                           const int64_t delta =
@@ -2921,6 +2930,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               : (kTimerClockHz / (2u * rateHz)) - 1u;
                         };
                         Limits limits{};
+                        CoordinatedXyExecutor::TerminalReason firstAbnormalTerminal =
+                            CoordinatedXyExecutor::TerminalReason::Completed;
                         struct MoveResult {
                           bool passed = false;
                           MoveObservation observation{};
@@ -2940,6 +2951,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               orchestrator.executeAbsoluteXy(
                                   target.x, target.y, 0u, false, kMoveTimeoutMs);
                           result.snapshot = gantry->coordinatedSnapshot();
+                          if (result.snapshot.terminalReason !=
+                                  CoordinatedXyExecutor::TerminalReason::Completed &&
+                              firstAbnormalTerminal ==
+                                  CoordinatedXyExecutor::TerminalReason::Completed) {
+                            firstAbnormalTerminal = result.snapshot.terminalReason;
+                          }
                           uint32_t statusAgeMs =
                               std::numeric_limits<uint32_t>::max();
                           (void)Watchdog_GetTaskLastSeenAgeMs(
@@ -3033,6 +3050,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                   target.x, target.y, 0u, false, kMoveTimeoutMs);
                           const CoordinatedXySnapshot snapshot =
                               gantry->coordinatedSnapshot();
+                          if (snapshot.terminalReason !=
+                                  CoordinatedXyExecutor::TerminalReason::Completed &&
+                              firstAbnormalTerminal ==
+                                  CoordinatedXyExecutor::TerminalReason::Completed) {
+                            firstAbnormalTerminal = snapshot.terminalReason;
+                          }
                           return execution.waitCompleted &&
                               execution.endpointMatches && execution.targetsMatch &&
                               execution.disposition ==
@@ -3209,6 +3232,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             break;
                           }
                         }
+                        const MotionLimitDebouncePolicy::Snapshot xDebounceAfter =
+                            stepperX->getLimitDebounceSnapshot();
+                        const MotionLimitDebouncePolicy::Snapshot yDebounceAfter =
+                            stepperY->getLimitDebounceSnapshot();
                         uint32_t xDrift = std::numeric_limits<uint32_t>::max();
                         uint32_t yDrift = std::numeric_limits<uint32_t>::max();
                         if (rowPassed) {
@@ -3373,6 +3400,88 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                      configurationValid && configWritten > 0,
                                      configWritten > 0
                                          ? configMetrics
+                                         : "gate=metrics_overflow;sf=1;to=1");
+
+                        const uint32_t xCandidates =
+                            MotionLimitDebouncePolicy::counterDelta(
+                                xDebounceBefore.candidateCount,
+                                xDebounceAfter.candidateCount);
+                        const uint32_t xRejected =
+                            MotionLimitDebouncePolicy::counterDelta(
+                                xDebounceBefore.rejectionCount,
+                                xDebounceAfter.rejectionCount);
+                        const uint32_t xConfirmed =
+                            MotionLimitDebouncePolicy::counterDelta(
+                                xDebounceBefore.confirmationCount,
+                                xDebounceAfter.confirmationCount);
+                        const uint32_t yCandidates =
+                            MotionLimitDebouncePolicy::counterDelta(
+                                yDebounceBefore.candidateCount,
+                                yDebounceAfter.candidateCount);
+                        const uint32_t yRejected =
+                            MotionLimitDebouncePolicy::counterDelta(
+                                yDebounceBefore.rejectionCount,
+                                yDebounceAfter.rejectionCount);
+                        const uint32_t yConfirmed =
+                            MotionLimitDebouncePolicy::counterDelta(
+                                yDebounceBefore.confirmationCount,
+                                yDebounceAfter.confirmationCount);
+                        const uint32_t xTimebaseFailures =
+                            MotionLimitDebouncePolicy::counterDelta(
+                                xDebounceBefore.timebaseFailureCount,
+                                xDebounceAfter.timebaseFailureCount);
+                        const uint32_t yTimebaseFailures =
+                            MotionLimitDebouncePolicy::counterDelta(
+                                yDebounceBefore.timebaseFailureCount,
+                                yDebounceAfter.timebaseFailureCount);
+                        const uint32_t debounceTimebaseFailures =
+                            (xTimebaseFailures >
+                             std::numeric_limits<uint32_t>::max() -
+                                 yTimebaseFailures)
+                                ? std::numeric_limits<uint32_t>::max()
+                                : xTimebaseFailures + yTimebaseFailures;
+                        const uint32_t debounceSaturation =
+                            xDebounceAfter.saturationFlags |
+                            yDebounceAfter.saturationFlags;
+                        const bool debounceTimebaseValid =
+                            stepperX->limitDebounceTimebaseValid() &&
+                            stepperY->limitDebounceTimebaseValid();
+                        char debounceMetrics[224] = {};
+                        const int debounceWritten = snprintf(
+                            debounceMetrics,
+                            sizeof(debounceMetrics),
+                            "db=15;n=%lu;xc=%lu;xr=%lu;xf=%lu;xp=%u;"
+                            "yc=%lu;yr=%lu;yf=%lu;yp=%u;tv=%u;tf=%lu;"
+                            "tr=%u;sf=%lu;to=%u",
+                            (unsigned long)aggregate.moveCount,
+                            (unsigned long)xCandidates,
+                            (unsigned long)xRejected,
+                            (unsigned long)xConfirmed,
+                            xDebounceAfter.pending ? 1u : 0u,
+                            (unsigned long)yCandidates,
+                            (unsigned long)yRejected,
+                            (unsigned long)yConfirmed,
+                            yDebounceAfter.pending ? 1u : 0u,
+                            debounceTimebaseValid ? 1u : 0u,
+                            (unsigned long)debounceTimebaseFailures,
+                            static_cast<unsigned>(firstAbnormalTerminal),
+                            (unsigned long)debounceSaturation,
+                            aggregate.timeoutCount != 0u ? 1u : 0u);
+                        const bool debounceEvidence =
+                            aggregate.moveCount == 10u &&
+                            xConfirmed == 0u && yConfirmed == 0u &&
+                            !xDebounceAfter.pending && !yDebounceAfter.pending &&
+                            debounceTimebaseValid &&
+                            debounceTimebaseFailures == 0u &&
+                            debounceSaturation == 0u &&
+                            aggregate.timeoutCount == 0u &&
+                            firstAbnormalTerminal ==
+                                CoordinatedXyExecutor::TerminalReason::Completed;
+                        (void)runOne(2098u,
+                                     "coord_xy_limit_debounce",
+                                     debounceEvidence && debounceWritten > 0,
+                                     debounceWritten > 0
+                                         ? debounceMetrics
                                          : "gate=metrics_overflow;sf=1;to=1");
                         return finish();
                         };

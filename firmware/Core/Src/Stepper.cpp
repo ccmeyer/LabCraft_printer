@@ -49,17 +49,6 @@ static constexpr uint32_t kMoveWaitPollMs = 20u;
 static constexpr uint32_t kMoveWaitSlackMs = 4000u;
 static constexpr uint32_t kMoveWaitMinMs = 1000u;
 static constexpr uint32_t kMoveWaitMaxMs = 30000u;
-static constexpr uint8_t kHomeLimitStableSampleCount = 5u;
-static constexpr uint8_t kHomeLimitStableRequiredSamples = 3u;
-static constexpr uint32_t kHomeLimitStableSampleIntervalMs = 2u;
-static constexpr uint32_t kHomeLimitLevelPollMs = 5u;
-static constexpr uint8_t kHomeLimitLevelPollRequiredSamples = 2u;
-
-#if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
-static inline bool stepperInstrumentationAxis(Stepper::Axis axis)
-{
-  return axis == Stepper::X_AXIS || axis == Stepper::Y_AXIS;
-}
 
 static inline void stepperEnableCycleCounter()
 {
@@ -73,6 +62,25 @@ static inline void stepperEnableCycleCounter()
 static inline uint32_t stepperCycleNow()
 {
   return DWT->CYCCNT;
+}
+
+static bool stepperCycleCounterReady()
+{
+  stepperEnableCycleCounter();
+  if ((CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) == 0u ||
+      (DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0u) {
+    return false;
+  }
+  const uint32_t before = stepperCycleNow();
+  __NOP(); __NOP(); __NOP(); __NOP();
+  __NOP(); __NOP(); __NOP(); __NOP();
+  return stepperCycleNow() != before;
+}
+
+#if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+static inline bool stepperInstrumentationAxis(Stepper::Axis axis)
+{
+  return axis == Stepper::X_AXIS || axis == Stepper::Y_AXIS;
 }
 #endif
 
@@ -140,6 +148,15 @@ StepperIsrInstrumentation::Snapshot Stepper::getLastMoveInstrumentationSnapshot(
   #else
   return StepperIsrInstrumentation::Snapshot{};
   #endif
+}
+
+MotionLimitDebouncePolicy::Snapshot Stepper::getLimitDebounceSnapshot() const
+{
+  taskENTER_CRITICAL();
+  const MotionLimitDebouncePolicy::Snapshot snapshot =
+      MotionLimitDebouncePolicy::makeSnapshot(_limitDebounceState);
+  taskEXIT_CRITICAL();
+  return snapshot;
 }
 
 void Stepper::begin(
@@ -267,6 +284,21 @@ void Stepper::move(bool direction, uint32_t steps, uint32_t freqHz, uint32_t /*a
   const bool hwDir = direction ^ _invertDirection;
   _direction      = direction;
   _lastDirection  = direction;
+
+  // A switch which is already asserted may be left only in the direction
+  // away from home. Do not treat that existing assertion as a new stop, but
+  // require a continuous 15 ms released interval before a later approach.
+  if (_isLimitAsserted() && direction != _homeTowardLimitDir) {
+    _limitDebounceIgnoreUntilRelease = true;
+    _limitReleasePending = false;
+  } else if (_limitDebounceIgnoreUntilRelease &&
+             direction == _homeTowardLimitDir &&
+             !_confirmReleasedForNextApproach(nullptr)) {
+    _legacyMoveStartPending = false;
+    _targetPos = _pos;
+    xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
+    return;
+  }
 
   const uint32_t tclkEff = timer_input_hz(_htim, _prescaler);
   const uint32_t maxARR  = timer_max_arr(_htim);
@@ -498,12 +530,12 @@ HomeInterruptionPolicy::Outcome Stepper::home(
 	  return finishOutcome(Outcome::Canceled);
 	}
 	Logger::instance()->log(
-	  "[Home %d] lim pin=%u activeHigh=%d initial_raw=%s initial_stable=%s samples=%u/%u\r\n",
+	  "[Home %d] lim pin=%u activeHigh=%d initial_raw=%s initial_stable=%s stable_cycles=%lu timebase=%u\r\n",
 	  (int)_axis, (unsigned)_limPin, (int)_limitActiveHigh,
 	  initialRawLimit ? "PRESSED" : "released",
-	  initialLimit.asserted ? "PRESSED" : "released",
-	  (unsigned)initialLimit.assertedCount,
-	  (unsigned)initialLimit.sampleCount);
+	  initialLimit.stable ? "PRESSED" : "released",
+	  (unsigned long)initialLimit.elapsedCycles,
+	  (unsigned)initialLimit.timebaseValid);
 
   const float    saved_override = _softstop_accel_override_sps2;
   const uint32_t saved_floor    = _softstop_floor_hz;
@@ -550,12 +582,8 @@ HomeInterruptionPolicy::Outcome Stepper::home(
       return result;
     }
     const uint32_t timeoutMs = Stepper::recommendedWaitTimeoutMs(steps, freqHz);
-    const bool useHomeLevelPoll = _softStopOnLimit &&
-        StepperLimitPolicy::shouldPollHomeLimitLevel(direction, _homeTowardLimitDir);
     setHomeCheckpoint(CRASH_HOME_CHECKPOINT_WAITING_FOR_MOVE);
-    const bool moveCompleted = useHomeLevelPoll
-        ? _waitUntilDoneForHomeMove(direction, timeoutMs, cancelToken)
-        : waitUntilDone(timeoutMs, cancelToken);
+    const bool moveCompleted = waitUntilDone(timeoutMs, cancelToken);
     setHomeCheckpoint(CRASH_HOME_CHECKPOINT_AFTER_MOVE);
     if (canceledWithRestore()) {
       return result;
@@ -582,7 +610,7 @@ HomeInterruptionPolicy::Outcome Stepper::home(
     return result;
   };
 
-  if (initialLimit.asserted) {
+  if (initialLimit.stable) {
     _homeDiagnosticSnapshot.phase = HomeDiagnosticSnapshot::Phase::InitialRelease;
     CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_RELEASE);
     if (!_backOffLimitUntilReleased(releaseChunkSteps, slowHz, releaseGuardSteps, false, "initial release", cancelToken)) {
@@ -759,117 +787,92 @@ bool Stepper::waitUntilDone(
 }
 
 Stepper::LimitStableSample Stepper::_sampleLimitStable(
-    const HomeInterruptionPolicy::CancellationToken* cancelToken) const
-{
-  LimitStableSample sample{};
-  sample.sampleCount = kHomeLimitStableSampleCount;
-  for (uint8_t idx = 0u; idx < kHomeLimitStableSampleCount; ++idx) {
-    if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
-      sample.sampleCount = idx;
-      return sample;
-    }
-    if (_isLimitAsserted()) {
-      sample.assertedCount++;
-    }
-    if ((idx + 1u) < kHomeLimitStableSampleCount) {
-      stepperDelayMs(kHomeLimitStableSampleIntervalMs);
-    }
-  }
-  sample.asserted = StepperLimitPolicy::stableLimitAsserted(
-      sample.assertedCount,
-      sample.sampleCount,
-      kHomeLimitStableRequiredSamples);
-  return sample;
-}
-
-bool Stepper::_waitUntilDoneForHomeMove(
-    bool direction,
-    uint32_t timeoutMs,
     const HomeInterruptionPolicy::CancellationToken* cancelToken)
 {
-  if (!StepperLimitPolicy::shouldPollHomeLimitLevel(direction, _homeTowardLimitDir)) {
-    return waitUntilDone(timeoutMs, cancelToken);
-  }
+  return _sampleLimitLevelStable(true, cancelToken);
+}
 
-  if (_togglesRemaining == 0u) {
-    return true;
-  }
-
-  const TickType_t pollTicks = stepperMsToAtLeast1Tick(kHomeLimitLevelPollMs);
-  const uint32_t startMs = HAL_GetTick();
-  uint8_t assertedStreak = 0u;
-  bool levelPollHandled = false;
-
-  while (_togglesRemaining != 0u) {
-    if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
-      stop();
-      xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
-      return false;
+Stepper::LimitStableSample Stepper::_sampleLimitLevelStable(
+    bool assertedLevel,
+    const HomeInterruptionPolicy::CancellationToken* cancelToken)
+{
+  LimitStableSample sample{};
+  sample.timebaseValid = _limitDebounceTimebaseValid;
+  if (_isLimitAsserted() != assertedLevel) {
+    if (assertedLevel &&
+        _limitDebounceState.phase == MotionLimitDebouncePolicy::Phase::Pending) {
+      _observeLimitLevelFromTask(false, stepperCycleNow());
     }
-    const EventBits_t result = xEventGroupWaitBits(
-        Orchestrator::getDoneEvents(),
-        _doneBit,
-        pdTRUE, pdTRUE,
-        pollTicks
-    );
-    if ((result & _doneBit) != 0u || _togglesRemaining == 0u) {
+    return sample;
+  }
+  if (!_limitDebounceTimebaseValid || _limitDebounceCycles == 0u) {
+    // Missing timing evidence fails safe for an assertion. It cannot prove a
+    // released interval, so an approach remains inhibited in that case.
+    if (assertedLevel && !_limitDebounceIgnoreUntilRelease) {
+      _observeLimitLevelFromTask(true, 0u);
+    }
+    sample.stable = assertedLevel;
+    return sample;
+  }
+
+  const uint32_t startCycle = stepperCycleNow();
+  for (;;) {
+    if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
+      return sample;
+    }
+    const bool currentAsserted = _isLimitAsserted();
+    const uint32_t nowCycle = stepperCycleNow();
+    if (assertedLevel && !_limitDebounceIgnoreUntilRelease) {
+      _observeLimitLevelFromTask(currentAsserted, nowCycle);
+      const MotionLimitDebouncePolicy::Snapshot snapshot =
+          getLimitDebounceSnapshot();
+      sample.elapsedCycles = static_cast<uint32_t>(nowCycle - startCycle);
+      if (snapshot.confirmed) {
+        sample.stable = true;
+        return sample;
+      }
+      if (!currentAsserted) {
+        return sample;
+      }
+      stepperDelayMs(1u);
+      continue;
+    }
+    if (currentAsserted != assertedLevel) {
+      sample.elapsedCycles = static_cast<uint32_t>(nowCycle - startCycle);
+      return sample;
+    }
+    sample.elapsedCycles = static_cast<uint32_t>(nowCycle - startCycle);
+    if (sample.elapsedCycles >= _limitDebounceCycles) {
+      sample.stable = true;
+      return sample;
+    }
+    stepperDelayMs(1u);
+  }
+}
+
+bool Stepper::_confirmReleasedForNextApproach(
+    const HomeInterruptionPolicy::CancellationToken* cancelToken)
+{
+  if (!_limitDebounceIgnoreUntilRelease) {
+    if (!_isLimitAsserted()) {
       return true;
     }
-
-    if (_isLimitAsserted()) {
-      if (assertedStreak < 0xFFu) {
-        assertedStreak++;
-      }
-    } else {
-      assertedStreak = 0u;
-    }
-
-    if (!levelPollHandled &&
-        StepperLimitPolicy::homeLevelPollConfirmed(assertedStreak,
-                                                   kHomeLimitLevelPollRequiredSamples)) {
-      if (!_limitHandledThisMove) {
-        if (_stopHomeMoveFromLevelPoll()) {
-          return true;
-        }
-      }
-      levelPollHandled = true;
-    }
-
-    if ((timeoutMs != 0u) && ((HAL_GetTick() - startMs) >= timeoutMs)) {
-      Logger::instance()->log("[Stepper %d] home wait timeout rem=%lu pos=%ld target=%ld\r\n",
-                              (int)_axis,
-                              (unsigned long)_togglesRemaining,
-                              (long)_pos,
-                              (long)_targetPos);
-      stop();
-      xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
-      return false;
-    }
+    _limitDebounceIgnoreUntilRelease = true;
+    _limitReleasePending = false;
   }
-  return true;
-}
-
-bool Stepper::_stopHomeMoveFromLevelPoll()
-{
-  if (_togglesRemaining == 0u || _limitHandledThisMove) {
+  const LimitStableSample released =
+      _sampleLimitLevelStable(false, cancelToken);
+  if (!released.stable) {
     return false;
   }
-
-  if (!_limitSeenThisMove) {
-    _limitSeenThisMove = true;
-    ++_limitHitCount;
-  }
-
-  _limitHandledThisMove = true;
-  Logger::instance()->log("[Home %d] level-poll hard stop pos=%ld rem=%lu\r\n",
-                          (int)_axis,
-                          (long)_pos,
-                          (unsigned long)_togglesRemaining);
-  stop();
-  xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
+  taskENTER_CRITICAL();
+  _limitDebounceIgnoreUntilRelease = false;
+  _limitReleasePending = false;
+  _limitReleaseStartCycle = 0u;
+  MotionLimitDebouncePolicy::resetTransient(_limitDebounceState);
+  taskEXIT_CRITICAL();
   return true;
 }
-
 
 void Stepper::stop() {
 
@@ -897,6 +900,9 @@ void Stepper::_prepareForNewMove()
   if (_debounceTimer != nullptr) {
     xTimerStop(_debounceTimer, 0u);
   }
+  taskENTER_CRITICAL();
+  MotionLimitDebouncePolicy::resetTransient(_limitDebounceState, true);
+  taskEXIT_CRITICAL();
   __HAL_GPIO_EXTI_CLEAR_FLAG(_limPin);
   _unmaskExtiLine();
 }
@@ -921,7 +927,12 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
   const uint32_t guard = (releaseGuardSteps == 0u) ? chunk : releaseGuardSteps;
   uint32_t moved = 0u;
   CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);
-  bool shouldMove = alwaysBackOffOnce || _sampleLimitStable(cancelToken).asserted;
+  const LimitStableSample initiallyAsserted = _sampleLimitStable(cancelToken);
+  bool shouldMove = alwaysBackOffOnce || initiallyAsserted.stable;
+  if (initiallyAsserted.stable) {
+    _limitDebounceIgnoreUntilRelease = true;
+    _limitReleasePending = false;
+  }
   CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
 
   while (shouldMove && moved < guard) {
@@ -956,7 +967,7 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
 
     moved += stepThisMove;
     CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);
-    shouldMove = _sampleLimitStable(cancelToken).asserted;
+    shouldMove = !_confirmReleasedForNextApproach(cancelToken);
     CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
   }
 
@@ -966,7 +977,7 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
   }
 
   CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);
-  if (_sampleLimitStable(cancelToken).asserted) {
+  if (!_confirmReleasedForNextApproach(cancelToken)) {
     CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
     Logger::instance()->log("[Home %d] limit release not detected phase=%s after %lu steps\r\n",
                             (int)_axis,
@@ -1057,6 +1068,11 @@ void Stepper::_prepareCoordinatedAxis(bool participating,
   _targetPos = targetPosition;
   _direction = direction;
   _lastDirection = direction;
+  if (_isLimitAsserted() && direction != _homeTowardLimitDir) {
+    _limitDebounceIgnoreUntilRelease = true;
+    _limitReleasePending = false;
+    _limitReleaseStartCycle = 0u;
+  }
   _inSoftStop = false;
   _totalToggles = 0u;
   _togglesRemaining = 0u;
@@ -1198,36 +1214,23 @@ void Stepper::_stepTick() {
   const uint32_t instrumentationEntryCycle = instrumentThisAxis ? stepperCycleNow() : 0u;
   #endif
 
-  // Homing must not depend on the lower-priority EXTI debounce timer or a
-  // task-level GPIO poll getting CPU time. At high legacy edge rates those
-  // paths can be delayed by the timer interrupts themselves. Re-sample the
-  // switch in the timer ISR and hard-stop before doing profile math or
-  // emitting another edge.
-  if (_togglesRemaining != 0u && _softStopOnLimit &&
-      _homeHardStopOnLimit && (_limitSeenThisMove || _isLimitAsserted())) {
-    if (!_limitSeenThisMove) {
-      _limitSeenThisMove = true;
-      ++_limitHitCount;
+  if (_togglesRemaining != 0u) {
+    const bool asserted = _isLimitAsserted();
+    if (asserted ||
+        _limitDebounceState.phase == MotionLimitDebouncePolicy::Phase::Pending ||
+        _limitDebounceIgnoreUntilRelease) {
+      #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
+      const uint32_t limitCycle = instrumentThisAxis
+          ? instrumentationEntryCycle
+          : stepperCycleNow();
+      #else
+      const uint32_t limitCycle = stepperCycleNow();
+      #endif
+      _observeLimitLevelFromIsr(asserted, limitCycle);
     }
-    _limitHandledThisMove = true;
-    // If the prior callback raised STEP, this callback is its normal falling
-    // edge. Account that one completed pulse before stop() clears the toggle
-    // state. If STEP is already low, no new pulse is emitted or accounted.
-    if ((_togglesDone & 1u) != 0u) {
-      const int32_t logicalStep = static_cast<int32_t>(
-          MotionUnitScale::logicalUnitsPerNativeStep());
-      _pos += (_direction ? logicalStep : -logicalStep);
+    if (_takeConfirmedLimitFromIsr() && _stopForConfirmedLimitFromIsr()) {
+      return;
     }
-    stop();
-    _stepPort->BSRR = static_cast<uint32_t>(_stepPin) << 16u;
-    if (_dualDriver) {
-      _stepPort2->BSRR = static_cast<uint32_t>(_stepPin2) << 16u;
-    }
-    BaseType_t woken = pdFALSE;
-    xEventGroupSetBitsFromISR(
-        Orchestrator::getDoneEvents(), _doneBit, &woken);
-    portYIELD_FROM_ISR(woken);
-    return;
   }
 
   uint32_t done = _togglesDone;
@@ -1398,7 +1401,6 @@ void Stepper::configureLimitPin(GPIO_TypeDef* port, uint16_t pin) {
 
 void Stepper::attachLimitSwitch(GPIO_TypeDef* port,
                                 uint16_t      pin,
-                                TickType_t    debounceMs,
                                 bool          activeHigh,
                                 StepperLimitPolicy::PullMode pullMode)
 {
@@ -1406,6 +1408,15 @@ void Stepper::attachLimitSwitch(GPIO_TypeDef* port,
   _limPin  = pin;
   _limitActiveHigh = activeHigh;
   _limitPull = static_cast<uint32_t>(StepperLimitPolicy::resolvePullMode(pullMode, activeHigh));
+  const uint64_t debounceCycles =
+      (static_cast<uint64_t>(SystemCoreClock) *
+       MotionLimitDebouncePolicy::kDebounceMs + 999u) / 1000u;
+  _limitDebounceTimebaseValid = stepperCycleCounterReady() &&
+      debounceCycles != 0u &&
+      debounceCycles <= std::numeric_limits<uint32_t>::max();
+  _limitDebounceCycles = _limitDebounceTimebaseValid
+      ? static_cast<uint32_t>(debounceCycles)
+      : 0u;
 
   auto enable_gpio_clock = [](GPIO_TypeDef* p){
     if (p==GPIOA) __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -1452,13 +1463,112 @@ void Stepper::attachLimitSwitch(GPIO_TypeDef* port,
 
   // 4) Create one-shot debounce timer
   _debounceTimer = xTimerCreate(
-    "LmtDbnc", debounceMs, pdFALSE, this,
+    "LmtDbnc",
+    stepperMsToAtLeast1Tick(MotionLimitDebouncePolicy::kDebounceMs),
+    pdFALSE,
+    this,
     Stepper::_debounceTimerCb
   );
   if (_debounceTimer == nullptr) {
     Logger::instance()->log("[Stepper %d] debounce timer create failed\r\n", (int)_axis);
   }
   HAL_NVIC_EnableIRQ(_extiIRQn);
+}
+
+#if defined(__GNUC__) && !defined(UNIT_TEST)
+__attribute__((optimize("O2"), hot))
+#endif
+void Stepper::_observeLimitLevelFromIsr(bool asserted, uint32_t nowCycle)
+{
+  if (_limitDebounceIgnoreUntilRelease) {
+    if (asserted) {
+      _limitReleasePending = false;
+      _limitReleaseStartCycle = 0u;
+      return;
+    }
+    if (!_limitDebounceTimebaseValid || _limitDebounceCycles == 0u) {
+      return;
+    }
+    if (!_limitReleasePending) {
+      _limitReleasePending = true;
+      _limitReleaseStartCycle = nowCycle;
+      return;
+    }
+    if (static_cast<uint32_t>(nowCycle - _limitReleaseStartCycle) <
+        _limitDebounceCycles) {
+      return;
+    }
+    _limitDebounceIgnoreUntilRelease = false;
+    _limitReleasePending = false;
+    _limitReleaseStartCycle = 0u;
+    MotionLimitDebouncePolicy::resetTransient(_limitDebounceState);
+    return;
+  }
+
+  const MotionLimitDebouncePolicy::Decision decision =
+      MotionLimitDebouncePolicy::observe(
+          _limitDebounceState,
+          asserted,
+          nowCycle,
+          _limitDebounceCycles,
+          _limitDebounceTimebaseValid);
+  if (decision == MotionLimitDebouncePolicy::Decision::Rejected) {
+    _limitDroppedAfterLatch = true;
+    if (_limitDropCount != std::numeric_limits<uint32_t>::max()) {
+      ++_limitDropCount;
+    }
+  } else if (decision == MotionLimitDebouncePolicy::Decision::Confirmed) {
+    _limitSeenThisMove = true;
+    if (_limitHitCount != std::numeric_limits<uint32_t>::max()) {
+      ++_limitHitCount;
+    }
+  }
+}
+
+void Stepper::_observeLimitLevelFromTask(bool asserted, uint32_t nowCycle)
+{
+  taskENTER_CRITICAL();
+  _observeLimitLevelFromIsr(asserted, nowCycle);
+  taskEXIT_CRITICAL();
+}
+
+#if defined(__GNUC__) && !defined(UNIT_TEST)
+__attribute__((optimize("O2"), hot))
+#endif
+bool Stepper::_takeConfirmedLimitFromIsr()
+{
+  if (_limitHandledThisMove ||
+      _limitDebounceState.phase != MotionLimitDebouncePolicy::Phase::Confirmed) {
+    return false;
+  }
+  _limitHandledThisMove = true;
+  _limitDebounceIgnoreUntilRelease = true;
+  _limitReleasePending = false;
+  _limitReleaseStartCycle = 0u;
+  return true;
+}
+
+bool Stepper::_stopForConfirmedLimitFromIsr()
+{
+  if (_togglesRemaining == 0u) {
+    return false;
+  }
+  // If the previous callback raised STEP, this callback is the safe falling
+  // edge. Account the completed pulse before stop() clears the toggle state.
+  if ((_togglesDone & 1u) != 0u) {
+    const int32_t logicalStep = static_cast<int32_t>(
+        MotionUnitScale::logicalUnitsPerNativeStep());
+    _pos += (_direction ? logicalStep : -logicalStep);
+  }
+  stop();
+  _stepPort->BSRR = static_cast<uint32_t>(_stepPin) << 16u;
+  if (_dualDriver) {
+    _stepPort2->BSRR = static_cast<uint32_t>(_stepPin2) << 16u;
+  }
+  BaseType_t woken = pdFALSE;
+  xEventGroupSetBitsFromISR(Orchestrator::getDoneEvents(), _doneBit, &woken);
+  portYIELD_FROM_ISR(woken);
+  return true;
 }
 
 // This should be called from your HAL_GPIO_EXTI_Callback in main.c:
@@ -1474,25 +1584,10 @@ void Stepper::_onRawLimitInterruptFromIsr()
   __HAL_GPIO_EXTI_CLEAR_FLAG(_limPin);
 
   const bool pressed = _isLimitAsserted();
-  if (pressed) {
-    _limitSeenThisMove = true;
-    ++_limitHitCount;
-  }
-
-  const bool coordinatedLimit = pressed && _coordinatedReserved;
-  if (coordinatedLimit) {
-    _limitHandledThisMove = true;
-    Gantry::requestCoordinatedLimitAbortFromIsr(_axis);
-  }
-
-  const auto latchedAction = StepperLimitPolicy::decideLatchedLimitAction(
-      _togglesRemaining != 0u,
-      _softStopOnLimit,
-      _homeHardStopOnLimit);
-  if (!coordinatedLimit && pressed &&
-      latchedAction != StepperLimitPolicy::LatchedLimitAction::ConfirmLater) {
-    _limitHandledThisMove = true;
-    _onLimitTriggeredFromIsr(&woken);
+  if (pressed ||
+      _limitDebounceState.phase == MotionLimitDebouncePolicy::Phase::Pending ||
+      _limitDebounceIgnoreUntilRelease) {
+    _observeLimitLevelFromIsr(pressed, stepperCycleNow());
   }
 
   BaseType_t timerRc = pdFAIL;
@@ -1513,47 +1608,10 @@ void Stepper::_onRawLimitInterruptFromIsr()
   _debounceArmedGeneration = 0u;
   __HAL_GPIO_EXTI_CLEAR_FLAG(_limPin);
   _unmaskExtiLineFromIsr();
-  if (pressed && !_limitHandledThisMove) {
-    _limitHandledThisMove = true;
-    _onLimitTriggeredFromIsr(&woken);
-  }
   portYIELD_FROM_ISR(woken);
 }
 
 // Your public handler once debounce confirms it’s really pressed
-void Stepper::onLimitTriggered()
-{
-//  HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_13);
-
-  if (_coordinatedReserved) {
-    if (Gantry::instance() != nullptr) {
-      (void)Gantry::instance()->requestCoordinatedLimitAbort(_axis);
-    }
-    return;
-  }
-
-  if (_togglesRemaining == 0u) {
-    return;
-  }
-
-  if (_softStopOnLimit && _togglesRemaining != 0) {
-    if (_homeHardStopOnLimit) {
-      // Latch only. The timer ISR owns the next falling edge and terminal
-      // done notification so STEP cannot be stranded high by a task stop.
-      _limitSeenThisMove = true;
-      return;
-    }
-    // Gentle stop: reshape the current move into a decel tail and let the ISR finish it
-    _requestSoftStop();
-    return;  // do not signal "done" yet; _stepTick() will when the tail ends
-  }
-
-  // stop the motor immediately
-  stop();
-
-  xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
-}
-
 //------------------------------------------------------------------------------
 // Static dispatcher from HAL’s EXTI callback — call this in main.c:
 void Stepper::handleExtiFromIsr(uint16_t pin)
@@ -1590,36 +1648,6 @@ void Stepper::_unmaskExtiLine()
   taskEXIT_CRITICAL();
 }
 
-void Stepper::_onLimitTriggeredFromIsr(BaseType_t* pxHigherPriorityTaskWoken)
-{
-  if (_coordinatedReserved) {
-    Gantry::requestCoordinatedLimitAbortFromIsr(_axis);
-    return;
-  }
-
-  if (_togglesRemaining == 0u) {
-    return;
-  }
-
-  if (_softStopOnLimit && _togglesRemaining != 0) {
-    if (_homeHardStopOnLimit) {
-      // Latch only. The next step-timer update completes any active high
-      // pulse, forces STEP low, and signals done. This bounds latency to one
-      // timer edge without truncating a pulse or leaving STEP asserted.
-      _limitSeenThisMove = true;
-      return;
-    }
-    _requestSoftStop();
-    return;
-  }
-
-  stop();
-  xEventGroupSetBitsFromISR(
-      Orchestrator::getDoneEvents(),
-      _doneBit,
-      pxHigherPriorityTaskWoken);
-}
-
 void Stepper::_debounceTimerCb(TimerHandle_t timer)
 {
   auto* self = static_cast<Stepper*>(pvTimerGetTimerID(timer));
@@ -1635,16 +1663,10 @@ void Stepper::_debounceTimerCb(TimerHandle_t timer)
     return;
   }
   const bool pressed = self->_isLimitAsserted();
-  if (!pressed && self->_limitSeenThisMove) {
-    self->_limitDroppedAfterLatch = true;
-    ++self->_limitDropCount;
-    if (self->_softStopOnLimit || self->_axis == Stepper::Z_AXIS) {
-      self->_logLimitDebug("limit released after latch");
-    }
-  }
-  if (pressed && !self->_limitHandledThisMove) {
-    self->_limitHandledThisMove = true;
-    self->onLimitTriggered();
+  if (pressed ||
+      self->_limitDebounceState.phase == MotionLimitDebouncePolicy::Phase::Pending ||
+      self->_limitDebounceIgnoreUntilRelease) {
+    self->_observeLimitLevelFromTask(pressed, stepperCycleNow());
   }
 }
 
@@ -1681,8 +1703,7 @@ extern "C" void MX_STEPPERX_Init(void) {
 		   0,					// Prescaler
 		   invertDir,				// Invert direction
 		   homeDir);				// Home direction
-  s1.setHomeHardStopOnLimit(true);
-  s1.attachLimitSwitch(GPIOG,GPIO_PIN_6,pdMS_TO_TICKS(15));
+  s1.attachLimitSwitch(GPIOG, GPIO_PIN_6);
   s1.addDriver(GPIOG, GPIO_PIN_4,    // STEP
                GPIOC, GPIO_PIN_1,    // DIR
                GPIOA, GPIO_PIN_0);  // ENABLE
@@ -1706,8 +1727,7 @@ extern "C" void MX_STEPPERY_Init(void) {
 		   0,					// Prescaler
 		   invertDir,			// Invert direction
 		   homeDir);			// Home direction
-  s2.setHomeHardStopOnLimit(true);
-  s2.attachLimitSwitch(GPIOG,GPIO_PIN_9,pdMS_TO_TICKS(15));
+  s2.attachLimitSwitch(GPIOG, GPIO_PIN_9);
 }
 
 extern "C" void MX_STEPPERZ_Init(void) {
@@ -1721,10 +1741,8 @@ extern "C" void MX_STEPPERZ_Init(void) {
 		   1,					// Prescaler - TIM10 uses APB2 which is twice as fast as APB1
 		   true,				// Invert direction
 		   false);				// Home direction
-  s3.setHomeHardStopOnLimit(true);
   s3.attachLimitSwitch(GPIOG,
                        GPIO_PIN_10,
-                       pdMS_TO_TICKS(3),
                        true,
                        StepperLimitPolicy::PullMode::None);
   s3.setMaxSpeedHz(60000);
@@ -1748,7 +1766,7 @@ extern "C" void MX_STEPPERP_Init(void) {
 			   0,					// Prescaler
 			   invertDir,				// Invert direction
 			   homeDir);				// Home direction
-	  s4.attachLimitSwitch(GPIOG,GPIO_PIN_11,pdMS_TO_TICKS(15));
+	  s4.attachLimitSwitch(GPIOG, GPIO_PIN_11);
 	}
 #if (LC_PRESSURE_PORTS > 1)
 extern "C" void MX_STEPPERR_Init(void) {
@@ -1762,7 +1780,7 @@ extern "C" void MX_STEPPERR_Init(void) {
 		   0,					// Prescaler
 		   false,				// Invert direction
 		   false);				// Home direction
-  s5.attachLimitSwitch(GPIOG,GPIO_PIN_12,pdMS_TO_TICKS(15));
+  s5.attachLimitSwitch(GPIOG, GPIO_PIN_12);
 }
 #endif
 
