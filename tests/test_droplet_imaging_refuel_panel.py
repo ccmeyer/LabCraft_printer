@@ -8,7 +8,7 @@ from tests.calibration_test_utils import SignalStub, ensure_calibration_import_s
 ensure_calibration_import_stubs()
 
 from CalibrationClasses.Model import RefuelCameraModel
-from CalibrationClasses.View import DropletImagingDialog
+from CalibrationClasses.View import DropletImagingDialog, PrinterHeadCleaningDialog
 
 
 def _series_points(series):
@@ -90,12 +90,19 @@ def _build_droplet_dialog(
         refuel_camera_model=refuel_model,
         calibration_manager=_make_calibration_manager_stub(),
         machine_model=SimpleNamespace(
+            machine_connected=True,
+            motors_homed=True,
+            transport_paused=False,
+            paused=False,
+            is_connected=lambda: True,
+            motors_are_homed=lambda: True,
             get_print_pressure_bounds=lambda: (0.10, 5.00),
             get_print_pulse_width=lambda: 1400,
             get_current_print_pressure=lambda: 0.80,
             get_target_refuel_pressure=lambda: 0.60,
             get_current_refuel_pressure=lambda: 0.55,
             get_refuel_pulse_width=lambda: 3200,
+            get_current_position_dict=lambda: {"X": 111, "Y": 222, "Z": 333},
         ),
     )
     command_calls = []
@@ -154,6 +161,12 @@ def _build_droplet_dialog(
 
     controller = SimpleNamespace(
         _command_calls=command_calls,
+        machine=SimpleNamespace(
+            check_if_all_completed=lambda: True,
+            _command_queue_blocked_reason=None,
+        ),
+        error_occurred_signal=SignalStub(),
+        transport_fault_ui_signal=SignalStub(),
         last_capture_queue_rejection_reason=last_capture_queue_rejection_reason,
         start_droplet_camera=Mock(),
         start_read_camera=Mock(side_effect=start_read_camera_side_effect),
@@ -189,6 +202,7 @@ def _build_droplet_dialog(
         set_refuel_pulse_width=_command_mock("set_refuel_pulse_width"),
         refuel_only=_command_mock("refuel_only"),
         move_to_location=_command_mock("move_to_location"),
+        check_if_all_completed=Mock(return_value=True),
     )
     if capture_ui_state is not None:
         controller.get_droplet_capture_ui_state = Mock(return_value=dict(capture_ui_state))
@@ -380,6 +394,267 @@ def test_repeat_and_benchmark_capture_profiles_use_optimized_exposure_default(mo
 
     controller.set_droplet_capture_profile.assert_called_once_with("throughput")
     assert dialog.exposure_time_spinbox.value() == 16500
+
+
+def test_head_cleaning_cancel_then_round_trip_restores_exact_position(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+    moves = []
+
+    def queue_move(name, **kwargs):
+        moves.append((name, dict(kwargs)))
+        return object()
+
+    controller.move_to_location = Mock(side_effect=queue_move)
+    assert dialog.printer_head_cleaning_button.text() == "Clean Printer Head"
+
+    dialog.open_printer_head_cleaning_dialog()
+    cleaning = dialog._printer_head_cleaning_dialog
+    assert cleaning.saved_position == {"X": 111, "Y": 222, "Z": 333}
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_CONFIRM
+    escape = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Escape, QtCore.Qt.NoModifier)
+    cleaning.keyPressEvent(escape)
+    qapp.processEvents()
+    assert moves == []
+    controller.stop_read_camera.assert_not_called()
+
+    dialog.open_printer_head_cleaning_dialog()
+    cleaning = dialog._printer_head_cleaning_dialog
+    cleaning._confirm_clear_to_return = Mock(return_value=True)
+    cleaning.move_to_loading_button.click()
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_MOVING_TO_LOADING
+    assert moves[0][0] == "loading"
+    assert moves[0][1]["manual"] is True
+    controller.stop_read_camera.assert_called_once_with()
+    assert dialog._read_camera_stream_armed is False
+
+    moves[0][1]["on_complete"]()
+    qapp.processEvents()
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_AT_LOADING
+    cleaning.return_button.click()
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_RETURNING
+    assert moves[1][0] == "camera"
+    assert moves[1][1]["coords"] == {"X": 111, "Y": 222, "Z": 333}
+    assert moves[1][1]["manual"] is True
+    controller.start_read_camera.assert_called_once_with()
+
+    moves[1][1]["on_complete"]()
+    qapp.processEvents()
+    assert dialog._printer_head_cleaning_dialog is None
+    assert dialog._read_camera_stream_armed is True
+    assert controller.start_read_camera.call_count == 2
+
+
+def test_head_cleaning_completion_callback_wins_idle_monitor_race(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+    moves = []
+    controller.move_to_location = Mock(
+        side_effect=lambda name, **kwargs: moves.append((name, dict(kwargs))) or object()
+    )
+
+    dialog.open_printer_head_cleaning_dialog()
+    cleaning = dialog._printer_head_cleaning_dialog
+    cleaning._confirm_clear_to_return = Mock(return_value=True)
+    cleaning.move_to_loading_button.click()
+
+    deferred_callbacks = []
+
+    class DeferredSingleShotTimer:
+        @staticmethod
+        def singleShot(_delay, callback):
+            deferred_callbacks.append(callback)
+
+    monkeypatch.setattr("CalibrationClasses.View.QTimer", DeferredSingleShotTimer)
+
+    moves[0][1]["on_complete"]()
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_MOVING_TO_LOADING
+    assert len(deferred_callbacks) == 1
+
+    cleaning._monitor_state()
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_MOVING_TO_LOADING
+    deferred_callbacks.pop(0)()
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_AT_LOADING
+
+    cleaning.return_button.click()
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_RETURNING
+    moves[1][1]["on_complete"]()
+    assert len(deferred_callbacks) == 1
+
+    cleaning._monitor_state()
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_RETURNING
+    deferred_callbacks.pop(0)()
+
+    assert dialog._printer_head_cleaning_dialog is None
+    assert dialog._read_camera_stream_armed is True
+
+
+def test_head_cleaning_preflight_blocks_unsafe_states(monkeypatch, qapp):
+    warnings = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, message: warnings.append((str(title), str(message))),
+    )
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+    machine_model = dialog.model.machine_model
+    original_position_getter = machine_model.get_current_position_dict
+
+    cases = [
+        (lambda: setattr(dialog, "capturing", True), "Stop repeated capture"),
+        (
+            lambda: setattr(dialog.model.calibration_manager, "activeCalibration", object()),
+            "Finish the active calibration",
+        ),
+        (
+            lambda: controller.get_droplet_capture_ui_state.return_value.update(
+                {"pending_active": True}
+            ),
+            "pending image capture",
+        ),
+        (
+            lambda: controller.get_droplet_capture_ui_state.return_value.update(
+                {"dirty_shutdown": True}
+            ),
+            "force closed",
+        ),
+        (lambda: setattr(machine_model, "is_connected", lambda: False), "Connect to the machine"),
+        (lambda: setattr(machine_model, "motors_are_homed", lambda: False), "Home the motors"),
+        (lambda: controller.check_if_all_completed.configure_mock(return_value=False), "queued machine commands"),
+        (
+            lambda: setattr(machine_model, "get_current_position_dict", lambda: {"X": 1, "Y": None, "Z": 3}),
+            "current XYZ position",
+        ),
+    ]
+
+    for configure, expected in cases:
+        dialog.capturing = False
+        dialog.model.calibration_manager.activeCalibration = None
+        controller.get_droplet_capture_ui_state.return_value.update(
+            {"pending_active": False, "dirty_shutdown": False}
+        )
+        machine_model.is_connected = lambda: True
+        machine_model.motors_are_homed = lambda: True
+        controller.check_if_all_completed.return_value = True
+        machine_model.get_current_position_dict = original_position_getter
+        configure()
+        dialog.open_printer_head_cleaning_dialog()
+        assert dialog._printer_head_cleaning_dialog is None
+        assert expected in warnings[-1][1]
+
+    controller.move_to_location.assert_not_called()
+
+
+def test_head_cleaning_failed_dispatch_and_missing_callback_enter_recovery(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+    controller.move_to_location = Mock(return_value=False)
+
+    dialog.open_printer_head_cleaning_dialog()
+    cleaning = dialog._printer_head_cleaning_dialog
+    cleaning.move_to_loading_button.click()
+
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_RECOVERY_ERROR
+    assert cleaning.saved_position == {"X": 111, "Y": 222, "Z": 333}
+    assert "partway" in cleaning.detail_label.text()
+    assert dialog._read_camera_stream_armed is False
+    assert cleaning.exit_imager_button.isEnabled() is True
+
+    cleaning.close_for_parent()
+    qapp.processEvents()
+    controller.move_to_location = Mock(return_value=object())
+    dialog.open_printer_head_cleaning_dialog()
+    cleaning = dialog._printer_head_cleaning_dialog
+    controller.check_if_all_completed.return_value = False
+    cleaning.move_to_loading_button.click()
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_MOVING_TO_LOADING
+    controller.check_if_all_completed.return_value = True
+    cleaning._monitor_state()
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_RECOVERY_ERROR
+    assert "without confirming" in cleaning.detail_label.text()
+
+
+def test_head_cleaning_does_not_move_when_imaging_cannot_be_disarmed(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+    controller.stop_read_camera.side_effect = RuntimeError("logger unavailable")
+
+    dialog.open_printer_head_cleaning_dialog()
+    cleaning = dialog._printer_head_cleaning_dialog
+    cleaning.move_to_loading_button.click()
+
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_RECOVERY_ERROR
+    assert "could not be paused safely" in cleaning.detail_label.text()
+    assert cleaning.exit_imager_button.text() == "Exit Imager — Stay at Current Position"
+    controller.move_to_location.assert_not_called()
+
+
+def test_head_cleaning_transport_fault_blocks_return_until_machine_is_ready(monkeypatch, qapp):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+    moves = []
+    controller.move_to_location = Mock(
+        side_effect=lambda name, **kwargs: moves.append((name, dict(kwargs))) or object()
+    )
+
+    dialog.open_printer_head_cleaning_dialog()
+    cleaning = dialog._printer_head_cleaning_dialog
+    cleaning.move_to_loading_button.click()
+    controller.transport_fault_ui_signal.emit({"summary": "simulated transport fault"})
+
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_RECOVERY_ERROR
+    assert "simulated transport fault" in cleaning.detail_label.text()
+    dialog.model.machine_model.transport_paused = True
+    cleaning._refresh_action_availability()
+    assert cleaning.return_button.isEnabled() is False
+    assert cleaning.exit_imager_button.isEnabled() is True
+
+    dialog.model.machine_model.transport_paused = False
+    cleaning._refresh_action_availability()
+    assert cleaning.return_button.isEnabled() is True
+    cleaning._confirm_clear_to_return = Mock(return_value=True)
+    cleaning.return_button.click()
+    assert moves[-1][0] == "camera"
+    assert moves[-1][1]["coords"] == {"X": 111, "Y": 222, "Z": 333}
+
+
+def test_head_cleaning_requires_explicit_loading_choice_and_exit_stays_at_loading(
+    monkeypatch,
+    qapp,
+):
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_should_confirm_close_without_applied_calibration",
+        lambda self: False,
+    )
+    moves = []
+    controller.move_to_location = Mock(
+        side_effect=lambda name, **kwargs: moves.append((name, dict(kwargs))) or object()
+    )
+    dialog.show()
+    qapp.processEvents()
+    dialog.open_printer_head_cleaning_dialog()
+    cleaning = dialog._printer_head_cleaning_dialog
+    cleaning.move_to_loading_button.click()
+    moves[0][1]["on_complete"]()
+    qapp.processEvents()
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_AT_LOADING
+
+    escape = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Escape, QtCore.Qt.NoModifier)
+    cleaning.keyPressEvent(escape)
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_AT_LOADING
+    assert cleaning.close() is False
+    assert cleaning.isVisible()
+
+    original_closer = dialog._exit_imager_from_head_cleaning
+    dialog._exit_imager_from_head_cleaning = Mock(return_value=False)
+    cleaning.exit_imager_button.click()
+    qapp.processEvents()
+    assert cleaning.isVisible()
+    assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_AT_LOADING
+    dialog._exit_imager_from_head_cleaning = original_closer
+
+    cleaning.exit_imager_button.click()
+    qapp.processEvents()
+    assert moves == [("loading", moves[0][1])]
+    assert dialog.isVisible() is False
+    assert dialog._printer_head_cleaning_dialog is None
 
 
 def test_legacy_full_rgb_detection_checkbox_toggles_profile_and_is_not_persisted(monkeypatch, qapp):

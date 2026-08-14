@@ -1659,6 +1659,382 @@ class PrinterHeadRecoveryDialog(QtWidgets.QDialog):
         super().closeEvent(event)
 
 
+class PrinterHeadCleaningDialog(QtWidgets.QDialog):
+    """Modal, stateful handoff for cleaning the bottom of the printer head."""
+
+    PHASE_CONFIRM = "confirm"
+    PHASE_MOVING_TO_LOADING = "moving_to_loading"
+    PHASE_AT_LOADING = "at_loading"
+    PHASE_RETURNING = "returning"
+    PHASE_RECOVERY_ERROR = "recovery_error"
+
+    def __init__(self, parent, model, controller, saved_position, read_camera_was_armed):
+        super().__init__(parent)
+        self.model = model
+        self.controller = controller
+        self.saved_position = {
+            axis: int(saved_position[axis]) for axis in ("X", "Y", "Z")
+        }
+        self.read_camera_was_armed = bool(read_camera_was_armed)
+        self.phase = self.PHASE_CONFIRM
+        self._move_token = 0
+        self._completion_observed_token = None
+        self._pending_failure_reason = None
+        self._allow_close = False
+        self._cleanup_done = False
+
+        self.setObjectName("printerHeadCleaningDialog")
+        self.setWindowTitle("Clean Printer Head")
+        self.setModal(True)
+        self.setMinimumWidth(480)
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        self._build_ui()
+
+        self._monitor_timer = QTimer(self)
+        self._monitor_timer.setInterval(100)
+        self._monitor_timer.timeout.connect(self._monitor_state)
+        self._monitor_timer.start()
+        self.finished.connect(self._cleanup)
+        self._render_phase()
+
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        self.status_label = QtWidgets.QLabel()
+        self.status_label.setObjectName("printerHeadCleaningStatusLabel")
+        self.status_label.setWordWrap(True)
+        status_font = self.status_label.font()
+        status_font.setBold(True)
+        self.status_label.setFont(status_font)
+        layout.addWidget(self.status_label)
+
+        self.position_label = QtWidgets.QLabel(
+            "Return position: "
+            f"X {self.saved_position['X']}, "
+            f"Y {self.saved_position['Y']}, "
+            f"Z {self.saved_position['Z']}"
+        )
+        self.position_label.setObjectName("printerHeadCleaningPositionLabel")
+        self.position_label.setWordWrap(True)
+        layout.addWidget(self.position_label)
+
+        self.detail_label = QtWidgets.QLabel()
+        self.detail_label.setObjectName("printerHeadCleaningDetailLabel")
+        self.detail_label.setWordWrap(True)
+        layout.addWidget(self.detail_label)
+
+        self.confirm_row = QtWidgets.QWidget()
+        confirm_layout = QtWidgets.QHBoxLayout(self.confirm_row)
+        confirm_layout.setContentsMargins(0, 0, 0, 0)
+        confirm_layout.addStretch(1)
+        self.cancel_button = QtWidgets.QPushButton("Cancel")
+        self.cancel_button.setObjectName("printerHeadCleaningCancelButton")
+        self.move_to_loading_button = QtWidgets.QPushButton("Move to Loading Position")
+        self.move_to_loading_button.setObjectName("printerHeadCleaningMoveButton")
+        self.move_to_loading_button.setDefault(True)
+        confirm_layout.addWidget(self.cancel_button)
+        confirm_layout.addWidget(self.move_to_loading_button)
+        layout.addWidget(self.confirm_row)
+
+        self.loading_row = QtWidgets.QWidget()
+        loading_layout = QtWidgets.QHBoxLayout(self.loading_row)
+        loading_layout.setContentsMargins(0, 0, 0, 0)
+        self.exit_imager_button = QtWidgets.QPushButton("Exit Imager — Stay at Loading")
+        self.exit_imager_button.setObjectName("printerHeadCleaningExitButton")
+        self.return_button = QtWidgets.QPushButton("Return to Previous Imager Position")
+        self.return_button.setObjectName("printerHeadCleaningReturnButton")
+        self.return_button.setDefault(True)
+        loading_layout.addWidget(self.exit_imager_button)
+        loading_layout.addWidget(self.return_button)
+        layout.addWidget(self.loading_row)
+
+        self.cancel_button.clicked.connect(self.reject)
+        self.move_to_loading_button.clicked.connect(self._move_to_loading)
+        self.return_button.clicked.connect(self._request_return)
+        self.exit_imager_button.clicked.connect(self._exit_imager)
+
+    def _parent_dialog(self):
+        return self.parent()
+
+    def _commands_idle(self):
+        parent = self._parent_dialog()
+        checker = getattr(parent, "_head_cleaning_commands_idle", None)
+        return bool(callable(checker) and checker())
+
+    def _return_is_available(self):
+        parent = self._parent_dialog()
+        checker = getattr(parent, "_head_cleaning_motion_ready", None)
+        if not callable(checker):
+            return False, "Machine readiness cannot be verified."
+        return checker(require_idle=True)
+
+    def _render_phase(self):
+        confirm = self.phase == self.PHASE_CONFIRM
+        choices = self.phase in {self.PHASE_AT_LOADING, self.PHASE_RECOVERY_ERROR}
+        self.confirm_row.setVisible(confirm)
+        self.loading_row.setVisible(choices)
+
+        if confirm:
+            self.status_label.setText("Move the printer head to the loading position for cleaning?")
+            self.detail_label.setText(
+                "Imaging will pause during the move. The saved XYZ position shown above will be used "
+                "when you return."
+            )
+        elif self.phase == self.PHASE_MOVING_TO_LOADING:
+            self.status_label.setText("Moving to the loading position…")
+            self.detail_label.setText(
+                "Keep clear of the machine. Cleaning options will appear only after motion completes."
+            )
+        elif self.phase == self.PHASE_AT_LOADING:
+            self.exit_imager_button.setText("Exit Imager — Stay at Loading")
+            self.status_label.setText("Printer head is at the loading position.")
+            self.detail_label.setText(
+                "Clean the bottom of the printer head as needed. When finished, clear all hands and "
+                "tools before returning to the saved imager position."
+            )
+        elif self.phase == self.PHASE_RETURNING:
+            self.status_label.setText("Returning to the saved imager position…")
+            self.detail_label.setText("Keep clear of the machine until motion completes.")
+        else:
+            self.exit_imager_button.setText("Exit Imager — Stay at Current Position")
+            self.status_label.setText("Printer-head cleaning motion needs operator attention.")
+            self.detail_label.setText(str(self._pending_failure_reason or "Motion did not complete."))
+
+        self._refresh_action_availability()
+
+    def _refresh_action_availability(self):
+        if self.phase not in {self.PHASE_AT_LOADING, self.PHASE_RECOVERY_ERROR}:
+            return
+        ready, reason = self._return_is_available()
+        self.return_button.setEnabled(bool(ready))
+        self.return_button.setToolTip("" if ready else str(reason))
+        self.exit_imager_button.setEnabled(True)
+
+    def _disarm_imaging(self):
+        if not self.read_camera_was_armed:
+            return True
+        parent = self._parent_dialog()
+        setter = getattr(parent, "_set_stream_capture_read_camera_enabled", None)
+        if not callable(setter):
+            self._enter_recovery_error("Droplet imaging could not be paused safely.")
+            return False
+        try:
+            setter(False)
+        except Exception as exc:
+            self._enter_recovery_error(f"Droplet imaging could not be paused safely: {exc}")
+            return False
+        return True
+
+    def _begin_move(self, phase, name, *, coords=None, completion):
+        self.phase = phase
+        self._pending_failure_reason = None
+        self._move_token += 1
+        token = self._move_token
+        self._completion_observed_token = None
+        self._render_phase()
+        mover = getattr(self.controller, "move_to_location", None)
+        if not callable(mover):
+            self._enter_recovery_error("The move-to-location command is unavailable.")
+            return False
+        try:
+            kwargs = {
+                "manual": True,
+                "on_complete": lambda: completion(token),
+            }
+            if coords is not None:
+                kwargs["coords"] = dict(coords)
+            result = mover(name, **kwargs)
+        except Exception as exc:
+            self._pending_failure_reason = f"Could not queue the move: {exc}"
+            if self._commands_idle():
+                self._enter_recovery_error(self._pending_failure_reason)
+            return False
+        if result is False:
+            self._pending_failure_reason = (
+                "The complete motion route could not be queued. The printer may have moved partway."
+            )
+            if self._commands_idle():
+                self._enter_recovery_error(self._pending_failure_reason)
+            return False
+        return True
+
+    def _move_to_loading(self):
+        if self.phase != self.PHASE_CONFIRM:
+            return
+        self.phase = self.PHASE_MOVING_TO_LOADING
+        self._render_phase()
+        if not self._disarm_imaging() or self.phase != self.PHASE_MOVING_TO_LOADING:
+            return
+        self._begin_move(
+            self.PHASE_MOVING_TO_LOADING,
+            "loading",
+            completion=self._on_loading_complete,
+        )
+
+    def _on_loading_complete(self, token):
+        if token != self._move_token or self.phase != self.PHASE_MOVING_TO_LOADING:
+            return
+        self._completion_observed_token = token
+        QTimer.singleShot(0, lambda token=token: self._finish_loading_move(token))
+
+    def _finish_loading_move(self, token):
+        if token != self._move_token or self.phase != self.PHASE_MOVING_TO_LOADING:
+            return
+        self._completion_observed_token = None
+        self.phase = self.PHASE_AT_LOADING
+        self._pending_failure_reason = None
+        self._render_phase()
+
+    def _confirm_clear_to_return(self):
+        message_box = QtWidgets.QMessageBox(self)
+        message_box.setIcon(QtWidgets.QMessageBox.Warning)
+        message_box.setWindowTitle("Clear the printer before returning")
+        message_box.setText(
+            "Remove all hands, wipes, and tools from the printer, then return to the saved imager position."
+        )
+        return_button = message_box.addButton(
+            "Return to Previous Position", QtWidgets.QMessageBox.AcceptRole
+        )
+        cancel_button = message_box.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
+        message_box.setDefaultButton(cancel_button)
+        message_box.exec()
+        return message_box.clickedButton() is return_button
+
+    def _request_return(self):
+        if self.phase not in {self.PHASE_AT_LOADING, self.PHASE_RECOVERY_ERROR}:
+            return
+        ready, reason = self._return_is_available()
+        if not ready:
+            self.return_button.setToolTip(str(reason))
+            return
+        if not self._confirm_clear_to_return():
+            return
+        self._begin_move(
+            self.PHASE_RETURNING,
+            "camera",
+            coords=self.saved_position,
+            completion=self._on_return_complete,
+        )
+
+    def _on_return_complete(self, token):
+        if token != self._move_token or self.phase != self.PHASE_RETURNING:
+            return
+        self._completion_observed_token = token
+        QTimer.singleShot(0, lambda token=token: self._finish_return_move(token))
+
+    def _finish_return_move(self, token):
+        if token != self._move_token or self.phase != self.PHASE_RETURNING:
+            return
+        self._completion_observed_token = None
+        parent = self._parent_dialog()
+        restorer = getattr(parent, "_finish_head_cleaning_return", None)
+        if callable(restorer):
+            restorer(self.read_camera_was_armed)
+        self._allow_close = True
+        self.accept()
+
+    def _enter_recovery_error(self, reason):
+        if self.phase == self.PHASE_CONFIRM:
+            return
+        self._completion_observed_token = None
+        self.phase = self.PHASE_RECOVERY_ERROR
+        self._pending_failure_reason = (
+            f"{str(reason or 'Motion did not complete.')} "
+            "Do not assume the printer is at the loading or saved imager position. Keep clear until motion stops."
+        )
+        self._render_phase()
+
+    def handle_controller_error(self, title, message):
+        if self.phase in {
+            self.PHASE_MOVING_TO_LOADING,
+            self.PHASE_AT_LOADING,
+            self.PHASE_RETURNING,
+        }:
+            detail = ": ".join(part for part in (str(title or ""), str(message or "")) if part)
+            self._enter_recovery_error(detail or "The controller reported a motion error.")
+
+    def handle_transport_fault(self, report=None):
+        if self.phase == self.PHASE_CONFIRM:
+            return
+        summary = "Command transport became untrusted during the cleaning workflow."
+        if isinstance(report, dict) and report.get("summary"):
+            summary = str(report["summary"])
+        self._enter_recovery_error(summary)
+
+    def _monitor_state(self):
+        if self.phase in {self.PHASE_MOVING_TO_LOADING, self.PHASE_RETURNING}:
+            if self._commands_idle():
+                # The motion callback defers its UI transition out of the queue
+                # handler. Do not mistake that short handoff window for a lost callback.
+                if self._completion_observed_token == self._move_token:
+                    return
+                reason = self._pending_failure_reason or (
+                    "The command queue became idle without confirming the requested destination."
+                )
+                self._enter_recovery_error(reason)
+            return
+        if self.phase == self.PHASE_AT_LOADING:
+            parent = self._parent_dialog()
+            checker = getattr(parent, "_head_cleaning_motion_ready", None)
+            if callable(checker):
+                ready, reason = checker(require_idle=False)
+                if not ready:
+                    self._enter_recovery_error(reason)
+                    return
+        self._refresh_action_availability()
+
+    def _exit_imager(self):
+        if self.phase not in {self.PHASE_AT_LOADING, self.PHASE_RECOVERY_ERROR}:
+            return
+        parent = self._parent_dialog()
+        closer = getattr(parent, "_exit_imager_from_head_cleaning", None)
+        if not callable(closer):
+            self._enter_recovery_error("The droplet imager could not be closed.")
+            return
+        self.hide()
+        if not closer(self):
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            self._render_phase()
+
+    def close_for_parent(self):
+        self._allow_close = True
+        self._cleanup()
+        self.done(QtWidgets.QDialog.Rejected)
+
+    def _cleanup(self, *_args):
+        if self._cleanup_done:
+            return
+        self._cleanup_done = True
+        self._completion_observed_token = None
+        self._monitor_timer.stop()
+
+    def reject(self):
+        if self.phase != self.PHASE_CONFIRM and not self._allow_close:
+            return
+        self._allow_close = True
+        super().reject()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            if self.phase == self.PHASE_CONFIRM:
+                self.reject()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        if self.phase != self.PHASE_CONFIRM and not self._allow_close:
+            event.ignore()
+            return
+        self._allow_close = True
+        self._cleanup()
+        super().closeEvent(event)
+
+
 class ManualRefuelCheckDialog(QtWidgets.QDialog):
     DEFAULT_TRIAL_DROPLETS = 5
     SOURCE = "manual_refuel_check_dialog"
@@ -2698,6 +3074,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._droplet_calibration_sequence_gripper_preamble_attempted = False
         self._droplet_calibration_sequence_gripper_restore_attempted = False
         self._printer_head_recovery_dialog = None
+        self._printer_head_cleaning_dialog = None
         self._optics_session_active = False
         self._optics_session_dir = None
         self._optics_rejected_filenames = []
@@ -3420,6 +3797,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.printer_head_recovery_button.setToolTip("Open pull-back and refill recovery controls.")
         run_options_v.addWidget(self.printer_head_recovery_button)
 
+        self.printer_head_cleaning_button = QtWidgets.QPushButton("Clean Printer Head")
+        self.printer_head_cleaning_button.setObjectName("printerHeadCleaningButton")
+        self.printer_head_cleaning_button.setToolTip(
+            "Move to loading for cleaning, then return to the exact current imager position."
+        )
+        self.printer_head_cleaning_button.setVisible(not self.result_presentation_only)
+        run_options_v.addWidget(self.printer_head_cleaning_button)
+
         self.droplet_setup_widget = QtWidgets.QWidget()
         droplet_setup_grid = QtWidgets.QGridLayout(self.droplet_setup_widget)
         droplet_setup_grid.setContentsMargins(0, 0, 0, 0)
@@ -3973,6 +4358,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         transport_fault_signal = getattr(self.controller, "transport_fault_ui_signal", None)
         if transport_fault_signal is not None:
             transport_fault_signal.connect(self._handle_printing_controls_transport_fault)
+        controller_error_signal = getattr(self.controller, "error_occurred_signal", None)
+        if controller_error_signal is not None:
+            controller_error_signal.connect(self._handle_printer_head_cleaning_controller_error)
 
         self.start_pressure_spin.valueChanged.connect(self.set_start_pressure)
         self.num_pressure_tests_spin.valueChanged.connect(self.set_num_pressure_tests)
@@ -3987,6 +4375,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.enable_refuel_level_tracking_checkbox.toggled.connect(self._set_refuel_tracking_enabled)
         self.enable_refuel_process_monitoring_checkbox.toggled.connect(self._set_refuel_process_monitoring_enabled)
         self.printer_head_recovery_button.clicked.connect(self.open_printer_head_recovery_dialog)
+        self.printer_head_cleaning_button.clicked.connect(self.open_printer_head_cleaning_dialog)
         self.summary_current_run_checkbox.toggled.connect(self._refresh_summary_filters)
         self.summary_valid_only_checkbox.toggled.connect(self._refresh_summary_filters)
         self.summary_source_combo.currentIndexChanged.connect(self._refresh_summary_filters)
@@ -4896,6 +5285,163 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._printer_head_recovery_dialog = dialog
         dialog.finished.connect(lambda _result: setattr(self, "_printer_head_recovery_dialog", None))
         dialog.open()
+
+    def _head_cleaning_commands_idle(self):
+        checker = getattr(self.controller, "check_if_all_completed", None)
+        if not callable(checker):
+            checker = getattr(getattr(self.controller, "machine", None), "check_if_all_completed", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+
+    def _head_cleaning_motion_ready(self, *, require_idle):
+        machine_model = getattr(self.model, "machine_model", None)
+        if machine_model is None:
+            return False, "Machine state is unavailable."
+
+        connected_getter = getattr(machine_model, "is_connected", None)
+        try:
+            connected = (
+                bool(connected_getter())
+                if callable(connected_getter)
+                else bool(getattr(machine_model, "machine_connected", False))
+            )
+        except Exception:
+            connected = False
+        if not connected:
+            return False, "Connect to the machine before moving the printer head."
+
+        homed_getter = getattr(machine_model, "motors_are_homed", None)
+        try:
+            homed = (
+                bool(homed_getter())
+                if callable(homed_getter)
+                else bool(getattr(machine_model, "motors_homed", False))
+            )
+        except Exception:
+            homed = False
+        if not homed:
+            return False, "Home the motors before moving the printer head."
+
+        if bool(getattr(machine_model, "transport_paused", False)) or bool(
+            getattr(machine_model, "paused", False)
+        ):
+            return False, "Machine motion is paused or its transport state is not trusted."
+
+        machine = getattr(self.controller, "machine", None)
+        blocked_reason = getattr(machine, "_command_queue_blocked_reason", None)
+        if blocked_reason:
+            return (
+                False,
+                "Machine motion is not trusted. Reconnect and home the motors before returning.",
+            )
+
+        if require_idle and not self._head_cleaning_commands_idle():
+            return False, "Wait for all queued machine commands to finish."
+        return True, ""
+
+    def _head_cleaning_position_snapshot(self):
+        machine_model = getattr(self.model, "machine_model", None)
+        getter = getattr(machine_model, "get_current_position_dict", None)
+        if not callable(getter):
+            return None
+        try:
+            raw = getter()
+            if not isinstance(raw, dict):
+                return None
+            position = {}
+            for axis in ("X", "Y", "Z"):
+                value = raw.get(axis)
+                if isinstance(value, bool) or not np.isfinite(float(value)):
+                    return None
+                position[axis] = int(value)
+            return position
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _head_cleaning_preflight(self):
+        if bool(getattr(self, "result_presentation_only", False)):
+            return None, "Printer-head cleaning motion is unavailable in a result-only window."
+
+        recovery = getattr(self, "_printer_head_recovery_dialog", None)
+        if recovery is not None and recovery.isVisible():
+            return None, "Close Printer Head Recovery before starting the cleaning workflow."
+
+        if DropletImagingDialog._is_calibration_busy(self):
+            return None, "Finish the active calibration before cleaning the printer head."
+        if bool(getattr(self, "capturing", False)):
+            return None, "Stop repeated capture before cleaning the printer head."
+        if self._capture_pending_for_ui():
+            return None, "Wait for the pending image capture to finish."
+        if self._imager_dirty_shutdown_active():
+            return None, self._imager_dirty_shutdown_warning()
+
+        ready, reason = self._head_cleaning_motion_ready(require_idle=True)
+        if not ready:
+            return None, reason
+        position = self._head_cleaning_position_snapshot()
+        if position is None:
+            return None, "The current XYZ position could not be verified."
+        return position, ""
+
+    def open_printer_head_cleaning_dialog(self):
+        existing = getattr(self, "_printer_head_cleaning_dialog", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+
+        position, error = self._head_cleaning_preflight()
+        if position is None:
+            QtWidgets.QMessageBox.warning(self, "Clean Printer Head", error)
+            return
+
+        dialog = PrinterHeadCleaningDialog(
+            self,
+            self.model,
+            self.controller,
+            position,
+            read_camera_was_armed=bool(getattr(self, "_read_camera_stream_armed", False)),
+        )
+        self._printer_head_cleaning_dialog = dialog
+
+        def clear_dialog_reference(_result, dialog=dialog):
+            if getattr(self, "_printer_head_cleaning_dialog", None) is dialog:
+                self._printer_head_cleaning_dialog = None
+
+        dialog.finished.connect(clear_dialog_reference)
+        dialog.open()
+
+    def _finish_head_cleaning_return(self, read_camera_was_armed):
+        if not bool(read_camera_was_armed) or bool(getattr(self, "_stream_capture_dialog_closing", False)):
+            return
+        try:
+            self._set_stream_capture_read_camera_enabled(True)
+        except Exception as exc:
+            self._read_camera_stream_armed = False
+            self._read_camera_stream_reconciled = False
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Droplet imaging unavailable",
+                f"The printer returned to the saved position, but imaging could not be restarted: {exc}",
+            )
+
+    def _exit_imager_from_head_cleaning(self, cleaning_dialog):
+        if getattr(self, "_printer_head_cleaning_dialog", None) is not cleaning_dialog:
+            return False
+        try:
+            closed = bool(self.close())
+        except Exception:
+            return False
+        return bool(closed or not self.isVisible())
+
+    def _handle_printer_head_cleaning_controller_error(self, title, message):
+        dialog = getattr(self, "_printer_head_cleaning_dialog", None)
+        if dialog is not None:
+            dialog.handle_controller_error(title, message)
 
     def open_refuel_vacuum_dialog(self):
         self.open_printer_head_recovery_dialog()
@@ -8172,6 +8718,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._print_profile_apply_pending = False
         self._sync_printing_controls_from_model(force=True)
         self._refresh_printing_controls_enabled_state()
+        dialog = getattr(self, "_printer_head_cleaning_dialog", None)
+        if dialog is not None:
+            dialog.handle_transport_fault(_report)
 
     def _refresh_current_pressure_values(self, *_args):
         print_value = self._printing_machine_value("get_current_print_pressure", None)
@@ -13779,6 +14328,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if recovery_dialog is not None:
             try:
                 recovery_dialog.close()
+            except Exception:
+                pass
+        cleaning_dialog = getattr(self, "_printer_head_cleaning_dialog", None)
+        if cleaning_dialog is not None:
+            try:
+                cleaning_dialog.close_for_parent()
             except Exception:
                 pass
         if getattr(self, "_optics_session_active", False):

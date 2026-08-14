@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -16,7 +17,9 @@ from CalibrationClasses.View import (
     CalibrationModePreflightDialog,
     DropletImagingDialog,
     ManualRefuelCheckDialog,
+    PrinterHeadCleaningDialog,
 )
+from simulation import SimulationFaultPlan
 from tools.sil.session import (
     ArtifactRetentionPolicy,
     SessionRootPolicy,
@@ -46,6 +49,92 @@ _PRINT_PROFILES = [
         "refuel_pulse_width": 6000,
     },
 ]
+
+
+def _wait_for(qapp, predicate, label, *, attempts=1200):
+    for _ in range(attempts):
+        qapp.processEvents()
+        if predicate():
+            return
+        QtTest.QTest.qWait(2)
+    raise AssertionError(f"Timed out waiting for {label}")
+
+
+def _connect_home_and_move_to_custom_camera(session, qapp, custom_position):
+    assert session.connect_simulator() is not False
+    _wait_for(
+        qapp,
+        lambda: session.components.model.machine_model.is_connected(),
+        "simulator connection",
+    )
+    session.components.controller.home_machine()
+    _wait_for(
+        qapp,
+        lambda: (
+            session.components.model.machine_model.motors_are_homed()
+            and session.components.machine.check_if_all_completed()
+        ),
+        "simulator homing",
+    )
+
+    completed = {"value": False}
+    assert session.components.controller.move_to_location(
+        "camera",
+        coords=dict(custom_position),
+        manual=True,
+        on_complete=lambda: completed.update(value=True),
+    ) is not False
+    _wait_for(
+        qapp,
+        lambda: completed["value"] and session.components.machine.check_if_all_completed(),
+        "custom camera positioning",
+    )
+    assert session.components.model.machine_model.get_current_position_dict() == custom_position
+
+
+def _launch_motion_capable_imager(monkeypatch, session, qapp):
+    view = session.components.view
+    box = view.pressure_box
+    controller = session.components.controller
+
+    monkeypatch.setattr(controller, "start_droplet_camera", Mock())
+    monkeypatch.setattr(controller, "stop_droplet_camera", Mock())
+    monkeypatch.setattr(controller, "start_read_camera", Mock())
+    monkeypatch.setattr(controller, "stop_read_camera", Mock())
+
+    capture_state = {
+        "pending_active": False,
+        "dirty_shutdown": False,
+        "last_result_status": None,
+        "last_result_reason": "",
+        "last_result_dirty_shutdown": False,
+    }
+
+    def capture_stub(*_args, **_kwargs):
+        capture_state["pending_active"] = True
+        return True
+
+    monkeypatch.setattr(controller, "capture_droplet_image", Mock(side_effect=capture_stub))
+    monkeypatch.setattr(
+        controller,
+        "get_droplet_capture_ui_state",
+        Mock(side_effect=lambda: dict(capture_state)),
+    )
+    controller._sil_imager_capture_state = capture_state
+    monkeypatch.setattr(controller, "set_exposure_time", Mock(return_value=True))
+    monkeypatch.setattr(controller, "set_flash_delay", Mock(return_value=True))
+    monkeypatch.setattr(controller, "set_flash_duration", Mock(return_value=True))
+    monkeypatch.setattr(controller, "set_imaging_droplets", Mock(return_value=True))
+
+    dialog = DropletImagingDialog(view, session.components.model, controller)
+    box._set_active_droplet_imager_dialog(dialog)
+    box._droplet_imager_launch_pending = False
+    dialog.finished.connect(
+        lambda _result=None, active=dialog: box._clear_droplet_imager_launch_state(active)
+    )
+    dialog.open()
+    qapp.processEvents()
+    return dialog
 
 
 def _camera_free_model():
@@ -242,6 +331,7 @@ def test_full_layout_simulation_calibration_uses_real_tabs_but_no_camera(
     assert dialog.control_panel_scroll.isVisible()
     assert dialog.analysis_panel.isVisible()
     assert "CAMERA DISABLED" in dialog.image_label.text()
+    assert dialog.printer_head_cleaning_button.isVisible()
     assert not dialog.calibration_tabs.isTabEnabled(
         dialog.calibration_tabs.indexOf(dialog.debug_tab)
     )
@@ -616,6 +706,372 @@ def test_imager_printing_controls_round_trip_through_virtual_machine(qapp, tmp_p
         assert box.print_series.at(box.print_series.count() - 1).y() == float(
             print_readings[-1]
         )
+    finally:
+        if dialog is not None:
+            dialog.close()
+            qapp.processEvents()
+        assert session.close()
+
+
+def test_imager_head_cleaning_camera_free_sil_round_trip(
+    monkeypatch,
+    qapp,
+    tmp_path,
+):
+    session = SimulationSession.create(
+        SimulationSessionConfigV1(
+            visible=False,
+            qt_ownership="borrowed",
+            root_policy=SessionRootPolicy.RETAINED,
+            session_root=(tmp_path / "imager-head-cleaning-camera-free").resolve(),
+            artifact_retention=ArtifactRetentionPolicy.RETAIN,
+            seed=1,
+            speed_multiplier=1000.0,
+            source_identity="pytest-imager-head-cleaning-camera-free",
+        )
+    )
+    dialog = None
+    try:
+        view = session.launch()
+        model = session.components.model
+        controller = session.components.controller
+        camera_position = model.location_model.get_location_dict("camera")
+        _connect_home_and_move_to_custom_camera(session, qapp, camera_position)
+
+        camera_calls = []
+
+        def record_camera_call(name):
+            return lambda *args, **kwargs: camera_calls.append(name)
+
+        monkeypatch.setattr(
+            controller,
+            "start_droplet_camera",
+            record_camera_call("start_droplet_camera"),
+        )
+        monkeypatch.setattr(
+            controller,
+            "stop_droplet_camera",
+            record_camera_call("stop_droplet_camera"),
+        )
+        monkeypatch.setattr(
+            controller,
+            "start_read_camera",
+            record_camera_call("start_read_camera"),
+        )
+        monkeypatch.setattr(
+            controller,
+            "stop_read_camera",
+            record_camera_call("stop_read_camera"),
+        )
+        monkeypatch.setattr(
+            PrinterHeadCleaningDialog,
+            "_confirm_clear_to_return",
+            lambda self: True,
+        )
+
+        dialog = view.pressure_box._launch_simulation_calibration_dialog()
+        qapp.processEvents()
+        assert dialog.camera_free_mode is True
+        assert dialog.printer_head_cleaning_button.isVisible()
+        assert dialog._read_camera_stream_armed is False
+
+        dialog.open_printer_head_cleaning_dialog()
+        cleaning = dialog._printer_head_cleaning_dialog
+        assert cleaning.saved_position == camera_position
+        cleaning.move_to_loading_button.click()
+        _wait_for(
+            qapp,
+            lambda: cleaning.phase == PrinterHeadCleaningDialog.PHASE_AT_LOADING,
+            "camera-free loading position",
+        )
+        cleaning.return_button.click()
+        _wait_for(
+            qapp,
+            lambda: (
+                dialog._printer_head_cleaning_dialog is None
+                and session.components.machine.check_if_all_completed()
+            ),
+            "camera-free exact imager return",
+        )
+
+        assert model.machine_model.get_current_position_dict() == camera_position
+        assert dialog._read_camera_stream_armed is False
+        assert camera_calls == []
+    finally:
+        if dialog is not None:
+            dialog.close()
+            qapp.processEvents()
+        assert session.close()
+
+
+def test_imager_head_cleaning_sil_round_trip_resume_and_exit(
+    monkeypatch,
+    qapp,
+    tmp_path,
+):
+    session = SimulationSession.create(
+        SimulationSessionConfigV1(
+            visible=False,
+            qt_ownership="borrowed",
+            root_policy=SessionRootPolicy.RETAINED,
+            session_root=(tmp_path / "imager-head-cleaning-round-trip").resolve(),
+            artifact_retention=ArtifactRetentionPolicy.RETAIN,
+            seed=1,
+            speed_multiplier=1000.0,
+            source_identity="pytest-imager-head-cleaning-round-trip",
+        )
+    )
+    dialog = None
+    custom_position = {"X": 12000, "Y": 39000, "Z": 98000}
+    try:
+        view = session.launch()
+        box = view.pressure_box
+        controller = session.components.controller
+        machine = session.components.machine
+        model = session.components.model
+        lifecycle = []
+        machine.command_lifecycle_changed.connect(lambda payload: lifecycle.append(dict(payload)))
+        monkeypatch.setattr(
+            PrinterHeadCleaningDialog,
+            "_confirm_clear_to_return",
+            lambda self: True,
+        )
+        monkeypatch.setattr(
+            "CalibrationClasses.View.QtWidgets.QMessageBox.question",
+            lambda *args, **kwargs: QtWidgets.QMessageBox.Yes,
+        )
+
+        _connect_home_and_move_to_custom_camera(session, qapp, custom_position)
+        dialog = _launch_motion_capable_imager(monkeypatch, session, qapp)
+        manager = model.calibration_manager
+        camera_model = model.droplet_camera_model
+        machine_model = model.machine_model
+        calibration_before = copy.deepcopy(manager.data)
+        settings_before = (
+            machine_model.get_target_print_pressure(),
+            machine_model.get_target_refuel_pressure(),
+            machine_model.get_print_pulse_width(),
+            machine_model.get_refuel_pulse_width(),
+            camera_model.get_exposure_time(),
+            camera_model.get_flash_delay(),
+            camera_model.get_flash_duration(),
+            camera_model.get_num_droplets(),
+        )
+        selected_tab = dialog.calibration_tabs.currentWidget()
+
+        lifecycle_before_cancel = len(lifecycle)
+        dialog.open_printer_head_cleaning_dialog()
+        cleaning = dialog._printer_head_cleaning_dialog
+        assert cleaning.saved_position == custom_position
+        cleaning.cancel_button.click()
+        qapp.processEvents()
+        assert len(lifecycle) == lifecycle_before_cancel
+        assert dialog._printer_head_cleaning_dialog is None
+
+        motion_start = len(lifecycle)
+        dialog.open_printer_head_cleaning_dialog()
+        cleaning = dialog._printer_head_cleaning_dialog
+        assert QtWidgets.QApplication.activeModalWidget() is cleaning
+        cleaning.move_to_loading_button.click()
+        assert dialog._read_camera_stream_armed is False
+        _wait_for(
+            qapp,
+            lambda: (
+                cleaning.phase == PrinterHeadCleaningDialog.PHASE_AT_LOADING
+                and cleaning.return_button.isEnabled()
+            ),
+            "confirmed loading position",
+        )
+        loading_position = model.location_model.get_location_dict("loading")
+        assert machine_model.get_current_position_dict() == loading_position
+        assert controller.expected_location == "loading"
+        assert QtWidgets.QApplication.activeModalWidget() is cleaning
+
+        cleaning.return_button.click()
+        _wait_for(
+            qapp,
+            lambda: (
+                dialog._printer_head_cleaning_dialog is None
+                and machine.check_if_all_completed()
+            ),
+            "exact imager return",
+        )
+        motion_end = len(lifecycle)
+        assert machine_model.get_current_position_dict() == custom_position
+        assert controller.expected_position == custom_position
+        assert controller.expected_location == "camera"
+        assert dialog._read_camera_stream_armed is True
+        assert dialog.calibration_tabs.currentWidget() is selected_tab
+        assert manager.data == calibration_before
+        assert settings_before == (
+            machine_model.get_target_print_pressure(),
+            machine_model.get_target_refuel_pressure(),
+            machine_model.get_print_pulse_width(),
+            machine_model.get_refuel_pulse_width(),
+            camera_model.get_exposure_time(),
+            camera_model.get_flash_delay(),
+            camera_model.get_flash_duration(),
+            camera_model.get_num_droplets(),
+        )
+
+        cleaning_motion_events = lifecycle[motion_start:motion_end]
+        assert cleaning_motion_events
+        assert {event["command_type"] for event in cleaning_motion_events} <= {
+            "ABSOLUTE_XY",
+            "ABSOLUTE_Z",
+        }
+        terminal_by_command = {}
+        for event in cleaning_motion_events:
+            terminal_by_command.setdefault(event["command_number"], []).append(event["event"])
+        assert all(states[-1] == "completed" for states in terminal_by_command.values())
+        assert all(
+            states[:4] == ["queued", "sent", "accepted", "executing"]
+            for states in terminal_by_command.values()
+        )
+
+        dialog.capture_image()
+        assert dialog._capture_request_pending is True
+        controller._sil_imager_capture_state["pending_active"] = False
+        camera_model.droplet_image_updated.emit()
+        dialog._on_droplet_capture_finished()
+        _wait_for(
+            qapp,
+            lambda: dialog._capture_request_pending is False,
+            "capture pending cleanup",
+        )
+
+        dialog.open_printer_head_cleaning_dialog()
+        cleaning = dialog._printer_head_cleaning_dialog
+        cleaning.move_to_loading_button.click()
+        _wait_for(
+            qapp,
+            lambda: cleaning.phase == PrinterHeadCleaningDialog.PHASE_AT_LOADING,
+            "second loading position",
+        )
+        cleaning.exit_imager_button.click()
+        qapp.processEvents()
+        if not dialog.isVisible():
+            # Production uses blocking exec() and clears this state in its finally block.
+            box._clear_droplet_imager_launch_state(dialog)
+        _wait_for(
+            qapp,
+            lambda: not dialog.isVisible() and box._droplet_imager_dialog is None,
+            "imager exit at loading",
+        )
+        assert machine_model.get_current_position_dict() == loading_position
+        assert controller.expected_location == "loading"
+        assert box._pressure_render_suspended is False
+        assert dialog._printer_head_cleaning_dialog is None
+        assert not dialog.camera_timer.isActive()
+        assert not dialog.refuel_monitor_timer.isActive()
+        dialog = None
+    finally:
+        if dialog is not None:
+            dialog.close()
+            qapp.processEvents()
+        assert session.close()
+
+
+def test_imager_head_cleaning_sil_recovers_from_interrupted_move(
+    monkeypatch,
+    qapp,
+    tmp_path,
+):
+    session = SimulationSession.create(
+        SimulationSessionConfigV1(
+            visible=False,
+            qt_ownership="borrowed",
+            root_policy=SessionRootPolicy.RETAINED,
+            session_root=(tmp_path / "imager-head-cleaning-fault").resolve(),
+            artifact_retention=ArtifactRetentionPolicy.RETAIN,
+            seed=2,
+            speed_multiplier=1000.0,
+            source_identity="pytest-imager-head-cleaning-fault",
+        )
+    )
+    dialog = None
+    custom_position = {"X": 12100, "Y": 38900, "Z": 97900}
+    try:
+        session.launch()
+        controller = session.components.controller
+        machine = session.components.machine
+        model = session.components.model
+        lifecycle = []
+        machine.command_lifecycle_changed.connect(lambda payload: lifecycle.append(dict(payload)))
+        monkeypatch.setattr(
+            PrinterHeadCleaningDialog,
+            "_confirm_clear_to_return",
+            lambda self: True,
+        )
+        monkeypatch.setattr(
+            "CalibrationClasses.View.QtWidgets.QMessageBox.exec",
+            lambda self: 0,
+        )
+        monkeypatch.setattr(
+            "CalibrationClasses.View.QtWidgets.QMessageBox.question",
+            lambda *args, **kwargs: QtWidgets.QMessageBox.Yes,
+        )
+
+        _connect_home_and_move_to_custom_camera(session, qapp, custom_position)
+        dialog = _launch_motion_capable_imager(monkeypatch, session, qapp)
+        motion_start = len(lifecycle)
+        next_command = int(machine.command_queue.command_number) + 1
+        assert machine.configure_faults(
+            SimulationFaultPlan(fail_command_numbers={next_command + 1})
+        ) is True
+
+        dialog.open_printer_head_cleaning_dialog()
+        cleaning = dialog._printer_head_cleaning_dialog
+        cleaning.move_to_loading_button.click()
+        _wait_for(
+            qapp,
+            lambda: (
+                cleaning.phase == PrinterHeadCleaningDialog.PHASE_RECOVERY_ERROR
+                and machine.check_if_all_completed()
+                and cleaning.return_button.isEnabled()
+            ),
+            "interrupted cleaning recovery state",
+        )
+        failed_motion_events = lifecycle[motion_start:]
+        assert cleaning.saved_position == custom_position
+        assert dialog._read_camera_stream_armed is False
+        assert "Do not assume" in cleaning.detail_label.text()
+        assert "Printer head is at the loading position" not in cleaning.status_label.text()
+        assert any(event["event"] == "completed" for event in failed_motion_events)
+        assert any(event["event"] == "canceled" for event in failed_motion_events)
+        assert {event["command_type"] for event in failed_motion_events} <= {
+            "ABSOLUTE_XY",
+            "ABSOLUTE_Z",
+        }
+
+        assert machine.reset_faults() is True
+        cleaning.return_button.click()
+        _wait_for(
+            qapp,
+            lambda: (
+                dialog._printer_head_cleaning_dialog is None
+                and machine.check_if_all_completed()
+            ),
+            "fault recovery return",
+        )
+        assert model.machine_model.get_current_position_dict() == custom_position
+        assert controller.expected_position == custom_position
+        assert controller.expected_location == "camera"
+        assert dialog._read_camera_stream_armed is True
+
+        dialog.capture_image()
+        assert dialog._capture_request_pending is True
+        controller._sil_imager_capture_state["pending_active"] = False
+        model.droplet_camera_model.droplet_image_updated.emit()
+        dialog._on_droplet_capture_finished()
+        _wait_for(
+            qapp,
+            lambda: dialog._capture_request_pending is False,
+            "fault-recovery capture cleanup",
+        )
+        dialog.close()
+        qapp.processEvents()
+        dialog = None
     finally:
         if dialog is not None:
             dialog.close()

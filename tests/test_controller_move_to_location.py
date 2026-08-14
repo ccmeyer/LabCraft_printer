@@ -442,6 +442,49 @@ def test_move_to_location_on_complete_runs_after_location_update():
     assert events.index(("location", "plate")) < events.index("complete")
 
 
+def test_move_to_location_camera_custom_coords_preserve_safe_route_and_callback_order():
+    waypoint_lookups = []
+    callbacks = []
+    events = []
+    custom_target = {"X": 4321, "Y": 5432, "Z": 61000}
+    c, calls = _build_controller(
+        "loading",
+        50000,
+        {"X": 1, "Y": 2, "Z": 3},
+        location_lookup=lambda name: waypoint_lookups.append(name) or {"X": 1, "Y": 2, "Z": 3},
+    )
+    c.update_location_handler = lambda **kwargs: events.append(("location", kwargs["name"]))
+
+    def queue_xyz(x, y, z, **kwargs):
+        calls.append(("xyz", x, y, z))
+        c.expected_position.update({"X": x, "Y": y, "Z": z})
+        callbacks.append(kwargs["handler"])
+        return True
+
+    c.set_absolute_coordinates = queue_xyz
+
+    ok = Controller.move_to_location(
+        c,
+        "camera",
+        coords=custom_target,
+        manual=True,
+        on_complete=lambda: events.append("complete"),
+    )
+
+    assert ok is True
+    assert waypoint_lookups == []
+    assert calls == [
+        ("z", 35000),
+        ("xyz", custom_target["X"], custom_target["Y"], custom_target["Z"]),
+    ]
+    assert c.expected_position == custom_target
+    assert c.expected_location == "camera"
+    assert events == []
+
+    callbacks[0]()
+    assert events == [("location", "camera"), "complete"]
+
+
 def test_move_to_location_plate_prefers_active_plate_reference_coords():
     location_lookups = []
     plate_target = {"X": 700, "Y": 800, "Z": 900}
