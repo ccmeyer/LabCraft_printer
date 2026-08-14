@@ -3864,6 +3864,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         debug_content_v.addWidget(self.pw_sweep_group)
         debug_content_v.addWidget(self.timecourse_group)
         debug_content_v.addWidget(self.stream_capture_group)
+        self.calibration_recorder_debug_group = self._build_calibration_recorder_debug_group()
+        debug_content_v.addWidget(self.calibration_recorder_debug_group)
         self.droplet_capture_performance_debug_group = self._build_droplet_capture_performance_debug_group()
         debug_content_v.addWidget(self.droplet_capture_performance_debug_group)
         self.refuel_performance_debug_group = self._build_refuel_performance_debug_group()
@@ -4740,6 +4742,30 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return
         self.raise_()
         self.activateWindow()
+
+    def _build_calibration_recorder_debug_group(self):
+        group = QtWidgets.QGroupBox("Calibration Recorder Debug")
+        group_v = QtWidgets.QVBoxLayout(group)
+        group_v.setContentsMargins(8, 8, 8, 8)
+        group_v.setSpacing(6)
+
+        self.prompt_calibration_verdict_checkbox = QtWidgets.QCheckBox(
+            "Prompt for Calibration Verdict / Comments"
+        )
+        self.prompt_calibration_verdict_checkbox.setToolTip(
+            "Show the optional operator verdict and comments dialog after each eligible recorded calibration run."
+        )
+        self.prompt_calibration_verdict_checkbox.setChecked(False)
+        group_v.addWidget(self.prompt_calibration_verdict_checkbox)
+        return group
+
+    @staticmethod
+    def _is_calibration_verdict_prompt_enabled(dialog):
+        checkbox = getattr(dialog, "prompt_calibration_verdict_checkbox", None)
+        try:
+            return bool(checkbox is not None and checkbox.isChecked())
+        except Exception:
+            return False
 
     def _build_droplet_capture_performance_debug_group(self):
         group = QtWidgets.QGroupBox("Droplet Capture Performance Debug")
@@ -11161,6 +11187,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def _prompt_calibration_verdict(self, *, default_outcome: str, error_message: str = ""):
         mgr = self.model.calibration_manager
+        if not DropletImagingDialog._is_calibration_verdict_prompt_enabled(self):
+            try:
+                mgr.clear_pending_process_verdict(reason="ui_prompt_disabled")
+            except Exception:
+                pass
+            return
+
         pending = None
         try:
             pending = mgr.get_pending_process_verdict()

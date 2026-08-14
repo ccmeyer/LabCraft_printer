@@ -2069,6 +2069,17 @@ def test_stream_calibration_sequence_followup_uses_gripper_only_without_moves(mo
     dialog.deleteLater()
 
 
+def test_calibration_verdict_prompt_is_an_unchecked_debug_opt_in(monkeypatch, qapp):
+    dialog, _manager, _controller = _build_view_dialog(monkeypatch, qapp)
+
+    checkbox = dialog.prompt_calibration_verdict_checkbox
+    assert checkbox.text() == "Prompt for Calibration Verdict / Comments"
+    assert checkbox.isChecked() is False
+    assert dialog.debug_tab_content.isAncestorOf(checkbox) is True
+
+    dialog.deleteLater()
+
+
 def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict(monkeypatch, qapp):
     dialog, manager, controller = _build_view_dialog(monkeypatch, qapp)
     prompted = []

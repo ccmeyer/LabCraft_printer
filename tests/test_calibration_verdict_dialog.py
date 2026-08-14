@@ -135,7 +135,10 @@ def test_prompt_ignores_stale_latest_recording_when_no_pending_context(monkeypat
             AssertionError("prompt should not consult latest recording directory")
         ),
     )
-    dialog = SimpleNamespace(model=SimpleNamespace(calibration_manager=manager))
+    dialog = SimpleNamespace(
+        model=SimpleNamespace(calibration_manager=manager),
+        prompt_calibration_verdict_checkbox=SimpleNamespace(isChecked=lambda: True),
+    )
     dialog._prompt_calibration_verdict = (
         DropletImagingDialog._prompt_calibration_verdict.__get__(dialog, DropletImagingDialog)
     )
@@ -146,6 +149,51 @@ def test_prompt_ignores_stale_latest_recording_when_no_pending_context(monkeypat
     monkeypatch.setattr(calibration_view, "CalibrationVerdictDialog", _boom)
 
     dialog._prompt_calibration_verdict(default_outcome="success")
+
+
+def test_prompt_disabled_clears_pending_verdict_without_constructing_dialog(monkeypatch, qapp):
+    cleared = []
+    manager = SimpleNamespace(
+        clear_pending_process_verdict=lambda *, reason="": cleared.append(str(reason)),
+    )
+    dialog = SimpleNamespace(
+        model=SimpleNamespace(calibration_manager=manager),
+        prompt_calibration_verdict_checkbox=SimpleNamespace(isChecked=lambda: False),
+    )
+    dialog._prompt_calibration_verdict = (
+        DropletImagingDialog._prompt_calibration_verdict.__get__(dialog, DropletImagingDialog)
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("verdict dialog should not be constructed when prompting is disabled")
+
+    monkeypatch.setattr(calibration_view, "CalibrationVerdictDialog", _boom)
+
+    dialog._prompt_calibration_verdict(default_outcome="success")
+
+    assert cleared == ["ui_prompt_disabled"]
+    assert DropletImagingDialog._is_calibration_verdict_prompt_enabled(SimpleNamespace()) is False
+
+
+def test_prompt_disabled_stays_suppressed_when_pending_cleanup_fails(monkeypatch, qapp):
+    def _fail_cleanup(*, reason=""):
+        raise RuntimeError(f"cleanup failed: {reason}")
+
+    manager = SimpleNamespace(clear_pending_process_verdict=_fail_cleanup)
+    dialog = SimpleNamespace(
+        model=SimpleNamespace(calibration_manager=manager),
+        prompt_calibration_verdict_checkbox=SimpleNamespace(isChecked=lambda: False),
+    )
+    dialog._prompt_calibration_verdict = (
+        DropletImagingDialog._prompt_calibration_verdict.__get__(dialog, DropletImagingDialog)
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("verdict dialog should remain suppressed after cleanup failure")
+
+    monkeypatch.setattr(calibration_view, "CalibrationVerdictDialog", _boom)
+
+    dialog._prompt_calibration_verdict(default_outcome="failed", error_message="camera timeout")
 
 
 def test_prompt_submits_pending_verdict_and_clears_on_skip(monkeypatch, qapp):
@@ -199,7 +247,10 @@ def test_prompt_submits_pending_verdict_and_clears_on_skip(monkeypatch, qapp):
             raise AssertionError("payload should not be read when dialog is rejected")
 
     manager = _Manager()
-    dialog = SimpleNamespace(model=SimpleNamespace(calibration_manager=manager))
+    dialog = SimpleNamespace(
+        model=SimpleNamespace(calibration_manager=manager),
+        prompt_calibration_verdict_checkbox=SimpleNamespace(isChecked=lambda: True),
+    )
     dialog._prompt_calibration_verdict = (
         DropletImagingDialog._prompt_calibration_verdict.__get__(dialog, DropletImagingDialog)
     )
