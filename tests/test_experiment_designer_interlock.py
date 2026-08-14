@@ -39,6 +39,7 @@ def _build_dialog_stub(
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog._uploaded_design_active = False
     dialog._editing_locked_by_gripper = False
+    dialog._auto_timer = Mock()
     dialog.status_lbl = QLabel("")
     dialog.lifecycle_banner = QLabel("")
     dialog.lifecycle_banner.hide()
@@ -171,6 +172,8 @@ def test_legacy_view_action_populates_main_window_and_closes_editor(qapp):
 
 def _assert_mutating_controls_disabled(dialog):
     controls = [
+        dialog.exp_name_edit,
+        dialog.auto_update_chk,
         dialog.finish_btn,
         dialog.run_btn,
         dialog.add_reagent_btn,
@@ -323,9 +326,48 @@ def test_experiment_designer_locks_edit_actions_when_gripper_loaded(qapp):
     ExperimentDesignDialog._on_finish(dialog)
 
     assert dialog._editing_locked_by_gripper is True
+    assert dialog.exp_name_edit.isEnabled() is False
+    assert dialog.exp_name_edit.isReadOnly() is True
+    assert dialog.auto_update_chk.isEnabled() is False
     assert dialog.finish_btn.isEnabled() is False
+    assert dialog.lifecycle_banner.isVisible() is True
+    assert (
+        dialog.lifecycle_banner.text()
+        == ExperimentDesignDialog.GRIPPER_LOCK_BANNER
+    )
+    dialog._auto_timer.stop.assert_called()
     assert "view-only" in dialog.status_lbl.text()
     dialog.main_window.complete_experiment_design.assert_not_called()
+
+
+def test_gripper_lock_blocks_debounced_and_direct_design_updates(qapp):
+    dialog = _build_dialog_stub(gripper_loaded=True)
+    dialog._auto_update_suspended = False
+    dialog._mark_design_optimization_dirty = Mock()
+    dialog._auto_update_enabled = Mock(return_value=True)
+    dialog._run_design_optimization_flow = Mock()
+
+    ExperimentDesignDialog._schedule_auto_update(dialog)
+    ExperimentDesignDialog._recompute_silent(dialog)
+
+    dialog._auto_timer.stop.assert_called_once_with()
+    dialog._auto_timer.start.assert_not_called()
+    dialog._mark_design_optimization_dirty.assert_not_called()
+    dialog._run_design_optimization_flow.assert_not_called()
+
+
+def test_gripper_lock_rejects_direct_optimization_flow(qapp):
+    dialog = _build_dialog_stub(gripper_loaded=True)
+    dialog._rebuild_model_from_table = Mock()
+    dialog._update_metadata_from_controls = Mock()
+
+    ok, result = ExperimentDesignDialog._run_design_optimization_flow(dialog)
+
+    assert ok is False
+    assert result["read_only"] is True
+    assert result["reason"] == ExperimentDesignDialog.GRIPPER_LOCK_STATUS
+    dialog._rebuild_model_from_table.assert_not_called()
+    dialog._update_metadata_from_controls.assert_not_called()
 
 
 def test_experiment_designer_unlocks_when_gripper_unloaded(qapp):
@@ -337,12 +379,19 @@ def test_experiment_designer_unlocks_when_gripper_unloaded(qapp):
 
     ExperimentDesignDialog._refresh_all_lock_states(dialog)
     assert dialog.finish_btn.isEnabled() is False
+    assert dialog.exp_name_edit.isEnabled() is False
+    assert dialog.exp_name_edit.isReadOnly() is True
+    assert dialog.lifecycle_banner.text() == ExperimentDesignDialog.GRIPPER_LOCK_BANNER
 
     gripper_loaded["value"] = False
     ExperimentDesignDialog._refresh_all_lock_states(dialog)
 
     assert dialog._editing_locked_by_gripper is False
     assert dialog.finish_btn.isEnabled() is True
+    assert dialog.exp_name_edit.isEnabled() is True
+    assert dialog.exp_name_edit.isReadOnly() is False
+    assert dialog.auto_update_chk.isEnabled() is True
+    assert dialog.lifecycle_banner.isVisible() is False
 
 
 @pytest.mark.parametrize(
@@ -552,8 +601,9 @@ def test_gripper_lock_overrides_active_execution_editable_copy(qapp):
 
     assert dialog.duplicate_btn.isEnabled() is False
     assert dialog.finish_btn.isEnabled() is False
+    assert dialog.lifecycle_banner.text() == ExperimentDesignDialog.ACTIVE_EXECUTION_BANNER
     assert dialog.status_lbl.text() == (
-        "Design is view-only while a printer head is loaded in the gripper."
+        ExperimentDesignDialog.GRIPPER_LOCK_STATUS
     )
 
 

@@ -11156,6 +11156,13 @@ class ExperimentDesignDialog(QDialog):
         "update the printing mode and measured ejection volume for a reagent that "
         "has not yet been dispensed."
     )
+    GRIPPER_LOCK_STATUS = (
+        "Design is view-only while a printer head is loaded in the gripper."
+    )
+    GRIPPER_LOCK_BANNER = (
+        "Experiment design is locked while a printer head is loaded in the gripper. "
+        "Return the printer head to its rack slot to edit the experiment."
+    )
 
     def __init__(self, model: ExperimentModel, main_window):
         super().__init__()
@@ -12334,6 +12341,12 @@ class ExperimentDesignDialog(QDialog):
         if getattr(self, "_auto_update_suspended", False):
             return
 
+        if self._gripper_edit_lock_is_active():
+            timer = getattr(self, "_auto_timer", None)
+            if timer is not None:
+                timer.stop()
+            return
+
         if mark_dirty:
             self._mark_design_optimization_dirty()
 
@@ -12362,7 +12375,10 @@ class ExperimentDesignDialog(QDialog):
             timer.start()
 
     def _recompute_silent(self):
-        if self._model_execution_is_read_only(getattr(self, "model", None)):
+        if (
+            self._gripper_edit_lock_is_active()
+            or self._model_execution_is_read_only(getattr(self, "model", None))
+        ):
             return
         if (
             getattr(self, "_uploaded_design_active", False)
@@ -13277,112 +13293,11 @@ class ExperimentDesignDialog(QDialog):
         except Exception:
             return False
 
-    def _apply_gripper_edit_lock_state(self):
-        self._editing_locked_by_gripper = self._is_gripper_loaded()
-        locked = self._editing_locked_by_gripper
-
-        mutating_controls = [
-            "add_reagent_btn",
-            "upload_design_btn",
-            "reset_upload_btn",
-            "unique_conditions_btn",
-            "preview_reactions_btn",
-            "export_reaction_preview_btn",
-            "run_btn",
-            "new_btn",
-            "duplicate_btn",
-            "save_btn",
-            "load_btn",
-            "finish_btn",
-            "rep_spin",
-            "v_spin",
-            "final_v_spin",
-            "volume_tolerance_spin",
-            "fill_name_edit",
-            "fill_mode_combo",
-            "fill_dv_spin",
-            "allow_two_chk",
-            "randomize_chk",
-            "random_seed_spin",
-            "subset_chk",
-            "reduction_spin",
-            "start_col_spin",
-            "start_row_spin",
-            "plate_format_combo",
-            "well_selection_btn",
-        ]
-        for attr_name in mutating_controls:
-            widget = getattr(self, attr_name, None)
-            if widget is not None and locked:
-                widget.setEnabled(False)
-
-        if hasattr(self, "reagent_table") and self.reagent_table is not None:
-            for row in range(self.reagent_table.rowCount()):
-                for col in range(self.reagent_table.columnCount()):
-                    w = self.reagent_table.cellWidget(row, col)
-                    if w is None:
-                        continue
-                    if isinstance(w, QLineEdit):
-                        if locked:
-                            w.setReadOnly(True)
-                    elif locked:
-                        w.setEnabled(False)
-
-        if locked:
-            self._set_status("Design is view-only while a printer head is loaded in the gripper.")
-        elif hasattr(self, "status_lbl") and self.status_lbl is not None:
-            if self.status_lbl.text() == "Design is view-only while a printer head is loaded in the gripper.":
-                self._set_status("")
-
-    def _apply_default_edit_state(self):
-        baseline_controls = [
-            "add_reagent_btn",
-            "upload_design_btn",
-            "reset_upload_btn",
-            "unique_conditions_btn",
-            "preview_reactions_btn",
-            "export_reaction_preview_btn",
-            "run_btn",
-            "new_btn",
-            "save_btn",
-            "load_btn",
-            "finish_btn",
-            "rep_spin",
-            "v_spin",
-            "final_v_spin",
-            "volume_tolerance_spin",
-            "fill_name_edit",
-            "fill_mode_combo",
-            "fill_dv_spin",
-            "allow_two_chk",
-            "randomize_chk",
-            "random_seed_spin",
-            "subset_chk",
-            "reduction_spin",
-            "start_col_spin",
-            "start_row_spin",
-            "well_selection_btn",
-        ]
-        for attr_name in baseline_controls:
-            widget = getattr(self, attr_name, None)
-            if widget is not None:
-                widget.setEnabled(True)
-
-        if hasattr(self, "random_seed_spin") and hasattr(self, "randomize_chk"):
-            self.random_seed_spin.setEnabled(self.randomize_chk.isChecked())
-        if hasattr(self, "reduction_spin") and hasattr(self, "subset_chk"):
-            self.reduction_spin.setEnabled(self.subset_chk.isChecked())
-
-        if hasattr(self, "reagent_table") and self.reagent_table is not None:
-            for row in range(self.reagent_table.rowCount()):
-                for col in range(self.reagent_table.columnCount()):
-                    w = self.reagent_table.cellWidget(row, col)
-                    if w is None:
-                        continue
-                    if isinstance(w, QLineEdit):
-                        w.setReadOnly(False)
-                    else:
-                        w.setEnabled(True)
+    def _gripper_edit_lock_is_active(self) -> bool:
+        return bool(
+            getattr(self, "_editing_locked_by_gripper", False)
+            or self._is_gripper_loaded()
+        )
 
     def _refresh_all_lock_states(self):
         self._apply_default_edit_state()
@@ -13390,9 +13305,9 @@ class ExperimentDesignDialog(QDialog):
         self._apply_manual_assignment_lock_state()
         self._apply_progress_edit_lock_state()
         self._apply_execution_edit_lock_state()
-        self._refresh_editor_lifecycle_state()
+        lifecycle = self._refresh_editor_lifecycle_state()
         self._refresh_editable_copy_availability()
-        self._apply_gripper_edit_lock_state()
+        self._apply_gripper_edit_lock_state(lifecycle=lifecycle)
 
     def _apply_uploaded_design_mode_to_ui(self, active: bool):
         self._uploaded_design_active = bool(active)
@@ -13425,11 +13340,12 @@ class ExperimentDesignDialog(QDialog):
                 else:
                     w.setEnabled(True)
 
-    def _apply_gripper_edit_lock_state(self):
+    def _apply_gripper_edit_lock_state(self, *, lifecycle=None):
         self._editing_locked_by_gripper = self._is_gripper_loaded()
         locked = self._editing_locked_by_gripper
 
         mutating_controls = [
+            "exp_name_edit",
             "add_reagent_btn",
             "upload_design_btn",
             "reset_upload_btn",
@@ -13442,6 +13358,7 @@ class ExperimentDesignDialog(QDialog):
             "load_btn",
             "duplicate_btn",
             "finish_btn",
+            "auto_update_chk",
             "rep_spin",
             "v_spin",
             "final_v_spin",
@@ -13464,6 +13381,14 @@ class ExperimentDesignDialog(QDialog):
             if widget is not None and locked:
                 widget.setEnabled(False)
 
+        if locked:
+            timer = getattr(self, "_auto_timer", None)
+            if timer is not None:
+                timer.stop()
+            name_edit = getattr(self, "exp_name_edit", None)
+            if name_edit is not None:
+                name_edit.setReadOnly(True)
+
         if hasattr(self, "reagent_table") and self.reagent_table is not None:
             for _row, _col, w in self._iter_reagent_widgets():
                 if isinstance(w, QLineEdit):
@@ -13473,9 +13398,20 @@ class ExperimentDesignDialog(QDialog):
                     w.setEnabled(False)
 
         if locked:
-            self._set_status("Design is view-only while a printer head is loaded in the gripper.")
+            if lifecycle is None:
+                lifecycle = self._classify_editor_lifecycle()
+            if (
+                lifecycle.get("state") == "editable"
+                and not getattr(self, "_progress_protected", False)
+            ):
+                banner = getattr(self, "lifecycle_banner", None)
+                if banner is not None:
+                    banner.setText(self.GRIPPER_LOCK_BANNER)
+                    banner.setVisible(True)
+                    banner.setToolTip(self.GRIPPER_LOCK_BANNER)
+            self._set_status(self.GRIPPER_LOCK_STATUS)
         elif hasattr(self, "status_lbl") and self.status_lbl is not None:
-            if self.status_lbl.text() == "Design is view-only while a printer head is loaded in the gripper.":
+            if self.status_lbl.text() == self.GRIPPER_LOCK_STATUS:
                 self._set_status("")
 
     def _apply_default_edit_state(self):
@@ -14151,6 +14087,15 @@ class ExperimentDesignDialog(QDialog):
         busy_message: str | None = None,
         show_busy_dialog: bool = True,
     ) -> tuple[bool, dict | None]:
+        if self._gripper_edit_lock_is_active():
+            message = self.GRIPPER_LOCK_STATUS
+            self._set_status(message)
+            return False, {
+                "best": None,
+                "reason": message,
+                "issues_by_key": {},
+                "read_only": True,
+            }
         if self._model_execution_is_read_only(self.model):
             message = (
                 "This experiment is locked. Reactions and stock solutions cannot be "
