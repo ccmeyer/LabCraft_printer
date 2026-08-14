@@ -290,6 +290,44 @@ Stepper timing fields reduced the versioned production binary from 331,680 to
 325,496 bytes (6,184 bytes). The cleanup artifact SHA-256 is
 `4D0EAB390C0B2B98FA764E244DE8F44B8362E8B1BA9A4779F4F816586F687373`.
 
+### Z speed-ladder cleanup qualification
+
+The exact 325,496-byte cleanup artifact above was flashed once on LC-001. The
+initial and final SAFE runs each passed 30/30 with `boot=176`, `fault_ct=4`,
+`wdg_ct=6`, all four watchdog participants live, no current late task, no new
+execution-time reset report, and no I2C failure/recovery evidence. The initial
+SAFE retained the expected startup reset report from the deliberate flash.
+Production selector `2096`
+passed 5/5 with exact direct X/Y/Z normalized-LUT endpoints and no pending or
+saturation evidence; `direct_xyz_lut_v1` normalized with zero warnings or
+blocking issues.
+
+The production `motion_envelope_v1` suite then passed 5/5. Its ordinary Z row
+completed three 30 kHz / 140,000 steps/s^2 repetitions to `Z=80000`, with
+`z_span=2`, `z_drift=2`, zero return error, and no timeout, guard, bound, limit,
+reset, or watchdog failure. The operator observed normal sound and motion for
+every move and home in both suites. The normalized envelope report also had
+zero warnings or blocking issues.
+
+Retained evidence SHA-256 values:
+
+- `hil_reports/z_cleanup_00_pre_safe_5b99e24f.json`:
+  `255BABA0992133A3B042181798EDFA555C855748A4C69FD04892796EC87897EC`;
+- `hil_reports/z_cleanup_01_direct_2096_d2d0929a.json`:
+  `918D72F5772966F0545EA5CB1D845D3EAABF4EAC9171956E6C1F3B7564A65F33`;
+- `hil_reports/z_cleanup_02_post_2096_safe_d2d0929a.json`:
+  `1C2BF3C56FA86F8542A35E686B5FF1A85A283087888C44D04BECFC234F5A8E13`;
+- `hil_reports/z_cleanup_03_motion_envelope_d2d0929a.json`:
+  `0144E3C44CB258BCAB1C9AD64D58D85BA2F3CECDD80D0D509FE330595D26A364`;
+- `hil_reports/z_cleanup_04_final_safe_d2d0929a.json`:
+  `A45AECEFA07244C4AA26F98EFA553B1497B9510952DCFAB6C014F5BEC36F5346`;
+- normalized `direct_xyz_lut_v1` report at
+  `hil_reports/qualification/LC-001/20260814T012118Z/report.json`:
+  `9B80042E8EE5A1FEA46AE24EE1F67834A0E5810DCDF57C794F2FEF34158B1358`;
+- normalized `motion_envelope_v1` report at
+  `hil_reports/qualification/LC-001/20260814T012534Z/report.json`:
+  `972112B2D33FCDF0237DD7103737D81A3B0AFCF0C1F4FCD200E4AD4FB2B70302`.
+
 Raw evidence (path, SHA-256):
 
 | Evidence | SHA-256 |
