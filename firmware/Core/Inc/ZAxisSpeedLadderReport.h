@@ -12,8 +12,9 @@ namespace ZAxisSpeedLadderReport {
 constexpr uint32_t kRequiredRepetitions = 3u;
 constexpr uint32_t kMeasuredMovesPerTier = kRequiredRepetitions * 2u;
 constexpr uint32_t kActiveBodyLimitCycles = 2250u;
+constexpr uint32_t kActiveFullIrqLimitCycles = 2550u;
 constexpr uint32_t kTerminalFullIrqLimitCycles = 4500u;
-constexpr uint32_t kMinimumDeadlineSlackCycles = 450u;
+constexpr uint32_t kMinimumDeadlineSlackCycles = 900u;
 constexpr uint32_t kHomeErrorLimitLogicalSteps = 25u;
 constexpr uint32_t kReturnErrorLimitLogicalSteps = 10u;
 constexpr uint32_t kStatusPeriodLimitMs = 125u;

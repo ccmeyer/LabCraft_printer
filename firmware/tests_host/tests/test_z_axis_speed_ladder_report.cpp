@@ -28,7 +28,7 @@ MoveObservation passingMove(uint32_t logicalDistance,
   move.timing.totalEntries = callbacks;
   move.timing.fullIrqSamples = callbacks;
   move.timing.deadlineSamples = callbacks - 1u;
-  move.timing.minimumDeadlineSlackCycles = 700u;
+  move.timing.minimumDeadlineSlackCycles = 1000u;
   move.timing.phaseMaxCycles[static_cast<uint8_t>(
       StepperIsrInstrumentation::Phase::Cruise)] = 500u;
   move.timing.fullIrqActiveMaxCycles = 700u;
@@ -39,7 +39,7 @@ MoveObservation passingMove(uint32_t logicalDistance,
 TierObservation passingTier()
 {
   TierObservation tier{};
-  tier.rateHz = 60000u;
+  tier.rateHz = 50000u;
   for (uint32_t index = 0u; index < 6u; ++index) {
     ZAxisSpeedLadderReport::accumulateMove(
         tier, passingMove(79900u, 39950u, 79901u));
@@ -82,6 +82,31 @@ TEST(ZAxisSpeedLadderReport, RejectsTimingCoverageDeadlineAndProfileFailures)
       tier, 479400u, 239700u, 479406u, 479400u));
 }
 
+TEST(ZAxisSpeedLadderReport, SeparatesBodyFullVectorAndSlackLimits)
+{
+  TierObservation tier = passingTier();
+  tier.activeBodyMaxCycles = 2250u;
+  tier.activeFullIrqMaxCycles = 2550u;
+  tier.minimumDeadlineSlackCycles = 900u;
+  CHECK_TRUE(ZAxisSpeedLadderReport::tierPasses(
+      tier, 479400u, 239700u, 479406u, 479400u));
+
+  tier = passingTier();
+  tier.activeBodyMaxCycles = 2251u;
+  CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
+      tier, 479400u, 239700u, 479406u, 479400u));
+
+  tier = passingTier();
+  tier.activeFullIrqMaxCycles = 2551u;
+  CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
+      tier, 479400u, 239700u, 479406u, 479400u));
+
+  tier = passingTier();
+  tier.minimumDeadlineSlackCycles = 899u;
+  CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
+      tier, 479400u, 239700u, 479406u, 479400u));
+}
+
 TEST(ZAxisSpeedLadderReport, AcceptsAtMostOneDwtWrapPerMeasuredMove)
 {
   TierObservation tier = passingTier();
@@ -120,8 +145,8 @@ TEST(ZAxisSpeedLadderReport, MetricsFitTheGenericResultBudget)
   const size_t length = ZAxisSpeedLadderReport::buildMetrics(
       metrics, sizeof(metrics), tier);
   CHECK(length > 0u);
-  CHECK(length <= (230u - std::strlen("z_speed_ladder_60khz")));
-  STRCMP_CONTAINS("hz=60000;rep=3", metrics);
+  CHECK(length <= (230u - std::strlen("z_speed_ladder_50khz")));
+  STRCMP_CONTAINS("hz=50000;rep=3", metrics);
   STRCMP_CONTAINS("cb=479406;s=479406;mi=0", metrics);
   STRCMP_CONTAINS("cw=0", metrics);
 }

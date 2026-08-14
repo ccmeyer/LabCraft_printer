@@ -3,7 +3,7 @@
   "manifest_id": "z_speed_ladder_v1",
   "name": "Instrumented Z-Axis Speed Ladder v1",
   "profile": "FULL",
-  "lifecycle": "active",
+  "lifecycle": "archived",
   "description": "Diagnostic-only long-Z speed ladder at 30, 40, 50, and 60 kHz logical rates. Each tier uses the production MRES=3 normalized LUT path and records complete TIM10 callback, full-vector, entry-lateness, and deadline evidence without changing the app's normal Z speed.",
   "expected_test_ids": [2190, 2191, 2192, 2193, 2194],
   "enforce_expected_test_ids": true,

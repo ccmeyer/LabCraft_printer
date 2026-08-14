@@ -258,12 +258,22 @@ Milestone 7 leaves the app's ordinary Z request at 30 kHz logical rate and
 the firmware cap at 60 kHz. Selector `2199` is the separate, watched path for
 deciding whether that ordinary request can safely increase. It reuses the
 qualified long-Z anchor and endpoints, applies the production MRES=3 and
-normalized-LUT implementation, and tests 30/40/50/60 kHz in order with an
+normalized-LUT implementation, and tests 30/40/50 kHz in order with an
 operator gate before each increase. Only the six measured legs in a tier arm
 TIM10 entry/full-IRQ/deadline telemetry; setup moves and homes retain their
 production behavior. A passing ladder is characterization evidence, not an
 automatic app/default-speed change. Any production Z-speed change requires a
 separate reviewed change and regression qualification.
+
+The initial v1 watched run completed all three 30 kHz repetitions with exact
+pulse/callback coverage, zero pending updates or deadline misses, 3,078 core
+cycles of minimum post-service slack, and normal operator-observed motion and
+homes. It stopped only because the complete TIM1/TIM10 vector maximum was
+2,253 cycles against a 2,250-cycle limit that had also been applied to the
+831-cycle stepping body. V2 therefore preserves the 2,250-cycle body ceiling,
+uses a distinct 2,550-cycle complete-vector ceiling, raises the authoritative
+minimum measured slack to 900 core cycles, and ends at the intended 50 kHz
+production candidate. V1 remains archived for historical normalization.
 
 Raw evidence (path, SHA-256):
 

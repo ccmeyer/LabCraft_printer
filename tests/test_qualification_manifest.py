@@ -447,23 +447,26 @@ def test_load_direct_xyz_lut_manifest_freezes_motion_and_isolation_gates():
     assert "sn" not in x
 
 
-def test_load_z_speed_ladder_manifest_freezes_geometry_and_timing_gates():
-    manifest = load_manifest("z_speed_ladder_v1")
+def test_load_z_speed_ladder_v2_freezes_geometry_and_timing_gates():
+    manifest = load_manifest("z_speed_ladder_v2")
 
-    assert manifest.expected_test_ids == (2190, 2191, 2192, 2193, 2194)
+    assert manifest.expected_test_ids == (2190, 2191, 2192, 2194)
     assert manifest.selftest_args == ("--z-speed-ladder-suite",)
     assert manifest.required_host_checks == (
         "selftest_progress_watchdog",
         "coordinated_xy_status_cadence",
     )
     assert manifest.fixtures[0]["fixture_id"] == "z_speed_ladder_envelope_clear"
-    for test_id in range(2190, 2194):
+    for test_id in range(2190, 2193):
         metrics = manifest.analysis_rules[str(test_id)]["metrics"]
         assert metrics["ld"]["equals"] == 479400
         assert metrics["np"]["equals"] == 239700
         assert metrics["cb"]["equals"] == metrics["s"]["equals"] == 479406
         assert metrics["ds"]["equals"] == 479400
         assert metrics["dm"]["equals"] == 0
+        assert metrics["bm"]["max"] == 2250
+        assert metrics["fm"]["max"] == 2550
+        assert metrics["sl"]["min"] == 900
         assert metrics["cw"]["max"] == 6
         assert metrics["to"]["equals"] == 0
     summary = manifest.analysis_rules["2194"]["metrics"]
@@ -471,6 +474,13 @@ def test_load_z_speed_ladder_manifest_freezes_geometry_and_timing_gates():
     assert summary["se"]["equals"] == 0
     assert summary["re"]["equals"] == 0
     assert summary["bc"]["equals"] == 0
+
+
+def test_load_z_speed_ladder_v1_remains_archived_for_historical_reports():
+    manifest = load_manifest("z_speed_ladder_v1")
+    assert manifest.lifecycle == "archived"
+    assert manifest.expected_test_ids == (2190, 2191, 2192, 2193, 2194)
+    assert manifest.analysis_rules["2193"]["metrics"]["hz"]["equals"] == 60000
 
 
 def test_load_coordinated_xy_mres3_rearm_manifest_is_diagnostic_only():

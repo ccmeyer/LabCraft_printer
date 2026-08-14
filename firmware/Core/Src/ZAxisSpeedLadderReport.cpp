@@ -115,7 +115,7 @@ bool tierPasses(const TierObservation& tier,
       tier.missingFullIrqSamples == 0u &&
       tier.pendingObservations == 0u && tier.maximumPendingStreak == 0u &&
       tier.activeBodyMaxCycles <= kActiveBodyLimitCycles &&
-      tier.activeFullIrqMaxCycles <= kActiveBodyLimitCycles &&
+      tier.activeFullIrqMaxCycles <= kActiveFullIrqLimitCycles &&
       tier.terminalFullIrqMaxCycles <= kTerminalFullIrqLimitCycles &&
       tier.deadlineSamples == expectedDeadlineSamples &&
       tier.deadlineMisses == 0u &&

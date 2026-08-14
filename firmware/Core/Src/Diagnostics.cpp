@@ -3496,19 +3496,17 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                       }
                       if (runZSpeedLadderSuite) {
                         static constexpr uint32_t kRatesHz[] = {
-                            30000u, 40000u, 50000u, 60000u};
+                            30000u, 40000u, 50000u};
                         static constexpr uint16_t kResultIds[] = {
-                            2190u, 2191u, 2192u, 2193u};
+                            2190u, 2191u, 2192u};
                         static constexpr const char* kResultNames[] = {
                             "z_speed_ladder_30khz",
                             "z_speed_ladder_40khz",
-                            "z_speed_ladder_50khz",
-                            "z_speed_ladder_60khz"};
+                            "z_speed_ladder_50khz"};
                         static constexpr const char* kTierPrompts[] = {
                             nullptr,
                             "z_speed_ladder_40khz_confirm",
-                            "z_speed_ladder_50khz_confirm",
-                            "z_speed_ladder_60khz_confirm"};
+                            "z_speed_ladder_50khz_confirm"};
                         static constexpr int32_t kAnchorX = 43000;
                         static constexpr int32_t kAnchorY = 13000;
                         static constexpr int32_t kZMaximum = 80000;
@@ -3533,12 +3531,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         if (stepperZ == nullptr || stepperX == nullptr ||
                             stepperY == nullptr || stepperP == nullptr ||
                             Gantry::instance() == nullptr) {
-                          for (uint32_t index = 0u; index < 4u; ++index) {
+                          for (uint32_t index = 0u; index < 3u; ++index) {
                             (void)runOne(kResultIds[index], kResultNames[index], false,
                                          "gate=motion_unavailable;sk=1;sf=1;to=0");
                           }
                           (void)runOne(2194u, "z_speed_ladder_summary", false,
-                                       "n=4;ok=0;last=0;zh=0;xyh=0;ax=43000;ay=13000;zr=0;pd=0;rd=0;mr=3;de=1;mf=0;pv=0;se=0;re=0;bc=0;is=1;sf=1;to=0");
+                                       "n=3;ok=0;last=0;zh=0;xyh=0;ax=43000;ay=13000;zr=0;pd=0;rd=0;mr=3;de=1;mf=0;pv=0;se=0;re=0;bc=0;is=1;sf=1;to=0");
                           return finishSelfTestNow();
                         }
 
@@ -3564,8 +3562,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         const int32_t pStart = stepperP->getPosition();
                         const int32_t rStart = stepperR != nullptr
                             ? stepperR->getPosition() : 0;
-                        ZAxisSpeedLadderReport::TierObservation tiers[4]{};
-                        for (uint32_t index = 0u; index < 4u; ++index) {
+                        ZAxisSpeedLadderReport::TierObservation tiers[3]{};
+                        for (uint32_t index = 0u; index < 3u; ++index) {
                           tiers[index].rateHz = kRatesHz[index];
                         }
 
@@ -3596,7 +3594,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                         auto emitRemainingSkipped = [&](uint32_t firstIndex,
                                                         const char* gate) {
-                          for (uint32_t index = firstIndex; index < 4u; ++index) {
+                          for (uint32_t index = firstIndex; index < 3u; ++index) {
                             tiers[index].skipped = true;
                             char metrics[96] = {};
                             snprintf(metrics, sizeof(metrics),
@@ -3645,7 +3643,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         bool timedOut = false;
                         bool ladderOk = setupOk;
                         for (uint32_t tierIndex = 0u;
-                             tierIndex < 4u && ladderOk;
+                             tierIndex < 3u && ladderOk;
                              ++tierIndex) {
                           if (kTierPrompts[tierIndex] != nullptr &&
                               !waitForOperatorResume(kTierPrompts[tierIndex])) {
@@ -3804,7 +3802,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                         if (!ladderOk) {
                           uint32_t firstSkipped = passedTiers;
-                          if (firstSkipped < 4u &&
+                          if (firstSkipped < 3u &&
                               tiers[firstSkipped].logicalDistance != 0u) {
                             ++firstSkipped;
                           }
@@ -3841,7 +3839,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             pressureSnapshot.selectFailureCount == 0u &&
                             pressureSnapshot.readFailureCount == 0u &&
                             pressureSnapshot.recoveryCount == 0u;
-                        const bool summaryPass = ladderOk && passedTiers == 4u &&
+                        const bool summaryPass = ladderOk && passedTiers == 3u &&
                             zHomeOk && xyHomeOk && pDelta == 0 && rDelta == 0 &&
                             TMC2208Configuration::kMres == 3u &&
                             driverConfig.doubleEdge &&
@@ -3849,7 +3847,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             pressureEvidencePass && !timedOut;
                         char summaryMetrics[224] = {};
                         snprintf(summaryMetrics, sizeof(summaryMetrics),
-                                 "n=4;ok=%lu;last=%lu;zh=%u;xyh=%u;ax=%ld;ay=%ld;zr=%ld;pd=%ld;rd=%ld;mr=%u;de=%u;mf=%u;pv=%u;se=%lu;re=%lu;bc=%lu;is=%u;sf=0;to=%u",
+                                 "n=3;ok=%lu;last=%lu;zh=%u;xyh=%u;ax=%ld;ay=%ld;zr=%ld;pd=%ld;rd=%ld;mr=%u;de=%u;mf=%u;pv=%u;se=%lu;re=%lu;bc=%lu;is=%u;sf=0;to=%u",
                                  static_cast<unsigned long>(passedTiers),
                                  static_cast<unsigned long>(lastRateHz),
                                  zHomeOk ? 1u : 0u,

@@ -774,8 +774,8 @@ def test_direct_xyz_lut_manifest_rejects_profile_timing_or_isolation_regressions
     assert _analyze(incomplete, manifest)["verdict"]["status"] == "fail"
 
 
-def test_z_speed_ladder_manifest_rejects_incomplete_or_late_evidence():
-    manifest = load_manifest("z_speed_ladder_v1")
+def test_z_speed_ladder_v2_manifest_rejects_incomplete_or_late_evidence():
+    manifest = load_manifest("z_speed_ladder_v2")
     results = []
     for test_id in manifest.expected_test_ids:
         metrics = {}
@@ -793,7 +793,7 @@ def test_z_speed_ladder_manifest_rejects_incomplete_or_late_evidence():
         "started_at": "2026-08-13T00:00:00Z",
         "finished_at": "2026-08-13T00:01:00Z",
         "aborted": False,
-        "summary": {"total": 5, "passed": 5, "failed": 0},
+        "summary": {"total": 4, "passed": 4, "failed": 0},
         "results": results,
         "host_checks": [
             {"name": "coordinated_xy_status_cadence", "pass": True, "details": {}},
@@ -806,11 +806,12 @@ def test_z_speed_ladder_manifest_rejects_incomplete_or_late_evidence():
         (2190, "s", 479405),
         (2191, "po", 1),
         (2192, "dm", 1),
-        (2193, "sl", 449),
-        (2193, "cw", 7),
-        (2193, "fm", 2251),
-        (2193, "to", 1),
-        (2194, "ok", 3),
+        (2192, "sl", 899),
+        (2192, "cw", 7),
+        (2192, "bm", 2251),
+        (2192, "fm", 2551),
+        (2192, "to", 1),
+        (2194, "ok", 2),
         (2194, "re", 1),
     ):
         rejected = deepcopy(valid)
@@ -820,7 +821,7 @@ def test_z_speed_ladder_manifest_rejects_incomplete_or_late_evidence():
 
     incomplete = deepcopy(valid)
     incomplete["results"] = incomplete["results"][:-1]
-    incomplete["summary"] = {"total": 4, "passed": 4, "failed": 0}
+    incomplete["summary"] = {"total": 3, "passed": 3, "failed": 0}
     assert _analyze(incomplete, manifest)["verdict"]["status"] == "fail"
 
 def test_single_irq_manifest_requires_one_callback_and_complete_pulse_margin():

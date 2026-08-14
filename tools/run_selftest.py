@@ -731,7 +731,6 @@ def _operator_prompt_message(stage: str) -> str:
     if stage in {
         "z_speed_ladder_40khz_confirm",
         "z_speed_ladder_50khz_confirm",
-        "z_speed_ladder_60khz_confirm",
     }:
         rate = stage.split("_")[3].replace("khz", " kHz")
         return (
@@ -754,7 +753,6 @@ def _is_operator_prompt_stage(stage: str) -> bool:
         "z_speed_ladder_envelope_clear",
         "z_speed_ladder_40khz_confirm",
         "z_speed_ladder_50khz_confirm",
-        "z_speed_ladder_60khz_confirm",
     }
 
 
