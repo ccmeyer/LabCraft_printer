@@ -3242,6 +3242,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.calibration_tabs.addTab(self.optics_tab, "Optics")
         self.calibration_tabs.currentChanged.connect(self._refresh_calibration_tab_lock_state)
         self.calibration_tabs.currentChanged.connect(
+            self._refresh_calibration_tabs_compact_height
+        )
+        self.calibration_tabs.currentChanged.connect(
             self._on_printing_controls_tab_changed
         )
         self.calibration_tabs.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
@@ -3520,27 +3523,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
         calib_grid.addWidget(self.calibrate_pressure_sweep_button, crow, 0, 1, 2); crow += 1
 
         self.calibrate_all_pressure_mode_label = QtWidgets.QLabel("Calibrate All pressure step")
-        self.calibrate_all_pressure_mode_widget = QtWidgets.QWidget()
-        calibrate_all_pressure_mode_layout = QtWidgets.QHBoxLayout(
-            self.calibrate_all_pressure_mode_widget
+        self.calibrate_all_pressure_mode_combo = QtWidgets.QComboBox()
+        self.calibrate_all_pressure_mode_combo.setObjectName("calibrateAllPressureModeCombo")
+        self.calibrate_all_pressure_mode_combo.addItem("Full Band Scan", "band")
+        self.calibrate_all_pressure_mode_combo.addItem(
+            "Find Single Pressure",
+            "single_candidate",
         )
-        calibrate_all_pressure_mode_layout.setContentsMargins(0, 0, 0, 0)
-        calibrate_all_pressure_mode_layout.setSpacing(8)
-        self.calibrate_all_pressure_full_band_radio = QtWidgets.QRadioButton("Full Band Scan")
-        self.calibrate_all_pressure_single_radio = QtWidgets.QRadioButton("Find Single Pressure")
-        self.calibrate_all_pressure_full_band_radio.setChecked(True)
-        self.calibrate_all_pressure_mode_group = QtWidgets.QButtonGroup(self)
-        self.calibrate_all_pressure_mode_group.addButton(
-            self.calibrate_all_pressure_full_band_radio
-        )
-        self.calibrate_all_pressure_mode_group.addButton(
-            self.calibrate_all_pressure_single_radio
-        )
-        calibrate_all_pressure_mode_layout.addWidget(self.calibrate_all_pressure_full_band_radio)
-        calibrate_all_pressure_mode_layout.addWidget(self.calibrate_all_pressure_single_radio)
-        calibrate_all_pressure_mode_layout.addStretch(1)
         calib_grid.addWidget(self.calibrate_all_pressure_mode_label, crow, 0)
-        calib_grid.addWidget(self.calibrate_all_pressure_mode_widget, crow, 1); crow += 1
+        calib_grid.addWidget(self.calibrate_all_pressure_mode_combo, crow, 1); crow += 1
 
         self.calibrate_all_button = QtWidgets.QPushButton("Calibrate All")
         self.calibrate_all_button.clicked.connect(self.toggle_start_all_calibration)
@@ -3805,51 +3796,97 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.printer_head_cleaning_button.setVisible(not self.result_presentation_only)
         run_options_v.addWidget(self.printer_head_cleaning_button)
 
-        self.droplet_setup_widget = QtWidgets.QWidget()
-        droplet_setup_grid = QtWidgets.QGridLayout(self.droplet_setup_widget)
-        droplet_setup_grid.setContentsMargins(0, 0, 0, 0)
-        droplet_setup_grid.setHorizontalSpacing(8)
-        droplet_setup_grid.setVerticalSpacing(6)
-        droplet_setup_grid.addWidget(self.prime_head_button, 0, 0, 1, 2)
-        droplet_setup_grid.addWidget(self.calibrate_nozzle_button, 1, 0, 1, 2)
-        droplet_setup_grid.addWidget(self.calibrate_focus_button, 2, 0, 1, 2)
-        droplet_setup_grid.addWidget(self.calibrate_emergence_button, 3, 0, 1, 2)
+        self.droplet_standard_workflow_widget = QtWidgets.QWidget()
+        droplet_standard_grid = QtWidgets.QGridLayout(
+            self.droplet_standard_workflow_widget
+        )
+        droplet_standard_grid.setContentsMargins(0, 0, 0, 0)
+        droplet_standard_grid.setHorizontalSpacing(8)
+        droplet_standard_grid.setVerticalSpacing(6)
+        droplet_standard_grid.addWidget(self.prime_head_button, 0, 0, 1, 2)
+        droplet_standard_grid.addWidget(self.start_pressure_label, 1, 0)
+        droplet_standard_grid.addWidget(self.start_pressure_spin, 1, 1)
+        droplet_standard_grid.addWidget(self.num_pressure_tests_label, 2, 0)
+        droplet_standard_grid.addWidget(self.num_pressure_tests_spin, 2, 1)
+        droplet_standard_grid.addWidget(self.calibrate_all_pressure_mode_label, 3, 0)
+        droplet_standard_grid.addWidget(self.calibrate_all_pressure_mode_combo, 3, 1)
+        droplet_standard_grid.addWidget(self.calibrate_all_button, 4, 0, 1, 2)
 
-        self.droplet_workflow_widget = QtWidgets.QWidget()
-        droplet_workflow_grid = QtWidgets.QGridLayout(self.droplet_workflow_widget)
-        droplet_workflow_grid.setContentsMargins(0, 0, 0, 0)
-        droplet_workflow_grid.setHorizontalSpacing(8)
-        droplet_workflow_grid.setVerticalSpacing(6)
-        droplet_workflow_grid.addWidget(self.start_pressure_label, 0, 0)
-        droplet_workflow_grid.addWidget(self.start_pressure_spin, 0, 1)
-        droplet_workflow_grid.addWidget(self.num_pressure_tests_label, 1, 0)
-        droplet_workflow_grid.addWidget(self.num_pressure_tests_spin, 1, 1)
-        droplet_workflow_grid.addWidget(self.calibrate_pressure_scan_button, 2, 0, 1, 2)
-        droplet_workflow_grid.addWidget(self.find_single_pressure_button, 3, 0, 1, 2)
-        droplet_workflow_grid.addWidget(self.scan_trajectory_button, 4, 0, 1, 2)
-        droplet_workflow_grid.addWidget(self.calibrate_pressure_sweep_button, 5, 0, 1, 2)
-        droplet_workflow_grid.addWidget(self.calibrate_all_pressure_mode_label, 6, 0)
-        droplet_workflow_grid.addWidget(self.calibrate_all_pressure_mode_widget, 6, 1)
-        droplet_workflow_grid.addWidget(self.calibrate_all_button, 7, 0, 1, 2)
-        droplet_workflow_grid.addWidget(self.calibrate_characterization_button, 8, 0, 1, 2)
+        (
+            self.droplet_individual_steps_section,
+            self.droplet_individual_steps_toggle,
+            self.droplet_individual_steps_content,
+            droplet_individual_grid,
+        ) = self._create_collapsible_section(
+            "Individual Calibration Steps",
+            expanded=False,
+        )
+        self.droplet_individual_steps_toggle.setObjectName(
+            "dropletIndividualCalibrationStepsToggle"
+        )
+        for row, button in enumerate(
+            (
+                self.calibrate_nozzle_button,
+                self.calibrate_focus_button,
+                self.calibrate_emergence_button,
+                self.calibrate_pressure_scan_button,
+                self.find_single_pressure_button,
+                self.scan_trajectory_button,
+                self.calibrate_pressure_sweep_button,
+                self.calibrate_characterization_button,
+            )
+        ):
+            droplet_individual_grid.addWidget(button, row, 0, 1, 2)
+        self.droplet_individual_steps_toggle.toggled.connect(
+            lambda expanded: self._set_individual_calibration_steps_expanded(
+                "droplet",
+                expanded,
+            )
+        )
 
-        self.stream_setup_widget = QtWidgets.QWidget()
-        stream_setup_grid = QtWidgets.QGridLayout(self.stream_setup_widget)
-        stream_setup_grid.setContentsMargins(0, 0, 0, 0)
-        stream_setup_grid.setHorizontalSpacing(8)
-        stream_setup_grid.setVerticalSpacing(6)
-        stream_setup_grid.addWidget(self.prime_head_stream_button, 0, 0, 1, 2)
-        stream_setup_grid.addWidget(self.calibrate_nozzle_stream_button, 1, 0, 1, 2)
-        stream_setup_grid.addWidget(self.calibrate_focus_stream_button, 2, 0, 1, 2)
-        stream_setup_grid.addWidget(self.calibrate_emergence_stream_button, 3, 0, 1, 2)
+        self.stream_standard_workflow_widget = QtWidgets.QWidget()
+        stream_standard_grid = QtWidgets.QGridLayout(
+            self.stream_standard_workflow_widget
+        )
+        stream_standard_grid.setContentsMargins(0, 0, 0, 0)
+        stream_standard_grid.setHorizontalSpacing(8)
+        stream_standard_grid.setVerticalSpacing(6)
+        stream_standard_grid.addWidget(self.prime_head_stream_button, 0, 0, 1, 2)
+        stream_standard_grid.addWidget(
+            self.calibrate_all_stream_button,
+            1,
+            0,
+            1,
+            2,
+        )
 
-        self.stream_workflow_widget = QtWidgets.QWidget()
-        stream_workflow_grid = QtWidgets.QGridLayout(self.stream_workflow_widget)
-        stream_workflow_grid.setContentsMargins(0, 0, 0, 0)
-        stream_workflow_grid.setHorizontalSpacing(8)
-        stream_workflow_grid.setVerticalSpacing(6)
-        stream_workflow_grid.addWidget(self.calibrate_online_stream_button, 0, 0, 1, 2)
-        stream_workflow_grid.addWidget(self.calibrate_all_stream_button, 1, 0, 1, 2)
+        (
+            self.stream_individual_steps_section,
+            self.stream_individual_steps_toggle,
+            self.stream_individual_steps_content,
+            stream_individual_grid,
+        ) = self._create_collapsible_section(
+            "Individual Calibration Steps",
+            expanded=False,
+        )
+        self.stream_individual_steps_toggle.setObjectName(
+            "streamIndividualCalibrationStepsToggle"
+        )
+        for row, button in enumerate(
+            (
+                self.calibrate_nozzle_stream_button,
+                self.calibrate_focus_stream_button,
+                self.calibrate_emergence_stream_button,
+                self.calibrate_online_stream_button,
+            )
+        ):
+            stream_individual_grid.addWidget(button, row, 0, 1, 2)
+        self.stream_individual_steps_toggle.toggled.connect(
+            lambda expanded: self._set_individual_calibration_steps_expanded(
+                "stream",
+                expanded,
+            )
+        )
 
         self.debug_scroll = QtWidgets.QScrollArea()
         self.debug_scroll.setWidgetResizable(True)
@@ -3879,18 +3916,21 @@ class DropletImagingDialog(QtWidgets.QDialog):
             for button in buttons:
                 button.setMinimumHeight(32)
 
-        self.droplet_tab.layout().addWidget(self._create_lightweight_tab_section_header("Setup"))
-        self.droplet_tab.layout().addWidget(self.droplet_setup_widget)
-        self.droplet_tab.layout().addWidget(self._create_lightweight_tab_section_header("Workflow"))
-        self.droplet_tab.layout().addWidget(self.droplet_workflow_widget)
+        self.droplet_tab.layout().addWidget(
+            self._create_lightweight_tab_section_header("Standard Workflow")
+        )
+        self.droplet_tab.layout().addWidget(self.droplet_standard_workflow_widget)
+        self.droplet_tab.layout().addWidget(self.droplet_individual_steps_section)
         self.droplet_tab.layout().addStretch(1)
-        self.stream_tab.layout().addWidget(self._create_lightweight_tab_section_header("Setup"))
-        self.stream_tab.layout().addWidget(self.stream_setup_widget)
-        self.stream_tab.layout().addWidget(self._create_lightweight_tab_section_header("Workflow"))
-        self.stream_tab.layout().addWidget(self.stream_workflow_widget)
+        self.stream_tab.layout().addWidget(
+            self._create_lightweight_tab_section_header("Standard Workflow")
+        )
+        self.stream_tab.layout().addWidget(self.stream_standard_workflow_widget)
+        self.stream_tab.layout().addWidget(self.stream_individual_steps_section)
         self.stream_tab.layout().addStretch(1)
         self.debug_tab.layout().addWidget(self.debug_scroll)
         self._build_optics_tab()
+        self._refresh_calibration_tabs_compact_height()
 
         self.refuel_level_group = self._build_refuel_level_panel()
         control_panel_v.addWidget(self.reagent_title_widget)
@@ -7994,17 +8034,17 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _set_calibrate_all_pressure_mode_controls_enabled(self, enabled: bool):
         for widget in (
             getattr(self, "calibrate_all_pressure_mode_label", None),
-            getattr(self, "calibrate_all_pressure_full_band_radio", None),
-            getattr(self, "calibrate_all_pressure_single_radio", None),
+            getattr(self, "calibrate_all_pressure_mode_combo", None),
         ):
             if widget is not None:
                 widget.setEnabled(bool(enabled))
 
     def _get_calibrate_all_pressure_scan_mode(self) -> str:
-        single_radio = getattr(self, "calibrate_all_pressure_single_radio", None)
-        if single_radio is not None and bool(single_radio.isChecked()):
-            return "single_candidate"
-        return "band"
+        combo = getattr(self, "calibrate_all_pressure_mode_combo", None)
+        if combo is None:
+            return "band"
+        mode = str(combo.currentData() or "band")
+        return mode if mode in {"band", "single_candidate"} else "band"
 
     def _apply_flash_safety_ui_state(self):
         fault_latched = self._is_flash_fault_latched()
@@ -8069,6 +8109,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             DropletImagingDialog._sync_manual_controls_from_model(self, force=True)
 
         self._manual_controls_locked = busy
+        self._refresh_individual_calibration_steps_lock_state(busy)
         enabled = (
             (not busy)
             and (not flash_fault_latched)
@@ -8250,6 +8291,68 @@ class DropletImagingDialog(QtWidgets.QDialog):
         outer_layout.addWidget(toggle)
         outer_layout.addWidget(content)
         return container, toggle, content, content_layout
+
+    def _set_individual_calibration_steps_expanded(self, mode, expanded):
+        mode = self._normalize_printing_mode(mode)
+        toggle = getattr(self, f"{mode}_individual_steps_toggle", None)
+        content = getattr(self, f"{mode}_individual_steps_content", None)
+        expanded = bool(expanded)
+        if content is not None:
+            content.setVisible(expanded)
+        if toggle is not None:
+            toggle.setArrowType(
+                QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow
+            )
+        self._refresh_calibration_tabs_compact_height()
+
+    def _refresh_calibration_tabs_compact_height(self, *_args):
+        tabs = getattr(self, "calibration_tabs", None)
+        if tabs is None:
+            return
+        current_page = tabs.currentWidget()
+        standard_pages = {
+            getattr(self, "droplet_tab", None),
+            getattr(self, "stream_tab", None),
+        }
+        if current_page not in standard_pages:
+            tabs.setMaximumHeight(16777215)
+            tabs.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding,
+                QtWidgets.QSizePolicy.Expanding,
+            )
+            tabs.updateGeometry()
+            return
+
+        page_layout = current_page.layout()
+        if page_layout is not None:
+            page_layout.activate()
+        page_height = max(
+            current_page.minimumSizeHint().height(),
+            current_page.sizeHint().height(),
+        )
+        tab_chrome_height = (
+            tabs.tabBar().sizeHint().height()
+            + 8
+        )
+        tabs.setMaximumHeight(max(1, page_height + tab_chrome_height))
+        tabs.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Fixed,
+        )
+        tabs.updateGeometry()
+
+    def _refresh_individual_calibration_steps_lock_state(self, busy):
+        busy = bool(busy)
+        for mode in ("droplet", "stream"):
+            toggle = getattr(self, f"{mode}_individual_steps_toggle", None)
+            if toggle is None:
+                continue
+            toggle.setEnabled(not busy)
+            toggle.setToolTip(
+                "Individual calibration steps cannot be hidden while calibration is running."
+                if busy
+                else "Show independently runnable calibration and recovery steps."
+            )
 
     def _get_saved_acquisition_controls_expanded(self):
         try:

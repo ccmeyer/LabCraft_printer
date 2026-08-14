@@ -342,6 +342,12 @@ def test_full_layout_simulation_calibration_uses_real_tabs_but_no_camera(
     assert not dialog.calibrate_pressure_scan_button.isEnabled()
     assert dialog.calibrate_all_button.isEnabled()
     assert dialog.calibrate_all_stream_button.isEnabled()
+    assert dialog.prime_head_button.isVisible()
+    assert dialog.calibrate_all_button.isVisible()
+    assert dialog.droplet_individual_steps_toggle.isChecked() is False
+    assert dialog.droplet_individual_steps_content.isHidden()
+    assert dialog.stream_individual_steps_toggle.isChecked() is False
+    assert dialog.stream_individual_steps_content.isHidden()
     assert dialog.printing_controls_section.isVisible()
     assert dialog.printing_controls_toggle.isChecked()
     assert dialog.live_pressure_section.isVisible()
@@ -377,8 +383,17 @@ def test_full_layout_simulation_calibration_uses_real_tabs_but_no_camera(
         "refuel_pw",
     ]
 
+    dialog.droplet_individual_steps_toggle.click()
+    dialog.droplet_individual_steps_toggle.click()
+    qapp.processEvents()
+    assert physical_calls == []
+
     dialog.calibration_tabs.setCurrentWidget(dialog.stream_tab)
     qapp.processEvents()
+    dialog.stream_individual_steps_toggle.click()
+    dialog.stream_individual_steps_toggle.click()
+    qapp.processEvents()
+    assert physical_calls == []
     assert [
         dialog.print_profile_combo.itemData(index)["id"]
         for index in range(dialog.print_profile_combo.count())

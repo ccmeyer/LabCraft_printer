@@ -822,6 +822,7 @@ def test_droplet_calibrate_all_toggle_starts_and_stops_via_controller(monkeypatc
     assert controller.start_droplet_calibration_sequence_calls == 1
     assert controller.start_droplet_calibration_sequence_modes == ["band"]
     assert dialog.calibrate_all_button.text() == "Stop Calibration"
+    assert dialog.calibrate_all_pressure_mode_combo.isEnabled() is False
 
     manager.droplet_sequence_state["status"] = "running"
     dialog.calibrate_all_button.click()
@@ -836,6 +837,7 @@ def test_droplet_calibrate_all_toggle_starts_and_stops_via_controller(monkeypatc
     qapp.processEvents()
 
     assert dialog.calibrate_all_button.text() == "Calibrate All"
+    assert dialog.calibrate_all_pressure_mode_combo.isEnabled() is True
 
     dialog.deleteLater()
 
@@ -843,7 +845,9 @@ def test_droplet_calibrate_all_toggle_starts_and_stops_via_controller(monkeypatc
 def test_droplet_calibrate_all_single_pressure_mode_passes_to_controller(monkeypatch, qapp):
     dialog, _manager, controller = _build_dialog(monkeypatch, qapp)
 
-    dialog.calibrate_all_pressure_single_radio.setChecked(True)
+    dialog.calibrate_all_pressure_mode_combo.setCurrentIndex(
+        dialog.calibrate_all_pressure_mode_combo.findData("single_candidate")
+    )
     dialog.calibrate_all_button.click()
     qapp.processEvents()
 
@@ -853,9 +857,30 @@ def test_droplet_calibrate_all_single_pressure_mode_passes_to_controller(monkeyp
     dialog.deleteLater()
 
 
+def test_individual_calibration_expanders_do_not_dispatch_actions(monkeypatch, qapp):
+    dialog, _manager, controller = _build_dialog(monkeypatch, qapp)
+
+    dialog.droplet_individual_steps_toggle.click()
+    dialog.droplet_individual_steps_toggle.click()
+    dialog.calibration_tabs.setCurrentWidget(dialog.stream_tab)
+    dialog.stream_individual_steps_toggle.click()
+    dialog.stream_individual_steps_toggle.click()
+    qapp.processEvents()
+
+    assert controller.start_nozzle_calls == 0
+    assert controller.start_online_stream_calls == 0
+    assert controller.start_droplet_calibration_sequence_calls == 0
+    assert controller.start_stream_calibration_sequence_calls == 0
+    assert controller.stop_calibration_calls == 0
+
+    dialog.deleteLater()
+
+
 def test_shared_nozzle_buttons_mirror_start_and_stop_text(monkeypatch, qapp):
     dialog, manager, controller = _build_dialog(monkeypatch, qapp)
 
+    dialog.calibration_tabs.setCurrentWidget(dialog.stream_tab)
+    dialog.stream_individual_steps_toggle.click()
     dialog.calibrate_nozzle_stream_button.click()
     qapp.processEvents()
 
@@ -864,7 +889,14 @@ def test_shared_nozzle_buttons_mirror_start_and_stop_text(monkeypatch, qapp):
     assert dialog.calibrate_nozzle_stream_button.text() == "Stop Calibration"
 
     manager.activeCalibration = object()
-    dialog.calibrate_nozzle_button.click()
+    dialog._refresh_manual_control_lock_state()
+    qapp.processEvents()
+
+    assert dialog.stream_individual_steps_content.isHidden() is False
+    assert dialog.stream_individual_steps_toggle.isEnabled() is False
+    assert dialog.calibrate_nozzle_stream_button.isEnabled() is True
+
+    dialog.calibrate_nozzle_stream_button.click()
     qapp.processEvents()
 
     assert controller.stop_calibration_calls == 1
@@ -1008,6 +1040,7 @@ def test_tabs_lock_during_active_calibration_and_unlock_when_idle(monkeypatch, q
     dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
 
     dialog.calibration_tabs.setCurrentIndex(1)
+    dialog.stream_individual_steps_toggle.click()
     qapp.processEvents()
 
     manager.activeCalibration = object()
@@ -1020,6 +1053,10 @@ def test_tabs_lock_during_active_calibration_and_unlock_when_idle(monkeypatch, q
     assert dialog.flash_delay_spinbox.isEnabled() is False
     assert dialog.print_pulse_width_spinbox.isEnabled() is False
     assert dialog.flash_button.isEnabled() is False
+    assert dialog.stream_individual_steps_toggle.isEnabled() is False
+    assert dialog.stream_individual_steps_content.isHidden() is False
+    assert dialog.droplet_individual_steps_toggle.isEnabled() is False
+    assert dialog.droplet_individual_steps_content.isHidden() is True
 
     manager.activeCalibration = None
     dialog._refresh_manual_control_lock_state()
@@ -1031,6 +1068,9 @@ def test_tabs_lock_during_active_calibration_and_unlock_when_idle(monkeypatch, q
     assert dialog.flash_delay_spinbox.isEnabled() is True
     assert dialog.print_pulse_width_spinbox.isEnabled() is True
     assert dialog.flash_button.isEnabled() is True
+    assert dialog.stream_individual_steps_toggle.isEnabled() is True
+    assert dialog.stream_individual_steps_content.isHidden() is False
+    assert dialog.droplet_individual_steps_toggle.isEnabled() is True
 
     dialog.deleteLater()
 

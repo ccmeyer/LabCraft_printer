@@ -553,8 +553,19 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert dialog.debug_tab_content.layout().contentsMargins().right() > 0
     assert dialog.droplet_tab.isAncestorOf(dialog.start_pressure_spin) is True
     assert dialog.droplet_tab.isAncestorOf(dialog.num_pressure_tests_spin) is True
+    assert dialog.droplet_standard_workflow_widget.isAncestorOf(dialog.prime_head_button)
+    assert dialog.droplet_standard_workflow_widget.isAncestorOf(dialog.calibrate_all_button)
+    assert dialog.droplet_standard_workflow_widget.isAncestorOf(
+        dialog.calibrate_all_pressure_mode_combo
+    )
     assert dialog.stream_tab.isAncestorOf(dialog.start_pressure_spin) is False
     assert dialog.stream_tab.isAncestorOf(dialog.num_pressure_tests_spin) is False
+    assert dialog.stream_standard_workflow_widget.isAncestorOf(
+        dialog.prime_head_stream_button
+    )
+    assert dialog.stream_standard_workflow_widget.isAncestorOf(
+        dialog.calibrate_all_stream_button
+    )
     assert dialog.stream_tab.isAncestorOf(dialog.calibrate_online_stream_button) is True
     assert dialog.droplet_tab.isAncestorOf(dialog.calibrate_online_stream_button) is False
     assert dialog.acquisition_controls_section.isAncestorOf(dialog.flash_delay_spinbox) is True
@@ -579,6 +590,8 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     stream_header = dialog.stream_tab.layout().itemAt(0).widget()
     assert droplet_header.layout().count() == 3
     assert stream_header.layout().count() == 3
+    assert droplet_header.layout().itemAt(1).widget().text() == "Standard Workflow"
+    assert stream_header.layout().itemAt(1).widget().text() == "Standard Workflow"
     assert dialog.info_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.info_panel_scroll.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.control_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Ignored
@@ -743,3 +756,114 @@ def test_real_dialog_creates_duplicate_shared_buttons_for_droplet_and_stream_tab
     assert dialog.calibrate_emergence_button.text() == dialog.calibrate_emergence_stream_button.text()
 
     dialog.deleteLater()
+
+
+def test_individual_calibration_steps_start_collapsed_and_expand_independently(
+    monkeypatch,
+    qapp,
+):
+    dialog = _build_real_dialog_for_layout(monkeypatch, qapp)
+
+    assert dialog.droplet_individual_steps_toggle.isChecked() is False
+    assert dialog.droplet_individual_steps_content.isHidden() is True
+    assert dialog.stream_individual_steps_toggle.isChecked() is False
+    assert dialog.stream_individual_steps_content.isHidden() is True
+
+    droplet_buttons = (
+        dialog.calibrate_nozzle_button,
+        dialog.calibrate_focus_button,
+        dialog.calibrate_emergence_button,
+        dialog.calibrate_pressure_scan_button,
+        dialog.find_single_pressure_button,
+        dialog.scan_trajectory_button,
+        dialog.calibrate_pressure_sweep_button,
+        dialog.calibrate_characterization_button,
+    )
+    stream_buttons = (
+        dialog.calibrate_nozzle_stream_button,
+        dialog.calibrate_focus_stream_button,
+        dialog.calibrate_emergence_stream_button,
+        dialog.calibrate_online_stream_button,
+    )
+    assert all(
+        dialog.droplet_individual_steps_content.isAncestorOf(button)
+        for button in droplet_buttons
+    )
+    assert all(
+        dialog.stream_individual_steps_content.isAncestorOf(button)
+        for button in stream_buttons
+    )
+    assert [
+        dialog.calibrate_all_pressure_mode_combo.itemData(index)
+        for index in range(dialog.calibrate_all_pressure_mode_combo.count())
+    ] == ["band", "single_candidate"]
+    assert dialog.calibrate_all_pressure_mode_combo.currentData() == "band"
+
+    dialog.droplet_individual_steps_toggle.click()
+    qapp.processEvents()
+
+    assert dialog.droplet_individual_steps_content.isHidden() is False
+    assert dialog.stream_individual_steps_content.isHidden() is True
+
+    dialog.stream_individual_steps_toggle.click()
+    qapp.processEvents()
+
+    assert dialog.droplet_individual_steps_content.isHidden() is False
+    assert dialog.stream_individual_steps_content.isHidden() is False
+    dialog.deleteLater()
+
+
+def test_compact_workflows_keep_live_pressure_chart_in_initial_viewport(monkeypatch, qapp):
+    dialog = _build_real_dialog_for_layout(monkeypatch, qapp)
+    dialog.resize(1600, 1000)
+    dialog.show()
+    for _ in range(3):
+        qapp.processEvents()
+
+    scroll = dialog.control_panel_scroll
+    viewport = scroll.viewport()
+    scroll.verticalScrollBar().setValue(0)
+
+    for tab in (dialog.droplet_tab, dialog.stream_tab):
+        dialog.calibration_tabs.setCurrentWidget(tab)
+        for _ in range(3):
+            qapp.processEvents()
+        chart_top = dialog.live_pressure_chart_view.mapTo(
+            viewport,
+            calibration_view.QtCore.QPoint(0, 0),
+        ).y()
+        chart_bottom = chart_top + dialog.live_pressure_chart_view.height()
+        assert chart_top >= 0
+        assert chart_bottom <= viewport.height()
+
+    dialog.calibration_tabs.setCurrentWidget(dialog.droplet_tab)
+    qapp.processEvents()
+    collapsed_height = dialog.calibration_tabs.height()
+    dialog.droplet_individual_steps_toggle.click()
+    for _ in range(3):
+        qapp.processEvents()
+    last_step_bottom = dialog.calibrate_characterization_button.mapTo(
+        dialog.droplet_tab,
+        calibration_view.QtCore.QPoint(0, 0),
+    ).y() + dialog.calibrate_characterization_button.height()
+    assert dialog.calibration_tabs.height() > collapsed_height
+    assert last_step_bottom <= dialog.droplet_tab.height()
+
+    for tab in (dialog.debug_tab, dialog.optics_tab):
+        dialog.calibration_tabs.setCurrentWidget(tab)
+        qapp.processEvents()
+        assert (
+            dialog.calibration_tabs.sizePolicy().verticalPolicy()
+            == calibration_view.QtWidgets.QSizePolicy.Expanding
+        )
+        assert dialog.calibration_tabs.maximumHeight() == 16777215
+
+    dialog.calibration_tabs.setCurrentWidget(dialog.droplet_tab)
+    qapp.processEvents()
+    assert (
+        dialog.calibration_tabs.sizePolicy().verticalPolicy()
+        == calibration_view.QtWidgets.QSizePolicy.Fixed
+    )
+
+    dialog.close()
+    qapp.processEvents()
