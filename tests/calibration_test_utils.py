@@ -368,7 +368,7 @@ class SignalStub:
         self._subs = []
         self.calls = []
 
-    def connect(self, fn):
+    def connect(self, fn, *args, **kwargs):
         self._subs.append(fn)
 
     def emit(self, *args, **kwargs):
