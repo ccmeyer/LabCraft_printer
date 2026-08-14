@@ -4276,6 +4276,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.image_label.setMinimumSize(480, 360)
         self.image_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.image_label.setStyleSheet("background-color: black; border: 1px solid #444; padding: 8px;")
+        self._analysis_image_layout_index = self.analysis_layout.count()
         self.analysis_layout.addWidget(self.image_label, 1)
 
         self.online_stream_plot_container = QtWidgets.QWidget()
@@ -4348,8 +4349,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._online_stream_tail_override_preview_x_us = None
         self._online_stream_tail_override_available = False
         self._online_stream_tail_override_controls_updating = False
+        self._analysis_stream_plot_layout_index = self.analysis_layout.count()
         self.analysis_layout.addWidget(self.online_stream_plot_container, 0)
 
+        self._analysis_bottom_spacer_index = self.analysis_layout.count()
         self.analysis_layout.addStretch(1)
 
         # Add panels to the main layout: left controls, middle image, right results.
@@ -9717,8 +9720,34 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if hasattr(self, "online_stream_tail_override_panel"):
             self.online_stream_tail_override_panel.hide()
             self._set_online_stream_tail_override_buttons()
-        if hide and hasattr(self, "online_stream_plot_container"):
-            self.online_stream_plot_container.hide()
+        if hide:
+            self._set_online_stream_debug_layout_active(False)
+
+    def _set_online_stream_debug_layout_active(self, active):
+        layout = getattr(self, "analysis_layout", None)
+        plot_container = getattr(self, "online_stream_plot_container", None)
+        if layout is None or plot_container is None:
+            return
+
+        active = bool(active)
+        plot_container.setVisible(active)
+        layout.setStretch(
+            int(getattr(self, "_analysis_image_layout_index", 0)),
+            1,
+        )
+        layout.setStretch(
+            int(getattr(self, "_analysis_stream_plot_layout_index", 1)),
+            1 if active else 0,
+        )
+        layout.setStretch(
+            int(getattr(self, "_analysis_bottom_spacer_index", 2)),
+            0 if active else 1,
+        )
+        layout.invalidate()
+        plot_container.updateGeometry()
+        analysis_panel = getattr(self, "analysis_panel", None)
+        if analysis_panel is not None:
+            analysis_panel.updateGeometry()
 
     def _update_online_stream_flow_chart(self, flow_plot: dict | None):
         plot = dict(flow_plot or {})
@@ -10019,7 +10048,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if str(data.get("phase_name") or "") != "online_stream_calibration":
             return
         self._online_stream_debug_active = True
-        self.online_stream_plot_container.show()
+        self._set_online_stream_debug_layout_active(True)
         if str(data.get("subphase") or "") == "prepare":
             self._clear_online_stream_chart_bundle(self._online_stream_flow_chart_bundle)
             self._clear_online_stream_chart_bundle(self._online_stream_tail_chart_bundle)

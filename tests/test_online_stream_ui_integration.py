@@ -1184,6 +1184,111 @@ def test_online_stream_debug_widgets_are_created_in_analysis_and_info_panels(mon
     dialog.deleteLater()
 
 
+def test_online_stream_debug_layout_uses_empty_space_and_restores_image(
+    monkeypatch,
+    qapp,
+):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+    dialog.resize(1600, 1000)
+    dialog.show()
+    for _ in range(3):
+        qapp.processEvents()
+
+    layout = dialog.analysis_layout
+    bottom_spacer = layout.itemAt(
+        dialog._analysis_bottom_spacer_index
+    ).spacerItem()
+    initial_image_height = dialog.image_label.height()
+    initial_spacer_height = bottom_spacer.geometry().height()
+    assert 450 <= initial_image_height <= 525
+    assert initial_spacer_height > 0
+
+    manager.activeCalibration = SimpleNamespace(
+        phase_name="online_stream_calibration"
+    )
+    manager.onlineStreamDebugUpdated.emit(
+        {
+            "phase_name": "online_stream_calibration",
+            "subphase": "prepare",
+            "flow_plot": {},
+            "tail_plot": {},
+        }
+    )
+    for _ in range(3):
+        qapp.processEvents()
+
+    plot_height = dialog.online_stream_plot_container.height()
+    assert dialog.online_stream_plot_container.isHidden() is False
+    assert bottom_spacer.geometry().height() == 0
+    assert abs(dialog.image_label.height() - plot_height) <= 2
+    assert 450 <= plot_height <= 525
+    assert dialog.online_stream_flow_chart_view.height() == plot_height
+    assert dialog.online_stream_tail_chart_view.height() == plot_height
+    assert abs(
+        dialog.online_stream_flow_chart_view.width()
+        - dialog.online_stream_tail_chart_view.width()
+    ) <= 2
+    plot_row = dialog.online_stream_flow_chart_view.parentWidget().layout()
+    assert abs(
+        dialog.online_stream_flow_chart_view.width()
+        + dialog.online_stream_tail_chart_view.width()
+        + plot_row.spacing()
+        - dialog.online_stream_plot_container.width()
+    ) <= 2
+
+    manager.onlineStreamDebugUpdated.emit(
+        {
+            "phase_name": "online_stream_calibration",
+            "subphase": "completed",
+            "flow_plot": {},
+            "tail_plot": {
+                "tail_start_x_us": 1800,
+                "tail_override_available": True,
+            },
+        }
+    )
+    for _ in range(3):
+        qapp.processEvents()
+
+    assert dialog.online_stream_tail_override_panel.isHidden() is False
+    assert dialog.online_stream_plot_container.height() == plot_height
+    assert bottom_spacer.geometry().height() == 0
+    assert dialog.online_stream_flow_chart_view.height() >= 400
+    assert dialog.online_stream_tail_chart_view.height() >= 400
+
+    manager.activeCalibration = None
+    dialog.display_analyzed_image(np.full((50, 50), 120, dtype=np.uint8))
+    for _ in range(3):
+        qapp.processEvents()
+
+    assert dialog.online_stream_plot_container.isHidden() is True
+    assert abs(dialog.image_label.height() - initial_image_height) <= 2
+    assert abs(bottom_spacer.geometry().height() - initial_spacer_height) <= 2
+
+    dialog.resize(1366, 768)
+    manager.activeCalibration = SimpleNamespace(
+        phase_name="online_stream_calibration"
+    )
+    manager.onlineStreamDebugUpdated.emit(
+        {
+            "phase_name": "online_stream_calibration",
+            "subphase": "prepare",
+            "flow_plot": {},
+            "tail_plot": {},
+        }
+    )
+    for _ in range(3):
+        qapp.processEvents()
+
+    assert dialog.image_label.height() >= 360
+    assert dialog.online_stream_plot_container.height() >= 360
+    assert dialog.online_stream_flow_chart_view.height() >= 360
+    assert dialog.online_stream_tail_chart_view.height() >= 360
+    assert bottom_spacer.geometry().height() == 0
+
+    dialog.deleteLater()
+
+
 def test_stream_calibration_sequence_keeps_stop_button_enabled_through_restore(monkeypatch, qapp):
     dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
 
