@@ -3,6 +3,7 @@ import json
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+from types import MethodType
 
 import pytest
 
@@ -30,12 +31,110 @@ from ExecutionResumeStore import (
     new_resume_document,
     save_execution_resume,
 )
-from Model import Model
+from Model import Model, PrinterHeadManager, RackModel
 from test_execution_terminal_cache import _ready_completion
 
 
 PLAN_ID = "f33cf5d6-2f38-4ca7-86fd-74f73baac81d"
 NOW = "2026-07-17T12:00:00Z"
+
+
+def _attach_test_rack(model):
+    rack = RackModel(
+        5,
+        location_data={
+            "rack_position_Left": {},
+            "rack_position_Right": {},
+        },
+    )
+    model.rack_model = rack
+    model.printer_head_colors = {
+        "one": "#e41a1c",
+        "two": "#377eb8",
+        "three": "#4daf4a",
+        "four": "#984ea3",
+        "five": "#ff7f00",
+        "six": "#ffff33",
+    }
+    model.printer_head_manager = PrinterHeadManager(
+        model.printer_head_colors,
+        rack,
+    )
+    model.assign_printer_heads = MethodType(Model.assign_printer_heads, model)
+    model._rack_runtime_plan_id = None
+    model._recorded_audit_events = []
+
+    def _record(event_type, summary, details=None, **_kwargs):
+        model._recorded_audit_events.append(
+            (event_type, summary, dict(details or {}))
+        )
+
+    model.record_experiment_audit_event = _record
+    return model
+
+
+def _configure_rack_order_design(model):
+    em = model.experiment_model
+    em.factors = []
+    em.add_choice_group("Choice")
+    em.add_choice_option(
+        "Choice",
+        "Alpha",
+        [0.0, 1.0],
+        "x",
+        10.0,
+        forced_stock_conc=10.0,
+    )
+    em.add_choice_option(
+        "Choice",
+        "Beta",
+        [0.0, 1.0],
+        "x",
+        10.0,
+        forced_stock_conc=10.0,
+    )
+    em.add_additive(
+        "Zeta",
+        [1.0],
+        "x",
+        10.0,
+        forced_stock_conc=10.0,
+    )
+    em.add_additive(
+        "Yankee",
+        [1.0],
+        "x",
+        10.0,
+        forced_stock_conc=10.0,
+    )
+    em.set_metadata(
+        name="rack-order",
+        target_reaction_volume_nL=100.0,
+        final_reaction_volume_nL=100.0,
+        printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Aqua",
+        fill_droplet_volume_nL=10.0,
+    )
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    em.save_experiment()
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    return em.get_execution_plan_snapshot()
+
+
+def _rack_stock_sequence(model):
+    assigned = [
+        slot.printer_head
+        for slot in model.rack_model.get_all_slots()
+        if slot.printer_head is not None
+        and not slot.printer_head.is_calibration_chip()
+    ]
+    unassigned = [
+        head
+        for head in model.printer_head_manager.get_unassigned_printer_heads()
+        if not head.is_calibration_chip()
+    ]
+    return tuple(head.get_stock_id() for head in assigned + unassigned)
 
 
 def _write_bundle(tmp_path: Path, *, added=0):
@@ -379,6 +478,271 @@ def test_explicit_activation_reconstructs_finalized_runtime_without_optimizer(
     )
     assert result["plan"].plan_revision > saved_plan.plan_revision
     assert Path(loaded_em.experiment_file_path).read_bytes() == design_bytes
+
+
+@pytest.mark.parametrize("with_progress", [False, True])
+def test_same_session_activation_preserves_live_rack_objects_and_positions(
+    experiment_model_factory,
+    with_progress,
+):
+    model = _attach_test_rack(experiment_model_factory())
+    plan = _configure_rack_order_design(model)
+    em = model.experiment_model
+
+    if with_progress:
+        model.load_authoritative_execution_runtime()
+        saved_well = next(
+            well
+            for well in plan.wells
+            if any(item.target_dispenses > 0 for item in well.dispenses)
+        )
+        saved_dispense = next(
+            item for item in saved_well.dispenses if item.target_dispenses > 0
+        )
+        intent_id = em.begin_execution_print_intent(
+            well_id=saved_well.well_id,
+            stock_id=saved_dispense.stock_id,
+            commanded_droplets=1,
+            printer_head_id="same-session-progress-head",
+        )
+        model.well_plate.get_well(saved_well.well_id).record_stock_print(
+            saved_dispense.stock_id,
+            1,
+        )
+        em.create_progress_file(execution_intent_id=intent_id)
+        em.complete_execution_print_intent(intent_id)
+
+    fill_stock_id = next(stock.stock_id for stock in plan.stocks if stock.units == "--")
+    fill_head = model.printer_head_manager.get_printer_head_by_id(fill_stock_id)
+    model.printer_head_manager.swap_printer_head(0, fill_head)
+    model.rack_model.swap_printer_heads_between_slots(1, 3)
+    model.rack_model.confirm_slot(0)
+    model.rack_model.confirm_slot(1)
+    fill_head.set_absolute_volume(37.5)
+
+    slot_heads_before = tuple(
+        slot.printer_head for slot in model.rack_model.get_all_slots()
+    )
+    confirmations_before = tuple(
+        slot.confirmed for slot in model.rack_model.get_all_slots()
+    )
+    unassigned_before = tuple(
+        model.printer_head_manager.get_unassigned_printer_heads()
+    )
+    identities_before = {
+        id(head): head.printer_head_id
+        for head in model.printer_head_manager.get_all_printer_heads()
+    }
+
+    em.load_experiment(em.experiment_file_path, em.experiment_dir_path)
+    eligibility = model.load_authoritative_execution_runtime()
+
+    assert eligibility["status"] == (
+        "ready_to_resume" if with_progress else "ready_to_start"
+    )
+    assert tuple(
+        slot.printer_head for slot in model.rack_model.get_all_slots()
+    ) == slot_heads_before
+    assert tuple(
+        slot.confirmed for slot in model.rack_model.get_all_slots()
+    ) == confirmations_before
+    assert tuple(
+        model.printer_head_manager.get_unassigned_printer_heads()
+    ) == unassigned_before
+    assert fill_head.get_current_volume() == 37.5
+    assert {
+        id(head): head.printer_head_id
+        for head in model.printer_head_manager.get_all_printer_heads()
+    } == identities_before
+    assert model.printer_head_manager.get_assigned_printer_heads() == {
+        index: head
+        for index, head in enumerate(slot_heads_before)
+        if head is not None
+    }
+    assert model.rack_model.expected_slot_printer_heads == list(slot_heads_before)
+    assert model.rack_model.expected_gripper_printer_head is None
+    assert model._rack_runtime_plan_id == plan.plan_id
+    activation_details = model._recorded_audit_events[-1][2]
+    assert activation_details["rack_assignment_mode"] == "same_session_preserved"
+    assert activation_details["restored_assigned_head_count"] == 4
+    assert activation_details["restored_unassigned_head_count"] == 1
+
+
+def test_new_session_assignment_matches_initial_finalize_order(
+    experiment_model_factory,
+):
+    source = _attach_test_rack(experiment_model_factory())
+    plan = _configure_rack_order_design(source)
+    initial_sequence = _rack_stock_sequence(source)
+
+    loaded = _attach_test_rack(experiment_model_factory())
+    loaded.experiment_model.load_experiment(
+        source.experiment_model.experiment_file_path,
+        source.experiment_model.experiment_dir_path,
+    )
+    loaded.load_authoritative_execution_runtime()
+
+    fill_stock_id = next(stock.stock_id for stock in plan.stocks if stock.units == "--")
+    assert _rack_stock_sequence(loaded) == initial_sequence
+    assert initial_sequence[-1] == fill_stock_id
+    assert [
+        stock_id.split("_", 1)[0] for stock_id in initial_sequence
+    ] == ["Zeta", "Yankee", "Alpha", "Beta", "Aqua"]
+    assert loaded._recorded_audit_events[-1][2]["rack_assignment_mode"] == (
+        "initial_finalize_order"
+    )
+
+
+def test_different_plan_uses_initial_finalize_order_not_live_layout(
+    experiment_model_factory,
+):
+    live = _attach_test_rack(experiment_model_factory())
+    live_plan = _configure_rack_order_design(live)
+    target = _attach_test_rack(experiment_model_factory())
+    target_plan = _configure_rack_order_design(target)
+    target_sequence = _rack_stock_sequence(target)
+    assert live_plan.plan_id != target_plan.plan_id
+
+    fill_stock_id = next(
+        stock.stock_id for stock in live_plan.stocks if stock.units == "--"
+    )
+    live_fill_head = live.printer_head_manager.get_printer_head_by_id(fill_stock_id)
+    live.printer_head_manager.swap_printer_head(0, live_fill_head)
+    assert live.rack_model.get_all_slots()[0].printer_head is live_fill_head
+
+    live.experiment_model.load_experiment(
+        target.experiment_model.experiment_file_path,
+        target.experiment_model.experiment_dir_path,
+    )
+    live.load_authoritative_execution_runtime()
+
+    assert _rack_stock_sequence(live) == target_sequence
+    assert live.rack_model.get_all_slots()[0].printer_head is not live_fill_head
+    assert live._rack_runtime_plan_id == target_plan.plan_id
+    assert live._recorded_audit_events[-1][2]["rack_assignment_mode"] == (
+        "initial_finalize_order"
+    )
+
+
+def test_explicit_runtime_clear_forgets_same_session_rack_ownership(
+    experiment_model_factory,
+):
+    model = _attach_test_rack(experiment_model_factory())
+    _configure_rack_order_design(model)
+    assert model._rack_runtime_plan_id is not None
+
+    Model.clear_experiment(model)
+
+    assert model._rack_runtime_plan_id is None
+
+
+def test_same_session_activation_with_occupied_gripper_fails_before_mutation(
+    experiment_model_factory,
+):
+    model = _attach_test_rack(experiment_model_factory())
+    plan = _configure_rack_order_design(model)
+    em = model.experiment_model
+    model.rack_model.confirm_slot(0)
+    model.rack_model.transfer_to_gripper(0)
+    em.load_experiment(em.experiment_file_path, em.experiment_dir_path)
+
+    slots_before = tuple(
+        (slot.printer_head, slot.confirmed, slot.locked)
+        for slot in model.rack_model.get_all_slots()
+    )
+    gripper_before = model.rack_model.get_gripper_printer_head()
+    heads_before = tuple(model.printer_head_manager.get_all_printer_heads())
+    unassigned_before = tuple(
+        model.printer_head_manager.get_unassigned_printer_heads()
+    )
+    resume_path = Path(em.execution_resume_file_path)
+    assert not resume_path.exists()
+
+    with pytest.raises(RuntimeError, match="gripper holds a printer head"):
+        model.load_authoritative_execution_runtime()
+
+    assert tuple(
+        (slot.printer_head, slot.confirmed, slot.locked)
+        for slot in model.rack_model.get_all_slots()
+    ) == slots_before
+    assert model.rack_model.get_gripper_printer_head() is gripper_before
+    assert tuple(model.printer_head_manager.get_all_printer_heads()) == heads_before
+    assert tuple(
+        model.printer_head_manager.get_unassigned_printer_heads()
+    ) == unassigned_before
+    assert not resume_path.exists()
+    assert model._rack_runtime_plan_id == plan.plan_id
+
+
+def test_inconsistent_same_session_rack_fails_before_mutation(
+    experiment_model_factory,
+):
+    model = _attach_test_rack(experiment_model_factory())
+    plan = _configure_rack_order_design(model)
+    em = model.experiment_model
+    model.printer_head_manager.unassigned_printer_heads.clear()
+    em.load_experiment(em.experiment_file_path, em.experiment_dir_path)
+
+    slots_before = tuple(
+        slot.printer_head for slot in model.rack_model.get_all_slots()
+    )
+    manager_heads_before = tuple(
+        model.printer_head_manager.get_all_printer_heads()
+    )
+    resume_path = Path(em.execution_resume_file_path)
+    assert not resume_path.exists()
+
+    with pytest.raises(RuntimeError, match="assignment state is inconsistent"):
+        model.load_authoritative_execution_runtime()
+
+    assert tuple(
+        slot.printer_head for slot in model.rack_model.get_all_slots()
+    ) == slots_before
+    assert tuple(
+        model.printer_head_manager.get_all_printer_heads()
+    ) == manager_heads_before
+    assert model.printer_head_manager.get_unassigned_printer_heads() == []
+    assert not resume_path.exists()
+    assert model._rack_runtime_plan_id == plan.plan_id
+
+
+def test_same_session_identity_change_unconfirms_only_affected_slot(
+    experiment_model_factory,
+    monkeypatch,
+):
+    model = _attach_test_rack(experiment_model_factory())
+    _configure_rack_order_design(model)
+    em = model.experiment_model
+    model.rack_model.confirm_slot(0)
+    model.rack_model.confirm_slot(1)
+    affected_head = model.rack_model.get_all_slots()[0].printer_head
+    unaffected_head = model.rack_model.get_all_slots()[1].printer_head
+    affected_stock_id = affected_head.get_stock_id()
+    original_builder = model._build_authoritative_runtime_projection
+
+    def _build_with_changed_identity(bundle):
+        projection = original_builder(bundle)
+        projection.stock_specs[affected_stock_id] = replace(
+            projection.stock_specs[affected_stock_id],
+            printer_head_id="authoritative-replacement-head",
+        )
+        return projection
+
+    monkeypatch.setattr(
+        model,
+        "_build_authoritative_runtime_projection",
+        _build_with_changed_identity,
+    )
+    em.load_experiment(em.experiment_file_path, em.experiment_dir_path)
+
+    model.load_authoritative_execution_runtime()
+
+    slots = model.rack_model.get_all_slots()
+    assert slots[0].printer_head is affected_head
+    assert slots[1].printer_head is unaffected_head
+    assert affected_head.printer_head_id == "authoritative-replacement-head"
+    assert not slots[0].confirmed
+    assert slots[1].confirmed
 
 
 def test_completed_execution_view_projects_exact_finished_runtime_without_writes(

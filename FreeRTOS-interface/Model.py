@@ -162,6 +162,16 @@ class _AuthoritativeRuntimeProjection:
     stock_specs: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _SameSessionRackSnapshot:
+    plan_id: str
+    printer_heads: tuple[Any, ...]
+    slot_printer_heads: tuple[Any | None, ...]
+    slot_confirmed: tuple[bool, ...]
+    unassigned_printer_heads: tuple[Any, ...]
+    printer_head_identities: tuple[tuple[int, str | None], ...]
+
+
 def _format_stock_display_sig_figs(value, sig_figs: int = 3) -> str:
     try:
         dec_value = Decimal(str(value))
@@ -14961,6 +14971,7 @@ class Model(QObject):
         self.stock_solutions = StockSolutionManager()
         self.reaction_collection = ReactionCollection()
         self.printer_head_manager = PrinterHeadManager(self.printer_head_colors,self.rack_model)
+        self._rack_runtime_plan_id = None
 
         # self.calibration_model = MassCalibrationModel(self.machine_model,self.printer_head_manager,self.rack_model,self.predictive_model_dir)
         self.experiment_file_path = None
@@ -16163,6 +16174,9 @@ class Model(QObject):
                 ) from exc
             raise
 
+        if execution_plan is not None:
+            self._rack_runtime_plan_id = execution_plan.plan_id
+
         assigned_well_count = sum(
             1
             for well in self.well_plate.get_all_wells()
@@ -16313,6 +16327,7 @@ class Model(QObject):
 
     def _clear_runtime_experiment_without_signal(self):
         """Clear runtime execution state without announcing a successful load."""
+        self._rack_runtime_plan_id = None
         self._read_only_experiment_view_active = False
         self._read_only_experiment_display_heads = ()
         self._completed_execution_view_active = False
@@ -16360,6 +16375,222 @@ class Model(QObject):
         self.experiment_loaded.emit()
         return str(self.experiment_model.experiment_dir_path)
 
+    def _default_rack_stock_ids_for_execution(self, plan) -> tuple[str, ...]:
+        """Return the stock order produced by normal experiment finalization."""
+        stocks = list(getattr(plan, "stocks", ()) or ())
+        fill_name = self.experiment_model.get_fill_reagent_name()
+
+        def _is_fill(stock):
+            return bool(stock.reagent_name == fill_name and stock.units == "--")
+
+        stocks_by_design_key: dict[tuple[str, str | None], list[Any]] = {}
+        for stock in stocks:
+            if _is_fill(stock):
+                continue
+            option_name = stock.option_name
+            if option_name in (None, ""):
+                option_name = None
+            stocks_by_design_key.setdefault(
+                (stock.factor_name, option_name), []
+            ).append(stock)
+
+        ordered = []
+        matched_stock_ids = set()
+
+        def _append_design_key(key):
+            matches = sorted(
+                stocks_by_design_key.get(key, ()),
+                key=lambda stock: (-float(stock.concentration), stock.stock_id),
+            )
+            for stock in matches:
+                if stock.stock_id in matched_stock_ids:
+                    continue
+                ordered.append(stock)
+                matched_stock_ids.add(stock.stock_id)
+
+        factors = list(getattr(self.experiment_model, "factors", ()) or ())
+        for factor in factors:
+            if getattr(factor, "kind", None) == "additive":
+                _append_design_key((factor.name, None))
+        for factor in factors:
+            if getattr(factor, "kind", None) != "choice":
+                continue
+            for option in list(getattr(factor, "options", ()) or ()):
+                _append_design_key((factor.name, option.name))
+
+        # Valid current plans are completely covered by the design keys above.
+        # Keep older compatible plans deterministic without treating their
+        # canonical serialization order as the intended fill position.
+        ordered.extend(
+            stock
+            for stock in stocks
+            if not _is_fill(stock) and stock.stock_id not in matched_stock_ids
+        )
+        ordered.extend(stock for stock in stocks if _is_fill(stock))
+        return tuple(stock.stock_id for stock in ordered)
+
+    def _capture_same_session_rack_snapshot(
+        self,
+        *,
+        plan_id: str,
+        target_stock_ids: Iterable[str],
+    ) -> _SameSessionRackSnapshot | None:
+        """Validate and capture the live rack when it belongs to ``plan_id``."""
+        if getattr(self, "_rack_runtime_plan_id", None) != plan_id:
+            return None
+
+        rack = self.rack_model
+        manager = self.printer_head_manager
+        if rack.get_gripper_printer_head() is not None:
+            raise RuntimeError(
+                "The same-session rack cannot be restored while the gripper holds a printer head."
+            )
+        if (
+            rack.expected_gripper_printer_head is not None
+            or rack.expected_gripper_slot_number is not None
+        ):
+            raise RuntimeError(
+                "The same-session rack cannot be restored while a gripper transfer is pending."
+            )
+        if any(slot.is_locked() for slot in rack.get_all_slots()):
+            raise RuntimeError(
+                "The same-session rack cannot be restored while a rack slot is locked."
+            )
+
+        printer_heads = tuple(manager.get_all_printer_heads())
+        calibration_heads = tuple(
+            head for head in printer_heads if head.is_calibration_chip()
+        )
+        if len(calibration_heads) != 1:
+            raise RuntimeError(
+                "The same-session rack must contain exactly one calibration chip."
+            )
+
+        slot_printer_heads = tuple(
+            slot.printer_head for slot in rack.get_all_slots()
+        )
+        if len(slot_printer_heads) <= 4 or slot_printer_heads[4] is not calibration_heads[0]:
+            raise RuntimeError(
+                "The same-session calibration chip is not in its reserved rack slot."
+            )
+
+        stock_heads = tuple(
+            head for head in printer_heads if not head.is_calibration_chip()
+        )
+        live_stock_ids = tuple(head.get_stock_id() for head in stock_heads)
+        target_stock_ids = tuple(str(stock_id) for stock_id in target_stock_ids)
+        if (
+            len(set(live_stock_ids)) != len(live_stock_ids)
+            or len(set(target_stock_ids)) != len(target_stock_ids)
+            or set(live_stock_ids) != set(target_stock_ids)
+        ):
+            raise RuntimeError(
+                "The same-session rack stocks do not match the saved execution plan."
+            )
+
+        unassigned = tuple(manager.get_unassigned_printer_heads())
+        placements = tuple(
+            head for head in slot_printer_heads if head is not None
+        ) + unassigned
+        manager_object_ids = tuple(id(head) for head in printer_heads)
+        placement_object_ids = tuple(id(head) for head in placements)
+        if (
+            len(set(manager_object_ids)) != len(manager_object_ids)
+            or len(set(placement_object_ids)) != len(placement_object_ids)
+            or set(manager_object_ids) != set(placement_object_ids)
+        ):
+            raise RuntimeError(
+                "The same-session rack assignment state is inconsistent."
+            )
+
+        return _SameSessionRackSnapshot(
+            plan_id=plan_id,
+            printer_heads=printer_heads,
+            slot_printer_heads=slot_printer_heads,
+            slot_confirmed=tuple(
+                bool(slot.confirmed) for slot in rack.get_all_slots()
+            ),
+            unassigned_printer_heads=unassigned,
+            printer_head_identities=tuple(
+                (id(head), getattr(head, "printer_head_id", None))
+                for head in printer_heads
+            ),
+        )
+
+    def _restore_same_session_rack_snapshot(
+        self,
+        snapshot: _SameSessionRackSnapshot,
+        projection: _AuthoritativeRuntimeProjection,
+    ) -> dict[str, int]:
+        """Restore a validated live rack using the newly projected stock objects."""
+        rack = self.rack_model
+        manager = self.printer_head_manager
+        slots = list(rack.get_all_slots())
+        if len(slots) != len(snapshot.slot_printer_heads):
+            raise RuntimeError("The rack slot count changed during experiment loading.")
+
+        stock_lookup = {
+            stock.get_stock_id(): stock
+            for stock in projection.stock_manager.get_all_stock_solutions()
+        }
+        prior_identities = dict(snapshot.printer_head_identities)
+        for head in snapshot.printer_heads:
+            if head.is_calibration_chip():
+                continue
+            stock_id = head.get_stock_id()
+            stock = stock_lookup.get(stock_id)
+            if stock is None:
+                raise RuntimeError(
+                    f"The saved execution no longer contains rack stock {stock_id!r}."
+                )
+            head.change_stock_solution(stock)
+
+        self._apply_saved_printer_head_projection(
+            list(snapshot.printer_heads),
+            projection.stock_specs,
+        )
+
+        manager.printer_heads = list(snapshot.printer_heads)
+        manager.assigned_printer_heads = {}
+        manager.unassigned_printer_heads = list(
+            snapshot.unassigned_printer_heads
+        )
+        rack.gripper_printer_head = None
+        rack.gripper_slot_number = None
+
+        restored_assigned = 0
+        for index, (slot, head, was_confirmed) in enumerate(
+            zip(slots, snapshot.slot_printer_heads, snapshot.slot_confirmed)
+        ):
+            slot.change_printer_head(head)
+            slot.set_locked(False)
+            identity_unchanged = bool(
+                head is not None
+                and prior_identities.get(id(head))
+                == getattr(head, "printer_head_id", None)
+            )
+            if was_confirmed and identity_unchanged:
+                slot.confirm()
+            else:
+                slot.unconfirm()
+            if head is not None:
+                manager.assigned_printer_heads[index] = head
+                if not head.is_calibration_chip():
+                    restored_assigned += 1
+
+        rack.sync_expected_to_actual()
+        rack.slot_updated.emit()
+        rack.gripper_updated.emit()
+        restored_unassigned = sum(
+            1
+            for head in snapshot.unassigned_printer_heads
+            if not head.is_calibration_chip()
+        )
+        return {
+            "restored_assigned_head_count": restored_assigned,
+            "restored_unassigned_head_count": restored_unassigned,
+        }
+
     def load_authoritative_execution_runtime(self):
         """Explicitly activate a validated execution bundle without regenerating it."""
         bundle = self.experiment_model._refresh_authoritative_execution_bundle()
@@ -16367,9 +16598,14 @@ class Model(QObject):
         if not eligibility.can_activate_runtime or eligibility.status.startswith("blocked_"):
             raise RuntimeError(eligibility.reason)
         projection = self._build_authoritative_runtime_projection(bundle)
+        rack_snapshot = self._capture_same_session_rack_snapshot(
+            plan_id=bundle.plan.plan_id,
+            target_stock_ids=projection.stock_specs,
+        )
 
         # The checkpoint write is an explicit activation side effect. It occurs only
-        # after every saved runtime identity has been validated and built in memory.
+        # after every saved runtime identity and any same-session rack state have
+        # been validated and built in memory.
         self.experiment_model.ensure_execution_resume_checkpoint()
 
         self._clear_runtime_experiment_without_signal()
@@ -16381,12 +16617,27 @@ class Model(QObject):
             list(projection.well_ids),
         )
         self.well_plate.apply_calibration_data()
-        self.assign_printer_heads()
-
-        self._apply_saved_printer_head_projection(
-            list(getattr(getattr(self, "printer_head_manager", None), "printer_heads", []) or []),
-            projection.stock_specs,
-        )
+        rack_assignment_mode = "initial_finalize_order"
+        rack_assignment_details = {}
+        if rack_snapshot is not None:
+            rack_assignment_mode = "same_session_preserved"
+            rack_assignment_details = self._restore_same_session_rack_snapshot(
+                rack_snapshot,
+                projection,
+            )
+        else:
+            self.assign_printer_heads()
+            self._apply_saved_printer_head_projection(
+                list(
+                    getattr(
+                        getattr(self, "printer_head_manager", None),
+                        "printer_heads",
+                        [],
+                    )
+                    or []
+                ),
+                projection.stock_specs,
+            )
 
         self.experiment_model.set_runtime_context(
             self.well_plate,
@@ -16397,6 +16648,7 @@ class Model(QObject):
             bundle.plan,
             self.experiment_model.to_dict(),
         )
+        self._rack_runtime_plan_id = bundle.plan.plan_id
         self.record_experiment_audit_event(
             "authoritative_execution_activated",
             "Experiment loaded",
@@ -16405,6 +16657,8 @@ class Model(QObject):
                 "plan_revision": bundle.plan.plan_revision,
                 "resume_status": eligibility.status,
                 "reaction_count": len(projection.reactions),
+                "rack_assignment_mode": rack_assignment_mode,
+                **rack_assignment_details,
             },
         )
         self.experiment_loaded.emit()
@@ -16413,7 +16667,11 @@ class Model(QObject):
     def _build_authoritative_runtime_projection(self, bundle):
         """Build and validate saved runtime state without mutating the live model."""
         spec = build_execution_runtime_spec(bundle)
-        return self._build_execution_runtime_projection(spec)
+        stock_ids = self._default_rack_stock_ids_for_execution(bundle.plan)
+        return self._build_execution_runtime_projection(
+            spec,
+            preferred_stock_ids=stock_ids,
+        )
 
     def _build_legacy_runtime_projection(self):
         """Build a validated display projection from an in-memory legacy snapshot."""
@@ -16426,9 +16684,18 @@ class Model(QObject):
             plan,
             self.experiment_model.progress_data,
         )
-        return self._build_execution_runtime_projection(spec)
+        stock_ids = self._default_rack_stock_ids_for_execution(plan)
+        return self._build_execution_runtime_projection(
+            spec,
+            preferred_stock_ids=stock_ids,
+        )
 
-    def _build_execution_runtime_projection(self, spec):
+    def _build_execution_runtime_projection(
+        self,
+        spec,
+        *,
+        preferred_stock_ids: Iterable[str] = (),
+    ):
         """Build and validate a plan/progress projection without mutating live state."""
         try:
             plate_data = self.well_plate.get_plate_data_by_name(spec.plate_name)
@@ -16455,7 +16722,18 @@ class Model(QObject):
         for well in spec.wells:
             for stock_id, target in well.targets.items():
                 remaining_by_stock[stock_id] += max(0, target - well.added[stock_id])
-        for stock in spec.stocks:
+        ordered_stocks = []
+        seen_stock_ids = set()
+        for stock_id in preferred_stock_ids:
+            stock = stock_specs.get(str(stock_id))
+            if stock is None or stock.stock_id in seen_stock_ids:
+                continue
+            ordered_stocks.append(stock)
+            seen_stock_ids.add(stock.stock_id)
+        ordered_stocks.extend(
+            stock for stock in spec.stocks if stock.stock_id not in seen_stock_ids
+        )
+        for stock in ordered_stocks:
             required_uL = (
                 remaining_by_stock[stock.stock_id] * stock.effective_volume_nL / 1000.0
             )
@@ -16516,6 +16794,7 @@ class Model(QObject):
     def _apply_read_only_experiment_projection(self, projection):
         display_heads = self._build_read_only_experiment_display_heads(projection)
 
+        self._rack_runtime_plan_id = None
         self.well_plate.clear_all_wells()
         self.well_plate.set_plate_format(projection.spec.plate_name)
         self.stock_solutions = projection.stock_manager
