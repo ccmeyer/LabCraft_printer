@@ -447,18 +447,25 @@ def test_load_direct_xyz_lut_manifest_freezes_motion_and_isolation_gates():
     assert "sn" not in x
 
 
-def test_load_z_speed_ladder_v2_freezes_geometry_and_timing_gates():
-    manifest = load_manifest("z_speed_ladder_v2")
+def test_load_z_speed_ladder_v3_freezes_configs_geometry_and_timing_gates():
+    manifest = load_manifest("z_speed_ladder_v3")
 
-    assert manifest.expected_test_ids == (2190, 2191, 2192, 2194)
+    assert manifest.expected_test_ids == (2195, 2196, 2197, 2194)
     assert manifest.selftest_args == ("--z-speed-ladder-suite",)
     assert manifest.required_host_checks == (
         "selftest_progress_watchdog",
         "coordinated_xy_status_cadence",
     )
     assert manifest.fixtures[0]["fixture_id"] == "z_speed_ladder_envelope_clear"
-    for test_id in range(2190, 2193):
+    expected_configs = {
+        2195: (35000, 140000),
+        2196: (35000, 100000),
+        2197: (40000, 100000),
+    }
+    for test_id, (rate, acceleration) in expected_configs.items():
         metrics = manifest.analysis_rules[str(test_id)]["metrics"]
+        assert metrics["hz"]["equals"] == rate
+        assert metrics["ac"]["equals"] == acceleration
         assert metrics["ld"]["equals"] == 479400
         assert metrics["np"]["equals"] == 239700
         assert metrics["cb"]["equals"] == metrics["s"]["equals"] == 479406
@@ -474,6 +481,15 @@ def test_load_z_speed_ladder_v2_freezes_geometry_and_timing_gates():
     assert summary["se"]["equals"] == 0
     assert summary["re"]["equals"] == 0
     assert summary["bc"]["equals"] == 0
+    assert summary["last"]["equals"] == 40000
+    assert summary["la"]["equals"] == 100000
+
+
+def test_load_z_speed_ladder_v2_remains_archived_for_historical_reports():
+    manifest = load_manifest("z_speed_ladder_v2")
+    assert manifest.lifecycle == "archived"
+    assert manifest.expected_test_ids == (2190, 2191, 2192, 2194)
+    assert manifest.analysis_rules["2192"]["metrics"]["hz"]["equals"] == 50000
 
 
 def test_load_z_speed_ladder_v1_remains_archived_for_historical_reports():

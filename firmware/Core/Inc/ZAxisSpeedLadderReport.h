@@ -31,6 +31,7 @@ struct MoveObservation {
 
 struct TierObservation {
   uint32_t rateHz = 0u;
+  uint32_t accelerationStepsPerSec2 = 0u;
   uint32_t completedRepetitions = 0u;
   uint32_t logicalDistance = 0u;
   uint32_t nativePulses = 0u;
@@ -65,6 +66,8 @@ struct TierObservation {
 
 void accumulateMove(TierObservation& tier, const MoveObservation& move);
 bool tierPasses(const TierObservation& tier,
+                uint32_t expectedRateHz,
+                uint32_t expectedAccelerationStepsPerSec2,
                 uint32_t expectedLogicalDistance,
                 uint32_t expectedNativePulses,
                 uint32_t expectedCallbacks,

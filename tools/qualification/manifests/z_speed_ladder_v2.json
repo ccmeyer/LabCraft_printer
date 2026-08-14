@@ -3,7 +3,7 @@
   "manifest_id": "z_speed_ladder_v2",
   "name": "Instrumented Z-Axis Speed Ladder v2",
   "profile": "FULL",
-  "lifecycle": "active",
+  "lifecycle": "archived",
   "description": "Diagnostic-only long-Z speed ladder at 30, 40, and 50 kHz logical rates. It separates the 2,250-cycle stepping-body gate from a 2,550-cycle complete TIM1/TIM10 vector gate and requires at least 900 measured core cycles of post-service deadline slack.",
   "expected_test_ids": [2190, 2191, 2192, 2194],
   "enforce_expected_test_ids": true,

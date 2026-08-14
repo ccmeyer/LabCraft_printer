@@ -1,0 +1,34 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "z_speed_ladder_v3",
+  "name": "Instrumented Z-Axis Rate/Acceleration Comparison v3",
+  "profile": "FULL",
+  "lifecycle": "active",
+  "description": "Diagnostic-only long-Z comparison at 35 kHz/140,000 steps/s^2, 35 kHz/100,000 steps/s^2, and 40 kHz/100,000 steps/s^2. Measured travel varies rate and acceleration while all homes retain the established 140,000 steps/s^2 baseline.",
+  "expected_test_ids": [2195, 2196, 2197, 2194],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": true,
+  "selftest_args": ["--z-speed-ladder-suite"],
+  "required_host_checks": ["selftest_progress_watchdog", "coordinated_xy_status_cadence"],
+  "fixtures": [
+    {
+      "fixture_id": "z_speed_ladder_envelope_clear",
+      "required_for": [2195, 2196, 2197, 2194],
+      "operator_note": "Confirm all limits are released and the XY anchor (43000,13000) plus the complete Z=100..80000 travel volume are clear. Remain present and confirm normal sound/motion before each configuration. Stop for contact, abnormal sound, missing motion/home, excessive travel, reset, watchdog evidence, or communication loss."
+    }
+  ],
+  "analysis_rules": {
+    "2195": {"category": "performance", "failure_domain": "firmware_motion", "metrics": {
+      "hz": {"maturity": "acceptance", "equals": 35000}, "ac": {"maturity": "acceptance", "equals": 140000}, "rep": {"maturity": "acceptance", "equals": 3}, "ld": {"maturity": "acceptance", "equals": 479400}, "np": {"maturity": "acceptance", "equals": 239700}, "cb": {"maturity": "acceptance", "equals": 479406}, "s": {"maturity": "acceptance", "equals": 479406}, "mi": {"maturity": "acceptance", "equals": 0}, "po": {"maturity": "acceptance", "equals": 0}, "ps": {"maturity": "acceptance", "equals": 0}, "bm": {"maturity": "acceptance", "max": 2250}, "fm": {"maturity": "acceptance", "max": 2550}, "tm": {"maturity": "acceptance", "max": 4500}, "ds": {"maturity": "acceptance", "equals": 479400}, "dm": {"maturity": "acceptance", "equals": 0}, "sl": {"maturity": "acceptance", "min": 900}, "pf": {"maturity": "acceptance", "equals": 0}, "ep": {"maturity": "acceptance", "equals": 0}, "cw": {"maturity": "acceptance", "max": 6}, "zs": {"maturity": "acceptance", "max": 25}, "zd": {"maturity": "acceptance", "max": 25}, "zr": {"maturity": "acceptance", "max": 10}, "lf": {"maturity": "acceptance", "equals": 0}, "lp": {"maturity": "acceptance", "equals": 0}, "sg": {"maturity": "acceptance", "max": 125}, "wd": {"maturity": "acceptance", "max": 100}, "sa": {"maturity": "acceptance", "equals": 0}, "sf": {"maturity": "acceptance", "equals": 0}, "to": {"maturity": "acceptance", "equals": 0}, "sk": {"maturity": "acceptance", "equals": 0}
+    }},
+    "2196": {"category": "performance", "failure_domain": "firmware_motion", "metrics": {
+      "hz": {"maturity": "acceptance", "equals": 35000}, "ac": {"maturity": "acceptance", "equals": 100000}, "rep": {"maturity": "acceptance", "equals": 3}, "ld": {"maturity": "acceptance", "equals": 479400}, "np": {"maturity": "acceptance", "equals": 239700}, "cb": {"maturity": "acceptance", "equals": 479406}, "s": {"maturity": "acceptance", "equals": 479406}, "mi": {"maturity": "acceptance", "equals": 0}, "po": {"maturity": "acceptance", "equals": 0}, "ps": {"maturity": "acceptance", "equals": 0}, "bm": {"maturity": "acceptance", "max": 2250}, "fm": {"maturity": "acceptance", "max": 2550}, "tm": {"maturity": "acceptance", "max": 4500}, "ds": {"maturity": "acceptance", "equals": 479400}, "dm": {"maturity": "acceptance", "equals": 0}, "sl": {"maturity": "acceptance", "min": 900}, "pf": {"maturity": "acceptance", "equals": 0}, "ep": {"maturity": "acceptance", "equals": 0}, "cw": {"maturity": "acceptance", "max": 6}, "zs": {"maturity": "acceptance", "max": 25}, "zd": {"maturity": "acceptance", "max": 25}, "zr": {"maturity": "acceptance", "max": 10}, "lf": {"maturity": "acceptance", "equals": 0}, "lp": {"maturity": "acceptance", "equals": 0}, "sg": {"maturity": "acceptance", "max": 125}, "wd": {"maturity": "acceptance", "max": 100}, "sa": {"maturity": "acceptance", "equals": 0}, "sf": {"maturity": "acceptance", "equals": 0}, "to": {"maturity": "acceptance", "equals": 0}, "sk": {"maturity": "acceptance", "equals": 0}
+    }},
+    "2197": {"category": "performance", "failure_domain": "firmware_motion", "metrics": {
+      "hz": {"maturity": "acceptance", "equals": 40000}, "ac": {"maturity": "acceptance", "equals": 100000}, "rep": {"maturity": "acceptance", "equals": 3}, "ld": {"maturity": "acceptance", "equals": 479400}, "np": {"maturity": "acceptance", "equals": 239700}, "cb": {"maturity": "acceptance", "equals": 479406}, "s": {"maturity": "acceptance", "equals": 479406}, "mi": {"maturity": "acceptance", "equals": 0}, "po": {"maturity": "acceptance", "equals": 0}, "ps": {"maturity": "acceptance", "equals": 0}, "bm": {"maturity": "acceptance", "max": 2250}, "fm": {"maturity": "acceptance", "max": 2550}, "tm": {"maturity": "acceptance", "max": 4500}, "ds": {"maturity": "acceptance", "equals": 479400}, "dm": {"maturity": "acceptance", "equals": 0}, "sl": {"maturity": "acceptance", "min": 900}, "pf": {"maturity": "acceptance", "equals": 0}, "ep": {"maturity": "acceptance", "equals": 0}, "cw": {"maturity": "acceptance", "max": 6}, "zs": {"maturity": "acceptance", "max": 25}, "zd": {"maturity": "acceptance", "max": 25}, "zr": {"maturity": "acceptance", "max": 10}, "lf": {"maturity": "acceptance", "equals": 0}, "lp": {"maturity": "acceptance", "equals": 0}, "sg": {"maturity": "acceptance", "max": 125}, "wd": {"maturity": "acceptance", "max": 100}, "sa": {"maturity": "acceptance", "equals": 0}, "sf": {"maturity": "acceptance", "equals": 0}, "to": {"maturity": "acceptance", "equals": 0}, "sk": {"maturity": "acceptance", "equals": 0}
+    }},
+    "2194": {"category": "configuration", "failure_domain": "firmware_motion", "metrics": {
+      "n": {"maturity": "acceptance", "equals": 3}, "ok": {"maturity": "acceptance", "equals": 3}, "last": {"maturity": "acceptance", "equals": 40000}, "la": {"maturity": "acceptance", "equals": 100000}, "zh": {"maturity": "acceptance", "equals": 1}, "xyh": {"maturity": "acceptance", "equals": 1}, "ax": {"maturity": "acceptance", "equals": 43000}, "ay": {"maturity": "acceptance", "equals": 13000}, "zr": {"maturity": "acceptance", "equals": 100}, "pd": {"maturity": "acceptance", "equals": 0}, "rd": {"maturity": "acceptance", "equals": 0}, "mr": {"maturity": "acceptance", "equals": 3}, "de": {"maturity": "acceptance", "equals": 1}, "mf": {"maturity": "acceptance", "equals": 0}, "pv": {"maturity": "acceptance", "equals": 1}, "se": {"maturity": "acceptance", "equals": 0}, "re": {"maturity": "acceptance", "equals": 0}, "bc": {"maturity": "acceptance", "equals": 0}, "is": {"maturity": "acceptance", "equals": 0}, "sf": {"maturity": "acceptance", "equals": 0}, "to": {"maturity": "acceptance", "equals": 0}
+    }}
+  }
+}

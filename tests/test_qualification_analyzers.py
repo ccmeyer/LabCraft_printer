@@ -774,8 +774,8 @@ def test_direct_xyz_lut_manifest_rejects_profile_timing_or_isolation_regressions
     assert _analyze(incomplete, manifest)["verdict"]["status"] == "fail"
 
 
-def test_z_speed_ladder_v2_manifest_rejects_incomplete_or_late_evidence():
-    manifest = load_manifest("z_speed_ladder_v2")
+def test_z_speed_ladder_v3_manifest_rejects_wrong_config_or_incomplete_evidence():
+    manifest = load_manifest("z_speed_ladder_v3")
     results = []
     for test_id in manifest.expected_test_ids:
         metrics = {}
@@ -803,15 +803,18 @@ def test_z_speed_ladder_v2_manifest_rejects_incomplete_or_late_evidence():
     assert _analyze(valid, manifest)["verdict"]["status"] == "pass"
 
     for result_id, metric, value in (
-        (2190, "s", 479405),
-        (2191, "po", 1),
-        (2192, "dm", 1),
-        (2192, "sl", 899),
-        (2192, "cw", 7),
-        (2192, "bm", 2251),
-        (2192, "fm", 2551),
-        (2192, "to", 1),
+        (2195, "ac", 100000),
+        (2195, "s", 479405),
+        (2196, "po", 1),
+        (2197, "hz", 50000),
+        (2197, "dm", 1),
+        (2197, "sl", 899),
+        (2197, "cw", 7),
+        (2197, "bm", 2251),
+        (2197, "fm", 2551),
+        (2197, "to", 1),
         (2194, "ok", 2),
+        (2194, "la", 140000),
         (2194, "re", 1),
     ):
         rejected = deepcopy(valid)
@@ -823,6 +826,37 @@ def test_z_speed_ladder_v2_manifest_rejects_incomplete_or_late_evidence():
     incomplete["results"] = incomplete["results"][:-1]
     incomplete["summary"] = {"total": 3, "passed": 3, "failed": 0}
     assert _analyze(incomplete, manifest)["verdict"]["status"] == "fail"
+
+
+def test_z_speed_ladder_v2_archived_manifest_still_normalizes_historical_evidence():
+    manifest = load_manifest("z_speed_ladder_v2")
+    results = []
+    for test_id in manifest.expected_test_ids:
+        metrics = {}
+        for metric, rule in manifest.analysis_rules[str(test_id)]["metrics"].items():
+            if "equals" in rule:
+                metrics[metric] = rule["equals"]
+            elif "min" in rule:
+                metrics[metric] = rule["min"]
+            else:
+                metrics[metric] = 0
+        results.append({"test_id": test_id, "name": f"z_ladder_{test_id}",
+                        "pass": True, "metrics": metrics})
+    historical = {
+        "run_id": 2199, "profile": "FULL",
+        "started_at": "2026-08-13T00:00:00Z",
+        "finished_at": "2026-08-13T00:01:00Z",
+        "aborted": False,
+        "summary": {"total": 4, "passed": 4, "failed": 0},
+        "results": results,
+        "host_checks": [
+            {"name": "coordinated_xy_status_cadence", "pass": True,
+             "details": {}},
+            {"name": "selftest_progress_watchdog", "pass": True,
+             "details": {}},
+        ],
+    }
+    assert _analyze(historical, manifest)["verdict"]["status"] == "pass"
 
 def test_single_irq_manifest_requires_one_callback_and_complete_pulse_margin():
     manifest = load_manifest("coordinated_xy_single_irq_v1")

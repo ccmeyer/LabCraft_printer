@@ -153,9 +153,9 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2093u, "direct_lut_z_cruise", "performance", "FULL", "explicit_selection"},
     {2094u, "direct_lut_x_triangular", "performance", "FULL", "explicit_selection"},
     {2095u, "direct_lut_isolation", "configuration", "FULL", "explicit_selection"},
-    {2190u, "z_speed_ladder_30khz", "performance", "FULL", "explicit_selection"},
-    {2191u, "z_speed_ladder_40khz", "performance", "FULL", "explicit_selection"},
-    {2192u, "z_speed_ladder_50khz", "performance", "FULL", "explicit_selection"},
+    {2195u, "z_speed_ladder_35k_a140k", "performance", "FULL", "explicit_selection"},
+    {2196u, "z_speed_ladder_35k_a100k", "performance", "FULL", "explicit_selection"},
+    {2197u, "z_speed_ladder_40k_a100k", "performance", "FULL", "explicit_selection"},
     {2193u, "z_speed_ladder_60khz", "performance", "FULL", "explicit_selection"},
     {2194u, "z_speed_ladder_summary", "configuration", "FULL", "explicit_selection"},
     {2003u, "pressure_regulator_step_response_full", "pressure", "FULL", "safe_gate_or_full"},
@@ -3496,17 +3496,19 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                       }
                       if (runZSpeedLadderSuite) {
                         static constexpr uint32_t kRatesHz[] = {
-                            30000u, 40000u, 50000u};
+                            35000u, 35000u, 40000u};
+                        static constexpr uint32_t kAccelerations[] = {
+                            140000u, 100000u, 100000u};
                         static constexpr uint16_t kResultIds[] = {
-                            2190u, 2191u, 2192u};
+                            2195u, 2196u, 2197u};
                         static constexpr const char* kResultNames[] = {
-                            "z_speed_ladder_30khz",
-                            "z_speed_ladder_40khz",
-                            "z_speed_ladder_50khz"};
+                            "z_speed_ladder_35k_a140k",
+                            "z_speed_ladder_35k_a100k",
+                            "z_speed_ladder_40k_a100k"};
                         static constexpr const char* kTierPrompts[] = {
                             nullptr,
-                            "z_speed_ladder_40khz_confirm",
-                            "z_speed_ladder_50khz_confirm"};
+                            "z_speed_ladder_35khz_100k_confirm",
+                            "z_speed_ladder_40khz_100k_confirm"};
                         static constexpr int32_t kAnchorX = 43000;
                         static constexpr int32_t kAnchorY = 13000;
                         static constexpr int32_t kZMaximum = 80000;
@@ -3518,6 +3520,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         static constexpr uint32_t kHomeSlowHz = 3000u;
                         static constexpr uint32_t kHomeBackoffSteps = 400u;
                         static constexpr uint32_t kHomeTimeoutMs = 20000u;
+                        static constexpr uint32_t kHomeAcceleration = 140000u;
                         static constexpr uint32_t kExpectedLogicalDistance = 479400u;
                         static constexpr uint32_t kExpectedNativePulses = 239700u;
                         static constexpr uint32_t kExpectedCallbacks = 479406u;
@@ -3536,7 +3539,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                          "gate=motion_unavailable;sk=1;sf=1;to=0");
                           }
                           (void)runOne(2194u, "z_speed_ladder_summary", false,
-                                       "n=3;ok=0;last=0;zh=0;xyh=0;ax=43000;ay=13000;zr=0;pd=0;rd=0;mr=3;de=1;mf=0;pv=0;se=0;re=0;bc=0;is=1;sf=1;to=0");
+                                       "n=3;ok=0;last=0;la=0;zh=0;xyh=0;ax=43000;ay=13000;zr=0;pd=0;rd=0;mr=3;de=1;mf=0;pv=0;se=0;re=0;bc=0;is=1;sf=1;to=0");
                           return finishSelfTestNow();
                         }
 
@@ -3557,7 +3560,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                        stepperZ->accelStepsPerSec2()};
                         stepperZ->setAccelProfile(Stepper::PROFILE_SCURVE_COSINE);
                         stepperZ->setMaxSpeedHz(60000u);
-                        stepperZ->setAccelStepsPerSec2(140000.0f);
+                        stepperZ->setAccelStepsPerSec2(
+                            static_cast<float>(kHomeAcceleration));
 
                         const int32_t pStart = stepperP->getPosition();
                         const int32_t rStart = stepperR != nullptr
@@ -3565,6 +3569,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         ZAxisSpeedLadderReport::TierObservation tiers[3]{};
                         for (uint32_t index = 0u; index < 3u; ++index) {
                           tiers[index].rateHz = kRatesHz[index];
+                          tiers[index].accelerationStepsPerSec2 =
+                              kAccelerations[index];
                         }
 
                         auto emitTier = [&](uint32_t index) {
@@ -3580,6 +3586,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           const bool passes = fits &&
                               ZAxisSpeedLadderReport::tierPasses(
                                   tiers[index],
+                                  kRatesHz[index],
+                                  kAccelerations[index],
                                   kExpectedLogicalDistance,
                                   kExpectedNativePulses,
                                   kExpectedCallbacks,
@@ -3598,9 +3606,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             tiers[index].skipped = true;
                             char metrics[96] = {};
                             snprintf(metrics, sizeof(metrics),
-                                     "gate=%s;hz=%lu;rep=0;sk=1;sf=0;to=0",
+                                     "gate=%s;hz=%lu;ac=%lu;rep=0;sk=1;sf=0;to=0",
                                      gate,
-                                     static_cast<unsigned long>(kRatesHz[index]));
+                                     static_cast<unsigned long>(kRatesHz[index]),
+                                     static_cast<unsigned long>(
+                                         kAccelerations[index]));
                             (void)runOne(kResultIds[index],
                                          kResultNames[index], false, metrics);
                           }
@@ -3640,6 +3650,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                         uint32_t passedTiers = 0u;
                         uint32_t lastRateHz = 0u;
+                        uint32_t lastAcceleration = 0u;
                         bool timedOut = false;
                         bool ladderOk = setupOk;
                         for (uint32_t tierIndex = 0u;
@@ -3661,6 +3672,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           bool tierMotionOk = statusReset;
 
                           auto runMeasuredLeg = [&](int32_t target) {
+                            stepperZ->setAccelStepsPerSec2(
+                                static_cast<float>(kAccelerations[tierIndex]));
                             const MotionLimitDebouncePolicy::Snapshot limitBefore =
                                 stepperZ->getLimitDebounceSnapshot();
                             const int32_t start = stepperZ->getPosition();
@@ -3723,6 +3736,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             if (returnError > tier.returnErrorSteps) {
                               tier.returnErrorSteps = returnError;
                             }
+                            // Keep every home on the established production
+                            // acceleration so only measured travel varies.
+                            stepperZ->setAccelStepsPerSec2(
+                                static_cast<float>(kHomeAcceleration));
                             const bool homeOk = !_selfTestAbortRequested &&
                                 runAxisHomeDiagnosticAttempt(
                                     stepperZ, BIT_HOME_Z_DONE,
@@ -3785,6 +3802,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           const bool tierPass = tierMotionOk &&
                               ZAxisSpeedLadderReport::tierPasses(
                                   tier,
+                                  kRatesHz[tierIndex],
+                                  kAccelerations[tierIndex],
                                   kExpectedLogicalDistance,
                                   kExpectedNativePulses,
                                   kExpectedCallbacks,
@@ -3798,6 +3817,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           }
                           ++passedTiers;
                           lastRateHz = kRatesHz[tierIndex];
+                          lastAcceleration = kAccelerations[tierIndex];
                         }
 
                         if (!ladderOk) {
@@ -3813,6 +3833,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         MotionQualificationMath::AxisHomeSample zFinal{};
                         MotionQualificationMath::AxisHomeSample xFinal{};
                         MotionQualificationMath::AxisHomeSample yFinal{};
+                        stepperZ->setAccelStepsPerSec2(
+                            static_cast<float>(kHomeAcceleration));
                         const bool zHomeOk = !_selfTestAbortRequested &&
                             runAxisHomeDiagnosticAttempt(
                                 stepperZ, BIT_HOME_Z_DONE, zFinal,
@@ -3847,9 +3869,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             pressureEvidencePass && !timedOut;
                         char summaryMetrics[224] = {};
                         snprintf(summaryMetrics, sizeof(summaryMetrics),
-                                 "n=3;ok=%lu;last=%lu;zh=%u;xyh=%u;ax=%ld;ay=%ld;zr=%ld;pd=%ld;rd=%ld;mr=%u;de=%u;mf=%u;pv=%u;se=%lu;re=%lu;bc=%lu;is=%u;sf=0;to=%u",
+                                 "n=3;ok=%lu;last=%lu;la=%lu;zh=%u;xyh=%u;ax=%ld;ay=%ld;zr=%ld;pd=%ld;rd=%ld;mr=%u;de=%u;mf=%u;pv=%u;se=%lu;re=%lu;bc=%lu;is=%u;sf=0;to=%u",
                                  static_cast<unsigned long>(passedTiers),
                                  static_cast<unsigned long>(lastRateHz),
+                                 static_cast<unsigned long>(lastAcceleration),
                                  zHomeOk ? 1u : 0u,
                                  xyHomeOk ? 1u : 0u,
                                  static_cast<long>(kAnchorX),

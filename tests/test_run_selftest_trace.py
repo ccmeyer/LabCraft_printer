@@ -2161,14 +2161,20 @@ def test_z_speed_ladder_stages_are_operator_prompts():
     mod = _load_run_selftest()
     initial = "z_speed_ladder_envelope_clear"
     assert mod._is_operator_prompt_stage(initial)
-    assert "Z=100..80000" in mod._operator_prompt_message(initial)
-    for rate in (40, 50):
-        stage = f"z_speed_ladder_{rate}khz_confirm"
+    initial_message = mod._operator_prompt_message(initial)
+    assert "Z=100..80000" in initial_message
+    assert "35 kHz / 140,000 steps/s^2" in initial_message
+    for stage, prior, next_arm in (
+        ("z_speed_ladder_35khz_100k_confirm",
+         "35 kHz / 140,000 steps/s^2", "35 kHz / 100,000 steps/s^2"),
+        ("z_speed_ladder_40khz_100k_confirm",
+         "35 kHz / 100,000 steps/s^2", "40 kHz / 100,000 steps/s^2"),
+    ):
         assert mod._is_operator_prompt_stage(stage)
         message = mod._operator_prompt_message(stage)
-        assert f"{rate} kHz" in message
-        assert "previous Z tier completed" in message
-    assert not mod._is_operator_prompt_stage("z_speed_ladder_60khz_confirm")
+        assert prior in message
+        assert next_arm in message
+    assert not mod._is_operator_prompt_stage("z_speed_ladder_50khz_confirm")
 
 
 def test_active_production_selector_is_mutually_exclusive_with_direct_lut(

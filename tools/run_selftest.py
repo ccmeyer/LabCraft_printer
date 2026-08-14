@@ -726,16 +726,20 @@ def _operator_prompt_message(stage: str) -> str:
         return (
             "Confirm the production firmware is flashed, every limit switch is released, and the "
             "XY anchor (43000,13000) plus the complete Z=100..80000 travel volume are clear. "
-            "The firmware will home Z and XY, move to the long-Z anchor, and begin the 30 kHz tier."
+            "The firmware will home Z and XY, move to the long-Z anchor, and begin the "
+            "35 kHz / 140,000 steps/s^2 tier."
         )
-    if stage in {
-        "z_speed_ladder_40khz_confirm",
-        "z_speed_ladder_50khz_confirm",
-    }:
-        rate = stage.split("_")[3].replace("khz", " kHz")
+    if stage == "z_speed_ladder_35khz_100k_confirm":
         return (
-            f"The previous Z tier completed. Confirm motion and homing looked and sounded normal, "
-            f"the travel volume remains clear, and you are ready for the {rate} logical-rate tier."
+            "The 35 kHz / 140,000 steps/s^2 Z tier completed. Confirm motion and homing "
+            "looked and sounded normal, the travel volume remains clear, and you are ready "
+            "for 35 kHz / 100,000 steps/s^2."
+        )
+    if stage == "z_speed_ladder_40khz_100k_confirm":
+        return (
+            "The 35 kHz / 100,000 steps/s^2 Z tier completed. Confirm motion and homing "
+            "looked and sounded normal, the travel volume remains clear, and you are ready "
+            "for 40 kHz / 100,000 steps/s^2."
         )
     return "Confirm the operator-gated self-test step is ready to continue."
 
@@ -751,8 +755,8 @@ def _is_operator_prompt_stage(stage: str) -> bool:
         "coordinated_xy_production_mres3_envelope_clear",
         "direct_xyz_lut_envelope_clear",
         "z_speed_ladder_envelope_clear",
-        "z_speed_ladder_40khz_confirm",
-        "z_speed_ladder_50khz_confirm",
+        "z_speed_ladder_35khz_100k_confirm",
+        "z_speed_ladder_40khz_100k_confirm",
     }
 
 

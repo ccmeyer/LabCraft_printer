@@ -101,12 +101,16 @@ void accumulateMove(TierObservation& tier, const MoveObservation& move)
 }
 
 bool tierPasses(const TierObservation& tier,
+                uint32_t expectedRateHz,
+                uint32_t expectedAccelerationStepsPerSec2,
                 uint32_t expectedLogicalDistance,
                 uint32_t expectedNativePulses,
                 uint32_t expectedCallbacks,
                 uint32_t expectedDeadlineSamples)
 {
   return !tier.skipped &&
+      tier.rateHz == expectedRateHz &&
+      tier.accelerationStepsPerSec2 == expectedAccelerationStepsPerSec2 &&
       tier.completedRepetitions == kRequiredRepetitions &&
       tier.logicalDistance == expectedLogicalDistance &&
       tier.nativePulses == expectedNativePulses &&
@@ -142,11 +146,12 @@ size_t buildMetrics(char* out,
   const int written = std::snprintf(
       out,
       capacity,
-      "hz=%lu;rep=%lu;ld=%lu;np=%lu;cb=%lu;s=%lu;mi=%lu;po=%lu;"
+      "hz=%lu;ac=%lu;rep=%lu;ld=%lu;np=%lu;cb=%lu;s=%lu;mi=%lu;po=%lu;"
       "ps=%lu;bm=%lu;fm=%lu;tm=%lu;em=%lu;ds=%lu;dm=%lu;sl=%lu;"
       "pf=%lu;ep=%lu;cw=%lu;zs=%lu;zd=%lu;zr=%lu;lf=%lu;lp=%u;sg=%lu;"
       "wd=%lu;sa=%lu;sf=%lu;to=%lu;sk=%u",
       static_cast<unsigned long>(tier.rateHz),
+      static_cast<unsigned long>(tier.accelerationStepsPerSec2),
       static_cast<unsigned long>(tier.completedRepetitions),
       static_cast<unsigned long>(tier.logicalDistance),
       static_cast<unsigned long>(tier.nativePulses),

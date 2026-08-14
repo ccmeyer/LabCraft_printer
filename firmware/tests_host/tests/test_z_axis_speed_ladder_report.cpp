@@ -40,6 +40,7 @@ TierObservation passingTier()
 {
   TierObservation tier{};
   tier.rateHz = 50000u;
+  tier.accelerationStepsPerSec2 = 100000u;
   for (uint32_t index = 0u; index < 6u; ++index) {
     ZAxisSpeedLadderReport::accumulateMove(
         tier, passingMove(79900u, 39950u, 79901u));
@@ -63,7 +64,16 @@ TEST(ZAxisSpeedLadderReport, AcceptsExactCompleteTier)
 {
   const TierObservation tier = passingTier();
   CHECK_TRUE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
+}
+
+TEST(ZAxisSpeedLadderReport, RejectsWrongRateOrAccelerationEvidence)
+{
+  TierObservation tier = passingTier();
+  CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
+      tier, 40000u, 100000u, 479400u, 239700u, 479406u, 479400u));
+  CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
+      tier, 50000u, 140000u, 479400u, 239700u, 479406u, 479400u));
 }
 
 TEST(ZAxisSpeedLadderReport, RejectsTimingCoverageDeadlineAndProfileFailures)
@@ -71,15 +81,15 @@ TEST(ZAxisSpeedLadderReport, RejectsTimingCoverageDeadlineAndProfileFailures)
   TierObservation tier = passingTier();
   tier.fullIrqSamples--;
   CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
   tier = passingTier();
   tier.deadlineMisses = 1u;
   CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
   tier = passingTier();
   tier.profileFailureCount = 1u;
   CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
 }
 
 TEST(ZAxisSpeedLadderReport, SeparatesBodyFullVectorAndSlackLimits)
@@ -89,22 +99,22 @@ TEST(ZAxisSpeedLadderReport, SeparatesBodyFullVectorAndSlackLimits)
   tier.activeFullIrqMaxCycles = 2550u;
   tier.minimumDeadlineSlackCycles = 900u;
   CHECK_TRUE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
 
   tier = passingTier();
   tier.activeBodyMaxCycles = 2251u;
   CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
 
   tier = passingTier();
   tier.activeFullIrqMaxCycles = 2551u;
   CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
 
   tier = passingTier();
   tier.minimumDeadlineSlackCycles = 899u;
   CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
 }
 
 TEST(ZAxisSpeedLadderReport, AcceptsAtMostOneDwtWrapPerMeasuredMove)
@@ -112,10 +122,10 @@ TEST(ZAxisSpeedLadderReport, AcceptsAtMostOneDwtWrapPerMeasuredMove)
   TierObservation tier = passingTier();
   tier.cycleWrapCount = ZAxisSpeedLadderReport::kMeasuredMovesPerTier;
   CHECK_TRUE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
   ++tier.cycleWrapCount;
   CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
 }
 
 TEST(ZAxisSpeedLadderReport, RejectsHomeStatusLimitAndSaturationFailures)
@@ -123,19 +133,19 @@ TEST(ZAxisSpeedLadderReport, RejectsHomeStatusLimitAndSaturationFailures)
   TierObservation tier = passingTier();
   tier.homeDriftSteps = 26u;
   CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
   tier = passingTier();
   tier.statusPeriodMaxMs = 126u;
   CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
   tier = passingTier();
   tier.limitConfirmations = 1u;
   CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
   tier = passingTier();
   tier.saturationFlags = 1u;
   CHECK_FALSE(ZAxisSpeedLadderReport::tierPasses(
-      tier, 479400u, 239700u, 479406u, 479400u));
+      tier, 50000u, 100000u, 479400u, 239700u, 479406u, 479400u));
 }
 
 TEST(ZAxisSpeedLadderReport, MetricsFitTheGenericResultBudget)
@@ -145,8 +155,8 @@ TEST(ZAxisSpeedLadderReport, MetricsFitTheGenericResultBudget)
   const size_t length = ZAxisSpeedLadderReport::buildMetrics(
       metrics, sizeof(metrics), tier);
   CHECK(length > 0u);
-  CHECK(length <= (230u - std::strlen("z_speed_ladder_50khz")));
-  STRCMP_CONTAINS("hz=50000;rep=3", metrics);
+  CHECK(length <= (230u - std::strlen("z_speed_ladder_40k_a100k")));
+  STRCMP_CONTAINS("hz=50000;ac=100000;rep=3", metrics);
   STRCMP_CONTAINS("cb=479406;s=479406;mi=0", metrics);
   STRCMP_CONTAINS("cw=0", metrics);
 }

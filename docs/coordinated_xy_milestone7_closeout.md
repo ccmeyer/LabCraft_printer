@@ -256,12 +256,14 @@ phase; exact motion and transition telemetry passed.
 
 Milestone 7 leaves the app's ordinary Z request at 30 kHz logical rate and
 the firmware cap at 60 kHz. Selector `2199` is the separate, watched path for
-deciding whether that ordinary request can safely increase. It reuses the
-qualified long-Z anchor and endpoints, applies the production MRES=3 and
-normalized-LUT implementation, and tests 30/40/50 kHz in order with an
-operator gate before each increase. Only the six measured legs in a tier arm
+deciding whether that ordinary request can safely increase. Its active v3
+form reuses the qualified long-Z anchor and endpoints, applies the production
+MRES=3 normalized-LUT implementation, and compares 35 kHz/140,000 logical
+steps/s^2, 35 kHz/100,000 steps/s^2, and 40 kHz/100,000 steps/s^2 with an
+operator gate between configurations. Only the six measured legs in an arm use
+its candidate acceleration and arm
 TIM10 entry/full-IRQ/deadline telemetry; setup moves and homes retain their
-production behavior. A passing ladder is characterization evidence, not an
+established 140,000 steps/s^2 behavior. A passing ladder is characterization evidence, not an
 automatic app/default-speed change. Any production Z-speed change requires a
 separate reviewed change and regression qualification.
 
@@ -274,6 +276,13 @@ homes. It stopped only because the complete TIM1/TIM10 vector maximum was
 uses a distinct 2,550-cycle complete-vector ceiling, raises the authoritative
 minimum measured slack to 900 core cycles, and ends at the intended 50 kHz
 production candidate. V1 remains archived for historical normalization.
+The v2 watched run subsequently passed complete 30 and 40 kHz timing/count
+coverage, but the operator reported a slightly unusual sound at 40 kHz. The
+50 kHz arm mechanically stalled and the later return legitimately confirmed
+the Z limit after physical position diverged from the open-loop count. V3
+therefore removes 50 kHz and compares the requested 35/40 kHz rate and
+100,000/140,000 steps/s^2 acceleration candidates. V2 remains archived for
+historical normalization.
 
 Raw evidence (path, SHA-256):
 

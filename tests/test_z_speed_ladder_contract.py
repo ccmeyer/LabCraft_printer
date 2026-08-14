@@ -10,15 +10,18 @@ def test_z_speed_ladder_is_diagnostic_only_and_uses_tim10_user_hooks():
     interrupts = (ROOT / "firmware/Core/Src/stm32f4xx_it.c").read_text(encoding="utf-8")
 
     assert "selectedDiagnosticId == 2199u" in diagnostics
-    assert "z_speed_ladder_50khz_confirm" in diagnostics
-    assert "z_speed_ladder_60khz_confirm" not in diagnostics
+    assert "z_speed_ladder_35khz_100k_confirm" in diagnostics
+    assert "z_speed_ladder_40khz_100k_confirm" in diagnostics
+    assert "z_speed_ladder_50khz_confirm" not in diagnostics
     assert "armZSpeedDiagnosticInstrumentation" in diagnostics
     assert "_zDiagnosticInstrumentationArmed" in stepper
     assert "g_lcStepperZTim10IrqTimingArmed" in interrupts
     assert "TIM1_UP_TIM10_IRQn 0" in interrupts
     assert "MX_STEPPERZ_RecordTim10IrqExit" in interrupts
-    assert "30000u, 40000u, 50000u" in diagnostics
-    # This is the unchanged production cap, not a tier in the v2 ladder.
+    assert "35000u, 35000u, 40000u" in diagnostics
+    assert "140000u, 100000u, 100000u" in diagnostics
+    assert "kHomeAcceleration = 140000u" in diagnostics
+    # This is the unchanged production cap, not a tier in the v3 ladder.
     assert "setMaxSpeedHz(60000u)" in diagnostics
 
 
