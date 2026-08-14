@@ -11163,6 +11163,10 @@ class ExperimentDesignDialog(QDialog):
         "Experiment design is locked while a printer head is loaded in the gripper. "
         "Return the printer head to its rack slot to edit the experiment."
     )
+    GRIPPER_COPY_BLOCKED_GUIDANCE = (
+        "Return the loaded printer head to its rack slot before selecting Create "
+        "Editable Copy."
+    )
 
     def __init__(self, model: ExperimentModel, main_window):
         super().__init__()
@@ -13343,6 +13347,12 @@ class ExperimentDesignDialog(QDialog):
     def _apply_gripper_edit_lock_state(self, *, lifecycle=None):
         self._editing_locked_by_gripper = self._is_gripper_loaded()
         locked = self._editing_locked_by_gripper
+        duplicate_button = getattr(self, "duplicate_btn", None)
+        copy_available_without_gripper = bool(
+            locked
+            and duplicate_button is not None
+            and duplicate_button.isEnabled()
+        )
 
         mutating_controls = [
             "exp_name_edit",
@@ -13388,6 +13398,8 @@ class ExperimentDesignDialog(QDialog):
             name_edit = getattr(self, "exp_name_edit", None)
             if name_edit is not None:
                 name_edit.setReadOnly(True)
+            if copy_available_without_gripper:
+                duplicate_button.setToolTip(self.GRIPPER_COPY_BLOCKED_GUIDANCE)
 
         if hasattr(self, "reagent_table") and self.reagent_table is not None:
             for _row, _col, w in self._iter_reagent_widgets():
@@ -13400,15 +13412,30 @@ class ExperimentDesignDialog(QDialog):
         if locked:
             if lifecycle is None:
                 lifecycle = self._classify_editor_lifecycle()
+            banner = getattr(self, "lifecycle_banner", None)
             if (
                 lifecycle.get("state") == "editable"
                 and not getattr(self, "_progress_protected", False)
             ):
-                banner = getattr(self, "lifecycle_banner", None)
                 if banner is not None:
                     banner.setText(self.GRIPPER_LOCK_BANNER)
                     banner.setVisible(True)
                     banner.setToolTip(self.GRIPPER_LOCK_BANNER)
+            elif copy_available_without_gripper and banner is not None:
+                base_text = str(lifecycle.get("banner_text") or "").strip()
+                if not base_text and getattr(self, "_progress_protected", False):
+                    base_text = str(
+                        getattr(self, "_progress_lock_status_message", "") or ""
+                    ).strip()
+                if base_text:
+                    combined_text = (
+                        base_text
+                        if self.GRIPPER_COPY_BLOCKED_GUIDANCE in base_text
+                        else f"{base_text} {self.GRIPPER_COPY_BLOCKED_GUIDANCE}"
+                    )
+                    banner.setText(combined_text)
+                    banner.setVisible(True)
+                    banner.setToolTip(combined_text)
             self._set_status(self.GRIPPER_LOCK_STATUS)
         elif hasattr(self, "status_lbl") and self.status_lbl is not None:
             if self.status_lbl.text() == self.GRIPPER_LOCK_STATUS:

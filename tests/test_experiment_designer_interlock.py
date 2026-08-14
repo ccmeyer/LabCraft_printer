@@ -601,9 +601,92 @@ def test_gripper_lock_overrides_active_execution_editable_copy(qapp):
 
     assert dialog.duplicate_btn.isEnabled() is False
     assert dialog.finish_btn.isEnabled() is False
-    assert dialog.lifecycle_banner.text() == ExperimentDesignDialog.ACTIVE_EXECUTION_BANNER
+    assert dialog.lifecycle_banner.text() == (
+        f"{ExperimentDesignDialog.ACTIVE_EXECUTION_BANNER} "
+        f"{ExperimentDesignDialog.GRIPPER_COPY_BLOCKED_GUIDANCE}"
+    )
+    assert (
+        dialog.duplicate_btn.toolTip()
+        == ExperimentDesignDialog.GRIPPER_COPY_BLOCKED_GUIDANCE
+    )
     assert dialog.status_lbl.text() == (
         ExperimentDesignDialog.GRIPPER_LOCK_STATUS
+    )
+
+
+def test_progress_gripper_copy_guidance_clears_after_head_is_returned(qapp):
+    gripper_loaded = {"value": True}
+    dialog = _build_dialog_stub(
+        gripper_loaded=True,
+        execution_locked=True,
+        runtime_active=False,
+        resume_eligibility={
+            "status": "ready_to_resume",
+            "can_activate_runtime": True,
+            "reason": "Execution can resume.",
+        },
+        plan_state="active",
+    )
+    dialog.main_window.model.rack_model = SimpleNamespace(
+        get_gripper_printer_head=lambda: (
+            object() if gripper_loaded["value"] else None
+        )
+    )
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert dialog.duplicate_btn.isEnabled() is False
+    assert "saved setup and progress" in dialog.lifecycle_banner.text()
+    assert (
+        ExperimentDesignDialog.GRIPPER_COPY_BLOCKED_GUIDANCE
+        in dialog.lifecycle_banner.text()
+    )
+    assert (
+        dialog.duplicate_btn.toolTip()
+        == ExperimentDesignDialog.GRIPPER_COPY_BLOCKED_GUIDANCE
+    )
+
+    gripper_loaded["value"] = False
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert dialog.duplicate_btn.isEnabled() is True
+    assert (
+        ExperimentDesignDialog.GRIPPER_COPY_BLOCKED_GUIDANCE
+        not in dialog.lifecycle_banner.text()
+    )
+    assert "saved setup and progress" in dialog.lifecycle_banner.text()
+    assert dialog.duplicate_btn.toolTip() == (
+        "Create a new editable experiment from the currently loaded experiment."
+    )
+
+
+def test_gripper_does_not_promise_copy_when_source_is_unavailable(qapp):
+    dialog = _build_dialog_stub(
+        gripper_loaded=True,
+        execution_locked=True,
+        runtime_active=True,
+        resume_eligibility={
+            "status": "ready_to_resume",
+            "can_activate_runtime": True,
+            "reason": "Execution can resume.",
+        },
+        plan_state="active",
+    )
+    unavailable_message = "The current experiment file is not available."
+    dialog._resolve_current_persisted_design_source = lambda: (
+        None,
+        None,
+        unavailable_message,
+    )
+
+    ExperimentDesignDialog._refresh_all_lock_states(dialog)
+
+    assert dialog.duplicate_btn.isEnabled() is False
+    assert dialog.duplicate_btn.toolTip() == unavailable_message
+    assert dialog.lifecycle_banner.text() == ExperimentDesignDialog.ACTIVE_EXECUTION_BANNER
+    assert (
+        ExperimentDesignDialog.GRIPPER_COPY_BLOCKED_GUIDANCE
+        not in dialog.lifecycle_banner.text()
     )
 
 
