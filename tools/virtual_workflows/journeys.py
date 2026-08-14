@@ -1035,8 +1035,15 @@ def _connect_execution_signals(
 ) -> None:
     context = runtime.context
     completed = runtime.observations.setdefault("completed_wells", [])
+
+    def record_completed_well(well_id) -> None:
+        well_id = str(well_id)
+        if well_id.strip().lower() == "all":
+            return
+        completed.append(well_id)
+
     context.model.well_plate.well_state_changed_signal.connect(
-        lambda well_id: completed.append(str(well_id))
+        record_completed_well
     )
     context.controller.array_state_changed.connect(
         lambda state: context.array_states.append(str(state))

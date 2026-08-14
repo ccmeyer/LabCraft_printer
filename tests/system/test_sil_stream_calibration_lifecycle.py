@@ -139,6 +139,26 @@ def test_stream_transition_refuel_pass_and_reload_authoritative_bundle(
     assert result.measured_volume_nL == 60.0
     row = model.calibration_manager.get_characterization_summary_rows()[0]
 
+    prepared_well = next(
+        well
+        for well in prepared.wells
+        if any(dispense.stock_id == stock.stock_id for dispense in well.dispenses)
+    )
+    prepared_target = next(
+        dispense.target_dispenses
+        for dispense in prepared_well.dispenses
+        if dispense.stock_id == stock.stock_id
+    )
+    runtime_well = model.well_plate.get_well(prepared_well.well_id)
+    assert (
+        runtime_well.assigned_reaction.get_target_droplets_for_stock(stock.stock_id)
+        == prepared_target
+    )
+    stock_refreshes = []
+    plate_refreshes = []
+    em.stock_updated.connect(lambda: stock_refreshes.append(True))
+    model.well_plate.well_state_changed_signal.connect(plate_refreshes.append)
+
     em.apply_droplet_volume_for_option(
         result.factor_name,
         result.option_name,
@@ -158,6 +178,24 @@ def test_stream_transition_refuel_pass_and_reload_authoritative_bundle(
             "applied_printing_mode": result.applied_printing_mode,
         },
     )
+    calibrated_after_first_apply = em.get_execution_plan_snapshot()
+    calibrated_well = next(
+        well
+        for well in calibrated_after_first_apply.wells
+        if well.well_id == prepared_well.well_id
+    )
+    calibrated_target = next(
+        dispense.target_dispenses
+        for dispense in calibrated_well.dispenses
+        if dispense.stock_id == stock.stock_id
+    )
+    assert calibrated_target != prepared_target
+    assert (
+        runtime_well.assigned_reaction.get_target_droplets_for_stock(stock.stock_id)
+        == calibrated_target
+    )
+    assert stock_refreshes == [True]
+    assert plate_refreshes == ["all"]
     head.set_printing_mode("stream")
     required = refuel_preflight()
     assert required["code"] == "required_refuel_check"

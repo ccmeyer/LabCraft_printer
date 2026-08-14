@@ -9907,6 +9907,12 @@ class ExperimentModel(QObject):
                 if stock_id not in desired and reagent.added_droplets == 0:
                     reagent.set_target_droplets(0, preserve_progress=True)
 
+        self.stock_updated.emit()
+        wp = getattr(self, "_runtime_well_plate", None)
+        signal = getattr(wp, "well_state_changed_signal", None)
+        if signal is not None and hasattr(signal, "emit"):
+            signal.emit("all")
+
     def apply_execution_calibration(
         self,
         *,
