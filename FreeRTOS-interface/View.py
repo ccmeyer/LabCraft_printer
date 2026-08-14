@@ -11138,6 +11138,10 @@ class ExperimentDesignDialog(QDialog):
     COL_PRIOR        = 11
     COL_DELETE       = 12
 
+    REAGENT_COLUMN_DEFAULT_WIDTH = 230
+    REAGENT_COLUMN_MINIMUM_WIDTH = 170
+    REAGENT_COLUMN_COMPACT_AFTER = 3
+
     PROGRESS_POLICY_RESUME = "resume"
     PROGRESS_POLICY_RESET = "reset"
     PROGRESS_POLICY_COPY = "copy"
@@ -11182,7 +11186,8 @@ class ExperimentDesignDialog(QDialog):
         self.default_droplet_volume_nL = printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET)
 
         self.setWindowTitle("Experiment Design (v2)")
-        self.setMinimumSize(1440, 820)
+        self.setMinimumSize(1560, 840)
+        self.resize(1760, 900)
 
         self.model: ExperimentModel = model
         self.runtime_model = getattr(self.main_window, "model", None)
@@ -11212,7 +11217,7 @@ class ExperimentDesignDialog(QDialog):
         self._auto_timer.timeout.connect(self._recompute_silent)
 
         # -------------------------
-        # Root layout: lifecycle banner over LEFT (narrow) | RIGHT (wide)
+        # Root layout: lifecycle banner over LEFT (organized controls) | RIGHT (wide tables)
         # -------------------------
         outer_root = QVBoxLayout(self)
         self.lifecycle_banner = QLabel("")
@@ -11235,11 +11240,15 @@ class ExperimentDesignDialog(QDialog):
         self.root = QHBoxLayout()
         outer_root.addLayout(self.root, stretch=1)
 
-        left = QVBoxLayout()                # single column for all controls/buttons
-        self.root.addLayout(left, stretch=1)  # make left narrower
+        left_panel = QWidget(self)
+        left_panel.setMinimumWidth(390)
+        left_panel.setMaximumWidth(430)
+        left = QVBoxLayout(left_panel)
+        left.setContentsMargins(0, 0, 8, 0)
+        self.root.addWidget(left_panel, stretch=0)
 
-        right = QVBoxLayout()                 # tables column (wide)
-        self.root.addLayout(right, stretch=3) # make right wider
+        right = QVBoxLayout()
+        self.root.addLayout(right, stretch=1)
 
         # ---------- Reagents table (top-right) ----------
         self.reagent_name_table = None
@@ -11262,7 +11271,7 @@ class ExperimentDesignDialog(QDialog):
         self.reagent_table.setVerticalHeaderLabels(self._reagent_field_labels)
         self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.reagent_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.reagent_table.horizontalHeader().setMinimumSectionSize(170)
+        self.reagent_table.horizontalHeader().setMinimumSectionSize(self.REAGENT_COLUMN_MINIMUM_WIDTH)
         self.reagent_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.reagent_table.verticalHeader().setMinimumSectionSize(28)
         self.reagent_table.verticalHeader().setMinimumWidth(155)
@@ -11290,25 +11299,30 @@ class ExperimentDesignDialog(QDialog):
         self.stock_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         right.addWidget(self.stock_table)
 
-        # =========================
-        # right COLUMN (single stack)
-        # =========================
-        controls_col = QVBoxLayout()
-        left.addLayout(controls_col)
+        # ---------- Organized controls (left) ----------
+        controls_col = left
 
-        # --- Form-like controls stacked at top of right column ---
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        experiment_group = QGroupBox("Experiment")
+        experiment_form = QFormLayout(experiment_group)
+        experiment_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        reaction_group = QGroupBox("Reaction Setup")
+        reaction_form = QFormLayout(reaction_group)
+        reaction_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        options_group = QGroupBox("Design Options")
+        options_form = QFormLayout(options_group)
+        options_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         # Experiment name
         self.exp_name_edit = QLineEdit(self.model.metadata.get("name", "Untitled"))
-        form.addRow(QLabel("Experiment Name"), self.exp_name_edit)
+        experiment_form.addRow(QLabel("Experiment Name"), self.exp_name_edit)
 
         # Replicates
         self.rep_spin = QSpinBox()
         self.rep_spin.setMinimum(1); self.rep_spin.setMaximum(9999)
         self.rep_spin.setValue(int(self.model.metadata.get("replicates", 1)))
-        form.addRow(QLabel("Replicates"), self.rep_spin)
+        reaction_form.addRow(QLabel("Replicates"), self.rep_spin)
 
         # Printed volume (nL)
         self.v_spin = QDoubleSpinBox()
@@ -11316,7 +11330,7 @@ class ExperimentDesignDialog(QDialog):
         self.v_spin.setRange(1.0, 1_000_000.0)
         self.v_spin.setValue(float(self.model.metadata.get("target_reaction_volume_nL", 2000.0)))
         self.v_spin.setSingleStep(50.0)
-        form.addRow(QLabel("Printed Volume (nL)"), self.v_spin)
+        reaction_form.addRow(QLabel("Printed Volume (nL)"), self.v_spin)
         
         self.final_v_spin = QDoubleSpinBox()
         self.final_v_spin.setDecimals(1)
@@ -11327,23 +11341,23 @@ class ExperimentDesignDialog(QDialog):
             self.model.metadata.get("target_reaction_volume_nL", 2000.0)
         )))
         self.final_v_spin.setSingleStep(50.0)
-        form.addRow(QLabel("Final Reaction Volume (nL)"), self.final_v_spin)
+        reaction_form.addRow(QLabel("Final Reaction Volume (nL)"), self.final_v_spin)
 
         self.volume_tolerance_spin = QDoubleSpinBox()
         self.volume_tolerance_spin.setDecimals(1)
         self.volume_tolerance_spin.setRange(0.0, 1_000_000.0)
         self.volume_tolerance_spin.setSingleStep(10.0)
         self.volume_tolerance_spin.setValue(float(self.model.metadata.get("printed_volume_tolerance_nL", 50.0)))
-        form.addRow(QLabel("Printed Volume Tolerance (nL)"), self.volume_tolerance_spin)
+        reaction_form.addRow(QLabel("Printed Volume Tolerance (nL)"), self.volume_tolerance_spin)
 
         self.allow_two_chk = QCheckBox()
         self.allow_two_chk.setChecked(bool(self.model.metadata.get("allow_two_stock_solutions", False)))
         self.allow_two_chk.setToolTip("Enable two-stock fallback when a single stock cannot satisfy the targets under the current bounds.")
-        form.addRow(QLabel("Allow Two Stock Solutions"), self.allow_two_chk)
+        options_form.addRow(QLabel("Allow Two Stock Solutions"), self.allow_two_chk)
 
         # Fill reagent name
         self.fill_name_edit = QLineEdit(self.model.metadata.get("fill_reagent_name", "Water"))
-        form.addRow(QLabel("Fill Reagent Name"), self.fill_name_edit)
+        reaction_form.addRow(QLabel("Fill Reagent Name"), self.fill_name_edit)
 
         fill_dv_value = float(self.model.metadata.get("fill_droplet_volume_nL", self.default_droplet_volume_nL))
         fill_mode_value = normalize_printing_mode(
@@ -11352,7 +11366,7 @@ class ExperimentDesignDialog(QDialog):
         )
 
         self.fill_mode_combo = self._build_printing_mode_selector(fill_mode_value)
-        form.addRow(QLabel("Fill Mode"), self.fill_mode_combo)
+        reaction_form.addRow(QLabel("Fill Mode"), self.fill_mode_combo)
 
         # Fill ejection volume
         self.fill_dv_spin = QDoubleSpinBox()
@@ -11363,12 +11377,12 @@ class ExperimentDesignDialog(QDialog):
             fill_mode_value,
             preferred_value=fill_dv_value,
         )
-        form.addRow(QLabel("Fill Ejection Vol (nL)"), self.fill_dv_spin)
+        reaction_form.addRow(QLabel("Fill Ejection Vol (nL)"), self.fill_dv_spin)
 
         # Randomize well assignments + seed
         self.randomize_chk = QCheckBox()
         self.randomize_chk.setChecked(bool(self.model.metadata.get("randomize_assignments", False)))
-        form.addRow(QLabel("Randomize well assignments"), self.randomize_chk)
+        options_form.addRow(QLabel("Randomize well assignments"), self.randomize_chk)
 
         self.random_seed_spin = QSpinBox()
         self.random_seed_spin.setMinimum(0); self.random_seed_spin.setMaximum(9999999)
@@ -11376,19 +11390,19 @@ class ExperimentDesignDialog(QDialog):
         self.random_seed_spin.setValue(int(current_seed))
         self.randomize_chk.toggled.connect(self.random_seed_spin.setEnabled)
         self.random_seed_spin.setEnabled(self.randomize_chk.isChecked())
-        form.addRow(QLabel("Random seed"), self.random_seed_spin)
+        options_form.addRow(QLabel("Random seed"), self.random_seed_spin)
 
         # Use subset design + reduction factor
         self.subset_chk = QCheckBox()
         self.subset_chk.setChecked(bool(self.model.metadata.get("use_subset_design", False)))
-        form.addRow(QLabel("Use subset design"), self.subset_chk)
+        options_form.addRow(QLabel("Use subset design"), self.subset_chk)
 
         self.reduction_spin = QSpinBox()
         self.reduction_spin.setMinimum(1); self.reduction_spin.setMaximum(999)
         self.reduction_spin.setValue(int(self.model.metadata.get("reduction_factor", 1)))
         self.subset_chk.toggled.connect(self.reduction_spin.setEnabled)
         self.reduction_spin.setEnabled(self.subset_chk.isChecked())
-        form.addRow(QLabel("Reduction factor"), self.reduction_spin)
+        options_form.addRow(QLabel("Reduction factor"), self.reduction_spin)
 
         # Hidden legacy start-offset controls kept for old designs/tests.
         self.start_col_spin = QSpinBox(self)
@@ -11415,7 +11429,7 @@ class ExperimentDesignDialog(QDialog):
             idx = self.plate_format_combo.findText(str(selected_plate))
             if idx >= 0:
                 self.plate_format_combo.setCurrentIndex(idx)
-        form.addRow(QLabel("Plate format"), self.plate_format_combo)
+        experiment_form.addRow(QLabel("Plate format"), self.plate_format_combo)
 
         self.well_selection_btn = QPushButton("Printable Wells...")
         self.well_selection_btn.clicked.connect(self._on_choose_printable_wells)
@@ -11426,36 +11440,41 @@ class ExperimentDesignDialog(QDialog):
         well_selection_layout.setContentsMargins(0, 0, 0, 0)
         well_selection_layout.addWidget(self.well_selection_btn)
         well_selection_layout.addWidget(self.well_selection_summary_lbl, stretch=1)
-        form.addRow(QLabel("Printable Wells"), well_selection_row)
+        experiment_form.addRow(QLabel("Printable Wells"), well_selection_row)
 
-        # Add the form to the left-hand column
-        controls_col.addLayout(form)
+        controls_col.addWidget(experiment_group)
+        controls_col.addWidget(reaction_group)
+        controls_col.addWidget(options_group)
 
-        # --- Buttons stacked below the form ---
+        # --- Design tools ---
+        design_tools_group = QGroupBox("Design Tools")
+        design_tools_layout = QGridLayout(design_tools_group)
+        design_tools_layout.setColumnStretch(0, 1)
+        design_tools_layout.setColumnStretch(1, 1)
+
         self.add_reagent_btn = QPushButton("Add Reagent")
         self.add_reagent_btn.clicked.connect(self._on_add_reagent)
-        controls_col.addWidget(self.add_reagent_btn)
+        design_tools_layout.addWidget(self.add_reagent_btn, 0, 0)
 
         # --- Manual design vs uploaded design controls ---
-        self.upload_design_btn = QPushButton("Upload reaction design (CSV)…")
+        self.upload_design_btn = QPushButton("Import Reaction Design (CSV)…")
         self.upload_design_btn.clicked.connect(self._on_upload_design)
-        controls_col.addWidget(self.upload_design_btn)
+        design_tools_layout.addWidget(self.upload_design_btn, 1, 0)
 
-        self.reset_upload_btn = QPushButton("Reset uploaded design")
+        self.reset_upload_btn = QPushButton("Return to Manual Design")
+        self.reset_upload_btn.setToolTip(
+            "Discard the imported reaction matrix while keeping its reagents available for manual editing."
+        )
         self.reset_upload_btn.clicked.connect(self._on_reset_uploaded_design)
-        controls_col.addWidget(self.reset_upload_btn)
+        design_tools_layout.addWidget(self.reset_upload_btn, 1, 1)
 
         self.unique_conditions_btn = QPushButton("Additional Conditions...")
         self.unique_conditions_btn.clicked.connect(self._on_unique_conditions)
-        controls_col.addWidget(self.unique_conditions_btn)
+        design_tools_layout.addWidget(self.unique_conditions_btn, 0, 1)
 
         self.preview_reactions_btn = QPushButton("Preview Reactions...")
         self.preview_reactions_btn.clicked.connect(self._on_preview_reactions)
-        controls_col.addWidget(self.preview_reactions_btn)
-
-        self.export_reaction_preview_btn = QPushButton("Export Reaction Preview CSV...")
-        self.export_reaction_preview_btn.clicked.connect(self._on_export_reaction_preview_csv)
-        controls_col.addWidget(self.export_reaction_preview_btn)
+        design_tools_layout.addWidget(self.preview_reactions_btn, 2, 0, 1, 2)
 
         self.auto_update_chk = QCheckBox("Auto update design")
         self.auto_update_chk.setChecked(True)
@@ -11465,38 +11484,48 @@ class ExperimentDesignDialog(QDialog):
             "pressing Update Reactions and Stock Solutions."
         )
         self.auto_update_chk.toggled.connect(self._on_auto_update_toggled)
-        controls_col.addWidget(self.auto_update_chk)
+        design_tools_layout.addWidget(self.auto_update_chk, 3, 0, 1, 2)
 
         self.run_btn = new_btn = QPushButton("Update Reactions and Stock Solutions")
         self._run_btn_default_stylesheet = self.run_btn.styleSheet()
         self.run_btn.clicked.connect(self._on_optimize_and_generate)
-        controls_col.addWidget(self.run_btn)
+        design_tools_layout.addWidget(self.run_btn, 4, 0, 1, 2)
+        controls_col.addWidget(design_tools_group)
+
+        # --- Experiment lifecycle actions ---
+        experiment_actions_group = QGroupBox("Experiment Actions")
+        experiment_actions_layout = QGridLayout(experiment_actions_group)
+        experiment_actions_layout.setColumnStretch(0, 1)
+        experiment_actions_layout.setColumnStretch(1, 1)
 
         self.new_btn = QPushButton("New Experiment")
         # self.new_btn.setStyleSheet(f"background-color: {self.color_dict['blue']}; color: white;")
         self.new_btn.clicked.connect(self._on_new_experiment)
-        controls_col.addWidget(self.new_btn)
+        experiment_actions_layout.addWidget(self.new_btn, 0, 0)
 
         self.duplicate_btn = QPushButton("Create Editable Copy...")
         self.duplicate_btn.clicked.connect(self._on_duplicate_design)
-        controls_col.addWidget(self.duplicate_btn)
+        experiment_actions_layout.addWidget(self.duplicate_btn, 1, 1)
 
         self.save_btn = QPushButton("Save Design…")
         self.save_btn.clicked.connect(self._on_save_design)
-        controls_col.addWidget(self.save_btn)
+        experiment_actions_layout.addWidget(self.save_btn, 1, 0)
 
         self.load_btn = QPushButton("Load Design…")
         self.load_btn.clicked.connect(self._on_load_design)
-        controls_col.addWidget(self.load_btn)
+        experiment_actions_layout.addWidget(self.load_btn, 0, 1)
 
         self.finish_btn = QPushButton(self.ACTION_FINALIZE_DESIGN)
         self.finish_btn.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
         self.finish_btn.clicked.connect(self._on_finish)
-        controls_col.addWidget(self.finish_btn)
+        experiment_actions_layout.addWidget(self.finish_btn, 2, 0, 1, 2)
+        controls_col.addWidget(experiment_actions_group)
 
         # Summary & status
+        status_group = QGroupBox("Design Status")
+        status_layout = QVBoxLayout(status_group)
         self.summary_lbl = QLabel("Summary: —")
-        controls_col.addWidget(self.summary_lbl)
+        status_layout.addWidget(self.summary_lbl)
 
         self.status_lbl = QLabel("")
         self.status_lbl.setWordWrap(True)
@@ -11505,7 +11534,8 @@ class ExperimentDesignDialog(QDialog):
         self.status_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Maximum)
         line_h = self.status_lbl.fontMetrics().height()
         self.status_lbl.setMaximumHeight(int(line_h * 3.6))
-        controls_col.addWidget(self.status_lbl)
+        status_layout.addWidget(self.status_lbl)
+        controls_col.addWidget(status_group)
 
         controls_col.addStretch(1)
 
@@ -11550,6 +11580,34 @@ class ExperimentDesignDialog(QDialog):
     # Reagent table utilities
     # -----------------------------
 
+    @classmethod
+    def _responsive_reagent_column_width(cls, reagent_count: int, available_width: int) -> int:
+        if reagent_count <= cls.REAGENT_COLUMN_COMPACT_AFTER or available_width <= 0:
+            return cls.REAGENT_COLUMN_DEFAULT_WIDTH
+        fitted_width = int(available_width) // int(reagent_count)
+        return max(
+            cls.REAGENT_COLUMN_MINIMUM_WIDTH,
+            min(cls.REAGENT_COLUMN_DEFAULT_WIDTH, fitted_width),
+        )
+
+    def _update_reagent_column_widths(self):
+        table = getattr(self, "reagent_table", None)
+        if table is None:
+            return
+        reagent_count = table.columnCount()
+        if reagent_count <= 0:
+            return
+        width = self._responsive_reagent_column_width(
+            reagent_count,
+            table.viewport().width(),
+        )
+        for column in range(reagent_count):
+            table.setColumnWidth(column, width)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._update_reagent_column_widths)
+
     def _has_frozen_reagent_column(self) -> bool:
         return False
 
@@ -11589,12 +11647,13 @@ class ExperimentDesignDialog(QDialog):
                 if labels:
                     self.reagent_table.setVerticalHeaderLabels(labels)
             self.reagent_table.insertColumn(row)
-            self.reagent_table.setColumnWidth(row, 230)
             self._update_reagent_column_header(row)
+            self._update_reagent_column_widths()
 
     def _reagent_remove_row(self, row: int):
         if getattr(self, "reagent_table", None) is not None:
             self.reagent_table.removeColumn(row)
+            self._update_reagent_column_widths()
 
     def _clear_reagent_rows(self):
         if getattr(self, "reagent_table", None) is not None:
@@ -11611,6 +11670,7 @@ class ExperimentDesignDialog(QDialog):
         table = getattr(self, "reagent_table", None)
         if table is not None:
             table.resizeRowsToContents()
+            self._update_reagent_column_widths()
 
     def _sync_reagent_row_height(self, row: int):
         self._sync_reagent_tables_geometry()
@@ -12761,7 +12821,6 @@ class ExperimentDesignDialog(QDialog):
             getattr(self, "reset_upload_btn", None),
             getattr(self, "unique_conditions_btn", None),
             getattr(self, "preview_reactions_btn", None),
-            getattr(self, "export_reaction_preview_btn", None),
             getattr(self, "add_reagent_btn", None),
             getattr(self, "well_selection_btn", None),
             getattr(self, "auto_update_chk", None),
@@ -12917,39 +12976,6 @@ class ExperimentDesignDialog(QDialog):
         preview_df = self._reaction_preview_dataframe()
         dialog = ReactionPreviewDialog(preview_df, self)
         dialog.exec()
-
-    def _default_reaction_preview_export_path(self) -> str:
-        export_dir = getattr(self.model, "experiment_dir_path", None)
-        if not export_dir or not os.path.isdir(str(export_dir)):
-            export_dir = os.getcwd()
-        return os.path.join(str(export_dir), "reaction_preview.csv")
-
-    def _on_export_reaction_preview_csv(self):
-        if not self._ensure_reaction_preview_current():
-            return
-        preview_df = self._reaction_preview_dataframe()
-        if preview_df.empty:
-            QMessageBox.warning(self, "No Reactions", "There are no generated reactions to export.")
-            return
-
-        default_path = self._default_reaction_preview_export_path()
-        path, _selected_filter = QFileDialog.getSaveFileName(
-            self,
-            "Export Reaction Preview CSV",
-            default_path,
-            "CSV files (*.csv);;All files (*)",
-        )
-        if not path:
-            return
-        if not os.path.splitext(path)[1]:
-            path = f"{path}.csv"
-
-        try:
-            preview_df.to_csv(path, index=False)
-        except Exception as e:
-            QMessageBox.warning(self, "Export Failed", f"Could not export reaction preview CSV:\n{e}")
-            return
-        self._set_status(f"Reaction preview exported to: {path}")
 
     # -----------------------------
     # Uploaded design mode toggling
@@ -13197,7 +13223,7 @@ class ExperimentDesignDialog(QDialog):
 
         resp = QMessageBox.question(
             self,
-            "Reset uploaded design",
+            "Return to manual design",
             "This will discard the imported reaction design and return to manual design mode.\n\n"
             "Existing reagents will remain in the table, but you can edit them again.\n\n"
             "Continue?",
@@ -13286,7 +13312,7 @@ class ExperimentDesignDialog(QDialog):
         if hasattr(self, "unique_conditions_btn") and self.unique_conditions_btn is not None:
             self.unique_conditions_btn.setEnabled(not active)
         preview_enabled = (not active) or self._can_reuse_current_generated_design()
-        for attr_name in ("preview_reactions_btn", "export_reaction_preview_btn"):
+        for attr_name in ("preview_reactions_btn",):
             widget = getattr(self, attr_name, None)
             if widget is not None:
                 widget.setEnabled(preview_enabled)
@@ -13317,6 +13343,9 @@ class ExperimentDesignDialog(QDialog):
         self._uploaded_design_active = bool(active)
 
         self.add_reagent_btn.setEnabled(not active)
+        reset_button = getattr(self, "reset_upload_btn", None)
+        if reset_button is not None:
+            reset_button.setVisible(active)
         self.subset_chk.setEnabled(not active)
         self.reduction_spin.setEnabled(not active and self.subset_chk.isChecked())
 
@@ -13361,7 +13390,6 @@ class ExperimentDesignDialog(QDialog):
             "reset_upload_btn",
             "unique_conditions_btn",
             "preview_reactions_btn",
-            "export_reaction_preview_btn",
             "run_btn",
             "new_btn",
             "save_btn",
@@ -13449,7 +13477,6 @@ class ExperimentDesignDialog(QDialog):
             "reset_upload_btn",
             "unique_conditions_btn",
             "preview_reactions_btn",
-            "export_reaction_preview_btn",
             "run_btn",
             "new_btn",
             "save_btn",
@@ -13506,7 +13533,6 @@ class ExperimentDesignDialog(QDialog):
             "reset_upload_btn",
             "unique_conditions_btn",
             "preview_reactions_btn",
-            "export_reaction_preview_btn",
             "run_btn",
             "save_btn",
             "finish_btn",
@@ -13630,7 +13656,6 @@ class ExperimentDesignDialog(QDialog):
             "reset_upload_btn",
             "unique_conditions_btn",
             "preview_reactions_btn",
-            "export_reaction_preview_btn",
             "run_btn",
             "save_btn",
             "rep_spin",

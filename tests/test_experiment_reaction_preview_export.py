@@ -11,7 +11,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSpinBox,
-    QFileDialog,
 )
 
 import View
@@ -232,42 +231,12 @@ def test_preview_button_runs_generation_when_dirty_and_opens_dialog(qapp, monkey
     pd.testing.assert_frame_equal(opened["df"], preview_df)
 
 
-def test_export_button_runs_generation_when_dirty_and_writes_preview_csv(qapp, monkeypatch, tmp_path):
-    preview_df = _preview_df()
-    dialog = _make_preview_action_dialog(preview_df, tmp_path=tmp_path)
-    export_path = tmp_path / "chosen_preview.csv"
-    monkeypatch.setattr(
-        QFileDialog,
-        "getSaveFileName",
-        lambda *args, **kwargs: (str(export_path), "CSV files (*.csv)"),
-    )
-
-    ExperimentDesignDialog._on_export_reaction_preview_csv(dialog)
-
-    assert dialog._optimization_calls
-    written = pd.read_csv(export_path)
-    assert written["design_source"].tolist() == preview_df["design_source"].tolist()
-    assert written["additional_condition_label"].fillna("").tolist() == preview_df["additional_condition_label"].tolist()
-    assert written["Signal (mM)"].tolist() == pytest.approx(preview_df["Signal (mM)"].tolist())
-    assert dialog._last_status.startswith("Reaction preview exported to:")
-
-
-def test_export_cancel_does_not_write_file(qapp, monkeypatch, tmp_path):
-    dialog = _make_preview_action_dialog(_preview_df(), tmp_path=tmp_path)
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: ("", ""))
-
-    ExperimentDesignDialog._on_export_reaction_preview_csv(dialog)
-
-    assert not list(tmp_path.glob("*.csv"))
-
-
 def _install_lock_widgets(dialog):
     dialog.add_reagent_btn = QPushButton()
     dialog.upload_design_btn = QPushButton()
     dialog.reset_upload_btn = QPushButton()
     dialog.unique_conditions_btn = QPushButton()
     dialog.preview_reactions_btn = QPushButton()
-    dialog.export_reaction_preview_btn = QPushButton()
     dialog.run_btn = QPushButton()
     dialog.new_btn = QPushButton()
     dialog.save_btn = QPushButton()
@@ -294,14 +263,13 @@ def _install_lock_widgets(dialog):
     dialog._set_status = ExperimentDesignDialog._set_status.__get__(dialog, ExperimentDesignDialog)
 
 
-def test_preview_export_buttons_participate_in_busy_and_lock_states(qapp):
+def test_preview_button_participates_in_busy_and_lock_states(qapp):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     _install_lock_widgets(dialog)
     dialog.model = SimpleNamespace(_uploaded_well_ids=["A1"])
 
     busy_widgets = ExperimentDesignDialog._design_busy_widgets(dialog)
     assert dialog.preview_reactions_btn in busy_widgets
-    assert dialog.export_reaction_preview_btn in busy_widgets
     assert dialog.well_selection_btn in busy_widgets
 
     dialog._can_reuse_current_generated_design = lambda: False
@@ -309,26 +277,21 @@ def test_preview_export_buttons_participate_in_busy_and_lock_states(qapp):
     assert dialog.unique_conditions_btn.isEnabled() is False
     assert dialog.well_selection_btn.isEnabled() is False
     assert dialog.preview_reactions_btn.isEnabled() is False
-    assert dialog.export_reaction_preview_btn.isEnabled() is False
 
     dialog.preview_reactions_btn.setEnabled(False)
-    dialog.export_reaction_preview_btn.setEnabled(False)
     dialog._can_reuse_current_generated_design = lambda: True
     ExperimentDesignDialog._apply_manual_assignment_lock_state(dialog)
     assert dialog.unique_conditions_btn.isEnabled() is False
     assert dialog.well_selection_btn.isEnabled() is False
     assert dialog.preview_reactions_btn.isEnabled() is True
-    assert dialog.export_reaction_preview_btn.isEnabled() is True
 
     dialog._progress_protected = True
     dialog._progress_lock_status_message = "locked"
     ExperimentDesignDialog._apply_progress_edit_lock_state(dialog)
     assert dialog.preview_reactions_btn.isEnabled() is False
     assert dialog.well_selection_btn.isEnabled() is False
-    assert dialog.export_reaction_preview_btn.isEnabled() is False
 
     dialog.preview_reactions_btn.setEnabled(True)
-    dialog.export_reaction_preview_btn.setEnabled(True)
     dialog.main_window = SimpleNamespace(
         model=SimpleNamespace(
             rack_model=SimpleNamespace(get_gripper_printer_head=lambda: object())
@@ -337,7 +300,6 @@ def test_preview_export_buttons_participate_in_busy_and_lock_states(qapp):
     ExperimentDesignDialog._apply_gripper_edit_lock_state(dialog)
     assert dialog.preview_reactions_btn.isEnabled() is False
     assert dialog.well_selection_btn.isEnabled() is False
-    assert dialog.export_reaction_preview_btn.isEnabled() is False
 
 
 def test_manual_assignment_dirty_guard_blocks_preview_action(qapp):

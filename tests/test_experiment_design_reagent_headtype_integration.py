@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QLabel, QLineEdit, QTableWidget
+from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QGroupBox, QLabel, QLineEdit, QTableWidget
 
 import LocalConfig
 from CalibrationMemoryStore import CalibrationMemoryStore
@@ -664,6 +664,48 @@ def test_experiment_designer_fill_mode_updates_volume_range_and_metadata(qapp):
     assert dialog.model.metadata["fill_printing_mode"] == "stream"
     assert dialog.model.metadata["fill_droplet_volume_nL"] == pytest.approx(85.0)
 
+    dialog.close()
+
+
+def test_experiment_designer_uses_grouped_wide_layout_without_export_action(qapp):
+    dialog = _build_real_dialog()
+
+    group_titles = {group.title() for group in dialog.findChildren(QGroupBox)}
+
+    assert dialog.minimumWidth() == 1560
+    assert {
+        "Experiment",
+        "Reaction Setup",
+        "Design Options",
+        "Design Tools",
+        "Experiment Actions",
+        "Design Status",
+    }.issubset(group_titles)
+    assert not hasattr(dialog, "export_reaction_preview_btn")
+    assert dialog.reset_upload_btn.text() == "Return to Manual Design"
+    assert dialog.reset_upload_btn.isHidden() is True
+
+    dialog._apply_uploaded_design_mode_to_ui(True)
+
+    assert dialog.reset_upload_btn.isHidden() is False
+    dialog.close()
+
+
+def test_reagent_columns_keep_default_width_then_compact_to_available_space(qapp):
+    width_for = ExperimentDesignDialog._responsive_reagent_column_width
+
+    assert width_for(3, 510) == 230
+    assert width_for(4, 800) == 200
+    assert width_for(8, 800) == 170
+    assert width_for(4, 1200) == 230
+
+    dialog = _build_real_dialog()
+    dialog.reagent_table.setColumnCount(4)
+    dialog.reagent_table.resize(800, 400)
+    dialog._update_reagent_column_widths()
+    expected = width_for(4, dialog.reagent_table.viewport().width())
+
+    assert {dialog.reagent_table.columnWidth(column) for column in range(4)} == {expected}
     dialog.close()
 
 
