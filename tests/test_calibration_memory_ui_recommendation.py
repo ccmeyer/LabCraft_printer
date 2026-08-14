@@ -849,6 +849,12 @@ def test_compact_workflows_keep_live_pressure_chart_in_initial_viewport(monkeypa
     assert dialog.calibration_tabs.height() > collapsed_height
     assert last_step_bottom <= dialog.droplet_tab.height()
 
+    dialog.droplet_individual_steps_toggle.click()
+    for _ in range(3):
+        qapp.processEvents()
+    assert dialog.droplet_individual_steps_content.isHidden()
+    assert dialog.calibration_tabs.height() == collapsed_height
+
     for tab in (dialog.debug_tab, dialog.optics_tab):
         dialog.calibration_tabs.setCurrentWidget(tab)
         qapp.processEvents()

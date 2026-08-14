@@ -8296,13 +8296,26 @@ class DropletImagingDialog(QtWidgets.QDialog):
         mode = self._normalize_printing_mode(mode)
         toggle = getattr(self, f"{mode}_individual_steps_toggle", None)
         content = getattr(self, f"{mode}_individual_steps_content", None)
+        section = getattr(self, f"{mode}_individual_steps_section", None)
+        page = getattr(self, f"{mode}_tab", None)
         expanded = bool(expanded)
         if content is not None:
             content.setVisible(expanded)
+            content.updateGeometry()
         if toggle is not None:
             toggle.setArrowType(
                 QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow
             )
+        if section is not None:
+            section_layout = section.layout()
+            if section_layout is not None:
+                section_layout.invalidate()
+            section.updateGeometry()
+        if page is not None:
+            page_layout = page.layout()
+            if page_layout is not None:
+                page_layout.invalidate()
+            page.updateGeometry()
         self._refresh_calibration_tabs_compact_height()
 
     def _refresh_calibration_tabs_compact_height(self, *_args):
