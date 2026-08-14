@@ -5,7 +5,7 @@ import pandas as pd
 from PySide6.QtWidgets import QLabel, QMessageBox, QSpinBox
 
 import View
-from Model import WellPlate
+from Model import DesignSizeEstimate, WellPlate
 from View import ExperimentDesignDialog
 
 
@@ -17,6 +17,20 @@ class _CapacityModelStub:
 
     def get_number_of_reactions(self):
         return self._required_reactions
+
+    def estimate_design_size(self):
+        return DesignSizeEstimate(
+            mode="full_factorial",
+            factor_level_counts=(("A", self._required_reactions),),
+            unreduced_factorial_count=self._required_reactions,
+            base_reaction_count=self._required_reactions,
+            replicate_count=1,
+            additional_condition_count=0,
+            total_runs=self._required_reactions,
+        )
+
+    def validate_design_size(self, estimate):
+        return estimate
 
     def get_auto_assignment_included_wells(self):
         return self._included_wells
@@ -179,6 +193,38 @@ def test_validate_plate_capacity_no_popup_when_sufficient(monkeypatch, qapp):
     ok = ExperimentDesignDialog._validate_plate_capacity(dialog, show_dialog=False)
 
     assert ok is True
+    warn.assert_not_called()
+
+
+def test_design_size_preflight_blocks_before_generation_and_uses_explicit_dialog(monkeypatch, qapp):
+    dialog = _build_capacity_dialog(required_reactions=53_384_362_200, rows=16, cols=24)
+    warn = Mock()
+    monkeypatch.setattr(QMessageBox, "warning", warn)
+
+    ok, estimate, message = ExperimentDesignDialog._preflight_design_size(
+        dialog, show_dialog=True
+    )
+
+    assert ok is False
+    assert estimate.total_runs == 53_384_362_200
+    assert "53,384,362,200 reactions" in message
+    assert "384 available wells" in message
+    assert "No reactions were generated" in message
+    warn.assert_called_once()
+    assert warn.call_args[0][1] == "Design Too Large"
+
+
+def test_auto_update_size_preflight_does_not_repeat_modal_dialogs(monkeypatch, qapp):
+    dialog = _build_capacity_dialog(required_reactions=500, rows=16, cols=24)
+    warn = Mock()
+    monkeypatch.setattr(QMessageBox, "warning", warn)
+
+    ok, _estimate, message = ExperimentDesignDialog._preflight_design_size(
+        dialog, show_dialog=False
+    )
+
+    assert ok is False
+    assert "500 reactions" in message
     warn.assert_not_called()
 
 

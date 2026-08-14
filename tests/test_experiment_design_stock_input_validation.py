@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 import pandas as pd
 import pytest
 import View
-from Model import CURRENT_PROFILE, ExperimentModel
+from Model import CURRENT_PROFILE, DesignSizeEstimate, ExperimentModel
 from View import ExperimentDesignDialog
 
 
@@ -146,6 +146,36 @@ def test_invalid_fixed_stock_text_is_styled_and_skips_optimize(qapp):
     assert "last valid stock solutions" in dialog.stock_table_status_lbl.text()
     assert dialog.stock_table.styleSheet() == "QTableWidget { border:1px solid #8a0303; }"
     assert result["issues_by_key"][("AddA", None)][0]["code"] == "invalid_number"
+
+
+def test_oversized_design_preflight_skips_optimizer_and_generation(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog(
+        responses=[{"best": True, "issues_by_key": {}}]
+    )
+    estimate = DesignSizeEstimate(
+        mode="full_factorial",
+        factor_level_counts=(("A", 500),),
+        unreduced_factorial_count=500,
+        base_reaction_count=500,
+        replicate_count=1,
+        additional_condition_count=0,
+        total_runs=500,
+    )
+    message = (
+        "This design would generate 500 reactions. The selected plate has 384 "
+        "available wells. No reactions were generated."
+    )
+    dialog._preflight_design_size = lambda **_kwargs: (False, estimate, message)
+
+    ok, result = ExperimentDesignDialog._run_design_optimization_flow(
+        dialog, show_failure_dialog=False
+    )
+
+    assert ok is False
+    assert result["design_size_estimate"] == estimate
+    assert dialog.model.optimize_calls == 0
+    assert dialog.model.generated == 0
+    assert dialog.status_lbl.text() == message
 
 
 def test_negative_fixed_stock_is_treated_as_invalid_input(qapp):

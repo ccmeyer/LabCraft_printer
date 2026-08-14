@@ -1,8 +1,11 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
+import pandas as pd
 import pytest
-from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QGroupBox, QLabel, QLineEdit, QTableWidget
+from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QGroupBox, QLabel, QLineEdit, QMessageBox, QTableWidget
 
 import LocalConfig
 from CalibrationMemoryStore import CalibrationMemoryStore
@@ -682,12 +685,55 @@ def test_experiment_designer_uses_grouped_wide_layout_without_export_action(qapp
         "Design Status",
     }.issubset(group_titles)
     assert not hasattr(dialog, "export_reaction_preview_btn")
-    assert dialog.reset_upload_btn.text() == "Return to Manual Design"
+    assert dialog.reset_upload_btn.text() == "Clear Imported Design"
     assert dialog.reset_upload_btn.isHidden() is True
 
     dialog._apply_uploaded_design_mode_to_ui(True)
 
     assert dialog.reset_upload_btn.isHidden() is False
+    dialog.close()
+
+
+def test_clear_imported_design_returns_to_an_empty_manual_editor(monkeypatch, qapp):
+    dialog = _build_real_dialog()
+    sample_design = (
+        Path(__file__).resolve().parents[1]
+        / "FreeRTOS-interface"
+        / "Experiments"
+        / "CSV_upload_examples"
+        / "sample_target_concentrations.csv"
+    )
+    dialog.model.set_uploaded_design_from_dataframe(
+        pd.read_csv(sample_design), source_path=str(sample_design)
+    )
+    dialog.model.set_additional_conditions(
+        [{"label": "Control", "replicates": 2, "targets": {("tRNA", None): 0.0}}]
+    )
+    dialog._uploaded_design_active = True
+    dialog._uploaded_design_path = "import.csv"
+    dialog._load_factors_into_table()
+    dialog._apply_uploaded_design_mode_to_ui(True)
+
+    optimize = Mock(side_effect=AssertionError("clear must not optimize"))
+    generate = Mock(side_effect=AssertionError("clear must not generate"))
+    dialog.model.optimize_stock_solutions = optimize
+    dialog.model.generate_experiment = generate
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args, **_kwargs: QMessageBox.Yes)
+
+    dialog._on_reset_uploaded_design()
+
+    assert dialog.model.factors == []
+    assert dialog.model.additional_conditions == []
+    assert dialog.model.has_uploaded_design() is False
+    assert dialog.model.get_number_of_reactions() == 0
+    assert dialog.reagent_table.columnCount() == 0
+    assert dialog.stock_table.rowCount() == 0
+    assert dialog.reset_upload_btn.isHidden() is True
+    assert dialog.add_reagent_btn.isEnabled() is True
+    assert dialog.model.unsaved_changes is True
+    assert dialog.status_lbl.text() == "Imported design cleared. Add reagents or import another design."
+    optimize.assert_not_called()
+    generate.assert_not_called()
     dialog.close()
 
 

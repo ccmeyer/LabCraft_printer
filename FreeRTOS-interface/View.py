@@ -3,6 +3,7 @@ from __future__ import annotations
 # Import your model & dataclasses
 from Model import (
     AdditionalConditionSpec,
+    DesignSizeLimitError,
     FactorSpec,
     OptionSpec,
     ExperimentModel,
@@ -11461,9 +11462,9 @@ class ExperimentDesignDialog(QDialog):
         self.upload_design_btn.clicked.connect(self._on_upload_design)
         design_tools_layout.addWidget(self.upload_design_btn, 1, 0)
 
-        self.reset_upload_btn = QPushButton("Return to Manual Design")
+        self.reset_upload_btn = QPushButton("Clear Imported Design")
         self.reset_upload_btn.setToolTip(
-            "Discard the imported reaction matrix while keeping its reagents available for manual editing."
+            "Remove the imported reactions and reagent rows, then return to an empty manual design."
         )
         self.reset_upload_btn.clicked.connect(self._on_reset_uploaded_design)
         design_tools_layout.addWidget(self.reset_upload_btn, 1, 1)
@@ -13223,33 +13224,40 @@ class ExperimentDesignDialog(QDialog):
 
         resp = QMessageBox.question(
             self,
-            "Return to manual design",
-            "This will discard the imported reaction design and return to manual design mode.\n\n"
-            "Existing reagents will remain in the table, but you can edit them again.\n\n"
-            "Continue?",
+            "Clear Imported Design",
+            "This removes the imported reactions, all reagent rows, additional conditions, "
+            "and calculated stock solutions. Experiment name, plate, and volume settings "
+            "will remain. This cannot be undone. Continue?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
         if resp != QMessageBox.Yes:
             return
 
-        # Clear model's uploaded design
-        self.model.clear_uploaded_design()
-        self._uploaded_design_active = False
-        self._uploaded_design_path = None
+        timer = getattr(self, "_auto_timer", None)
+        if timer is not None:
+            timer.stop()
+        previous_suspended = getattr(self, "_auto_update_suspended", False)
+        self._auto_update_suspended = True
+        try:
+            self.model.clear_uploaded_design()
+            self._uploaded_design_active = False
+            self._uploaded_design_path = None
+            self.choice_groups = set()
+            self._load_factors_into_table()
+            self._update_unique_conditions_button_label()
+            self._refresh_stock_table()
+            self._update_summary_labels(total_reactions=0, worst_nonfill_nL=0.0)
+            self._clear_target_color_state()
+            self._set_stock_table_stale(False, "")
+            self._design_optimization_dirty = False
+            self._last_optimization_result = None
+            self._update_run_button_dirty_state()
+        finally:
+            self._auto_update_suspended = previous_suspended
 
-        # We keep the current factors (the uploaded design already set them).
-        # Just rebuild table UI from whatever is now in model.factors.
-        self.choice_groups = set(
-            f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
-        )
-        self._load_factors_into_table()
-        self._update_unique_conditions_button_label()
-        self._run_design_optimization_flow(
-            show_failure_dialog=False,
-            show_capacity_dialog=False,
-            refresh_lock_states=True,
-        )
+        self._refresh_all_lock_states()
+        self._set_status("Imported design cleared. Add reagents or import another design.")
 
     def _manual_assignments_active(self) -> bool:
         """
@@ -14128,6 +14136,92 @@ class ExperimentDesignDialog(QDialog):
             parts.append("Reactions and stock solutions updated.")
         self._set_status(" ".join(parts))
 
+    def _preflight_design_size(
+        self,
+        *,
+        show_dialog: bool,
+    ) -> tuple[bool, Any | None, str | None]:
+        estimator = getattr(self.model, "estimate_design_size", None)
+        if not callable(estimator):
+            # Compatibility for lightweight integration models. The production
+            # ExperimentModel always provides the allocation-free estimator.
+            return True, None, None
+
+        try:
+            estimate = estimator()
+        except DesignSizeLimitError as exc:
+            message = str(exc)
+            if show_dialog:
+                QMessageBox.warning(self, "Design Too Large", message)
+            return False, getattr(exc, "estimate", None), message
+
+        if getattr(estimate, "mode", "") == "empty" or int(estimate.total_runs) <= 0:
+            message = "Add at least one reagent or import a reaction design."
+            if show_dialog:
+                QMessageBox.warning(self, "Cannot Generate Design", message)
+            return False, estimate, message
+
+        try:
+            available, plate_name = self._available_wells_for_selected_plate()
+        except Exception:
+            available, plate_name = None, "unknown"
+
+        if available is not None and int(estimate.total_runs) > int(available):
+            message = (
+                f"This design would generate {int(estimate.total_runs):,} reactions. "
+                f"The selected plate has {int(available):,} available wells. "
+                "No reactions were generated."
+            )
+            if plate_name and plate_name != "unknown":
+                message += f" Selected plate: {plate_name}."
+            if show_dialog:
+                QMessageBox.warning(self, "Design Too Large", message)
+            return False, estimate, message
+
+        validator = getattr(self.model, "validate_design_size", None)
+        if callable(validator):
+            try:
+                validator(estimate)
+            except DesignSizeLimitError as exc:
+                message = str(exc)
+                title = "Cannot Generate Design" if exc.code == "empty_design" else "Design Too Large"
+                if show_dialog:
+                    QMessageBox.warning(self, title, message)
+                return False, getattr(exc, "estimate", estimate), message
+
+        return True, estimate, None
+
+    def _handle_design_size_failure(
+        self,
+        message: str,
+        *,
+        estimate: Any | None = None,
+        refresh_lock_states: bool = False,
+    ) -> tuple[bool, dict]:
+        self._mark_design_optimization_dirty()
+        self._clear_target_color_state()
+        self._set_stock_table_stale(
+            True,
+            "Showing the last valid stock solutions; the current design was not generated.",
+        )
+        if estimate is not None:
+            try:
+                self._update_summary_labels(
+                    total_reactions=int(estimate.total_runs),
+                    worst_nonfill_nL=0.0,
+                )
+            except Exception:
+                pass
+        self._set_status(message)
+        if refresh_lock_states:
+            self._refresh_all_lock_states()
+        return False, {
+            "best": None,
+            "reason": message,
+            "issues_by_key": {},
+            "design_size_estimate": estimate,
+        }
+
     def _run_design_optimization_flow(
         self,
         *,
@@ -14161,8 +14255,19 @@ class ExperimentDesignDialog(QDialog):
                 "read_only": True,
             }
         self._rebuild_model_from_table()
-        self._refresh_all_prior_availability()
         self._update_metadata_from_controls()
+
+        size_ok, size_estimate, size_message = self._preflight_design_size(
+            show_dialog=bool(show_failure_dialog or show_capacity_dialog)
+        )
+        if not size_ok:
+            return self._handle_design_size_failure(
+                size_message or "The reaction design could not be generated safely.",
+                estimate=size_estimate,
+                refresh_lock_states=refresh_lock_states,
+            )
+
+        self._refresh_all_prior_availability()
 
         volume_issues = self._collect_volume_input_issues()
         raw_issues = self._collect_raw_stock_input_issues()
@@ -14200,23 +14305,34 @@ class ExperimentDesignDialog(QDialog):
                 "issues_by_key": input_issues,
             }
 
-        with _BusyUiContext(
-            self,
-            busy_message
-            or "Updating reactions and stock solutions... this may take a moment on Raspberry Pi.",
-            widgets=self._design_busy_widgets(),
-            status_setter=self._set_status,
-            failure_message="Reactions and stock solutions could not be updated.",
-            show_dialog=show_busy_dialog,
-        ):
-            res = self.model.optimize_stock_solutions(
-                quantum=0.1,
-                max_refine=60,
-                two_max_refine=40,
-                allow_two=self._allow_two_setting(),
+        try:
+            with _BusyUiContext(
+                self,
+                busy_message
+                or "Updating reactions and stock solutions... this may take a moment on Raspberry Pi.",
+                widgets=self._design_busy_widgets(),
+                status_setter=self._set_status,
+                failure_message="Reactions and stock solutions could not be updated.",
+                show_dialog=show_busy_dialog,
+            ):
+                res = self.model.optimize_stock_solutions(
+                    quantum=0.1,
+                    max_refine=60,
+                    two_max_refine=40,
+                    allow_two=self._allow_two_setting(),
+                )
+                if res.get("best"):
+                    self.model.generate_experiment()
+        except DesignSizeLimitError as exc:
+            message = str(exc)
+            if show_failure_dialog or show_capacity_dialog:
+                title = "Cannot Generate Design" if exc.code == "empty_design" else "Design Too Large"
+                QMessageBox.warning(self, title, message)
+            return self._handle_design_size_failure(
+                message,
+                estimate=getattr(exc, "estimate", size_estimate),
+                refresh_lock_states=refresh_lock_states,
             )
-            if res.get("best"):
-                self.model.generate_experiment()
         merged_issues = self._merge_issue_maps(res.get("issues_by_key") or {})
         self._apply_stock_input_issue_state(merged_issues)
 
@@ -14245,7 +14361,11 @@ class ExperimentDesignDialog(QDialog):
                 )
             return False, res
 
-        capacity_ok = self._validate_plate_capacity(show_dialog=show_capacity_dialog)
+        capacity_ok = (
+            True
+            if size_estimate is not None
+            else self._validate_plate_capacity(show_dialog=show_capacity_dialog)
+        )
         self._refresh_stock_table()
         self._update_summary_labels()
         self._apply_target_color_state()

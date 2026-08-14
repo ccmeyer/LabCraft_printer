@@ -370,6 +370,45 @@ class AdditionalConditionSpec:
     replicates: int = 1
 
 
+@dataclass(frozen=True)
+class DesignSizeEstimate:
+    """Allocation-free summary of the reaction space for the current design."""
+
+    mode: str
+    factor_level_counts: Tuple[Tuple[str, int], ...]
+    unreduced_factorial_count: int
+    base_reaction_count: int
+    replicate_count: int
+    additional_condition_count: int
+    total_runs: int
+    subset_intermediate_rows: int = 0
+
+    @property
+    def base_reactions(self) -> int:
+        return self.base_reaction_count
+
+    @property
+    def additional_condition_runs(self) -> int:
+        return self.additional_condition_count
+
+
+class DesignSizeLimitError(ValueError):
+    """Raised before an unsafe or invalid reaction design is materialized."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        estimate: DesignSizeEstimate | None = None,
+        code: str = "design_too_large",
+        limit: int | None = None,
+    ):
+        super().__init__(message)
+        self.estimate = estimate
+        self.code = str(code)
+        self.limit = limit
+
+
 # --------------------------
 # Numeric helpers (grid-based)
 # --------------------------
@@ -453,6 +492,10 @@ class _PlanAccuracyScore:
 # --------------------------
 
 class ExperimentModel(QObject):
+    MAX_GENERATED_REACTIONS = 10_000
+    MAX_SUBSET_SOURCE_COMBINATIONS = 10_000
+    MAX_SUBSET_INTERMEDIATE_ROWS = 10_000
+
     # Signals to mirror the classic API
     stock_updated = Signal()
     experiment_generated = Signal(int, float)  # (n_reactions, worst_nonfill_volume_nL)
@@ -3685,6 +3728,271 @@ class ExperimentModel(QObject):
                 return True
         return False
 
+    def _manual_factor_level_counts(self, *, for_subset: bool) -> Tuple[Tuple[str, int], ...]:
+        counts: List[Tuple[str, int]] = []
+        for factor in self.factors:
+            options = list(getattr(factor, "options", []) or [])
+            if factor.kind == "additive":
+                targets = list(getattr(options[0], "targets", []) or []) if options else []
+                if for_subset:
+                    finite_targets = set()
+                    for target in targets:
+                        try:
+                            value = float(target)
+                        except Exception:
+                            continue
+                        if math.isfinite(value):
+                            finite_targets.add(value)
+                    level_count = len(finite_targets)
+                else:
+                    level_count = len(targets)
+                counts.append((str(factor.name), int(level_count)))
+                continue
+
+            if factor.kind != "choice":
+                continue
+            level_count = 0
+            for option in options:
+                if not self._choice_option_contributes_to_base_design(option):
+                    continue
+                targets = list(getattr(option, "targets", []) or [])
+                if for_subset:
+                    level_count += sum(
+                        1
+                        for target in targets
+                        if self._is_finite_design_level(target)
+                    )
+                else:
+                    level_count += len(targets)
+            if level_count:
+                counts.append((str(factor.name), int(level_count)))
+        return tuple(counts)
+
+    @staticmethod
+    def _is_finite_design_level(value: Any) -> bool:
+        try:
+            return math.isfinite(float(value))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _factorial_count(level_counts: Iterable[int], *, configured: bool) -> int:
+        counts = [int(count) for count in level_counts]
+        if not configured:
+            return 0
+        if not counts:
+            # A configured all-zero choice group contributes one empty base row.
+            return 1
+        if any(count <= 0 for count in counts):
+            return 0
+        return int(math.prod(counts))
+
+    @staticmethod
+    def _subset_intermediate_row_count(dimension_count: int, reduction: int) -> int:
+        if dimension_count <= 0 or reduction <= 1:
+            return 0
+        # pyDOE3 constructs every complementary orthogonal array, plus an r x r
+        # Latin square, before returning the first requested design.
+        return int(max(reduction ** dimension_count, reduction ** 2))
+
+    @staticmethod
+    def _subset_partition_size(level_count: int, partition: int, reduction: int) -> int:
+        if partition < 0 or partition >= level_count:
+            return 0
+        return 1 + ((level_count - 1 - partition) // reduction)
+
+    @classmethod
+    def _estimate_subset_base_reactions(
+        cls,
+        level_counts: List[int],
+        reduction: int,
+        *,
+        unreduced_count: int,
+        intermediate_rows: int,
+    ) -> int:
+        if not level_counts:
+            return 1
+        if unreduced_count <= 0:
+            return 0
+        if (
+            unreduced_count > cls.MAX_SUBSET_SOURCE_COMBINATIONS
+            or intermediate_rows > cls.MAX_SUBSET_INTERMEDIATE_ROWS
+        ):
+            # This estimate will only be used in a rejection message. Avoid even
+            # enumerating the small orthogonal-array index space until validated.
+            return int(math.ceil(unreduced_count / reduction))
+
+        if len(level_counts) == 1:
+            return cls._subset_partition_size(level_counts[0], 0, reduction)
+
+        # For the first GSD returned by pyDOE3, the first d-1 partition indices
+        # vary freely and the final index is their sum modulo the reduction.
+        # Counting partition sizes yields the exact row count without building
+        # factor combinations or reaction dictionaries.
+        def _count_partition_rows(
+            factor_index: int,
+            partition_sum: int,
+            partial_count: int,
+        ) -> int:
+            if factor_index == len(level_counts) - 1:
+                final_partition = partition_sum % reduction
+                return partial_count * cls._subset_partition_size(
+                    level_counts[-1], final_partition, reduction
+                )
+
+            subtotal = 0
+            for partition in range(reduction):
+                partition_size = cls._subset_partition_size(
+                    level_counts[factor_index], partition, reduction
+                )
+                if partition_size:
+                    subtotal += _count_partition_rows(
+                        factor_index + 1,
+                        partition_sum + partition,
+                        partial_count * partition_size,
+                    )
+            return subtotal
+
+        return int(_count_partition_rows(0, 0, 1))
+
+    def estimate_design_size(self) -> DesignSizeEstimate:
+        """Estimate the complete run count without enumerating reaction rows."""
+        replicate_count = self._metadata_replicate_count()
+        additional_count = 0
+        for condition in self.additional_conditions:
+            try:
+                condition_replicates = int(condition.replicates)
+            except Exception:
+                condition_replicates = 1
+            additional_count += max(1, condition_replicates)
+
+        if self._uploaded_reactions is not None:
+            base_count = len(self._uploaded_reactions)
+            factor_counts = self._manual_factor_level_counts(for_subset=False)
+            return DesignSizeEstimate(
+                mode="uploaded",
+                factor_level_counts=factor_counts,
+                unreduced_factorial_count=int(base_count),
+                base_reaction_count=int(base_count),
+                replicate_count=int(replicate_count),
+                additional_condition_count=int(additional_count),
+                total_runs=int(base_count * replicate_count + additional_count),
+            )
+
+        if not self.factors:
+            return DesignSizeEstimate(
+                mode="empty",
+                factor_level_counts=(),
+                unreduced_factorial_count=0,
+                base_reaction_count=0,
+                replicate_count=int(replicate_count),
+                additional_condition_count=int(additional_count),
+                total_runs=int(additional_count),
+            )
+
+        use_subset = bool(self.metadata.get("use_subset_design", False))
+        try:
+            reduction = int(self.metadata.get("reduction_factor", 1))
+        except Exception:
+            reduction = 1
+
+        if use_subset and reduction > 1:
+            factor_counts = self._manual_factor_level_counts(for_subset=True)
+            level_counts = [count for _name, count in factor_counts]
+            unreduced_count = self._factorial_count(level_counts, configured=True)
+            intermediate_rows = self._subset_intermediate_row_count(
+                len(level_counts), reduction
+            )
+            base_count = self._estimate_subset_base_reactions(
+                level_counts,
+                reduction,
+                unreduced_count=unreduced_count,
+                intermediate_rows=intermediate_rows,
+            )
+            return DesignSizeEstimate(
+                mode="subset",
+                factor_level_counts=factor_counts,
+                unreduced_factorial_count=int(unreduced_count),
+                base_reaction_count=int(base_count),
+                replicate_count=int(replicate_count),
+                additional_condition_count=int(additional_count),
+                total_runs=int(base_count * replicate_count + additional_count),
+                subset_intermediate_rows=int(intermediate_rows),
+            )
+
+        factor_counts = self._manual_factor_level_counts(for_subset=False)
+        base_count = self._factorial_count(
+            (count for _name, count in factor_counts), configured=True
+        )
+        return DesignSizeEstimate(
+            mode="full_factorial",
+            factor_level_counts=factor_counts,
+            unreduced_factorial_count=int(base_count),
+            base_reaction_count=int(base_count),
+            replicate_count=int(replicate_count),
+            additional_condition_count=int(additional_count),
+            total_runs=int(base_count * replicate_count + additional_count),
+        )
+
+    def validate_design_size(
+        self,
+        estimate: DesignSizeEstimate | None = None,
+        *,
+        reject_empty: bool = True,
+    ) -> DesignSizeEstimate:
+        estimate = estimate or self.estimate_design_size()
+        if (
+            estimate.mode == "subset"
+            and estimate.unreduced_factorial_count > self.MAX_SUBSET_SOURCE_COMBINATIONS
+        ):
+            raise DesignSizeLimitError(
+                "This subset design starts from "
+                f"{estimate.unreduced_factorial_count:,} source combinations. "
+                f"The safe limit is {self.MAX_SUBSET_SOURCE_COMBINATIONS:,}. "
+                "Use an explicit row-based CSV for a large reduced design. No reactions were generated.",
+                estimate=estimate,
+                code="subset_source_too_large",
+                limit=self.MAX_SUBSET_SOURCE_COMBINATIONS,
+            )
+        if (
+            estimate.mode == "subset"
+            and estimate.subset_intermediate_rows > self.MAX_SUBSET_INTERMEDIATE_ROWS
+        ):
+            raise DesignSizeLimitError(
+                "This subset design would require approximately "
+                f"{estimate.subset_intermediate_rows:,} intermediate rows. "
+                f"The safe limit is {self.MAX_SUBSET_INTERMEDIATE_ROWS:,}. "
+                "Use an explicit row-based CSV instead. No reactions were generated.",
+                estimate=estimate,
+                code="subset_intermediate_too_large",
+                limit=self.MAX_SUBSET_INTERMEDIATE_ROWS,
+            )
+        if estimate.total_runs > self.MAX_GENERATED_REACTIONS:
+            raise DesignSizeLimitError(
+                f"This design would generate {estimate.total_runs:,} reactions. "
+                f"The model limit is {self.MAX_GENERATED_REACTIONS:,}. "
+                "No reactions were generated.",
+                estimate=estimate,
+                code="design_too_large",
+                limit=self.MAX_GENERATED_REACTIONS,
+            )
+        if estimate.base_reaction_count > self.MAX_GENERATED_REACTIONS:
+            raise DesignSizeLimitError(
+                f"This design would enumerate {estimate.base_reaction_count:,} base reactions. "
+                f"The model limit is {self.MAX_GENERATED_REACTIONS:,}. "
+                "No reactions were generated.",
+                estimate=estimate,
+                code="design_too_large",
+                limit=self.MAX_GENERATED_REACTIONS,
+            )
+        if reject_empty and (estimate.mode == "empty" or estimate.total_runs <= 0):
+            raise DesignSizeLimitError(
+                "Add at least one reagent or import a reaction design.",
+                estimate=estimate,
+                code="empty_design",
+            )
+        return estimate
+
     def _enumerate_reactions(self) -> List[Dict]:
         """
         Build the list of reactions.
@@ -3696,6 +4004,8 @@ class ExperimentModel(QObject):
         (group_name, option_name) -> target
         """
 
+        estimate = self.validate_design_size()
+
         # ---------- Uploaded design path ----------
         if self._uploaded_reactions is not None:
             # Each entry is already a mapping (factor_name, None) -> final target conc
@@ -3706,7 +4016,7 @@ class ExperimentModel(QObject):
         additives = [f for f in self.factors if f.kind == "additive"]
         choices   = [f for f in self.factors if f.kind == "choice"]
 
-        use_gsd = bool(self.metadata.get("use_subset_design", False))
+        use_gsd = estimate.mode == "subset"
         reduction = int(self.metadata.get("reduction_factor", 1))
         print(f"[ExperimentModel] Enumerating reactions: use_gsd={use_gsd}, reduction={reduction}")
 
@@ -3752,13 +4062,28 @@ class ExperimentModel(QObject):
                         })
 
                 level_counts = [len(fd["levels"]) for fd in facs]
-                if not level_counts:   # No factors configured
-                    return [{}]
+                if not level_counts:
+                    return [{}] if self.factors else []
 
                 # Use pyDOE3 to get a balanced subset of factor-level combinations
                 # Returns an array of 0-based level indices per factor
                 design = gsd(level_counts, reduction)   # e.g., shape (n_runs, n_factors)
                 design = np.atleast_2d(design).astype(int)
+
+                actual_total = len(design) * estimate.replicate_count + estimate.additional_condition_count
+                if actual_total > self.MAX_GENERATED_REACTIONS:
+                    raise DesignSizeLimitError(
+                        f"This design would generate {actual_total:,} reactions. "
+                        f"The model limit is {self.MAX_GENERATED_REACTIONS:,}. "
+                        "No reactions were generated.",
+                        estimate=replace(
+                            estimate,
+                            base_reaction_count=len(design),
+                            total_runs=actual_total,
+                        ),
+                        code="design_too_large",
+                        limit=self.MAX_GENERATED_REACTIONS,
+                    )
 
                 reactions: List[Dict] = []
                 for row in design:
@@ -3775,9 +4100,16 @@ class ExperimentModel(QObject):
 
                 return reactions
 
+            except DesignSizeLimitError:
+                raise
             except Exception as e:
-                # Safety: fall back silently, but leave a breadcrumb in logs
-                print(f"[ExperimentModel] GSD failed or unavailable; falling back to full factorial. Reason: {e}")
+                raise DesignSizeLimitError(
+                    "The subset design could not be constructed safely. "
+                    "Adjust the subset settings or use an explicit row-based CSV. "
+                    "No reactions were generated.",
+                    estimate=estimate,
+                    code="subset_generation_failed",
+                ) from e
 
         # ---------- Full-factorial fallback (your original logic) ----------
         # (unchanged from your current implementation)
@@ -3792,7 +4124,7 @@ class ExperimentModel(QObject):
             add_target_lists.append(opt.targets)
             add_keys.append((f.name, None))
 
-        add_combos = list(itertools.product(*add_target_lists)) if add_target_lists else [()]
+        add_combos = itertools.product(*add_target_lists) if add_target_lists else iter([()])
 
         # For choices, each group contributes a sum over options (option, target) tuples
         choice_lists = []
@@ -4653,21 +4985,21 @@ class ExperimentModel(QObject):
         }
 
     def clear_uploaded_design(self):
-        """Reset back to normal (factor-defined) design."""
+        """Clear an imported design while retaining experiment setup and paths."""
+        self.factors.clear()
+        self.additional_conditions.clear()
         self._uploaded_reactions = None
         self._uploaded_design_source = None
         self._uploaded_well_ids = None
 
-        # Keep factors; UI will rebuild them as usual.
-        # Recompute plans/grid on next optimize/generate.
-        self.plans_per_option.clear()
-        self._unreachable_preview_map = {}
-        self._target_preview_map = {}
-        self._stock_rows_cache.clear()
-        self._fill_row_cache = None
-        self._reactions_df = pd.DataFrame()
-        self._last_worst_nonfill_volume_nL = None
+        self._clear_design_derived_state()
+        self.stock_prep_state = self._default_stock_prep_state()
+        self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(None)
+        self.manual_refuel_checks = self._normalize_manual_refuel_checks(None)
+        self.unsaved_changes = True
         self.stock_updated.emit()
+        self.applied_imaging_calibration_changed.emit({})
+        self.manual_refuel_check_changed.emit({})
 
     def set_uploaded_design_from_dataframe(
         self,
@@ -4863,6 +5195,7 @@ class ExperimentModel(QObject):
     def generate_experiment(self):
         """Enumerate the reaction space, compute droplet counts per stock, fill volumes,
         and aggregate totals. Emits experiment_generated(n, worst_nonfill_nL)."""
+        self.validate_design_size()
         V = float(self.metadata.get("target_reaction_volume_nL", 2000.0))
         fill_dv = float(self.metadata.get("fill_droplet_volume_nL", self._default_fill_droplet_volume_nl()))
 
@@ -7032,10 +7365,7 @@ class ExperimentModel(QObject):
     # -----------------------------
     def get_number_of_reactions(self) -> int:
         """Total reactions including replicates."""
-        if hasattr(self, "_reactions_df") and not self._reactions_df.empty:
-            return len(self._reactions_df)
-        # Fallback if generate_experiment() hasn't been called yet
-        return sum(1 for _ in self._iter_reaction_run_specs())
+        return int(self.estimate_design_size().total_runs)
 
     def get_random_seed(self) -> Optional[int]:
         return self.metadata.get("random_seed")
