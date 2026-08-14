@@ -283,6 +283,34 @@ def test_refuel_panel_default_disabled_and_no_capture(monkeypatch, qapp):
     controller.capture_refuel_image_with_context.assert_not_called()
 
 
+def test_control_panel_tracks_scroll_viewport_without_horizontal_clipping(
+    monkeypatch,
+    qapp,
+):
+    dialog, _refuel_model, _controller = _build_droplet_dialog(monkeypatch, qapp)
+    dialog.resize(1600, 1000)
+    dialog.show()
+    for _ in range(3):
+        qapp.processEvents()
+
+    scroll = dialog.control_panel_scroll
+    panel = dialog.control_panel
+    assert scroll.verticalScrollBar().isVisible()
+    assert panel.sizePolicy().horizontalPolicy() == QtWidgets.QSizePolicy.Ignored
+    assert panel.width() == scroll.viewport().width()
+    assert panel.width() < scroll.width()
+    assert dialog.calibration_tabs.geometry().right() < panel.width()
+
+    dialog.resize(1800, 1000)
+    for _ in range(3):
+        qapp.processEvents()
+
+    assert panel.width() == scroll.viewport().width()
+    assert dialog.calibration_tabs.geometry().right() < panel.width()
+    dialog.close()
+    qapp.processEvents()
+
+
 def test_droplet_imager_startup_read_camera_arm_failure_is_nonfatal(monkeypatch, qapp):
     status_calls = []
     dialog, _refuel_model, controller = _build_droplet_dialog(

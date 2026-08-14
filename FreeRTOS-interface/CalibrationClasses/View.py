@@ -4219,7 +4219,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Keep the side panels stable so buttons and labels remain readable.
         self.info_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
         self.info_panel_scroll.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
-        self.control_panel.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Preferred)
+        self.control_panel.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         self.control_panel_scroll.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Expanding)
         self.info_panel.adjustSize()
         self.control_panel.adjustSize()
@@ -8153,8 +8153,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         control_width = max(380, min(460, available_width // 4 if available_width > 0 else 380))
         info_width = max(460, min(640, available_width // 3 if available_width > 0 else 460))
 
-        self.control_panel.setMinimumWidth(control_width)
-        self.control_panel.setMaximumWidth(control_width)
+        # QScrollArea's vertical scrollbar reduces the viewport width. Keep the
+        # outer column fixed and let widgetResizable size its child to that viewport.
+        self.control_panel.setMinimumWidth(0)
+        self.control_panel.setMaximumWidth(16777215)
         self.control_panel_scroll.setMinimumWidth(control_width)
         self.control_panel_scroll.setMaximumWidth(control_width)
         self.info_panel.setMinimumWidth(info_width)
@@ -8163,6 +8165,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.info_panel_scroll.setMaximumWidth(info_width)
         self.analysis_panel.setMinimumWidth(560)
         self.analysis_panel.setMaximumWidth(16777215)
+        self.control_panel.updateGeometry()
         self.analysis_panel.updateGeometry()
 
     def _create_lightweight_tab_section_header(self, title):

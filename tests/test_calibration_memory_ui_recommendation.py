@@ -581,11 +581,12 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert stream_header.layout().count() == 3
     assert dialog.info_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.info_panel_scroll.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
-    assert dialog.control_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
+    assert dialog.control_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Ignored
+    assert dialog.control_panel_scroll.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Fixed
     assert dialog.analysis_panel.sizePolicy().horizontalPolicy() == calibration_view.QtWidgets.QSizePolicy.Expanding
     assert dialog.analysis_panel.minimumWidth() >= 560
-    assert dialog.control_panel.maximumWidth() <= 460
-    assert dialog.info_panel.maximumWidth() >= dialog.control_panel.maximumWidth()
+    assert dialog.control_panel_scroll.maximumWidth() <= 460
+    assert dialog.info_panel.maximumWidth() >= dialog.control_panel_scroll.maximumWidth()
     assert dialog.summary_table.minimumHeight() >= 280
     assert dialog.bridge_table.minimumHeight() >= 220
     assert dialog.stage_table.minimumHeight() >= 140
