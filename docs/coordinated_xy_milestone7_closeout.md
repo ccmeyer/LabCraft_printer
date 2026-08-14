@@ -288,7 +288,7 @@ cannot launch hardware; the host-only records consume no MCU flash.
 Removing the retired selector, report module, Z-only TIM10 hooks, and extended
 Stepper timing fields reduced the versioned production binary from 331,680 to
 325,496 bytes (6,184 bytes). The cleanup artifact SHA-256 is
-`70BA38EAA26AC1F1291296DD489E203491CE0046877BBA8CE65CC4DD75B04ABF`.
+`4D0EAB390C0B2B98FA764E244DE8F44B8362E8B1BA9A4779F4F816586F687373`.
 
 Raw evidence (path, SHA-256):
 
