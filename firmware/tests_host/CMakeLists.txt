@@ -42,7 +42,6 @@ add_executable(fw_tests
     tests/test_coordinated_xy_performance_report.cpp
     tests/test_stepper_isr_instrumentation.cpp
     tests/test_stepper_instrumentation_report.cpp
-    tests/test_z_axis_speed_ladder_report.cpp
     tests/test_stepper_limit_policy.cpp
     tests/test_motion_limit_debounce_policy.cpp
     tests/test_exti_debounce.cpp
@@ -91,7 +90,6 @@ add_executable(fw_tests
     ../Core/Src/CoordinatedXyPerformanceReport.cpp
     ../Core/Src/StepperIsrInstrumentation.cpp
     ../Core/Src/StepperInstrumentationReport.cpp
-    ../Core/Src/ZAxisSpeedLadderReport.cpp
     ../Core/Src/CrashLogCodec.c
     ../Core/Src/CrashFaultContext.c
     ../Core/Src/ResetReportPolicy.cpp

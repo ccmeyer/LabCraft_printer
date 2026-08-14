@@ -255,17 +255,12 @@ phase; exact motion and transition telemetry passed.
 ### Post-closeout Z speed characterization
 
 Milestone 7 leaves the app's ordinary Z request at 30 kHz logical rate and
-the firmware cap at 60 kHz. Selector `2199` is the separate, watched path for
-deciding whether that ordinary request can safely increase. Its active v3
-form reuses the qualified long-Z anchor and endpoints, applies the production
-MRES=3 normalized-LUT implementation, and compares 35 kHz/140,000 logical
-steps/s^2, 35 kHz/100,000 steps/s^2, and 40 kHz/100,000 steps/s^2 with an
-operator gate between configurations. Only the six measured legs in an arm use
-its candidate acceleration and arm
-TIM10 entry/full-IRQ/deadline telemetry; setup moves and homes retain their
-established 140,000 steps/s^2 behavior. A passing ladder is characterization evidence, not an
-automatic app/default-speed change. Any production Z-speed change requires a
-separate reviewed change and regression qualification.
+140,000 logical steps/s^2 acceleration. The completed selector `2199`
+experiment compared higher rates and a lower acceleration at the qualified
+long-Z anchor and endpoints. Its runtime selector, report module, and Z-only
+TIM10 entry/full-IRQ/deadline hooks were subsequently removed from production;
+the v1-v3 manifests and result catalog rows remain archived for historical raw
+report normalization only.
 
 The initial v1 watched run completed all three 30 kHz repetitions with exact
 pulse/callback coverage, zero pending updates or deadline misses, 3,078 core
@@ -283,6 +278,17 @@ the Z limit after physical position diverged from the open-loop count. V3
 therefore removes 50 kHz and compares the requested 35/40 kHz rate and
 100,000/140,000 steps/s^2 acceleration candidates. V2 remains archived for
 historical normalization.
+
+The watched v3 runs completed at both 35 kHz acceleration settings with a
+slightly unusual sound, while 40 kHz/100,000 steps/s^2 mechanically stalled in
+the same way as the earlier 50 kHz trial. The production decision is therefore
+to retain 30 kHz/140,000 steps/s^2. All three ladder manifests are archived and
+cannot launch hardware; the host-only records consume no MCU flash.
+
+Removing the retired selector, report module, Z-only TIM10 hooks, and extended
+Stepper timing fields reduced the versioned production binary from 331,680 to
+325,496 bytes (6,184 bytes). The cleanup artifact SHA-256 is
+`70BA38EAA26AC1F1291296DD489E203491CE0046877BBA8CE65CC4DD75B04ABF`.
 
 Raw evidence (path, SHA-256):
 

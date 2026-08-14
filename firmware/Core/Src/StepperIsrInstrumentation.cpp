@@ -143,81 +143,6 @@ void recordSample(State& state,
   }
 }
 
-void recordFullIrqSample(State& state,
-                         bool entryValid,
-                         uint32_t entryCycle,
-                         uint32_t exitCycle,
-                         bool timerSampleValid,
-                         uint32_t entryTimerCount,
-                         uint32_t entryTimerArr,
-                         bool postTimerSampleValid,
-                         uint32_t postTimerCount,
-                         uint32_t postTimerArr,
-                         bool updatePendingAfter,
-                         bool terminalCallback)
-{
-  if (!state.valid) {
-    return;
-  }
-  if (!entryValid) {
-    saturatingIncrement(state.missingFullIrqSamples,
-                        state.saturationFlags,
-                        SaturatedMissingFullIrqSamples);
-    return;
-  }
-
-  saturatingIncrement(state.fullIrqSamples,
-                      state.saturationFlags,
-                      SaturatedFullIrqSamples);
-  const uint32_t elapsedCycles = exitCycle - entryCycle;
-  uint32_t& maximum = terminalCallback
-      ? state.fullIrqTerminalMaxCycles
-      : state.fullIrqActiveMaxCycles;
-  if (elapsedCycles > maximum) {
-    maximum = elapsedCycles;
-  }
-
-  if (!timerSampleValid || entryTimerCount > entryTimerArr) {
-    saturatingIncrement(state.missingFullIrqSamples,
-                        state.saturationFlags,
-                        SaturatedMissingFullIrqSamples);
-    return;
-  }
-  if (entryTimerCount > state.entryTimerCountMax) {
-    state.entryTimerCountMax = entryTimerCount;
-  }
-
-  // A terminal callback stops TIM10 in the handler, so its post-handler CNT
-  // is not a following-deadline sample.
-  if (terminalCallback) {
-    return;
-  }
-  if (!postTimerSampleValid || postTimerCount > postTimerArr) {
-    saturatingIncrement(state.deadlineMisses,
-                        state.saturationFlags,
-                        SaturatedDeadlineMisses);
-    return;
-  }
-  saturatingIncrement(state.deadlineSamples,
-                      state.saturationFlags,
-                      SaturatedDeadlineSamples);
-
-  // TIM10 is clocked at 180 MHz with PSC=1, so each timer tick is two
-  // 180 MHz DWT core cycles.
-  const uint64_t remainingCoreCycles =
-      (static_cast<uint64_t>(postTimerArr - postTimerCount) + 1u) * 2u;
-  if (updatePendingAfter) {
-    saturatingIncrement(state.deadlineMisses,
-                        state.saturationFlags,
-                        SaturatedDeadlineMisses);
-    return;
-  }
-  const uint32_t slack = static_cast<uint32_t>(remainingCoreCycles);
-  if (slack < state.minimumDeadlineSlackCycles) {
-    state.minimumDeadlineSlackCycles = slack;
-  }
-}
-
 Snapshot makeSnapshot(const State& state)
 {
   Snapshot snapshot{};
@@ -237,14 +162,6 @@ Snapshot makeSnapshot(const State& state)
   snapshot.completedPulses = state.completedPulses;
   snapshot.pendingObservations = state.pendingObservations;
   snapshot.maxPendingStreak = state.maxPendingStreak;
-  snapshot.fullIrqSamples = state.fullIrqSamples;
-  snapshot.missingFullIrqSamples = state.missingFullIrqSamples;
-  snapshot.fullIrqActiveMaxCycles = state.fullIrqActiveMaxCycles;
-  snapshot.fullIrqTerminalMaxCycles = state.fullIrqTerminalMaxCycles;
-  snapshot.entryTimerCountMax = state.entryTimerCountMax;
-  snapshot.deadlineSamples = state.deadlineSamples;
-  snapshot.deadlineMisses = state.deadlineMisses;
-  snapshot.minimumDeadlineSlackCycles = state.minimumDeadlineSlackCycles;
   snapshot.saturationFlags = state.saturationFlags;
   return snapshot;
 }

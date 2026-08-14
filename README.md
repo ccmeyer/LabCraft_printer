@@ -2687,36 +2687,16 @@ python3 tools/run_qualification.py --manifest coordinated_xy_production_mres3_v3
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --direct-xyz-lut-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/direct_xyz_lut.json
 python3 tools/run_qualification.py --manifest direct_xyz_lut_v1 --operator-prompts --fixture direct_xyz_lut_envelope_clear --machine-id LC-001 --raw-report hil_reports/direct_xyz_lut.json
 
-python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --z-speed-ladder-suite --timeout-ms 360000 --status-only-timeout-ms 120000 --out hil_reports/z_speed_ladder.json
-python3 tools/run_qualification.py --manifest z_speed_ladder_v3 --operator-prompts --fixture z_speed_ladder_envelope_clear --machine-id LC-001 --raw-report hil_reports/z_speed_ladder.json
-
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-camera-transition-suite --timeout-ms 180000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_camera_transition_v2.json
 python3 tools/run_qualification.py --manifest coordinated_xy_camera_transition_v2 --operator-prompts --fixture coordinated_xy_camera_transition_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_camera_transition_v2.json
 ```
 
-`--z-speed-ladder-suite` is a diagnostic-only selector (`2199`); it does not
-change the app's ordinary 30 kHz Z command rate or the production 60 kHz Z
-cap. It uses the same XY anchor and Z endpoints as the long-Z factory row,
-then runs three out/return/home repetitions at 35 kHz/140,000 logical
-steps/s^2, 35 kHz/100,000 steps/s^2, and 40 kHz/100,000 steps/s^2. Only the
-measured out/return legs use the candidate acceleration; all homes remain at
-the established 140,000 steps/s^2 baseline. The runner pauses for operator
-confirmation between configurations. Results `2195`-`2197` report and require
-the selected `hz` and `ac` values plus exact MRES=3 pulse/callback totals,
-complete earliest-entry-to-post-HAL TIM10 coverage, no pending update or
-deadline miss, at least 900 core cycles of post-service slack, a 2,250-cycle
-stepping-body ceiling, a separate 2,550-cycle complete shared-vector ceiling,
-wrap-safe DWT evidence (at most one counter wrap per measured leg),
-repeatable homes, live status/watchdog cadence, and no asserted motion
-limit. Result `2194` checks all tiers, final Z/XY homes, P/R isolation, and the
-production MRES=3/DEDGE/multistep-filter configuration. The earliest TIM10
-capture is dormant outside explicitly armed measured Z legs; positioning,
-homes, existing selector `2096`, and app motion do not collect this telemetry.
-The archived `z_speed_ladder_v1` and `z_speed_ladder_v2` manifests remain
-available for raw normalization of the original 30/40/50/60 kHz and
-30/40/50 kHz reports. The summary also
-requires a valid pressure-task diagnostic window with zero
-I2C selection failures, read failures, recoveries, or telemetry saturation.
+The completed Z speed-ladder experiment selected the existing 30 kHz logical
+rate and 140,000 logical steps/s^2 acceleration for production. Its firmware
+selector (`2199`), TIM10 diagnostic hooks, and report code have been removed.
+Manifests `z_speed_ladder_v1` through `v3` and catalog rows `2190` through
+`2197` remain archived for raw normalization of retained historical reports;
+they cannot launch hardware and consume no MCU flash.
 
 Only the normal `Debug` firmware image is built and versioned. The former
 `MRES3_Diagnostic` configuration and its separate binary were removed. The

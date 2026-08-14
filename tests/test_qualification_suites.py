@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from QualificationSuites import build_test_plan_rows, discover_suite_entries, required_fixture_ids
+from tools.qualification.manifest import load_manifest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +25,6 @@ def test_discover_suite_entries_lists_current_manifests():
         "coordinated_xy_camera_transition_v2",
         "coordinated_xy_production_mres3_v3",
         "direct_xyz_lut_v1",
-        "z_speed_ladder_v3",
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "refuel_vacuum_v1",
@@ -225,35 +225,13 @@ def test_direct_xyz_lut_suite_requires_profile_coverage_and_isolation():
     assert "sn" not in manifest.analysis_rules["2091"]["metrics"]
 
 
-def test_z_speed_ladder_suite_exposes_three_rate_acceleration_arms():
+def test_z_speed_ladder_suite_is_archived_and_not_launchable():
     entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    manifest = entries["z_speed_ladder_v3"].manifest
+    assert "z_speed_ladder_v3" not in entries
 
-    assert manifest.profile == "FULL"
-    assert manifest.selftest_args == ("--z-speed-ladder-suite",)
-    assert required_fixture_ids(manifest) == ("z_speed_ladder_envelope_clear",)
-    assert [row.test_id for row in build_test_plan_rows(manifest)] == [
-        2195, 2196, 2197, 2194
-    ]
-    for test_id, rate, acceleration in (
-        (2195, 35000, 140000),
-        (2196, 35000, 100000),
-        (2197, 40000, 100000),
-    ):
-        metrics = manifest.analysis_rules[str(test_id)]["metrics"]
-        assert metrics["hz"]["equals"] == rate
-        assert metrics["ac"]["equals"] == acceleration
-        assert metrics["cb"]["equals"] == 479406
-        assert metrics["s"]["equals"] == 479406
-        assert metrics["ds"]["equals"] == 479400
-        assert metrics["sl"]["min"] == 900
-        assert metrics["cw"]["max"] == 6
-        assert metrics["bm"]["max"] == 2250
-        assert metrics["fm"]["max"] == 2550
-    assert manifest.analysis_rules["2194"]["metrics"]["last"]["equals"] == 40000
-    assert manifest.analysis_rules["2194"]["metrics"]["la"]["equals"] == 100000
-    assert manifest.analysis_rules["2194"]["metrics"]["pv"]["equals"] == 1
-    assert manifest.analysis_rules["2194"]["metrics"]["re"]["equals"] == 0
+    manifest = load_manifest("z_speed_ladder_v3")
+    assert manifest.lifecycle == "archived"
+    assert manifest.expected_test_ids == (2195, 2196, 2197, 2194)
 
 
 def test_camera_transition_v2_is_single_production_scaled_gate():

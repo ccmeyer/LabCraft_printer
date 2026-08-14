@@ -35,9 +35,6 @@
 #ifndef LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE
 #define LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE 1
 #endif
-#ifndef LC_STEPPER_ISR_INSTRUMENTATION_ENABLE
-#define LC_STEPPER_ISR_INSTRUMENTATION_ENABLE 1
-#endif
 
 /* USER CODE END PD */
 
@@ -92,15 +89,6 @@ extern volatile uint32_t g_lcCoordinatedTim2IrqEntryCycle;
 extern volatile uint32_t g_lcCoordinatedTim2IrqEntryTimerCount;
 extern volatile uint32_t g_lcCoordinatedTim2IrqEntryTimerArr;
 extern void MX_GANTRY_RecordTim2IrqExit(uint32_t irqExitCycle);
-#endif
-#if LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0
-extern volatile uint8_t g_lcStepperZTim10IrqTimingArmed;
-extern volatile uint8_t g_lcStepperZTim10IrqEntryValid;
-extern volatile uint8_t g_lcStepperZTim10IrqEntryTimerValid;
-extern volatile uint32_t g_lcStepperZTim10IrqEntryCycle;
-extern volatile uint32_t g_lcStepperZTim10IrqEntryTimerCount;
-extern volatile uint32_t g_lcStepperZTim10IrqEntryTimerArr;
-extern void MX_STEPPERZ_RecordTim10IrqExit(uint32_t irqExitCycle);
 #endif
 
 /* USER CODE END EV */
@@ -304,27 +292,12 @@ void TIM1_BRK_TIM9_IRQHandler(void)
 void TIM1_UP_TIM10_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM1_UP_TIM10_IRQn 0 */
-#if LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0
-  if (g_lcStepperZTim10IrqTimingArmed != 0u &&
-      (TIM10->SR & TIM_SR_UIF) != 0u)
-  {
-    g_lcStepperZTim10IrqEntryCycle = DWT->CYCCNT;
-    g_lcStepperZTim10IrqEntryTimerCount = TIM10->CNT;
-    g_lcStepperZTim10IrqEntryTimerArr = TIM10->ARR;
-    g_lcStepperZTim10IrqEntryTimerValid = 1u;
-    g_lcStepperZTim10IrqEntryValid = 1u;
-  }
-#endif
+
   /* USER CODE END TIM1_UP_TIM10_IRQn 0 */
   HAL_TIM_IRQHandler(&htim1);
   HAL_TIM_IRQHandler(&htim10);
   /* USER CODE BEGIN TIM1_UP_TIM10_IRQn 1 */
-#if LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0
-  if (g_lcStepperZTim10IrqEntryValid != 0u)
-  {
-    MX_STEPPERZ_RecordTim10IrqExit(DWT->CYCCNT);
-  }
-#endif
+
   /* USER CODE END TIM1_UP_TIM10_IRQn 1 */
 }
 

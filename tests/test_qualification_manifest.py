@@ -450,6 +450,7 @@ def test_load_direct_xyz_lut_manifest_freezes_motion_and_isolation_gates():
 def test_load_z_speed_ladder_v3_freezes_configs_geometry_and_timing_gates():
     manifest = load_manifest("z_speed_ladder_v3")
 
+    assert manifest.lifecycle == "archived"
     assert manifest.expected_test_ids == (2195, 2196, 2197, 2194)
     assert manifest.selftest_args == ("--z-speed-ladder-suite",)
     assert manifest.required_host_checks == (

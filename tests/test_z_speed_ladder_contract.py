@@ -4,25 +4,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_z_speed_ladder_is_diagnostic_only_and_uses_tim10_user_hooks():
+def test_z_speed_ladder_runtime_and_tim10_hooks_are_removed():
     diagnostics = (ROOT / "firmware/Core/Src/Diagnostics.cpp").read_text(encoding="utf-8")
     stepper = (ROOT / "firmware/Core/Src/Stepper.cpp").read_text(encoding="utf-8")
     interrupts = (ROOT / "firmware/Core/Src/stm32f4xx_it.c").read_text(encoding="utf-8")
+    runner = (ROOT / "tools/run_selftest.py").read_text(encoding="utf-8")
 
-    assert "selectedDiagnosticId == 2199u" in diagnostics
-    assert "z_speed_ladder_35khz_100k_confirm" in diagnostics
-    assert "z_speed_ladder_40khz_100k_confirm" in diagnostics
-    assert "z_speed_ladder_50khz_confirm" not in diagnostics
-    assert "armZSpeedDiagnosticInstrumentation" in diagnostics
-    assert "_zDiagnosticInstrumentationArmed" in stepper
-    assert "g_lcStepperZTim10IrqTimingArmed" in interrupts
+    assert "selectedDiagnosticId == 2199u" not in diagnostics
+    assert "z_speed_ladder_" not in diagnostics
+    assert "armZSpeedDiagnosticInstrumentation" not in diagnostics
+    assert "_zDiagnosticInstrumentationArmed" not in stepper
+    assert "g_lcStepperZTim10IrqTimingArmed" not in interrupts
     assert "TIM1_UP_TIM10_IRQn 0" in interrupts
-    assert "MX_STEPPERZ_RecordTim10IrqExit" in interrupts
-    assert "35000u, 35000u, 40000u" in diagnostics
-    assert "140000u, 100000u, 100000u" in diagnostics
-    assert "kHomeAcceleration = 140000u" in diagnostics
-    # This is the unchanged production cap, not a tier in the v3 ladder.
-    assert "setMaxSpeedHz(60000u)" in diagnostics
+    assert "MX_STEPPERZ_RecordTim10IrqExit" not in interrupts
+    assert "--z-speed-ladder-suite" not in runner
+    assert not (ROOT / "firmware/Core/Inc/ZAxisSpeedLadderReport.h").exists()
+    assert not (ROOT / "firmware/Core/Src/ZAxisSpeedLadderReport.cpp").exists()
 
 
 def test_existing_direct_z_contract_remains_uninstrumented():

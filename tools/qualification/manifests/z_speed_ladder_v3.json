@@ -3,7 +3,7 @@
   "manifest_id": "z_speed_ladder_v3",
   "name": "Instrumented Z-Axis Rate/Acceleration Comparison v3",
   "profile": "FULL",
-  "lifecycle": "active",
+  "lifecycle": "archived",
   "description": "Diagnostic-only long-Z comparison at 35 kHz/140,000 steps/s^2, 35 kHz/100,000 steps/s^2, and 40 kHz/100,000 steps/s^2. Measured travel varies rate and acceleration while all homes retain the established 140,000 steps/s^2 baseline.",
   "expected_test_ids": [2195, 2196, 2197, 2194],
   "enforce_expected_test_ids": true,
