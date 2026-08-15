@@ -897,6 +897,10 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
             resources.sample()
 
     calibration_path = Path(prepared["calibration_file"])
+    # Model a fresh application manager: release the live workload document
+    # before timing the retained-file load, rather than charging object
+    # destruction from the prior composition to reload latency.
+    runner.manager.data = {"schema_version": 1, "runs": []}
     reload_started = time.perf_counter_ns()
     runner.manager.load_calibration_data(str(calibration_path))
     metrics.fresh_reload_latency_ms.append(
