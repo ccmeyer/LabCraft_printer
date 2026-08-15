@@ -5,6 +5,7 @@ param(
 
   [string]$PiUser = "labcraft",
   [string]$RemoteRepo = "/home/labcraft/LabCraft_printer",
+  [string]$SshIdentityFile = "",
   [Parameter(ParameterSetName = "Scenario")]
   [string]$HostLabel = "pi5-sil-primary-v1",
 
@@ -79,7 +80,7 @@ function Invoke-SshCapture(
 ) {
   $remoteCommand = "bash -lc " + (ConvertTo-ShellLiteral $Command)
   if ($DryRun.IsPresent) {
-    Write-Host "DRY RUN ssh $Target $remoteCommand"
+    Write-Host ("DRY RUN ssh " + ($script:SshCommonArguments -join " ") + " $Target $remoteCommand")
     return @()
   }
   $output = & ssh @script:SshCommonArguments $Target $remoteCommand 2>&1
@@ -98,7 +99,7 @@ function Invoke-SshCapture(
 
 function Invoke-Scp([string[]]$Arguments) {
   if ($DryRun.IsPresent) {
-    Write-Host ("DRY RUN scp " + ($Arguments -join " "))
+    Write-Host ("DRY RUN scp " + ($script:SshCommonArguments -join " ") + " " + ($Arguments -join " "))
     return
   }
   & scp @script:SshCommonArguments @Arguments
@@ -179,6 +180,13 @@ Require-Cmd "scp"
 
 $repoRoot = Get-RepoRoot
 $python = Get-PreferredPython -RepoRoot $repoRoot
+if (-not [string]::IsNullOrWhiteSpace($SshIdentityFile)) {
+  $identityPath = Resolve-RepoPath -Value $SshIdentityFile -RepoRoot $repoRoot
+  if (-not (Test-Path -LiteralPath $identityPath -PathType Leaf)) {
+    throw "SSH identity file does not exist: $identityPath"
+  }
+  $script:SshCommonArguments += @("-i", $identityPath, "-o", "BatchMode=yes")
+}
 $target = if ($PiHost.Contains("@")) { $PiHost } else { "$PiUser@$PiHost" }
 $collectionId = [DateTimeOffset]::UtcNow.ToString("yyyyMMddTHHmmssZ")
 $remoteOutputRoot = "$RemoteRepo/verification_reports/virtual_workflows/pi-sil"

@@ -613,10 +613,14 @@ def test_remote_wrapper_allows_calibration_storage_pi_qualification_contract():
     assert "Dry run complete" in result.stdout
 
 
-def test_remote_wrapper_allows_calibration_storage_shadow_pi_qualification_contract():
+def test_remote_wrapper_allows_calibration_storage_shadow_pi_qualification_contract(
+    tmp_path,
+):
     powershell = shutil.which("powershell") or shutil.which("pwsh")
     if powershell is None:
         pytest.skip("PowerShell is unavailable")
+    identity = tmp_path / "pi-sil-test-identity"
+    identity.write_text("test-only-placeholder", encoding="utf-8")
     result = subprocess.run(
         [
             powershell,
@@ -626,6 +630,8 @@ def test_remote_wrapper_allows_calibration_storage_shadow_pi_qualification_contr
             str(REMOTE_TOOL),
             "-PiHost",
             "pi-test",
+            "-SshIdentityFile",
+            str(identity),
             "-Scenario",
             "calibration_storage_shadow_8x25_v1",
             "-HostLabel",
@@ -648,6 +654,8 @@ def test_remote_wrapper_allows_calibration_storage_shadow_pi_qualification_contr
     assert result.returncode == 0, result.stderr
     assert "'calibration_storage_shadow_8x25_v1'" in result.stdout
     assert "'--emit-report-set'" in result.stdout
+    assert str(identity) in result.stdout
+    assert "BatchMode=yes" in result.stdout
     assert "Dry run complete" in result.stdout
 
 

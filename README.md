@@ -2355,6 +2355,7 @@ The explicit qualified-Pi comparison uses the frozen Milestone 1 workload:
 ```powershell
 .\tools\run_pi_virtual_workflow.ps1 `
   -PiHost <qualified-pi-host> `
+  -SshIdentityFile <optional-private-key-path> `
   -Scenario calibration_storage_shadow_8x25_v1 `
   -HostLabel pi5-calibration-storage-shadow-v1 `
   -WarmupRuns 1 `
