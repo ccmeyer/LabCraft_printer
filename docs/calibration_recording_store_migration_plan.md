@@ -867,6 +867,11 @@ progress, and registered lifecycle/stress scenarios are implemented. Final
 host and Raspberry Pi evidence is recorded in
 `docs/calibration_recording_store_milestone_4b_completion.md`.
 
+The Milestone 4B Pi gate uses no warm-up and one measured frozen 8x25 pass
+with a 3,600-second scenario budget. This is explicitly single-sample
+candidate evidence; multi-run statistical qualification is optional and is
+not required for Milestone 4B completion.
+
 ### Milestone 5: historical conversion
 
 Scope:

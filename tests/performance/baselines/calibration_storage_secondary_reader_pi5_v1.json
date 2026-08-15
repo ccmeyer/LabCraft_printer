@@ -1,0 +1,414 @@
+{
+  "artifact_growth": {
+    "per_run": [
+      {
+        "calibration_json_bytes": 7970868,
+        "inventory": {
+          "by_extension": {
+            ".csv": {
+              "bytes": 145,
+              "count": 2
+            },
+            ".jpg": {
+              "bytes": 670,
+              "count": 2
+            },
+            ".json": {
+              "bytes": 12405463,
+              "count": 832
+            },
+            ".jsonl": {
+              "bytes": 10470680,
+              "count": 814
+            },
+            ".lock": {
+              "bytes": 92,
+              "count": 1
+            },
+            ".log": {
+              "bytes": 146,
+              "count": 1
+            },
+            ".zip": {
+              "bytes": 2616810,
+              "count": 1
+            },
+            "no_extension": {
+              "bytes": 21,
+              "count": 1
+            }
+          },
+          "root": "/tmp/LabCraft/SIL/composed-sessions/20260815T210935646747Z-f34c08a5-106"
+        },
+        "run_id": "f34c08a5-1062-485a-8b61-bddbc05bdde9",
+        "scenario_total_bytes": 25494027
+      }
+    ]
+  },
+  "baseline_id": "calibration_storage_secondary_reader_pi5_v1",
+  "classification": {
+    "status": "pass",
+    "threshold_maturity": "candidate"
+  },
+  "compatibility": {
+    "environment": {
+      "architecture": "aarch64",
+      "cpu_identifier": "unknown",
+      "operating_system": "Linux",
+      "os_release": "6.12.20+rpt-rpi-2712",
+      "python_executable": "C:\\usr\\bin\\python3.11",
+      "python_implementation": "CPython",
+      "python_version": "3.11.2",
+      "qt": {
+        "binding": "real",
+        "platform": "offscreen",
+        "pyside_version": "6.7.1",
+        "qt_version": "6.7.1"
+      },
+      "target_pi": {
+        "filesystem": {
+          "filesystem_type": "ext4",
+          "mount_source": "/dev/nvme0n1p2[/home/labcraft/LabCraft_printer/verification_reports/virtual_workflows/pi-sil]",
+          "storage_class": "nvme"
+        },
+        "lane": "raspberry_pi_sil",
+        "pi_model": "Raspberry Pi 5 Model B Rev 1.0"
+      }
+    },
+    "host_label": "pi5-calibration-storage-secondary-reader-v1",
+    "report_schema_name": "labcraft.virtual_workflow_report",
+    "report_schema_version": 1,
+    "run_mode": "offscreen_pi_sil",
+    "safety": {
+      "hardware_access_allowed": false,
+      "hardware_interfaces": {
+        "GPIO": false,
+        "MCU": false,
+        "balance": false,
+        "camera": false,
+        "firmware_update": false,
+        "serial": false
+      },
+      "pi_sil": {
+        "network_unshared": true,
+        "private_dev": true,
+        "root_read_only": true,
+        "sandbox_method": "bubblewrap_private_dev_v1"
+      },
+      "simulated_port": "SIMULATED",
+      "simulation": true
+    },
+    "scenario_name": "calibration_storage_secondary_reader",
+    "scenario_version": "1",
+    "timing_policy": "simulated_command_durations_x1000",
+    "workload": {
+      "capture_mode": "structured_only_proxy",
+      "completion_count": 200,
+      "expected_update_count": 232,
+      "fixture_path": "tools/virtual_workflows/fixtures/calibration_storage_contract_legacy_baseline_8x25_v1.json",
+      "fixture_schema_version": 1,
+      "fixture_sha256": "0a2b57a0ea07bbe437ee3037c9ca2a9331a38dbdcae5fbb908e8390d8f592621",
+      "head_count": 8,
+      "key_evidence_probe_capture_count": 2,
+      "large_process_ordinal_per_head": 25,
+      "large_update_count_per_process": 5,
+      "process_runs_per_head": 25,
+      "speed_multiplier": 1000.0,
+      "structured_process_runs": 200,
+      "timeout_seconds": 3600.0,
+      "workload_hash": "f99bdfc4150c98d0d2a37fd43d3cf4353ca1b20240152cfb264c89c9800ff341",
+      "workload_id": "calibration_storage_secondary_reader_8x25_v1"
+    }
+  },
+  "created_at_utc": "2026-08-15T22:45:35.496247Z",
+  "exact_counts": {
+    "canonical_index_event_count": 200,
+    "canonical_result_count": 200,
+    "canonical_update_count": 232,
+    "integrity_failure_count": 0,
+    "key_evidence_probe_capture_count": 2,
+    "legacy_run_envelope_count": 201,
+    "process_run_count": 200,
+    "recording_count": 200,
+    "update_count": 232,
+    "workload_capture_count": 0
+  },
+  "host_label": "pi5-calibration-storage-secondary-reader-v1",
+  "limitations": [
+    "This candidate uses no warm-up and one measured Pi run and does not claim multi-run statistical stability.",
+    "Image analysis, camera acquisition, firmware, and physical hardware behavior are outside this baseline."
+  ],
+  "milestone3_comparison": {
+    "baseline_id": "calibration_storage_authoritative_pi5_v1",
+    "baseline_sha256": "379dc373e2684f3743c0fee21b7cc28cb046f777e5f0cc30b2b06187d2efaf40",
+    "decision": "pass",
+    "metrics": {
+      "calibration_rewrite_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 505.55588926250005,
+        "observed_p95": [
+          410.3910843
+        ]
+      },
+      "canonical_update_append_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 17.694213112499998,
+        "observed_p95": [
+          16.704244199999998
+        ]
+      },
+      "first_quartile_update_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 141.00450201249998,
+        "observed_p95": [
+          120.71515394999999
+        ]
+      },
+      "index_latency": {
+        "decision": "pass",
+        "milestone3_upper_limit": 4.48551595,
+        "observed_p95": [
+          4.47692245
+        ]
+      },
+      "last_quartile_update_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 575.8676432249999,
+        "observed_p95": [
+          470.6021237
+        ]
+      },
+      "peak_rss_bytes": {
+        "decision": "pass",
+        "milestone3_upper_limit": 862846976.0,
+        "observed": [
+          448905216.0
+        ]
+      },
+      "process_finalize_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 121.47911048750001,
+        "observed_p95": [
+          93.47796904999998
+        ]
+      },
+      "recorder_append_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 3.8568638,
+        "observed_p95": [
+          3.17939305
+        ]
+      },
+      "result_finalize_latency": {
+        "decision": "pass",
+        "milestone3_upper_limit": 1.2990521,
+        "observed_p95": [
+          0.46629059999999994
+        ]
+      },
+      "update_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 507.38090245,
+        "observed_p95": [
+          413.74720645
+        ]
+      }
+    }
+  },
+  "milestone4a_comparison": {
+    "baseline_id": "calibration_storage_primary_reader_pi5_v1",
+    "baseline_sha256": "8c7406ae013b9c53590841c65e01c5adb25902292a89cb34ee856d8eb3d956a6",
+    "decision": "pass",
+    "reader_metrics": {
+      "index_read_latency_ms": {
+        "decision": "pass",
+        "milestone4a_upper_limit": 368.8711595,
+        "observed_p95": [
+          363.129291
+        ]
+      },
+      "recheck_context_latency_ms": {
+        "decision": "pass",
+        "milestone4a_upper_limit": 2.86019525,
+        "observed_p95": [
+          1.8830900499999998
+        ]
+      },
+      "selected_validation_latency_ms": {
+        "decision": "pass",
+        "milestone4a_upper_limit": 806.5561566500002,
+        "observed_p95": [
+          622.8218469000001
+        ]
+      },
+      "summary_materialization_latency_ms": {
+        "decision": "pass",
+        "milestone4a_upper_limit": 136.56342483749998,
+        "observed_p95": [
+          118.3209119
+        ]
+      }
+    }
+  },
+  "resource_metrics": {
+    "peak_rss_bytes": {
+      "candidate_limit": {
+        "maximum_observed": 448905216.0,
+        "measurement_floor": 1048576.0,
+        "relative_margin": 112226304.0,
+        "robust_margin": 0.0,
+        "selected_margin": 112226304.0,
+        "upper_limit": 561131520.0
+      },
+      "per_run": [
+        {
+          "run_id": "f34c08a5-1062-485a-8b61-bddbc05bdde9",
+          "value": 448905216.0
+        }
+      ],
+      "unit": "bytes"
+    },
+    "rss_growth_bytes": {
+      "candidate_limit": {
+        "maximum_observed": 50675712.0,
+        "measurement_floor": 1048576.0,
+        "relative_margin": 12668928.0,
+        "robust_margin": 0.0,
+        "selected_margin": 12668928.0,
+        "upper_limit": 63344640.0
+      },
+      "per_run": [
+        {
+          "run_id": "f34c08a5-1062-485a-8b61-bddbc05bdde9",
+          "value": 50675712.0
+        }
+      ],
+      "unit": "bytes"
+    }
+  },
+  "runs": {
+    "measured_count": 1,
+    "raw_reports": [
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_secondary_reader_8x25_v1/20260815T210935646521Z_composed/report.json",
+        "role": "measured",
+        "run_id": "f34c08a5-1062-485a-8b61-bddbc05bdde9",
+        "sha256": "a04d8b3f9896244b35bc01f5ddc7143653d5593679fee7e16f20275e49300722"
+      }
+    ],
+    "report_set_sha256": "f1fb7c3df5a1ead9e4c64d67ac475b3225126fe36755d886b50e7b3f156fa7dd",
+    "sampling_policy": "single_measured_candidate",
+    "warmup_count": 0
+  },
+  "schema_name": "labcraft.calibration_storage_secondary_reader_pi_baseline",
+  "schema_version": 1,
+  "secondary_integrity": {
+    "consumer_error_count": 0,
+    "legacy_hash_preserved": true,
+    "memory_usable_run_count": 200,
+    "summary_row_count": 200
+  },
+  "secondary_metrics": {
+    "export_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 3444.00077,
+        "measurement_floor": 1.0,
+        "relative_margin": 861.0001925,
+        "robust_margin": 0.0,
+        "selected_margin": 861.0001925,
+        "upper_limit": 4305.0009625
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 1,
+            "maximum": 3444.00077,
+            "median": 3444.00077,
+            "minimum": 3444.00077,
+            "p95": 3444.00077
+          },
+          "run_id": "f34c08a5-1062-485a-8b61-bddbc05bdde9"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "memory_rebuild_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 3358.975617,
+        "measurement_floor": 1.0,
+        "relative_margin": 839.74390425,
+        "robust_margin": 0.0,
+        "selected_margin": 839.74390425,
+        "upper_limit": 4198.71952125
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 1,
+            "maximum": 3358.975617,
+            "median": 3358.975617,
+            "minimum": 3358.975617,
+            "p95": 3358.975617
+          },
+          "run_id": "f34c08a5-1062-485a-8b61-bddbc05bdde9"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "summary_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 1284.662086,
+        "measurement_floor": 1.0,
+        "relative_margin": 321.1655215,
+        "robust_margin": 0.0,
+        "selected_margin": 321.1655215,
+        "upper_limit": 1605.8276075
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 1,
+            "maximum": 1284.662086,
+            "median": 1284.662086,
+            "minimum": 1284.662086,
+            "p95": 1284.662086
+          },
+          "run_id": "f34c08a5-1062-485a-8b61-bddbc05bdde9"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "tool_update_load_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 0.661705,
+        "measurement_floor": 1.0,
+        "relative_margin": 0.16542625,
+        "robust_margin": 0.0,
+        "selected_margin": 1.0,
+        "upper_limit": 1.661705
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 1,
+            "maximum": 0.661705,
+            "median": 0.661705,
+            "minimum": 0.661705,
+            "p95": 0.661705
+          },
+          "run_id": "f34c08a5-1062-485a-8b61-bddbc05bdde9"
+        }
+      ],
+      "unit": "milliseconds"
+    }
+  },
+  "source": {
+    "dirty_worktree": false,
+    "git_commit": "50bd4279352bb30266a9d47994d304713a30ecaf"
+  },
+  "timeout_policy": {
+    "milestone4a_seconds": 1800.0,
+    "milestone4b_seconds": 3600.0,
+    "reason": "legacy whole-file rewrite workload exceeds 1800 seconds on the qualified Pi"
+  }
+}

@@ -2595,14 +2595,22 @@ Pi qualification and baseline freezing use:
   -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
   -Scenario calibration_storage_secondary_reader_8x25_v1 `
   -HostLabel pi5-calibration-storage-secondary-reader-v1 `
-  -WarmupRuns 1 -MeasuredRuns 3 `
-  -SpeedMultiplier 1000 -TimeoutSeconds 1800
+  -WarmupRuns 0 -MeasuredRuns 1 `
+  -SpeedMultiplier 1000 -TimeoutSeconds 3600
 
 .\env\Scripts\python.exe -m tools.sil.calibration_storage_secondary_reader_baseline `
   --report-set <retrieved-report-set.json> `
   --milestone4a-baseline tests\performance\baselines\calibration_storage_primary_reader_pi5_v1.json `
   --output tests\performance\baselines\calibration_storage_secondary_reader_pi5_v1.json
 ```
+
+Milestone 4B uses no warm-up and one measured Pi pass. The resulting
+baseline is candidate, single-sample evidence; it detects large regressions
+but does not claim multi-run statistical stability. Use the 3,600-second
+scenario budget on the qualified Pi. The retained
+whole-file legacy writer made the frozen 200-process workload take about 37
+minutes during qualification; 1,800 seconds can therefore expire after the
+workload succeeds but before final artifact inspection.
 
 The complete consumer inventory is tracked at
 `tools/virtual_workflows/fixtures/calibration_storage_secondary_consumers_v1.json`.

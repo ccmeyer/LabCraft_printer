@@ -787,8 +787,8 @@ def test_remote_wrapper_allows_calibration_storage_secondary_reader_pi_qualifica
             "-PiHost", "pi-test", "-SshIdentityFile", str(identity),
             "-Scenario", "calibration_storage_secondary_reader_8x25_v1",
             "-HostLabel", "pi5-calibration-storage-secondary-reader-v1",
-            "-WarmupRuns", "1", "-MeasuredRuns", "3",
-            "-SpeedMultiplier", "1000", "-TimeoutSeconds", "1800", "-DryRun",
+            "-WarmupRuns", "0", "-MeasuredRuns", "1",
+            "-SpeedMultiplier", "1000", "-TimeoutSeconds", "3600", "-DryRun",
         ],
         cwd=REPO_ROOT,
         capture_output=True,
@@ -798,6 +798,8 @@ def test_remote_wrapper_allows_calibration_storage_secondary_reader_pi_qualifica
     assert result.returncode == 0, result.stderr
     assert "'calibration_storage_secondary_reader_8x25_v1'" in result.stdout
     assert "'--emit-report-set'" in result.stdout
+    assert "--timeout-seconds" in result.stdout
+    assert "3600" in result.stdout
     assert str(identity) in result.stdout
     assert "BatchMode=yes" in result.stdout
     assert "Dry run complete" in result.stdout
