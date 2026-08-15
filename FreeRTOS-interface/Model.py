@@ -7406,6 +7406,16 @@ class ExperimentModel(QObject):
     def get_calibration_file_path(self) -> Optional[str]:
         return self.calibration_file_path
 
+    def get_calibration_storage_paths(self) -> Dict[str, Optional[str]]:
+        """Return the canonical and compatibility paths for this experiment."""
+
+        return {
+            "experiment_dir": self.experiment_dir_path,
+            "calibration_index_path": self.calibration_index_file_path,
+            "calibration_recordings_root": self.calibration_recordings_dir_path,
+            "calibration_json_path": self.calibration_file_path,
+        }
+
     def get_unreachable_preview_map(self) -> Dict[Tuple[str, Optional[str]], List[float]]:
         return dict(self._unreachable_preview_map)
 

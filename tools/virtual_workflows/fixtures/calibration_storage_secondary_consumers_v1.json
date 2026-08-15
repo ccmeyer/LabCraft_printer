@@ -1,0 +1,26 @@
+{
+  "schema_name": "labcraft.calibration_secondary_consumer_inventory",
+  "schema_version": 1,
+  "inventory_id": "calibration_storage_secondary_consumers_v1",
+  "reader_default": "canonical",
+  "rollback_environment": "LABCRAFT_CALIBRATION_SECONDARY_READER=legacy",
+  "consumers": [
+    {"id": "current_session_prerequisites", "disposition": "canonical_primary_m4a", "fallback": "typed_legacy"},
+    {"id": "characterization_history", "disposition": "canonical_primary_m4a", "fallback": "typed_legacy"},
+    {"id": "selection_load_preview_recheck_apply", "disposition": "canonical_primary_m4a", "fallback": "typed_legacy"},
+    {"id": "calibration_memory_run_summary", "disposition": "canonical_session_ref_v2", "fallback": "legacy_run_coordinates"},
+    {"id": "calibration_memory_aggregation", "disposition": "canonical_session_resolution", "fallback": "typed_legacy"},
+    {"id": "experiment_audit", "disposition": "additive_canonical_result_ref", "fallback": "legacy_coordinates_retained"},
+    {"id": "calibration_record_export", "disposition": "manifest_v2_complete_bundle", "fallback": "legacy_files_retained_when_present"},
+    {"id": "recording_summary_csv", "disposition": "canonical_result_columns", "fallback": "legacy_recording_classification"},
+    {"id": "pressure_sweep_replay", "disposition": "canonical_updates_first", "fallback": "analysis_jsonl"},
+    {"id": "online_stream_emergence_context", "disposition": "canonical_updates_first", "fallback": "analysis_jsonl"},
+    {"id": "recording_analysis_and_dataset_tools", "disposition": "diagnostic_streams_preserved", "fallback": "analysis_jsonl"},
+    {"id": "experiment_initialization", "disposition": "canonical_paths_lazy", "fallback": "legacy_dual_write_seed"},
+    {"id": "experiment_duplication", "disposition": "new_identity_no_evidence_copy", "fallback": "empty_legacy_dual_write_seed"}
+  ],
+  "limitations": [
+    "Image-analysis execution and historical conversion are outside Milestone 4B.",
+    "Legacy dual-writing remains active for rollback and historical compatibility."
+  ]
+}

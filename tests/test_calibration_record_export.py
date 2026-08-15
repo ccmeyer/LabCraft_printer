@@ -114,7 +114,8 @@ def test_export_calibration_records_writes_zip_with_summary_and_manifest(tmp_pat
         assert "manifest.json" in names
 
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
-        assert manifest["schema_version"] == 1
+        assert manifest["schema_version"] == 2
+        assert manifest["canonical_storage"]["status"] == "not_available"
         assert manifest["experiment_name"] == "Test Experiment"
         assert manifest["archive_name"] == archive.name
         assert manifest["summary"]["row_count"] == 1
@@ -188,6 +189,32 @@ def test_export_calibration_records_skips_missing_optional_files(tmp_path):
         assert "experiment_design.json" not in names
         assert "progress.json" not in names
         assert "experiment_audit.jsonl" not in names
+
+
+def test_export_includes_valid_canonical_bundle_and_progress(tmp_path):
+    from tests.test_calibration_recording_reader import _write_case
+
+    experiment_dir = tmp_path / "Canonical"
+    _write_case(experiment_dir)
+    progress = []
+
+    result = export_calibration_records(
+        experiment_dir,
+        tmp_path / "Downloads",
+        progress_callback=lambda stage, completed, total: progress.append(
+            (stage, completed, total)
+        ),
+    )
+
+    assert result["canonical_storage"]["status"] == "valid"
+    assert result["canonical_storage"]["valid_result_count"] == 1
+    assert progress[0] == ("inventory", 1, 1)
+    assert progress[-1][0] == "archive_recordings"
+    with zipfile.ZipFile(result["archive_path"]) as archive:
+        names = set(archive.namelist())
+    assert "calibration_index.jsonl" in names
+    assert any(name.endswith("/updates.jsonl") for name in names)
+    assert any(name.endswith("/result.json") for name in names)
 
 
 def _raise(exc):

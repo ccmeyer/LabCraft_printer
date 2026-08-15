@@ -16,6 +16,7 @@ if str(UI_DIR) not in sys.path:
     sys.path.insert(0, str(UI_DIR))
 
 from CalibrationClasses.Model import NozzlePositionCalibrationProcess  # noqa: E402
+from tools.calibration_recording_updates import load_calibration_updates  # noqa: E402
 
 
 def _load_jsonl(path: Path):
@@ -211,6 +212,19 @@ def replay_run(run_dir: str | Path):
     process_name = str(run_meta.get("process_name", ""))
 
     analyses = _load_jsonl(analysis_path)
+    update_load = load_calibration_updates(run_dir)
+    if update_load.source == "canonical":
+        analyses = [
+            *(
+                row
+                for row in analyses
+                if str(row.get("kind") or "") != "calibration_data_updated"
+            ),
+            *(
+                {"kind": "calibration_data_updated", "payload": row.get("payload") or {}}
+                for row in update_load.rows
+            ),
+        ]
     events = _load_jsonl(events_path)
     decision_events = [
         e for e in events

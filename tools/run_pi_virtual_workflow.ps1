@@ -16,7 +16,8 @@ param(
     "calibration_storage_legacy_baseline_8x25_v1",
     "calibration_storage_shadow_8x25_v1",
     "calibration_storage_authoritative_8x25_v1",
-    "calibration_storage_primary_reader_8x25_v1"
+    "calibration_storage_primary_reader_8x25_v1",
+    "calibration_storage_secondary_reader_8x25_v1"
   )]
   [string]$Scenario = "virtual_print_array_96_v1",
 
@@ -90,16 +91,19 @@ function Invoke-SshCapture(
     # PowerShell 5.1 wraps native stderr as ErrorRecord objects. SSH tools use
     # stderr for benign remote diagnostics, so their exit code is authoritative.
     $ErrorActionPreference = "Continue"
-    $output = & ssh @script:SshCommonArguments $Target $remoteCommand 2>&1
+    $captured = [System.Collections.Generic.List[string]]::new()
+    & ssh @script:SshCommonArguments $Target $remoteCommand 2>&1 |
+      ForEach-Object {
+        $line = $_.ToString()
+        [void]$captured.Add($line)
+        Write-Host $line
+      }
     $exitCode = $LASTEXITCODE
   } finally {
     $ErrorActionPreference = $previousErrorActionPreference
   }
   $script:LastSshExitCode = $exitCode
-  $lines = @($output | ForEach-Object { $_.ToString() })
-  foreach ($line in $lines) {
-    Write-Host $line
-  }
+  $lines = @($captured.ToArray())
   if ($exitCode -notin $AllowedExitCodes) {
     $text = ($lines -join [Environment]::NewLine).Trim()
     throw "ssh failed ($exitCode): $text"

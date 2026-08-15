@@ -69,6 +69,28 @@ class CalibrationHistorySnapshot:
     diagnostics: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class CalibrationSessionSnapshot:
+    """Immutable secondary-reader view of one calibration session."""
+
+    calibration_session_id: str
+    reader_state: CalibrationReaderState
+    result_refs: tuple[Mapping[str, Any], ...]
+    phase_payloads: Mapping[str, tuple[Mapping[str, Any], ...]]
+    issues: tuple[CalibrationReaderIssue, ...]
+    diagnostics: Mapping[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "calibration_session_id": self.calibration_session_id,
+            "reader_state": self.reader_state.value,
+            "result_refs": _thaw(self.result_refs),
+            "phase_payloads": _thaw(self.phase_payloads),
+            "issues": [issue.to_dict() for issue in self.issues],
+            "diagnostics": _thaw(self.diagnostics),
+        }
+
+
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
         return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
@@ -544,6 +566,236 @@ class CalibrationRecordingReader:
             payloads.extend(dict(update.get("payload") or {}) for update in validated["updates"])
         return payloads
 
+    def resolve_session(
+        self,
+        calibration_session_id: str,
+        *,
+        expected_result_refs: Iterable[Mapping[str, Any]] | None = None,
+        expected_identity: Mapping[str, Any] | None = None,
+        legacy_run_id: str | None = None,
+        legacy_run_index: int | None = None,
+    ) -> CalibrationSessionSnapshot:
+        """Resolve one session for secondary consumers without directory scans."""
+
+        session_id = str(calibration_session_id or legacy_run_id or "").strip()
+        requested_refs = [dict(item) for item in (expected_result_refs or ())]
+        expected_by_result = {
+            str(item.get("result_id") or ""): item
+            for item in requested_refs
+            if str(item.get("result_id") or "")
+        }
+        issues: list[CalibrationReaderIssue] = []
+        result_refs: list[dict[str, Any]] = []
+        phase_payloads: dict[str, list[dict[str, Any]]] = {}
+        canonical_error: Exception | None = None
+        index_event_count = 0
+        bundle_read_count = 0
+
+        try:
+            events = self._index_events()
+            matching = [
+                dict(event)
+                for event in events
+                if str(event.get("calibration_session_id") or "") == session_id
+            ]
+            if expected_by_result:
+                matching = [
+                    event
+                    for event in matching
+                    if str(event.get("result_id") or "") in expected_by_result
+                ]
+                observed_ids = {str(event.get("result_id") or "") for event in matching}
+                missing = sorted(set(expected_by_result) - observed_ids)
+                if missing:
+                    raise CalibrationStoreCorruptionError(
+                        "referenced canonical results are missing from the index: "
+                        + ", ".join(missing)
+                    )
+            index_event_count = len(matching)
+            if not matching:
+                raise CalibrationStoreCorruptionError(
+                    f"canonical session is not committed: {session_id}"
+                )
+            for event in matching:
+                relpath = Path(str(event.get("result_relpath") or ""))
+                result_path = (self.experiment_dir / relpath).resolve()
+                if (
+                    self.experiment_dir not in result_path.parents
+                    or result_path.name != "result.json"
+                ):
+                    raise CalibrationStoreCorruptionError(
+                        "indexed result path escaped the experiment"
+                    )
+                validated = CalibrationRecordingStore.validate_run(result_path.parent)
+                bundle_read_count += 1
+                result = dict(validated["result"])
+                meta = dict(validated.get("run_meta") or {})
+                if (
+                    result.get("result_id") != event.get("result_id")
+                    or result.get("result_sha256") != event.get("result_sha256")
+                    or result.get("calibration_session_id") != session_id
+                ):
+                    raise CalibrationStoreCorruptionError(
+                        "indexed session result identity changed"
+                    )
+                expected = expected_by_result.get(str(result.get("result_id") or ""))
+                if expected:
+                    for field in ("process_run_id", "result_sha256"):
+                        wanted = str(expected.get(field) or "")
+                        if wanted and str(result.get(field) or "") != wanted:
+                            raise CalibrationStoreCorruptionError(
+                                f"referenced canonical {field} changed"
+                            )
+                if expected_identity:
+                    observed_identity = dict(result.get("identity") or {})
+                    for field in ("printer_head_id", "stock_id"):
+                        wanted = str(expected_identity.get(field) or "")
+                        if wanted and str(observed_identity.get(field) or "") != wanted:
+                            raise CalibrationStoreCorruptionError(
+                                f"canonical session {field} does not match"
+                            )
+                if int(meta.get("parity_mismatch_count") or 0) != 0:
+                    raise CalibrationStoreCorruptionError(
+                        "canonical session contains a parity mismatch"
+                    )
+                updates = [dict(item) for item in validated.get("updates") or ()]
+                phase_name = str(result.get("phase_name") or event.get("phase_name") or "")
+                if str(result.get("outcome") or "") == "completed":
+                    phase_payloads.setdefault(phase_name, []).extend(
+                        dict(update.get("payload") or {}) for update in updates
+                    )
+                result_refs.append(
+                    {
+                        "calibration_session_id": session_id,
+                        "process_run_id": str(result.get("process_run_id") or ""),
+                        "result_id": str(result.get("result_id") or ""),
+                        "result_sha256": str(result.get("result_sha256") or ""),
+                        "result_relpath": relpath.as_posix(),
+                        "phase_name": phase_name,
+                        "result_kind": str(result.get("result_kind") or ""),
+                        "outcome": str(result.get("outcome") or ""),
+                        "update_ids": [str(item.get("update_id") or "") for item in updates],
+                    }
+                )
+        except (OSError, ValueError, CalibrationStoreCorruptionError) as exc:
+            canonical_error = exc
+
+        legacy_document: dict[str, Any] = {"runs": []}
+        legacy_error: Exception | None = None
+        try:
+            legacy_document = self._legacy_document()
+        except (OSError, ValueError, CalibrationStoreCorruptionError) as exc:
+            legacy_error = exc
+        runs = list(legacy_document.get("runs") or [])
+        legacy_run = None
+        wanted_legacy_id = str(legacy_run_id or session_id or "")
+        if wanted_legacy_id:
+            legacy_run = next(
+                (
+                    dict(run)
+                    for run in reversed(runs)
+                    if isinstance(run, Mapping)
+                    and str(run.get("run_id") or "") == wanted_legacy_id
+                ),
+                None,
+            )
+        if legacy_run is None and legacy_run_index is not None:
+            try:
+                index = int(legacy_run_index)
+                if 0 <= index < len(runs) and isinstance(runs[index], Mapping):
+                    legacy_run = dict(runs[index])
+            except (TypeError, ValueError):
+                pass
+
+        authority_marked = bool(legacy_run and _authority_marked(legacy_run))
+        if canonical_error is None:
+            state = CalibrationReaderState.CANONICAL_ONLY
+            if legacy_run is not None:
+                legacy_refs = {
+                    str((step.get("canonical_storage_ref") or {}).get("update_id") or ""):
+                    semantic_sha256(step)
+                    for steps in dict(legacy_run.get("steps") or {}).values()
+                    for step in list(steps or ())
+                    if isinstance(step, Mapping)
+                }
+                canonical_updates = {
+                    str(update_id)
+                    for ref in result_refs
+                    for update_id in list(ref.get("update_ids") or ())
+                    if str(update_id)
+                }
+                if authority_marked and canonical_updates != set(legacy_refs):
+                    state = CalibrationReaderState.PARITY_CONFLICT
+                    issues.append(
+                        CalibrationReaderIssue(
+                            code="session_parity_conflict",
+                            message="Canonical and legacy session update identities differ.",
+                            state=state,
+                        )
+                    )
+                    result_refs = []
+                    phase_payloads = {}
+                else:
+                    state = CalibrationReaderState.MATCHING_DUAL
+        elif legacy_run is not None and not authority_marked and self.allow_legacy_fallback:
+            state = (
+                CalibrationReaderState.LEGACY_ONLY
+                if not self.index_path.exists()
+                else CalibrationReaderState.CANONICAL_INVALID_LEGACY_FALLBACK
+            )
+            result_refs = []
+            phase_payloads = {
+                str(phase): [dict(step) for step in list(steps or ()) if isinstance(step, Mapping)]
+                for phase, steps in dict(legacy_run.get("steps") or {}).items()
+            }
+            issues.append(
+                CalibrationReaderIssue(
+                    code="legacy_session_fallback",
+                    message=str(canonical_error),
+                    state=state,
+                )
+            )
+        else:
+            state = CalibrationReaderState.UNAVAILABLE
+            issues.append(
+                CalibrationReaderIssue(
+                    code=(
+                        "authority_marked_session_invalid"
+                        if authority_marked
+                        else "session_unavailable"
+                    ),
+                    message=str(canonical_error or legacy_error or "session unavailable"),
+                    state=state,
+                )
+            )
+            result_refs = []
+            phase_payloads = {}
+
+        result_refs.sort(
+            key=lambda item: (
+                str(item.get("phase_name") or ""),
+                str(item.get("process_run_id") or ""),
+            )
+        )
+        return CalibrationSessionSnapshot(
+            calibration_session_id=session_id,
+            reader_state=state,
+            result_refs=tuple(_freeze(item) for item in result_refs),
+            phase_payloads=_freeze(
+                {key: tuple(_freeze(item) for item in value) for key, value in phase_payloads.items()}
+            ),
+            issues=tuple(issues),
+            diagnostics=_freeze(
+                {
+                    "index_event_count": index_event_count,
+                    "bundle_read_count": bundle_read_count,
+                    "legacy_run_found": legacy_run is not None,
+                    "calibration_json_reads": int(self.legacy_path.is_file()),
+                    "recursive_scans": 0,
+                }
+            ),
+        )
+
 
 def repair_calibration_index(
     experiment_dir: str | Path,
@@ -600,6 +852,7 @@ def repair_calibration_index(
 
 
 __all__ = [
+    "CalibrationSessionSnapshot",
     "CalibrationHistorySnapshot",
     "CalibrationReaderIssue",
     "CalibrationReaderState",

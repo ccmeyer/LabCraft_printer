@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Any, Callable, Mapping, MutableMapping, Sequence
 
@@ -129,6 +130,30 @@ class JourneyRuntime:
     observations: MutableMapping[str, Any] = field(default_factory=dict)
     _restorables: list[tuple[str, Any]] = field(default_factory=list, repr=False)
     _restored_names: set[str] = field(default_factory=set, repr=False)
+
+    def emit_progress(
+        self,
+        stage: str,
+        *,
+        completed: int | None = None,
+        total: int | None = None,
+        detail: str | None = None,
+    ) -> dict[str, Any]:
+        """Emit a stable, unbuffered host/Pi progress checkpoint."""
+
+        row = {
+            "schema_name": "labcraft.virtual_workflow.progress",
+            "schema_version": 1,
+            "scenario_id": self.definition.registry_id,
+            "stage": str(stage),
+            "completed": completed,
+            "total": total,
+            "detail": detail,
+        }
+        checkpoints = self.observations.setdefault("progress_checkpoints", [])
+        checkpoints.append(dict(row))
+        print("SIL_PROGRESS " + json.dumps(row, sort_keys=True), flush=True)
+        return row
 
     @property
     def context(self) -> Any:

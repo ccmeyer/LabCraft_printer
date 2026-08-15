@@ -88,6 +88,23 @@ def test_semantic_steps_validate_and_normalize_surface_contract():
         SemanticStep("machine.connect_via_ui", "ui", lambda runtime: {})
 
 
+def test_runtime_progress_is_structured_flushed_evidence(capsys):
+    runtime = JourneyRuntime(
+        definition=_definition(registry_id="progress_contract_v1"),
+        harness=_Harness(),
+        fixture={},
+        fixture_path=Path("fixture.json"),
+    )
+
+    row = runtime.emit_progress("workload", completed=25, total=200)
+
+    output = capsys.readouterr().out.strip()
+    assert output.startswith("SIL_PROGRESS ")
+    assert '"completed": 25' in output
+    assert row["schema_name"] == "labcraft.virtual_workflow.progress"
+    assert runtime.observations["progress_checkpoints"] == [row]
+
+
 def test_definition_rejects_duplicate_assertions_and_non_ui_membership():
     with pytest.raises(ValueError, match="assertion IDs must be unique"):
         _definition(

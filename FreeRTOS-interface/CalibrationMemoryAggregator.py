@@ -4,6 +4,11 @@ import tempfile
 from datetime import datetime, timezone
 from statistics import median, pstdev
 
+from CalibrationRecordingReader import (
+    CalibrationReaderState,
+    CalibrationRecordingReader,
+)
+
 from CalibrationIdentity import (
     QUALITY_EXPLICIT,
     QUALITY_INFERRED,
@@ -170,6 +175,16 @@ class CalibrationMemoryAggregator:
         self.reagent_memory_path = os.path.join(self.indices_dir, "reagent_memory.json")
         self.head_type_memory_path = os.path.join(self.indices_dir, "head_type_memory.json")
         self.recommendation_index_path = os.path.join(self.indices_dir, "recommendation_index.json")
+        configured = str(
+            os.environ.get("LABCRAFT_CALIBRATION_SECONDARY_READER", "canonical")
+        ).strip().lower()
+        self.secondary_reader_preference = (
+            configured if configured in {"canonical", "legacy"} else "canonical"
+        )
+        self.allow_legacy_fallback = str(
+            os.environ.get("LABCRAFT_CALIBRATION_LEGACY_FALLBACK", "1")
+        ).strip() != "0"
+        self._last_source_diagnostics = []
 
     def ensure_initialized(self):
         os.makedirs(self.indices_dir, exist_ok=True)
@@ -654,7 +669,7 @@ class CalibrationMemoryAggregator:
                 paths.append(path)
         return paths
 
-    def _load_authoritative_run(self, summary, cache):
+    def _load_legacy_authoritative_run(self, summary, cache):
         refs = summary.get("authoritative_refs") or {}
         calibration_path = _clean_str(refs.get("calibration_json_path"))
         if calibration_path is None or not os.path.exists(calibration_path):
@@ -687,9 +702,85 @@ class CalibrationMemoryAggregator:
             pass
         return None
 
+    def _load_authoritative_run(self, summary, cache):
+        refs = dict(summary.get("authoritative_refs") or {})
+        canonical = (
+            refs.get("schema_name")
+            == "labcraft.calibration_memory.canonical_session_ref"
+            and int(refs.get("schema_version") or 0) == 1
+        )
+        if not canonical or self.secondary_reader_preference == "legacy":
+            run = self._load_legacy_authoritative_run(summary, cache)
+            return {
+                "run": run,
+                "usable": run is not None or not canonical,
+                "reader_state": "legacy",
+                "issues": [],
+                "diagnostics": {"calibration_json_reads": int(run is not None)},
+            }
+
+        session_id = _clean_str(refs.get("calibration_session_id"))
+        index_path = _clean_str(refs.get("calibration_index_path"))
+        experiment_dir = _clean_str(refs.get("experiment_dir"))
+        if experiment_dir is None and index_path:
+            experiment_dir = os.path.dirname(index_path)
+        if experiment_dir is None:
+            return {
+                "run": None,
+                "usable": False,
+                "reader_state": CalibrationReaderState.UNAVAILABLE.value,
+                "issues": [{"code": "missing_experiment_dir"}],
+                "diagnostics": {},
+            }
+        reader_key = ("canonical_reader", os.path.abspath(experiment_dir))
+        reader = cache.get(reader_key)
+        if reader is None:
+            reader = CalibrationRecordingReader(
+                experiment_dir,
+                primary="canonical",
+                allow_legacy_fallback=self.allow_legacy_fallback,
+            )
+            cache[reader_key] = reader
+        snapshot = reader.resolve_session(
+            session_id or "",
+            expected_result_refs=list(refs.get("process_results") or ()),
+            expected_identity=summary.get("context") or {},
+            legacy_run_id=_clean_str(refs.get("calibration_run_id")),
+            legacy_run_index=refs.get("calibration_run_index"),
+        )
+        allowed = {
+            CalibrationReaderState.CANONICAL_ONLY,
+            CalibrationReaderState.MATCHING_DUAL,
+            CalibrationReaderState.LEGACY_ONLY,
+            CalibrationReaderState.CANONICAL_INVALID_LEGACY_FALLBACK,
+        }
+        usable = snapshot.reader_state in allowed
+        run = None
+        if usable:
+            run = {
+                "run_id": session_id,
+                "started_at": (summary.get("run_timing") or {}).get(
+                    "started_at_utc"
+                ),
+                "ended_at": (summary.get("run_timing") or {}).get("ended_at_utc"),
+                "outcome": summary.get("run_status"),
+                "steps": {
+                    str(phase): [dict(item) for item in list(payloads or ())]
+                    for phase, payloads in snapshot.phase_payloads.items()
+                },
+            }
+        return {
+            "run": run,
+            "usable": usable,
+            "reader_state": snapshot.reader_state.value,
+            "issues": [issue.to_dict() for issue in snapshot.issues],
+            "diagnostics": dict(snapshot.diagnostics),
+        }
+
     def _build_run_records(self):
         cache = {}
         run_records = []
+        source_diagnostics = []
         for summary_path in self._iter_run_summary_paths():
             try:
                 summary = self._load_json(summary_path)
@@ -698,7 +789,19 @@ class CalibrationMemoryAggregator:
             if not isinstance(summary, dict):
                 continue
 
-            authoritative_run = self._load_authoritative_run(summary, cache)
+            source = self._load_authoritative_run(summary, cache)
+            authoritative_run = source.get("run")
+            source_diagnostics.append(
+                {
+                    "run_id": _clean_str(summary.get("run_id")),
+                    "reader_state": source.get("reader_state"),
+                    "usable": bool(source.get("usable")),
+                    "issues": list(source.get("issues") or ()),
+                    "diagnostics": dict(source.get("diagnostics") or {}),
+                }
+            )
+            if not source.get("usable"):
+                continue
             try:
                 derived_metrics = self.extract_run_features(summary, authoritative_run=authoritative_run)
             except Exception:
@@ -716,13 +819,18 @@ class CalibrationMemoryAggregator:
                     "source_refs": source_refs,
                     "authoritative_refs": dict(summary.get("authoritative_refs") or {}),
                     "derived_metrics": derived_metrics,
+                    "reader_state": source.get("reader_state"),
                     "updated_at_utc": _coalesce(
                         _clean_str((summary.get("run_timing") or {}).get("ended_at_utc")),
                         _clean_str(summary.get("last_updated_at_utc")),
                     ),
                 }
             )
+        self._last_source_diagnostics = source_diagnostics
         return run_records
+
+    def get_source_diagnostics(self):
+        return [dict(item) for item in self._last_source_diagnostics]
 
     @staticmethod
     def _identity_quality_summary(run_records):
@@ -753,6 +861,9 @@ class CalibrationMemoryAggregator:
                     "run_summary_path": _clean_str((run_record.get("source_refs") or {}).get("run_summary_path")),
                     "observations_path": _clean_str((run_record.get("source_refs") or {}).get("observations_path")),
                     "calibration_json_path": _clean_str((run_record.get("authoritative_refs") or {}).get("calibration_json_path")),
+                    "calibration_index_path": _clean_str((run_record.get("authoritative_refs") or {}).get("calibration_index_path")),
+                    "calibration_session_id": _clean_str((run_record.get("authoritative_refs") or {}).get("calibration_session_id")),
+                    "reader_state": _clean_str(run_record.get("reader_state")),
                     "ended_at_utc": _clean_str((run_record.get("summary") or {}).get("run_timing", {}).get("ended_at_utc")),
                 }
             )

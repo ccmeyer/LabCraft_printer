@@ -114,6 +114,15 @@ def test_duplicate_design_from_source_creates_fresh_run_state(tmp_path):
     assert json.loads((duplicate_dir / "progress.json").read_text(encoding="utf-8")) == {}
     assert json.loads((duplicate_dir / "calibration.json").read_text(encoding="utf-8")) == {}
     assert not (duplicate_dir / "calibration_recordings").exists()
+    assert not (duplicate_dir / "calibration_index.jsonl").exists()
+    storage_paths = duplicate_model.get_calibration_storage_paths()
+    assert storage_paths["experiment_dir"] == str(duplicate_dir.resolve())
+    assert storage_paths["calibration_index_path"] == str(
+        duplicate_dir.resolve() / "calibration_index.jsonl"
+    )
+    assert storage_paths["calibration_recordings_root"] == str(
+        duplicate_dir.resolve() / "calibration_recordings"
+    )
     assert not (duplicate_dir / "execution_plan.json").exists()
     assert not (duplicate_dir / "execution_resume.json").exists()
     assert not (duplicate_dir / "execution_calibrations.json").exists()

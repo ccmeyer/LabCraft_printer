@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import platform
 import re
@@ -20,6 +21,10 @@ from tools.export_calibration_recording_summary import (
     build_calibration_recording_summary_rows,
     export_calibration_recording_summary,
 )
+from CalibrationRecordingStore import (
+    CalibrationRecordingStore,
+    CalibrationStoreError,
+)
 
 
 class CalibrationRecordExportError(Exception):
@@ -27,11 +32,77 @@ class CalibrationRecordExportError(Exception):
 
 
 OPTIONAL_EXPERIMENT_FILES = (
+    "calibration_index.jsonl",
     "calibration.json",
     "experiment_design.json",
     "progress.json",
     "experiment_audit.jsonl",
 )
+
+
+def _notify_progress(callback, stage: str, completed: int, total: int) -> None:
+    if callback is not None:
+        callback(str(stage), int(completed), int(total))
+
+
+def _canonical_inventory(experiment_path: Path) -> dict[str, Any]:
+    index_path = experiment_path / "calibration_index.jsonl"
+    if not index_path.is_file():
+        return {
+            "status": "not_available",
+            "index_sha256": None,
+            "index_event_count": 0,
+            "valid_result_count": 0,
+            "update_count": 0,
+            "issues": [],
+        }
+    issues: list[dict[str, Any]] = []
+    events, ignored_tail = CalibrationRecordingStore.read_jsonl(index_path)
+    if ignored_tail:
+        issues.append({"code": "incomplete_index_tail"})
+    valid_results = 0
+    update_count = 0
+    seen_results: set[str] = set()
+    for line_number, event in enumerate(events, 1):
+        try:
+            result_id = str(event.get("result_id") or "")
+            if not result_id or result_id in seen_results:
+                raise ValueError("missing or duplicate result identity")
+            seen_results.add(result_id)
+            result_path = (
+                experiment_path / str(event.get("result_relpath") or "")
+            ).resolve()
+            if (
+                experiment_path not in result_path.parents
+                or result_path.name != "result.json"
+            ):
+                raise ValueError("result path escaped experiment")
+            validated = CalibrationRecordingStore.validate_run(result_path.parent)
+            result = dict(validated["result"])
+            if (
+                result.get("result_id") != result_id
+                or result.get("result_sha256") != event.get("result_sha256")
+            ):
+                raise ValueError("result identity or hash mismatch")
+            valid_results += 1
+            update_count += len(validated.get("updates") or ())
+        except (OSError, ValueError, CalibrationStoreError) as exc:
+            issues.append(
+                {
+                    "code": "canonical_bundle_invalid",
+                    "line_number": line_number,
+                    "result_id": event.get("result_id"),
+                    "message": str(exc),
+                }
+            )
+    return {
+        "status": "valid" if not issues else "issues_detected",
+        "index_sha256": hashlib.sha256(index_path.read_bytes()).hexdigest(),
+        "index_event_count": len(events),
+        "valid_result_count": valid_results,
+        "update_count": update_count,
+        "issues": issues,
+    }
 
 
 def _sanitize_filename_part(value: str) -> str:
@@ -123,9 +194,10 @@ def _build_manifest(
     exported_at_utc: str,
     included_top_level_items: set[str],
     summary_result: dict[str, Any],
+    canonical_inventory: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "exported_at_utc": exported_at_utc,
         "experiment_name": experiment_dir.name,
         "experiment_path": str(experiment_dir),
@@ -137,6 +209,7 @@ def _build_manifest(
             "parse_error_count": int(summary_result.get("parse_error_count") or 0),
             "tool_error_count": int(summary_result.get("tool_error_count") or 0),
         },
+        "canonical_storage": dict(canonical_inventory),
         "platform": {
             "system": platform.system(),
             "release": platform.release(),
@@ -153,6 +226,7 @@ def export_calibration_records(
     output_dir: str | os.PathLike[str] | None = None,
     *,
     created_at: datetime | None = None,
+    progress_callback=None,
 ) -> dict[str, Any]:
     experiment_path = Path(experiment_dir).resolve()
     if not experiment_path.exists():
@@ -177,6 +251,8 @@ def export_calibration_records(
     archive_path = _unique_archive_path(out_dir, archive_stem)
 
     included: set[str] = set()
+    canonical_inventory = _canonical_inventory(experiment_path)
+    _notify_progress(progress_callback, "inventory", 1, 1)
     with tempfile.TemporaryDirectory() as tmp:
         summary_path = Path(tmp) / "calibration_recordings_summary.csv"
         summary_result = export_calibration_recording_summary(
@@ -189,9 +265,17 @@ def export_calibration_records(
         summary_result.update(summary_stats)
 
         with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for src in _iter_files(recordings_root):
+            recording_files = list(_iter_files(recordings_root))
+            for ordinal, src in enumerate(recording_files, 1):
                 rel = src.relative_to(experiment_path).as_posix()
                 _add_file(zf, src, rel, included)
+                if ordinal % 100 == 0 or ordinal == len(recording_files):
+                    _notify_progress(
+                        progress_callback,
+                        "archive_recordings",
+                        ordinal,
+                        len(recording_files),
+                    )
 
             for filename in OPTIONAL_EXPERIMENT_FILES:
                 src = experiment_path / filename
@@ -206,6 +290,7 @@ def export_calibration_records(
                 exported_at_utc=exported_at_utc,
                 included_top_level_items=included,
                 summary_result=summary_result,
+                canonical_inventory=canonical_inventory,
             )
             zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
 
@@ -222,4 +307,5 @@ def export_calibration_records(
             "parse_error_count": int(summary_result.get("parse_error_count") or 0),
             "tool_error_count": int(summary_result.get("tool_error_count") or 0),
         },
+        "canonical_storage": canonical_inventory,
     }

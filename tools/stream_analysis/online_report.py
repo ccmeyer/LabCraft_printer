@@ -240,10 +240,11 @@ def _stream_capture_log_index(experiment_root: Path) -> dict[str, dict]:
 
 
 def _latest_emergence_result(emergence_run_dir: Path) -> dict:
+    from tools.calibration_recording_updates import load_calibration_updates
+
     latest = {}
-    for row in _iter_jsonl(emergence_run_dir / "analysis.jsonl"):
-        if str(row.get("kind") or "") != "calibration_data_updated":
-            continue
+    loaded = load_calibration_updates(emergence_run_dir)
+    for row in loaded.rows:
         payload = dict(row.get("payload") or {})
         result = dict(payload.get("result") or {})
         if not result:
@@ -252,6 +253,7 @@ def _latest_emergence_result(emergence_run_dir: Path) -> dict:
             "analysis_row": dict(row),
             "payload": payload,
             "result": result,
+            "reader_state": loaded.reader_state,
         }
     return latest
 

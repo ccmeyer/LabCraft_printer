@@ -307,6 +307,7 @@ class CalibrationContextBuilder:
 class CalibrationMemoryStore:
     SCHEMA_FAMILY = "labcraft.calibration_memory"
     SCHEMA_VERSION = 1
+    RUN_SUMMARY_SCHEMA_VERSION = 2
     RUN_SUMMARY_SCHEMA = f"{SCHEMA_FAMILY}.run_summary"
     OBSERVATION_SCHEMA = f"{SCHEMA_FAMILY}.observation"
     RUN_CATALOG_SCHEMA = f"{SCHEMA_FAMILY}.run_catalog_entry"
@@ -817,14 +818,89 @@ class CalibrationMemoryStore:
                 camera_active_dir = None
 
         process_recordings_root = None
+        calibration_index_path = None
         if experiment_dir is not None:
             process_recordings_root = os.path.abspath(os.path.join(experiment_dir, "calibration_recordings"))
+            calibration_index_path = os.path.abspath(
+                os.path.join(experiment_dir, "calibration_index.jsonl")
+            )
 
         return {
             "calibration_json_path": calibration_path,
+            "calibration_index_path": calibration_index_path,
             "process_recordings_root": process_recordings_root,
             "camera_capture_root": camera_root,
             "camera_active_save_dir": camera_active_dir,
+        }
+
+    @staticmethod
+    def _canonical_session_snapshot(calibration_manager):
+        if calibration_manager is None:
+            return None
+        preference = getattr(
+            calibration_manager,
+            "get_calibration_secondary_reader_preference",
+            None,
+        )
+        if callable(preference) and str(preference()) != "canonical":
+            return None
+        getter = getattr(
+            calibration_manager,
+            "get_current_calibration_session_snapshot",
+            None,
+        )
+        if not callable(getter):
+            return None
+        snapshot = dict(getter() or {})
+        if not str(snapshot.get("calibration_session_id") or "").strip():
+            return None
+        return snapshot
+
+    @classmethod
+    def _authoritative_refs(
+        cls,
+        *,
+        calibration_manager,
+        run_id,
+        run_idx,
+        canonical_snapshot=None,
+    ):
+        snapshot = dict(canonical_snapshot or {})
+        if snapshot:
+            index_path = cls._clean_str(snapshot.get("calibration_index_path"))
+            legacy_path = cls._clean_str(snapshot.get("calibration_json_path"))
+            experiment_dir = (
+                os.path.dirname(index_path) if index_path
+                else os.path.dirname(legacy_path) if legacy_path
+                else None
+            )
+            return {
+                "schema_name": "labcraft.calibration_memory.canonical_session_ref",
+                "schema_version": 1,
+                "preferred_source": "canonical",
+                "experiment_dir": experiment_dir,
+                "calibration_index_path": index_path,
+                "calibration_recordings_root": cls._clean_str(
+                    snapshot.get("calibration_recordings_root")
+                ),
+                "calibration_session_id": cls._clean_str(
+                    snapshot.get("calibration_session_id")
+                ),
+                "process_results": [
+                    dict(item) for item in list(snapshot.get("result_refs") or ())
+                ],
+                "calibration_json_path": legacy_path,
+                "reader_state": "canonical_session",
+                "calibration_run_id": str(run_id or "") or None,
+                "calibration_run_index": run_idx,
+            }
+        return {
+            "preferred_source": "legacy",
+            "calibration_json_path": cls._clean_str(
+                getattr(calibration_manager, "calibration_file_path", None)
+            ),
+            "calibration_run_id": str(run_id or "") or None,
+            "calibration_run_index": run_idx,
         }
 
     def _mark_derived_memory_dirty(self):
@@ -881,9 +957,14 @@ class CalibrationMemoryStore:
             except Exception:
                 ui_recommendation = {}
         run_idx = getattr(calibration_manager, "_run_idx", None) if calibration_manager is not None else None
+        canonical_snapshot = self._canonical_session_snapshot(calibration_manager)
         summary = {
             "schema_name": self.RUN_SUMMARY_SCHEMA,
-            "schema_version": int(self.SCHEMA_VERSION),
+            "schema_version": int(
+                self.RUN_SUMMARY_SCHEMA_VERSION
+                if canonical_snapshot is not None
+                else self.SCHEMA_VERSION
+            ),
             "run_id": run_id,
             "context": context,
             "run_status": "in_progress",
@@ -899,11 +980,12 @@ class CalibrationMemoryStore:
                 "run_summary_path": paths["run_summary_path"],
                 "observations_path": paths["observations_path"],
             },
-            "authoritative_refs": {
-                "calibration_json_path": self._clean_str(getattr(calibration_manager, "calibration_file_path", None)),
-                "calibration_run_id": run_id,
-                "calibration_run_index": run_idx,
-            },
+            "authoritative_refs": self._authoritative_refs(
+                calibration_manager=calibration_manager,
+                run_id=run_id,
+                run_idx=run_idx,
+                canonical_snapshot=canonical_snapshot,
+            ),
             "manager_meta": dict(manager_meta or {}),
             "advisory_prior": dict(advisory_prior or {}) if advisory_prior else None,
             "prior_application_mode": prior_runtime.get("mode", self.get_prior_application_mode()),
@@ -962,7 +1044,7 @@ class CalibrationMemoryStore:
         self.ensure_initialized()
         record = dict(payload or {})
         record["schema_name"] = self.RUN_SUMMARY_SCHEMA
-        record["schema_version"] = int(self.SCHEMA_VERSION)
+        record.setdefault("schema_version", int(self.SCHEMA_VERSION))
         record["run_id"] = str(run_id)
         record.setdefault("last_updated_at_utc", self._now_utc())
         self._write_json_atomic(self._get_run_summary_path(run_id), record)
@@ -1022,6 +1104,13 @@ class CalibrationMemoryStore:
             raise ValueError("calibration_manager is required")
 
         run = None
+        canonical_snapshot = self._canonical_session_snapshot(calibration_manager)
+        if canonical_snapshot is not None and not list(
+            canonical_snapshot.get("result_refs") or ()
+        ):
+            # Compatibility-only/manual manager updates have no committed
+            # terminal bundle and must retain their legacy summary source.
+            canonical_snapshot = None
         run_idx = getattr(calibration_manager, "_run_idx", None)
         data = getattr(calibration_manager, "data", {}) or {}
         runs = data.get("runs") or []
@@ -1034,6 +1123,22 @@ class CalibrationMemoryStore:
                     if candidate.get("run_id") == run_id:
                         run = candidate
                         break
+        if canonical_snapshot is not None:
+            run = {
+                "run_id": canonical_snapshot.get("calibration_session_id"),
+                "started_at": canonical_snapshot.get("started_at_utc"),
+                "ended_at": canonical_snapshot.get("ended_at_utc"),
+                "outcome": canonical_snapshot.get("outcome"),
+                "error_message": canonical_snapshot.get("error_message"),
+                "notes": canonical_snapshot.get("notes"),
+                "steps": {
+                    str(phase): [dict(item) for item in list(payloads or ())]
+                    for phase, payloads in dict(
+                        canonical_snapshot.get("phase_payloads") or {}
+                    ).items()
+                },
+                "flat_measurements": [],
+            }
         if run is None:
             raise ValueError("no active calibration run available for summary")
 
@@ -1079,7 +1184,11 @@ class CalibrationMemoryStore:
 
         summary = {
             "schema_name": self.RUN_SUMMARY_SCHEMA,
-            "schema_version": int(self.SCHEMA_VERSION),
+            "schema_version": int(
+                self.RUN_SUMMARY_SCHEMA_VERSION
+                if canonical_snapshot is not None
+                else self.SCHEMA_VERSION
+            ),
             "run_id": run_id,
             "context": context,
             "run_status": run_status,
@@ -1091,11 +1200,12 @@ class CalibrationMemoryStore:
             "phase_counts": phase_counts,
             "process_results": process_results,
             "artifact_refs": self._build_artifact_refs(context=context, calibration_manager=calibration_manager),
-            "authoritative_refs": {
-                "calibration_json_path": self._clean_str(getattr(calibration_manager, "calibration_file_path", None)),
-                "calibration_run_id": run_id,
-                "calibration_run_index": run_idx,
-            },
+            "authoritative_refs": self._authoritative_refs(
+                calibration_manager=calibration_manager,
+                run_id=run_id,
+                run_idx=run_idx,
+                canonical_snapshot=canonical_snapshot,
+            ),
             "source_refs": {
                 "run_summary_path": paths["run_summary_path"],
                 "observations_path": paths["observations_path"],

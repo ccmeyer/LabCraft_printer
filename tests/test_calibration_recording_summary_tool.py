@@ -243,3 +243,19 @@ def test_recordings_root_can_scan_standalone_copy(tmp_path):
     _fieldnames, rows = _read_csv_rows(output)
     assert len(rows) == 1
     assert rows[0]["run_id"] == "run_20260424_120000_deadbeef"
+
+
+def test_summary_adds_canonical_result_and_index_columns(tmp_path):
+    from tests.test_calibration_recording_reader import _write_case
+
+    experiment_dir = tmp_path / "Canonical"
+    _store, _run, _update, commit = _write_case(experiment_dir)
+
+    rows, stats = mod.build_calibration_recording_summary_rows(experiment_dir)
+
+    assert stats["row_count"] == 1
+    assert rows[0]["result_id"] == commit.result.result_id
+    assert rows[0]["result_sha256"] == commit.result.document["result_sha256"]
+    assert rows[0]["result_outcome"] == "completed"
+    assert rows[0]["index_state"] == "committed"
+    assert rows[0]["application_eligible"] is True

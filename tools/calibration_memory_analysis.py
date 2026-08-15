@@ -22,6 +22,10 @@ RUN_SUMMARY_COLUMNS = [
     "summary_path",
     "observations_path",
     "calibration_json_path",
+    "canonical_session_id",
+    "calibration_index_path",
+    "canonical_result_count",
+    "secondary_reader_state",
     "run_status",
     "run_completed",
     "started_at_utc",
@@ -534,6 +538,20 @@ def flatten_run_summary(summary):
     row["summary_path"] = _clean_text(summary.get("_summary_path")) or _clean_text(source_refs.get("run_summary_path"))
     row["observations_path"] = _clean_text(source_refs.get("observations_path"))
     row["calibration_json_path"] = _clean_text(authoritative_refs.get("calibration_json_path"))
+    row["canonical_session_id"] = _clean_text(
+        authoritative_refs.get("calibration_session_id")
+    )
+    row["calibration_index_path"] = _clean_text(
+        authoritative_refs.get("calibration_index_path")
+    )
+    canonical_results = authoritative_refs.get("process_results") or []
+    row["canonical_result_count"] = len(canonical_results) if isinstance(
+        canonical_results, list
+    ) else 0
+    row["secondary_reader_state"] = _clean_text(
+        authoritative_refs.get("reader_state")
+        or summary.get("secondary_reader_state")
+    )
     row["run_status"] = _clean_text(summary.get("run_status")) or ("completed" if run_timing.get("ended_at_utc") else "in_progress")
     row["run_completed"] = row["run_status"] == "completed"
     row["started_at_utc"] = _clean_text(run_timing.get("started_at_utc"))

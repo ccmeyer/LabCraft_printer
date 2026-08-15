@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import time
 from typing import Any, Mapping
+import zipfile
 
 from tools.sil.calibration_storage_contract import (
     CATALOG_PATH,
@@ -53,6 +54,8 @@ AUTHORITATIVE_FUNCTIONAL_ID = "calibration_storage_authoritative_contract_v1"
 AUTHORITATIVE_PERFORMANCE_ID = "calibration_storage_authoritative_8x25_v1"
 PRIMARY_READER_FUNCTIONAL_ID = "calibration_storage_primary_reader_contract_v1"
 PRIMARY_READER_PERFORMANCE_ID = "calibration_storage_primary_reader_8x25_v1"
+SECONDARY_READER_FUNCTIONAL_ID = "calibration_storage_secondary_reader_contract_v1"
+SECONDARY_READER_PERFORMANCE_ID = "calibration_storage_secondary_reader_8x25_v1"
 FUNCTIONAL_SCENARIO = "calibration_storage_contract"
 PERFORMANCE_SCENARIO = "calibration_storage_legacy_baseline"
 SHADOW_FUNCTIONAL_SCENARIO = "calibration_storage_shadow_contract"
@@ -61,6 +64,8 @@ AUTHORITATIVE_FUNCTIONAL_SCENARIO = "calibration_storage_authoritative_contract"
 AUTHORITATIVE_PERFORMANCE_SCENARIO = "calibration_storage_authoritative"
 PRIMARY_READER_FUNCTIONAL_SCENARIO = "calibration_storage_primary_reader_contract"
 PRIMARY_READER_PERFORMANCE_SCENARIO = "calibration_storage_primary_reader"
+SECONDARY_READER_FUNCTIONAL_SCENARIO = "calibration_storage_secondary_reader_contract"
+SECONDARY_READER_PERFORMANCE_SCENARIO = "calibration_storage_secondary_reader"
 
 
 def _shadow_enabled(runtime: JourneyRuntime) -> bool:
@@ -76,6 +81,8 @@ def _authoritative_enabled(runtime: JourneyRuntime) -> bool:
         AUTHORITATIVE_PERFORMANCE_ID,
         PRIMARY_READER_FUNCTIONAL_ID,
         PRIMARY_READER_PERFORMANCE_ID,
+        SECONDARY_READER_FUNCTIONAL_ID,
+        SECONDARY_READER_PERFORMANCE_ID,
     }
 
 
@@ -83,6 +90,15 @@ def _primary_reader_enabled(runtime: JourneyRuntime) -> bool:
     return runtime.definition.registry_id in {
         PRIMARY_READER_FUNCTIONAL_ID,
         PRIMARY_READER_PERFORMANCE_ID,
+        SECONDARY_READER_FUNCTIONAL_ID,
+        SECONDARY_READER_PERFORMANCE_ID,
+    }
+
+
+def _secondary_reader_enabled(runtime: JourneyRuntime) -> bool:
+    return runtime.definition.registry_id in {
+        SECONDARY_READER_FUNCTIONAL_ID,
+        SECONDARY_READER_PERFORMANCE_ID,
     }
 
 
@@ -326,6 +342,7 @@ def _run_functional_catalog(runtime: JourneyRuntime) -> dict[str, Any]:
     )
     application_identity = dict(prepared["stock_identity"])
     executed: list[tuple[ScriptedCalibrationCase, dict[str, Any]]] = []
+    runtime.emit_progress("functional_catalog", completed=0, total=len(fixture_cases))
     for original in fixture_cases:
         case = (
             replace(original, identity=application_identity)
@@ -333,6 +350,9 @@ def _run_functional_catalog(runtime: JourneyRuntime) -> dict[str, Any]:
             else original
         )
         executed.append((case, runner.run_case(case).as_dict()))
+    runtime.emit_progress(
+        "functional_catalog", completed=len(executed), total=len(fixture_cases)
+    )
 
     by_process = {case.process_id: evidence for case, evidence in executed}
     identities = {
@@ -674,12 +694,14 @@ def _inspect_applied_record(
 
 
 def _functional_body(runtime: JourneyRuntime) -> None:
+    runtime.emit_progress("setup", completed=0, total=1)
     runtime.add_assertion(simulation_identity_assertion(runtime.context))
     runtime.harness.run_action(
         "fixture.prepare_calibration_storage",
         lambda: _prepare_minimal_experiment(runtime),
         surface=InteractionSurface.MODEL,
     )
+    runtime.emit_progress("setup", completed=1, total=1)
     runtime.harness.run_action(
         "calibration.run_scripted_processes",
         lambda: _run_functional_catalog(runtime),
@@ -691,6 +713,15 @@ def _functional_body(runtime: JourneyRuntime) -> None:
         surface=InteractionSurface.HARNESS,
     )
     _functional_contract_assertions(runtime)
+    if _secondary_reader_enabled(runtime):
+        prepared_path = Path(
+            runtime.observations["prepared_experiment"]["calibration_file"]
+        )
+        runtime.observations["secondary_consumers"] = _exercise_secondary_consumers(
+            runtime,
+            runtime.context.model.calibration_manager,
+            prepared_path,
+        )
     before_summary = runtime.observations["functional_storage"]["application_summary"]
     experiment_dir = Path(runtime.observations["prepared_experiment"]["experiment_dir"])
     from PySide6 import QtCore, QtWidgets
@@ -700,6 +731,7 @@ def _functional_body(runtime: JourneyRuntime) -> None:
         True,
     )
     runtime.restore_all()
+    runtime.emit_progress("fresh_application", completed=0, total=1)
     runtime.harness.run_action(
         "experiment.activate_authoritative",
         lambda: runtime.context.model.load_authoritative_execution_runtime(),
@@ -750,6 +782,7 @@ def _functional_body(runtime: JourneyRuntime) -> None:
             sources=("ExperimentLoaderDriver", "CalibrationManager"),
         )
     )
+    runtime.emit_progress("fresh_application", completed=1, total=1)
 
     def open_calibration_dialog() -> dict[str, Any]:
         try:
@@ -891,10 +924,12 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
         "canonical" if _primary_reader_enabled(runtime) else "legacy"
     )
     evidence = []
+    runtime.emit_progress("workload", completed=0, total=len(cases))
     for index, case in enumerate(cases, start=1):
         evidence.append(runner.run_case(case).as_dict())
         if index % 25 == 0:
             resources.sample()
+            runtime.emit_progress("workload", completed=index, total=len(cases))
 
     calibration_path = Path(prepared["calibration_file"])
     # Model a fresh application manager: release the live workload document
@@ -902,10 +937,12 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
     # destruction from the prior composition to reload latency.
     runner.manager.data = {"schema_version": 1, "runs": []}
     reload_started = time.perf_counter_ns()
+    runtime.emit_progress("fresh_reload", completed=0, total=1)
     runner.manager.load_calibration_data(str(calibration_path))
     metrics.fresh_reload_latency_ms.append(
         (time.perf_counter_ns() - reload_started) / 1_000_000.0
     )
+    runtime.emit_progress("fresh_reload", completed=1, total=1)
     reader_index_latency_ms = []
     reader_summary_latency_ms = []
     reader_selection_latency_ms = []
@@ -941,6 +978,11 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
             if not resolved.get("ok"):
                 raise RuntimeError(f"primary reader selection failed: {resolved}")
     reader_diagnostics = runner.manager.get_calibration_reader_diagnostics()
+    secondary_metrics = {}
+    if _secondary_reader_enabled(runtime):
+        secondary_metrics = _exercise_secondary_consumers(
+            runtime, runner.manager, calibration_path
+        )
     resources.stop()
 
     calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
@@ -1097,6 +1139,7 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
             "reader_states": reader_states,
             "diagnostics": reader_diagnostics,
         },
+        "secondary_consumer_metrics": secondary_metrics,
         "resources": resources.snapshot(),
         "artifact_growth": {
             "calibration_json_bytes": calibration_path.stat().st_size,
@@ -1112,13 +1155,114 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
     return snapshot
 
 
+def _exercise_secondary_consumers(
+    runtime: JourneyRuntime,
+    manager: Any,
+    calibration_path: Path,
+) -> dict[str, Any]:
+    """Exercise canonical secondary consumers with legacy temporarily absent."""
+
+    from CalibrationRecordExport import export_calibration_records
+    from tools.calibration_recording_updates import load_calibration_updates
+    from tools.export_calibration_recording_summary import (
+        build_calibration_recording_summary_rows,
+    )
+
+    experiment_dir = calibration_path.parent
+    memory_store = manager.model.calibration_memory_store
+    aggregator = memory_store.aggregator
+    aggregator.secondary_reader_preference = "canonical"
+    held_path = calibration_path.with_name(".calibration.json.sil-held")
+    original_hash = file_sha256(calibration_path)
+    memory_started = time.perf_counter_ns()
+    calibration_path.replace(held_path)
+    try:
+        memory_result = aggregator.rebuild()
+        memory_diagnostics = aggregator.get_source_diagnostics()
+    finally:
+        held_path.replace(calibration_path)
+    memory_latency = (time.perf_counter_ns() - memory_started) / 1_000_000.0
+    if file_sha256(calibration_path) != original_hash:
+        raise RuntimeError("secondary-consumer probe changed calibration.json")
+    usable_memory = [row for row in memory_diagnostics if row.get("usable")]
+    if not usable_memory or any(
+        int((row.get("diagnostics") or {}).get("calibration_json_reads") or 0)
+        for row in usable_memory
+    ):
+        raise RuntimeError("canonical calibration-memory aggregation used legacy data")
+
+    runtime.emit_progress("secondary_memory", completed=1, total=1)
+    summary_started = time.perf_counter_ns()
+    summary_rows, summary_stats = build_calibration_recording_summary_rows(
+        experiment_dir
+    )
+    summary_latency = (time.perf_counter_ns() - summary_started) / 1_000_000.0
+    if not summary_rows or not any(row.get("result_id") for row in summary_rows):
+        raise RuntimeError("recording summary omitted canonical result identity")
+    runtime.emit_progress("secondary_summary", completed=1, total=1)
+
+    run_dirs = sorted(
+        path.parent for path in experiment_dir.glob("calibration_recordings/*/*/result.json")
+    )
+    if not run_dirs:
+        raise RuntimeError("secondary-consumer probe found no canonical bundles")
+    tool_started = time.perf_counter_ns()
+    update_load = load_calibration_updates(run_dirs[0])
+    tool_latency = (time.perf_counter_ns() - tool_started) / 1_000_000.0
+    if update_load.source != "canonical":
+        raise RuntimeError("offline update helper did not prefer canonical updates")
+
+    export_root = Path(runtime.context.scenario_root) / "secondary-consumer-exports"
+    export_started = time.perf_counter_ns()
+    export_result = export_calibration_records(
+        experiment_dir,
+        output_dir=export_root,
+    )
+    export_latency = (time.perf_counter_ns() - export_started) / 1_000_000.0
+    archive = Path(export_result["archive_path"])
+    with zipfile.ZipFile(archive, "r") as handle:
+        members = set(handle.namelist())
+    required = {"calibration.json", "calibration_index.jsonl", "manifest.json"}
+    if not required <= members or not any(name.endswith("/result.json") for name in members):
+        raise RuntimeError("calibration export omitted canonical or legacy evidence")
+    runtime.emit_progress("secondary_export", completed=1, total=1)
+
+    audit_path = experiment_dir / "experiment_audit.jsonl"
+    canonical_audit_ref_count = 0
+    if audit_path.is_file():
+        for raw in audit_path.read_text(encoding="utf-8").splitlines():
+            row = json.loads(raw)
+            details = row.get("details") or {}
+            if isinstance(details.get("canonical_storage_ref"), Mapping):
+                canonical_audit_ref_count += 1
+
+    return {
+        "memory_rebuild_latency_ms": distribution([memory_latency]),
+        "summary_latency_ms": distribution([summary_latency]),
+        "tool_update_load_latency_ms": distribution([tool_latency]),
+        "export_latency_ms": distribution([export_latency]),
+        "memory_usable_run_count": len(usable_memory),
+        "memory_source_diagnostics": memory_diagnostics,
+        "summary_row_count": len(summary_rows),
+        "summary_stats": summary_stats,
+        "tool_reader_state": update_load.reader_state,
+        "export_archive_bytes": archive.stat().st_size,
+        "export_member_count": len(members),
+        "canonical_audit_ref_count": canonical_audit_ref_count,
+        "legacy_hash_preserved": True,
+        "consumer_error_count": 0,
+    }
+
+
 def _performance_body(runtime: JourneyRuntime) -> None:
+    runtime.emit_progress("setup", completed=0, total=1)
     runtime.add_assertion(simulation_identity_assertion(runtime.context))
     runtime.harness.run_action(
         "fixture.prepare_calibration_storage",
         lambda: _prepare_minimal_experiment(runtime),
         surface=InteractionSurface.MODEL,
     )
+    runtime.emit_progress("setup", completed=1, total=1)
     runtime.harness.run_action(
         "calibration.run_scripted_processes",
         lambda: _run_performance_workload(runtime),
@@ -1274,6 +1418,9 @@ def _functional_payload(
                 "calibration_storage": {
                     **dict(observed),
                     "fresh_application": dict(fresh),
+                    "secondary_consumers": dict(
+                        runtime.observations.get("secondary_consumers") or {}
+                    ),
                     "metrics": metrics,
                 }
             },
@@ -1471,6 +1618,38 @@ PRIMARY_READER_PERFORMANCE_DEFINITION = JourneyDefinition(
     summary_builder=_summary,
 )
 
+SECONDARY_READER_FUNCTIONAL_DEFINITION = JourneyDefinition(
+    registry_id=SECONDARY_READER_FUNCTIONAL_ID,
+    scenario_name=SECONDARY_READER_FUNCTIONAL_SCENARIO,
+    scenario_version="1",
+    workload_id=SECONDARY_READER_FUNCTIONAL_ID,
+    required_action_ids=FUNCTIONAL_ACTIONS,
+    required_ui_action_ids=FUNCTIONAL_UI_ACTIONS,
+    required_assertion_ids=FUNCTIONAL_ASSERTIONS,
+    required_screenshots=frozenset(),
+    fixture_loader=_functional_fixture,
+    body=_functional_body,
+    artifact_assertion=_artifact_assertion,
+    payload_builder=_functional_payload,
+    summary_builder=_summary,
+)
+
+SECONDARY_READER_PERFORMANCE_DEFINITION = JourneyDefinition(
+    registry_id=SECONDARY_READER_PERFORMANCE_ID,
+    scenario_name=SECONDARY_READER_PERFORMANCE_SCENARIO,
+    scenario_version="1",
+    workload_id=SECONDARY_READER_PERFORMANCE_ID,
+    required_action_ids=PERFORMANCE_ACTIONS,
+    required_ui_action_ids=frozenset(),
+    required_assertion_ids=PERFORMANCE_ASSERTIONS,
+    required_screenshots=frozenset(),
+    fixture_loader=_performance_fixture,
+    body=_performance_body,
+    artifact_assertion=_artifact_assertion,
+    payload_builder=_performance_payload,
+    summary_builder=_summary,
+)
+
 
 __all__ = [
     "AUTHORITATIVE_FUNCTIONAL_DEFINITION",
@@ -1485,6 +1664,10 @@ __all__ = [
     "PRIMARY_READER_FUNCTIONAL_ID",
     "PRIMARY_READER_PERFORMANCE_DEFINITION",
     "PRIMARY_READER_PERFORMANCE_ID",
+    "SECONDARY_READER_FUNCTIONAL_DEFINITION",
+    "SECONDARY_READER_FUNCTIONAL_ID",
+    "SECONDARY_READER_PERFORMANCE_DEFINITION",
+    "SECONDARY_READER_PERFORMANCE_ID",
     "SHADOW_FUNCTIONAL_DEFINITION",
     "SHADOW_FUNCTIONAL_ID",
     "SHADOW_PERFORMANCE_DEFINITION",

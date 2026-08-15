@@ -121,6 +121,31 @@ def test_reader_canonical_only_and_legacy_preference(tmp_path):
     assert legacy.rows == ()
 
 
+def test_reader_resolves_exact_canonical_session_without_legacy_document(tmp_path):
+    _store, _run, update, commit = _write_case(tmp_path, legacy=False)
+    reader = CalibrationRecordingReader(tmp_path)
+
+    session = reader.resolve_session(
+        "session-1",
+        expected_result_refs=[
+            {
+                "result_id": commit.result.result_id,
+                "result_sha256": commit.result.document["result_sha256"],
+                "process_run_id": "run_reader_0001",
+            }
+        ],
+        expected_identity={"printer_head_id": "head-1", "stock_id": "stock-1"},
+    )
+
+    assert session.reader_state.value == "canonical_only"
+    assert session.calibration_session_id == "session-1"
+    assert session.result_refs[0]["result_id"] == commit.result.result_id
+    assert session.phase_payloads["pressure_sweep_characterization"][0][
+        "canonical_storage_ref"
+    ]["update_id"] == update.update_id
+    assert session.diagnostics["bundle_read_count"] == 1
+
+
 def test_reader_history_accepts_manager_owned_legacy_snapshot(tmp_path, monkeypatch):
     _write_case(tmp_path)
     legacy_document = json.loads(

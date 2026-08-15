@@ -12,6 +12,13 @@ from typing import Any
 
 SUMMARY_COLUMNS = [
     "run_id",
+    "process_run_id",
+    "result_id",
+    "result_kind",
+    "result_outcome",
+    "result_sha256",
+    "index_state",
+    "application_eligible",
     "process_name",
     "phase_name",
     "started_at_utc",
@@ -229,8 +236,27 @@ def _summarize_run(run_dir: Path) -> tuple[dict[str, Any], int]:
 
     meta, meta_issues = _load_json_object(run_dir / "run_meta.json", required=True)
     verdict, verdict_issues = _load_json_object(run_dir / "verdict.json", required=True)
+    result, result_issues = _load_json_object(run_dir / "result.json", required=False)
     issues.extend(meta_issues)
     issues.extend(verdict_issues)
+    issues.extend(result_issues)
+
+    index_state = "legacy_recording"
+    if result:
+        index_state = "missing"
+        experiment_dir = run_dir.parent.parent.parent
+        index_rows, index_issues = _load_jsonl_rows(
+            experiment_dir / "calibration_index.jsonl", required=False
+        )
+        issues.extend(index_issues)
+        matches = [
+            row for row in index_rows
+            if row.get("result_id") == result.get("result_id")
+            and row.get("result_sha256") == result.get("result_sha256")
+        ]
+        index_state = "committed" if len(matches) == 1 else (
+            "conflict" if len(matches) > 1 else "missing"
+        )
 
     event_error_count, event_warning_count, event_messages, event_issues = _scan_events(run_dir)
     analysis_problem_count, analysis_messages, analysis_issues = _scan_analysis_jsonl(run_dir)
@@ -287,6 +313,17 @@ def _summarize_run(run_dir: Path) -> tuple[dict[str, Any], int]:
     review_status = "needs_review" if review_reasons else "ok"
     row = {
         "run_id": run_id,
+        "process_run_id": _clean_text(result.get("process_run_id")) or run_id,
+        "result_id": _clean_text(result.get("result_id")),
+        "result_kind": _clean_text(result.get("result_kind")),
+        "result_outcome": _clean_text(result.get("outcome")),
+        "result_sha256": _clean_text(result.get("result_sha256")),
+        "index_state": index_state,
+        "application_eligible": bool(
+            result.get("outcome") == "completed"
+            and result.get("result_kind") == "calibration"
+            and index_state == "committed"
+        ),
         "process_name": process_name,
         "phase_name": phase_name,
         "started_at_utc": _clean_text(meta.get("started_at_utc")),

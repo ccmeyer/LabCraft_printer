@@ -1720,12 +1720,24 @@ class CalibrationManager(QObject):
             )
             configured_reader = "canonical"
         self._calibration_reader_preference = configured_reader
+        configured_secondary_reader = str(
+            os.environ.get("LABCRAFT_CALIBRATION_SECONDARY_READER", "canonical")
+        ).strip().lower()
+        if configured_secondary_reader not in {"canonical", "legacy"}:
+            LOGGER.warning(
+                "Invalid LABCRAFT_CALIBRATION_SECONDARY_READER=%r; using canonical",
+                configured_secondary_reader,
+            )
+            configured_secondary_reader = "canonical"
+        self._calibration_secondary_reader_preference = configured_secondary_reader
         self._legacy_reader_fallback_enabled = str(
             os.environ.get("LABCRAFT_CALIBRATION_LEGACY_FALLBACK", "1")
         ).strip() != "0"
         self._calibration_recording_reader = None
         self._calibration_reader_diagnostics = {}
         self._completed_canonical_session_cache = {}
+        self._canonical_session_result_cache = []
+        self._active_calibration_session_state = None
         self._calibration_history_revision = 0
         self._capture_performance_diagnostics_enabled = False
 
@@ -1931,6 +1943,42 @@ class CalibrationManager(QObject):
         if not self.is_calibration_store_authoritative():
             return "legacy"
         return str(getattr(self, "_calibration_reader_preference", "canonical"))
+
+    def get_calibration_secondary_reader_preference(self):
+        if not self.is_calibration_store_authoritative():
+            return "legacy"
+        return str(
+            getattr(self, "_calibration_secondary_reader_preference", "canonical")
+        )
+
+    def get_current_calibration_session_snapshot(self):
+        """Return the bounded in-memory source used by secondary writers."""
+
+        state = dict(getattr(self, "_active_calibration_session_state", None) or {})
+        session_id = str(state.get("calibration_session_id") or self._run_id or "")
+        phase_payloads = {
+            str(phase): [dict(item) for item in list(payloads or ())]
+            for phase, payloads in dict(
+                getattr(self, "_completed_canonical_session_cache", {}) or {}
+            ).items()
+        }
+        return {
+            **state,
+            "calibration_session_id": session_id,
+            "reader_preference": self.get_calibration_secondary_reader_preference(),
+            "result_refs": [
+                dict(item)
+                for item in list(
+                    getattr(self, "_canonical_session_result_cache", ()) or ()
+                )
+            ],
+            "phase_payloads": phase_payloads,
+            "calibration_index_path": str(self._calibration_index_path or ""),
+            "calibration_recordings_root": str(
+                self._calibration_recordings_root or ""
+            ),
+            "calibration_json_path": str(self.calibration_file_path or ""),
+        }
 
     def _ensure_calibration_recording_reader(self):
         reader = getattr(self, "_calibration_recording_reader", None)
@@ -3062,6 +3110,8 @@ class CalibrationManager(QObject):
     def _begin_process_recording(self, process_obj):
         if process_obj is None:
             return False
+        self._last_shadow_commit = None
+        self._last_shadow_run = None
         contract = None
         if self.is_calibration_store_authoritative():
             contract = process_storage_contract(process_obj)
@@ -3356,6 +3406,10 @@ class CalibrationManager(QObject):
                     summary_projection=summary,
                     recorder_summary=recorder_summary,
                 )
+                self._register_terminal_canonical_run(
+                    shadow_run,
+                    self._last_shadow_commit,
+                )
                 committed_outcome = str(
                     self._last_shadow_commit.result.document.get("outcome") or ""
                 )
@@ -3419,6 +3473,37 @@ class CalibrationManager(QObject):
             self._calibration_history_revision = int(
                 getattr(self, "_calibration_history_revision", 0)
             ) + 1
+        return True
+
+    def _register_terminal_canonical_run(self, run, commit):
+        if run is None or commit is None:
+            return False
+        if str(getattr(run, "calibration_session_id", "")) != str(
+            getattr(self, "_run_id", "")
+        ):
+            return False
+        result = dict(commit.result.document or {})
+        index_event = dict(commit.index_event.document or {}) if commit.index_event else {}
+        ref = {
+            "calibration_session_id": str(result.get("calibration_session_id") or ""),
+            "process_run_id": str(result.get("process_run_id") or ""),
+            "result_id": str(result.get("result_id") or ""),
+            "result_sha256": str(result.get("result_sha256") or ""),
+            "result_relpath": str(index_event.get("result_relpath") or ""),
+            "phase_name": str(result.get("phase_name") or ""),
+            "process_name": str(result.get("process_name") or ""),
+            "result_kind": str(result.get("result_kind") or ""),
+            "outcome": str(result.get("outcome") or ""),
+            "update_ids": [
+                str(item.get("update_id") or "")
+                for item in list(getattr(run, "updates", ()) or ())
+            ],
+        }
+        cache = getattr(self, "_canonical_session_result_cache", None)
+        if not isinstance(cache, list):
+            cache = []
+            self._canonical_session_result_cache = cache
+        cache.append(ref)
         return True
 
     def record_process_event(
@@ -3577,6 +3662,7 @@ class CalibrationManager(QObject):
         self._reset_calibration_memory_prior_runtime()
         self._reset_online_stream_prior_runtime()
         self._completed_canonical_session_cache = {}
+        self._canonical_session_result_cache = []
         self._reset_calibration_memory_ui_recommendation_state()
         state = "enabled" if bool(enabled) else "disabled"
         self.calibrationStageChanged.emit(f"Calibration memory {state}.", "dark_blue")
@@ -3725,6 +3811,15 @@ class CalibrationManager(QObject):
         except Exception:
             pass
 
+        calibration_index_path = getattr(self, "_calibration_index_path", None)
+        recordings_root = getattr(self, "_calibration_recordings_root", None)
+        if calibration_index_path:
+            refs["calibration_index_path"] = str(calibration_index_path)
+        if recordings_root:
+            refs["calibration_recordings_root"] = str(
+                recordings_root
+            )
+
         try:
             run_dir = getattr(process_obj, "_recorder_run_dir", None)
             if not run_dir:
@@ -3750,6 +3845,34 @@ class CalibrationManager(QObject):
         except Exception:
             pass
         return refs
+
+    def _build_canonical_audit_ref(self):
+        run = getattr(self, "_active_shadow_run", None) or getattr(
+            self, "_last_shadow_run", None
+        )
+        commit = getattr(self, "_last_shadow_commit", None)
+        result = dict(commit.result.document or {}) if commit is not None else {}
+        event = (
+            dict(commit.index_event.document or {})
+            if commit is not None and commit.index_event is not None
+            else {}
+        )
+        process_run_id = str(getattr(run, "process_run_id", "") or "")
+        if result and str(result.get("process_run_id") or "") != process_run_id:
+            result = {}
+            event = {}
+        return {
+            "schema_name": "labcraft.calibration_recording.audit_ref",
+            "schema_version": 1,
+            "calibration_session_id": str(
+                getattr(run, "calibration_session_id", "") or self._run_id or ""
+            ),
+            "process_run_id": process_run_id or None,
+            "result_id": str(result.get("result_id") or "") or None,
+            "result_sha256": str(result.get("result_sha256") or "") or None,
+            "result_relpath": str(event.get("result_relpath") or "") or None,
+            "outcome": str(result.get("outcome") or "") or None,
+        }
 
     def _build_calibration_result_summary(self, process_obj=None):
         summary = {}
@@ -3895,6 +4018,7 @@ class CalibrationManager(QObject):
             "settings": settings,
             "artifact_refs": self._build_calibration_artifact_refs(process_obj),
             "result_summary": self._build_calibration_result_summary(process_obj),
+            "canonical_storage_ref": self._build_canonical_audit_ref(),
         }
         snapshot.update(self._build_calibration_stock_identity_snapshot())
         return snapshot
@@ -3956,10 +4080,21 @@ class CalibrationManager(QObject):
 
         # Build run envelope
         self._run_id = str(uuid.uuid4())
+        started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self._completed_canonical_session_cache = {}
+        self._canonical_session_result_cache = []
+        self._active_calibration_session_state = {
+            "calibration_session_id": self._run_id,
+            "started_at_utc": started_at,
+            "ended_at_utc": None,
+            "outcome": None,
+            "error_message": "",
+            "notes": notes or "",
+        }
         stock_identity = self._build_calibration_stock_identity_snapshot()
         run_meta = {
             "run_id": self._run_id,
-            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "started_at": started_at,
             "ended_at": None,
             "outcome": None,
             "error_message": "",
@@ -4006,9 +4141,19 @@ class CalibrationManager(QObject):
     def end_session(self, *, outcome: str = "completed", error_message: str = "", emit_stage: bool = True):
         """Stamp end time for the current run."""
         if self._run_idx is not None and 0 <= self._run_idx < len(self.data.get("runs", [])):
-            self.data["runs"][self._run_idx]["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            ended_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self.data["runs"][self._run_idx]["ended_at"] = ended_at
             self.data["runs"][self._run_idx]["outcome"] = str(outcome or "completed")
             self.data["runs"][self._run_idx]["error_message"] = str(error_message or "")
+            session_state = dict(self._active_calibration_session_state or {})
+            session_state.update(
+                {
+                    "ended_at_utc": ended_at,
+                    "outcome": str(outcome or "completed"),
+                    "error_message": str(error_message or ""),
+                }
+            )
+            self._active_calibration_session_state = session_state
             self._save_atomic()
             self._write_calibration_memory_summary()
             if emit_stage:
@@ -4035,6 +4180,8 @@ class CalibrationManager(QObject):
         self._run_id = None
         self._run_idx = None
         self._completed_canonical_session_cache = {}
+        self._canonical_session_result_cache = []
+        self._active_calibration_session_state = None
         self._reset_calibration_memory_prior_runtime()
         self._reset_online_stream_prior_runtime()
         self._reset_calibration_memory_ui_recommendation_state()

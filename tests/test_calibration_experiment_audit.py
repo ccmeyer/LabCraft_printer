@@ -267,6 +267,36 @@ def _assert_stock_identity(details):
     }
 
 
+def test_calibration_audit_ref_carries_committed_canonical_identity(tmp_path):
+    mgr = _make_manager(tmp_path)
+    mgr._active_shadow_run = SimpleNamespace(
+        calibration_session_id="session-1",
+        process_run_id="process-1",
+    )
+    mgr._last_shadow_run = None
+    mgr._last_shadow_commit = SimpleNamespace(
+        result=SimpleNamespace(
+            document={
+                "calibration_session_id": "session-1",
+                "process_run_id": "process-1",
+                "result_id": "result-1",
+                "result_sha256": "a" * 64,
+                "outcome": "completed",
+            }
+        ),
+        index_event=SimpleNamespace(
+            document={"result_relpath": "calibration_recordings/P/process-1/result.json"}
+        ),
+    )
+
+    ref = mgr._build_canonical_audit_ref()
+
+    assert ref["result_id"] == "result-1"
+    assert ref["process_run_id"] == "process-1"
+    assert ref["result_sha256"] == "a" * 64
+    assert ref["result_relpath"].endswith("/result.json")
+
+
 def test_begin_session_does_not_record_high_level_audit_event(tmp_path):
     mgr = _make_manager(tmp_path)
 

@@ -2544,6 +2544,71 @@ integrity, fallback, or conflict events. Exact report hashes, reader limits,
 host-test results, synchronization evidence, and rollback details are in
 `docs/calibration_recording_store_milestone_4a_completion.md`.
 
+### Calibration recording store Milestone 4B
+
+Milestone 4B moves calibration memory, experiment audit references, record
+export, recording-summary CSVs, pressure-sweep replay, and online-stream
+emergence lookup to canonical recording identities. New calibration-memory
+summaries use schema v2 and resolve their exact canonical session without
+requiring `calibration.json`. Legacy files and diagnostic `analysis.jsonl`
+remain readable and are retained in exports when present.
+
+The secondary-consumer reader defaults to canonical. To roll back only this
+slice for one application process, set this value and restart:
+
+```powershell
+$env:LABCRAFT_CALIBRATION_SECONDARY_READER = "legacy"
+```
+
+Run the focused and registered SIL coverage with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_calibration_recording_reader.py `
+  tests\test_calibration_recording_updates.py `
+  tests\test_calibration_memory_store.py `
+  tests\test_calibration_memory_aggregator.py `
+  tests\test_calibration_record_export.py `
+  tests\test_calibration_recording_summary_tool.py `
+  tests\test_calibration_secondary_consumer_inventory.py `
+  tests\test_calibration_storage_secondary_reader_baseline.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_calibration_storage_secondary_reader_contract_lifecycle.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-stress `
+  tests\system\test_calibration_storage_secondary_reader_performance.py
+```
+
+The storage journeys emit one-line `SIL_PROGRESS` JSON at phase boundaries
+and every 25 processes in the 200-process workload. The Pi wrapper streams
+remote SSH output immediately, so a terminal advances through 0, 25, 50, ...,
+200, then `fresh_reload`, `secondary_memory`, `secondary_summary`, and
+`secondary_export`. Long gaps can still be normal because the retained legacy
+writer rewrites its growing whole-file document.
+
+Pi qualification and baseline freezing use:
+
+```powershell
+.\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -Scenario calibration_storage_secondary_reader_8x25_v1 `
+  -HostLabel pi5-calibration-storage-secondary-reader-v1 `
+  -WarmupRuns 1 -MeasuredRuns 3 `
+  -SpeedMultiplier 1000 -TimeoutSeconds 1800
+
+.\env\Scripts\python.exe -m tools.sil.calibration_storage_secondary_reader_baseline `
+  --report-set <retrieved-report-set.json> `
+  --milestone4a-baseline tests\performance\baselines\calibration_storage_primary_reader_pi5_v1.json `
+  --output tests\performance\baselines\calibration_storage_secondary_reader_pi5_v1.json
+```
+
+The complete consumer inventory is tracked at
+`tools/virtual_workflows/fixtures/calibration_storage_secondary_consumers_v1.json`.
+Image-analysis SIL, historical conversion, stopping legacy writes, firmware,
+and physical-device behavior remain outside this milestone.
+
 ## Raspberry Pi Software-In-The-Loop
 
 The target-Pi SIL lane runs the same real-UI workflow on Raspberry Pi CPU and

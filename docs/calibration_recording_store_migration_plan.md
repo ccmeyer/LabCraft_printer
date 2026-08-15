@@ -860,6 +860,13 @@ Exit criteria:
 
 Rollback: restore individual consumer fallback; core dual writes continue.
 
+Implementation completed on 2026-08-15. Canonical session resolution,
+schema-v2 calibration-memory references, canonical audit/export/summary and
+offline-tool consumers, the complete consumer inventory, structured live SIL
+progress, and registered lifecycle/stress scenarios are implemented. Final
+host and Raspberry Pi evidence is recorded in
+`docs/calibration_recording_store_milestone_4b_completion.md`.
+
 ### Milestone 5: historical conversion
 
 Scope:

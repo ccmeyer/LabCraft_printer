@@ -152,6 +152,12 @@ class ExperimentAuditLog:
             payload["experiment_file_path"] = self._clean_path(getattr(exp, "experiment_file_path", None))
             payload["progress_file_path"] = self._clean_path(getattr(exp, "progress_file_path", None))
             payload["calibration_file_path"] = self._clean_path(getattr(exp, "calibration_file_path", None))
+            payload["calibration_index_path"] = self._clean_path(
+                getattr(exp, "calibration_index_file_path", None)
+            )
+            payload["calibration_recordings_root"] = self._clean_path(
+                getattr(exp, "calibration_recordings_dir_path", None)
+            )
 
         if isinstance(context, dict):
             payload.update(_normalize_json_value(context))
