@@ -570,6 +570,44 @@ def test_remote_wrapper_dry_run_builds_preflight_proof_and_collection_commands()
     assert "Dry run complete" in result.stdout
 
 
+def test_remote_wrapper_uses_native_exit_code_when_ssh_writes_stderr(
+    tmp_path,
+):
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("PowerShell is unavailable")
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    (fake_bin / "ssh.cmd").write_text(
+        "@echo off\r\necho benign-native-stderr 1>&2\r\nexit /b 0\r\n",
+        encoding="utf-8",
+    )
+    (fake_bin / "scp.cmd").write_text("@exit /b 0\r\n", encoding="utf-8")
+    environment = dict(os.environ)
+    environment["PATH"] = str(fake_bin) + os.pathsep + environment.get("PATH", "")
+    result = subprocess.run(
+        [
+            powershell,
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REMOTE_TOOL),
+            "-PiHost",
+            "pi-test",
+            "-PreflightOnly",
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "benign-native-stderr" in result.stdout
+    assert "Pi SIL preflight completed" in result.stdout
+
+
 def test_remote_wrapper_allows_calibration_storage_pi_qualification_contract():
     powershell = shutil.which("powershell") or shutil.which("pwsh")
     if powershell is None:

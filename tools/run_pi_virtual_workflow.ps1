@@ -83,8 +83,16 @@ function Invoke-SshCapture(
     Write-Host ("DRY RUN ssh " + ($script:SshCommonArguments -join " ") + " $Target $remoteCommand")
     return @()
   }
-  $output = & ssh @script:SshCommonArguments $Target $remoteCommand 2>&1
-  $exitCode = $LASTEXITCODE
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    # PowerShell 5.1 wraps native stderr as ErrorRecord objects. SSH tools use
+    # stderr for benign remote diagnostics, so their exit code is authoritative.
+    $ErrorActionPreference = "Continue"
+    $output = & ssh @script:SshCommonArguments $Target $remoteCommand 2>&1
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
   $script:LastSshExitCode = $exitCode
   $lines = @($output | ForEach-Object { $_.ToString() })
   foreach ($line in $lines) {
@@ -102,9 +110,16 @@ function Invoke-Scp([string[]]$Arguments) {
     Write-Host ("DRY RUN scp " + ($script:SshCommonArguments -join " ") + " " + ($Arguments -join " "))
     return
   }
-  & scp @script:SshCommonArguments @Arguments
-  if ($LASTEXITCODE -ne 0) {
-    throw "scp failed ($LASTEXITCODE)."
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    & scp @script:SshCommonArguments @Arguments
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  if ($exitCode -ne 0) {
+    throw "scp failed ($exitCode)."
   }
 }
 
