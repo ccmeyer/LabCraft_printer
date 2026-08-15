@@ -21,6 +21,9 @@ BASELINE_SCHEMA_NAME = "labcraft.virtual_workflow_baseline"
 COMPARISON_SCHEMA_NAME = "labcraft.virtual_workflow_comparison"
 COMPARISON_SCHEMA_VERSION = 1
 POLICY_VERSION = "virtual_workflow_policy_v1"
+DEFAULT_METRIC_PROFILE = "virtual_print_array_v1"
+CALIBRATION_STORAGE_METRIC_PROFILE = "calibration_storage_reference_v1"
+CALIBRATION_STORAGE_WORKLOAD_ID = "calibration_storage_legacy_baseline_8x25_v1"
 
 PRIMARY_METRICS = (
     "metrics.responsiveness.values.scheduling_lateness_ms.p95",
@@ -175,20 +178,27 @@ def _load_json(path: str | Path) -> tuple[Path, dict[str, Any]]:
     return source, payload
 
 
-def _report_reference(path: Path, report: Mapping[str, Any]) -> dict[str, Any]:
+def _report_reference(
+    path: Path,
+    report: Mapping[str, Any],
+    *,
+    require_injected_stall: bool,
+) -> dict[str, Any]:
     source = _require_mapping(report.get("source"), "report.source")
     run = _require_mapping(report.get("run"), "report.run")
     classification = _require_mapping(
         report.get("classification"), "report.classification"
     )
-    injected = _path_value(
-        report,
-        "metrics.responsiveness.values.injected_stall_assessment.requested",
-    )
-    if not isinstance(injected, bool):
-        raise ComparisonIncompleteError(
-            "injected_stall_assessment.requested must be boolean"
+    injected = False
+    if require_injected_stall:
+        injected = _path_value(
+            report,
+            "metrics.responsiveness.values.injected_stall_assessment.requested",
         )
+        if not isinstance(injected, bool):
+            raise ComparisonIncompleteError(
+                "injected_stall_assessment.requested must be boolean"
+            )
     return {
         "path": _portable_path(path),
         "sha256": _sha256(path),
@@ -254,6 +264,13 @@ def _compatibility_identity(
             "network_unshared": pi_sil.get("network_unshared"),
         }
     return identity
+
+
+def _metric_profile(identity: Mapping[str, Any]) -> str:
+    workload = _require_mapping(identity.get("workload"), "compatibility.workload")
+    if workload.get("workload_id") == CALIBRATION_STORAGE_WORKLOAD_ID:
+        return CALIBRATION_STORAGE_METRIC_PROFILE
+    return DEFAULT_METRIC_PROFILE
 
 
 def _distribution(values: Iterable[float]) -> dict[str, Any]:
@@ -355,12 +372,19 @@ def build_report_set(
                 f"report {path} is incompatible with the first report in the set"
             )
 
+    metric_profile = _metric_profile(identity)
+    require_injected_stall = metric_profile == DEFAULT_METRIC_PROFILE
+
     warmup_references = [
-        _report_reference(path, report)
+        _report_reference(
+            path, report, require_injected_stall=require_injected_stall
+        )
         for path, report in zip(resolved_warmups, warmup_reports)
     ]
     measured_references = [
-        _report_reference(path, report)
+        _report_reference(
+            path, report, require_injected_stall=require_injected_stall
+        )
         for path, report in zip(measured_paths, measured_reports)
     ]
     all_references = warmup_references + measured_references
@@ -376,22 +400,36 @@ def build_report_set(
         )
         for reference in all_references
     }
-    metrics = _extract_metrics(measured_reports)
-    noisy_metrics = [
-        metric_path
-        for metric_path in PRIMARY_METRICS
-        if (
-            metrics[metric_path]["distribution"]["coefficient_of_variation"]
-            is None
-            or metrics[metric_path]["distribution"]["coefficient_of_variation"]
-            > ComparisonPolicy().maximum_primary_cv
-        )
-    ]
+    if metric_profile == DEFAULT_METRIC_PROFILE:
+        metrics = _extract_metrics(measured_reports)
+        noisy_metrics = [
+            metric_path
+            for metric_path in PRIMARY_METRICS
+            if (
+                metrics[metric_path]["distribution"]["coefficient_of_variation"]
+                is None
+                or metrics[metric_path]["distribution"]["coefficient_of_variation"]
+                > ComparisonPolicy().maximum_primary_cv
+            )
+        ]
+        noise = {
+            "maximum_primary_cv": ComparisonPolicy().maximum_primary_cv,
+            "noisy_primary_metrics": noisy_metrics,
+            "status": "noisy" if noisy_metrics else "acceptable",
+        }
+    else:
+        metrics = {}
+        noise = {
+            "maximum_primary_cv": None,
+            "noisy_primary_metrics": [],
+            "status": "not_applicable",
+        }
     return {
         "schema_name": REPORT_SET_SCHEMA_NAME,
         "schema_version": COMPARISON_SCHEMA_VERSION,
         "created_at_utc": _utc_now(),
         "host_label": label,
+        "metric_profile": metric_profile,
         "compatibility": identity,
         "source_summary": {
             "sources": [
@@ -426,11 +464,7 @@ def build_report_set(
             ),
         },
         "metrics": metrics,
-        "noise": {
-            "maximum_primary_cv": ComparisonPolicy().maximum_primary_cv,
-            "noisy_primary_metrics": noisy_metrics,
-            "status": "noisy" if noisy_metrics else "acceptable",
-        },
+        "noise": noise,
     }
 
 
@@ -461,7 +495,21 @@ def validate_report_set(payload: Mapping[str, Any], *, verify_hashes: bool = Tru
     if payload.get("schema_version") != COMPARISON_SCHEMA_VERSION:
         raise ComparisonError("unsupported report-set schema_version")
     _validate_host_label(str(payload.get("host_label") or ""))
-    _require_mapping(payload.get("compatibility"), "report_set.compatibility")
+    compatibility = _require_mapping(
+        payload.get("compatibility"), "report_set.compatibility"
+    )
+    metric_profile = payload.get("metric_profile", DEFAULT_METRIC_PROFILE)
+    if metric_profile not in {
+        DEFAULT_METRIC_PROFILE,
+        CALIBRATION_STORAGE_METRIC_PROFILE,
+    }:
+        raise ComparisonError("report-set metric profile is invalid")
+    if metric_profile == CALIBRATION_STORAGE_METRIC_PROFILE:
+        workload = _require_mapping(
+            compatibility.get("workload"), "report_set.compatibility.workload"
+        )
+        if workload.get("workload_id") != CALIBRATION_STORAGE_WORKLOAD_ID:
+            raise ComparisonError("storage metric profile has the wrong workload")
     runs = _require_mapping(payload.get("runs"), "report_set.runs")
     warmups = _require_sequence(runs.get("warmups"), "report_set.runs.warmups")
     measured = _require_sequence(runs.get("measured"), "report_set.runs.measured")
@@ -473,14 +521,17 @@ def validate_report_set(payload: Mapping[str, Any], *, verify_hashes: bool = Tru
     if functional.get("status") not in {"pass", "fail"}:
         raise ComparisonError("report-set functional status is invalid")
     metrics = _require_mapping(payload.get("metrics"), "report_set.metrics")
-    for metric_path in ALL_METRICS:
-        metric = _require_mapping(metrics.get(metric_path), f"metrics.{metric_path}")
-        values = _require_sequence(metric.get("per_run"), f"{metric_path}.per_run")
-        if len(values) != len(measured):
-            raise ComparisonError(f"{metric_path} does not preserve measured runs")
-        for index, value in enumerate(values):
-            _finite_number(value, f"{metric_path}[{index}]")
-        _require_mapping(metric.get("distribution"), f"{metric_path}.distribution")
+    if metric_profile == DEFAULT_METRIC_PROFILE:
+        for metric_path in ALL_METRICS:
+            metric = _require_mapping(metrics.get(metric_path), f"metrics.{metric_path}")
+            values = _require_sequence(metric.get("per_run"), f"{metric_path}.per_run")
+            if len(values) != len(measured):
+                raise ComparisonError(f"{metric_path} does not preserve measured runs")
+            for index, value in enumerate(values):
+                _finite_number(value, f"{metric_path}[{index}]")
+            _require_mapping(metric.get("distribution"), f"{metric_path}.distribution")
+    elif metrics:
+        raise ComparisonError("storage reference report sets must not contain generic metrics")
     if verify_hashes:
         for raw_reference in list(warmups) + list(measured):
             _validate_report_reference(
@@ -510,6 +561,10 @@ def create_baseline_summary(
 
     selected_policy = policy or ComparisonPolicy()
     validate_report_set(report_set)
+    if report_set.get("metric_profile", DEFAULT_METRIC_PROFILE) != DEFAULT_METRIC_PROFILE:
+        raise ComparisonIncompleteError(
+            "the generic baseline builder does not support this metric profile"
+        )
     if maturity not in {"candidate", "acceptance"}:
         raise ComparisonError("baseline maturity must be candidate or acceptance")
     runs = _require_mapping(report_set["runs"], "report_set.runs")
@@ -783,6 +838,10 @@ def compare_report_sets(
 
     validate_baseline_summary(baseline)
     validate_report_set(candidate)
+    if candidate.get("metric_profile", DEFAULT_METRIC_PROFILE) != DEFAULT_METRIC_PROFILE:
+        raise ComparisonIncompleteError(
+            "the generic comparison engine does not support this metric profile"
+        )
     try:
         baseline_policy = ComparisonPolicy(**dict(baseline["policy"]))
     except (TypeError, ValueError) as exc:

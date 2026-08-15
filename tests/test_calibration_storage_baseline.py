@@ -13,6 +13,13 @@ from tools.sil.calibration_storage_baseline import (
     create_calibration_storage_baseline,
     freeze_calibration_storage_baseline,
 )
+from tools.virtual_workflows.compare import (
+    CALIBRATION_STORAGE_METRIC_PROFILE,
+    ComparisonIncompleteError,
+    build_report_set,
+    create_baseline_summary,
+    validate_report_set,
+)
 from tools.virtual_workflows.report import REPORT_SCHEMA_NAME, REPORT_SCHEMA_VERSION
 
 
@@ -215,6 +222,37 @@ def test_candidate_upper_limit_uses_largest_required_margin():
     result = candidate_upper_limit([10.0, 12.0, 20.0], floor=1.0)
     assert result["robust_margin"] == 12.0
     assert result["upper_limit"] == 32.0
+
+
+def test_storage_report_set_is_reference_only_and_skips_print_array_metrics(tmp_path):
+    reports = [_report("warmup", 9.0)] + [
+        _report(f"measured-{index}", value)
+        for index, value in enumerate((10.0, 12.0, 20.0), start=1)
+    ]
+    paths = []
+    for report in reports:
+        report["metrics"]["responsiveness"] = {
+            "status": "not_applicable",
+            "values": {},
+        }
+        path = tmp_path / f"{report['run']['run_id']}.json"
+        path.write_text(json.dumps(report), encoding="utf-8")
+        paths.append(path)
+
+    report_set = build_report_set(
+        paths[1:], warmup_paths=paths[:1], host_label="pi5-storage-v1"
+    )
+
+    assert report_set["metric_profile"] == CALIBRATION_STORAGE_METRIC_PROFILE
+    assert report_set["metrics"] == {}
+    assert report_set["noise"]["status"] == "not_applicable"
+    assert report_set["synthetic"] == {
+        "warmup_injected_count": 0,
+        "measured_injected_count": 0,
+    }
+    validate_report_set(report_set)
+    with pytest.raises(ComparisonIncompleteError, match="generic baseline builder"):
+        create_baseline_summary(report_set, maturity="candidate")
 
 
 def test_storage_baseline_preserves_identity_counts_distributions_and_deferred_fields():
