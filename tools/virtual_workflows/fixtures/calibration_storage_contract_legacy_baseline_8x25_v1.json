@@ -1,0 +1,18 @@
+{
+  "schema_id": "labcraft.calibration_storage_performance_workload",
+  "schema_version": 1,
+  "fixture_id": "calibration_storage_legacy_baseline_8x25_v1",
+  "workload": {
+    "completion_count": 200,
+    "head_count": 8,
+    "process_runs_per_head": 25,
+    "structured_process_runs": 200,
+    "expected_update_count": 232,
+    "large_process_ordinal_per_head": 25,
+    "large_update_count_per_process": 5,
+    "capture_mode": "structured_only_proxy",
+    "key_evidence_probe_capture_count": 2
+  },
+  "source_fixture_ids": ["droplet_sequence_nominal_v1", "online_stream_large_multi_update_v1", "capture_policy_v1"],
+  "limitations": ["current legacy-writer performance only", "no physical hardware, camera, image analysis, firmware, or protocol claim"]
+}

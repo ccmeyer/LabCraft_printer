@@ -1,0 +1,30 @@
+{
+  "schema_id": "labcraft.calibration_storage_contract_fixture",
+  "schema_version": 1,
+  "fixture_id": "online_stream_large_multi_update_v1",
+  "source_shape": "sanitized online-stream flow/tail payload with deterministic large trace expansion",
+  "source_semantic_sha256": "synthetic-reviewed-v1",
+  "identity": {"printer_head_id": "sil-head-02", "stock_id": "sil-stock-02", "reagent_name": "SIL Reagent B", "concentration": "2.0", "units": "x"},
+  "processes": [
+    {
+      "process_id": "online-stream-five-update",
+      "phase_name": "online_stream_calibration",
+      "result_kind": "calibration",
+      "terminal_outcome": "completed",
+      "error_message": "",
+      "record_mode_enabled": true,
+      "capture_mode": "structured_only_proxy",
+      "updates": [
+        {"result": {"condition": {"print_pulse_width_us": 1500, "print_pressure_psi": 1.4}, "flow_phase": {"fit_status": "collecting"}, "tail_phase": {"status": "not_run"}, "warnings": []}, "_sil_generator": {"kind": "online_stream_trace_v1", "seed": 11, "sample_count": 500, "minimum_canonical_bytes": 60000}},
+        {"result": {"condition": {"print_pulse_width_us": 1500, "print_pressure_psi": 1.4}, "flow_phase": {"fit_status": "collecting"}, "tail_phase": {"status": "not_run"}, "warnings": []}, "_sil_generator": {"kind": "online_stream_trace_v1", "seed": 12, "sample_count": 500, "minimum_canonical_bytes": 60000}},
+        {"result": {"condition": {"print_pulse_width_us": 1500, "print_pressure_psi": 1.4}, "flow_phase": {"fit_status": "stable"}, "tail_phase": {"status": "not_run"}, "warnings": ["sil_trace_only"]}, "_sil_generator": {"kind": "online_stream_trace_v1", "seed": 13, "sample_count": 500, "minimum_canonical_bytes": 60000}},
+        {"result": {"condition": {"print_pulse_width_us": 1500, "print_pressure_psi": 1.4}, "flow_phase": {"fit_status": "stable"}, "tail_phase": {"status": "collecting"}, "warnings": []}, "_sil_generator": {"kind": "online_stream_trace_v1", "seed": 14, "sample_count": 500, "minimum_canonical_bytes": 60000}},
+        {"result": {"condition": {"print_pulse_width_us": 1500, "print_pressure_psi": 1.4}, "flow_phase": {"fit_status": "stable"}, "tail_phase": {"status": "captured"}, "predicted_stream_duration_us": 175000, "predicted_volume_nl": 82.5, "warnings": []}, "_sil_generator": {"kind": "online_stream_trace_v1", "seed": 15, "sample_count": 500, "minimum_canonical_bytes": 60000}}
+      ],
+      "captures": [],
+      "expected_summary_rows": [],
+      "expected_update_hashes": ["0a3efe4c59cbe99c3a6f931ddaaa2326926dd04d2f885a318c71a24e97ea963a", "ee4b623c5edd5dbd96158f0d2ceffb581af3ac682cb5691eae6b878fb7b9924b", "eb97dc13c7808ef4c8df2112b204828e9dba68772acbff072539ee3a787699f3", "87a56cd48e8a3ed4bf54a50772f11b5f836383d54aeb4fd25aa8f5a09601451d", "3f5f6e887dce05fdf5345516eb5b9398ddef1991f096f2e13bf410061b862b9a"]
+    }
+  ],
+  "limitations": ["large trace is deterministically expanded from a reviewed source-shaped template", "no stream image analysis, flow sensing, or physical volume claim"]
+}

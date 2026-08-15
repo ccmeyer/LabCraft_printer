@@ -1,0 +1,13 @@
+{
+  "schema_id": "labcraft.calibration_storage_contract_fixture",
+  "schema_version": 1,
+  "fixture_id": "stopped_and_error_v1",
+  "source_shape": "manager stopped and error terminal paths before application-eligible updates",
+  "source_semantic_sha256": "synthetic-reviewed-v1",
+  "identity": {"printer_head_id": "sil-head-04", "stock_id": "sil-stock-04", "reagent_name": "SIL Reagent D", "concentration": "4.0", "units": "x"},
+  "processes": [
+    {"process_id": "stopped-before-result", "phase_name": "pressure_sweep_characterization", "result_kind": "none", "terminal_outcome": "stopped", "error_message": "Calibration terminated by user", "record_mode_enabled": true, "capture_mode": "structured_only_proxy", "updates": [], "captures": [], "expected_summary_rows": [], "expected_update_hashes": []},
+    {"process_id": "error-before-result", "phase_name": "online_stream_calibration", "result_kind": "none", "terminal_outcome": "error", "error_message": "SIL injected storage-contract process error", "record_mode_enabled": true, "capture_mode": "structured_only_proxy", "updates": [], "captures": [], "expected_summary_rows": [], "expected_update_hashes": []}
+  ],
+  "limitations": ["does not claim current readers reject an application-eligible partial update", "no physical fault is injected"]
+}

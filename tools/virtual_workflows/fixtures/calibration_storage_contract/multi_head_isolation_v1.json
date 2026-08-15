@@ -1,0 +1,43 @@
+{
+  "schema_id": "labcraft.calibration_storage_contract_fixture",
+  "schema_version": 1,
+  "fixture_id": "multi_head_isolation_v1",
+  "source_shape": "two overlapping pressure-sweep process types with distinct synthetic identities",
+  "source_semantic_sha256": "synthetic-reviewed-v1",
+  "identity": {"printer_head_id": "sil-head-default", "stock_id": "sil-stock-default", "reagent_name": "SIL Reagent", "concentration": "1.0", "units": "x"},
+  "processes": [
+    {
+      "process_id": "head-a-sweep",
+      "phase_name": "pressure_sweep_characterization",
+      "result_kind": "calibration",
+      "terminal_outcome": "completed",
+      "error_message": "",
+      "record_mode_enabled": true,
+      "capture_mode": "structured_only_proxy",
+      "identity": {"printer_head_id": "sil-head-a", "stock_id": "sil-stock-a", "reagent_name": "SIL Isolation Reagent A", "concentration": "11.0", "units": "x"},
+      "updates": [{"result": {"print_pulse_width_us": 1350, "pressures": [{"pressure": 1.1, "mean_volume": 8.5, "cv_volume_percent": 2.5, "valid": true}]}}],
+      "captures": [],
+      "expected_summary_rows": [
+        {"source_phase_key": "pressure_sweep_characterization", "source_step_index": 0, "source_pressure_index": 0, "phase": "sweep", "pw_us": 1400, "pressure_psi": 1.1, "mean_nL": 8.5, "cv_pct": 2.5, "valid": true, "printing_mode": "droplet"}
+      ],
+      "expected_update_hashes": ["d0d68b13012227133eae6b7a994b84bbcef752a9033830896a551fe3d52c92a9"]
+    },
+    {
+      "process_id": "head-b-sweep",
+      "phase_name": "pressure_sweep_characterization",
+      "result_kind": "calibration",
+      "terminal_outcome": "completed",
+      "error_message": "",
+      "record_mode_enabled": true,
+      "capture_mode": "structured_only_proxy",
+      "identity": {"printer_head_id": "sil-head-b", "stock_id": "sil-stock-b", "reagent_name": "SIL Isolation Reagent B", "concentration": "12.0", "units": "x"},
+      "updates": [{"result": {"print_pulse_width_us": 1450, "pressures": [{"pressure": 1.4, "mean_volume": 12.5, "cv_volume_percent": 4.0, "valid": true}]}}],
+      "captures": [],
+      "expected_summary_rows": [
+        {"source_phase_key": "pressure_sweep_characterization", "source_step_index": 0, "source_pressure_index": 0, "phase": "sweep", "pw_us": 1400, "pressure_psi": 1.4, "mean_nL": 12.5, "cv_pct": 4.0, "valid": true, "printing_mode": "droplet"}
+      ],
+      "expected_update_hashes": ["d3a6fa4ec951833af9501a9c342e80a3a48443c79e202f025b550a6e037b0dde"]
+    }
+  ],
+  "limitations": ["identity isolation only; no physical head exchange", "values are synthetic"]
+}

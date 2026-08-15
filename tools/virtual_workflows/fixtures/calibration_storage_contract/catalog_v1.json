@@ -1,0 +1,17 @@
+{
+  "schema_id": "labcraft.calibration_storage_contract_catalog",
+  "schema_version": 1,
+  "fixture_id": "calibration_storage_contract_v1",
+  "workload": {"completion_count": 16, "successful_processes": 14, "stopped_processes": 1, "error_processes": 1, "update_count": 17},
+  "fixtures": [
+    {"fixture_id": "droplet_sequence_nominal_v1", "path": "droplet_sequence_nominal_v1.json", "semantic_sha256": "2db24dda62ee56f68de184d140453e25cd8b4608e4eecf1c80aab31572d9b175"},
+    {"fixture_id": "online_stream_large_multi_update_v1", "path": "online_stream_large_multi_update_v1.json", "semantic_sha256": "901efd291c9dcd33873f5fe23313eb1f525e1bf1a8dedc91d626eb0906f33c3d"},
+    {"fixture_id": "multi_head_isolation_v1", "path": "multi_head_isolation_v1.json", "semantic_sha256": "46e45f5fd482b80b55f43a24b900a39c97417c3836e3d4837d68eb16b13b35e7"},
+    {"fixture_id": "non_calibration_terminal_v1", "path": "non_calibration_terminal_v1.json", "semantic_sha256": "ff2903f487bef42f159d1439f4f1103af8faf2f2a373d145b2880d6f8b2f8173"},
+    {"fixture_id": "stopped_and_error_v1", "path": "stopped_and_error_v1.json", "semantic_sha256": "cbfac20e1d981ac4d347f237c7159d92288c2df1b8ce309b2ae678d252c66e61"},
+    {"fixture_id": "capture_policy_v1", "path": "capture_policy_v1.json", "semantic_sha256": "27dcc08ab5dcedc230a5ae355768ff36d69fbf1861750e4bed40e755a6e06acb"},
+    {"fixture_id": "legacy_parity_v1", "path": "legacy_parity_v1.json", "semantic_sha256": "0977e79e36a1bb7080f8de88d98ff6ab803bf70c76e8efe7aa62de93f91823bc"}
+  ],
+  "catalog_semantic_sha256": "15e6bd78f585310c6e548409c5ff85a2c43f6786d3f8d323d154e0e3ae9e2be5",
+  "limitations": ["storage semantics only; no camera, image analysis, physical calibration quality, firmware, or protocol coverage"]
+}

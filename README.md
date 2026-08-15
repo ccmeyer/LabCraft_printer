@@ -2220,6 +2220,98 @@ CV/outlier evidence. It is designed to expose host UI/persistence regressions,
 not physical printer behavior. It still does not validate firmware, protocol,
 motion, pressure, cameras, balance, or droplet quality.
 
+### Calibration storage-contract SIL
+
+Milestone 1 adds two current-writer scenarios without changing production
+calibration behavior or persisted schemas:
+
+- `calibration_storage_contract_v1` runs the seven reviewed fixture families
+  through the real `CalibrationManager` writers, then closes and reopens the
+  MVC composition and selects/applies a persisted row through the real UI.
+- `calibration_storage_legacy_baseline_8x25_v1` freezes eight synthetic heads
+  with 25 process runs per head: 200 process recordings and 232 structured
+  updates. Workload captures are disabled; a separate two-frame probe proves
+  recorder drain behavior.
+
+Run the focused host coverage with unique temporary roots outside the
+repository when the default pytest root has stale Windows permissions:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_calibration_storage_contract_fixtures.py `
+  tests\test_calibration_storage_fixture_sanitizer.py `
+  tests\test_calibration_storage_scripted_process.py `
+  tests\test_calibration_storage_baseline.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_calibration_storage_contract_lifecycle.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-stress `
+  tests\system\test_calibration_storage_contract_performance.py
+```
+
+The developer-only sanitizer reads one explicitly selected legacy run/phase,
+verifies that the source hash does not change, removes identities and paths,
+and refuses to overwrite its reviewed output. Tests never invoke it and never
+read `FreeRTOS-interface/Experiments`:
+
+```powershell
+.\env\Scripts\python.exe -m tools.sil.calibration_storage_sanitizer `
+  --source <explicit-calibration.json> `
+  --output <new-reviewed-fixture.json> `
+  --fixture-id <fixture-id-v1> `
+  --process-id <synthetic-process-id> `
+  --run-index 0 `
+  --phase <phase-key> `
+  --step-index 0
+```
+
+Use repeated `--step-index` arguments to retain ordered multi-update shapes.
+Review every generated fixture before adding it to the catalog.
+
+The qualified Pi collection is explicit and uses the existing Bubblewrap
+private-device lane:
+
+```powershell
+.\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost <qualified-pi-host> `
+  -Scenario calibration_storage_legacy_baseline_8x25_v1 `
+  -HostLabel pi5-calibration-storage-legacy-v1 `
+  -WarmupRuns 1 `
+  -MeasuredRuns 3 `
+  -SpeedMultiplier 1000 `
+  -TimeoutSeconds 1800
+```
+
+After the wrapper retrieves and validates the report set, freeze the
+storage-specific candidate baseline. The command refuses to overwrite an
+existing baseline and requires one clean warm-up plus exactly three clean,
+passing measured Pi reports:
+
+```powershell
+.\env\Scripts\python.exe -m tools.sil.calibration_storage_baseline `
+  --report-set <retrieved-report_set.json> `
+  --output tests\performance\baselines\calibration_storage_legacy_pi5_v1.json
+```
+
+The baseline preserves the source/Pi/storage/Python/Qt identity, fixture and
+workload hashes, exact counts, rewrite/append and first/last-quartile latency,
+reload/history latency, RSS, and artifact growth. Result-finalize and index
+latency remain `not_available_until_m2` because those artifacts do not exist
+in the current writer.
+
+If Qt session creation reports `WinError 5`, choose a new `--basetemp` under
+`$env:LOCALAPPDATA\Temp\LabCraft`; do not place a SIL session root inside the
+repository. If the baseline tool rejects evidence, retain the report set and
+raw reports: count, hash, clean-source, Pi identity, safety-proof, and
+environment mismatches are intentionally fail-closed.
+
+This coverage proves only structured current-writer storage, recording,
+summary isolation, reload, UI application, and deterministic capture-policy
+proxies. It does not prove camera acquisition, image analysis, physical
+calibration quality, firmware, serial/GPIO, motion, dispense, balance, or
+pressure response.
+
 ## Raspberry Pi Software-In-The-Loop
 
 The target-Pi SIL lane runs the same real-UI workflow on Raspberry Pi CPU and

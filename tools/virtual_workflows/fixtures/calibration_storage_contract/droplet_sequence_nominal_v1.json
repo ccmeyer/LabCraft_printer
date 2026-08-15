@@ -1,0 +1,66 @@
+{
+  "schema_id": "labcraft.calibration_storage_contract_fixture",
+  "schema_version": 1,
+  "fixture_id": "droplet_sequence_nominal_v1",
+  "source_shape": "sanitized legacy droplet calibration sequence payload shapes",
+  "source_semantic_sha256": "synthetic-reviewed-v1",
+  "identity": {"printer_head_id": "sil-head-01", "stock_id": "sil-stock-01", "reagent_name": "SIL Reagent A", "concentration": "1.0", "units": "x"},
+  "processes": [
+    {
+      "process_id": "droplet-emergence",
+      "phase_name": "droplet_emergence",
+      "result_kind": "calibration",
+      "terminal_outcome": "completed",
+      "error_message": "",
+      "record_mode_enabled": true,
+      "capture_mode": "structured_only_proxy",
+      "updates": [{"result": {"emergence_time_us": 275, "nozzle_center_px": [320.0, 241.0], "valid": true}}],
+      "captures": [],
+      "expected_summary_rows": [],
+      "expected_update_hashes": ["7928280453e668703a4cbbc424a63a14c7b68250bb1a5acd42f12b47ff0ff636"]
+    },
+    {
+      "process_id": "pressure-scan",
+      "phase_name": "pressure_scan",
+      "result_kind": "calibration",
+      "terminal_outcome": "completed",
+      "error_message": "",
+      "record_mode_enabled": true,
+      "capture_mode": "structured_only_proxy",
+      "updates": [{"result": {"pressure": 1.25, "lower_bound_psi": 1.1, "upper_bound_psi": 1.4, "valid": true}}],
+      "captures": [],
+      "expected_summary_rows": [],
+      "expected_update_hashes": ["beb47d5ba4d80b22e1cbe53a49c55e61f42b2efc5006657bc53a69894b7cb898"]
+    },
+    {
+      "process_id": "pressure-trajectory",
+      "phase_name": "pressure_trajectory",
+      "result_kind": "calibration",
+      "terminal_outcome": "completed",
+      "error_message": "",
+      "record_mode_enabled": true,
+      "capture_mode": "structured_only_proxy",
+      "updates": [{"result": {"pressure": 1.25, "delay_us": 415, "mean_position_machine": [10.0, 20.0, 30.0], "vec_steps_per_s": 1250.0, "valid": true}}],
+      "captures": [],
+      "expected_summary_rows": [],
+      "expected_update_hashes": ["f6fe308ba194c120ddbe0ccf8b945c301e25587f17a498c71798ae1a87f677a6"]
+    },
+    {
+      "process_id": "pressure-sweep-characterization",
+      "phase_name": "pressure_sweep_characterization",
+      "result_kind": "calibration",
+      "terminal_outcome": "completed",
+      "error_message": "",
+      "record_mode_enabled": true,
+      "capture_mode": "structured_only_proxy",
+      "updates": [{"result": {"print_pulse_width_us": 1400, "nozzle_center_px": [320.0, 241.0], "pressures": [{"pressure": 1.2, "delay_us": 410, "mean_volume": 9.8, "cv_volume_percent": 3.2, "valid": true}, {"pressure": 1.3, "delay_us": 420, "mean_volume": 10.4, "cv_volume_percent": 3.5, "valid": true}]}}],
+      "captures": [],
+      "expected_summary_rows": [
+        {"source_phase_key": "pressure_sweep_characterization", "source_step_index": 0, "source_pressure_index": 0, "phase": "sweep", "pw_us": 1400, "pressure_psi": 1.2, "mean_nL": 9.8, "cv_pct": 3.2, "valid": true, "printing_mode": "droplet"},
+        {"source_phase_key": "pressure_sweep_characterization", "source_step_index": 0, "source_pressure_index": 1, "phase": "sweep", "pw_us": 1400, "pressure_psi": 1.3, "mean_nL": 10.4, "cv_pct": 3.5, "valid": true, "printing_mode": "droplet"}
+      ],
+      "expected_update_hashes": ["64768729266deb4b2a249c05974bfa683837861055bd6f14a73b1d89be6e1172"]
+    }
+  ],
+  "limitations": ["no camera or image-analysis execution", "numeric values are synthetic and do not claim physical calibration quality"]
+}

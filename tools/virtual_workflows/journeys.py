@@ -150,6 +150,10 @@ from tools.virtual_workflows.editor_safeguards import get_editor_safeguard_case
 from tools.virtual_workflows.execution_preflight_safeguards import (
     get_execution_preflight_case,
 )
+from tools.virtual_workflows.calibration_storage_journeys import (
+    FUNCTIONAL_DEFINITION as CALIBRATION_STORAGE_FUNCTIONAL_DEFINITION,
+    PERFORMANCE_DEFINITION as CALIBRATION_STORAGE_PERFORMANCE_DEFINITION,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -5958,6 +5962,8 @@ JOURNEY_DEFINITIONS = {
         DISCONNECT_DEFINITION,
         RANDOMIZED_CALIBRATION_DEFINITION,
         OPTIMIZER_360_DEFINITION,
+        CALIBRATION_STORAGE_FUNCTIONAL_DEFINITION,
+        CALIBRATION_STORAGE_PERFORMANCE_DEFINITION,
     )
 }
 JOURNEY_DEFINITION_IDS = frozenset(JOURNEY_DEFINITIONS)

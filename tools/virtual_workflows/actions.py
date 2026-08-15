@@ -165,6 +165,14 @@ LEGACY_READ_ONLY_ACTION_IDS = frozenset(
         "analysis.open_plate_reader_via_ui",
     }
 )
+CALIBRATION_STORAGE_ACTION_IDS = frozenset(
+    {
+        "fixture.prepare_calibration_storage",
+        "calibration.run_scripted_processes",
+        "calibration.inspect_storage_artifacts",
+        "calibration.stage_persisted_selection",
+    }
+)
 ACTION_IDS = (
     AUTHORITATIVE_RELOAD_ACTION_IDS
     | MULTI_STOCK_LIFECYCLE_ACTION_IDS
@@ -178,6 +186,7 @@ ACTION_IDS = (
     | EXECUTION_PREFLIGHT_SAFEGUARD_ACTION_IDS
     | PERSISTENCE_SAFEGUARD_ACTION_IDS
     | LEGACY_READ_ONLY_ACTION_IDS
+    | CALIBRATION_STORAGE_ACTION_IDS
 )
 
 
@@ -233,6 +242,14 @@ ACTION_INTERACTION_SURFACES.update(
             action_id: InteractionSurface.UI
             for action_id in PERSISTENCE_SAFEGUARD_ACTION_IDS
         },
+    }
+)
+ACTION_INTERACTION_SURFACES.update(
+    {
+        "fixture.prepare_calibration_storage": InteractionSurface.MODEL,
+        "calibration.run_scripted_processes": InteractionSurface.MODEL,
+        "calibration.inspect_storage_artifacts": InteractionSurface.HARNESS,
+        "calibration.stage_persisted_selection": InteractionSurface.HARNESS,
     }
 )
 

@@ -185,6 +185,46 @@ class AutomationHarness:
             }
         )
 
+    def _bind_pi_report_identity(self) -> None:
+        if self.config.pi_preflight_path is None:
+            return
+        if self.report_identity.get("pi_sil") is not None:
+            return
+        from tools.virtual_workflows.pi_sil import (
+            load_and_validate_pi_evidence,
+            pi_report_identity,
+        )
+        from tools.virtual_workflows.report import collect_environment_identity
+
+        repo_root = Path(__file__).resolve().parents[2]
+        identity = collect_environment_identity(repo_root)
+        qt_platform = str((identity["environment"].get("qt") or {}).get("platform"))
+        preflight, proof = load_and_validate_pi_evidence(
+            self.config.pi_preflight_path,
+            self.config.pi_hardware_proof_path,
+            expected_qt_platform=qt_platform,
+        )
+        if identity["source"].get("git_commit") != preflight.get("source_commit"):
+            raise RuntimeError(
+                "Pi SIL preflight source commit does not match the composed journey"
+            )
+        for field in (
+            "operating_system",
+            "architecture",
+            "python_version",
+            "python_executable",
+        ):
+            if identity["environment"].get(field) != preflight.get(field):
+                raise RuntimeError(
+                    f"Pi SIL preflight {field} does not match the composed journey"
+                )
+        target_pi, pi_safety = pi_report_identity(
+            preflight,
+            proof,
+            self.config.pi_hardware_proof_path,
+        )
+        self.report_identity.update(target_pi=target_pi, pi_sil=pi_safety)
+
     def _launch_application_session(
         self,
         prelaunch_prepare: Callable[[Path], None] | None = None,
@@ -294,7 +334,7 @@ class AutomationHarness:
         prelaunch_prepare: Callable[[Path], None] | None = None,
     ) -> dict[str, Any]:
         """Construct and launch the canonical retained SimulationSession."""
-
+        self._bind_pi_report_identity()
         return execute_action(
             self.context,
             "app.launch_simulated",

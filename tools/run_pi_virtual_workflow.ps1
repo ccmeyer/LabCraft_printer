@@ -9,7 +9,11 @@ param(
   [string]$HostLabel = "pi5-sil-primary-v1",
 
   [Parameter(ParameterSetName = "Scenario")]
-  [ValidateSet("virtual_print_array_96_v1", "virtual_print_array_384x10_v1")]
+  [ValidateSet(
+    "virtual_print_array_96_v1",
+    "virtual_print_array_384x10_v1",
+    "calibration_storage_legacy_baseline_8x25_v1"
+  )]
   [string]$Scenario = "virtual_print_array_96_v1",
 
   [Parameter(Mandatory = $true, ParameterSetName = "Suite")]

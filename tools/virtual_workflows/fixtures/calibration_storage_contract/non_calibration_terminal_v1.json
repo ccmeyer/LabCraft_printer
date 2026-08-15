@@ -1,0 +1,13 @@
+{
+  "schema_id": "labcraft.calibration_storage_contract_fixture",
+  "schema_version": 1,
+  "fixture_id": "non_calibration_terminal_v1",
+  "source_shape": "dataset and operational process terminal envelopes without calibration updates",
+  "source_semantic_sha256": "synthetic-reviewed-v1",
+  "identity": {"printer_head_id": "sil-head-03", "stock_id": "sil-stock-03", "reagent_name": "SIL Reagent C", "concentration": "3.0", "units": "x"},
+  "processes": [
+    {"process_id": "dataset-terminal", "phase_name": "pre_breakup_dataset_acquisition", "result_kind": "dataset", "terminal_outcome": "completed", "error_message": "", "record_mode_enabled": true, "capture_mode": "structured_only_proxy", "updates": [], "captures": [], "expected_summary_rows": [], "expected_update_hashes": []},
+    {"process_id": "operational-terminal", "phase_name": "head_prime", "result_kind": "operational", "terminal_outcome": "completed", "error_message": "", "record_mode_enabled": true, "capture_mode": "structured_only_proxy", "updates": [], "captures": [], "expected_summary_rows": [], "expected_update_hashes": []}
+  ],
+  "limitations": ["result_kind is fixture metadata until the canonical store exists", "no dataset pixels or physical priming"]
+}

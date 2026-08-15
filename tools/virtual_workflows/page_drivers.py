@@ -3085,6 +3085,68 @@ class CalibrationDialogDriver:
         )
         return dict(raw)
 
+    def select_persisted_result(
+        self,
+        *,
+        source_run_id: str,
+        source_phase_key: str,
+        source_step_index: int,
+        source_pressure_index: int | None,
+    ) -> dict[str, Any]:
+        """Select one legacy-backed summary row by its stable source coordinates."""
+
+        expected = {
+            "source_run_id": str(source_run_id),
+            "source_phase_key": str(source_phase_key),
+            "source_step_index": int(source_step_index),
+            "source_pressure_index": (
+                None
+                if source_pressure_index is None
+                else int(source_pressure_index)
+            ),
+        }
+        table = self.dialog.summary_table
+        proxy = self.dialog.summary_table_proxy_model
+        source = self.dialog.summary_table_model
+        match = None
+        for proxy_row in range(proxy.rowCount()):
+            source_index = proxy.mapToSource(proxy.index(proxy_row, 0))
+            raw = dict(source.raw_row_at(source_index.row()) or {})
+            observed = {
+                "source_run_id": str(raw.get("source_run_id") or ""),
+                "source_phase_key": str(raw.get("source_phase_key") or ""),
+                "source_step_index": raw.get("source_step_index"),
+                "source_pressure_index": raw.get("source_pressure_index"),
+            }
+            if observed == expected:
+                match = (proxy_row, raw)
+                break
+        if match is None:
+            raise RuntimeError(
+                "persisted calibration result is not visible at source coordinates: "
+                f"{expected}"
+            )
+        proxy_row, raw = match
+        target = proxy.index(proxy_row, 1)
+        table.scrollTo(target)
+        rect = table.visualRect(target)
+        QtTest.QTest.mouseClick(
+            table.viewport(),
+            QtCore.Qt.MouseButton.LeftButton,
+            pos=rect.center(),
+        )
+        self.wait_until(
+            lambda: bool(self.dialog._selected_summary_row()[1]),
+            "persisted calibration row selection",
+        )
+        selected = dict(self.dialog._selected_summary_row()[1] or {})
+        for key, value in expected.items():
+            if selected.get(key) != value:
+                raise RuntimeError(
+                    "persisted calibration selection drifted from its source coordinates"
+                )
+        return dict(raw)
+
     def inspect_preview(self) -> dict[str, Any]:
         payload = dict(getattr(self.dialog, "_bridge_preview_payload", None) or {})
         table = self.dialog.bridge_table
@@ -3172,7 +3234,8 @@ class CalibrationDialogDriver:
             expected_step_title, standard_button = steps.pop(0)
             if active.windowTitle() != expected_step_title:
                 state["error"] = RuntimeError(
-                    f"unexpected Apply dialog title: {active.windowTitle()!r}"
+                    "unexpected Apply dialog title: "
+                    f"{active.windowTitle()!r}; message={active.text()!r}"
                 )
                 active.reject()
                 return

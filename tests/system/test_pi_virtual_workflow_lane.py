@@ -33,6 +33,7 @@ from tools.virtual_workflows.report import (
     REPORT_SCHEMA_VERSION,
     validate_report_v1,
 )
+from tools.virtual_workflows.harness import AutomationHarness, AutomationHarnessConfig
 
 pytestmark = pytest.mark.sil_pi_contract
 
@@ -327,6 +328,56 @@ def test_pi_evidence_requires_exact_preflight_hash_and_qt_platform(tmp_path):
         )
 
 
+def test_composed_harness_binds_validated_pi_identity_before_launch(
+    tmp_path, monkeypatch
+):
+    preflight_payload = _preflight(tmp_path)
+    preflight_path = _write_json(tmp_path / "preflight.json", preflight_payload)
+    trace_path = tmp_path / "trace.txt"
+    trace_path.write_text("clean\n", encoding="utf-8")
+    audit_path = _write_json(
+        tmp_path / "audit-report.json",
+        _report("audit", tmp_path / "scenario-root"),
+    )
+    proof_path = _write_json(
+        tmp_path / "proof.json",
+        _proof(preflight_path, trace_path, audit_path),
+    )
+    from tools.virtual_workflows import report as report_module
+
+    monkeypatch.setattr(
+        report_module,
+        "collect_environment_identity",
+        lambda _repo_root: {
+            "source": {"git_commit": preflight_payload["source_commit"]},
+            "environment": {
+                "operating_system": preflight_payload["operating_system"],
+                "architecture": preflight_payload["architecture"],
+                "python_version": preflight_payload["python_version"],
+                "python_executable": preflight_payload["python_executable"],
+                "qt": {"platform": preflight_payload["qt_platform"]},
+            },
+        },
+    )
+    harness = AutomationHarness(
+        AutomationHarnessConfig(
+            scenario_id="calibration_storage_legacy_baseline_8x25_v1",
+            workload_id="calibration_storage_legacy_baseline_8x25_v1",
+            output_root=tmp_path / "reports",
+            pi_preflight_path=preflight_path,
+            pi_hardware_proof_path=proof_path,
+        )
+    )
+
+    harness._bind_pi_report_identity()
+
+    assert harness.report_identity["target_pi"]["pi_model"].startswith(
+        "Raspberry Pi 5"
+    )
+    assert harness.report_identity["target_pi"]["filesystem"]["storage_class"] == "sd"
+    assert harness.report_identity["pi_sil"]["private_dev"] is True
+
+
 def test_artifact_bundle_round_trip_preserves_relative_reports_and_hashes(
     tmp_path, monkeypatch
 ):
@@ -515,6 +566,49 @@ def test_remote_wrapper_dry_run_builds_preflight_proof_and_collection_commands()
     assert "'prove'" in result.stdout
     assert "'collect'" in result.stdout
     assert "'virtual_print_array_384x10_v1'" in result.stdout
+    assert "'--emit-report-set'" in result.stdout
+    assert "Dry run complete" in result.stdout
+
+
+def test_remote_wrapper_allows_calibration_storage_pi_qualification_contract():
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("PowerShell is unavailable")
+    result = subprocess.run(
+        [
+            powershell,
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REMOTE_TOOL),
+            "-PiHost",
+            "pi-test",
+            "-Scenario",
+            "calibration_storage_legacy_baseline_8x25_v1",
+            "-HostLabel",
+            "pi5-calibration-storage-legacy-v1",
+            "-WarmupRuns",
+            "1",
+            "-MeasuredRuns",
+            "3",
+            "-SpeedMultiplier",
+            "1000",
+            "-TimeoutSeconds",
+            "1800",
+            "-DryRun",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "'calibration_storage_legacy_baseline_8x25_v1'" in result.stdout
+    assert "--warmup-runs" in result.stdout
+    assert "--measured-runs" in result.stdout
+    assert "--speed-multiplier" in result.stdout
+    assert "--timeout-seconds" in result.stdout
     assert "'--emit-report-set'" in result.stdout
     assert "Dry run complete" in result.stdout
 

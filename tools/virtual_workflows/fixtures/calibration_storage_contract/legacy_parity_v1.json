@@ -1,0 +1,31 @@
+{
+  "schema_id": "labcraft.calibration_storage_contract_fixture",
+  "schema_version": 1,
+  "fixture_id": "legacy_parity_v1",
+  "source_shape": "two ordered pressure-sweep updates used as the Milestone 2 parity oracle",
+  "source_semantic_sha256": "synthetic-reviewed-v1",
+  "identity": {"printer_head_id": "sil-head-parity", "stock_id": "sil-stock-parity", "reagent_name": "SIL Reagent Parity", "concentration": "6.0", "units": "x"},
+  "processes": [
+    {
+      "process_id": "legacy-parity-two-update",
+      "phase_name": "pressure_sweep_characterization",
+      "result_kind": "calibration",
+      "terminal_outcome": "completed",
+      "error_message": "",
+      "record_mode_enabled": true,
+      "capture_mode": "structured_only_proxy",
+      "updates": [
+        {"result": {"print_pulse_width_us": 1425, "pressures": [{"pressure": 1.2, "mean_volume": 9.5, "cv_volume_percent": 3.0, "valid": true}]}},
+        {"result": {"print_pulse_width_us": 1425, "pressures": [{"pressure": 1.2, "mean_volume": 9.6, "cv_volume_percent": 2.9, "valid": true}, {"pressure": 1.3, "mean_volume": 10.2, "cv_volume_percent": 3.1, "valid": true}]}}
+      ],
+      "captures": [],
+      "expected_summary_rows": [
+        {"source_phase_key": "pressure_sweep_characterization", "source_step_index": 0, "source_pressure_index": 0, "phase": "sweep", "pw_us": 1400, "pressure_psi": 1.2, "mean_nL": 9.5, "cv_pct": 3.0, "valid": true, "printing_mode": "droplet"},
+        {"source_phase_key": "pressure_sweep_characterization", "source_step_index": 1, "source_pressure_index": 0, "phase": "sweep", "pw_us": 1400, "pressure_psi": 1.2, "mean_nL": 9.6, "cv_pct": 2.9, "valid": true, "printing_mode": "droplet"},
+        {"source_phase_key": "pressure_sweep_characterization", "source_step_index": 1, "source_pressure_index": 1, "phase": "sweep", "pw_us": 1400, "pressure_psi": 1.3, "mean_nL": 10.2, "cv_pct": 3.1, "valid": true, "printing_mode": "droplet"}
+      ],
+      "expected_update_hashes": ["3c2e0f3f028e03f4c26324e454438edbc9278d7304f62dd96609d1b66bfcd3d6", "a56ab3784d06a8d38acdf927c272e707134648658e9ee86f0762ed2ffb58cbde"]
+    }
+  ],
+  "limitations": ["freezes semantic payload and legacy source coordinates, not runtime IDs or timestamps", "new-store parity is added in Milestone 2"]
+}
