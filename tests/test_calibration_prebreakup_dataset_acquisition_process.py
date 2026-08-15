@@ -352,7 +352,7 @@ def test_prebreakup_dataset_on_record_frame_writes_analysis_and_overlay(tmp_path
 
     proc._append_dataset_jsonl = lambda path, payload: appended.append((path, payload))
     proc._record_analysis = lambda payload: analyses.append(payload)
-    proc._record_capture = lambda _image, *, role, metadata=None: {
+    proc._record_capture = lambda _image, *, role, metadata=None, **_kwargs: {
         "capture_id": "cap_overlay",
         "image_relpath": "captures/overlay_0001.png",
         "capture_role": role,

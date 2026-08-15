@@ -65,6 +65,7 @@ def _dummy_model(tmp_path):
 def test_manager_submits_pending_process_verdict(tmp_path):
     model = _dummy_model(tmp_path)
     mgr = CalibrationManager(model)
+    mgr._canonical_store_authoritative = False
 
     proc = _DummyProcess()
     mgr._begin_process_recording(proc)
@@ -99,6 +100,7 @@ def test_manager_submits_pending_process_verdict(tmp_path):
 def test_non_verdict_process_does_not_create_pending_verdict_context(tmp_path):
     model = _dummy_model(tmp_path)
     mgr = CalibrationManager(model)
+    mgr._canonical_store_authoritative = False
 
     proc = _NonVerdictProcess()
     mgr._begin_process_recording(proc)
@@ -113,6 +115,7 @@ def test_non_verdict_process_does_not_create_pending_verdict_context(tmp_path):
 def test_on_calibration_completed_cleans_up_process_and_sets_pending_verdict(tmp_path, monkeypatch):
     model = _dummy_model(tmp_path)
     mgr = CalibrationManager(model)
+    mgr._canonical_store_authoritative = False
     mgr._emit_readiness = lambda: None
     proc = _CleanupProcess()
     mgr.activeCalibration = proc

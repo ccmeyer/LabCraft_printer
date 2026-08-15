@@ -45,6 +45,8 @@ from tools.virtual_workflows.editor_scenarios import (
 )
 from tools.virtual_workflows.journeys import LEGACY_READ_ONLY_WORKLOAD_ID
 from tools.virtual_workflows.calibration_storage_journeys import (
+    AUTHORITATIVE_FUNCTIONAL_ID as CALIBRATION_STORAGE_AUTHORITATIVE_CONTRACT_ID,
+    AUTHORITATIVE_PERFORMANCE_ID as CALIBRATION_STORAGE_AUTHORITATIVE_PERFORMANCE_ID,
     FUNCTIONAL_ID as CALIBRATION_STORAGE_CONTRACT_ID,
     PERFORMANCE_ID as CALIBRATION_STORAGE_PERFORMANCE_ID,
     SHADOW_FUNCTIONAL_ID as CALIBRATION_STORAGE_SHADOW_CONTRACT_ID,
@@ -98,6 +100,8 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         CALIBRATION_STORAGE_PERFORMANCE_ID,
         CALIBRATION_STORAGE_SHADOW_CONTRACT_ID,
         CALIBRATION_STORAGE_SHADOW_PERFORMANCE_ID,
+        CALIBRATION_STORAGE_AUTHORITATIVE_CONTRACT_ID,
+        CALIBRATION_STORAGE_AUTHORITATIVE_PERFORMANCE_ID,
     )
 
     for scenario_id in (WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID):
@@ -176,6 +180,7 @@ def test_tracked_manifest_validates_and_describes_current_truth():
             JOINED_INTERACTION_CASE_ID,
             CALIBRATION_STORAGE_CONTRACT_ID,
             CALIBRATION_STORAGE_SHADOW_CONTRACT_ID,
+            CALIBRATION_STORAGE_AUTHORITATIVE_CONTRACT_ID,
     ]
     rename_scenario = _row(
         payload,
@@ -255,6 +260,7 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         OPTIMIZER_360_CASE_ID,
         CALIBRATION_STORAGE_PERFORMANCE_ID,
         CALIBRATION_STORAGE_SHADOW_PERFORMANCE_ID,
+        CALIBRATION_STORAGE_AUTHORITATIVE_PERFORMANCE_ID,
     ]
     assert OPTIMIZER_360_CASE_ID not in _row(
         payload, "suites", "pi_stress"
@@ -263,6 +269,9 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         payload, "suites", "pi_stress"
     )["scenario_ids"]
     assert CALIBRATION_STORAGE_SHADOW_PERFORMANCE_ID in _row(
+        payload, "suites", "pi_stress"
+    )["scenario_ids"]
+    assert CALIBRATION_STORAGE_AUTHORITATIVE_PERFORMANCE_ID in _row(
         payload, "suites", "pi_stress"
     )["scenario_ids"]
     multi_stock = _row(payload, "scenarios", MULTI_STOCK_WORKLOAD_ID)

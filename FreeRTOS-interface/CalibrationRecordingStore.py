@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import IntEnum
 import hashlib
 import json
 import math
@@ -29,6 +30,8 @@ UPDATE_SCHEMA_VERSION = 1
 RESULT_SCHEMA_VERSION = 1
 RUN_META_SCHEMA_VERSION = 2
 INDEX_SCHEMA_VERSION = 1
+LEGACY_REF_SCHEMA_NAME = "labcraft.calibration_recording.legacy_ref"
+LEGACY_REF_SCHEMA_VERSION = 1
 
 _PROCESS_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _RESULT_KINDS = {"calibration", "dataset", "operational", "none"}
@@ -40,6 +43,39 @@ _OUTCOMES = {
     "storage_error",
 }
 _ID_NAMESPACE = uuid.UUID("987f756b-d794-4cc4-8f8b-42d42825b6d1")
+
+
+class CaptureRetentionPolicy(IntEnum):
+    """Ordered pixel-retention policy; structured persistence is always separate."""
+
+    STRUCTURED_ONLY = 0
+    KEY_EVIDENCE = 1
+    FULL = 2
+
+    @property
+    def storage_name(self) -> str:
+        return {
+            type(self).STRUCTURED_ONLY: "structured_only",
+            type(self).KEY_EVIDENCE: "key_evidence",
+            type(self).FULL: "full",
+        }[self]
+
+    @classmethod
+    def parse(cls, value: Any) -> "CaptureRetentionPolicy":
+        if isinstance(value, cls):
+            return value
+        normalized = str(value or "").strip().lower().replace("-", "_")
+        aliases = {
+            "structured_only": cls.STRUCTURED_ONLY,
+            "key_evidence": cls.KEY_EVIDENCE,
+            "full": cls.FULL,
+        }
+        try:
+            return aliases[normalized]
+        except KeyError as exc:
+            raise CalibrationStoreValidationError(
+                f"invalid capture retention policy: {value!r}"
+            ) from exc
 
 
 class CalibrationStoreError(RuntimeError):
@@ -403,6 +439,12 @@ class CalibrationRecordingStore:
             "pending_capture_write_count": int(
                 recorder.get("pending_capture_write_count", 0)
             ),
+            "capture_requested_count": int(
+                recorder.get("capture_requested_count", 0)
+            ),
+            "capture_saved_count": int(recorder.get("capture_saved_count", 0)),
+            "capture_omitted_count": int(recorder.get("capture_omitted_count", 0)),
+            "capture_failed_count": int(recorder.get("capture_failed_count", 0)),
         }
 
     def start_run(
@@ -430,6 +472,16 @@ class CalibrationRecordingStore:
         kind = str(result_kind or "none").strip().lower()
         if kind not in _RESULT_KINDS:
             raise CalibrationStoreValidationError(f"invalid result_kind: {kind}")
+        requested_policy = CaptureRetentionPolicy.parse(
+            capture_policy_requested or "structured_only"
+        )
+        effective_policy = CaptureRetentionPolicy.parse(
+            capture_policy_effective or requested_policy.storage_name
+        )
+        if effective_policy < requested_policy:
+            raise CalibrationStoreValidationError(
+                "effective capture policy cannot be lower than the requested policy"
+            )
         run_id = str(process_run_id or "").strip()
         if not run_id:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -470,12 +522,8 @@ class CalibrationRecordingStore:
             process_name=process,
             phase_name=phase,
             result_kind=kind,
-            capture_policy_requested=str(capture_policy_requested or "structured_only"),
-            capture_policy_effective=str(
-                capture_policy_effective
-                or capture_policy_requested
-                or "structured_only"
-            ),
+            capture_policy_requested=requested_policy.storage_name,
+            capture_policy_effective=effective_policy.storage_name,
             identity=_identity_snapshot(identity),
             started_at_utc=self._clock(),
             run_dir=run_dir,
@@ -502,12 +550,22 @@ class CalibrationRecordingStore:
         phase_name: str | None = None,
         recorded_at_utc: str | None = None,
         legacy_source: Mapping[str, Any] | None = None,
+        include_legacy_reference: bool = False,
     ) -> CanonicalUpdateV1:
         if run.finalized:
             raise CalibrationStoreConflictError("cannot append to a finalized run")
         normalized_payload = _normalize_json(dict(payload or {}))
         index = len(run.updates) + 1
         update_id = _stable_id("update", run.process_run_id, index)
+        if include_legacy_reference:
+            normalized_payload["canonical_storage_ref"] = {
+                "schema_name": LEGACY_REF_SCHEMA_NAME,
+                "schema_version": LEGACY_REF_SCHEMA_VERSION,
+                "process_name": run.process_name,
+                "process_run_id": run.process_run_id,
+                "update_id": update_id,
+                "update_index": index,
+            }
         document = {
             "schema_name": UPDATE_SCHEMA_NAME,
             "schema_version": UPDATE_SCHEMA_VERSION,
@@ -623,6 +681,18 @@ class CalibrationRecordingStore:
                 "updates_sha256": self._updates_hash(run.updates),
                 "final_update_id": update_ids[-1] if update_ids else None,
                 "summary_projection": _normalize_json(dict(summary_projection or {})),
+                "capture_evidence": _normalize_json(
+                    {
+                        key: (recorder_summary or {}).get(key, 0)
+                        for key in (
+                            "capture_requested_count",
+                            "capture_saved_count",
+                            "capture_omitted_count",
+                            "capture_failed_count",
+                            "pending_capture_write_count",
+                        )
+                    }
+                ),
                 "warnings": list(run.warnings),
             }
             result_document = {
@@ -900,7 +970,10 @@ class CalibrationRecordingStore:
 
 
 __all__ = [
+    "CaptureRetentionPolicy",
     "INDEX_SCHEMA_NAME",
+    "LEGACY_REF_SCHEMA_NAME",
+    "LEGACY_REF_SCHEMA_VERSION",
     "RESULT_SCHEMA_NAME",
     "RUN_META_SCHEMA_NAME",
     "UPDATE_SCHEMA_NAME",

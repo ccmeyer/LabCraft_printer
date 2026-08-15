@@ -311,6 +311,10 @@ def normalized_legacy_step(step: Mapping[str, Any]) -> dict[str, Any]:
     projected.pop("timestamp", None)
     projected.pop("settings", None)
     projected.pop("meta", None)
+    # The authoritative dual-write reference contains runtime-generated run and
+    # update identities.  It is validated independently and is intentionally
+    # excluded from the stable fixture oracle.
+    projected.pop("canonical_storage_ref", None)
     return {"phase": phase, "data": projected}
 
 

@@ -14,7 +14,8 @@ param(
     "virtual_print_array_96_v1",
     "virtual_print_array_384x10_v1",
     "calibration_storage_legacy_baseline_8x25_v1",
-    "calibration_storage_shadow_8x25_v1"
+    "calibration_storage_shadow_8x25_v1",
+    "calibration_storage_authoritative_8x25_v1"
   )]
   [string]$Scenario = "virtual_print_array_96_v1",
 

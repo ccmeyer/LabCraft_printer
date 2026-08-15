@@ -309,6 +309,33 @@ _SCENARIO_DEFINITIONS = {
         supports_injected_stall=False,
         supports_report_sets=True,
     ),
+    "calibration_storage_authoritative_contract_v1": ScenarioDefinition(
+        registry_id="calibration_storage_authoritative_contract_v1",
+        workload_id="calibration_storage_contract_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "calibration_storage_contract" / "catalog_v1.json"
+        ),
+        expected_completion_count=16,
+        scenario_name="calibration_storage_authoritative_contract",
+        runner_family="composed_journey",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
+    "calibration_storage_authoritative_8x25_v1": ScenarioDefinition(
+        registry_id="calibration_storage_authoritative_8x25_v1",
+        workload_id="calibration_storage_legacy_baseline_8x25_v1",
+        fixture_path=(
+            _FIXTURE_ROOT
+            / "calibration_storage_contract_legacy_baseline_8x25_v1.json"
+        ),
+        expected_completion_count=200,
+        scenario_name="calibration_storage_authoritative",
+        runner_family="composed_journey",
+        supports_pi_evidence=True,
+        supports_injected_stall=False,
+        supports_report_sets=True,
+    ),
 }
 REGISTERED_SCENARIOS: Mapping[str, ScenarioDefinition] = MappingProxyType(
     _SCENARIO_DEFINITIONS

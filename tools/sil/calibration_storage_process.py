@@ -22,7 +22,10 @@ if str(UI_ROOT) not in sys.path:
 
 from ApplicationComposition import SIMULATION_RUNTIME_CONTEXT  # noqa: E402
 from CalibrationClasses.Model import BaseCalibrationProcess  # noqa: E402
-from CalibrationRecordingStore import CalibrationRecordingStore  # noqa: E402
+from CalibrationRecordingStore import (  # noqa: E402
+    CalibrationRecordingStore,
+    CaptureRetentionPolicy,
+)
 from simulation.machine import SimulatedMachine  # noqa: E402
 
 from .calibration_storage_contract import (  # noqa: E402
@@ -191,9 +194,11 @@ class ScriptedCalibrationProcess(BaseCalibrationProcess):
         super().__init__(calibration_manager, model, parent=parent)
         self.case = case
         self.calibration_storage_result_kind = case.result_kind
-        self.calibration_storage_capture_policy = str(case.capture_mode).replace(
-            "_proxy", ""
-        ).replace("recorder_disabled_control", "structured_only")
+        self.calibration_storage_capture_policy = (
+            "structured_only"
+            if not case.record_mode_enabled
+            else str(case.capture_mode).replace("_proxy", "")
+        )
         self.phase_name = case.phase_name
         self.runtime_context = runtime_context
         self.machine = machine
@@ -254,7 +259,10 @@ class ScriptedCalibrationProcess(BaseCalibrationProcess):
 
     def _emit_captures(self) -> None:
         for capture in self.case.captures:
-            if not self._capture_selected(capture):
+            if (
+                not self.calibration_manager.is_calibration_store_authoritative()
+                and not self._capture_selected(capture)
+            ):
                 continue
             value = int(capture.get("value", 0))
             frame = np.full((12, 16), value, dtype=np.uint8)
@@ -268,6 +276,9 @@ class ScriptedCalibrationProcess(BaseCalibrationProcess):
                     "fixture_capture_index": int(capture.get("capture_index", 0)),
                     "key_evidence": bool(capture.get("key_evidence")),
                 },
+                retention_class=(
+                    "key" if bool(capture.get("key_evidence")) else "routine"
+                ),
             )
             if result is not None:
                 self.submitted_capture_count += 1
@@ -280,6 +291,8 @@ class ScriptedCalibrationProcess(BaseCalibrationProcess):
             self.metrics.update_latency_ms.append(
                 (time.perf_counter_ns() - started) / 1_000_000.0
             )
+            if self.calibration_manager.activeCalibration is not self:
+                return
             self.emitted_update_hashes.append(
                 semantic_sha256({"phase": self.phase_name, "data": payload})
             )
@@ -365,6 +378,7 @@ class StorageContractRunner:
         timeout_seconds: float = 30.0,
         metrics: StorageMetricsCollector | None = None,
         shadow_store_enabled: bool = False,
+        authoritative_mode: bool = False,
     ):
         runtime_context = getattr(controller, "runtime_context", None)
         if runtime_context is not SIMULATION_RUNTIME_CONTEXT:
@@ -384,10 +398,15 @@ class StorageContractRunner:
         self.timeout_seconds = float(timeout_seconds)
         self.metrics = metrics or StorageMetricsCollector()
         self.shadow_store_enabled = bool(shadow_store_enabled)
+        self.authoritative_mode = bool(authoritative_mode)
         self._previous_head = None
         self._previous_gripper_slot = None
         self._previous_record_mode_enabled = self.manager.get_record_mode_enabled()
         self._previous_shadow_store_enabled = self.manager.get_shadow_store_enabled()
+        self._previous_authoritative_mode = (
+            self.manager.is_calibration_store_authoritative()
+        )
+        self._previous_capture_policy = self.manager.get_capture_retention_policy()
         self._identity_overridden = False
 
     def _activate_identity(self, identity: Mapping[str, Any]) -> None:
@@ -428,8 +447,11 @@ class StorageContractRunner:
         return rows
 
     def restore(self) -> None:
+        self.manager._canonical_store_authoritative = False
         self.manager.set_record_mode_enabled(self._previous_record_mode_enabled)
         self.manager.set_shadow_store_enabled(self._previous_shadow_store_enabled)
+        self.manager._capture_retention_policy = self._previous_capture_policy
+        self.manager._canonical_store_authoritative = self._previous_authoritative_mode
         rack = self.model.rack_model
         if self._identity_overridden:
             rack.gripper_printer_head = self._previous_head
@@ -501,7 +523,7 @@ class StorageContractRunner:
 
         manager._save_atomic = measured_save
         recorder.append_analysis = measured_analysis
-        if self.shadow_store_enabled:
+        if self.shadow_store_enabled or self.authoritative_mode:
             store.append_update = measured_canonical_append
             store.finalize_run = measured_canonical_finalize
         return (
@@ -514,8 +536,20 @@ class StorageContractRunner:
 
     def run_case(self, case: ScriptedCalibrationCase) -> StorageProcessEvidence:
         self._activate_identity(case.identity)
-        self.manager.set_record_mode_enabled(case.record_mode_enabled)
-        self.manager.set_shadow_store_enabled(self.shadow_store_enabled)
+        self.manager._canonical_store_authoritative = self.authoritative_mode
+        if self.authoritative_mode:
+            policy_name = (
+                "structured_only"
+                if not case.record_mode_enabled
+                else str(case.capture_mode).replace("_proxy", "")
+            )
+            self.manager.set_capture_retention_policy(
+                CaptureRetentionPolicy.parse(policy_name)
+            )
+            self.manager._shadow_store_enabled = True
+        else:
+            self.manager.set_record_mode_enabled(case.record_mode_enabled)
+            self.manager.set_shadow_store_enabled(self.shadow_store_enabled)
         self.manager.begin_session(
             str(self.calibration_file_path),
             notes="SIL storage-contract fixture",
@@ -560,12 +594,16 @@ class StorageContractRunner:
             raise CalibrationStorageContractError(
                 f"legacy calibration payload mismatch for {case.process_id}"
             )
-        expected_recorder = evidence.update_hashes if case.record_mode_enabled else ()
+        expected_recorder = (
+            evidence.update_hashes
+            if self.authoritative_mode or case.record_mode_enabled
+            else ()
+        )
         if evidence.recorder_update_hashes != expected_recorder:
             raise CalibrationStorageContractError(
                 f"recorder payload mismatch for {case.process_id}"
             )
-        if self.shadow_store_enabled:
+        if self.shadow_store_enabled or self.authoritative_mode:
             if evidence.canonical_update_hashes != evidence.update_hashes:
                 raise CalibrationStorageContractError(
                     f"canonical payload mismatch for {case.process_id}"

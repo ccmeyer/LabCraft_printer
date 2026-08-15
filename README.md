@@ -2386,6 +2386,67 @@ The candidate upper limits are 17.514 ms for canonical update-append p95,
 `docs/calibration_recording_store_milestone_2_completion.md` for the report
 hashes, exact measurements, limitations, and rollback.
 
+Milestone 3 makes the canonical store authoritative for every new calibration
+process while retaining the legacy `calibration.json` dual-write and all
+legacy readers. Each application session starts with `Key evidence` capture
+retention. The calibration dialog now offers `Structured only`, `Key
+evidence`, and `Full`; this choice is session-scoped and cannot change while a
+process or capture-owned queue is active. `Structured only` still writes
+canonical updates, terminal results, index events, diagnostic events, and
+explicit capture-omission records—it only omits pixels. Dataset processes and
+stream-gravimetric/refuel dataset acquisition require `Full` and reject lower
+policies with operator guidance.
+
+Canonical run creation and update fsync occur before the process starts and
+before each legacy step is exposed. Completion is emitted only after capture
+drain, minimum-evidence enforcement, result commit, index fsync, and final
+metadata. New authority-marked legacy rows are applicable only when their
+canonical reference, update hash chain, parity state, completed application
+result, and committed index event validate. Historical legacy-only rows remain
+available.
+
+Run the Milestone 3 host coverage with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_calibration_recording_store.py `
+  tests\test_calibration_recording_store_failures.py `
+  tests\test_calibration_storage_terminal_adapters.py `
+  tests\test_calibration_capture_retention_policy.py `
+  tests\test_calibration_storage_scripted_process.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_calibration_storage_authoritative_contract_lifecycle.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-stress `
+  tests\system\test_calibration_storage_authoritative_performance.py
+```
+
+Run and freeze the qualified Pi candidate with:
+
+```powershell
+.\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -Scenario calibration_storage_authoritative_8x25_v1 `
+  -HostLabel pi5-calibration-storage-authoritative-v1 `
+  -WarmupRuns 1 `
+  -MeasuredRuns 3 `
+  -SpeedMultiplier 1000 `
+  -TimeoutSeconds 1800
+
+.\env\Scripts\python.exe -m tools.sil.calibration_storage_authoritative_baseline `
+  --report-set <retrieved-report_set.json> `
+  --shadow-baseline tests\performance\baselines\calibration_storage_shadow_pi5_v1.json `
+  --output tests\performance\baselines\calibration_storage_authoritative_pi5_v1.json
+```
+
+Set `LABCRAFT_CALIBRATION_STORE_AUTHORITATIVE=0` and restart the application
+for operational rollback to the Milestone 2 legacy-authoritative checkbox and
+recorder-toggle behavior. This leaves additive canonical artifacts intact.
+Image analysis, physical camera behavior, firmware, protocols, motion,
+pressure, and dispense remain outside this storage qualification.
+
 ## Raspberry Pi Software-In-The-Loop
 
 The target-Pi SIL lane runs the same real-UI workflow on Raspberry Pi CPU and

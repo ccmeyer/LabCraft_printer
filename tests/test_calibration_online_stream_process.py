@@ -274,7 +274,7 @@ def _flow_proc(tmp_path: Path):
     proc._plan_snapshot_written = False
     proc._cancel_timeout = lambda timer: None
     proc._start_timeout = lambda *args, **kwargs: None
-    proc._record_capture = lambda image, *, role, metadata=None: {
+    proc._record_capture = lambda image, *, role, metadata=None, **_kwargs: {
         "capture_id": "cap_flow",
         "capture_index": proc._attempted_capture_count,
         "image_relpath": f"captures/flow_{proc._attempted_capture_count:04d}.png",

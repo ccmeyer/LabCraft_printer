@@ -155,7 +155,7 @@ def _make_capture_policy_fixture(monkeypatch, capture_signal):
     proc._cancel_timeout = lambda *_args, **_kwargs: None
     proc._last_capture_refs = {}
     proc._active_capture_pair_id = None
-    proc._record_capture = lambda frame, role="capture", metadata=None: saved.append(
+    proc._record_capture = lambda frame, role="capture", metadata=None, **_kwargs: saved.append(
         {"frame": frame, "role": role, "metadata": dict(metadata or {})}
     ) or {"capture_id": "cap-test", "image_relpath": "captures/cap-test.jpg"}
     proc.calibrationError = SimpleNamespace(emit=lambda msg: errors.append((("emit", msg), {})))
@@ -348,7 +348,7 @@ def test_capture_policy_busy_rejection_backs_off_without_consuming_attempt(monke
     proc._cancel_timeout = lambda *_args, **_kwargs: None
     proc._last_capture_refs = {}
     proc._active_capture_pair_id = None
-    proc._record_capture = lambda frame, role="capture", metadata=None: saved.append(
+    proc._record_capture = lambda frame, role="capture", metadata=None, **_kwargs: saved.append(
         {"role": role, "metadata": dict(metadata or {})}
     ) or {"capture_id": "cap-test", "image_relpath": "captures/cap-test.jpg"}
     proc.calibration_manager = SimpleNamespace(

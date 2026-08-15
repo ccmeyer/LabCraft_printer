@@ -169,3 +169,151 @@ def test_shadow_append_failure_preserves_legacy_completion(qapp, tmp_path, monke
         runner.restore()
     finally:
         assert session.close()
+
+
+def test_authoritative_append_failure_blocks_legacy_write_and_completion(
+    qapp, tmp_path, monkeypatch
+):
+    session = _session(qapp, tmp_path / "authoritative-failure-session")
+    try:
+        _catalog, cases = load_catalog()
+        selected = next(
+            case for case in cases if case.process_id == "legacy-parity-two-update"
+        )
+        calibration_path = (
+            tmp_path / "authoritative-failure-experiment" / "calibration.json"
+        )
+        calibration_path.parent.mkdir()
+        em = session.components.model.experiment_model
+        em.experiment_dir_path = str(calibration_path.parent)
+        em.calibration_file_path = str(calibration_path)
+        runner = StorageContractRunner(
+            model=session.components.model,
+            controller=session.components.controller,
+            machine=session.components.machine,
+            app=qapp,
+            calibration_file_path=calibration_path,
+            authoritative_mode=True,
+        )
+        completions = []
+        errors = []
+        runner.manager.calibrationCompleted.connect(lambda: completions.append(True))
+        runner.manager.calibrationError.connect(errors.append)
+
+        def fail_append(self, *args, **kwargs):
+            raise OSError("injected authoritative append failure")
+
+        monkeypatch.setattr(CalibrationRecordingStore, "append_update", fail_append)
+        with pytest.raises(CalibrationStorageContractError, match="legacy calibration"):
+            runner.run_case(selected)
+
+        legacy = json.loads(calibration_path.read_text(encoding="utf-8"))
+        assert legacy["runs"][0]["steps"].get(selected.phase_name, []) == []
+        assert completions == []
+        assert len(errors) == 1
+        assert "update_append_failed" in errors[0].lower()
+        assert runner.manager.activeCalibration is None
+        result_path = next(
+            calibration_path.parent.glob("calibration_recordings/*/*/result.json")
+        )
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        assert result["outcome"] == "storage_error"
+        runner.restore()
+    finally:
+        assert session.close()
+
+
+def test_authoritative_run_creation_failure_prevents_process_start(
+    qapp, tmp_path, monkeypatch
+):
+    session = _session(qapp, tmp_path / "authoritative-start-failure-session")
+    try:
+        _catalog, cases = load_catalog()
+        selected = next(
+            case for case in cases if case.process_id == "legacy-parity-two-update"
+        )
+        calibration_path = tmp_path / "start-failure" / "calibration.json"
+        calibration_path.parent.mkdir()
+        em = session.components.model.experiment_model
+        em.experiment_dir_path = str(calibration_path.parent)
+        em.calibration_file_path = str(calibration_path)
+        runner = StorageContractRunner(
+            model=session.components.model,
+            controller=session.components.controller,
+            machine=session.components.machine,
+            app=qapp,
+            calibration_file_path=calibration_path,
+            authoritative_mode=True,
+        )
+        starts = []
+        errors = []
+        monkeypatch.setattr(
+            ScriptedCalibrationProcess,
+            "start",
+            lambda self: starts.append(self.case.process_id),
+        )
+
+        def fail_start(self, *args, **kwargs):
+            raise OSError("injected authoritative run creation failure")
+
+        monkeypatch.setattr(CalibrationRecordingStore, "start_run", fail_start)
+        runner.manager.calibrationError.connect(errors.append)
+        with pytest.raises(CalibrationStorageContractError, match="legacy calibration"):
+            runner.run_case(selected)
+
+        legacy = json.loads(calibration_path.read_text(encoding="utf-8"))
+        assert legacy["runs"][0]["steps"].get(selected.phase_name, []) == []
+        assert starts == []
+        assert len(errors) == 1
+        assert "storage could not be opened" in errors[0].lower()
+        assert runner.manager.activeCalibration is None
+        runner.restore()
+    finally:
+        assert session.close()
+
+
+def test_authority_marked_row_is_blocked_when_index_commit_is_missing(
+    qapp, tmp_path
+):
+    session = _session(qapp, tmp_path / "authoritative-application-guard")
+    try:
+        _catalog, cases = load_catalog()
+        selected = next(
+            case for case in cases if case.process_id == "legacy-parity-two-update"
+        )
+        calibration_path = tmp_path / "application-guard" / "calibration.json"
+        calibration_path.parent.mkdir()
+        em = session.components.model.experiment_model
+        em.experiment_dir_path = str(calibration_path.parent)
+        em.calibration_file_path = str(calibration_path)
+        runner = StorageContractRunner(
+            model=session.components.model,
+            controller=session.components.controller,
+            machine=session.components.machine,
+            app=qapp,
+            calibration_file_path=calibration_path,
+            authoritative_mode=True,
+        )
+        evidence = runner.run_case(selected)
+        rows = runner.characterization_rows(selected.identity)
+        target = next(
+            row
+            for row in rows
+            if row.get("source_run_id") == evidence.run_id
+            and row.get("source_step_index") == 1
+        )
+        assert runner.manager.validate_characterization_candidate_for_application(
+            target
+        )["ok"] is True
+
+        (calibration_path.parent / "calibration_index.jsonl").write_text(
+            "", encoding="utf-8"
+        )
+        blocked = runner.manager.validate_characterization_candidate_for_application(
+            target
+        )
+        assert blocked["ok"] is False
+        assert blocked["code"] == "canonical_storage_unavailable"
+        runner.restore()
+    finally:
+        assert session.close()

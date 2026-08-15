@@ -93,8 +93,9 @@ def test_lifecycle_suite_preserves_manifest_order_and_per_scenario_timeouts():
         JOINED_INTERACTION_CASE_ID,
         "calibration_storage_contract_v1",
         "calibration_storage_shadow_contract_v1",
+        "calibration_storage_authoritative_contract_v1",
     ]
-    assert [row["order"] for row in plan["scenarios"]] == list(range(1, 13))
+    assert [row["order"] for row in plan["scenarios"]] == list(range(1, 14))
     assert {row["seed"] for row in plan["scenarios"]} == {7}
     assert [row["timeout_seconds"] for row in plan["scenarios"]] == [
         60.0,
@@ -108,6 +109,7 @@ def test_lifecycle_suite_preserves_manifest_order_and_per_scenario_timeouts():
         60.0,
         180.0,
         300.0,
+        600.0,
         600.0,
     ]
 

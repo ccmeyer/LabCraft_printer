@@ -496,6 +496,9 @@ def _make_manager(tmp_path, *, experiment_dir_name="experiment", num_flashes=100
         num_flashes=num_flashes,
     )
     manager = CalibrationManager(model)
+    # These legacy stream-capture tests exercise acquisition behavior and
+    # therefore opt into the Milestone 3 required Full policy explicitly.
+    manager.set_capture_retention_policy("full")
     manager._emit_readiness = lambda: None
     return model, manager
 
@@ -1109,10 +1112,14 @@ def test_droplet_calibration_sequence_stop_restores_gripper_and_returns_idle(tmp
 
 def test_stream_capture_gripper_suspend_can_launch_first_internal_queue_step(tmp_path, monkeypatch):
     _model, manager = _make_manager(tmp_path)
+    launch_errors = []
+    manager.calibrationError.connect(launch_errors.append)
 
-    class _QueueStartStubProcess:
+    class QueueStartStubProcess:
         owns_calibration_memory_session = False
         supports_operator_verdict = False
+        calibration_storage_result_kind = "calibration"
+        calibration_storage_minimum_capture_policy = "structured_only"
 
         def __init__(self, calibration_manager, model, *args, **kwargs):
             self.calibration_manager = calibration_manager
@@ -1132,7 +1139,7 @@ def test_stream_capture_gripper_suspend_can_launch_first_internal_queue_step(tmp
         def stop(self):
             return None
 
-    monkeypatch.setattr("CalibrationClasses.Model.NozzlePositionCalibrationProcess", _QueueStartStubProcess)
+    monkeypatch.setattr("CalibrationClasses.Model.NozzlePositionCalibrationProcess", QueueStartStubProcess)
 
     ok, message = manager.start_stream_gravimetric_capture(0.0, rep_override=1, notes="queue launch")
     assert (ok, message) == (True, "")
@@ -1144,7 +1151,9 @@ def test_stream_capture_gripper_suspend_can_launch_first_internal_queue_step(tmp
     ok, message = manager.mark_stream_gravimetric_capture_gripper_suspended()
     assert (ok, message) == (True, "")
 
-    assert isinstance(manager.activeCalibration, _QueueStartStubProcess)
+    assert isinstance(manager.activeCalibration, QueueStartStubProcess), (
+        manager.get_shadow_storage_diagnostics(), launch_errors
+    )
     assert manager.activeCalibration.started is True
     assert manager.calibration_queue == list(manager._build_stream_capture_queue_for_mode("timecourse")[1:])
     assert manager.get_stream_gravimetric_capture_state()["status"] == "running"
@@ -1153,9 +1162,11 @@ def test_stream_capture_gripper_suspend_can_launch_first_internal_queue_step(tmp
 def test_stream_capture_gripper_suspend_queues_online_stream_mode(tmp_path, monkeypatch):
     _model, manager = _make_manager(tmp_path)
 
-    class _QueueStartStubProcess:
+    class QueueStartStubProcess:
         owns_calibration_memory_session = False
         supports_operator_verdict = False
+        calibration_storage_result_kind = "calibration"
+        calibration_storage_minimum_capture_policy = "structured_only"
 
         def __init__(self, calibration_manager, model, *args, **kwargs):
             self.calibration_manager = calibration_manager
@@ -1175,7 +1186,7 @@ def test_stream_capture_gripper_suspend_queues_online_stream_mode(tmp_path, monk
         def stop(self):
             return None
 
-    monkeypatch.setattr("CalibrationClasses.Model.NozzlePositionCalibrationProcess", _QueueStartStubProcess)
+    monkeypatch.setattr("CalibrationClasses.Model.NozzlePositionCalibrationProcess", QueueStartStubProcess)
 
     ok, message = manager.start_stream_gravimetric_capture(
         0.0,
@@ -1192,7 +1203,9 @@ def test_stream_capture_gripper_suspend_queues_online_stream_mode(tmp_path, monk
     ok, message = manager.mark_stream_gravimetric_capture_gripper_suspended()
     assert (ok, message) == (True, "")
 
-    assert isinstance(manager.activeCalibration, _QueueStartStubProcess)
+    assert isinstance(manager.activeCalibration, QueueStartStubProcess), (
+        manager.get_shadow_storage_diagnostics()
+    )
     assert manager.activeCalibration.started is True
     assert manager.calibration_queue == list(manager._build_stream_capture_queue_for_mode("online_stream")[1:])
     assert manager.get_stream_gravimetric_capture_state()["capture_mode"] == "online_stream"

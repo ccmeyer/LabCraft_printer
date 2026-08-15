@@ -757,6 +757,7 @@ def test_online_stream_manager_lifecycle_auto_closes_completed_session_and_reuse
     model = _make_model(tmp_path)
     store = model.calibration_memory_store
     manager = CalibrationManager(model)
+    manager._canonical_store_authoritative = False
 
     class _OwnedOnlineStreamStub:
         phase_name = "online_stream_calibration"
@@ -791,6 +792,7 @@ def test_online_stream_manager_lifecycle_auto_closes_completed_session_and_reuse
     assert summary["run_status"] == "completed"
 
     manager_b = CalibrationManager(model)
+    manager_b._canonical_store_authoritative = False
     manager_b.begin_session(model.experiment_model.calibration_file_path, notes="reuse learned prior")
     resolved = manager_b.resolve_online_stream_calibration_prior(
         condition={"print_pressure_psi": 1.62, "print_pulse_width_us": 1500, "emergence_time_us": 3200}
@@ -807,6 +809,7 @@ def test_online_stream_stopped_session_is_closed_and_not_reused_as_prior(tmp_pat
     model = _make_model(tmp_path)
     store = model.calibration_memory_store
     manager = CalibrationManager(model)
+    manager._canonical_store_authoritative = False
 
     class _OwnedOnlineStreamStub:
         phase_name = "online_stream_calibration"
@@ -836,6 +839,7 @@ def test_online_stream_stopped_session_is_closed_and_not_reused_as_prior(tmp_pat
     assert stopped_summary["run_status"] == "stopped"
 
     manager_b = CalibrationManager(model)
+    manager_b._canonical_store_authoritative = False
     monkeypatch.setattr(manager_b, "start_active_calibration", lambda: None)
     monkeypatch.setattr(manager_b, "_record_stream_capture_process_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(manager_b, "_complete_stream_capture_queue_success", lambda: None)
@@ -853,6 +857,7 @@ def test_online_stream_stopped_session_is_closed_and_not_reused_as_prior(tmp_pat
     manager_b.onCalibrationCompleted()
 
     manager_c = CalibrationManager(model)
+    manager_c._canonical_store_authoritative = False
     manager_c.begin_session(model.experiment_model.calibration_file_path, notes="after stopped + completed")
     resolved = manager_c.resolve_online_stream_calibration_prior(
         condition={"print_pressure_psi": 1.62, "print_pulse_width_us": 1500, "emergence_time_us": 3200}
@@ -879,6 +884,7 @@ def test_online_stream_auto_started_session_preserves_prior_runtime_in_summary(t
     )
 
     manager = CalibrationManager(model)
+    manager._canonical_store_authoritative = False
     monkeypatch.setattr(manager, "start_active_calibration", lambda: None)
     monkeypatch.setattr(manager, "_record_stream_capture_process_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(manager, "_complete_stream_capture_queue_success", lambda: None)

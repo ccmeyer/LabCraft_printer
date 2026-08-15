@@ -3719,16 +3719,36 @@ class DropletImagingDialog(QtWidgets.QDialog):
         run_options_v.setContentsMargins(8, 8, 8, 8)
         run_options_v.setSpacing(6)
 
-        self.record_calibration_checkbox = QtWidgets.QCheckBox("Record Calibration Runs")
-        self.record_calibration_checkbox.setToolTip(
-            "When enabled, calibration runs save captures/events/analysis to calibration_recordings."
+        manager = self.model.calibration_manager
+        authoritative_storage = bool(
+            getattr(manager, "is_calibration_store_authoritative", lambda: False)()
         )
-        try:
-            rec_enabled = bool(self.model.calibration_manager.get_record_mode_enabled())
-        except Exception:
-            rec_enabled = bool(getattr(self.model.calibration_manager, "record_mode_enabled", True))
-        self.record_calibration_checkbox.setChecked(rec_enabled)
-        run_options_v.addWidget(self.record_calibration_checkbox)
+        if authoritative_storage:
+            capture_row = QtWidgets.QHBoxLayout()
+            capture_row.addWidget(QtWidgets.QLabel("Capture Retention:"))
+            self.capture_retention_combo = QtWidgets.QComboBox()
+            self.capture_retention_combo.addItem("Structured only", "structured_only")
+            self.capture_retention_combo.addItem("Key evidence", "key_evidence")
+            self.capture_retention_combo.addItem("Full", "full")
+            self.capture_retention_combo.setToolTip(
+                "Structured calibration results are always saved. This controls retained image pixels for future runs."
+            )
+            selected_policy = str(manager.get_capture_retention_policy())
+            selected_index = self.capture_retention_combo.findData(selected_policy)
+            self.capture_retention_combo.setCurrentIndex(max(0, selected_index))
+            capture_row.addWidget(self.capture_retention_combo, 1)
+            run_options_v.addLayout(capture_row)
+        else:
+            self.record_calibration_checkbox = QtWidgets.QCheckBox("Record Calibration Runs")
+            self.record_calibration_checkbox.setToolTip(
+                "When enabled, calibration runs save captures/events/analysis to calibration_recordings."
+            )
+            try:
+                rec_enabled = bool(manager.get_record_mode_enabled())
+            except Exception:
+                rec_enabled = bool(getattr(manager, "record_mode_enabled", True))
+            self.record_calibration_checkbox.setChecked(rec_enabled)
+            run_options_v.addWidget(self.record_calibration_checkbox)
 
         self.export_calibration_records_button = QtWidgets.QPushButton(
             self.EXPORT_CALIBRATION_RECORDS_TEXT
@@ -4414,7 +4434,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         self.online_stream_tail_apply_button.clicked.connect(self.apply_online_stream_tail_start_override)
         self.online_stream_tail_reset_button.clicked.connect(self.reset_online_stream_tail_start_override)
-        self.record_calibration_checkbox.toggled.connect(self.set_record_mode_enabled)
+        if hasattr(self, "record_calibration_checkbox"):
+            self.record_calibration_checkbox.toggled.connect(self.set_record_mode_enabled)
+        if hasattr(self, "capture_retention_combo"):
+            self.capture_retention_combo.currentIndexChanged.connect(
+                self.set_capture_retention_policy
+            )
         self.export_calibration_records_button.clicked.connect(self.export_calibration_records_to_downloads)
         self.enable_calibration_memory_checkbox.toggled.connect(self.set_calibration_memory_enabled)
         self.enable_refuel_level_tracking_checkbox.toggled.connect(self._set_refuel_tracking_enabled)
@@ -8176,6 +8201,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     sequence_busy = False
             if sequence_busy or droplet_sequence_busy:
                 self.record_calibration_checkbox.setEnabled(False)
+        if hasattr(self, "capture_retention_combo"):
+            self.capture_retention_combo.setEnabled(not busy)
 
         self._refresh_calibration_record_export_button_state()
         self._recompute_online_stream_button_state()
@@ -10313,6 +10340,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
             mgr.record_mode_enabled = bool(enabled)
         self._sync_stream_capture_panel_state()
 
+    def set_capture_retention_policy(self, _index=None):
+        combo = getattr(self, "capture_retention_combo", None)
+        if combo is None:
+            return False
+        policy = str(combo.currentData() or "key_evidence")
+        manager = self.model.calibration_manager
+        accepted = bool(manager.set_capture_retention_policy(policy))
+        if not accepted:
+            current = str(manager.get_capture_retention_policy())
+            current_index = combo.findData(current)
+            combo.blockSignals(True)
+            combo.setCurrentIndex(max(0, current_index))
+            combo.blockSignals(False)
+        self._sync_stream_capture_panel_state()
+        return accepted
+
     @staticmethod
     def _format_export_file_size(byte_count):
         try:
@@ -10997,7 +11040,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         record_mode_enabled = True
         try:
-            record_mode_enabled = bool(self.model.calibration_manager.get_record_mode_enabled())
+            manager = self.model.calibration_manager
+            if bool(manager.is_calibration_store_authoritative()):
+                record_mode_enabled = manager.get_capture_retention_policy() == "full"
+            else:
+                record_mode_enabled = bool(manager.get_record_mode_enabled())
         except Exception:
             record_mode_enabled = bool(getattr(self.model.calibration_manager, "record_mode_enabled", True))
         experiment_ready = False
@@ -11168,6 +11215,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         if hasattr(self, "record_calibration_checkbox"):
             self.record_calibration_checkbox.setEnabled(not stream_busy and not block_new_starts)
+        if hasattr(self, "capture_retention_combo"):
+            self.capture_retention_combo.setEnabled(not stream_busy and not block_new_starts)
 
         self._stream_capture_last_status = status
         self._refresh_calibration_tab_lock_state()
@@ -13406,6 +13455,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if not raw:
             return
 
+        candidate_validation = self._validate_selected_characterization_candidate(raw)
+        if not candidate_validation.get("ok"):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Nothing to load",
+                candidate_validation.get("message") or "Selected candidate is unavailable.",
+            )
+            return
+
         mismatch_message = self._summary_row_mode_mismatch_message(raw)
         if mismatch_message:
             QtWidgets.QMessageBox.information(self, "Nothing to load", mismatch_message)
@@ -13493,6 +13551,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return
         _, raw = self._selected_summary_row()
         if not raw:
+            return
+
+        candidate_validation = self._validate_selected_characterization_candidate(raw)
+        if not candidate_validation.get("ok"):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Cannot recheck",
+                candidate_validation.get("message") or "Selected candidate is unavailable.",
+            )
             return
 
         mismatch_message = self._summary_row_mode_mismatch_message(raw)

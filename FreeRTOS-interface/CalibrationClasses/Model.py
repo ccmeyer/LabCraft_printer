@@ -58,8 +58,16 @@ from GravimetricLedger import (
     ReusableMassBaseline,
 )
 from CalibrationRecordingStore import (
+    CaptureRetentionPolicy,
     CalibrationRecordingStore,
     CalibrationStoreError,
+    LEGACY_REF_SCHEMA_NAME,
+    LEGACY_REF_SCHEMA_VERSION,
+    semantic_sha256 as calibration_storage_sha256,
+)
+from CalibrationStorageContracts import (
+    build_terminal_summary,
+    process_storage_contract,
 )
 
 
@@ -673,6 +681,7 @@ class CalibrationProcessRecorder:
         failures.append(dict(failure or {}))
         run["capture_write_failures"] = failures
         run["capture_write_failure_count"] = int(len(failures))
+        run["capture_failed_count"] = int(run.get("capture_failed_count", 0)) + 1
 
     def _capture_write_worker(self, run: dict):
         while True:
@@ -700,15 +709,28 @@ class CalibrationProcessRecorder:
                     "capture_id": capture_ref.get("capture_id"),
                     "capture_role": capture_ref.get("capture_role"),
                     "image_relpath": capture_ref.get("image_relpath"),
+                    "width": capture_ref.get("width"),
+                    "height": capture_ref.get("height"),
+                    "retention_class": capture_ref.get("retention_class"),
+                    "requested_policy": capture_ref.get("requested_policy"),
+                    "effective_policy": capture_ref.get("effective_policy"),
+                    "retention_outcome": "saved",
                     "metadata": dict(job.get("metadata") or {}),
                 }
                 with self._lock:
+                    run["capture_saved_count"] = int(run.get("capture_saved_count", 0)) + 1
                     self._append_event_locked(run, "capture_saved", event_payload)
             except Exception as exc:
                 failure_payload = {
                     "capture_id": capture_ref.get("capture_id"),
                     "capture_role": capture_ref.get("capture_role"),
                     "image_relpath": capture_ref.get("image_relpath"),
+                    "width": capture_ref.get("width"),
+                    "height": capture_ref.get("height"),
+                    "retention_class": capture_ref.get("retention_class"),
+                    "requested_policy": capture_ref.get("requested_policy"),
+                    "effective_policy": capture_ref.get("effective_policy"),
+                    "retention_outcome": "failed",
                     "metadata": dict(job.get("metadata") or {}),
                     "error_message": str(exc),
                 }
@@ -762,8 +784,16 @@ class CalibrationProcessRecorder:
         *,
         extra_meta: dict | None = None,
         run_context: dict | None = None,
+        capture_policy: str = "full",
+        minimum_capture_policy: str = "structured_only",
     ):
         with self._lock:
+            requested_policy = CaptureRetentionPolicy.parse(capture_policy)
+            minimum_policy = CaptureRetentionPolicy.parse(minimum_capture_policy)
+            if requested_policy < minimum_policy:
+                raise ValueError(
+                    f"{minimum_policy.storage_name} capture retention is required for this process"
+                )
             managed_run_meta = isinstance(run_context, dict)
             if managed_run_meta:
                 run_id = str(run_context.get("process_run_id") or "").strip()
@@ -791,6 +821,8 @@ class CalibrationProcessRecorder:
                 "managed_run_meta": bool(managed_run_meta),
                 "capture_index": 0,
                 "event_index": 0,
+                "capture_policy": requested_policy.storage_name,
+                "minimum_capture_policy": minimum_policy.storage_name,
             }
 
             meta = {
@@ -832,6 +864,10 @@ class CalibrationProcessRecorder:
             run["recorder_warnings"] = []
             run["capture_write_failure_count"] = 0
             run["capture_write_failures"] = []
+            run["capture_requested_count"] = 0
+            run["capture_saved_count"] = 0
+            run["capture_omitted_count"] = 0
+            run["capture_failed_count"] = 0
 
             self._capture_write_queue = queue.Queue()
             self._capture_write_stop_evt = threading.Event()
@@ -889,6 +925,7 @@ class CalibrationProcessRecorder:
         role: str = "capture",
         file_ext: str = "jpg",
         metadata: dict | None = None,
+        retention_class: str = "routine",
     ) -> dict | None:
         with self._lock:
             if not self._active:
@@ -897,24 +934,58 @@ class CalibrationProcessRecorder:
             run["capture_index"] = int(run.get("capture_index", 0)) + 1
             idx = int(run["capture_index"])
             capture_id = f"cap_{idx:06d}"
+            retention = str(retention_class or "routine").strip().lower()
+            if retention not in {"routine", "key"}:
+                raise ValueError(f"invalid capture retention class: {retention_class!r}")
+            policy = CaptureRetentionPolicy.parse(run.get("capture_policy") or "full")
+            retain_pixels = policy is CaptureRetentionPolicy.FULL or (
+                policy is CaptureRetentionPolicy.KEY_EVIDENCE and retention == "key"
+            )
             ext = str(file_ext or "jpg").lstrip(".").lower()
             filename = f"{capture_id}_{str(role)}.{ext}"
             abspath = os.path.join(run["captures_dir"], filename)
             relpath = os.path.join("captures", filename).replace("\\", "/")
-            queued_image = self._copy_image_for_queue(image)
-            h = int(queued_image.shape[0]) if hasattr(queued_image, "shape") and len(queued_image.shape) >= 2 else None
-            w = int(queued_image.shape[1]) if hasattr(queued_image, "shape") and len(queued_image.shape) >= 2 else None
+            image_array = np.asarray(image)
+            h = int(image_array.shape[0]) if image_array.ndim >= 2 else None
+            w = int(image_array.shape[1]) if image_array.ndim >= 2 else None
             info = {
                 "capture_id": capture_id,
                 "capture_index": idx,
                 "capture_role": str(role),
-                "image_relpath": relpath,
+                "image_relpath": relpath if retain_pixels else None,
                 "width": w,
                 "height": h,
                 "captured_at_utc": self._now_utc(),
+                "retention_class": retention,
+                "capture_policy": policy.storage_name,
+                "requested_policy": policy.storage_name,
+                "effective_policy": policy.storage_name,
+                "retention_outcome": "pending" if retain_pixels else "omitted",
             }
             if isinstance(metadata, dict):
                 info.update(metadata)
+            run["capture_requested_count"] = int(run.get("capture_requested_count", 0)) + 1
+            if not retain_pixels:
+                run["capture_omitted_count"] = int(run.get("capture_omitted_count", 0)) + 1
+                self._append_event_locked(
+                    run,
+                    "capture_omitted",
+                    {
+                        "capture_id": capture_id,
+                        "capture_role": str(role),
+                        "retention_class": retention,
+                        "capture_policy": policy.storage_name,
+                        "requested_policy": policy.storage_name,
+                        "effective_policy": policy.storage_name,
+                        "retention_outcome": "omitted",
+                        "width": w,
+                        "height": h,
+                        "reason": "capture_policy",
+                        "metadata": dict(metadata or {}),
+                    },
+                )
+                return info
+            queued_image = self._copy_image_for_queue(image)
             run["pending_capture_write_count"] = int(run.get("pending_capture_write_count", 0)) + 1
             write_queue = self._capture_write_queue
             job = {
@@ -925,12 +996,30 @@ class CalibrationProcessRecorder:
             }
             if write_queue is None:
                 run["pending_capture_write_count"] = int(max(0, run["pending_capture_write_count"] - 1))
+                failure = {
+                    **dict(info),
+                    "retention_outcome": "failed",
+                    "error_message": "Capture writer queue is unavailable.",
+                }
+                self._append_capture_write_failure_locked(run, failure)
+                self._append_event_locked(
+                    run, "capture_save_failed", failure, level="warning"
+                )
                 raise RuntimeError("Capture writer queue is unavailable.")
             try:
                 write_queue.put_nowait(job)
-            except Exception:
+            except Exception as exc:
                 run["pending_capture_write_count"] = int(max(0, run["pending_capture_write_count"] - 1))
                 self._capture_write_condition.notify_all()
+                failure = {
+                    **dict(info),
+                    "retention_outcome": "failed",
+                    "error_message": str(exc),
+                }
+                self._append_capture_write_failure_locked(run, failure)
+                self._append_event_locked(
+                    run, "capture_save_failed", failure, level="warning"
+                )
                 raise
             return info
 
@@ -987,6 +1076,13 @@ class CalibrationProcessRecorder:
             meta["capture_write_failures"] = [
                 dict(item or {}) for item in list(run.get("capture_write_failures") or [])
             ]
+            for counter in (
+                "capture_requested_count",
+                "capture_saved_count",
+                "capture_omitted_count",
+                "capture_failed_count",
+            ):
+                meta[counter] = int(run.get(counter, 0))
             if not managed_run_meta:
                 self._write_json_atomic(meta_path, meta)
             self._last = dict(run)
@@ -1001,6 +1097,14 @@ class CalibrationProcessRecorder:
                 "capture_write_failures": list(meta["capture_write_failures"]),
                 "pending_capture_write_count": int(
                     run.get("pending_capture_write_count", 0)
+                ),
+                "capture_requested_count": int(run.get("capture_requested_count", 0)),
+                "capture_saved_count": int(run.get("capture_saved_count", 0)),
+                "capture_omitted_count": int(run.get("capture_omitted_count", 0)),
+                "capture_failed_count": int(run.get("capture_failed_count", 0)),
+                "capture_policy": str(run.get("capture_policy") or "full"),
+                "minimum_capture_policy": str(
+                    run.get("minimum_capture_policy") or "structured_only"
                 ),
             }
 
@@ -1199,6 +1303,16 @@ class RefuelDatasetCaptureStore:
         if self.run_dir is not None:
             return self.run_dir
 
+        owner = getattr(self.model, "owner_model", None)
+        manager = getattr(owner, "calibration_manager", None)
+        if manager is not None and bool(
+            getattr(manager, "is_calibration_store_authoritative", lambda: False)()
+        ):
+            if str(manager.get_capture_retention_policy()) != "full":
+                raise ValueError(
+                    "Full capture retention must be selected before starting refuel dataset acquisition."
+                )
+
         extra_meta = self._build_run_meta(
             operator_id=operator_id,
             notes=notes,
@@ -1210,6 +1324,8 @@ class RefuelDatasetCaptureStore:
             self.process_name,
             self.phase_name,
             extra_meta=extra_meta,
+            capture_policy="full",
+            minimum_capture_policy="full",
         )
 
         self.run_dir = str(run_dir)
@@ -1572,6 +1688,11 @@ class CalibrationManager(QObject):
 
         # Recorder mode: captures per-process runtime telemetry for offline replay/debug.
         self.record_mode_enabled = True
+        self._canonical_store_authoritative = (
+            str(os.environ.get("LABCRAFT_CALIBRATION_STORE_AUTHORITATIVE", "1")).strip()
+            != "0"
+        )
+        self._capture_retention_policy = CaptureRetentionPolicy.KEY_EVIDENCE
         self._process_recorder = CalibrationProcessRecorder(model)
         self._shadow_store_enabled = (
             str(os.environ.get("LABCRAFT_CALIBRATION_STORE_SHADOW", "1")).strip()
@@ -1705,8 +1826,37 @@ class CalibrationManager(QObject):
 
     # ------------- Per-process recorder -------------
 
+    def is_calibration_store_authoritative(self) -> bool:
+        return bool(getattr(self, "_canonical_store_authoritative", False))
+
+    def get_capture_retention_policy(self) -> str:
+        return CaptureRetentionPolicy.parse(
+            getattr(self, "_capture_retention_policy", CaptureRetentionPolicy.KEY_EVIDENCE)
+        ).storage_name
+
+    def set_capture_retention_policy(self, policy) -> bool:
+        selected = CaptureRetentionPolicy.parse(policy)
+        busy = self.activeCalibration is not None or bool(self.calibration_queue)
+        busy = busy or self.has_open_stream_gravimetric_capture()
+        if busy:
+            self.calibrationStageChanged.emit(
+                "Capture retention cannot change while calibration capture is active.",
+                "orange",
+            )
+            return False
+        self._capture_retention_policy = selected
+        self.calibrationStageChanged.emit(
+            f"Capture retention set to {selected.storage_name.replace('_', ' ')}.",
+            "dark_blue",
+        )
+        return True
+
     def set_shadow_store_enabled(self, enabled: bool):
         """Developer rollback switch; unrelated to the operator recorder toggle."""
+        if self.is_calibration_store_authoritative() and not bool(enabled):
+            raise RuntimeError(
+                "canonical storage cannot be disabled while authoritative mode is active"
+            )
         self._shadow_store_enabled = bool(enabled)
         store = getattr(self, "_calibration_recording_store", None)
         if store is not None:
@@ -1714,7 +1864,9 @@ class CalibrationManager(QObject):
         return self._shadow_store_enabled
 
     def get_shadow_store_enabled(self) -> bool:
-        return bool(getattr(self, "_shadow_store_enabled", False))
+        return self.is_calibration_store_authoritative() or bool(
+            getattr(self, "_shadow_store_enabled", False)
+        )
 
     def get_shadow_storage_diagnostics(self):
         return [dict(item) for item in self._shadow_storage_diagnostics]
@@ -1776,8 +1928,58 @@ class CalibrationManager(QObject):
                 pass
         return diagnostic
 
-    @staticmethod
-    def _shadow_process_descriptor(process_obj):
+    def _abort_active_process_for_storage_failure(self, kind, exc):
+        if not self.is_calibration_store_authoritative():
+            return False
+        if bool(getattr(self, "_storage_abort_in_progress", False)):
+            return False
+        self._storage_abort_in_progress = True
+        process_obj = self.activeCalibration or getattr(
+            self, "_active_shadow_process", None
+        )
+        message = f"Calibration storage failure ({kind}): {exc}"
+        try:
+            self.clear_calibration_queue()
+            self._disconnect_process_callbacks(process_obj)
+            try:
+                self._finalize_process_recording(
+                    "storage_error", error_message=message
+                )
+            except Exception as finalize_exc:
+                self._record_shadow_storage_failure(
+                    "storage_error_finalize_failed",
+                    finalize_exc,
+                    run=getattr(self, "_active_shadow_run", None),
+                )
+            if process_obj is not None:
+                try:
+                    release_fn = getattr(process_obj, "release_runtime_resources", None)
+                    if callable(release_fn):
+                        release_fn()
+                except Exception:
+                    pass
+                # This path is commonly entered from calibrationDataUpdated.
+                # Defer QObject destruction until the emitting signal unwinds.
+                try:
+                    QTimer.singleShot(0, process_obj.deleteLater)
+                except Exception:
+                    pass
+            self.activeCalibration = None
+            self.calibrationStageChanged.emit(message, "red")
+            self.calibrationError.emit(message)
+            self.calibrationQueueCompleted.emit()
+            return True
+        finally:
+            self._storage_abort_in_progress = False
+
+    def _shadow_process_descriptor(self, process_obj):
+        if self.is_calibration_store_authoritative():
+            contract = process_storage_contract(process_obj)
+            return (
+                contract.result_kind,
+                self.get_capture_retention_policy(),
+                [],
+            )
         declared = getattr(process_obj, "calibration_storage_result_kind", None)
         warnings = []
         if declared is None:
@@ -1792,6 +1994,9 @@ class CalibrationManager(QObject):
         return str(declared), capture_policy, warnings
 
     def _build_shadow_summary_projection(self, process_obj, run, outcome):
+        if self.is_calibration_store_authoritative():
+            contract = process_storage_contract(process_obj)
+            return build_terminal_summary(process_obj, contract, run, outcome)
         builder = getattr(
             process_obj,
             "build_calibration_storage_summary_projection",
@@ -2792,7 +2997,18 @@ class CalibrationManager(QObject):
 
     def _begin_process_recording(self, process_obj):
         if process_obj is None:
-            return
+            return False
+        contract = None
+        if self.is_calibration_store_authoritative():
+            contract = process_storage_contract(process_obj)
+            selected_policy = CaptureRetentionPolicy.parse(
+                self.get_capture_retention_policy()
+            )
+            if selected_policy < contract.minimum_capture_policy:
+                raise ValueError(
+                    f"{contract.minimum_capture_policy.storage_name.replace('_', ' ').title()} "
+                    f"capture retention is required for {process_obj.__class__.__name__}."
+                )
         try:
             process_obj._recorder_process_name = process_obj.__class__.__name__
             process_obj._recorder_phase_name = getattr(process_obj, "phase_name", None) or process_obj._recorder_process_name
@@ -2845,11 +3061,18 @@ class CalibrationManager(QObject):
                     self._record_shadow_storage_failure(
                         "run_start_failed", exc, run=shadow_run
                     )
-        if not getattr(self, "record_mode_enabled", False):
-            return
+                    if self.is_calibration_store_authoritative():
+                        return False
+        if shadow_run is None and self.is_calibration_store_authoritative():
+            return False
+        if (
+            not self.is_calibration_store_authoritative()
+            and not getattr(self, "record_mode_enabled", False)
+        ):
+            return True
         recorder = getattr(self, "_process_recorder", None)
         if recorder is None:
-            return
+            return contract is None or contract.minimum_capture_policy is CaptureRetentionPolicy.STRUCTURED_ONLY
         try:
             process_name = process_obj.__class__.__name__
             phase_name = getattr(process_obj, "phase_name", None) or process_name
@@ -2864,6 +3087,16 @@ class CalibrationManager(QObject):
                     }
                     if shadow_run is not None
                     else None
+                ),
+                capture_policy=(
+                    self.get_capture_retention_policy()
+                    if self.is_calibration_store_authoritative()
+                    else "full"
+                ),
+                minimum_capture_policy=(
+                    contract.minimum_capture_policy.storage_name
+                    if contract is not None
+                    else "structured_only"
                 ),
             )
             recorder.append_event(
@@ -2884,6 +3117,18 @@ class CalibrationManager(QObject):
             process_obj._process_recording_finalized = False
         except Exception as e:
             print(f"[CalibrationRecorder] Failed to start process recording: {e}")
+            if shadow_run is not None:
+                try:
+                    self._calibration_recording_store.add_warning(
+                        shadow_run,
+                        "recorder_start_failed",
+                        error_message=str(e),
+                    )
+                except Exception:
+                    pass
+            if contract is not None and contract.minimum_capture_policy is CaptureRetentionPolicy.FULL:
+                return False
+        return True
 
     def _build_pending_process_verdict_context(
         self,
@@ -2965,7 +3210,7 @@ class CalibrationManager(QObject):
         process_run_dir = None
         if process_obj is not None:
             if bool(getattr(process_obj, "_process_recording_finalized", False)):
-                return
+                return {"ok": True, "already_finalized": True, "outcome": str(outcome)}
             process_run_dir = getattr(process_obj, "_recorder_run_dir", None)
         # Finalize any active run even if record mode was toggled off mid-process.
         active_dir = None
@@ -2979,8 +3224,11 @@ class CalibrationManager(QObject):
         if run_dir_key and run_dir_key == str(getattr(self, "_finalized_process_recording_run_dir", "") or ""):
             return
         if not active_dir and not process_run_dir and shadow_run is None:
-            return
+            return {"ok": not self.is_calibration_store_authoritative(), "outcome": str(outcome)}
         recorder_summary = {}
+        storage_ok = True
+        effective_outcome = str(outcome)
+        effective_error_message = str(error_message or "")
         try:
             if recorder is not None and active_dir and getattr(self, "record_mode_enabled", False):
                 recorder.append_event(
@@ -3008,20 +3256,59 @@ class CalibrationManager(QObject):
                 ],
             }
 
+        if self.is_calibration_store_authoritative() and process_obj is not None:
+            try:
+                contract = process_storage_contract(process_obj)
+            except Exception as exc:
+                contract = None
+                storage_ok = False
+                effective_error_message = str(exc)
+            if contract is not None and contract.minimum_capture_policy is CaptureRetentionPolicy.FULL:
+                requested = int(recorder_summary.get("capture_requested_count", 0))
+                saved = int(recorder_summary.get("capture_saved_count", 0))
+                omitted = int(recorder_summary.get("capture_omitted_count", 0))
+                failed = int(recorder_summary.get("capture_failed_count", 0))
+                pending = int(recorder_summary.get("pending_capture_write_count", 0))
+                if requested <= 0 or omitted or failed or pending or saved != requested:
+                    storage_ok = False
+                    effective_error_message = (
+                        "Required full-capture evidence is incomplete "
+                        f"(requested={requested}, saved={saved}, omitted={omitted}, "
+                        f"failed={failed}, pending={pending})."
+                    )
+            if not storage_ok and str(outcome) == "completed":
+                effective_outcome = "storage_error"
+
         if shadow_run is not None:
             store = getattr(self, "_calibration_recording_store", None)
             try:
                 summary = self._build_shadow_summary_projection(
-                    process_obj, shadow_run, outcome
+                    process_obj, shadow_run, effective_outcome
                 )
                 self._last_shadow_commit = store.finalize_run(
                     shadow_run,
-                    outcome=str(outcome),
-                    error_message=str(error_message or ""),
+                    outcome=effective_outcome,
+                    error_message=effective_error_message,
                     summary_projection=summary,
                     recorder_summary=recorder_summary,
                 )
+                committed_outcome = str(
+                    self._last_shadow_commit.result.document.get("outcome") or ""
+                )
+                if (
+                    self.is_calibration_store_authoritative()
+                    and effective_outcome == "completed"
+                    and committed_outcome != "completed"
+                ):
+                    storage_ok = False
+                    effective_outcome = committed_outcome or "storage_error"
+                    effective_error_message = (
+                        "Canonical terminal result was not committed as completed."
+                    )
             except Exception as exc:
+                storage_ok = False
+                effective_outcome = "storage_error"
+                effective_error_message = str(exc)
                 self._record_shadow_storage_failure(
                     "terminal_commit_failed", exc, run=shadow_run
                 )
@@ -3034,6 +3321,13 @@ class CalibrationManager(QObject):
             process_obj._process_recording_finalized = True
         if run_dir_key:
             self._finalized_process_recording_run_dir = run_dir_key
+        return {
+            "ok": bool(storage_ok),
+            "outcome": effective_outcome,
+            "error_message": effective_error_message,
+            "recorder_summary": dict(recorder_summary),
+            "commit": getattr(self, "_last_shadow_commit", None),
+        }
 
     def record_process_event(
         self,
@@ -3071,8 +3365,18 @@ class CalibrationManager(QObject):
             print(f"[CalibrationRecorder] Failed to append analysis: {e}")
             return None
 
-    def record_capture_frame(self, image, *, role: str = "capture", metadata: dict | None = None):
-        if not getattr(self, "record_mode_enabled", False):
+    def record_capture_frame(
+        self,
+        image,
+        *,
+        role: str = "capture",
+        metadata: dict | None = None,
+        retention_class: str = "routine",
+    ):
+        if (
+            not self.is_calibration_store_authoritative()
+            and not getattr(self, "record_mode_enabled", False)
+        ):
             return None
         recorder = getattr(self, "_process_recorder", None)
         if recorder is None:
@@ -3084,6 +3388,11 @@ class CalibrationManager(QObject):
                 image,
                 role=str(role),
                 metadata=metadata or {},
+                retention_class=(
+                    "key"
+                    if bool((metadata or {}).get("key_evidence"))
+                    else str(retention_class or "routine")
+                ),
             )
         except Exception as e:
             print(f"[CalibrationRecorder] Failed to save capture image: {e}")
@@ -3150,11 +3459,17 @@ class CalibrationManager(QObject):
             return None
 
     def set_record_mode_enabled(self, enabled: bool):
+        if self.is_calibration_store_authoritative():
+            return self.set_capture_retention_policy(
+                "full" if bool(enabled) else "structured_only"
+            )
         self.record_mode_enabled = bool(enabled)
         state = "enabled" if self.record_mode_enabled else "disabled"
         self.calibrationStageChanged.emit(f"Calibration recorder {state}.", "dark_blue")
 
     def get_record_mode_enabled(self) -> bool:
+        if self.is_calibration_store_authoritative():
+            return self.get_capture_retention_policy() != "structured_only"
         return bool(getattr(self, "record_mode_enabled", False))
 
     def set_calibration_memory_enabled(self, enabled: bool):
@@ -3560,6 +3875,12 @@ class CalibrationManager(QObject):
             "steps": {k: [] for k in set(self.PHASE_ALIASES.values())},
             "flat_measurements": []
         }
+        if self.is_calibration_store_authoritative():
+            run_meta["canonical_storage"] = {
+                "schema_name": "labcraft.calibration_recording.legacy_session_authority",
+                "schema_version": 1,
+                "structured_persistence_required": True,
+            }
         self.data.setdefault("schema_version", 1)
         self.data.setdefault("runs", [])
         self.data["runs"].append(run_meta)
@@ -3863,6 +4184,36 @@ class CalibrationManager(QObject):
             if self._run_idx is None:
                 # Create a default session in CWD if the caller forgot
                 self.begin_session(self.model.experiment_model.get_calibration_file_path(), notes="auto-started session")
+            self._assign_capture_performance_process_instance(self.activeCalibration)
+            try:
+                storage_started = self._begin_process_recording(self.activeCalibration)
+            except Exception as exc:
+                storage_started = False
+                self._record_shadow_storage_failure(
+                    "run_start_failed", exc, run=getattr(self, "_active_shadow_run", None)
+                )
+            if self.is_calibration_store_authoritative() and not storage_started:
+                process_obj = self.activeCalibration
+                message = "Calibration did not start because required storage could not be opened."
+                self.clear_calibration_queue()
+                try:
+                    release_fn = getattr(process_obj, "release_runtime_resources", None)
+                    if callable(release_fn):
+                        release_fn()
+                except Exception:
+                    pass
+                try:
+                    process_obj.deleteLater()
+                except Exception:
+                    pass
+                self.activeCalibration = None
+                self._finalize_process_recording("storage_error", error_message=message)
+                self.calibrationStageChanged.emit(message, "red")
+                self.calibrationError.emit(message)
+                self.calibrationQueueCompleted.emit()
+                return
+            # Canonical run creation is the authority boundary.  Process
+            # callbacks are connected only after durable storage is open.
             self.activeCalibration.stageChanged.connect(self.onCalibrationStageChanged)
             self.activeCalibration.calibrationCompleted.connect(self.onCalibrationCompleted)
             self.activeCalibration.calibrationError.connect(self.onCalibrationError)
@@ -3871,8 +4222,6 @@ class CalibrationManager(QObject):
             debug_signal = getattr(self.activeCalibration, "onlineStreamDebugUpdated", None)
             if debug_signal is not None:
                 debug_signal.connect(self.onOnlineStreamDebugUpdated)
-            self._assign_capture_performance_process_instance(self.activeCalibration)
-            self._begin_process_recording(self.activeCalibration)
             process_name = self.activeCalibration.__class__.__name__
             self.record_capture_performance_marker(
                 "calibration_process_started",
@@ -6832,7 +7181,10 @@ class CalibrationManager(QObject):
             return False, "Stop the current droplet calibration sequence before starting a stream gravimetric capture.", None
         if self.has_open_stream_calibration_sequence():
             return False, "Stop the current stream calibration sequence before starting a stream gravimetric capture.", None
-        if not self.get_record_mode_enabled():
+        if self.is_calibration_store_authoritative():
+            if self.get_capture_retention_policy() != "full":
+                return False, "Full capture retention must be selected before starting a stream gravimetric capture.", None
+        elif not self.get_record_mode_enabled():
             return False, "Record Calibration Runs must be enabled before starting a stream gravimetric capture.", None
 
         experiment_dir = self._resolve_stream_capture_experiment_dir()
@@ -8194,8 +8546,27 @@ class CalibrationManager(QObject):
     @Slot()
     def onCalibrationCompleted(self):
         process_obj = self.activeCalibration
+        finalization = self._finalize_process_recording("completed") or {}
+        if self.is_calibration_store_authoritative() and not finalization.get("ok"):
+            message = str(
+                finalization.get("error_message")
+                or "Calibration storage could not commit the terminal result."
+            )
+            self.clear_calibration_queue()
+            self._record_calibration_audit_event(
+                "calibration_process_storage_failed",
+                f"Calibration storage failed: {process_obj.__class__.__name__ if process_obj else 'unknown'}",
+                details={"outcome": "storage_error", "error_message": message},
+                level="error",
+                process_obj=process_obj,
+            )
+            self._cleanup_finished_process(process_obj)
+            self.activeCalibration = None
+            self.calibrationStageChanged.emit(message, "red")
+            self.calibrationError.emit(message)
+            self.calibrationQueueCompleted.emit()
+            return
         self.calibrationStageChanged.emit("Calibration completed successfully", "green")
-        self._finalize_process_recording("completed")
         self._pending_process_verdict = self._build_pending_process_verdict_context(
             process_obj,
             default_outcome="success",
@@ -8372,16 +8743,46 @@ class CalibrationManager(QObject):
                         "source_phase_key": phase_key,
                         "source_step_index": legacy_step_index,
                     },
+                    include_legacy_reference=self.is_calibration_store_authoritative(),
                 )
+                if self.is_calibration_store_authoritative():
+                    payload = dict(canonical_update.document["payload"])
             except Exception as exc:
                 self._record_shadow_storage_failure(
                     "update_append_failed", exc, run=shadow_run
                 )
+                if self.is_calibration_store_authoritative():
+                    self._abort_active_process_for_storage_failure(
+                        "update_append_failed", exc
+                    )
+                    return
 
         self._update_stream_capture_online_summary_from_payload(
             payload,
             phase_key=phase_key,
         )
+
+        # In authoritative mode, prove semantic parity before exposing the
+        # legacy step.  The payload is the exact canonical payload returned by
+        # append_update(), including its canonical reference.
+        if canonical_update is not None and self.is_calibration_store_authoritative():
+            try:
+                if not store.record_parity(
+                    shadow_run,
+                    update_id=canonical_update.update_id,
+                    legacy_payload=payload,
+                ):
+                    raise CalibrationStoreError(
+                        "canonical and legacy payloads diverged"
+                    )
+            except Exception as exc:
+                self._record_shadow_storage_failure(
+                    "parity_check_failed", exc, run=shadow_run
+                )
+                self._abort_active_process_for_storage_failure(
+                    "parity_check_failed", exc
+                )
+                return
 
         # Append to steps
         run["steps"][phase_key].append(payload)
@@ -8389,11 +8790,26 @@ class CalibrationManager(QObject):
         # Optional: emit flat rows if droplet arrays present (from droplet_search / characterization)
         # self._try_append_flat_rows_from_payload(run, phase_key, payload)
 
-        self._save_atomic()
-
-        if canonical_update is not None:
+        try:
+            self._save_atomic()
+        except Exception as exc:
             try:
-                store.record_parity(
+                run["steps"][phase_key].pop()
+            except Exception:
+                pass
+            if self.is_calibration_store_authoritative():
+                self._record_shadow_storage_failure(
+                    "legacy_dual_write_failed", exc, run=shadow_run
+                )
+                self._abort_active_process_for_storage_failure(
+                    "legacy_dual_write_failed", exc
+                )
+                return
+            raise
+
+        if canonical_update is not None and not self.is_calibration_store_authoritative():
+            try:
+                parity_matched = store.record_parity(
                     shadow_run,
                     update_id=canonical_update.update_id,
                     legacy_payload=run["steps"][phase_key][legacy_step_index],
@@ -8852,6 +9268,25 @@ class CalibrationManager(QObject):
             kwargs = self._prepare_calibration_memory_prior_application(proc_cls, kwargs)
         except Exception as e:
             self._warn_calibration_memory("prepare_prior_application", e)
+        if self.is_calibration_store_authoritative():
+            try:
+                contract = process_storage_contract(proc_cls)
+                selected_policy = CaptureRetentionPolicy.parse(
+                    self.get_capture_retention_policy()
+                )
+                if selected_policy < contract.minimum_capture_policy:
+                    msg = (
+                        f"{contract.minimum_capture_policy.storage_name.replace('_', ' ').title()} "
+                        f"capture retention must be selected before starting {phase_name.replace('_', ' ')}."
+                    )
+                    self.calibrationStageChanged.emit(msg, "red")
+                    self.calibrationError.emit(msg)
+                    return False
+            except Exception as exc:
+                msg = f"{phase_name.replace('_', ' ').title()} storage contract is invalid: {exc}"
+                self.calibrationStageChanged.emit(msg, "red")
+                self.calibrationError.emit(msg)
+                return False
         missing = self._process_missing(proc_cls, *args, **kwargs)
 
         if missing:
@@ -9379,7 +9814,7 @@ class CalibrationManager(QObject):
             }
         candidate_id = transient_id or historical_id
         if not candidate_id:
-            return {"ok": True, "code": "persisted_result", "message": ""}
+            return self._validate_persisted_characterization_storage(row)
         if transient_id:
             stored = self._transient_characterization_candidate
             available = (
@@ -9453,6 +9888,103 @@ class CalibrationManager(QObject):
             "code": "ok",
             "message": "",
             "candidate_id": candidate.candidate_id,
+        }
+
+    def _validate_persisted_characterization_storage(self, row):
+        """Fail closed for Milestone 3 sessions while preserving legacy-only history."""
+
+        source_run_id = str(row.get("source_run_id") or row.get("run_id") or "")
+        phase = str(row.get("source_phase_key") or row.get("phase") or "")
+        step_index = row.get("source_step_index")
+        source_run = next(
+            (
+                item
+                for item in list(self.data.get("runs") or [])
+                if str(item.get("run_id") or "") == source_run_id
+            ),
+            None,
+        )
+        if not isinstance(source_run, dict):
+            return {"ok": True, "code": "persisted_legacy_result", "message": ""}
+        authority = dict(source_run.get("canonical_storage") or {})
+        if not authority.get("structured_persistence_required"):
+            return {"ok": True, "code": "persisted_legacy_result", "message": ""}
+        try:
+            step_index = int(step_index)
+            steps = source_run.get("steps") or {}
+            payload = list(steps.get(self._resolve_phase_key(phase)) or [])[step_index]
+            reference = dict(payload.get("canonical_storage_ref") or {})
+            if (
+                reference.get("schema_name") != LEGACY_REF_SCHEMA_NAME
+                or int(reference.get("schema_version") or 0)
+                != LEGACY_REF_SCHEMA_VERSION
+            ):
+                raise ValueError("legacy step has an invalid canonical reference")
+            process_name = str(reference["process_name"])
+            process_run_id = str(reference["process_run_id"])
+            update_id = str(reference["update_id"])
+            root = Path(str(self._calibration_recordings_root)).resolve()
+            run_dir = (root / process_name / process_run_id).resolve()
+            if root not in run_dir.parents:
+                raise ValueError("canonical result reference escaped the recording root")
+            validated = CalibrationRecordingStore.validate_run(run_dir)
+            result = dict(validated["result"])
+            updates = [
+                update
+                for update in validated["updates"]
+                if str(update.get("update_id") or "") == update_id
+            ]
+            if len(updates) != 1:
+                raise ValueError("canonical update reference does not resolve uniquely")
+            canonical_update = updates[0]
+            if (
+                str(canonical_update.get("process_run_id") or "") != process_run_id
+                or str(canonical_update.get("process_name") or "") != process_name
+                or int(canonical_update.get("update_index") or 0)
+                != int(reference.get("update_index") or 0)
+                or calibration_storage_sha256(canonical_update.get("payload") or {})
+                != calibration_storage_sha256(payload)
+            ):
+                raise ValueError("legacy and canonical update payloads conflict")
+            run_meta = dict(validated.get("run_meta") or {})
+            if (
+                int(run_meta.get("parity_mismatch_count") or 0) != 0
+                or int(run_meta.get("parity_checked_count") or 0)
+                != int(run_meta.get("parity_matched_count") or 0)
+            ):
+                raise ValueError("canonical run contains a parity conflict")
+            if (
+                result.get("outcome") != "completed"
+                or result.get("result_kind") != "calibration"
+                or not bool((result.get("summary_projection") or {}).get("application_eligible"))
+                or update_id not in set(result.get("update_ids") or [])
+            ):
+                raise ValueError("canonical result is not application eligible")
+            store = self._ensure_calibration_recording_store()
+            index_rows, ignored_tail = store.read_jsonl(store.index_path)
+            if ignored_tail:
+                raise ValueError("canonical index has an incomplete trailing event")
+            matching = [
+                event
+                for event in index_rows
+                if str(event.get("process_run_id") or "") == process_run_id
+                and str(event.get("result_id") or "") == str(result.get("result_id") or "")
+                and str(event.get("result_sha256") or "") == str(result.get("result_sha256") or "")
+            ]
+            if len(matching) != 1:
+                raise ValueError("canonical result does not have one committed index event")
+        except Exception as exc:
+            return {
+                "ok": False,
+                "code": "canonical_storage_unavailable",
+                "message": f"This calibration cannot be applied because its canonical storage is incomplete: {exc}",
+            }
+        return {
+            "ok": True,
+            "code": "canonical_result",
+            "message": "",
+            "process_run_id": process_run_id,
+            "result_id": result.get("result_id"),
         }
 
     def _transient_characterization_rows(self):
@@ -9905,7 +10437,14 @@ class BaseCalibrationProcess(QObject):
         except Exception:
             pass
 
-    def _record_capture(self, frame, *, role: str, metadata: dict | None = None):
+    def _record_capture(
+        self,
+        frame,
+        *,
+        role: str,
+        metadata: dict | None = None,
+        retention_class: str = "routine",
+    ):
         if frame is None:
             return None
         try:
@@ -9914,6 +10453,7 @@ class BaseCalibrationProcess(QObject):
                     frame,
                     role=str(role),
                     metadata=metadata or {},
+                    retention_class=retention_class,
                 )
                 if hasattr(self.calibration_manager, "record_memory_capture"):
                     self.calibration_manager.record_memory_capture(
@@ -10282,7 +10822,8 @@ class BaseCalibrationProcess(QObject):
         on_success = None,  # called after setting the attribute (optional)
         on_final_failure = None,  # called after we exhaust attempts (optional)
         on_result = None,  # optional hook that can handle a typed CaptureResult
-        final_error_msg: str = "Image capture failed repeatedly."  # default error if no handler
+        final_error_msg: str = "Image capture failed repeatedly.",  # default error if no handler
+        retention_class: str = "routine",
     ):
         """
         Issue a capture request that will retry if the controller reports failure (frame=None).
@@ -10547,7 +11088,12 @@ class BaseCalibrationProcess(QObject):
                             "subtract_background_image_relpath": bg_ref.get("image_relpath", ""),
                         }
                     )
-                capture_ref = self._record_capture(frame, role=role or "capture", metadata=capture_meta)
+                capture_ref = self._record_capture(
+                    frame,
+                    role=role or "capture",
+                    metadata=capture_meta,
+                    retention_class=retention_class,
+                )
                 if capture_ref is not None:
                     self._last_capture_refs[set_attr] = capture_ref
                 self._record_capture_performance_marker(
@@ -10815,7 +11361,12 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
     def missing_requirements(cm) -> list[str]:
         missing = []
         try:
-            if not bool(cm.get_record_mode_enabled()):
+            if (
+                not bool(
+                    getattr(cm, "is_calibration_store_authoritative", lambda: False)()
+                )
+                and not bool(cm.get_record_mode_enabled())
+            ):
                 missing.append("Record Calibration Runs enabled")
         except Exception:
             missing.append("Record Calibration Runs enabled")
@@ -12792,6 +13343,7 @@ class OnlineStreamCalibrationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="background_image",
             stage_text="Capturing online stream calibration background",
+            retention_class="key",
             attempts_total=3,
             retry_delay_ms=100,
             guard_timeout_ms=10_000,
@@ -14520,6 +15072,7 @@ class HeadPrimeCalibrationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="captured_image",
             stage_text="Capturing priming image",
+            retention_class="key",
             attempts_total=3,
             retry_delay_ms=100,
             guard_timeout_ms=10_000,
@@ -14749,6 +15302,36 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self.state_machine.setInitialState(self.state_initial_position)
 
     @Slot()
+    def onCalibrationCompleted(self):
+        """Persist the bounded nozzle-position result before terminal commit."""
+
+        machine_position = dict(
+            self.model.machine_model.get_current_position_dict() or {}
+        )
+        result = {
+            axis: int(machine_position[axis])
+            for axis in ("X", "Y", "Z")
+            if axis in machine_position
+        }
+        nozzle_px = getattr(
+            self.calibration_manager, "nozzle_center_image_position", None
+        )
+        if nozzle_px is not None:
+            result["nozzle_center_px"] = [int(value) for value in nozzle_px]
+        result["flash_delay"] = int(
+            self._clamp_delay(
+                getattr(self, "_current_flash_delay_us", self.initial_flash_delay_us)
+            )
+        )
+        result["measurement_count"] = int(len(self.measurements))
+        self.calibrationDataUpdated.emit(
+            {"measurements": [], "result": result}
+        )
+        if self.calibration_manager.activeCalibration is not self:
+            return
+        super().onCalibrationCompleted()
+
+    @Slot()
     def onInitialPosition(self):
         self.stageChanged.emit("Nozzle Pos - Moving to initial position")
         # Get the location of the camera in the location model
@@ -14786,6 +15369,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="background_image",
             stage_text="Capturing background image",
+            retention_class="key",
             attempts_total=3,
             retry_delay_ms=100,
             guard_timeout_ms=10_000,
@@ -14827,6 +15411,7 @@ class NozzlePositionCalibrationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="droplet_image",
             stage_text="Capturing droplet image",
+            retention_class="key",
             attempts_total=5,
             retry_delay_ms=75,
             guard_timeout_ms=10_000,
@@ -16649,6 +17234,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="background_image",
             stage_text="Capturing post-focus nozzle refresh background",
+            retention_class="key",
             attempts_total=3,
             retry_delay_ms=100,
             guard_timeout_ms=10_000,
@@ -16692,6 +17278,7 @@ class NozzleFocusCalibrationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="droplet_image",
             stage_text="Capturing post-focus nozzle refresh droplet",
+            retention_class="key",
             attempts_total=5,
             retry_delay_ms=75,
             guard_timeout_ms=10_000,
@@ -17469,6 +18056,7 @@ class DropletEmergenceCalibrationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="background_image",
             stage_text="Capturing background image",
+            retention_class="key",
             attempts_total=3,
             retry_delay_ms=100,
             guard_timeout_ms=10_000,
@@ -18294,6 +18882,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="background_image",
             stage_text="Capturing background image",
+            retention_class="key",
             attempts_total=3,
             retry_delay_ms=100,
             guard_timeout_ms=10_000,
@@ -18317,6 +18906,7 @@ class PressureCalibrationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="nozzle_image",
             stage_text="Capturing nozzle image",
+            retention_class="key",
             attempts_total=3,
             retry_delay_ms=100,
             guard_timeout_ms=10_000,
@@ -19771,6 +20361,7 @@ class PreBreakupMorphologyCalibrationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="background_image",
             stage_text="Capturing pre-breakup morphology background",
+            retention_class="key",
             attempts_total=3,
             retry_delay_ms=100,
             guard_timeout_ms=10_000,
@@ -20624,7 +21215,12 @@ class PreBreakupDatasetAcquisitionProcess(BaseCalibrationProcess):
     def missing_requirements(cm) -> list[str]:
         missing = []
         try:
-            if not bool(cm.get_record_mode_enabled()):
+            if bool(
+                getattr(cm, "is_calibration_store_authoritative", lambda: False)()
+            ):
+                if str(cm.get_capture_retention_policy()) != "full":
+                    missing.append("Full capture retention selected")
+            elif not bool(cm.get_record_mode_enabled()):
                 missing.append("Record Calibration Runs enabled")
         except Exception:
             missing.append("Record Calibration Runs enabled")
@@ -23705,6 +24301,7 @@ class PressureBandCalibrationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="residue_check_image",
             stage_text=label,
+            retention_class="key",
             attempts_total=3,
             retry_delay_ms=75,
             guard_timeout_ms=15_000,
@@ -28591,6 +29188,7 @@ class DropletSearchCalibrationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="background_image",
             stage_text="Capturing background image",
+            retention_class="key",
             attempts_total=3, retry_delay_ms=100, guard_timeout_ms=10_000,
             on_success=lambda _frame: self._reset_contour_tracker(),
             final_error_msg="Failed to capture background image."
@@ -31439,6 +32037,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         self._capture_with_policy(
             set_attr="background_image",
             stage_text="Capturing background",
+            retention_class="key",
             attempts_total=3, retry_delay_ms=120, guard_timeout_ms=10_000,
             on_success=self._on_background_captured,
             final_error_msg="Background capture failed."
@@ -39242,6 +39841,9 @@ class RefuelCameraModel(QObject):
         owner = getattr(self, "owner_model", None)
         manager = getattr(owner, "calibration_manager", None) if owner is not None else None
         getter = getattr(manager, "get_record_mode_enabled", None)
+        authoritative = getattr(manager, "is_calibration_store_authoritative", None)
+        if callable(authoritative) and authoritative():
+            return True
         if callable(getter):
             try:
                 return bool(getter())
@@ -39284,11 +39886,19 @@ class RefuelCameraModel(QObject):
         recorder = getattr(self, "_process_recorder", None)
         if recorder is None or not self._record_mode_enabled():
             return None
+        owner = getattr(self, "owner_model", None)
+        manager = getattr(owner, "calibration_manager", None) if owner is not None else None
         try:
             run_dir = recorder.start_run(
                 self.PROCESS_NAME,
                 self.PHASE_NAME,
                 extra_meta=self._build_refuel_run_meta(),
+                capture_policy=(
+                    manager.get_capture_retention_policy()
+                    if manager is not None
+                    and bool(getattr(manager, "is_calibration_store_authoritative", lambda: False)())
+                    else "full"
+                ),
             )
             self._recorder_run_dir = run_dir
             recorder.append_event(
@@ -39329,7 +39939,12 @@ class RefuelCameraModel(QObject):
         if recorder is None or self._recorder_run_dir is None or image is None:
             return None
         try:
-            return recorder.save_capture_image(image, role=str(role), metadata=metadata or {})
+            return recorder.save_capture_image(
+                image,
+                role=str(role),
+                metadata=metadata or {},
+                retention_class=("key" if str(role) == "burst_completion" else "routine"),
+            )
         except Exception as exc:
             print(f"[RefuelRecorder] Failed to save capture image: {exc}")
             return None
