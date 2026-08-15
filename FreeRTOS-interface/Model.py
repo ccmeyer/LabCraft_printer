@@ -5161,6 +5161,17 @@ class ExperimentModel(QObject):
             reps = int(self.metadata.get("replicates", 1))
         except Exception:
             reps = 1
+
+        # Older explicit-well finalization used ``0`` as a layout sentinel and
+        # preserved the authored multiplier separately.  Explicit wells control
+        # placement, not reaction multiplicity, so recover that value when
+        # reconstructing legacy designs instead of treating them as empty.
+        if reps == 0 and self.has_explicit_well_assignments():
+            try:
+                legacy_reps = int(self.metadata.get("_original_replicates", 1))
+            except Exception:
+                legacy_reps = 1
+            return max(1, legacy_reps)
         return max(0, reps)
 
     def _iter_reaction_run_specs(self):
@@ -16417,24 +16428,11 @@ class Model(QObject):
         # Randomization (handled earlier via seed in ExperimentModel->load_reactions_from_model)
         all_reactions = self.reaction_collection.get_all_reactions()
 
-        if using_manual_assignments:
-            # When manual well assignments are used, treat "replicates" as 0
-            # so the runtime / metadata clearly reflect that layout is explicit.
-            try:
-                original_reps = int(self.experiment_model.metadata.get("replicates", 1))
-            except Exception:
-                original_reps = self.experiment_model.metadata.get("replicates", 1)
-
-            # Preserve original value for reference if you want it later
-            if "_original_replicates" not in self.experiment_model.metadata:
-                self.experiment_model.metadata["_original_replicates"] = original_reps
-
-            self.experiment_model.metadata["replicates"] = 0
-
-            # IMPORTANT: do NOT randomize when manual assignments are provided.
-            # The user expects the i-th reaction to go to the i-th specified well.
-        else:
-            # ---- 2) Automatic mode: optional randomization as before ----
+        # Explicit well IDs control placement only. Preserve the authored
+        # replicate count and row order so each generated reaction continues to
+        # map one-to-one to its specified well.
+        if not using_manual_assignments:
+            # ---- 2) Automatic mode: optional randomization ----
             random_seed = self.experiment_model.get_random_seed()
             if random_seed is not None:
                 import random

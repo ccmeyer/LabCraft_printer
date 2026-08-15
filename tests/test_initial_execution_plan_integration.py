@@ -1,8 +1,10 @@
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pandas as pd
 import pytest
 
 import Model as model_module
@@ -48,6 +50,33 @@ def _configure_design(em, *, randomize=False, seed=None):
         fill_reagent_name="Water",
         fill_droplet_volume_nL=10.0,
     )
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    em.save_experiment()
+
+
+def _configure_explicit_uploaded_design(em):
+    em.set_metadata(
+        name="explicit-upload-calibration",
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=1,
+        target_reaction_volume_nL=500.0,
+        final_reaction_volume_nL=500.0,
+        printed_volume_tolerance_nL=50.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+    )
+    em.set_uploaded_design_from_dataframe(
+        pd.DataFrame(
+            {
+                "Well": ["A1", "B2"],
+                "Signal (mM)": [0.4, 1.0],
+            }
+        )
+    )
+    em.factors[0].options[0].forced_stock_conc = 10.0
     assert em.optimize_stock_solutions()["best"]
     em.generate_experiment()
     em.save_experiment()
@@ -958,6 +987,85 @@ def test_manual_well_assignments_are_captured_exactly(experiment_model_factory):
         for well in plan.wells
     }
     assert [by_reaction[f"R{i + 1}"] for i in range(len(explicit))] == explicit
+
+
+def test_explicit_uploaded_design_can_preview_and_apply_calibration(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_explicit_uploaded_design(em)
+
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+
+    prepared = load_execution_plan(em.execution_plan_file_path)
+    stock = next(item for item in prepared.stocks if item.factor_name == "Signal")
+    assert em.metadata["replicates"] == 1
+    assert "_original_replicates" not in em.metadata
+    assert [well.well_id for well in prepared.wells] == ["A1", "B2"]
+
+    projected = em.get_calibration_application_plan_for_key(("Signal", None))
+    assert projected["source"] == "authoritative_execution_plan"
+    prepared_counts_by_well = {
+        well.well_id: next(
+            dispense.target_dispenses
+            for dispense in well.dispenses
+            if dispense.stock_id == stock.stock_id
+        )
+        for well in prepared.wells
+    }
+    assert projected["stocks"][0]["droplets_per_target"] == {
+        0.4: prepared_counts_by_well["A1"],
+        1.0: prepared_counts_by_well["B2"],
+    }
+
+    preview = em.preview_requantized_for_option(("Signal", None), 12.0)
+    assert preview["ok"] is True
+    assert [row["drops"] for row in preview["rows"]] == [2, 4]
+
+    result = em.apply_droplet_volume_for_option(
+        "Signal",
+        None,
+        12.0,
+        printing_mode="droplet",
+        applied_calibration={
+            "printer_head": SimpleNamespace(printer_head_id="explicit-head-1"),
+            "measured_volume_nL": 12.0,
+            "pw_us": 1300,
+            "pressure_psi": 0.6,
+            "run_id": "explicit-upload-run",
+            "phase": "synthetic_characterization",
+            "timestamp": "2000-01-01T00:00:00Z",
+            "source_row_fingerprint": (
+                "explicit-upload-run",
+                "synthetic_characterization",
+                1300,
+                0.6,
+                "droplet",
+                12.0,
+            ),
+            "original_printing_mode": "droplet",
+            "applied_printing_mode": "droplet",
+        },
+    )
+
+    calibrated = load_execution_plan(em.execution_plan_file_path)
+    assert result["execution_plan_revision"] == 3
+    assert calibrated.plan_id == prepared.plan_id
+    assert calibrated.plan_revision == 3
+    calibrated_stock = next(
+        item for item in calibrated.stocks if item.stock_id == stock.stock_id
+    )
+    assert calibrated_stock.effective_volume_nL == pytest.approx(12.0)
+    counts_by_well = {
+        well.well_id: next(
+            dispense.target_dispenses
+            for dispense in well.dispenses
+            if dispense.stock_id == stock.stock_id
+        )
+        for well in calibrated.wells
+    }
+    assert counts_by_well == {"A1": 2, "B2": 4}
 
 
 def test_initialize_and_duplicate_do_not_create_execution_plan(

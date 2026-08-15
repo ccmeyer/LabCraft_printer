@@ -104,6 +104,28 @@ def test_sample_csv_is_estimated_from_its_103_explicit_rows_not_factorial_levels
     assert implied_factorial > 50_000_000_000
 
 
+def test_legacy_explicit_uploaded_design_recovers_authored_replicate_count():
+    model = _make_model()
+    model.set_uploaded_design_from_dataframe(
+        pd.DataFrame(
+            {
+                "Well": ["A1", "A2"],
+                "Signal (mM)": [0.0, 1.0],
+            }
+        )
+    )
+    model.metadata["replicates"] = 0
+    model.metadata["_original_replicates"] = 1
+
+    estimate = model.validate_design_size()
+    run_specs = list(model._iter_reaction_run_specs())
+
+    assert estimate.mode == "uploaded"
+    assert estimate.replicate_count == 1
+    assert estimate.total_runs == 2
+    assert [spec["reaction"] for spec in run_specs] == model._uploaded_reactions
+
+
 def test_clear_uploaded_design_removes_design_bound_state_but_keeps_setup_and_paths():
     model = _make_model()
     model.set_metadata(

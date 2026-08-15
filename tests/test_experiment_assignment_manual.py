@@ -93,7 +93,7 @@ def test_manual_assignment_length_mismatch_raises(experiment_model_factory):
         Model.load_experiment_from_model(model, load_progress=False)
 
 
-def test_manual_assignment_sets_replicates_runtime_to_zero(experiment_model_factory):
+def test_manual_assignment_preserves_authored_replicates(experiment_model_factory):
     model = experiment_model_factory()
     em = model.experiment_model
     _configure_design_for_manual(em)
@@ -106,8 +106,8 @@ def test_manual_assignment_sets_replicates_runtime_to_zero(experiment_model_fact
 
     Model.load_experiment_from_model(model, load_progress=False)
 
-    assert em.metadata["replicates"] == 0
-    assert em.metadata["_original_replicates"] == original
+    assert em.metadata["replicates"] == original
+    assert "_original_replicates" not in em.metadata
 
 
 def test_manual_assignment_rejects_invalid_and_excluded_wells(experiment_model_factory):
