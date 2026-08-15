@@ -1,7 +1,6 @@
 # Calibration Recording Store Migration: Milestone 0 Contract and Plan
 
-Status: Milestone 0 complete; Milestone 1 host implementation and validation
-complete; qualified Pi collection and candidate baseline pending
+Status: Milestones 0 and 1 complete; qualified Pi candidate baseline frozen
 
 Prepared: 2026-08-14
 
@@ -736,13 +735,15 @@ Rollback: remove this document; no runtime state is affected.
 
 ### Milestone 1: baseline storage-contract SIL
 
-Implementation status on 2026-08-14: the fixture catalog, guarded process,
+Completion status on 2026-08-14: the fixture catalog, guarded process,
 artifact inspection, composed lifecycle, frozen stress workload, Pi
 orchestration contract, and baseline-freezing tool are implemented. Focused,
-host lifecycle, and host stress validation pass. The qualified target-Pi run
-and tracked candidate baseline remain an explicit external qualification gate;
-Milestone 1 must not be marked complete until those artifacts exist and the
-full Python suite passes.
+host lifecycle, host stress, and full-suite validation pass. The qualified
+Raspberry Pi 5 NVMe/ext4 report set was measured from clean commit
+`ddea246c2aa89f492abf9cc8d4755e92af92d9f0`, and the tracked
+`calibration_storage_legacy_pi5_v1.json` candidate baseline is frozen. See
+`docs/calibration_recording_store_milestone_1_completion.md` for hashes,
+results, limitations, and rollback.
 
 Scope:
 

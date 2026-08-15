@@ -1,0 +1,774 @@
+{
+  "baseline_id": "calibration_storage_legacy_pi5_v1",
+  "classification": {
+    "status": "pass",
+    "threshold_maturity": "candidate"
+  },
+  "compatibility": {
+    "environment": {
+      "architecture": "aarch64",
+      "cpu_identifier": "unknown",
+      "operating_system": "Linux",
+      "os_release": "6.12.20+rpt-rpi-2712",
+      "python_executable": "/usr/bin/python3.11",
+      "python_implementation": "CPython",
+      "python_version": "3.11.2",
+      "qt": {
+        "binding": "real",
+        "platform": "offscreen",
+        "pyside_version": "6.7.1",
+        "qt_version": "6.7.1"
+      },
+      "target_pi": {
+        "filesystem": {
+          "filesystem_type": "ext4",
+          "mount_source": "/dev/nvme0n1p2[/home/labcraft/LabCraft_printer/verification_reports/virtual_workflows/pi-sil]",
+          "storage_class": "nvme"
+        },
+        "lane": "raspberry_pi_sil",
+        "pi_model": "Raspberry Pi 5 Model B Rev 1.0"
+      }
+    },
+    "safety": {
+      "hardware_access_allowed": false,
+      "hardware_interfaces": {
+        "GPIO": false,
+        "MCU": false,
+        "balance": false,
+        "camera": false,
+        "firmware_update": false,
+        "serial": false
+      },
+      "pi_sil": {
+        "network_unshared": true,
+        "private_dev": true,
+        "root_read_only": true,
+        "sandbox_method": "bubblewrap_private_dev_v1"
+      },
+      "simulated_port": "SIMULATED",
+      "simulation": true
+    },
+    "workload": {
+      "capture_mode": "structured_only_proxy",
+      "completion_count": 200,
+      "expected_update_count": 232,
+      "fixture_path": "tools/virtual_workflows/fixtures/calibration_storage_contract_legacy_baseline_8x25_v1.json",
+      "fixture_schema_version": 1,
+      "fixture_sha256": "0a2b57a0ea07bbe437ee3037c9ca2a9331a38dbdcae5fbb908e8390d8f592621",
+      "head_count": 8,
+      "key_evidence_probe_capture_count": 2,
+      "large_process_ordinal_per_head": 25,
+      "large_update_count_per_process": 5,
+      "process_runs_per_head": 25,
+      "speed_multiplier": 1000.0,
+      "structured_process_runs": 200,
+      "timeout_seconds": 1800.0,
+      "workload_hash": "f99bdfc4150c98d0d2a37fd43d3cf4353ca1b20240152cfb264c89c9800ff341",
+      "workload_id": "calibration_storage_legacy_baseline_8x25_v1"
+    }
+  },
+  "created_at_utc": "2026-08-15T04:40:32.362260Z",
+  "deferred_metrics": {
+    "index_latency": "not_available_until_m2",
+    "result_finalize_latency": "not_available_until_m2"
+  },
+  "exact_counts": {
+    "key_evidence_probe_capture_count": 2,
+    "legacy_run_envelope_count": 201,
+    "process_run_count": 200,
+    "recording_count": 200,
+    "update_count": 232,
+    "workload_capture_count": 0
+  },
+  "fixture_identity": {
+    "fixture_sha256": "0a2b57a0ea07bbe437ee3037c9ca2a9331a38dbdcae5fbb908e8390d8f592621",
+    "workload_hash": "f99bdfc4150c98d0d2a37fd43d3cf4353ca1b20240152cfb264c89c9800ff341"
+  },
+  "host_label": "pi5-calibration-storage-legacy-v1",
+  "limitations": [
+    "Valid only for the exact Pi model, storage class/filesystem, Python/Qt environment, fixture catalog, and workload hash above.",
+    "Characterizes the current legacy writer; it is not an acceptance threshold for the Milestone 2 store."
+  ],
+  "metrics": {
+    "resources_and_growth": {
+      "calibration_json_bytes": {
+        "candidate_limit": {
+          "maximum_observed": 7840095.0,
+          "measurement_floor": 4096.0,
+          "relative_margin": 1960023.75,
+          "robust_margin": 0.0,
+          "selected_margin": 1960023.75,
+          "upper_limit": 9800118.75
+        },
+        "distribution": {
+          "count": 3,
+          "maximum": 7840095.0,
+          "median": 7840095.0,
+          "median_absolute_deviation": 0.0,
+          "minimum": 7840095.0,
+          "q1": 7840095.0,
+          "q3": 7840095.0
+        },
+        "per_run": [
+          {
+            "run_id": "d821ebd9-7494-42d9-9fa2-191e64c3af75",
+            "value": 7840095.0
+          },
+          {
+            "run_id": "dc0f517a-4b3c-49d4-a354-3a40809049e0",
+            "value": 7840095.0
+          },
+          {
+            "run_id": "8037cc68-d245-4729-8751-29cc21a005aa",
+            "value": 7840095.0
+          }
+        ],
+        "unit": "bytes"
+      },
+      "peak_rss_bytes": {
+        "candidate_limit": {
+          "maximum_observed": 571179008.0,
+          "measurement_floor": 4096.0,
+          "relative_margin": 130572288.0,
+          "robust_margin": 291667968.0,
+          "selected_margin": 291667968.0,
+          "upper_limit": 862846976.0
+        },
+        "distribution": {
+          "count": 3,
+          "maximum": 571179008.0,
+          "median": 522289152.0,
+          "median_absolute_deviation": 48611328.0,
+          "minimum": 473677824.0,
+          "q1": 497983488.0,
+          "q3": 546734080.0
+        },
+        "per_run": [
+          {
+            "run_id": "d821ebd9-7494-42d9-9fa2-191e64c3af75",
+            "value": 473677824.0
+          },
+          {
+            "run_id": "dc0f517a-4b3c-49d4-a354-3a40809049e0",
+            "value": 522289152.0
+          },
+          {
+            "run_id": "8037cc68-d245-4729-8751-29cc21a005aa",
+            "value": 571179008.0
+          }
+        ],
+        "unit": "bytes"
+      },
+      "rss_growth_bytes": {
+        "candidate_limit": {
+          "maximum_observed": 18153472.0,
+          "measurement_floor": 4096.0,
+          "relative_margin": 3911680.0,
+          "robust_margin": 4227072.0,
+          "selected_margin": 4227072.0,
+          "upper_limit": 22380544.0
+        },
+        "distribution": {
+          "count": 3,
+          "maximum": 18153472.0,
+          "median": 15646720.0,
+          "median_absolute_deviation": 704512.0,
+          "minimum": 14942208.0,
+          "q1": 15294464.0,
+          "q3": 16900096.0
+        },
+        "per_run": [
+          {
+            "run_id": "d821ebd9-7494-42d9-9fa2-191e64c3af75",
+            "value": 18153472.0
+          },
+          {
+            "run_id": "dc0f517a-4b3c-49d4-a354-3a40809049e0",
+            "value": 14942208.0
+          },
+          {
+            "run_id": "8037cc68-d245-4729-8751-29cc21a005aa",
+            "value": 15646720.0
+          }
+        ],
+        "unit": "bytes"
+      },
+      "scenario_total_bytes": {
+        "candidate_limit": {
+          "maximum_observed": 26367422.0,
+          "measurement_floor": 4096.0,
+          "relative_margin": 6591855.5,
+          "robust_margin": 0.0,
+          "selected_margin": 6591855.5,
+          "upper_limit": 32959277.5
+        },
+        "distribution": {
+          "count": 3,
+          "maximum": 26367422.0,
+          "median": 26367422.0,
+          "median_absolute_deviation": 0.0,
+          "minimum": 26367422.0,
+          "q1": 26367422.0,
+          "q3": 26367422.0
+        },
+        "per_run": [
+          {
+            "run_id": "d821ebd9-7494-42d9-9fa2-191e64c3af75",
+            "value": 26367422.0
+          },
+          {
+            "run_id": "dc0f517a-4b3c-49d4-a354-3a40809049e0",
+            "value": 26367422.0
+          },
+          {
+            "run_id": "8037cc68-d245-4729-8751-29cc21a005aa",
+            "value": 26367422.0
+          }
+        ],
+        "unit": "bytes"
+      }
+    },
+    "timing": {
+      "calibration_rewrite_latency_ms": {
+        "candidate_limit": {
+          "maximum_observed": 397.3289824,
+          "measurement_floor": 1.0,
+          "relative_margin": 99.16685993749999,
+          "robust_margin": 1.1073461999998244,
+          "selected_margin": 99.16685993749999,
+          "upper_limit": 496.4958423375
+        },
+        "median_distribution": {
+          "count": 3,
+          "maximum": 225.33621,
+          "median": 225.1657015,
+          "median_absolute_deviation": 0.17050849999998263,
+          "minimum": 224.989276,
+          "q1": 225.07748875,
+          "q3": 225.25095575
+        },
+        "p95_distribution": {
+          "count": 3,
+          "maximum": 397.3289824,
+          "median": 396.66743974999997,
+          "median_absolute_deviation": 0.18455769999997074,
+          "minimum": 396.48288205,
+          "q1": 396.5751609,
+          "q3": 396.998211075
+        },
+        "per_run": [
+          {
+            "distribution": {
+              "count": 432,
+              "maximum": 449.887416,
+              "median": 224.989276,
+              "minimum": 0.329718,
+              "p95": 396.66743974999997
+            },
+            "run_id": "d821ebd9-7494-42d9-9fa2-191e64c3af75"
+          },
+          {
+            "distribution": {
+              "count": 432,
+              "maximum": 453.004087,
+              "median": 225.33621,
+              "minimum": 0.33107,
+              "p95": 396.48288205
+            },
+            "run_id": "dc0f517a-4b3c-49d4-a354-3a40809049e0"
+          },
+          {
+            "distribution": {
+              "count": 432,
+              "maximum": 450.247727,
+              "median": 225.1657015,
+              "minimum": 0.336608,
+              "p95": 397.3289824
+            },
+            "run_id": "8037cc68-d245-4729-8751-29cc21a005aa"
+          }
+        ],
+        "unit": "milliseconds"
+      },
+      "first_quartile_update_latency_ms": {
+        "candidate_limit": {
+          "maximum_observed": 90.99991359999997,
+          "measurement_floor": 1.0,
+          "relative_margin": 22.749242599999995,
+          "robust_margin": 0.017659199999940256,
+          "selected_margin": 22.749242599999995,
+          "upper_limit": 113.74915619999996
+        },
+        "median_distribution": {
+          "count": 3,
+          "maximum": 57.191596000000004,
+          "median": 57.1764655,
+          "median_absolute_deviation": 0.015130500000005043,
+          "minimum": 57.1375565,
+          "q1": 57.157011,
+          "q3": 57.184030750000005
+        },
+        "p95_distribution": {
+          "count": 3,
+          "maximum": 90.99991359999997,
+          "median": 90.99697039999998,
+          "median_absolute_deviation": 0.0029431999999900427,
+          "minimum": 90.71930044999998,
+          "q1": 90.85813542499997,
+          "q3": 90.99844199999998
+        },
+        "per_run": [
+          {
+            "distribution": {
+              "count": 58,
+              "maximum": 121.298109,
+              "median": 57.1764655,
+              "minimum": 0.759618,
+              "p95": 90.71930044999998
+            },
+            "run_id": "d821ebd9-7494-42d9-9fa2-191e64c3af75"
+          },
+          {
+            "distribution": {
+              "count": 58,
+              "maximum": 121.815835,
+              "median": 57.1375565,
+              "minimum": 0.765509,
+              "p95": 90.99991359999997
+            },
+            "run_id": "dc0f517a-4b3c-49d4-a354-3a40809049e0"
+          },
+          {
+            "distribution": {
+              "count": 58,
+              "maximum": 122.151533,
+              "median": 57.191596000000004,
+              "minimum": 0.771955,
+              "p95": 90.99697039999998
+            },
+            "run_id": "8037cc68-d245-4729-8751-29cc21a005aa"
+          }
+        ],
+        "unit": "milliseconds"
+      },
+      "fresh_reload_latency_ms": {
+        "candidate_limit": {
+          "maximum_observed": 279.297225,
+          "measurement_floor": 10.0,
+          "relative_margin": 63.49324875,
+          "robust_margin": 151.94538000000017,
+          "selected_margin": 151.94538000000017,
+          "upper_limit": 431.2426050000002
+        },
+        "median_distribution": {
+          "count": 3,
+          "maximum": 279.297225,
+          "median": 253.972995,
+          "median_absolute_deviation": 25.32423000000003,
+          "minimum": 75.605873,
+          "q1": 164.789434,
+          "q3": 266.63511
+        },
+        "p95_distribution": {
+          "count": 3,
+          "maximum": 279.297225,
+          "median": 253.972995,
+          "median_absolute_deviation": 25.32423000000003,
+          "minimum": 75.605873,
+          "q1": 164.789434,
+          "q3": 266.63511
+        },
+        "per_run": [
+          {
+            "distribution": {
+              "count": 1,
+              "maximum": 253.972995,
+              "median": 253.972995,
+              "minimum": 253.972995,
+              "p95": 253.972995
+            },
+            "run_id": "d821ebd9-7494-42d9-9fa2-191e64c3af75"
+          },
+          {
+            "distribution": {
+              "count": 1,
+              "maximum": 279.297225,
+              "median": 279.297225,
+              "minimum": 279.297225,
+              "p95": 279.297225
+            },
+            "run_id": "dc0f517a-4b3c-49d4-a354-3a40809049e0"
+          },
+          {
+            "distribution": {
+              "count": 1,
+              "maximum": 75.605873,
+              "median": 75.605873,
+              "minimum": 75.605873,
+              "p95": 75.605873
+            },
+            "run_id": "8037cc68-d245-4729-8751-29cc21a005aa"
+          }
+        ],
+        "unit": "milliseconds"
+      },
+      "history_load_latency_ms": {
+        "candidate_limit": {
+          "maximum_observed": 2.473583,
+          "measurement_floor": 2.0,
+          "relative_margin": 0.6157166000000001,
+          "robust_margin": 0.03859740000000045,
+          "selected_margin": 2.0,
+          "upper_limit": 4.473583
+        },
+        "median_distribution": {
+          "count": 3,
+          "maximum": 2.4514345,
+          "median": 2.4428219999999996,
+          "median_absolute_deviation": 0.008612500000000356,
+          "minimum": 2.3926524999999996,
+          "q1": 2.4177372499999996,
+          "q3": 2.4471282499999996
+        },
+        "p95_distribution": {
+          "count": 3,
+          "maximum": 2.473583,
+          "median": 2.4628664000000002,
+          "median_absolute_deviation": 0.006432900000000075,
+          "minimum": 2.4564335,
+          "q1": 2.45964995,
+          "q3": 2.4682247000000004
+        },
+        "per_run": [
+          {
+            "distribution": {
+              "count": 8,
+              "maximum": 2.475508,
+              "median": 2.4514345,
+              "minimum": 2.445267,
+              "p95": 2.473583
+            },
+            "run_id": "d821ebd9-7494-42d9-9fa2-191e64c3af75"
+          },
+          {
+            "distribution": {
+              "count": 8,
+              "maximum": 2.46542,
+              "median": 2.3926524999999996,
+              "minimum": 2.377236,
+              "p95": 2.4628664000000002
+            },
+            "run_id": "dc0f517a-4b3c-49d4-a354-3a40809049e0"
+          },
+          {
+            "distribution": {
+              "count": 8,
+              "maximum": 2.460238,
+              "median": 2.4428219999999996,
+              "minimum": 2.436961,
+              "p95": 2.4564335
+            },
+            "run_id": "8037cc68-d245-4729-8751-29cc21a005aa"
+          }
+        ],
+        "unit": "milliseconds"
+      },
+      "last_quartile_update_latency_ms": {
+        "candidate_limit": {
+          "maximum_observed": 430.87702249999995,
+          "measurement_floor": 1.0,
+          "relative_margin": 107.630581375,
+          "robust_margin": 1.9135142999998607,
+          "selected_margin": 107.630581375,
+          "upper_limit": 538.507603875
+        },
+        "median_distribution": {
+          "count": 3,
+          "maximum": 394.99129949999997,
+          "median": 394.304706,
+          "median_absolute_deviation": 0.5723870000000488,
+          "minimum": 393.73231899999996,
+          "q1": 394.0185125,
+          "q3": 394.64800275
+        },
+        "p95_distribution": {
+          "count": 3,
+          "maximum": 430.87702249999995,
+          "median": 430.5223255,
+          "median_absolute_deviation": 0.3189190499999768,
+          "minimum": 430.20340645000005,
+          "q1": 430.36286597500003,
+          "q3": 430.69967399999996
+        },
+        "per_run": [
+          {
+            "distribution": {
+              "count": 58,
+              "maximum": 459.713431,
+              "median": 393.73231899999996,
+              "minimum": 337.41416,
+              "p95": 430.87702249999995
+            },
+            "run_id": "d821ebd9-7494-42d9-9fa2-191e64c3af75"
+          },
+          {
+            "distribution": {
+              "count": 58,
+              "maximum": 462.90512,
+              "median": 394.304706,
+              "minimum": 338.430023,
+              "p95": 430.5223255
+            },
+            "run_id": "dc0f517a-4b3c-49d4-a354-3a40809049e0"
+          },
+          {
+            "distribution": {
+              "count": 58,
+              "maximum": 458.856263,
+              "median": 394.99129949999997,
+              "minimum": 338.989504,
+              "p95": 430.20340645000005
+            },
+            "run_id": "8037cc68-d245-4729-8751-29cc21a005aa"
+          }
+        ],
+        "unit": "milliseconds"
+      },
+      "process_finalize_latency_ms": {
+        "candidate_limit": {
+          "maximum_observed": 97.09040424999999,
+          "measurement_floor": 1.0,
+          "relative_margin": 24.15057705,
+          "robust_margin": 2.9285762999999747,
+          "selected_margin": 24.15057705,
+          "upper_limit": 121.24098129999999
+        },
+        "median_distribution": {
+          "count": 3,
+          "maximum": 59.161732,
+          "median": 56.853654,
+          "median_absolute_deviation": 2.308078000000002,
+          "minimum": 53.7760765,
+          "q1": 55.31486525,
+          "q3": 58.007693
+        },
+        "p95_distribution": {
+          "count": 3,
+          "maximum": 97.09040424999999,
+          "median": 96.6023082,
+          "median_absolute_deviation": 0.4880960499999958,
+          "minimum": 96.0788166,
+          "q1": 96.3405624,
+          "q3": 96.846356225
+        },
+        "per_run": [
+          {
+            "distribution": {
+              "count": 200,
+              "maximum": 99.346353,
+              "median": 59.161732,
+              "minimum": 3.993221,
+              "p95": 97.09040424999999
+            },
+            "run_id": "d821ebd9-7494-42d9-9fa2-191e64c3af75"
+          },
+          {
+            "distribution": {
+              "count": 200,
+              "maximum": 100.157083,
+              "median": 53.7760765,
+              "minimum": 4.101176,
+              "p95": 96.6023082
+            },
+            "run_id": "dc0f517a-4b3c-49d4-a354-3a40809049e0"
+          },
+          {
+            "distribution": {
+              "count": 200,
+              "maximum": 99.878116,
+              "median": 56.853654,
+              "minimum": 3.915908,
+              "p95": 96.0788166
+            },
+            "run_id": "8037cc68-d245-4729-8751-29cc21a005aa"
+          }
+        ],
+        "unit": "milliseconds"
+      },
+      "recorder_append_latency_ms": {
+        "candidate_limit": {
+          "maximum_observed": 2.8313416,
+          "measurement_floor": 1.0,
+          "relative_margin": 0.7067495749999999,
+          "robust_margin": 0.026059800000002298,
+          "selected_margin": 1.0,
+          "upper_limit": 3.8313416
+        },
+        "median_distribution": {
+          "count": 3,
+          "maximum": 0.1762665,
+          "median": 0.17567349999999998,
+          "median_absolute_deviation": 0.00016599999999999948,
+          "minimum": 0.17550749999999998,
+          "q1": 0.17559049999999998,
+          "q3": 0.17597
+        },
+        "p95_distribution": {
+          "count": 3,
+          "maximum": 2.8313416,
+          "median": 2.8269982999999996,
+          "median_absolute_deviation": 0.004343300000000383,
+          "minimum": 2.74808615,
+          "q1": 2.7875422249999997,
+          "q3": 2.82916995
+        },
+        "per_run": [
+          {
+            "distribution": {
+              "count": 232,
+              "maximum": 2.832726,
+              "median": 0.17567349999999998,
+              "minimum": 0.142979,
+              "p95": 2.74808615
+            },
+            "run_id": "d821ebd9-7494-42d9-9fa2-191e64c3af75"
+          },
+          {
+            "distribution": {
+              "count": 232,
+              "maximum": 3.15189,
+              "median": 0.17550749999999998,
+              "minimum": 0.146721,
+              "p95": 2.8313416
+            },
+            "run_id": "dc0f517a-4b3c-49d4-a354-3a40809049e0"
+          },
+          {
+            "distribution": {
+              "count": 232,
+              "maximum": 2.864361,
+              "median": 0.1762665,
+              "minimum": 0.167998,
+              "p95": 2.8269982999999996
+            },
+            "run_id": "8037cc68-d245-4729-8751-29cc21a005aa"
+          }
+        ],
+        "unit": "milliseconds"
+      },
+      "update_latency_ms": {
+        "candidate_limit": {
+          "maximum_observed": 399.06885135,
+          "measurement_floor": 1.0,
+          "relative_margin": 99.533568825,
+          "robust_margin": 2.7912575999998808,
+          "selected_margin": 99.533568825,
+          "upper_limit": 498.602420175
+        },
+        "median_distribution": {
+          "count": 3,
+          "maximum": 226.36263300000002,
+          "median": 225.99435799999998,
+          "median_absolute_deviation": 0.36827500000003965,
+          "minimum": 225.48670049999998,
+          "q1": 225.74052924999998,
+          "q3": 226.1784955
+        },
+        "p95_distribution": {
+          "count": 3,
+          "maximum": 399.06885135,
+          "median": 398.1342753,
+          "median_absolute_deviation": 0.46520959999998013,
+          "minimum": 397.66906570000003,
+          "q1": 397.9016705,
+          "q3": 398.60156332500003
+        },
+        "per_run": [
+          {
+            "distribution": {
+              "count": 232,
+              "maximum": 459.713431,
+              "median": 225.48670049999998,
+              "minimum": 0.759618,
+              "p95": 398.1342753
+            },
+            "run_id": "d821ebd9-7494-42d9-9fa2-191e64c3af75"
+          },
+          {
+            "distribution": {
+              "count": 232,
+              "maximum": 462.90512,
+              "median": 225.99435799999998,
+              "minimum": 0.765509,
+              "p95": 397.66906570000003
+            },
+            "run_id": "dc0f517a-4b3c-49d4-a354-3a40809049e0"
+          },
+          {
+            "distribution": {
+              "count": 232,
+              "maximum": 458.856263,
+              "median": 226.36263300000002,
+              "minimum": 0.771955,
+              "p95": 399.06885135
+            },
+            "run_id": "8037cc68-d245-4729-8751-29cc21a005aa"
+          }
+        ],
+        "unit": "milliseconds"
+      }
+    }
+  },
+  "policy": {
+    "byte_measurement_floor": 4096,
+    "clock_resolution_floors_ms": {
+      "calibration_rewrite_latency_ms": 1.0,
+      "first_quartile_update_latency_ms": 1.0,
+      "fresh_reload_latency_ms": 10.0,
+      "history_load_latency_ms": 2.0,
+      "last_quartile_update_latency_ms": 1.0,
+      "process_finalize_latency_ms": 1.0,
+      "recorder_append_latency_ms": 1.0,
+      "update_latency_ms": 1.0
+    },
+    "upper_limit_formula": "maximum observed p95 plus max(25% median p95, 6 median absolute deviations, measurement floor)"
+  },
+  "runs": {
+    "measured_count": 3,
+    "raw_reports": [
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_legacy_baseline_8x25_v1/20260815T042308908451Z_composed/report.json",
+        "role": "warmup",
+        "run_id": "7a117a6b-4592-40f9-853e-81149b6613ef",
+        "sha256": "71f8a62adac160747dbce826fdd0a3bf8d0b6e36a60c5805002afae56a4fa0ca"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_legacy_baseline_8x25_v1/20260815T042655972349Z_composed/report.json",
+        "role": "measured",
+        "run_id": "d821ebd9-7494-42d9-9fa2-191e64c3af75",
+        "sha256": "7e762f63393bf5220779707db80d7f7a79f4b46995e59cbad9f666b0f74dba55"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_legacy_baseline_8x25_v1/20260815T043048658910Z_composed/report.json",
+        "role": "measured",
+        "run_id": "dc0f517a-4b3c-49d4-a354-3a40809049e0",
+        "sha256": "135e7d917ccbb62f3f520a2f2cb5e4b366eb7061ce9b7026b0bc5e60c768a6b1"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_legacy_baseline_8x25_v1/20260815T043442629156Z_composed/report.json",
+        "role": "measured",
+        "run_id": "8037cc68-d245-4729-8751-29cc21a005aa",
+        "sha256": "2b9409c544841455316a8aa2578b7e14f92a74b3784635509de1593afb8add7c"
+      }
+    ],
+    "report_set_sha256": "ab48b7615547915043c0cab9e4a699f7c63fd2545af6483c62ce408441d41e8d",
+    "warmup_count": 1
+  },
+  "schema_name": "labcraft.calibration_storage_pi_baseline",
+  "schema_version": 1,
+  "source": {
+    "dirty_worktree": false,
+    "git_commit": "ddea246c2aa89f492abf9cc8d4755e92af92d9f0"
+  },
+  "threshold_maturity": "candidate"
+}

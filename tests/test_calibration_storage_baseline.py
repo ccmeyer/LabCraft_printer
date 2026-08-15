@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +22,14 @@ from tools.virtual_workflows.compare import (
     validate_report_set,
 )
 from tools.virtual_workflows.report import REPORT_SCHEMA_NAME, REPORT_SCHEMA_VERSION
+
+
+TRACKED_PI_BASELINE = (
+    Path(__file__).resolve().parent
+    / "performance"
+    / "baselines"
+    / "calibration_storage_legacy_pi5_v1.json"
+)
 
 
 def _distribution(value: float, count: int = 3) -> dict:
@@ -222,6 +231,42 @@ def test_candidate_upper_limit_uses_largest_required_margin():
     result = candidate_upper_limit([10.0, 12.0, 20.0], floor=1.0)
     assert result["robust_margin"] == 12.0
     assert result["upper_limit"] == 32.0
+
+
+def test_tracked_pi_candidate_baseline_has_qualified_identity_and_counts():
+    baseline = json.loads(TRACKED_PI_BASELINE.read_text(encoding="utf-8"))
+
+    assert baseline["baseline_id"] == BASELINE_ID
+    assert baseline["classification"] == {
+        "status": "pass",
+        "threshold_maturity": "candidate",
+    }
+    assert baseline["source"] == {
+        "dirty_worktree": False,
+        "git_commit": "ddea246c2aa89f492abf9cc8d4755e92af92d9f0",
+    }
+    target = baseline["compatibility"]["environment"]["target_pi"]
+    assert target["pi_model"] == "Raspberry Pi 5 Model B Rev 1.0"
+    assert target["filesystem"]["storage_class"] == "nvme"
+    assert target["filesystem"]["filesystem_type"] == "ext4"
+    assert baseline["exact_counts"] == {
+        "key_evidence_probe_capture_count": 2,
+        "legacy_run_envelope_count": 201,
+        "process_run_count": 200,
+        "recording_count": 200,
+        "update_count": 232,
+        "workload_capture_count": 0,
+    }
+    assert [row["role"] for row in baseline["runs"]["raw_reports"]] == [
+        "warmup",
+        "measured",
+        "measured",
+        "measured",
+    ]
+    assert baseline["deferred_metrics"] == {
+        "index_latency": "not_available_until_m2",
+        "result_finalize_latency": "not_available_until_m2",
+    }
 
 
 def test_storage_report_set_is_reference_only_and_skips_print_array_metrics(tmp_path):

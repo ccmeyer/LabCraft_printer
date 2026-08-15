@@ -2300,6 +2300,13 @@ reload/history latency, RSS, and artifact growth. Result-finalize and index
 latency remain `not_available_until_m2` because those artifacts do not exist
 in the current writer.
 
+The Milestone 1 candidate is tracked at
+`tests/performance/baselines/calibration_storage_legacy_pi5_v1.json`. It was
+qualified on a Raspberry Pi 5 with NVMe/ext4, Python 3.11.2, and PySide/Qt
+6.7.1 from clean source commit
+`ddea246c2aa89f492abf9cc8d4755e92af92d9f0`. It is valid only for the exact
+environment, fixture, and workload identities embedded in the baseline.
+
 If Qt session creation reports `WinError 5`, choose a new `--basetemp` under
 `$env:LOCALAPPDATA\Temp\LabCraft`; do not place a SIL session root inside the
 repository. If the baseline tool rejects evidence, retain the report set and

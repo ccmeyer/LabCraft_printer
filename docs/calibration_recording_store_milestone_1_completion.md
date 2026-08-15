@@ -1,6 +1,6 @@
 # Calibration Recording Store Migration: Milestone 1 Completion Record
 
-Status: Host implementation validated; Pi qualification pending
+Status: Complete
 
 Prepared: 2026-08-14
 
@@ -8,9 +8,9 @@ Prepared: 2026-08-14
 
 Milestone 1 now has a hardware-isolated storage-contract SIL implementation
 around the unchanged current `calibration.json` and `calibration_recordings`
-writers. The host lifecycle and frozen 8-head x 25-run workload pass. This
-record remains open because no qualified Pi host was supplied, so the required
-measured Pi report set and tracked candidate baseline do not yet exist.
+writers. The host lifecycle and frozen 8-head x 25-run workload pass. The
+qualified Raspberry Pi 5 workload also passes, and its clean report set and
+tracked candidate baseline are frozen.
 
 No file under `FreeRTOS-interface/` or `firmware/` was modified. No production
 or historical experiment was read, rewritten, moved, or deleted. All scenario
@@ -41,6 +41,10 @@ data was created beneath temporary/ignored SIL roots.
   fixture/workload hashes, exact counts, storage latency distributions,
   first/last quartiles, reload/history latency, RSS, artifact growth, raw
   report hashes, and explicit Milestone 2 deferred fields.
+- A storage-specific reference-only report-set profile, so Pi evidence does
+  not invent or require print-array responsiveness metrics.
+- Newline-stable frozen text hashing for cross-platform SIL source audits;
+  existing reviewed hash identities remain unchanged on Windows and Linux.
 
 ## Fixture file hashes
 
@@ -66,10 +70,9 @@ The frozen performance workload semantic hash produced by the journey is
 Passed during implementation:
 
 ```text
-14 passed: fixture, sanitizer, scripted-process, and baseline unit coverage
-1 passed: calibration storage lifecycle SIL
-1 passed in 127.16s: calibration storage 8x25 stress SIL
-162 passed: combined storage, registry, manifest, action, and Pi orchestration contracts
+209 passed: final storage, baseline, report-set, source-audit, manifest, selection, and Pi orchestration contracts
+1 passed in 8.74s: final calibration storage lifecycle SIL
+1 passed in 129.19s: final calibration storage 8x25 stress SIL
 manifest validation: pass
 ```
 
@@ -90,35 +93,58 @@ are not target-Pi gates.
 Final full Python suite:
 
 ```text
-4702 passed, 137 skipped, 483 warnings in 221.42s
+4705 passed, 137 skipped, 483 warnings in 222.65s
 ```
 
-## Pending Pi qualification
+## Pi qualification
 
-Run from a clean implementation commit:
+The final qualification used the following identity:
 
-```powershell
-.\tools\run_pi_virtual_workflow.ps1 `
-  -PiHost <qualified-pi-host> `
-  -Scenario calibration_storage_legacy_baseline_8x25_v1 `
-  -HostLabel pi5-calibration-storage-legacy-v1 `
-  -WarmupRuns 1 `
-  -MeasuredRuns 3 `
-  -SpeedMultiplier 1000 `
-  -TimeoutSeconds 1800
-```
+| Field | Qualified value |
+| --- | --- |
+| Source commit | `ddea246c2aa89f492abf9cc8d4755e92af92d9f0` (clean) |
+| Target | Raspberry Pi 5 Model B Rev 1.0, aarch64 |
+| OS | Linux `6.12.20+rpt-rpi-2712` |
+| Storage | NVMe, ext4, `/dev/nvme0n1p2` |
+| Runtime | Python 3.11.2, PySide6 6.7.1, Qt 6.7.1, offscreen |
+| Isolation | Bubblewrap private `/dev`, read-only root, network unshared |
+| Report set | `verification_reports/virtual_workflows/pi-sil/calibration_storage_legacy_baseline_8x25_v1/20260815T043836790058Z_ddea246c2aa8_report_set/report_set.json` |
+| Report-set SHA-256 | `ab48b7615547915043c0cab9e4a699f7c63fd2545af6483c62ce408441d41e8d` |
+| Retrieved archive SHA-256 | `a2a83995538a00ecf28276b3438d36a271b6c6cfcdeed4291a57c126bc1d964e` |
+| Tracked baseline | `tests/performance/baselines/calibration_storage_legacy_pi5_v1.json` |
+| Baseline SHA-256 | `236b15ee5addcaec26621072fb6cbd8672337a098bf77f93e948a5805cae86b5` |
 
-Then freeze the candidate without overwriting existing evidence:
+Raw evidence:
 
-```powershell
-.\env\Scripts\python.exe -m tools.sil.calibration_storage_baseline `
-  --report-set <retrieved-report_set.json> `
-  --output tests\performance\baselines\calibration_storage_legacy_pi5_v1.json
-```
+| Role | Run ID | Report SHA-256 |
+| --- | --- | --- |
+| Warmup | `7a117a6b-4592-40f9-853e-81149b6613ef` | `71f8a62adac160747dbce826fdd0a3bf8d0b6e36a60c5805002afae56a4fa0ca` |
+| Measured | `d821ebd9-7494-42d9-9fa2-191e64c3af75` | `7e762f63393bf5220779707db80d7f7a79f4b46995e59cbad9f666b0f74dba55` |
+| Measured | `dc0f517a-4b3c-49d4-a354-3a40809049e0` | `135e7d917ccbb62f3f520a2f2cb5e4b366eb7061ce9b7026b0bc5e60c768a6b1` |
+| Measured | `8037cc68-d245-4729-8751-29cc21a005aa` | `2b9409c544841455316a8aa2578b7e14f92a74b3784635509de1593afb8add7c` |
 
-Milestone 1 becomes complete only after this record contains the source commit,
-Pi/storage/Python/Qt identity, raw report and report-set hashes, tracked
-baseline hash, qualified result, and final full-suite result.
+All measured reports contain 200 processes, 232 updates, 201 legacy run
+envelopes, 200 recording directories, zero workload captures, and a two-frame
+drain probe. Measured durations were 232.67, 233.96, and 234.14 seconds.
+
+| Metric | Measured p95 values | Candidate upper limit |
+| --- | --- | --- |
+| Legacy rewrite latency | 396.67, 396.48, 397.33 ms | 496.50 ms |
+| Recorder append latency | 2.748, 2.831, 2.827 ms | 3.831 ms |
+| First-quartile update latency | 90.72, 91.00, 91.00 ms | 113.75 ms |
+| Last-quartile update latency | 430.88, 430.52, 430.20 ms | 538.51 ms |
+| Fresh reload latency | 253.97, 279.30, 75.61 ms | 431.24 ms |
+| Peak RSS | 473,677,824; 522,289,152; 571,179,008 bytes | 862,846,976 bytes |
+| RSS growth | 18,153,472; 14,942,208; 15,646,720 bytes | 22,380,544 bytes |
+| `calibration.json` size | 7,840,095 bytes each | 9,800,118.75 bytes |
+| Total scenario bytes | 26,367,422 bytes each | 32,959,277.5 bytes |
+
+The Windows SSH client reset after the clean warmup, but the remote isolated
+collector continued to terminal completion. The resulting report set was
+bundled with its original proof and trace, retrieved, and independently
+validated against the remote SHA-256 sidecar. Pre-existing untracked Pi HIL
+helpers were temporarily staged outside the repository for the clean-source
+measurement, then restored with matching hashes and sizes.
 
 ## Risks and rollback
 
