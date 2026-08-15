@@ -69,6 +69,10 @@ from CalibrationStorageContracts import (
     build_terminal_summary,
     process_storage_contract,
 )
+from CalibrationRecordingReader import (
+    CalibrationRecordingReader,
+    repair_calibration_index,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1706,6 +1710,22 @@ class CalibrationManager(QObject):
         self._shadow_storage_diagnostics = []
         self._calibration_recordings_root = None
         self._calibration_index_path = None
+        configured_reader = str(
+            os.environ.get("LABCRAFT_CALIBRATION_PRIMARY_READER", "canonical")
+        ).strip().lower()
+        if configured_reader not in {"canonical", "legacy"}:
+            LOGGER.warning(
+                "Invalid LABCRAFT_CALIBRATION_PRIMARY_READER=%r; using canonical",
+                configured_reader,
+            )
+            configured_reader = "canonical"
+        self._calibration_reader_preference = configured_reader
+        self._legacy_reader_fallback_enabled = str(
+            os.environ.get("LABCRAFT_CALIBRATION_LEGACY_FALLBACK", "1")
+        ).strip() != "0"
+        self._calibration_recording_reader = None
+        self._calibration_reader_diagnostics = {}
+        self._completed_canonical_session_cache = {}
         self._capture_performance_diagnostics_enabled = False
 
         # Persisted JSON
@@ -1897,7 +1917,50 @@ class CalibrationManager(QObject):
             index_path=index,
             enabled=self.get_shadow_store_enabled(),
         )
+        self._calibration_recording_reader = CalibrationRecordingReader(
+            experiment_root,
+            primary=self.get_calibration_reader_preference(),
+            allow_legacy_fallback=bool(
+                getattr(self, "_legacy_reader_fallback_enabled", True)
+            ),
+        )
         return self._calibration_recording_store
+
+    def get_calibration_reader_preference(self):
+        if not self.is_calibration_store_authoritative():
+            return "legacy"
+        return str(getattr(self, "_calibration_reader_preference", "canonical"))
+
+    def _ensure_calibration_recording_reader(self):
+        reader = getattr(self, "_calibration_recording_reader", None)
+        preference = self.get_calibration_reader_preference()
+        if reader is not None and reader.primary == preference:
+            return reader
+        calibration_path = str(self.calibration_file_path or "").strip()
+        if not calibration_path:
+            return None
+        experiment_dir = os.path.dirname(os.path.abspath(calibration_path)) or os.getcwd()
+        self._calibration_recording_reader = CalibrationRecordingReader(
+            experiment_dir,
+            primary=preference,
+            allow_legacy_fallback=bool(
+                getattr(self, "_legacy_reader_fallback_enabled", True)
+            ),
+        )
+        return self._calibration_recording_reader
+
+    def get_calibration_reader_diagnostics(self):
+        return dict(getattr(self, "_calibration_reader_diagnostics", {}) or {})
+
+    def rebuild_calibration_index(self, *, output_path=None, apply=False):
+        calibration_path = str(self.calibration_file_path or "").strip()
+        if not calibration_path:
+            raise ValueError("calibration experiment is not configured")
+        experiment_dir = Path(calibration_path).resolve().parent
+        if output_path is not None:
+            reader = self._ensure_calibration_recording_reader()
+            return reader.rebuild_index(output_path=output_path)
+        return repair_calibration_index(experiment_dir, apply=bool(apply))
 
     def _ensure_calibration_recording_store(self):
         store = getattr(self, "_calibration_recording_store", None)
@@ -3295,6 +3358,8 @@ class CalibrationManager(QObject):
                 committed_outcome = str(
                     self._last_shadow_commit.result.document.get("outcome") or ""
                 )
+                if committed_outcome == "completed":
+                    self._register_completed_canonical_run(shadow_run)
                 if (
                     self.is_calibration_store_authoritative()
                     and effective_outcome == "completed"
@@ -3328,6 +3393,22 @@ class CalibrationManager(QObject):
             "recorder_summary": dict(recorder_summary),
             "commit": getattr(self, "_last_shadow_commit", None),
         }
+
+    def _register_completed_canonical_run(self, run):
+        """Expose a run to current-session prerequisites only after full commit."""
+
+        if run is None or str(getattr(run, "calibration_session_id", "")) != str(
+            getattr(self, "_run_id", "")
+        ):
+            return False
+        phase_key = self._resolve_phase_key(str(getattr(run, "phase_name", "")))
+        payloads = [dict(item.get("payload") or {}) for item in list(run.updates or [])]
+        cache = getattr(self, "_completed_canonical_session_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._completed_canonical_session_cache = cache
+        cache.setdefault(phase_key, []).extend(payloads)
+        return True
 
     def record_process_event(
         self,
@@ -3484,6 +3565,7 @@ class CalibrationManager(QObject):
             return False
         self._reset_calibration_memory_prior_runtime()
         self._reset_online_stream_prior_runtime()
+        self._completed_canonical_session_cache = {}
         self._reset_calibration_memory_ui_recommendation_state()
         state = "enabled" if bool(enabled) else "disabled"
         self.calibrationStageChanged.emit(f"Calibration memory {state}.", "dark_blue")
@@ -3941,6 +4023,7 @@ class CalibrationManager(QObject):
 
         self._run_id = None
         self._run_idx = None
+        self._completed_canonical_session_cache = {}
         self._reset_calibration_memory_prior_runtime()
         self._reset_online_stream_prior_runtime()
         self._reset_calibration_memory_ui_recommendation_state()
@@ -4962,13 +5045,43 @@ class CalibrationManager(QObject):
         if not row:
             return {}, ["Selected characterization result"]
 
+        canonical_bundle = None
+        if row.get("result_id") and self.get_calibration_reader_preference() == "canonical":
+            resolved = self.resolve_characterization_selection(row)
+            if not resolved.get("ok"):
+                return {}, [resolved.get("message") or "Canonical characterization result"]
+            row = dict(resolved.get("row") or row)
+            canonical_bundle = dict(resolved.get("bundle") or {})
+
         phase = str(row.get("phase") or "").strip().lower()
         if phase == "stream":
             missing.append("Droplet-mode characterization result")
         if row.get("valid") is not True:
             missing.append("Valid characterization result")
 
-        run, step, pressure_entry = self._find_recheck_source_record(row)
+        if canonical_bundle:
+            step = dict((canonical_bundle.get("update") or {}).get("payload") or {})
+            result_payload = dict(step.get("result") or {})
+            pressure_index = self._recheck_int_or_none(row.get("source_pressure_index"))
+            pressures = list(result_payload.get("pressures") or [])
+            pressure_entry = (
+                pressures[pressure_index]
+                if pressure_index is not None and 0 <= pressure_index < len(pressures)
+                else result_payload
+            )
+            run = {"steps": {}}
+            try:
+                session_id = str((canonical_bundle.get("result") or {}).get("calibration_session_id") or "")
+                reader = self._ensure_calibration_recording_reader()
+                trajectory_payloads = reader.session_phase_payloads(
+                    session_id,
+                    ("pressure_trajectory", "trajectory_pressure_scan"),
+                )
+                run["steps"]["pressure_trajectory"] = trajectory_payloads
+            except Exception:
+                pass
+        else:
+            run, step, pressure_entry = self._find_recheck_source_record(row)
         step_result = (step.get("result") or {}) if isinstance(step, dict) else {}
         pressure_entry = pressure_entry if isinstance(pressure_entry, dict) else {}
 
@@ -8220,6 +8333,17 @@ class CalibrationManager(QObject):
         return c
 
     def _latest_step_list(self, phase_name):
+        if (
+            self.get_calibration_reader_preference() == "canonical"
+            and self._ensure_calibration_recording_reader() is not None
+        ):
+            phase_key = self._resolve_phase_key(phase_name)
+            cached = list(
+                (getattr(self, "_completed_canonical_session_cache", {}) or {}).get(
+                    phase_key, []
+                )
+            )
+            return [dict(item) for item in cached]
         runs = self.data.get("runs") if isinstance(self.data, dict) else None
         run_idx = self._run_idx
         if (
@@ -9893,6 +10017,9 @@ class CalibrationManager(QObject):
     def _validate_persisted_characterization_storage(self, row):
         """Fail closed for Milestone 3 sessions while preserving legacy-only history."""
 
+        if self.get_calibration_reader_preference() == "canonical":
+            return self.resolve_characterization_selection(row)
+
         source_run_id = str(row.get("source_run_id") or row.get("run_id") or "")
         phase = str(row.get("source_phase_key") or row.get("phase") or "")
         step_index = row.get("source_step_index")
@@ -10023,7 +10150,7 @@ class CalibrationManager(QObject):
                 rows.append(dict(stored["row"]))
         return rows
 
-    def get_characterization_summary_rows(self):
+    def _get_legacy_characterization_summary_rows(self):
         _cur_stock, matching = self._get_pressure_sweep_summary_matching_runs()
         if not matching:
             historical_rows = getattr(
@@ -10297,6 +10424,102 @@ class CalibrationManager(QObject):
         if callable(transient_rows):
             rows.extend(transient_rows())
         return rows
+
+    def get_characterization_history_snapshot(self):
+        if self.get_calibration_reader_preference() == "legacy":
+            rows = self._get_legacy_characterization_summary_rows()
+            diagnostics = {
+                "primary": "legacy",
+                "row_count": len(rows),
+                "issue_count": 0,
+                "routine_result_bundle_reads": 0,
+                "routine_recursive_scans": 0,
+            }
+            self._calibration_reader_diagnostics = diagnostics
+            return {"rows": rows, "issues": [], "diagnostics": diagnostics}
+        reader = self._ensure_calibration_recording_reader()
+        if reader is None:
+            rows = self._get_legacy_characterization_summary_rows()
+            diagnostics = {"primary": "legacy_unconfigured", "row_count": len(rows), "issue_count": 0}
+            self._calibration_reader_diagnostics = diagnostics
+            return {"rows": rows, "issues": [], "diagnostics": diagnostics}
+        snapshot = reader.history_snapshot()
+        current_identity = self._build_calibration_stock_identity_snapshot()
+        current_keys = set(self._calibration_stock_match_keys_from_fields(current_identity))
+        filtered = []
+        for frozen in snapshot.rows:
+            row = _thaw_candidate_value(frozen)
+            identity = dict(row.get("canonical_identity") or {})
+            row_keys = set(self._calibration_stock_match_keys_from_fields(identity))
+            if current_keys and row_keys and not current_keys.intersection(row_keys):
+                continue
+            filtered.append(row)
+
+        sessions = []
+        for row in filtered:
+            session_id = str(row.get("calibration_session_id") or row.get("source_run_id") or "")
+            if session_id not in sessions:
+                sessions.append(session_id)
+        run_numbers = {session_id: ordinal + 1 for ordinal, session_id in enumerate(sessions)}
+        focus_id = str(self._run_id or (sessions[-1] if sessions else ""))
+        for row in filtered:
+            session_id = str(row.get("calibration_session_id") or row.get("source_run_id") or "")
+            row.setdefault("run_id", row.get("source_run_id") or session_id)
+            row["run_no"] = run_numbers.get(session_id)
+            row["is_focus_run"] = session_id == focus_id
+            row["phase_label"] = self._pressure_sweep_phase_label(row.get("phase"))
+            row["timestamp_display"] = self._format_pressure_sweep_summary_timestamp(row.get("timestamp"))
+        filtered.sort(key=lambda row: (
+            row.get("pw_us") is None,
+            row.get("pw_us") if row.get("pw_us") is not None else 10**9,
+            row.get("pressure_psi") is None,
+            row.get("pressure_psi") if row.get("pressure_psi") is not None else 10**9,
+            row.get("run_no") or 10**9,
+            row.get("timestamp") or "",
+        ))
+        if callable(getattr(self, "_historical_characterization_rows", None)):
+            filtered.extend(self._historical_characterization_rows())
+        if callable(getattr(self, "_transient_characterization_rows", None)):
+            filtered.extend(self._transient_characterization_rows())
+        diagnostics = _thaw_candidate_value(snapshot.diagnostics)
+        diagnostics["filtered_row_count"] = len(filtered)
+        self._calibration_reader_diagnostics = diagnostics
+        return {
+            "rows": filtered,
+            "issues": [item.to_dict() for item in snapshot.issues],
+            "diagnostics": diagnostics,
+        }
+
+    def get_characterization_summary_rows(self):
+        history_getter = getattr(self, "get_characterization_history_snapshot", None)
+        if callable(history_getter):
+            return list(history_getter()["rows"])
+        # Compatibility for the intentionally minimal, unbound normalization
+        # hosts used by SIL and older integrations.
+        return list(
+            CalibrationManager._get_legacy_characterization_summary_rows(self)
+        )
+
+    def resolve_characterization_selection(self, selected_summary_row):
+        row = dict(selected_summary_row or {})
+        if row.get("_transient_candidate_id") or row.get("_historical_candidate_id"):
+            result = self.validate_characterization_candidate_for_application(row)
+            if result.get("ok"):
+                result["row"] = row
+            return result
+        if self.get_calibration_reader_preference() == "legacy":
+            return {"ok": True, "code": "legacy_reader", "message": "", "row": row, "bundle": None}
+        reader = self._ensure_calibration_recording_reader()
+        if reader is None:
+            return {
+                "ok": True,
+                "code": "legacy_unconfigured",
+                "message": "",
+                "row": row,
+                "bundle": None,
+            }
+        expected = self._build_calibration_stock_identity_snapshot()
+        return reader.resolve_selection(row, expected_identity=expected)
 
     def get_pressure_sweep_summary_rows(self):
         return self.get_characterization_summary_rows()

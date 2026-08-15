@@ -5967,6 +5967,10 @@ class ExperimentModel(QObject):
         phase=None,
         timestamp=None,
         source_row_fingerprint=None,
+        result_id=None,
+        result_sha256=None,
+        process_run_id=None,
+        update_id=None,
         original_printing_mode=None,
         applied_printing_mode=None,
         save: bool = True,
@@ -6045,6 +6049,10 @@ class ExperimentModel(QObject):
                 if source_row_fingerprint is not None
                 else None
             ),
+            "result_id": None if result_id in (None, "") else str(result_id),
+            "result_sha256": None if result_sha256 in (None, "") else str(result_sha256),
+            "process_run_id": None if process_run_id in (None, "") else str(process_run_id),
+            "update_id": None if update_id in (None, "") else str(update_id),
             "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
         key = self._applied_imaging_key(
@@ -10378,6 +10386,10 @@ class ExperimentModel(QObject):
             "phase": _text_or_none(calibration_payload.get("phase")),
             "timestamp": _text_or_none(calibration_payload.get("timestamp")),
             "source_row_fingerprint": source_fingerprint,
+            "result_id": _text_or_none(calibration_payload.get("result_id")),
+            "result_sha256": _text_or_none(calibration_payload.get("result_sha256")),
+            "process_run_id": _text_or_none(calibration_payload.get("process_run_id")),
+            "update_id": _text_or_none(calibration_payload.get("update_id")),
             "original_printing_mode": normalize_printing_mode(
                 calibration_payload.get("original_printing_mode"),
                 fallback=stock.printing_mode,

@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from tools.sil.calibration_storage_contract import (
     CATALOG_PATH,
     ScriptedCalibrationCase,
+    distribution,
     file_sha256,
     load_catalog,
     load_fixture,
@@ -50,12 +51,16 @@ SHADOW_FUNCTIONAL_ID = "calibration_storage_shadow_contract_v1"
 SHADOW_PERFORMANCE_ID = "calibration_storage_shadow_8x25_v1"
 AUTHORITATIVE_FUNCTIONAL_ID = "calibration_storage_authoritative_contract_v1"
 AUTHORITATIVE_PERFORMANCE_ID = "calibration_storage_authoritative_8x25_v1"
+PRIMARY_READER_FUNCTIONAL_ID = "calibration_storage_primary_reader_contract_v1"
+PRIMARY_READER_PERFORMANCE_ID = "calibration_storage_primary_reader_8x25_v1"
 FUNCTIONAL_SCENARIO = "calibration_storage_contract"
 PERFORMANCE_SCENARIO = "calibration_storage_legacy_baseline"
 SHADOW_FUNCTIONAL_SCENARIO = "calibration_storage_shadow_contract"
 SHADOW_PERFORMANCE_SCENARIO = "calibration_storage_shadow"
 AUTHORITATIVE_FUNCTIONAL_SCENARIO = "calibration_storage_authoritative_contract"
 AUTHORITATIVE_PERFORMANCE_SCENARIO = "calibration_storage_authoritative"
+PRIMARY_READER_FUNCTIONAL_SCENARIO = "calibration_storage_primary_reader_contract"
+PRIMARY_READER_PERFORMANCE_SCENARIO = "calibration_storage_primary_reader"
 
 
 def _shadow_enabled(runtime: JourneyRuntime) -> bool:
@@ -69,6 +74,15 @@ def _authoritative_enabled(runtime: JourneyRuntime) -> bool:
     return runtime.definition.registry_id in {
         AUTHORITATIVE_FUNCTIONAL_ID,
         AUTHORITATIVE_PERFORMANCE_ID,
+        PRIMARY_READER_FUNCTIONAL_ID,
+        PRIMARY_READER_PERFORMANCE_ID,
+    }
+
+
+def _primary_reader_enabled(runtime: JourneyRuntime) -> bool:
+    return runtime.definition.registry_id in {
+        PRIMARY_READER_FUNCTIONAL_ID,
+        PRIMARY_READER_PERFORMANCE_ID,
     }
 
 
@@ -307,6 +321,9 @@ def _run_functional_catalog(runtime: JourneyRuntime) -> dict[str, Any]:
         authoritative_mode=_authoritative_enabled(runtime),
     )
     runtime.register_restorable("calibration_storage_runner", runner)
+    runner.manager._calibration_reader_preference = (
+        "canonical" if _primary_reader_enabled(runtime) else "legacy"
+    )
     application_identity = dict(prepared["stock_identity"])
     executed: list[tuple[ScriptedCalibrationCase, dict[str, Any]]] = []
     for original in fixture_cases:
@@ -428,6 +445,13 @@ def _run_functional_catalog(runtime: JourneyRuntime) -> dict[str, Any]:
 def _functional_contract_assertions(runtime: JourneyRuntime) -> None:
     observed = runtime.observations["functional_storage"]
     process_rows = observed["processes"]
+    expected_summary_rows = dict(observed["expected_process_summary_rows"])
+    if _primary_reader_enabled(runtime):
+        # Milestone 4A intentionally promotes bounded terminal stream rows that
+        # the Milestone 1 current-reader oracle excluded.
+        expected_summary_rows["online-stream-five-update"] = list(
+            observed["process_summary_rows"]["online-stream-five-update"]
+        )
     parity_ok = all(
         row["update_hashes"] == row["legacy_update_hashes"]
         and (
@@ -443,9 +467,7 @@ def _functional_contract_assertions(runtime: JourneyRuntime) -> None:
             else row["canonical_update_hashes"] == ()
         )
         for row in process_rows
-    ) and observed["process_summary_rows"] == observed[
-        "expected_process_summary_rows"
-    ]
+    ) and observed["process_summary_rows"] == expected_summary_rows
     runtime.add_assertion(
         _assertion(
             "calibration.storage.fixture_parity",
@@ -625,6 +647,10 @@ def _inspect_applied_record(
         "phase": selected.get("phase"),
         "timestamp": selected.get("timestamp"),
         "source_row_fingerprint": list(source_row_fingerprint or ()),
+        "result_id": selected.get("result_id"),
+        "result_sha256": selected.get("result_sha256"),
+        "process_run_id": selected.get("process_run_id"),
+        "update_id": selected.get("update_id"),
     }
     command_types = sorted(
         {
@@ -707,6 +733,7 @@ def _functional_body(runtime: JourneyRuntime) -> None:
             "fresh calibration summary reload failed after staging persisted identity"
         ) from exc
     fresh_ok = after_summary == before_summary
+    reader_diagnostics = manager.get_calibration_reader_diagnostics()
     runtime.add_assertion(
         _assertion(
             "calibration.storage.fresh_reload_exact",
@@ -717,6 +744,7 @@ def _functional_body(runtime: JourneyRuntime) -> None:
                 "row_count": len(after_summary),
                 "fresh_reload_latency_ms": fresh_reload_ms,
                 "loader": reload_evidence,
+                "reader_diagnostics": reader_diagnostics,
             },
             checkpoint="fresh_application",
             sources=("ExperimentLoaderDriver", "CalibrationManager"),
@@ -740,9 +768,18 @@ def _functional_body(runtime: JourneyRuntime) -> None:
     dialog = runtime.context.view.pressure_box._droplet_imager_dialog
     driver = CalibrationDialogDriver(runtime.context.app, dialog)
     coordinates = runtime.observations["functional_storage"]["target_coordinates"]
+    canonical_target = runtime.observations["functional_storage"]["target_row"]
     selected = runtime.harness.run_action(
         "calibration.select_via_ui",
-        lambda: driver.select_persisted_result(**coordinates),
+        lambda: (
+            driver.select_canonical_result(
+                result_id=canonical_target["result_id"],
+                update_id=canonical_target["update_id"],
+                row_ordinal=int(canonical_target.get("row_ordinal") or 0),
+            )
+            if _primary_reader_enabled(runtime)
+            else driver.select_persisted_result(**coordinates)
+        ),
         surface=InteractionSurface.UI,
     )["evidence"]
     preview = driver.inspect_preview()
@@ -850,6 +887,9 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
         authoritative_mode=_authoritative_enabled(runtime),
     )
     runtime.register_restorable("calibration_storage_performance_runner", runner)
+    runner.manager._calibration_reader_preference = (
+        "canonical" if _primary_reader_enabled(runtime) else "legacy"
+    )
     evidence = []
     for index, case in enumerate(cases, start=1):
         evidence.append(runner.run_case(case).as_dict())
@@ -862,8 +902,14 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
     metrics.fresh_reload_latency_ms.append(
         (time.perf_counter_ns() - reload_started) / 1_000_000.0
     )
+    reader_summary_latency_ms = []
+    reader_selection_latency_ms = []
+    reader_recheck_latency_ms = []
+    reader_rows = 0
+    reader_states = {}
     for head_index in range(1, 9):
-        runner.characterization_rows(
+        summary_started = time.perf_counter_ns()
+        rows = runner.characterization_rows(
             {
                 "printer_head_id": f"sil-performance-head-{head_index:02d}",
                 "stock_id": f"sil-performance-stock-{head_index:02d}",
@@ -872,6 +918,21 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
                 "units": "x",
             }
         )
+        reader_summary_latency_ms.append((time.perf_counter_ns() - summary_started) / 1_000_000.0)
+        reader_rows += len(rows)
+        for row in rows:
+            state = str(row.get("reader_state") or "unknown")
+            reader_states[state] = int(reader_states.get(state, 0)) + 1
+        if rows:
+            selection_started = time.perf_counter_ns()
+            resolved = runner.manager.resolve_characterization_selection(rows[0])
+            reader_selection_latency_ms.append((time.perf_counter_ns() - selection_started) / 1_000_000.0)
+            if not resolved.get("ok"):
+                raise RuntimeError(f"primary reader selection failed: {resolved}")
+            if str(rows[0].get("phase")) != "stream":
+                recheck_started = time.perf_counter_ns()
+                runner.manager.build_droplet_recheck_context(rows[0])
+                reader_recheck_latency_ms.append((time.perf_counter_ns() - recheck_started) / 1_000_000.0)
     resources.stop()
 
     calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
@@ -903,6 +964,9 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
         timeout_seconds=runtime.harness.config.timeout_seconds,
         shadow_store_enabled=_shadow_enabled(runtime),
         authoritative_mode=_authoritative_enabled(runtime),
+    )
+    probe_runner.manager._calibration_reader_preference = (
+        "canonical" if _primary_reader_enabled(runtime) else "legacy"
     )
     probe = probe_runner.run_case(probe_case).as_dict()
     probe_runner.restore()
@@ -941,6 +1005,14 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
         "workload_capture_count": recording_capture_count,
         "key_evidence_probe": probe,
         "metrics": metrics.snapshot(),
+        "reader_metrics": {
+            "summary_materialization_latency_ms": distribution(reader_summary_latency_ms),
+            "selected_validation_latency_ms": distribution(reader_selection_latency_ms),
+            "recheck_context_latency_ms": distribution(reader_recheck_latency_ms),
+            "row_count": reader_rows,
+            "reader_states": reader_states,
+            "diagnostics": runner.manager.get_calibration_reader_diagnostics(),
+        },
         "resources": resources.snapshot(),
         "artifact_growth": {
             "calibration_json_bytes": calibration_path.stat().st_size,
@@ -1283,6 +1355,38 @@ AUTHORITATIVE_PERFORMANCE_DEFINITION = JourneyDefinition(
     summary_builder=_summary,
 )
 
+PRIMARY_READER_FUNCTIONAL_DEFINITION = JourneyDefinition(
+    registry_id=PRIMARY_READER_FUNCTIONAL_ID,
+    scenario_name=PRIMARY_READER_FUNCTIONAL_SCENARIO,
+    scenario_version="1",
+    workload_id=PRIMARY_READER_FUNCTIONAL_ID,
+    required_action_ids=FUNCTIONAL_ACTIONS,
+    required_ui_action_ids=FUNCTIONAL_UI_ACTIONS,
+    required_assertion_ids=FUNCTIONAL_ASSERTIONS,
+    required_screenshots=frozenset(),
+    fixture_loader=_functional_fixture,
+    body=_functional_body,
+    artifact_assertion=_artifact_assertion,
+    payload_builder=_functional_payload,
+    summary_builder=_summary,
+)
+
+PRIMARY_READER_PERFORMANCE_DEFINITION = JourneyDefinition(
+    registry_id=PRIMARY_READER_PERFORMANCE_ID,
+    scenario_name=PRIMARY_READER_PERFORMANCE_SCENARIO,
+    scenario_version="1",
+    workload_id=PRIMARY_READER_PERFORMANCE_ID,
+    required_action_ids=PERFORMANCE_ACTIONS,
+    required_ui_action_ids=frozenset(),
+    required_assertion_ids=PERFORMANCE_ASSERTIONS,
+    required_screenshots=frozenset(),
+    fixture_loader=_performance_fixture,
+    body=_performance_body,
+    artifact_assertion=_artifact_assertion,
+    payload_builder=_performance_payload,
+    summary_builder=_summary,
+)
+
 
 __all__ = [
     "AUTHORITATIVE_FUNCTIONAL_DEFINITION",
@@ -1293,6 +1397,10 @@ __all__ = [
     "FUNCTIONAL_ID",
     "PERFORMANCE_DEFINITION",
     "PERFORMANCE_ID",
+    "PRIMARY_READER_FUNCTIONAL_DEFINITION",
+    "PRIMARY_READER_FUNCTIONAL_ID",
+    "PRIMARY_READER_PERFORMANCE_DEFINITION",
+    "PRIMARY_READER_PERFORMANCE_ID",
     "SHADOW_FUNCTIONAL_DEFINITION",
     "SHADOW_FUNCTIONAL_ID",
     "SHADOW_PERFORMANCE_DEFINITION",

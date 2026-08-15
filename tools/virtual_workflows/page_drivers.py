@@ -3147,6 +3147,53 @@ class CalibrationDialogDriver:
                 )
         return dict(raw)
 
+    def select_canonical_result(
+        self,
+        *,
+        result_id: str,
+        update_id: str,
+        row_ordinal: int = 0,
+    ) -> dict[str, Any]:
+        """Select one persisted row by canonical result/update identity."""
+
+        expected = (str(result_id), str(update_id), int(row_ordinal))
+        table = self.dialog.summary_table
+        proxy = self.dialog.summary_table_proxy_model
+        source = self.dialog.summary_table_model
+        match = None
+        for proxy_row in range(proxy.rowCount()):
+            source_index = proxy.mapToSource(proxy.index(proxy_row, 0))
+            raw = dict(source.raw_row_at(source_index.row()) or {})
+            observed = (
+                str(raw.get("result_id") or ""),
+                str(raw.get("update_id") or ""),
+                int(raw.get("row_ordinal") or 0),
+            )
+            if observed == expected:
+                match = (proxy_row, raw)
+                break
+        if match is None:
+            raise RuntimeError(f"canonical calibration result is not visible: {expected}")
+        proxy_row, raw = match
+        target = proxy.index(proxy_row, 1)
+        table.scrollTo(target)
+        rect = table.visualRect(target)
+        QtTest.QTest.mouseClick(
+            table.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=rect.center()
+        )
+        self.wait_until(
+            lambda: bool(self.dialog._selected_summary_row()[1]),
+            "canonical calibration row selection",
+        )
+        selected = dict(self.dialog._selected_summary_row()[1] or {})
+        if (
+            str(selected.get("result_id") or ""),
+            str(selected.get("update_id") or ""),
+            int(selected.get("row_ordinal") or 0),
+        ) != expected:
+            raise RuntimeError("canonical calibration selection identity drifted")
+        return dict(raw)
+
     def inspect_preview(self) -> dict[str, Any]:
         payload = dict(getattr(self.dialog, "_bridge_preview_payload", None) or {})
         table = self.dialog.bridge_table

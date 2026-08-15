@@ -9358,6 +9358,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "phase": raw.get("phase"),
             "timestamp": raw.get("timestamp"),
             "source_row_fingerprint": source_row_fingerprint,
+            "result_id": raw.get("result_id"),
+            "result_sha256": raw.get("result_sha256"),
+            "process_run_id": raw.get("process_run_id"),
+            "update_id": raw.get("update_id"),
             "printing_mode": applied_mode,
             "original_printing_mode": original_mode,
             "applied_printing_mode": applied_mode,
@@ -13060,6 +13064,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 candidate_validation.get("message") or "The selected calibration candidate is unavailable.",
             )
             return
+        resolved_row = candidate_validation.get("row")
+        if isinstance(resolved_row, dict):
+            raw = dict(resolved_row)
         mode_pair_getter = getattr(self, "_bridge_result_mode_pair", None)
         if callable(mode_pair_getter):
             current_mode, result_mode = mode_pair_getter(raw)
@@ -13463,6 +13470,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 candidate_validation.get("message") or "Selected candidate is unavailable.",
             )
             return
+        raw = dict(candidate_validation.get("row") or raw)
 
         mismatch_message = self._summary_row_mode_mismatch_message(raw)
         if mismatch_message:
@@ -13561,6 +13569,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 candidate_validation.get("message") or "Selected candidate is unavailable.",
             )
             return
+        raw = dict(candidate_validation.get("row") or raw)
 
         mismatch_message = self._summary_row_mode_mismatch_message(raw)
         if mismatch_message:
@@ -13837,9 +13846,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
         manager = getattr(self.model, "calibration_manager", None)
         validator = getattr(
             manager,
-            "validate_characterization_candidate_for_application",
+            "resolve_characterization_selection",
             None,
         )
+        if not callable(validator):
+            validator = getattr(
+                manager,
+                "validate_characterization_candidate_for_application",
+                None,
+            )
         if callable(validator):
             try:
                 result = dict(validator(raw) or {})
@@ -13865,7 +13880,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     "code": "application_busy",
                     "message": "Synthetic calibration Apply requires an idle array and empty simulator queue.",
                 }
-        return {"ok": True, "code": "ok", "message": ""}
+        return {"ok": True, "code": "ok", "message": "", "row": raw}
 
     def _update_load_button_state(self):
         """Enable the Load button only when we have a usable selection."""
@@ -13930,6 +13945,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
         _, raw = self._selected_summary_row()
         if not raw:
             return
+
+        candidate_validation = self._validate_selected_characterization_candidate(raw)
+        if not candidate_validation.get("ok"):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Nothing to load",
+                candidate_validation.get("message") or "Selected candidate is unavailable.",
+            )
+            return
+        raw = dict(candidate_validation.get("row") or raw)
 
         mismatch_message = self._summary_row_mode_mismatch_message(raw)
         if mismatch_message:
@@ -14112,6 +14137,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 candidate_validation.get("message") or "Selected candidate is unavailable."
             )
             return
+        raw = dict(candidate_validation.get("row") or raw)
 
         mean_nL = raw.get("mean_nL")
         try:

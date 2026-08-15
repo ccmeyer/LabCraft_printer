@@ -20,13 +20,13 @@ from tools.virtual_workflows.safeguards import SafeguardContractError
 
 
 EXPECTED_SOURCE_CATALOG_SHA256 = (
-    "f1642ad998cad4793755890ab0ae79067a5c5c837bc25c8bfba9963d0c27ccc0"
+    "b902df545b585a05a167dbee3fd96b73194c4269a157de711a120eaa2a4d6c93"
 )
 EXPECTED_MATRIX_CATALOG_SHA256 = (
-    "8ce5cad77540dfaba3e1448a9bf35e9ffaf3340010c0c636cee2c7af361f5f13"
+    "80303a3256d0707b9bbf5deab2a0dc39c71a50f58fb6f3d5620cedd551bcb496"
 )
 EXPECTED_CATALOG_FILE_SHA256 = (
-    "78e029fca7cdf29fa8fcb6fbab5d682692945bc7c8eda48a69d31430c47b2122"
+    "b5f4422a16197c87ea9dd78c3eed3f8e2ea3d87f44517ff9d18b18525c7cd61f"
 )
 
 

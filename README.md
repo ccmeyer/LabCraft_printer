@@ -2458,6 +2458,84 @@ recorder-toggle behavior. This leaves additive canonical artifacts intact.
 Image analysis, physical camera behavior, firmware, protocols, motion,
 pressure, and dispense remain outside this storage qualification.
 
+Milestone 4A makes the canonical compact index the default source for
+calibration prerequisites, characterization history, persisted selection,
+preview/load, recheck context, and application. History reads only
+`calibration_index.jsonl` plus the legacy compatibility document; result and
+update bundles are opened only after a row is selected. New terminal results
+carry `labcraft.calibration_recording.summary_projection` v1 rows, and applied
+execution-calibration records use schema v2 with nullable result, process-run,
+and update identities. Existing schema-v1 application records remain readable.
+
+Reader rollback is session-start configuration:
+
+```powershell
+$env:LABCRAFT_CALIBRATION_PRIMARY_READER = "legacy"
+```
+
+The default is `canonical`. Set
+`LABCRAFT_CALIBRATION_LEGACY_FALLBACK=0` to reject historical unmarked legacy
+fallback. Authority-marked incomplete/corrupt data and canonical/legacy parity
+conflicts are always blocked. `LABCRAFT_CALIBRATION_STORE_AUTHORITATIVE=0`
+continues to force the broader Milestone 3 legacy rollback.
+
+Index repair is never automatic. Preview an offline rebuild first, using the
+exact experiment directory, then repeat with `--apply` only after reviewing the
+reported bundle counts and errors:
+
+```powershell
+.\env\Scripts\python.exe -m tools.calibration_index_repair `
+  --experiment-dir <experiment-directory>
+
+.\env\Scripts\python.exe -m tools.calibration_index_repair `
+  --experiment-dir <experiment-directory> `
+  --apply
+```
+
+Apply refuses any invalid canonical bundle, atomically replaces the index, and
+retains a content-hash-named backup of an existing index. It does not modify
+run bundles or `calibration.json`.
+
+Run the Milestone 4A host coverage with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_calibration_recording_reader.py `
+  tests\test_calibration_primary_reader.py `
+  tests\test_calibration_index_repair.py `
+  tests\test_execution_calibration_store.py `
+  tests\test_calibration_storage_primary_reader_baseline.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_calibration_storage_primary_reader_contract_lifecycle.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-stress `
+  tests\system\test_calibration_storage_primary_reader_performance.py
+```
+
+Run and freeze the qualified Pi candidate with:
+
+```powershell
+.\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -Scenario calibration_storage_primary_reader_8x25_v1 `
+  -HostLabel pi5-calibration-storage-primary-reader-v1 `
+  -WarmupRuns 1 `
+  -MeasuredRuns 3 `
+  -SpeedMultiplier 1000 `
+  -TimeoutSeconds 1800
+
+.\env\Scripts\python.exe -m tools.sil.calibration_storage_primary_reader_baseline `
+  --report-set <retrieved-report_set.json> `
+  --milestone3-baseline tests\performance\baselines\calibration_storage_authoritative_pi5_v1.json `
+  --output tests\performance\baselines\calibration_storage_primary_reader_pi5_v1.json
+```
+
+This qualification covers structured persistence and reader integrity only. It
+does not exercise camera acquisition, image analysis, physical motion,
+pressure response, dispense behavior, firmware, or device protocols.
+
 ## Raspberry Pi Software-In-The-Loop
 
 The target-Pi SIL lane runs the same real-UI workflow on Raspberry Pi CPU and

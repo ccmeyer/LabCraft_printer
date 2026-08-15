@@ -88,3 +88,22 @@ def test_compatibility_volume_and_mode_must_match_exact_execution_values():
             record_id=record_id,
             **{**values, "applied_design_volume_nL": 100.0},
         )
+
+
+def test_schema_v1_loads_with_null_canonical_references_and_upgrades_on_write(tmp_path):
+    record = _record()
+    payload = ExecutionCalibrationDocument(
+        plan_id=PLAN_ID, records={record.record_id: record}
+    ).to_dict()
+    payload["schema_version"] = 1
+    for name in ("result_id", "result_sha256", "process_run_id", "update_id"):
+        payload["records"][record.record_id].pop(name)
+    path = tmp_path / "execution_calibrations.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_execution_calibrations(path)
+    assert loaded.records[record.record_id].result_id is None
+    save_execution_calibrations(path, loaded)
+    upgraded = json.loads(path.read_text(encoding="utf-8"))
+    assert upgraded["schema_version"] == 2
+    assert upgraded["records"][record.record_id]["result_id"] is None

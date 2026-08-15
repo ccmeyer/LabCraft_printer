@@ -106,7 +106,7 @@
       "mutation_kind": "remove_calibration_sidecar",
       "relative_path": "execution_calibrations.json",
       "operation": "remove_file",
-      "original_sha256": "38343406b61c2a6c0e49120a3b72165dd28748dfb2032b331e29aac68a56f1b0",
+      "original_sha256": "13dbacaf6dbc1f8eee93a3c1f210b6215ef6c4d40e6c99f2e1baac90a1ef56fd",
       "faulted_sha256": "a4d0f0eb87fed960b9f1819efda1cd7935b4f665fdd3872149260986d11e96da",
       "invalid_invariant": "a progressed plan references a missing calibration sidecar",
       "classification": "authoritative_bundle_invalid",

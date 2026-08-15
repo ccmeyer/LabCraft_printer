@@ -14,7 +14,7 @@ from ExecutionPlan import canonical_sha256
 
 
 SCHEMA_NAME = "labcraft.execution_calibrations"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CALIBRATION_RECORD_NAMESPACE = uuid.UUID("54945835-c76e-4ccf-94c4-9fa9a78e034a")
 PRINTING_MODES = {"droplet", "stream"}
 
@@ -39,6 +39,13 @@ CALIBRATION_FIELDS = {
     "applied_design_volume_nL",
     "recorded_at",
     "recorded_at_utc",
+    "result_id",
+    "result_sha256",
+    "process_run_id",
+    "update_id",
+}
+CALIBRATION_FIELDS_V1 = CALIBRATION_FIELDS - {
+    "result_id", "result_sha256", "process_run_id", "update_id"
 }
 
 MANUAL_CHECK_FIELDS = {
@@ -145,6 +152,10 @@ class ExecutionCalibrationRecord:
     applied_design_volume_nL: float
     recorded_at: str
     recorded_at_utc: str
+    result_id: str | None = None
+    result_sha256: str | None = None
+    process_run_id: str | None = None
+    update_id: str | None = None
 
     def __post_init__(self) -> None:
         _canonical_uuid(self.record_id, "calibration.record_id")
@@ -168,6 +179,13 @@ class ExecutionCalibrationRecord:
         object.__setattr__(self, "pressure_psi", _optional_number(self.pressure_psi, "calibration.pressure_psi"))
         for name in ("run_id", "phase", "timestamp"):
             object.__setattr__(self, name, _optional_string(getattr(self, name), f"calibration.{name}"))
+        for name in ("result_id", "result_sha256", "process_run_id", "update_id"):
+            object.__setattr__(self, name, _optional_string(getattr(self, name), f"calibration.{name}"))
+        if self.result_sha256 is not None and (
+            len(self.result_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.result_sha256)
+        ):
+            raise ValueError("calibration.result_sha256: must be a lowercase SHA-256 or null")
         if self.source_row_fingerprint is not None and not isinstance(self.source_row_fingerprint, tuple):
             raise ValueError("calibration.source_row_fingerprint: must be an array or null")
         for name in ("original_printing_mode", "applied_printing_mode", "printing_mode"):
@@ -208,19 +226,32 @@ class ExecutionCalibrationRecord:
             "applied_design_volume_nL": self.applied_design_volume_nL,
             "recorded_at": self.recorded_at,
             "recorded_at_utc": self.recorded_at_utc,
+            "result_id": self.result_id,
+            "result_sha256": self.result_sha256,
+            "process_run_id": self.process_run_id,
+            "update_id": self.update_id,
         }
 
     @classmethod
-    def from_dict(cls, payload: Any) -> "ExecutionCalibrationRecord":
+    def from_dict(cls, payload: Any, *, schema_version: int = SCHEMA_VERSION) -> "ExecutionCalibrationRecord":
         if not isinstance(payload, Mapping):
             raise ValueError("calibration record must be an object")
-        _require_exact_fields(payload, CALIBRATION_FIELDS, "calibration record")
+        expected = CALIBRATION_FIELDS_V1 if int(schema_version) == 1 else CALIBRATION_FIELDS
+        _require_exact_fields(payload, expected, "calibration record")
         fingerprint = payload["source_row_fingerprint"]
         if fingerprint is not None and not isinstance(fingerprint, list):
             raise ValueError("calibration.source_row_fingerprint: must be an array or null")
+        normalized = dict(payload)
+        if int(schema_version) == 1:
+            normalized.update({
+                "result_id": None,
+                "result_sha256": None,
+                "process_run_id": None,
+                "update_id": None,
+            })
         return cls(
             **{
-                **dict(payload),
+                **normalized,
                 "source_row_fingerprint": tuple(fingerprint) if fingerprint is not None else None,
             }
         )
@@ -336,14 +367,16 @@ class ExecutionCalibrationDocument:
             {"schema_name", "schema_version", "plan_id", "records", "manual_refuel_checks"},
             "execution_calibrations",
         )
-        if payload["schema_name"] != SCHEMA_NAME or payload["schema_version"] != SCHEMA_VERSION:
+        if payload["schema_name"] != SCHEMA_NAME or payload["schema_version"] not in {1, SCHEMA_VERSION}:
             raise ValueError("Unsupported execution-calibration schema name or version.")
         if not isinstance(payload["records"], Mapping) or not isinstance(payload["manual_refuel_checks"], Mapping):
             raise ValueError("Execution-calibration records and manual checks must be objects.")
         return cls(
             plan_id=payload["plan_id"],
             records={
-                str(key): ExecutionCalibrationRecord.from_dict(value)
+                str(key): ExecutionCalibrationRecord.from_dict(
+                    value, schema_version=int(payload["schema_version"])
+                )
                 for key, value in payload["records"].items()
             },
             manual_refuel_checks={

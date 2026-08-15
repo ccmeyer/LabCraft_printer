@@ -834,6 +834,14 @@ Exit criteria:
 
 Rollback: switch reader preference to legacy; dual writes continue.
 
+Implementation status (2026-08-15): the Qt-free primary reader, typed summary
+projection, commit-gated current-session cache, exact selection/recheck
+resolution, schema-v2 application references, explicit repair CLI, and the
+registered lifecycle/stress SIL scenarios are implemented. Host lifecycle and
+the 200-process/232-update stress workload pass. Final milestone completion is
+pending the clean-commit Raspberry Pi qualification, tracked candidate
+baseline, completion record, and final local/origin/Pi synchronization.
+
 ### Milestone 4B: secondary reader cutover
 
 Scope:
