@@ -20,6 +20,7 @@ from tools.virtual_workflows.experiment_design_cases import (
     build_experiment_design_fixture,
     editor_specification,
     executable_experiment_design_cases,
+    frozen_text_sha256,
     get_experiment_design_case,
     planned_catalog_sha256,
     reference_fixture_sha256,
@@ -191,7 +192,7 @@ def test_reference_fixture_hash_is_stable_across_platform_newlines(tmp_path):
     windows_path.write_bytes(b'{\r\n  "fixture_id": "example"\r\n}\r\n')
     linux_path.write_bytes(b'{\n  "fixture_id": "example"\n}\n')
 
-    assert reference_fixture_sha256(windows_path) == reference_fixture_sha256(linux_path)
+    assert frozen_text_sha256(windows_path) == frozen_text_sha256(linux_path)
 
 
 def test_executable_prefix_and_editor_projection_are_additive_and_exact():

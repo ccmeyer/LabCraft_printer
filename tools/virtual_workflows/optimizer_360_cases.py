@@ -25,6 +25,7 @@ from tools.virtual_workflows.experiment_design_cases import (
     ExpectedStockWellCount,
     ExpectedWellAssignment,
     ExperimentDesignCase,
+    frozen_text_sha256,
 )
 from tools.virtual_workflows.joined_interaction_cases import (
     JoinedCalibration,
@@ -828,7 +829,7 @@ def load_optimizer_360_case(path: Path | None = None) -> Optimizer360Case:
 
 
 def optimizer_360_fixture_sha256(path: Path | None = None) -> str:
-    return hashlib.sha256(Path(path or OPTIMIZER_360_FIXTURE_PATH).read_bytes()).hexdigest()
+    return frozen_text_sha256(Path(path or OPTIMIZER_360_FIXTURE_PATH))
 
 
 OPTIMIZER_360_CASE = load_optimizer_360_case()

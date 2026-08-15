@@ -54,17 +54,21 @@ def _sha256_json(value: Mapping[str, Any] | Sequence[Any]) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def reference_fixture_sha256(path: str | Path = REFERENCE_FIXTURE_PATH) -> str:
-    """Return the frozen fixture hash without platform newline drift.
+def frozen_text_sha256(path: str | Path) -> str:
+    """Hash a frozen text artifact without platform newline drift.
 
-    The original reviewed identity was recorded from a Windows checkout. Git
-    materializes the same tracked JSON with LF endings on the Pi, so preserve
-    that identity by canonicalizing text to CRLF before hashing.
+    Existing reviewed identities were recorded from Windows checkouts. Git
+    materializes the same tracked text with LF endings on the Pi, so preserve
+    those identities by canonicalizing text to CRLF before hashing.
     """
 
     text = Path(path).read_text(encoding="utf-8")
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
     return hashlib.sha256(normalized.replace("\n", "\r\n").encode("utf-8")).hexdigest()
+
+
+def reference_fixture_sha256(path: str | Path = REFERENCE_FIXTURE_PATH) -> str:
+    return frozen_text_sha256(path)
 
 
 def _identity(value: Any, label: str) -> str:
@@ -1312,6 +1316,7 @@ __all__ = [
     "build_experiment_design_fixture",
     "editor_specification",
     "executable_experiment_design_cases",
+    "frozen_text_sha256",
     "get_experiment_design_case",
     "normalized_planned_catalog",
     "planned_catalog_sha256",
