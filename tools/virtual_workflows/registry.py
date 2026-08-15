@@ -282,6 +282,33 @@ _SCENARIO_DEFINITIONS = {
         supports_injected_stall=False,
         supports_report_sets=True,
     ),
+    "calibration_storage_shadow_contract_v1": ScenarioDefinition(
+        registry_id="calibration_storage_shadow_contract_v1",
+        workload_id="calibration_storage_contract_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "calibration_storage_contract" / "catalog_v1.json"
+        ),
+        expected_completion_count=16,
+        scenario_name="calibration_storage_shadow_contract",
+        runner_family="composed_journey",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
+    "calibration_storage_shadow_8x25_v1": ScenarioDefinition(
+        registry_id="calibration_storage_shadow_8x25_v1",
+        workload_id="calibration_storage_legacy_baseline_8x25_v1",
+        fixture_path=(
+            _FIXTURE_ROOT
+            / "calibration_storage_contract_legacy_baseline_8x25_v1.json"
+        ),
+        expected_completion_count=200,
+        scenario_name="calibration_storage_shadow",
+        runner_family="composed_journey",
+        supports_pi_evidence=True,
+        supports_injected_stall=False,
+        supports_report_sets=True,
+    ),
 }
 REGISTERED_SCENARIOS: Mapping[str, ScenarioDefinition] = MappingProxyType(
     _SCENARIO_DEFINITIONS
@@ -311,10 +338,15 @@ def run_registered_scenario(
     """Dispatch through the existing compatibility config and scenario runner."""
 
     definition = get_registered_scenario(registry_id)
-    requested_id = config_values.pop("scenario_id", definition.workload_id)
-    if requested_id != definition.workload_id:
+    dispatch_id = (
+        definition.registry_id
+        if definition.runner_family == "composed_journey"
+        else definition.workload_id
+    )
+    requested_id = config_values.pop("scenario_id", dispatch_id)
+    if requested_id != dispatch_id:
         raise RegistryError(
-            "registered scenario/workload mismatch: "
+            "registered scenario/dispatch mismatch: "
             f"{definition.registry_id!r} cannot dispatch {requested_id!r}"
         )
 
@@ -348,7 +380,7 @@ def run_registered_scenario(
         )
 
         config = JourneyRunConfig(
-            scenario_id=definition.workload_id,
+            scenario_id=dispatch_id,
             **config_values,
         )
         return run_composed_journey(config)

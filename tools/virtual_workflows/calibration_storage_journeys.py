@@ -46,8 +46,19 @@ PERFORMANCE_FIXTURE_PATH = (
 )
 FUNCTIONAL_ID = "calibration_storage_contract_v1"
 PERFORMANCE_ID = "calibration_storage_legacy_baseline_8x25_v1"
+SHADOW_FUNCTIONAL_ID = "calibration_storage_shadow_contract_v1"
+SHADOW_PERFORMANCE_ID = "calibration_storage_shadow_8x25_v1"
 FUNCTIONAL_SCENARIO = "calibration_storage_contract"
 PERFORMANCE_SCENARIO = "calibration_storage_legacy_baseline"
+SHADOW_FUNCTIONAL_SCENARIO = "calibration_storage_shadow_contract"
+SHADOW_PERFORMANCE_SCENARIO = "calibration_storage_shadow"
+
+
+def _shadow_enabled(runtime: JourneyRuntime) -> bool:
+    return runtime.definition.registry_id in {
+        SHADOW_FUNCTIONAL_ID,
+        SHADOW_PERFORMANCE_ID,
+    }
 
 FUNCTIONAL_ACTIONS = frozenset(
     {
@@ -277,6 +288,7 @@ def _run_functional_catalog(runtime: JourneyRuntime) -> dict[str, Any]:
         calibration_file_path=prepared["calibration_file"],
         timeout_seconds=runtime.harness.config.timeout_seconds,
         metrics=metrics,
+        shadow_store_enabled=_shadow_enabled(runtime),
     )
     runtime.register_restorable("calibration_storage_runner", runner)
     application_identity = dict(prepared["stock_identity"])
@@ -353,6 +365,15 @@ def _run_functional_catalog(runtime: JourneyRuntime) -> dict[str, Any]:
         ),
         "update_count": sum(len(case.updates) for case, _ in executed),
         "processes": [evidence for _case, evidence in executed],
+        "shadow_store_enabled": _shadow_enabled(runtime),
+        "canonical_result_count": sum(
+            row["canonical_result_id"] is not None
+            for _case, row in executed
+        ),
+        "canonical_index_event_count": sum(
+            int(row["canonical_index_event_count"])
+            for _case, row in executed
+        ),
         "process_summary_rows": process_summary_rows,
         "expected_process_summary_rows": {
             case.process_id: list(case.expected_summary_rows)
@@ -393,8 +414,15 @@ def _functional_contract_assertions(runtime: JourneyRuntime) -> None:
         row["update_hashes"] == row["legacy_update_hashes"]
         and (
             row["recorder_update_hashes"] == row["update_hashes"]
-            if row["recording_dir"] is not None
+            if row["diagnostic_recording_enabled"]
             else row["recorder_update_hashes"] == ()
+        )
+        and (
+            row["canonical_update_hashes"] == row["update_hashes"]
+            and row["canonical_valid"]
+            and row["canonical_index_event_count"] == 1
+            if observed["shadow_store_enabled"]
+            else row["canonical_update_hashes"] == ()
         )
         for row in process_rows
     ) and observed["process_summary_rows"] == observed[
@@ -426,6 +454,12 @@ def _functional_contract_assertions(runtime: JourneyRuntime) -> None:
             row["meta_outcome"] == row["terminal_outcome"]
             for row in process_rows
             if row["recording_dir"] is not None
+        )
+        and (
+            observed["canonical_result_count"] == 16
+            and observed["canonical_index_event_count"] == 16
+            if observed["shadow_store_enabled"]
+            else observed["canonical_result_count"] == 0
         )
     )
     runtime.add_assertion(
@@ -478,11 +512,17 @@ def _functional_contract_assertions(runtime: JourneyRuntime) -> None:
     capture_ok = (
         observed["capture_counts"] == expected_captures
         and observed["capture_dimensions"] == [(16, 12)]
-        and next(
+        and (
+            next(
             row for row in process_rows
             if row["process_id"] == "recorder-disabled-control"
-        )["recording_dir"]
-        is None
+            )["recording_dir"] is not None
+            if observed["shadow_store_enabled"]
+            else next(
+                row for row in process_rows
+                if row["process_id"] == "recorder-disabled-control"
+            )["recording_dir"] is None
+        )
     )
     runtime.add_assertion(
         _assertion(
@@ -788,6 +828,7 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
         calibration_file_path=prepared["calibration_file"],
         timeout_seconds=runtime.harness.config.timeout_seconds,
         metrics=metrics,
+        shadow_store_enabled=_shadow_enabled(runtime),
     )
     runtime.register_restorable("calibration_storage_performance_runner", runner)
     evidence = []
@@ -841,6 +882,7 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
         app=runtime.context.app,
         calibration_file_path=probe_path,
         timeout_seconds=runtime.harness.config.timeout_seconds,
+        shadow_store_enabled=_shadow_enabled(runtime),
     )
     probe = probe_runner.run_case(probe_case).as_dict()
     probe_runner.restore()
@@ -859,6 +901,16 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
         "legacy_run_envelope_count": workload_run_count,
         "update_count": workload_update_count,
         "recording_count": sum(row["recording_dir"] is not None for row in evidence),
+        "shadow_store_enabled": _shadow_enabled(runtime),
+        "canonical_update_count": sum(
+            len(row["canonical_update_hashes"]) for row in evidence
+        ),
+        "canonical_result_count": sum(
+            row["canonical_result_id"] is not None for row in evidence
+        ),
+        "canonical_index_event_count": sum(
+            int(row["canonical_index_event_count"]) for row in evidence
+        ),
         "workload_capture_count": recording_capture_count,
         "key_evidence_probe": probe,
         "metrics": metrics.snapshot(),
@@ -905,8 +957,13 @@ def _performance_body(runtime: JourneyRuntime) -> None:
             "update_count",
             "recording_count",
             "workload_capture_count",
+            "canonical_update_count",
+            "canonical_result_count",
+            "canonical_index_event_count",
         )
     }
+    expected_canonical_updates = 232 if observed["shadow_store_enabled"] else 0
+    expected_canonical_runs = 200 if observed["shadow_store_enabled"] else 0
     runtime.add_assertion(
         _assertion(
             "calibration.storage.workload_counts_exact",
@@ -916,6 +973,9 @@ def _performance_body(runtime: JourneyRuntime) -> None:
                 "update_count": 232,
                 "recording_count": 200,
                 "workload_capture_count": 0,
+                "canonical_update_count": expected_canonical_updates,
+                "canonical_result_count": expected_canonical_runs,
+                "canonical_index_event_count": expected_canonical_runs,
             },
             counts,
             checkpoint="stress_terminal",
@@ -931,6 +991,12 @@ def _performance_body(runtime: JourneyRuntime) -> None:
         "calibration_rewrite_latency_ms",
         "recorder_append_latency_ms",
     )
+    if observed["shadow_store_enabled"]:
+        metric_names = metric_names + (
+            "canonical_update_append_latency_ms",
+            "result_finalize_latency",
+            "index_latency",
+        )
     metrics_ok = all((metrics[name] or {}).get("count", 0) > 0 for name in metric_names)
     runtime.add_assertion(
         _assertion(
@@ -1028,7 +1094,11 @@ def _functional_payload(
             },
         },
         limitations=(
-            "The scenario verifies current application storage and reader behavior only; it does not change or endorse the legacy schema.",
+            (
+                "Canonical run artifacts are non-authoritative shadow evidence; all application readers remain on the legacy schema."
+                if _shadow_enabled(runtime)
+                else "The scenario verifies current application storage and reader behavior only; it does not change or endorse the legacy schema."
+            ),
             "Capture policies are deterministic proxies and do not exercise camera acquisition or image analysis.",
             "No physical motion, dispense, pressure response, serial, GPIO, balance, firmware, or device-protocol claim is made.",
         ),
@@ -1056,8 +1126,16 @@ def _performance_payload(
         },
         resources=dict(observed.get("resources") or {"status": "not_available", "values": {}}),
         limitations=(
-            "This is a current-writer characterization workload, not an acceptance threshold for the Milestone 2 store.",
-            "Result finalization and index latency are explicitly unavailable until Milestone 2.",
+            (
+                "This is the Milestone 2 dual-write shadow workload; legacy persistence remains authoritative."
+                if _shadow_enabled(runtime)
+                else "This is a current-writer characterization workload, not an acceptance threshold for the Milestone 2 store."
+            ),
+            (
+                "Canonical update, result finalization, and index latency are measured."
+                if _shadow_enabled(runtime)
+                else "Result finalization and index latency are explicitly unavailable until Milestone 2."
+            ),
             "No physical hardware, camera, image analysis, firmware, motion, dispense, or protocol behavior is exercised.",
         ),
     )
@@ -1104,10 +1182,46 @@ PERFORMANCE_DEFINITION = JourneyDefinition(
     summary_builder=_summary,
 )
 
+SHADOW_FUNCTIONAL_DEFINITION = JourneyDefinition(
+    registry_id=SHADOW_FUNCTIONAL_ID,
+    scenario_name=SHADOW_FUNCTIONAL_SCENARIO,
+    scenario_version="1",
+    workload_id=SHADOW_FUNCTIONAL_ID,
+    required_action_ids=FUNCTIONAL_ACTIONS,
+    required_ui_action_ids=FUNCTIONAL_UI_ACTIONS,
+    required_assertion_ids=FUNCTIONAL_ASSERTIONS,
+    required_screenshots=frozenset(),
+    fixture_loader=_functional_fixture,
+    body=_functional_body,
+    artifact_assertion=_artifact_assertion,
+    payload_builder=_functional_payload,
+    summary_builder=_summary,
+)
+
+SHADOW_PERFORMANCE_DEFINITION = JourneyDefinition(
+    registry_id=SHADOW_PERFORMANCE_ID,
+    scenario_name=SHADOW_PERFORMANCE_SCENARIO,
+    scenario_version="1",
+    workload_id=SHADOW_PERFORMANCE_ID,
+    required_action_ids=PERFORMANCE_ACTIONS,
+    required_ui_action_ids=frozenset(),
+    required_assertion_ids=PERFORMANCE_ASSERTIONS,
+    required_screenshots=frozenset(),
+    fixture_loader=_performance_fixture,
+    body=_performance_body,
+    artifact_assertion=_artifact_assertion,
+    payload_builder=_performance_payload,
+    summary_builder=_summary,
+)
+
 
 __all__ = [
     "FUNCTIONAL_DEFINITION",
     "FUNCTIONAL_ID",
     "PERFORMANCE_DEFINITION",
     "PERFORMANCE_ID",
+    "SHADOW_FUNCTIONAL_DEFINITION",
+    "SHADOW_FUNCTIONAL_ID",
+    "SHADOW_PERFORMANCE_DEFINITION",
+    "SHADOW_PERFORMANCE_ID",
 ]

@@ -388,6 +388,30 @@
       "max_evidence_age_days": 30
     },
     {
+      "id": "calibration.storage_shadow_store",
+      "risk": "Canonical shadow updates, results, and index events could diverge from legacy calibration data or regress Pi performance.",
+      "owner_role": "calibration storage maintainers",
+      "status": "covered",
+      "required_verification_layers": ["contract", "host_sil"],
+      "active_scenario_ids": ["calibration_storage_shadow_contract_v1"],
+      "required_assertion_ids": ["calibration.storage.fixture_parity", "calibration.storage.lifecycle_exact"],
+      "related_source_areas": ["FreeRTOS-interface/CalibrationRecordingStore.py", "FreeRTOS-interface/CalibrationClasses/Model.py", "tools/sil/calibration_storage_process.py"],
+      "limitations": ["The canonical store is non-authoritative; readers, image analysis, firmware, motion, dispense, and physical pressure behavior are not covered."],
+      "max_evidence_age_days": 30
+    },
+    {
+      "id": "calibration.storage_shadow_pi_baseline",
+      "risk": "Canonical shadow writes could add unacceptable latency, memory use, or storage growth on the qualified Pi.",
+      "owner_role": "calibration storage maintainers",
+      "status": "covered",
+      "required_verification_layers": ["host_sil", "pi_sil"],
+      "active_scenario_ids": ["calibration_storage_shadow_8x25_v1"],
+      "required_assertion_ids": ["calibration.storage.workload_counts_exact", "calibration.storage.metrics_complete", "calibration.storage.growth_recorded"],
+      "related_source_areas": ["FreeRTOS-interface/CalibrationRecordingStore.py", "tools/sil/calibration_storage_shadow_baseline.py", "tools/virtual_workflows/calibration_storage_journeys.py"],
+      "limitations": ["The Pi workload uses synthetic structured updates with no workload pixels and does not claim physical calibration behavior."],
+      "max_evidence_age_days": 30
+    },
+    {
       "id": "hardware.motion_pressure_droplet",
       "risk": "Software evidence could be misrepresented as physical print-quality evidence.",
       "owner_role": "hardware verification maintainers",
@@ -720,6 +744,46 @@
       "limitations": ["This is a no-pixel current-writer characterization workload; result/index latency remains unavailable until Milestone 2 and no physical hardware claim is made."],
       "test_node_ids": ["tests/system/test_calibration_storage_contract_performance.py::test_calibration_storage_legacy_8x25_workload"],
       "pi_safety_evidence": ["preflight", "hardware_proof"]
+    },
+    {
+      "id": "calibration_storage_shadow_contract_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "calibration_storage_shadow_contract_v1",
+      "workload_fixture_id": "calibration_storage_contract_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/calibration_storage_contract/catalog_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 600,
+      "action_ids": ["app.launch_simulated", "fixture.prepare_calibration_storage", "calibration.run_scripted_processes", "calibration.inspect_storage_artifacts", "experiment.activate_authoritative", "app.close_simulated_session", "experiment.load_authoritative_via_ui", "experiment.activate_authoritative_via_ui", "calibration.stage_persisted_selection", "calibration.open_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "artifact.capture_milestone", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "calibration.storage.fixture_parity", "calibration.storage.lifecycle_exact", "calibration.storage.summary_isolation", "calibration.storage.capture_policy_exact", "calibration.storage.fresh_reload_exact", "calibration.storage.ui_application_exact", "artifacts.cleanup_complete"],
+      "capability_ids": ["sil.hardware_isolation.host", "calibration.storage_shadow_store"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["Synthetic structured payloads validate dual-write parity and legacy reader stability without camera acquisition or physical hardware."],
+      "test_node_ids": ["tests/system/test_calibration_storage_shadow_contract_lifecycle.py::test_calibration_storage_shadow_contract"],
+      "pi_safety_evidence": []
+    },
+    {
+      "id": "calibration_storage_shadow_8x25_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "calibration_storage_shadow_8x25_v1",
+      "workload_fixture_id": "calibration_storage_legacy_baseline_8x25_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/calibration_storage_contract_legacy_baseline_8x25_v1.json",
+      "tier": "stress",
+      "suite_ids": ["host_stress", "pi_stress"],
+      "supported_platforms": ["windows_sil", "pi_sil"],
+      "timeout_seconds": 1800,
+      "action_ids": ["app.launch_simulated", "fixture.prepare_calibration_storage", "calibration.run_scripted_processes", "calibration.inspect_storage_artifacts", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "calibration.storage.workload_counts_exact", "calibration.storage.metrics_complete", "calibration.storage.growth_recorded", "calibration.storage.key_evidence_probe_exact", "artifacts.cleanup_complete"],
+      "capability_ids": ["sil.hardware_isolation.host", "calibration.storage_shadow_pi_baseline"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["This is a no-pixel dual-write shadow workload; canonical artifacts are non-authoritative and no physical hardware claim is made."],
+      "test_node_ids": ["tests/system/test_calibration_storage_shadow_performance.py::test_calibration_storage_shadow_8x25_workload"],
+      "pi_safety_evidence": ["preflight", "hardware_proof"]
     }
   ],
   "suites": [
@@ -736,7 +800,7 @@
       "status": "active",
       "kind": "lifecycle",
       "platform": "windows_sil",
-      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "legacy_experiment_read_only_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1", "print_array_mixed_mode_24x2_v1", "print_array_disconnect_mid_array_24_v1", "randomized_calibration_reload_execution_v1", "calibration_storage_contract_v1"],
+      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "legacy_experiment_read_only_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1", "print_array_mixed_mode_24x2_v1", "print_array_disconnect_mid_array_24_v1", "randomized_calibration_reload_execution_v1", "calibration_storage_contract_v1", "calibration_storage_shadow_contract_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -752,7 +816,7 @@
       "status": "active",
       "kind": "stress",
       "platform": "windows_sil",
-      "scenario_ids": ["print_array_stress_384x10_v1", "optimizer_360_calibration_reload_execution_v1", "calibration_storage_legacy_baseline_8x25_v1"],
+      "scenario_ids": ["print_array_stress_384x10_v1", "optimizer_360_calibration_reload_execution_v1", "calibration_storage_legacy_baseline_8x25_v1", "calibration_storage_shadow_8x25_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -768,7 +832,7 @@
       "status": "active",
       "kind": "stress",
       "platform": "pi_sil",
-      "scenario_ids": ["print_array_stress_384x10_v1", "calibration_storage_legacy_baseline_8x25_v1"],
+      "scenario_ids": ["print_array_stress_384x10_v1", "calibration_storage_legacy_baseline_8x25_v1", "calibration_storage_shadow_8x25_v1"],
       "requires_pi_safety_evidence": ["preflight", "hardware_proof"]
     }
   ],

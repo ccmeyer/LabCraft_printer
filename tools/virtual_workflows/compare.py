@@ -24,6 +24,10 @@ POLICY_VERSION = "virtual_workflow_policy_v1"
 DEFAULT_METRIC_PROFILE = "virtual_print_array_v1"
 CALIBRATION_STORAGE_METRIC_PROFILE = "calibration_storage_reference_v1"
 CALIBRATION_STORAGE_WORKLOAD_ID = "calibration_storage_legacy_baseline_8x25_v1"
+CALIBRATION_STORAGE_SHADOW_WORKLOAD_ID = "calibration_storage_shadow_8x25_v1"
+CALIBRATION_STORAGE_WORKLOAD_IDS = frozenset(
+    {CALIBRATION_STORAGE_WORKLOAD_ID, CALIBRATION_STORAGE_SHADOW_WORKLOAD_ID}
+)
 
 PRIMARY_METRICS = (
     "metrics.responsiveness.values.scheduling_lateness_ms.p95",
@@ -268,7 +272,7 @@ def _compatibility_identity(
 
 def _metric_profile(identity: Mapping[str, Any]) -> str:
     workload = _require_mapping(identity.get("workload"), "compatibility.workload")
-    if workload.get("workload_id") == CALIBRATION_STORAGE_WORKLOAD_ID:
+    if workload.get("workload_id") in CALIBRATION_STORAGE_WORKLOAD_IDS:
         return CALIBRATION_STORAGE_METRIC_PROFILE
     return DEFAULT_METRIC_PROFILE
 
@@ -508,7 +512,7 @@ def validate_report_set(payload: Mapping[str, Any], *, verify_hashes: bool = Tru
         workload = _require_mapping(
             compatibility.get("workload"), "report_set.compatibility.workload"
         )
-        if workload.get("workload_id") != CALIBRATION_STORAGE_WORKLOAD_ID:
+        if workload.get("workload_id") not in CALIBRATION_STORAGE_WORKLOAD_IDS:
             raise ComparisonError("storage metric profile has the wrong workload")
     runs = _require_mapping(payload.get("runs"), "report_set.runs")
     warmups = _require_sequence(runs.get("warmups"), "report_set.runs.warmups")

@@ -22,6 +22,7 @@ if str(UI_ROOT) not in sys.path:
 
 from ApplicationComposition import SIMULATION_RUNTIME_CONTEXT  # noqa: E402
 from CalibrationClasses.Model import BaseCalibrationProcess  # noqa: E402
+from CalibrationRecordingStore import CalibrationRecordingStore  # noqa: E402
 from simulation.machine import SimulatedMachine  # noqa: E402
 
 from .calibration_storage_contract import (  # noqa: E402
@@ -46,6 +47,9 @@ class StorageMetricsCollector:
     fresh_reload_latency_ms: list[float] = field(default_factory=list)
     calibration_rewrite_latency_ms: list[float] = field(default_factory=list)
     recorder_append_latency_ms: list[float] = field(default_factory=list)
+    canonical_update_append_latency_ms: list[float] = field(default_factory=list)
+    result_finalize_latency_ms: list[float] = field(default_factory=list)
+    index_latency_ms: list[float] = field(default_factory=list)
     calibration_rewrite_sizes: list[int] = field(default_factory=list)
 
     def snapshot(self) -> dict[str, Any]:
@@ -72,14 +76,19 @@ class StorageMetricsCollector:
             "last_to_first_median_ratio": ratio,
             "calibration_rewrite_count": len(self.calibration_rewrite_latency_ms),
             "calibration_rewrite_sizes": distribution(self.calibration_rewrite_sizes),
-            "result_finalize_latency": {
-                "status": "not_available_until_m2",
-                "samples": [],
-            },
-            "index_latency": {
-                "status": "not_available_until_m2",
-                "samples": [],
-            },
+            "canonical_update_append_latency_ms": distribution(
+                self.canonical_update_append_latency_ms
+            ),
+            "result_finalize_latency": (
+                distribution(self.result_finalize_latency_ms)
+                if self.result_finalize_latency_ms
+                else {"status": "not_available_until_m2", "samples": []}
+            ),
+            "index_latency": (
+                distribution(self.index_latency_ms)
+                if self.index_latency_ms
+                else {"status": "not_available_until_m2", "samples": []}
+            ),
         }
 
 
@@ -181,6 +190,10 @@ class ScriptedCalibrationProcess(BaseCalibrationProcess):
             raise TypeError("case must be a ScriptedCalibrationCase")
         super().__init__(calibration_manager, model, parent=parent)
         self.case = case
+        self.calibration_storage_result_kind = case.result_kind
+        self.calibration_storage_capture_policy = str(case.capture_mode).replace(
+            "_proxy", ""
+        ).replace("recorder_disabled_control", "structured_only")
         self.phase_name = case.phase_name
         self.runtime_context = runtime_context
         self.machine = machine
@@ -188,6 +201,29 @@ class ScriptedCalibrationProcess(BaseCalibrationProcess):
         self.emitted_update_hashes: list[str] = []
         self.submitted_capture_count = 0
         self._step_index = 0
+
+    def build_calibration_storage_summary_projection(self, run, outcome):
+        rows = []
+        for expected in self.case.expected_summary_rows:
+            row = dict(expected)
+            step_index = int(row.get("source_step_index", 0))
+            update = run.updates[step_index] if step_index < len(run.updates) else None
+            if update is not None:
+                row["update_id"] = str(update["update_id"])
+            row["process_run_id"] = run.process_run_id
+            row["source_run_id"] = run.calibration_session_id
+            rows.append(row)
+        eligible = (
+            str(outcome) == "completed"
+            and self.case.result_kind == "calibration"
+            and bool(run.updates)
+        )
+        return {
+            "application_eligible": bool(eligible),
+            "status": "eligible" if eligible else "not_applicable",
+            "row_count": len(rows),
+            "rows": rows,
+        }
 
     @staticmethod
     def missing_requirements(_manager, *_args, **_kwargs):
@@ -275,10 +311,19 @@ class StorageProcessEvidence:
     update_hashes: tuple[str, ...]
     legacy_update_hashes: tuple[str, ...]
     recorder_update_hashes: tuple[str, ...]
+    canonical_update_hashes: tuple[str, ...]
+    canonical_payload_hashes: tuple[str, ...]
     capture_count: int
     capture_bytes: int
     captures: tuple[dict[str, Any], ...]
     meta_outcome: str | None
+    canonical_result_id: str | None
+    canonical_result_kind: str | None
+    canonical_result_outcome: str | None
+    canonical_result_sha256: str | None
+    canonical_index_event_count: int
+    canonical_valid: bool
+    diagnostic_recording_enabled: bool
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -319,6 +364,7 @@ class StorageContractRunner:
         calibration_file_path: str | Path,
         timeout_seconds: float = 30.0,
         metrics: StorageMetricsCollector | None = None,
+        shadow_store_enabled: bool = False,
     ):
         runtime_context = getattr(controller, "runtime_context", None)
         if runtime_context is not SIMULATION_RUNTIME_CONTEXT:
@@ -337,9 +383,11 @@ class StorageContractRunner:
         self.calibration_file_path = Path(calibration_file_path).resolve()
         self.timeout_seconds = float(timeout_seconds)
         self.metrics = metrics or StorageMetricsCollector()
+        self.shadow_store_enabled = bool(shadow_store_enabled)
         self._previous_head = None
         self._previous_gripper_slot = None
         self._previous_record_mode_enabled = self.manager.get_record_mode_enabled()
+        self._previous_shadow_store_enabled = self.manager.get_shadow_store_enabled()
         self._identity_overridden = False
 
     def _activate_identity(self, identity: Mapping[str, Any]) -> None:
@@ -381,6 +429,7 @@ class StorageContractRunner:
 
     def restore(self) -> None:
         self.manager.set_record_mode_enabled(self._previous_record_mode_enabled)
+        self.manager.set_shadow_store_enabled(self._previous_shadow_store_enabled)
         rack = self.model.rack_model
         if self._identity_overridden:
             rack.gripper_printer_head = self._previous_head
@@ -406,6 +455,9 @@ class StorageContractRunner:
         original_save = manager._save_atomic
         recorder = manager._process_recorder
         original_analysis = recorder.append_analysis
+        store = manager._ensure_calibration_recording_store()
+        original_canonical_append = store.append_update
+        original_canonical_finalize = store.finalize_run
 
         def measured_save():
             started = time.perf_counter_ns()
@@ -429,13 +481,41 @@ class StorageContractRunner:
                     (time.perf_counter_ns() - started) / 1_000_000.0
                 )
 
+        def measured_canonical_append(*args, **kwargs):
+            started = time.perf_counter_ns()
+            try:
+                return original_canonical_append(*args, **kwargs)
+            finally:
+                self.metrics.canonical_update_append_latency_ms.append(
+                    (time.perf_counter_ns() - started) / 1_000_000.0
+                )
+
+        def measured_canonical_finalize(*args, **kwargs):
+            commit = original_canonical_finalize(*args, **kwargs)
+            self.metrics.result_finalize_latency_ms.append(
+                float(commit.result_finalize_latency_ms)
+            )
+            if commit.index_latency_ms is not None:
+                self.metrics.index_latency_ms.append(float(commit.index_latency_ms))
+            return commit
+
         manager._save_atomic = measured_save
         recorder.append_analysis = measured_analysis
-        return original_save, original_analysis
+        if self.shadow_store_enabled:
+            store.append_update = measured_canonical_append
+            store.finalize_run = measured_canonical_finalize
+        return (
+            original_save,
+            original_analysis,
+            store,
+            original_canonical_append,
+            original_canonical_finalize,
+        )
 
     def run_case(self, case: ScriptedCalibrationCase) -> StorageProcessEvidence:
         self._activate_identity(case.identity)
         self.manager.set_record_mode_enabled(case.record_mode_enabled)
+        self.manager.set_shadow_store_enabled(self.shadow_store_enabled)
         self.manager.begin_session(
             str(self.calibration_file_path),
             notes="SIL storage-contract fixture",
@@ -464,6 +544,8 @@ class StorageContractRunner:
         finally:
             self.manager._save_atomic = originals[0]
             self.manager._process_recorder.append_analysis = originals[1]
+            originals[2].append_update = originals[3]
+            originals[2].finalize_run = originals[4]
         evidence = inspect_current_writer_case(
             self.calibration_file_path,
             case=case,
@@ -483,6 +565,27 @@ class StorageContractRunner:
             raise CalibrationStorageContractError(
                 f"recorder payload mismatch for {case.process_id}"
             )
+        if self.shadow_store_enabled:
+            if evidence.canonical_update_hashes != evidence.update_hashes:
+                raise CalibrationStorageContractError(
+                    f"canonical payload mismatch for {case.process_id}"
+                )
+            if not evidence.canonical_valid:
+                raise CalibrationStorageContractError(
+                    f"canonical run validation failed for {case.process_id}"
+                )
+            if evidence.canonical_result_kind != case.result_kind:
+                raise CalibrationStorageContractError(
+                    f"canonical result kind mismatch for {case.process_id}"
+                )
+            if evidence.canonical_result_outcome != case.terminal_outcome:
+                raise CalibrationStorageContractError(
+                    f"canonical result outcome mismatch for {case.process_id}"
+                )
+            if evidence.canonical_index_event_count != 1:
+                raise CalibrationStorageContractError(
+                    f"canonical index event mismatch for {case.process_id}"
+                )
         return evidence
 
 
@@ -529,10 +632,19 @@ def inspect_current_writer_case(
     legacy_steps = list((run.get("steps") or {}).get(case.phase_name) or [])
     legacy_hashes = tuple(semantic_sha256(normalized_legacy_step(step)) for step in legacy_steps)
     recorder_hashes: tuple[str, ...] = ()
+    canonical_hashes: tuple[str, ...] = ()
+    canonical_payload_hashes: tuple[str, ...] = ()
     capture_count = 0
     capture_bytes = 0
     capture_manifest: tuple[dict[str, Any], ...] = ()
     meta_outcome = None
+    canonical_result_id = None
+    canonical_result_kind = None
+    canonical_result_outcome = None
+    canonical_result_sha256 = None
+    canonical_index_event_count = 0
+    canonical_valid = False
+    diagnostic_recording_enabled = False
     recording_text = None
     if recording_dir:
         directory = Path(recording_dir).resolve()
@@ -545,6 +657,11 @@ def inspect_current_writer_case(
         recorder_hashes = tuple(
             semantic_sha256(normalized_recorder_update(row)) for row in analysis
         )
+        diagnostic_recording_enabled = bool(
+            (directory / "events.jsonl").is_file()
+            or (directory / "analysis.jsonl").is_file()
+            or (directory / "verdict.json").is_file()
+        )
         capture_manifest = _decoded_capture_manifest(directory)
         capture_count = len(capture_manifest)
         capture_bytes = sum(
@@ -552,6 +669,31 @@ def inspect_current_writer_case(
         )
         meta = json.loads((directory / "run_meta.json").read_text(encoding="utf-8"))
         meta_outcome = str(meta.get("outcome"))
+        if (directory / "result.json").is_file():
+            validated = CalibrationRecordingStore.validate_run(directory)
+            canonical_valid = True
+            canonical_updates = list(validated["updates"])
+            canonical_hashes = tuple(
+                semantic_sha256(normalized_legacy_step(row["payload"]))
+                for row in canonical_updates
+            )
+            canonical_payload_hashes = tuple(
+                str(row["payload_sha256"]) for row in canonical_updates
+            )
+            result = dict(validated["result"])
+            canonical_result_id = str(result["result_id"])
+            canonical_result_kind = str(result["result_kind"])
+            canonical_result_outcome = str(result["outcome"])
+            canonical_result_sha256 = str(result["result_sha256"])
+            index_rows = _read_jsonl(
+                Path(calibration_file_path).resolve().parent
+                / "calibration_index.jsonl"
+            )
+            canonical_index_event_count = sum(
+                str(row.get("process_run_id")) == str(result["process_run_id"])
+                and str(row.get("result_id")) == canonical_result_id
+                for row in index_rows
+            )
     return StorageProcessEvidence(
         fixture_id=case.fixture_id,
         process_id=case.process_id,
@@ -562,10 +704,19 @@ def inspect_current_writer_case(
         update_hashes=case.expected_update_hashes,
         legacy_update_hashes=legacy_hashes,
         recorder_update_hashes=recorder_hashes,
+        canonical_update_hashes=canonical_hashes,
+        canonical_payload_hashes=canonical_payload_hashes,
         capture_count=capture_count,
         capture_bytes=capture_bytes,
         captures=capture_manifest,
         meta_outcome=meta_outcome,
+        canonical_result_id=canonical_result_id,
+        canonical_result_kind=canonical_result_kind,
+        canonical_result_outcome=canonical_result_outcome,
+        canonical_result_sha256=canonical_result_sha256,
+        canonical_index_event_count=int(canonical_index_event_count),
+        canonical_valid=bool(canonical_valid),
+        diagnostic_recording_enabled=bool(diagnostic_recording_enabled),
     )
 
 

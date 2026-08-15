@@ -7,6 +7,7 @@ from PySide6.QtStateMachine import QStateMachine, QState, QFinalState, QSignalTr
 import json
 import hashlib
 import heapq
+import logging
 import os
 import csv
 import cv2
@@ -56,6 +57,13 @@ from GravimetricLedger import (
     ImagingEjectionEvent,
     ReusableMassBaseline,
 )
+from CalibrationRecordingStore import (
+    CalibrationRecordingStore,
+    CalibrationStoreError,
+)
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _freeze_candidate_value(value):
@@ -747,12 +755,26 @@ class CalibrationProcessRecorder:
             self._capture_write_stop_evt = None
             self._capture_write_queue = None
 
-    def start_run(self, process_name: str, phase_name: str, *, extra_meta: dict | None = None):
+    def start_run(
+        self,
+        process_name: str,
+        phase_name: str,
+        *,
+        extra_meta: dict | None = None,
+        run_context: dict | None = None,
+    ):
         with self._lock:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_id = f"run_{ts}_{uuid.uuid4().hex[:8]}"
-            root = self._default_root_dir()
-            run_dir = os.path.join(root, str(process_name), run_id)
+            managed_run_meta = isinstance(run_context, dict)
+            if managed_run_meta:
+                run_id = str(run_context.get("process_run_id") or "").strip()
+                run_dir = str(run_context.get("run_dir") or "").strip()
+                if not run_id or not run_dir:
+                    raise ValueError("attached recorder run context is incomplete")
+            else:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                run_id = f"run_{ts}_{uuid.uuid4().hex[:8]}"
+                root = self._default_root_dir()
+                run_dir = os.path.join(root, str(process_name), run_id)
             captures_dir = os.path.join(run_dir, "captures")
             os.makedirs(captures_dir, exist_ok=True)
 
@@ -766,6 +788,7 @@ class CalibrationProcessRecorder:
                 "analysis_path": os.path.join(run_dir, "analysis.jsonl"),
                 "meta_path": os.path.join(run_dir, "run_meta.json"),
                 "verdict_path": os.path.join(run_dir, "verdict.json"),
+                "managed_run_meta": bool(managed_run_meta),
                 "capture_index": 0,
                 "event_index": 0,
             }
@@ -800,7 +823,8 @@ class CalibrationProcessRecorder:
                 "submitted_at_utc": self._now_utc(),
             }
 
-            self._write_json_atomic(run["meta_path"], meta)
+            if not managed_run_meta:
+                self._write_json_atomic(run["meta_path"], meta)
             self._write_json_atomic(run["verdict_path"], verdict)
 
             run["pending_capture_write_count"] = 0
@@ -939,17 +963,21 @@ class CalibrationProcessRecorder:
         self._stop_capture_write_worker()
 
         with self._lock:
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-            except Exception:
-                meta = {
-                    "schema_version": int(self.SCHEMA_VERSION),
-                    "run_id": run["run_id"],
-                    "process_name": run["process_name"],
-                    "phase_name": run["phase_name"],
-                    "started_at_utc": "",
-                }
+            managed_run_meta = bool(run.get("managed_run_meta", False))
+            if managed_run_meta:
+                meta = {}
+            else:
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                except Exception:
+                    meta = {
+                        "schema_version": int(self.SCHEMA_VERSION),
+                        "run_id": run["run_id"],
+                        "process_name": run["process_name"],
+                        "phase_name": run["phase_name"],
+                        "started_at_utc": "",
+                    }
             meta["ended_at_utc"] = self._now_utc()
             meta["outcome"] = str(outcome)
             meta["error_message"] = str(error_message or "")
@@ -959,9 +987,22 @@ class CalibrationProcessRecorder:
             meta["capture_write_failures"] = [
                 dict(item or {}) for item in list(run.get("capture_write_failures") or [])
             ]
-            self._write_json_atomic(meta_path, meta)
+            if not managed_run_meta:
+                self._write_json_atomic(meta_path, meta)
             self._last = dict(run)
             self._active = None
+            return {
+                "ended_at_utc": meta["ended_at_utc"],
+                "outcome": meta["outcome"],
+                "error_message": meta["error_message"],
+                "recorder_warning_count": meta["recorder_warning_count"],
+                "recorder_warnings": list(meta["recorder_warnings"]),
+                "capture_write_failure_count": meta["capture_write_failure_count"],
+                "capture_write_failures": list(meta["capture_write_failures"]),
+                "pending_capture_write_count": int(
+                    run.get("pending_capture_write_count", 0)
+                ),
+            }
 
     def write_verdict(
         self,
@@ -1532,6 +1573,18 @@ class CalibrationManager(QObject):
         # Recorder mode: captures per-process runtime telemetry for offline replay/debug.
         self.record_mode_enabled = True
         self._process_recorder = CalibrationProcessRecorder(model)
+        self._shadow_store_enabled = (
+            str(os.environ.get("LABCRAFT_CALIBRATION_STORE_SHADOW", "1")).strip()
+            != "0"
+        )
+        self._calibration_recording_store = None
+        self._active_shadow_run = None
+        self._last_shadow_run = None
+        self._last_shadow_commit = None
+        self._active_shadow_process = None
+        self._shadow_storage_diagnostics = []
+        self._calibration_recordings_root = None
+        self._calibration_index_path = None
         self._capture_performance_diagnostics_enabled = False
 
         # Persisted JSON
@@ -1651,6 +1704,109 @@ class CalibrationManager(QObject):
         return out
 
     # ------------- Per-process recorder -------------
+
+    def set_shadow_store_enabled(self, enabled: bool):
+        """Developer rollback switch; unrelated to the operator recorder toggle."""
+        self._shadow_store_enabled = bool(enabled)
+        store = getattr(self, "_calibration_recording_store", None)
+        if store is not None:
+            store.enabled = bool(enabled)
+        return self._shadow_store_enabled
+
+    def get_shadow_store_enabled(self) -> bool:
+        return bool(getattr(self, "_shadow_store_enabled", False))
+
+    def get_shadow_storage_diagnostics(self):
+        return [dict(item) for item in self._shadow_storage_diagnostics]
+
+    def update_calibration_storage_paths(
+        self,
+        *,
+        experiment_dir,
+        recordings_root=None,
+        index_path=None,
+    ):
+        experiment_root = os.path.abspath(os.fspath(experiment_dir))
+        recordings = os.path.abspath(
+            os.fspath(recordings_root)
+            if recordings_root is not None
+            else os.path.join(experiment_root, "calibration_recordings")
+        )
+        index = os.path.abspath(
+            os.fspath(index_path)
+            if index_path is not None
+            else os.path.join(experiment_root, "calibration_index.jsonl")
+        )
+        self._calibration_recordings_root = recordings
+        self._calibration_index_path = index
+        self._calibration_recording_store = CalibrationRecordingStore(
+            experiment_root,
+            recordings_root=recordings,
+            index_path=index,
+            enabled=self.get_shadow_store_enabled(),
+        )
+        return self._calibration_recording_store
+
+    def _ensure_calibration_recording_store(self):
+        store = getattr(self, "_calibration_recording_store", None)
+        if store is not None:
+            store.enabled = self.get_shadow_store_enabled()
+            return store
+        calibration_path = str(self.calibration_file_path or "").strip()
+        if not calibration_path:
+            return None
+        experiment_dir = os.path.dirname(os.path.abspath(calibration_path)) or os.getcwd()
+        return self.update_calibration_storage_paths(experiment_dir=experiment_dir)
+
+    def _record_shadow_storage_failure(self, kind, exc, *, run=None):
+        diagnostic = {
+            "kind": str(kind),
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "process_run_id": getattr(run, "process_run_id", None),
+            "calibration_session_id": getattr(self, "_run_id", None),
+        }
+        self._shadow_storage_diagnostics.append(diagnostic)
+        LOGGER.warning("Calibration shadow storage %s: %s", kind, exc)
+        store = getattr(self, "_calibration_recording_store", None)
+        if store is not None and run is not None:
+            try:
+                store.add_warning(run, str(kind), error_message=str(exc))
+            except Exception:
+                pass
+        return diagnostic
+
+    @staticmethod
+    def _shadow_process_descriptor(process_obj):
+        declared = getattr(process_obj, "calibration_storage_result_kind", None)
+        warnings = []
+        if declared is None:
+            declared = "none"
+            warnings.append(
+                {
+                    "kind": "terminal_adapter_pending_m3",
+                    "process_name": process_obj.__class__.__name__,
+                }
+            )
+        capture_policy = getattr(process_obj, "calibration_storage_capture_policy", None)
+        return str(declared), capture_policy, warnings
+
+    def _build_shadow_summary_projection(self, process_obj, run, outcome):
+        builder = getattr(
+            process_obj,
+            "build_calibration_storage_summary_projection",
+            None,
+        )
+        if callable(builder):
+            projected = builder(run, str(outcome))
+            if isinstance(projected, dict):
+                return projected
+        return {
+            "application_eligible": False,
+            "status": "terminal_adapter_pending_m3",
+            "row_count": 0,
+            "rows": [],
+        }
 
     def _build_recorder_meta(self):
         meta = {
@@ -2646,6 +2802,49 @@ class CalibrationManager(QObject):
         except Exception:
             pass
         self._finalized_process_recording_run_dir = None
+        self._active_shadow_run = None
+        self._active_shadow_process = process_obj
+        shadow_run = None
+        if self.get_shadow_store_enabled():
+            store = self._ensure_calibration_recording_store()
+            if store is not None:
+                try:
+                    process_name = process_obj.__class__.__name__
+                    phase_name = (
+                        getattr(process_obj, "phase_name", None) or process_name
+                    )
+                    result_kind, declared_capture_policy, warnings = (
+                        self._shadow_process_descriptor(process_obj)
+                    )
+                    default_policy = (
+                        "full"
+                        if getattr(self, "record_mode_enabled", False)
+                        else "structured_only"
+                    )
+                    capture_policy = str(
+                        declared_capture_policy or default_policy
+                    ).replace("_proxy", "")
+                    shadow_run = store.start_run(
+                        calibration_session_id=self._run_id,
+                        process_name=process_name,
+                        phase_name=str(phase_name),
+                        result_kind=result_kind,
+                        identity=self._build_calibration_stock_identity_snapshot(),
+                        capture_policy_requested=capture_policy,
+                        capture_policy_effective=capture_policy,
+                        warnings=warnings,
+                    )
+                    self._active_shadow_run = shadow_run
+                    self._last_shadow_run = shadow_run
+                    process_obj._canonical_process_run_id = shadow_run.process_run_id
+                    process_obj._canonical_run_dir = str(shadow_run.run_dir)
+                    # The canonical directory remains discoverable even when
+                    # diagnostic recording is disabled.
+                    process_obj._recorder_run_dir = str(shadow_run.run_dir)
+                except Exception as exc:
+                    self._record_shadow_storage_failure(
+                        "run_start_failed", exc, run=shadow_run
+                    )
         if not getattr(self, "record_mode_enabled", False):
             return
         recorder = getattr(self, "_process_recorder", None)
@@ -2658,6 +2857,14 @@ class CalibrationManager(QObject):
                 process_name,
                 phase_name,
                 extra_meta=self._build_recorder_meta(),
+                run_context=(
+                    {
+                        "process_run_id": shadow_run.process_run_id,
+                        "run_dir": str(shadow_run.run_dir),
+                    }
+                    if shadow_run is not None
+                    else None
+                ),
             )
             recorder.append_event(
                 "process_started",
@@ -2751,9 +2958,10 @@ class CalibrationManager(QObject):
 
     def _finalize_process_recording(self, outcome: str, *, error_message: str = ""):
         recorder = getattr(self, "_process_recorder", None)
-        if recorder is None:
-            return
-        process_obj = getattr(self, "activeCalibration", None)
+        process_obj = (
+            getattr(self, "activeCalibration", None)
+            or getattr(self, "_active_shadow_process", None)
+        )
         process_run_dir = None
         if process_obj is not None:
             if bool(getattr(process_obj, "_process_recording_finalized", False)):
@@ -2762,37 +2970,70 @@ class CalibrationManager(QObject):
         # Finalize any active run even if record mode was toggled off mid-process.
         active_dir = None
         try:
-            active_dir = recorder.get_active_run_dir()
+            active_dir = recorder.get_active_run_dir() if recorder is not None else None
         except Exception:
             active_dir = None
-        run_dir_key = str(process_run_dir or active_dir or "")
+        shadow_run = getattr(self, "_active_shadow_run", None)
+        shadow_dir = str(getattr(shadow_run, "run_dir", "") or "")
+        run_dir_key = str(process_run_dir or active_dir or shadow_dir or "")
         if run_dir_key and run_dir_key == str(getattr(self, "_finalized_process_recording_run_dir", "") or ""):
             return
-        if (not getattr(self, "record_mode_enabled", False)) and (not active_dir):
+        if not active_dir and not process_run_dir and shadow_run is None:
             return
-        if not active_dir and not process_run_dir:
-            return
+        recorder_summary = {}
         try:
-            if getattr(self, "record_mode_enabled", False):
+            if recorder is not None and active_dir and getattr(self, "record_mode_enabled", False):
                 recorder.append_event(
                     "process_finished",
                     {"outcome": str(outcome), "error_message": str(error_message or "")},
                 )
-            recorder.finalize_run(str(outcome), error_message=str(error_message or ""))
-            if str(outcome) == "error":
+            if recorder is not None and active_dir:
+                recorder_summary = recorder.finalize_run(
+                    str(outcome), error_message=str(error_message or "")
+                ) or {}
+            if recorder is not None and active_dir and str(outcome) == "error":
                 recorder.write_verdict(
                     "failed",
                     failure_summary=str(error_message or ""),
                     submitted_by="system",
                 )
-            elif str(outcome) == "completed":
+            elif recorder is not None and active_dir and str(outcome) == "completed":
                 recorder.write_verdict("unknown", submitted_by="system")
-            if process_obj is not None:
-                process_obj._process_recording_finalized = True
-            if run_dir_key:
-                self._finalized_process_recording_run_dir = run_dir_key
         except Exception as e:
             print(f"[CalibrationRecorder] Failed to finalize process recording: {e}")
+            recorder_summary = {
+                "recorder_warning_count": 1,
+                "recorder_warnings": [
+                    {"kind": "recorder_finalize_failed", "error_message": str(e)}
+                ],
+            }
+
+        if shadow_run is not None:
+            store = getattr(self, "_calibration_recording_store", None)
+            try:
+                summary = self._build_shadow_summary_projection(
+                    process_obj, shadow_run, outcome
+                )
+                self._last_shadow_commit = store.finalize_run(
+                    shadow_run,
+                    outcome=str(outcome),
+                    error_message=str(error_message or ""),
+                    summary_projection=summary,
+                    recorder_summary=recorder_summary,
+                )
+            except Exception as exc:
+                self._record_shadow_storage_failure(
+                    "terminal_commit_failed", exc, run=shadow_run
+                )
+            finally:
+                self._last_shadow_run = shadow_run
+                self._active_shadow_run = None
+                self._active_shadow_process = None
+
+        if process_obj is not None:
+            process_obj._process_recording_finalized = True
+        if run_dir_key:
+            self._finalized_process_recording_run_dir = run_dir_key
 
     def record_process_event(
         self,
@@ -3279,6 +3520,10 @@ class CalibrationManager(QObject):
         # if not os.path.exists(experiment_dir):
         #     os.makedirs(experiment_dir, exist_ok=True)
         self.calibration_file_path = calibration_file_path
+        experiment_dir = os.path.dirname(os.path.abspath(calibration_file_path)) or os.getcwd()
+        store = getattr(self, "_calibration_recording_store", None)
+        if store is None or str(store.experiment_dir) != str(Path(experiment_dir).resolve()):
+            self.update_calibration_storage_paths(experiment_dir=experiment_dir)
         # Per-run derived center used by pressure band; avoid stale cross-session carryover.
         self.emergence_nozzle_center_image_position = None
         self.real_nozzle_center_image_position = None
@@ -3417,6 +3662,8 @@ class CalibrationManager(QObject):
             self._reset_calibration_memory_prior_runtime()
             self._reset_online_stream_prior_runtime()
             self._reset_calibration_memory_ui_recommendation_state()
+            experiment_dir = os.path.dirname(os.path.abspath(file_path)) or os.getcwd()
+            self.update_calibration_storage_paths(experiment_dir=experiment_dir)
         self.calibration_file_path = file_path
         # Loading an existing file is read-only. The repository's legacy empty
         # calibration document is `{}`, normalized in memory to the v1 envelope.
@@ -8108,14 +8355,53 @@ class CalibrationManager(QObject):
         payload["meta"] = meta
         payload["phase"] = phase_key
 
+        run = self.data["runs"][self._run_idx]
+        legacy_step_index = len(run["steps"].setdefault(phase_key, []))
+        canonical_update = None
+        shadow_run = getattr(self, "_active_shadow_run", None)
+        store = getattr(self, "_calibration_recording_store", None)
+        if shadow_run is not None and store is not None:
+            try:
+                canonical_update = store.append_update(
+                    shadow_run,
+                    payload,
+                    phase_name=phase_key,
+                    recorded_at_utc=stamp,
+                    legacy_source={
+                        "source_run_id": self._run_id,
+                        "source_phase_key": phase_key,
+                        "source_step_index": legacy_step_index,
+                    },
+                )
+            except Exception as exc:
+                self._record_shadow_storage_failure(
+                    "update_append_failed", exc, run=shadow_run
+                )
+
         self._update_stream_capture_online_summary_from_payload(
             payload,
             phase_key=phase_key,
         )
 
         # Append to steps
-        run = self.data["runs"][self._run_idx]
-        run["steps"].setdefault(phase_key, []).append(payload)
+        run["steps"][phase_key].append(payload)
+
+        # Optional: emit flat rows if droplet arrays present (from droplet_search / characterization)
+        # self._try_append_flat_rows_from_payload(run, phase_key, payload)
+
+        self._save_atomic()
+
+        if canonical_update is not None:
+            try:
+                store.record_parity(
+                    shadow_run,
+                    update_id=canonical_update.update_id,
+                    legacy_payload=run["steps"][phase_key][legacy_step_index],
+                )
+            except Exception as exc:
+                self._record_shadow_storage_failure(
+                    "parity_check_failed", exc, run=shadow_run
+                )
 
         self.record_analysis(
             {
@@ -8124,11 +8410,6 @@ class CalibrationManager(QObject):
                 "payload": payload,
             }
         )
-
-        # Optional: emit flat rows if droplet arrays present (from droplet_search / characterization)
-        # self._try_append_flat_rows_from_payload(run, phase_key, payload)
-
-        self._save_atomic()
 
         # Notify listeners to refresh the summary table when relevant
         if phase_key in (

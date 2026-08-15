@@ -2319,6 +2319,62 @@ proxies. It does not prove camera acquisition, image analysis, physical
 calibration quality, firmware, serial/GPIO, motion, dispense, balance, or
 pressure response.
 
+Milestone 2 adds a non-authoritative canonical shadow store alongside those
+unchanged writers and readers. Every calibration process now attempts to write
+`calibration_recordings/<process>/<run>/updates.jsonl`, `result.json`, and
+schema-v2 `run_meta.json`, followed by one rebuildable
+`calibration_index.jsonl` event. The operator recorder toggle still controls
+diagnostic events, analysis, verdicts, and captures; it does not disable the
+structured shadow attempt. Existing `calibration.json` history and all current
+application/UI readers remain authoritative.
+
+The shadow path reports failures and continues through the legacy completion
+path. For emergency developer rollback, set
+`LABCRAFT_CALIBRATION_STORE_SHADOW=0` before launching the application. This is
+not an operator data-retention control and must not be treated as the Milestone
+3 capture-policy UI.
+
+Run the Milestone 2 contract and composed SIL coverage with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_calibration_recording_store.py `
+  tests\test_calibration_recording_store_failures.py `
+  tests\test_calibration_storage_scripted_process.py `
+  tests\test_calibration_storage_shadow_baseline.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_calibration_storage_shadow_contract_lifecycle.py
+
+.\env\Scripts\python.exe -m pytest -q --run-sil-stress `
+  tests\system\test_calibration_storage_shadow_performance.py
+```
+
+The explicit qualified-Pi comparison uses the frozen Milestone 1 workload:
+
+```powershell
+.\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost <qualified-pi-host> `
+  -Scenario calibration_storage_shadow_8x25_v1 `
+  -HostLabel pi5-calibration-storage-shadow-v1 `
+  -WarmupRuns 1 `
+  -MeasuredRuns 3 `
+  -SpeedMultiplier 1000 `
+  -TimeoutSeconds 1800
+
+.\env\Scripts\python.exe -m tools.sil.calibration_storage_shadow_baseline `
+  --report-set <retrieved-report_set.json> `
+  --legacy-baseline tests\performance\baselines\calibration_storage_legacy_pi5_v1.json `
+  --output tests\performance\baselines\calibration_storage_shadow_pi5_v1.json
+```
+
+The shadow baseline requires a clean one-warmup/three-measured report set,
+exact 200-process/232-update/200-result/200-index counts, matching Pi/storage
+and fixture identities, and no material regression against the Milestone 1
+candidate limits. It freezes separate candidate limits for canonical append,
+result-finalize, and index latency. No camera, image-analysis, firmware,
+protocol, motion, dispense, balance, or physical calibration claim is made.
+
 ## Raspberry Pi Software-In-The-Loop
 
 The target-Pi SIL lane runs the same real-UI workflow on Raspberry Pi CPU and

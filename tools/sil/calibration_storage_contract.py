@@ -11,9 +11,21 @@ import hashlib
 import json
 import math
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+UI_ROOT = REPO_ROOT / "FreeRTOS-interface"
+if str(UI_ROOT) not in sys.path:
+    sys.path.insert(0, str(UI_ROOT))
+
+from CalibrationRecordingStore import (  # noqa: E402
+    CalibrationStoreValidationError,
+    canonical_json_bytes as _store_canonical_json_bytes,
+)
 
 
 FIXTURE_SCHEMA_ID = "labcraft.calibration_storage_contract_fixture"
@@ -41,39 +53,12 @@ _SENSITIVE_KEY_PARTS = (
 class CalibrationStorageContractError(ValueError):
     """Raised when a storage-contract fixture or projection is invalid."""
 
-
-def _normalize_json(value: Any) -> Any:
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise CalibrationStorageContractError("non-finite JSON number")
-        return value
-    if isinstance(value, Mapping):
-        return {
-            str(key): _normalize_json(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [_normalize_json(item) for item in value]
-    scalar = getattr(value, "item", None)
-    if callable(scalar):
-        return _normalize_json(scalar())
-    raise CalibrationStorageContractError(
-        f"unsupported canonical JSON value: {type(value).__name__}"
-    )
-
-
 def canonical_json_bytes(value: Any) -> bytes:
     """Return the v1 finite, compact, sorted UTF-8 JSON representation."""
-
-    return json.dumps(
-        _normalize_json(value),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
+    try:
+        return _store_canonical_json_bytes(value)
+    except CalibrationStoreValidationError as exc:
+        raise CalibrationStorageContractError(str(exc)) from exc
 
 
 def semantic_sha256(value: Any) -> str:

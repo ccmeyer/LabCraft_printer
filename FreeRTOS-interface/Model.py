@@ -575,6 +575,8 @@ class ExperimentModel(QObject):
         self.key_file_path: Optional[str] = None
         self.concentration_key_file_path: Optional[str] = None
         self.calibration_file_path: Optional[str] = None
+        self.calibration_recordings_dir_path: Optional[str] = None
+        self.calibration_index_file_path: Optional[str] = None
         self.experiment_audit_file_path: Optional[str] = None
         self.execution_plan_file_path: Optional[str] = None
         self.execution_plan_revisions_dir_path: Optional[str] = None
@@ -7370,6 +7372,12 @@ class ExperimentModel(QObject):
         self._calibration_manager = mgr
         if self.calibration_file_path and hasattr(mgr, "update_calibration_file_path"):
             mgr.update_calibration_file_path(self.calibration_file_path)
+        if self.experiment_dir_path and hasattr(mgr, "update_calibration_storage_paths"):
+            mgr.update_calibration_storage_paths(
+                experiment_dir=self.experiment_dir_path,
+                recordings_root=self.calibration_recordings_dir_path,
+                index_path=self.calibration_index_file_path,
+            )
 
     # -----------------------------
     # Simple getters used by Model
@@ -7506,6 +7514,12 @@ class ExperimentModel(QObject):
         self.experiment_file_path   = os.path.join(self.experiment_dir_path, "experiment_design.json")
         self.progress_file_path     = os.path.join(self.experiment_dir_path, "progress.json")
         self.calibration_file_path  = os.path.join(self.experiment_dir_path, "calibration.json")
+        self.calibration_recordings_dir_path = os.path.join(
+            self.experiment_dir_path, "calibration_recordings"
+        )
+        self.calibration_index_file_path = os.path.join(
+            self.experiment_dir_path, "calibration_index.jsonl"
+        )
         self.experiment_audit_file_path = os.path.join(self.experiment_dir_path, "experiment_audit.jsonl")
         self.execution_plan_file_path = os.path.join(self.experiment_dir_path, "execution_plan.json")
         self.execution_plan_revisions_dir_path = os.path.join(
@@ -7524,6 +7538,14 @@ class ExperimentModel(QObject):
         self.concentration_key_file_path = os.path.join(self.experiment_dir_path, "concentration_key.csv")
         if self._calibration_manager is not None and hasattr(self._calibration_manager, "update_calibration_file_path"):
             self._calibration_manager.update_calibration_file_path(self.calibration_file_path)
+        if self._calibration_manager is not None and hasattr(
+            self._calibration_manager, "update_calibration_storage_paths"
+        ):
+            self._calibration_manager.update_calibration_storage_paths(
+                experiment_dir=self.experiment_dir_path,
+                recordings_root=self.calibration_recordings_dir_path,
+                index_path=self.calibration_index_file_path,
+            )
 
     # -----------------------------
     # Save / Load design
@@ -12505,6 +12527,8 @@ class ExperimentModel(QObject):
         self._last_progress_load_warnings = []
         self._last_progress_stock_override_warnings = []
         self.calibration_file_path = None
+        self.calibration_recordings_dir_path = None
+        self.calibration_index_file_path = None
         self.experiment_audit_file_path = None
         self.execution_plan_file_path = None
         self.execution_plan_revisions_dir_path = None
