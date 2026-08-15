@@ -40,6 +40,7 @@ def _report(run_id, value, prior):
     storage = report["metrics"]["persistence"]["values"]["calibration_storage"]
     distribution = {"count": 8, "minimum": value, "median": value, "p95": value, "maximum": value, "samples": [value] * 8}
     storage["reader_metrics"] = {
+        "index_read_latency_ms": dict(distribution),
         "summary_materialization_latency_ms": dict(distribution),
         "selected_validation_latency_ms": dict(distribution),
         "recheck_context_latency_ms": dict(distribution),

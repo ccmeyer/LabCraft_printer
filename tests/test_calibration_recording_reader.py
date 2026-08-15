@@ -120,3 +120,37 @@ def test_reader_canonical_only_and_legacy_preference(tmp_path):
     legacy = CalibrationRecordingReader(tmp_path, primary="legacy").history_snapshot()
     assert legacy.rows == ()
 
+
+def test_reader_history_accepts_manager_owned_legacy_snapshot(tmp_path, monkeypatch):
+    _write_case(tmp_path)
+    legacy_document = json.loads(
+        (tmp_path / "calibration.json").read_text(encoding="utf-8")
+    )
+    reader = CalibrationRecordingReader(tmp_path)
+
+    def fail_disk_read():
+        raise AssertionError("history should reuse the manager-owned legacy snapshot")
+
+    monkeypatch.setattr(reader, "_legacy_document", fail_disk_read)
+    snapshot = reader.history_snapshot(
+        legacy_document=legacy_document,
+        cache_revision=1,
+    )
+
+    assert len(snapshot.rows) == 1
+    assert dict(snapshot.rows[0])["reader_state"] == "matching_dual"
+
+    monkeypatch.setattr(
+        reader,
+        "_index_events",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("unchanged committed history should use its snapshot")
+        ),
+    )
+    assert reader.history_snapshot(
+        legacy_document=legacy_document,
+        cache_revision=1,
+    ) is reader.history_snapshot(
+        legacy_document=legacy_document,
+        cache_revision=1,
+    )

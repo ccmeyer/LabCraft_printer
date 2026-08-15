@@ -1726,6 +1726,7 @@ class CalibrationManager(QObject):
         self._calibration_recording_reader = None
         self._calibration_reader_diagnostics = {}
         self._completed_canonical_session_cache = {}
+        self._calibration_history_revision = 0
         self._capture_performance_diagnostics_enabled = False
 
         # Persisted JSON
@@ -3359,7 +3360,10 @@ class CalibrationManager(QObject):
                     self._last_shadow_commit.result.document.get("outcome") or ""
                 )
                 if committed_outcome == "completed":
-                    self._register_completed_canonical_run(shadow_run)
+                    self._register_completed_canonical_run(
+                        shadow_run,
+                        summary_projection=summary,
+                    )
                 if (
                     self.is_calibration_store_authoritative()
                     and effective_outcome == "completed"
@@ -3394,7 +3398,7 @@ class CalibrationManager(QObject):
             "commit": getattr(self, "_last_shadow_commit", None),
         }
 
-    def _register_completed_canonical_run(self, run):
+    def _register_completed_canonical_run(self, run, *, summary_projection=None):
         """Expose a run to current-session prerequisites only after full commit."""
 
         if run is None or str(getattr(run, "calibration_session_id", "")) != str(
@@ -3408,6 +3412,13 @@ class CalibrationManager(QObject):
             cache = {}
             self._completed_canonical_session_cache = cache
         cache.setdefault(phase_key, []).extend(payloads)
+        projection = dict(summary_projection or {})
+        if projection.get("application_eligible") and list(
+            projection.get("rows") or []
+        ):
+            self._calibration_history_revision = int(
+                getattr(self, "_calibration_history_revision", 0)
+            ) + 1
         return True
 
     def record_process_event(
@@ -4089,6 +4100,9 @@ class CalibrationManager(QObject):
         self.calibration_file_path = file_path
         with open(file_path, 'r') as file:
             self.data = self._normalize_loaded_calibration_data(json.load(file))
+        self._calibration_history_revision = int(
+            getattr(self, "_calibration_history_revision", 0)
+        ) + 1
 
     def ensure_loaded(self):
         """
@@ -10443,7 +10457,10 @@ class CalibrationManager(QObject):
             diagnostics = {"primary": "legacy_unconfigured", "row_count": len(rows), "issue_count": 0}
             self._calibration_reader_diagnostics = diagnostics
             return {"rows": rows, "issues": [], "diagnostics": diagnostics}
-        snapshot = reader.history_snapshot()
+        snapshot = reader.history_snapshot(
+            legacy_document=self.data,
+            cache_revision=int(getattr(self, "_calibration_history_revision", 0)),
+        )
         current_identity = self._build_calibration_stock_identity_snapshot()
         current_keys = set(self._calibration_stock_match_keys_from_fields(current_identity))
         filtered = []

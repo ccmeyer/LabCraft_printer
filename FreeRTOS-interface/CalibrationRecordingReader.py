@@ -206,6 +206,8 @@ class CalibrationRecordingReader:
             raise ValueError("primary reader must be canonical or legacy")
         self.primary = normalized
         self.allow_legacy_fallback = bool(allow_legacy_fallback)
+        self._history_cache_revision: Any = None
+        self._history_cache: CalibrationHistorySnapshot | None = None
 
     def _legacy_document(self) -> dict[str, Any]:
         if not self.legacy_path.is_file():
@@ -273,10 +275,30 @@ class CalibrationRecordingReader:
             rows.append(row)
         return rows
 
-    def history_snapshot(self) -> CalibrationHistorySnapshot:
+    def history_snapshot(
+        self,
+        *,
+        legacy_document: Mapping[str, Any] | None = None,
+        cache_revision: Any = None,
+    ) -> CalibrationHistorySnapshot:
+        if (
+            cache_revision is not None
+            and self._history_cache is not None
+            and cache_revision == self._history_cache_revision
+        ):
+            return self._history_cache
         issues: list[CalibrationReaderIssue] = []
         try:
-            legacy = self._legacy_document()
+            if legacy_document is None:
+                legacy = self._legacy_document()
+            elif not isinstance(legacy_document, Mapping) or not isinstance(
+                legacy_document.get("runs", []), list
+            ):
+                raise CalibrationStoreCorruptionError(
+                    "in-memory calibration document has an invalid root"
+                )
+            else:
+                legacy = legacy_document
             legacy_rows = _legacy_step_rows(legacy)
         except CalibrationStoreCorruptionError as exc:
             legacy_rows = []
@@ -289,7 +311,10 @@ class CalibrationRecordingReader:
                 item["reader_state"] = CalibrationReaderState.LEGACY_ONLY.value
                 item["selection_fingerprint"] = _application_fingerprint(item)
                 rows.append(item)
-            return self._snapshot(rows, issues, index_events=0, legacy_rows=len(legacy_rows))
+            snapshot = self._snapshot(
+                rows, issues, index_events=0, legacy_rows=len(legacy_rows)
+            )
+            return self._remember_snapshot(snapshot, cache_revision)
 
         try:
             events = self._index_events()
@@ -386,7 +411,16 @@ class CalibrationRecordingReader:
             item["reader_state"] = state.value
             item["selection_fingerprint"] = _application_fingerprint(item)
             rows.append(item)
-        return self._snapshot(rows, issues, index_events=len(events), legacy_rows=len(legacy_rows))
+        snapshot = self._snapshot(
+            rows, issues, index_events=len(events), legacy_rows=len(legacy_rows)
+        )
+        return self._remember_snapshot(snapshot, cache_revision)
+
+    def _remember_snapshot(self, snapshot, cache_revision):
+        if cache_revision is not None:
+            self._history_cache_revision = cache_revision
+            self._history_cache = snapshot
+        return snapshot
 
     def _snapshot(self, rows, issues, *, index_events: int, legacy_rows: int):
         diagnostics = {

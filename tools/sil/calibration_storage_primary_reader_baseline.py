@@ -43,6 +43,7 @@ EXPECTED_COUNTS = {
     "integrity_failure_count": 0,
 }
 READER_METRICS = (
+    "index_read_latency_ms",
     "summary_materialization_latency_ms",
     "selected_validation_latency_ms",
     "recheck_context_latency_ms",

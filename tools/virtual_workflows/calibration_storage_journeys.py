@@ -902,11 +902,18 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
     metrics.fresh_reload_latency_ms.append(
         (time.perf_counter_ns() - reload_started) / 1_000_000.0
     )
+    reader_index_latency_ms = []
     reader_summary_latency_ms = []
     reader_selection_latency_ms = []
     reader_recheck_latency_ms = []
     reader_rows = 0
     reader_states = {}
+    if _primary_reader_enabled(runtime):
+        index_started = time.perf_counter_ns()
+        runner.manager.get_characterization_history_snapshot()
+        reader_index_latency_ms.append(
+            (time.perf_counter_ns() - index_started) / 1_000_000.0
+        )
     for head_index in range(1, 9):
         summary_started = time.perf_counter_ns()
         rows = runner.characterization_rows(
@@ -1078,6 +1085,7 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
         "recheck_context_probe": recheck_probe,
         "metrics": metrics.snapshot(),
         "reader_metrics": {
+            "index_read_latency_ms": distribution(reader_index_latency_ms),
             "summary_materialization_latency_ms": distribution(reader_summary_latency_ms),
             "selected_validation_latency_ms": distribution(reader_selection_latency_ms),
             "recheck_context_latency_ms": distribution(reader_recheck_latency_ms),
