@@ -11244,6 +11244,7 @@ class ExperimentDesignDialog(QDialog):
         left_panel = QWidget(self)
         left_panel.setMinimumWidth(390)
         left_panel.setMaximumWidth(430)
+        self.controls_panel = left_panel
         left = QVBoxLayout(left_panel)
         left.setContentsMargins(0, 0, 8, 0)
         self.root.addWidget(left_panel, stretch=0)
@@ -11281,24 +11282,29 @@ class ExperimentDesignDialog(QDialog):
             "QHeaderView::section { padding-left: 10px; padding-right: 8px; }"
         )
         self.reagent_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        right.addWidget(self.reagent_table)
+        right.addWidget(self.reagent_table, stretch=1)
 
         # ---------- Stock table (bottom-right) ----------
+        self.stock_information_region = QWidget(self)
+        self._stock_information_layout = QHBoxLayout(self.stock_information_region)
+        self._stock_information_layout.setContentsMargins(0, 0, 0, 0)
+
         # Add "Max / Rxn (nL)" column
-        self.stock_table_status_lbl = QLabel("")
+        self.stock_table_status_lbl = QLabel("", self.stock_information_region)
         self.stock_table_status_lbl.setWordWrap(True)
         self.stock_table_status_lbl.setStyleSheet("color:#666; font-style: italic;")
         self.stock_table_status_lbl.setVisible(False)
-        right.addWidget(self.stock_table_status_lbl)
 
-        self.stock_table = QTableWidget(0, 9, self)
+        self.stock_table = QTableWidget(0, 9, self.stock_information_region)
+        self.stock_table.setMinimumWidth(700)
         self.stock_table.setHorizontalHeaderLabels([
             "Factor/Group", "Option", "Stock Conc", "Δ per drop",
             "Units", "Ejection Vol (nL)", "Max / Rxn (nL)", "Total Drops", "Total Vol (µL)"
         ])
         self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.stock_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.stock_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        right.addWidget(self.stock_table)
+        self._stock_information_layout.addWidget(self.stock_table, stretch=1)
 
         # ---------- Organized controls (left) ----------
         controls_col = left
@@ -11522,21 +11528,61 @@ class ExperimentDesignDialog(QDialog):
         experiment_actions_layout.addWidget(self.finish_btn, 2, 0, 1, 2)
         controls_col.addWidget(experiment_actions_group)
 
-        # Summary & status
-        status_group = QGroupBox("Design Status")
-        status_layout = QVBoxLayout(status_group)
-        self.summary_lbl = QLabel("Summary: —")
-        status_layout.addWidget(self.summary_lbl)
+        # Fixed-size information panel beside the stock table. Variable-length
+        # messages scroll inside this panel and cannot resize the controls column.
+        self.design_information_panel = QGroupBox(
+            "Design Information", self.stock_information_region
+        )
+        self.design_information_panel.setFixedWidth(350)
+        self.design_information_panel.setSizePolicy(
+            QSizePolicy.Fixed, QSizePolicy.Expanding
+        )
+        design_information_layout = QVBoxLayout(self.design_information_panel)
 
-        self.status_lbl = QLabel("")
+        self.summary_lbl = QLabel("Summary: —", self.design_information_panel)
+        self.summary_lbl.setWordWrap(True)
+        design_information_layout.addWidget(self.summary_lbl)
+
+        messages_heading = QLabel("Messages and Tips", self.design_information_panel)
+        messages_heading.setStyleSheet("font-weight: 600;")
+        design_information_layout.addWidget(messages_heading)
+
+        self.design_messages_scroll = QScrollArea(self.design_information_panel)
+        self.design_messages_scroll.setWidgetResizable(True)
+        self.design_messages_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.design_messages_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.design_messages_scroll.setSizeAdjustPolicy(
+            QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored
+        )
+
+        design_messages_content = QWidget(self.design_messages_scroll)
+        design_messages_layout = QVBoxLayout(design_messages_content)
+        design_messages_layout.setContentsMargins(8, 8, 8, 8)
+        design_messages_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        design_messages_layout.setSizeConstraint(
+            QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize
+        )
+
+        self.stock_table_status_lbl.setParent(design_messages_content)
+        self.stock_table_status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.stock_table_status_lbl.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Preferred
+        )
+        design_messages_layout.addWidget(self.stock_table_status_lbl)
+
+        self.status_lbl = QLabel("", design_messages_content)
         self.status_lbl.setWordWrap(True)
         self.status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.status_lbl.setStyleSheet("color:#666; font-style: italic;")
-        self.status_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Maximum)
-        line_h = self.status_lbl.fontMetrics().height()
-        self.status_lbl.setMaximumHeight(int(line_h * 3.6))
-        status_layout.addWidget(self.status_lbl)
-        controls_col.addWidget(status_group)
+        self.status_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        design_messages_layout.addWidget(self.status_lbl)
+
+        self.design_messages_scroll.setWidget(design_messages_content)
+        design_information_layout.addWidget(self.design_messages_scroll, stretch=1)
+        self._stock_information_layout.addWidget(
+            self.design_information_panel, stretch=0
+        )
+        right.addWidget(self.stock_information_region, stretch=1)
 
         controls_col.addStretch(1)
 

@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pandas as pd
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QGroupBox, QLabel, QLineEdit, QMessageBox, QTableWidget
 
 import LocalConfig
@@ -682,8 +683,16 @@ def test_experiment_designer_uses_grouped_wide_layout_without_export_action(qapp
         "Design Options",
         "Design Tools",
         "Experiment Actions",
-        "Design Status",
+        "Design Information",
     }.issubset(group_titles)
+    assert "Design Status" not in group_titles
+    assert dialog.design_information_panel.minimumWidth() == 350
+    assert dialog.design_information_panel.maximumWidth() == 350
+    assert dialog.stock_table.minimumWidth() == 700
+    assert dialog.stock_table.parentWidget() is dialog.stock_information_region
+    assert dialog.design_information_panel.parentWidget() is dialog.stock_information_region
+    assert dialog.design_messages_scroll.isAncestorOf(dialog.status_lbl)
+    assert dialog.design_messages_scroll.isAncestorOf(dialog.stock_table_status_lbl)
     assert not hasattr(dialog, "export_reaction_preview_btn")
     assert dialog.reset_upload_btn.text() == "Clear Imported Design"
     assert dialog.reset_upload_btn.isHidden() is True
@@ -691,6 +700,81 @@ def test_experiment_designer_uses_grouped_wide_layout_without_export_action(qapp
     dialog._apply_uploaded_design_mode_to_ui(True)
 
     assert dialog.reset_upload_btn.isHidden() is False
+    dialog.close()
+
+
+@pytest.mark.parametrize("dialog_size", [(1760, 900), (1560, 840)])
+def test_long_design_message_scrolls_without_resizing_editor_sections(qapp, dialog_size):
+    dialog = _build_real_dialog()
+    dialog.resize(*dialog_size)
+    dialog.show()
+    qapp.processEvents()
+
+    stable_group_titles = {
+        "Experiment",
+        "Reaction Setup",
+        "Design Options",
+        "Design Tools",
+        "Experiment Actions",
+    }
+    stable_groups = {
+        group.title(): group
+        for group in dialog.findChildren(QGroupBox)
+        if group.title() in stable_group_titles
+    }
+    before_groups = {
+        title: group.geometry().getRect()
+        for title, group in stable_groups.items()
+    }
+    before_controls = dialog.controls_panel.geometry().getRect()
+    before_reagents = dialog.reagent_table.geometry().getRect()
+    before_stock_region = dialog.stock_information_region.geometry().getRect()
+
+    long_message = "\n\n".join(
+        f"Validation issue {index}: " + ("Detailed guidance remains available. " * 18)
+        for index in range(1, 13)
+    )
+    dialog._set_status(long_message)
+    qapp.processEvents()
+
+    assert dialog.status_lbl.text() == long_message
+    assert dialog.status_lbl.textInteractionFlags() & Qt.TextSelectableByMouse
+    assert dialog.design_messages_scroll.verticalScrollBar().maximum() > 0
+    assert dialog.controls_panel.geometry().getRect() == before_controls
+    assert dialog.reagent_table.geometry().getRect() == before_reagents
+    assert dialog.stock_information_region.geometry().getRect() == before_stock_region
+    assert {
+        title: group.geometry().getRect()
+        for title, group in stable_groups.items()
+    } == before_groups
+    assert dialog.design_information_panel.width() == 350
+    dialog.close()
+
+
+def test_stock_warning_and_general_status_coexist_in_information_panel(qapp):
+    dialog = _build_real_dialog()
+    dialog.show()
+    qapp.processEvents()
+    status_message = "The current design needs attention before it can be generated."
+    stock_warning = "Showing the last valid stock solutions; current inputs are invalid."
+
+    dialog._set_status(status_message)
+    dialog._set_stock_table_stale(True, stock_warning)
+    qapp.processEvents()
+
+    assert dialog.status_lbl.text() == status_message
+    assert dialog.stock_table_status_lbl.text() == stock_warning
+    assert dialog.stock_table_status_lbl.isVisible() is True
+    assert dialog.design_messages_scroll.isAncestorOf(dialog.status_lbl)
+    assert dialog.design_messages_scroll.isAncestorOf(dialog.stock_table_status_lbl)
+    assert dialog.stock_table.styleSheet() == "QTableWidget { border:1px solid #8a0303; }"
+
+    dialog._set_stock_table_stale(False, "")
+
+    assert dialog.status_lbl.text() == status_message
+    assert dialog.stock_table_status_lbl.text() == ""
+    assert dialog.stock_table_status_lbl.isVisible() is False
+    assert dialog.stock_table.styleSheet() == ""
     dialog.close()
 
 
