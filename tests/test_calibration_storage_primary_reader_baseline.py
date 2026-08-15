@@ -35,6 +35,7 @@ def _report(run_id, value, prior):
     report = _authoritative_report(run_id, value, _shadow_baseline())
     report["environment"] = copy.deepcopy(prior["compatibility"]["environment"])
     report["run"]["scenario_name"] = "calibration_storage_primary_reader"
+    report["workload"] = copy.deepcopy(prior["compatibility"]["workload"])
     report["workload"]["workload_id"] = "calibration_storage_primary_reader_8x25_v1"
     storage = report["metrics"]["persistence"]["values"]["calibration_storage"]
     distribution = {"count": 8, "minimum": value, "median": value, "p95": value, "maximum": value, "samples": [value] * 8}
@@ -75,6 +76,19 @@ def test_primary_reader_baseline_rejects_unbounded_history_io():
     with pytest.raises(CalibrationStorageBaselineError, match="unbounded"):
         create_primary_reader_baseline(
             _report_set(reports), reports, prior,
+            report_set_sha256="9" * 64,
+            milestone3_baseline_sha256="8" * 64,
+        )
+
+
+def test_primary_reader_baseline_rejects_milestone3_workload_drift():
+    prior = _prior()
+    reports = [_report(f"measured-{index}", 0.01, prior) for index in range(1, 4)]
+    report_set = _report_set(reports)
+    report_set["compatibility"]["workload"]["workload_hash"] = "0" * 64
+    with pytest.raises(CalibrationStorageBaselineError, match="workload drifted"):
+        create_primary_reader_baseline(
+            report_set, reports, prior,
             report_set_sha256="9" * 64,
             milestone3_baseline_sha256="8" * 64,
         )

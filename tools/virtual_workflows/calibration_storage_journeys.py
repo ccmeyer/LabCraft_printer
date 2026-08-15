@@ -929,10 +929,7 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
             reader_selection_latency_ms.append((time.perf_counter_ns() - selection_started) / 1_000_000.0)
             if not resolved.get("ok"):
                 raise RuntimeError(f"primary reader selection failed: {resolved}")
-            if str(rows[0].get("phase")) != "stream":
-                recheck_started = time.perf_counter_ns()
-                runner.manager.build_droplet_recheck_context(rows[0])
-                reader_recheck_latency_ms.append((time.perf_counter_ns() - recheck_started) / 1_000_000.0)
+    reader_diagnostics = runner.manager.get_calibration_reader_diagnostics()
     resources.stop()
 
     calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
@@ -955,6 +952,11 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
     )
     probe_path = Path(runtime.context.scenario_root) / "storage-probe" / "calibration.json"
     probe_path.parent.mkdir(parents=True, exist_ok=True)
+    if _primary_reader_enabled(runtime):
+        probe_path.write_text(
+            json.dumps({"schema_version": 1, "runs": []}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     probe_runner = StorageContractRunner(
         model=runtime.context.model,
         controller=runtime.context.controller,
@@ -969,7 +971,76 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
         "canonical" if _primary_reader_enabled(runtime) else "legacy"
     )
     probe = probe_runner.run_case(probe_case).as_dict()
+    recheck_probe = None
+    if _primary_reader_enabled(runtime):
+        _probe_fixture, probe_cases = load_fixture(
+            CATALOG_PATH.parent / "droplet_sequence_nominal_v1.json"
+        )
+        sweep_case = next(
+            case
+            for case in probe_cases
+            if case.phase_name == "pressure_sweep_characterization"
+        )
+        recheck_case = replace(
+            sweep_case,
+            fixture_id=PERFORMANCE_ID,
+            process_id="primary-reader-recheck-probe",
+            identity=cases[-1].identity,
+            updates=(
+                {
+                    "result": {
+                        "print_pulse_width_us": 1400,
+                        "manual_current": True,
+                        "pressures": [
+                            {
+                                "pressure": 1.25,
+                                "delay_us": 415,
+                                "mean_position_machine": [10.0, 20.0, 30.0],
+                                "mean_volume": 10.1,
+                                "cv_volume_percent": 3.0,
+                                "manual_current": True,
+                                "valid": True,
+                            }
+                        ],
+                    }
+                },
+            ),
+            captures=(),
+        )
+        recheck_evidence = probe_runner.run_case(recheck_case).as_dict()
+        probe_rows = probe_runner.characterization_rows(recheck_case.identity)
+        matching_rows = [
+            row
+            for row in probe_rows
+            if row.get("source_run_id") == recheck_evidence["run_id"]
+            and str(row.get("phase")) != "stream"
+        ]
+        if len(matching_rows) != 1:
+            raise RuntimeError("primary reader recheck probe did not resolve uniquely")
+        recheck_row = matching_rows[0]
+        for _sample_index in range(8):
+            recheck_started = time.perf_counter_ns()
+            context, missing = probe_runner.manager.build_droplet_recheck_context(
+                recheck_row
+            )
+            reader_recheck_latency_ms.append(
+                (time.perf_counter_ns() - recheck_started) / 1_000_000.0
+            )
+            if missing:
+                raise RuntimeError(
+                    f"primary reader recheck probe is incomplete: {missing}"
+                )
+            if context.get("source_result", {}).get("run_id") != recheck_evidence["run_id"]:
+                raise RuntimeError("primary reader recheck probe source identity drifted")
+        recheck_probe = {
+            "process": recheck_evidence,
+            "row": recheck_row,
+            "resolution_count": len(reader_recheck_latency_ms),
+        }
     probe_runner.restore()
+    if _primary_reader_enabled(runtime):
+        runner.manager.load_calibration_data(str(calibration_path))
+        runner.manager._calibration_reader_preference = "canonical"
 
     snapshot = {
         "workload_hash": semantic_sha256(
@@ -1004,6 +1075,7 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
         ),
         "workload_capture_count": recording_capture_count,
         "key_evidence_probe": probe,
+        "recheck_context_probe": recheck_probe,
         "metrics": metrics.snapshot(),
         "reader_metrics": {
             "summary_materialization_latency_ms": distribution(reader_summary_latency_ms),
@@ -1011,7 +1083,7 @@ def _run_performance_workload(runtime: JourneyRuntime) -> dict[str, Any]:
             "recheck_context_latency_ms": distribution(reader_recheck_latency_ms),
             "row_count": reader_rows,
             "reader_states": reader_states,
-            "diagnostics": runner.manager.get_calibration_reader_diagnostics(),
+            "diagnostics": reader_diagnostics,
         },
         "resources": resources.snapshot(),
         "artifact_growth": {

@@ -15,6 +15,10 @@ from tools.sil.calibration_storage_baseline import (
     candidate_upper_limit,
 )
 from tools.sil.calibration_storage_shadow_baseline import (
+    COMMON_RESOURCE_METRICS,
+    COMMON_TIMING_METRICS,
+    NEW_TIMING_METRICS,
+    _path,
     _resolve_raw_report,
     _sha256,
     _storage,
@@ -42,6 +46,23 @@ READER_METRICS = (
     "summary_materialization_latency_ms",
     "selected_validation_latency_ms",
     "recheck_context_latency_ms",
+)
+MATCHING_WORKLOAD_FIELDS = (
+    "capture_mode",
+    "completion_count",
+    "expected_update_count",
+    "fixture_path",
+    "fixture_schema_version",
+    "fixture_sha256",
+    "head_count",
+    "key_evidence_probe_capture_count",
+    "large_process_ordinal_per_head",
+    "large_update_count_per_process",
+    "process_runs_per_head",
+    "speed_multiplier",
+    "structured_process_runs",
+    "timeout_seconds",
+    "workload_hash",
 )
 
 
@@ -95,6 +116,47 @@ def create_primary_reader_baseline(
     for key in ("storage_class", "filesystem_type"):
         if (target.get("filesystem") or {}).get(key) != (prior_target.get("filesystem") or {}).get(key):
             raise CalibrationStorageBaselineError(f"Milestone 3 storage environment drifted for {key}")
+    workload = dict((report_set.get("compatibility") or {}).get("workload") or {})
+    prior_workload = dict(
+        (milestone3_baseline.get("compatibility") or {}).get("workload") or {}
+    )
+    for key in MATCHING_WORKLOAD_FIELDS:
+        if workload.get(key) != prior_workload.get(key):
+            raise CalibrationStorageBaselineError(
+                f"Milestone 3 workload drifted for {key}"
+            )
+
+    comparison: dict[str, Any] = {}
+    regression = False
+    for name in (*COMMON_TIMING_METRICS, *NEW_TIMING_METRICS):
+        observed = [
+            float(_storage(report)["metrics"][name]["p95"])
+            for report in measured_reports
+        ]
+        upper = float(
+            milestone3_baseline["metrics"][name]["candidate_limit"]["upper_limit"]
+        )
+        decision = "pass" if max(observed) <= upper else "regression"
+        regression = regression or decision != "pass"
+        comparison[name] = {
+            "observed_p95": observed,
+            "milestone3_upper_limit": upper,
+            "decision": decision,
+        }
+    for name, path in COMMON_RESOURCE_METRICS.items():
+        observed = [float(_path(report, path)) for report in measured_reports]
+        upper = float(
+            milestone3_baseline["shadow_comparison"]["metrics"][name][
+                "shadow_upper_limit"
+            ]
+        )
+        decision = "pass" if max(observed) <= upper else "regression"
+        regression = regression or decision != "pass"
+        comparison[name] = {
+            "observed": observed,
+            "milestone3_upper_limit": upper,
+            "decision": decision,
+        }
 
     candidates = {}
     for name in READER_METRICS:
@@ -131,7 +193,8 @@ def create_primary_reader_baseline(
         "milestone3_comparison": {
             "baseline_id": milestone3_baseline.get("baseline_id"),
             "baseline_sha256": milestone3_baseline_sha256,
-            "decision": "compatible",
+            "metrics": comparison,
+            "decision": "regression" if regression else "pass",
         },
         "artifact_growth": {
             "per_run": [
@@ -149,7 +212,10 @@ def create_primary_reader_baseline(
                 for reference in refs
             ],
         },
-        "classification": {"status": "pass", "threshold_maturity": "candidate"},
+        "classification": {
+            "status": "fail" if regression else "pass",
+            "threshold_maturity": "candidate",
+        },
         "limitations": [
             "Image analysis, camera acquisition, firmware, and physical hardware behavior are outside this baseline."
         ],
