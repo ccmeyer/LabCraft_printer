@@ -20,6 +20,7 @@ from tools.virtual_workflows.experiment_design_cases import (
     REFERENCE_FIXTURE_SHA256,
     get_experiment_design_case,
     planned_catalog_sha256,
+    reference_fixture_sha256,
 )
 from tools.virtual_workflows.matrices import (
     CALIBRATION_REQUANTIZATION_MATRIX_ID,
@@ -486,7 +487,7 @@ def validate_source_compatibility(case: JoinedInteractionCase) -> dict[str, Any]
         "planned_catalog_sha256": planned_catalog_sha256(),
         "reaction_multiset_sha256": source_case.expected.reaction_multiset_sha256(),
         "assignment_sha256": source_case.expected.assignment_sha256(),
-        "editor_fixture_sha256": hashlib.sha256(REFERENCE_FIXTURE_PATH.read_bytes()).hexdigest(),
+        "editor_fixture_sha256": reference_fixture_sha256(REFERENCE_FIXTURE_PATH),
         "requantization_catalog_sha256": catalog_sha256(CALIBRATION_REQUANTIZATION_MATRIX_ID),
         "mixed_mode_catalog_sha256": catalog_sha256(MIXED_MODE_MATRIX_ID),
     }

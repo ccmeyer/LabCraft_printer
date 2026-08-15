@@ -54,6 +54,19 @@ def _sha256_json(value: Mapping[str, Any] | Sequence[Any]) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def reference_fixture_sha256(path: str | Path = REFERENCE_FIXTURE_PATH) -> str:
+    """Return the frozen fixture hash without platform newline drift.
+
+    The original reviewed identity was recorded from a Windows checkout. Git
+    materializes the same tracked JSON with LF endings on the Pi, so preserve
+    that identity by canonicalizing text to CRLF before hashing.
+    """
+
+    text = Path(path).read_text(encoding="utf-8")
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(normalized.replace("\n", "\r\n").encode("utf-8")).hexdigest()
+
+
 def _identity(value: Any, label: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -1242,10 +1255,10 @@ def build_experiment_design_fixture(
     """Derive one future matrix fixture from the unchanged tracked reference."""
 
     source = REFERENCE_FIXTURE_PATH.resolve()
-    source_bytes = source.read_bytes()
-    if hashlib.sha256(source_bytes).hexdigest() != REFERENCE_FIXTURE_SHA256:
+    source_text = source.read_text(encoding="utf-8")
+    if reference_fixture_sha256(source) != REFERENCE_FIXTURE_SHA256:
         raise ExperimentDesignCaseError("editor reference fixture hash drifted")
-    payload = json.loads(source_bytes.decode("utf-8"))
+    payload = json.loads(source_text)
     if not isinstance(payload, dict):
         raise ExperimentDesignCaseError("editor reference fixture is not an object")
     fixture = copy.deepcopy(payload)
@@ -1302,5 +1315,6 @@ __all__ = [
     "get_experiment_design_case",
     "normalized_planned_catalog",
     "planned_catalog_sha256",
+    "reference_fixture_sha256",
     "validate_experiment_design_catalog",
 ]

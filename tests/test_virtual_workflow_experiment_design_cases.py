@@ -22,6 +22,7 @@ from tools.virtual_workflows.experiment_design_cases import (
     executable_experiment_design_cases,
     get_experiment_design_case,
     planned_catalog_sha256,
+    reference_fixture_sha256,
     validate_experiment_design_catalog,
 )
 from tools.virtual_workflows.matrices import MatrixDefinition, MatrixRegistry
@@ -165,7 +166,7 @@ def test_formulation_and_rejection_oracles_are_literal_and_terminal_specific():
 
 def test_reference_fixture_is_sha_verified_and_transformed_only_in_memory():
     source_before = REFERENCE_FIXTURE_PATH.read_bytes()
-    assert hashlib.sha256(source_before).hexdigest() == REFERENCE_FIXTURE_SHA256
+    assert reference_fixture_sha256() == REFERENCE_FIXTURE_SHA256
 
     case = get_experiment_design_case("single_reagent_control")
     fixture, source = build_experiment_design_fixture(case)
@@ -182,6 +183,15 @@ def test_reference_fixture_is_sha_verified_and_transformed_only_in_memory():
     assert "reagent" not in fixture
     assert len(fixture["reagents"]) == 1
     assert REFERENCE_FIXTURE_PATH.read_bytes() == source_before
+
+
+def test_reference_fixture_hash_is_stable_across_platform_newlines(tmp_path):
+    windows_path = tmp_path / "windows.json"
+    linux_path = tmp_path / "linux.json"
+    windows_path.write_bytes(b'{\r\n  "fixture_id": "example"\r\n}\r\n')
+    linux_path.write_bytes(b'{\n  "fixture_id": "example"\n}\n')
+
+    assert reference_fixture_sha256(windows_path) == reference_fixture_sha256(linux_path)
 
 
 def test_executable_prefix_and_editor_projection_are_additive_and_exact():
