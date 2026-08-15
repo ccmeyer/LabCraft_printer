@@ -2376,6 +2376,16 @@ candidate limits. It freezes separate candidate limits for canonical append,
 result-finalize, and index latency. No camera, image-analysis, firmware,
 protocol, motion, dispense, balance, or physical calibration claim is made.
 
+The tracked Milestone 2 candidate is
+`tests/performance/baselines/calibration_storage_shadow_pi5_v1.json`. It was
+qualified from clean commit `0f93e037c26c8fa8d165e433a129f918b671643e`
+on the same Raspberry Pi 5 NVMe/ext4, Python 3.11.2, and PySide/Qt 6.7.1
+identity as the Milestone 1 baseline. All common timing/RSS comparisons pass.
+The candidate upper limits are 17.514 ms for canonical update-append p95,
+1.276 ms for result-finalize p95, and 4.416 ms for index-append p95. See
+`docs/calibration_recording_store_milestone_2_completion.md` for the report
+hashes, exact measurements, limitations, and rollback.
+
 ## Raspberry Pi Software-In-The-Loop
 
 The target-Pi SIL lane runs the same real-UI workflow on Raspberry Pi CPU and

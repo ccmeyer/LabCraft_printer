@@ -1,6 +1,6 @@
 # Calibration Recording Store Migration: Milestone 0 Contract and Plan
 
-Status: Milestones 0 and 1 complete; Milestone 2 implementation candidate awaiting qualified Pi comparison
+Status: Milestones 0, 1, and 2 complete; qualified shadow-store Pi candidate baseline frozen
 
 Prepared: 2026-08-14
 
@@ -764,12 +764,16 @@ Rollback: remove SIL-only additions; production behavior remains unchanged.
 
 ### Milestone 2: new run store in shadow mode
 
-Implementation status on 2026-08-14: the canonical run-store module, manager
+Completion status on 2026-08-15: the canonical run-store module, manager
 shadow integration, fixture-catalog dual-write journey, frozen 8x25 shadow
 workload, failure injection, index rebuild/idempotency coverage, Pi wrapper,
-and shadow-baseline tooling are implemented locally. Existing readers and
-legacy writes remain unchanged. Completion remains contingent on the full
-Python suite and the clean qualified Raspberry Pi comparison/baseline.
+and shadow-baseline tooling are implemented. Existing readers and legacy
+writes remain unchanged. Focused, lifecycle, stress, and full-suite host gates
+pass. A clean Raspberry Pi 5 NVMe/ext4 qualification passes the Milestone 1
+comparison and the tracked `calibration_storage_shadow_pi5_v1.json` candidate
+baseline is frozen. See
+`docs/calibration_recording_store_milestone_2_completion.md` for exact source,
+report, baseline, restoration, and rollback evidence.
 
 Scope:
 

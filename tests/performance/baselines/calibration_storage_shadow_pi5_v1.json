@@ -1,0 +1,478 @@
+{
+  "artifact_growth": {
+    "comparison_policy": "measured_additive_not_legacy_gated",
+    "per_run": [
+      {
+        "calibration_json_bytes": 7840095,
+        "inventory": {
+          "by_extension": {
+            ".csv": {
+              "bytes": 145,
+              "count": 2
+            },
+            ".jpg": {
+              "bytes": 670,
+              "count": 2
+            },
+            ".json": {
+              "bytes": 19740745,
+              "count": 828
+            },
+            ".jsonl": {
+              "bytes": 10279864,
+              "count": 810
+            },
+            ".lock": {
+              "bytes": 92,
+              "count": 1
+            },
+            ".log": {
+              "bytes": 146,
+              "count": 1
+            },
+            "no_extension": {
+              "bytes": 21,
+              "count": 1
+            }
+          },
+          "root": "/tmp/LabCraft/SIL/composed-sessions/20260815T071600479910Z-cce40a1a-d3f"
+        },
+        "run_id": "cce40a1a-d3f5-4273-910d-bd9fffe8d06c",
+        "scenario_total_bytes": 30021683
+      },
+      {
+        "calibration_json_bytes": 7840095,
+        "inventory": {
+          "by_extension": {
+            ".csv": {
+              "bytes": 145,
+              "count": 2
+            },
+            ".jpg": {
+              "bytes": 670,
+              "count": 2
+            },
+            ".json": {
+              "bytes": 19740745,
+              "count": 828
+            },
+            ".jsonl": {
+              "bytes": 10279864,
+              "count": 810
+            },
+            ".lock": {
+              "bytes": 92,
+              "count": 1
+            },
+            ".log": {
+              "bytes": 146,
+              "count": 1
+            },
+            "no_extension": {
+              "bytes": 21,
+              "count": 1
+            }
+          },
+          "root": "/tmp/LabCraft/SIL/composed-sessions/20260815T071952546848Z-054e517b-6ae"
+        },
+        "run_id": "054e517b-6ae6-46cd-ad2d-eda79c1f3950",
+        "scenario_total_bytes": 30021683
+      },
+      {
+        "calibration_json_bytes": 7840095,
+        "inventory": {
+          "by_extension": {
+            ".csv": {
+              "bytes": 145,
+              "count": 2
+            },
+            ".jpg": {
+              "bytes": 670,
+              "count": 2
+            },
+            ".json": {
+              "bytes": 19740745,
+              "count": 828
+            },
+            ".jsonl": {
+              "bytes": 10279864,
+              "count": 810
+            },
+            ".lock": {
+              "bytes": 92,
+              "count": 1
+            },
+            ".log": {
+              "bytes": 146,
+              "count": 1
+            },
+            "no_extension": {
+              "bytes": 21,
+              "count": 1
+            }
+          },
+          "root": "/tmp/LabCraft/SIL/composed-sessions/20260815T072346071902Z-88396cd3-aa6"
+        },
+        "run_id": "88396cd3-aa6b-433d-8563-31072242bbb3",
+        "scenario_total_bytes": 30021683
+      }
+    ]
+  },
+  "baseline_id": "calibration_storage_shadow_pi5_v1",
+  "classification": {
+    "status": "pass",
+    "threshold_maturity": "candidate"
+  },
+  "compatibility": {
+    "environment": {
+      "architecture": "aarch64",
+      "cpu_identifier": "unknown",
+      "operating_system": "Linux",
+      "os_release": "6.12.20+rpt-rpi-2712",
+      "python_executable": "/usr/bin/python3.11",
+      "python_implementation": "CPython",
+      "python_version": "3.11.2",
+      "qt": {
+        "binding": "real",
+        "platform": "offscreen",
+        "pyside_version": "6.7.1",
+        "qt_version": "6.7.1"
+      },
+      "target_pi": {
+        "filesystem": {
+          "filesystem_type": "ext4",
+          "mount_source": "/dev/nvme0n1p2[/home/labcraft/LabCraft_printer/verification_reports/virtual_workflows/pi-sil]",
+          "storage_class": "nvme"
+        },
+        "lane": "raspberry_pi_sil",
+        "pi_model": "Raspberry Pi 5 Model B Rev 1.0"
+      }
+    },
+    "host_label": "pi5-calibration-storage-shadow-v1",
+    "report_schema_name": "labcraft.virtual_workflow_report",
+    "report_schema_version": 1,
+    "run_mode": "offscreen_pi_sil",
+    "safety": {
+      "hardware_access_allowed": false,
+      "hardware_interfaces": {
+        "GPIO": false,
+        "MCU": false,
+        "balance": false,
+        "camera": false,
+        "firmware_update": false,
+        "serial": false
+      },
+      "pi_sil": {
+        "network_unshared": true,
+        "private_dev": true,
+        "root_read_only": true,
+        "sandbox_method": "bubblewrap_private_dev_v1"
+      },
+      "simulated_port": "SIMULATED",
+      "simulation": true
+    },
+    "scenario_name": "calibration_storage_shadow",
+    "scenario_version": "1",
+    "timing_policy": "simulated_command_durations_x1000",
+    "workload": {
+      "capture_mode": "structured_only_proxy",
+      "completion_count": 200,
+      "expected_update_count": 232,
+      "fixture_path": "tools/virtual_workflows/fixtures/calibration_storage_contract_legacy_baseline_8x25_v1.json",
+      "fixture_schema_version": 1,
+      "fixture_sha256": "0a2b57a0ea07bbe437ee3037c9ca2a9331a38dbdcae5fbb908e8390d8f592621",
+      "head_count": 8,
+      "key_evidence_probe_capture_count": 2,
+      "large_process_ordinal_per_head": 25,
+      "large_update_count_per_process": 5,
+      "process_runs_per_head": 25,
+      "speed_multiplier": 1000.0,
+      "structured_process_runs": 200,
+      "timeout_seconds": 1800.0,
+      "workload_hash": "f99bdfc4150c98d0d2a37fd43d3cf4353ca1b20240152cfb264c89c9800ff341",
+      "workload_id": "calibration_storage_shadow_8x25_v1"
+    }
+  },
+  "created_at_utc": "2026-08-15T07:28:12.407452Z",
+  "exact_counts": {
+    "canonical_index_event_count": 200,
+    "canonical_result_count": 200,
+    "canonical_update_count": 232,
+    "key_evidence_probe_capture_count": 2,
+    "legacy_run_envelope_count": 201,
+    "process_run_count": 200,
+    "recording_count": 200,
+    "update_count": 232,
+    "workload_capture_count": 0
+  },
+  "host_label": "pi5-calibration-storage-shadow-v1",
+  "legacy_comparison": {
+    "baseline_id": "calibration_storage_legacy_pi5_v1",
+    "baseline_sha256": "236b15ee5addcaec26621072fb6cbd8672337a098bf77f93e948a5805cae86b5",
+    "decision": "pass",
+    "metrics": {
+      "calibration_rewrite_latency_ms": {
+        "decision": "pass",
+        "legacy_upper_limit": 496.4958423375,
+        "observed_p95": [
+          398.98689949999994,
+          399.85071195,
+          400.22146384999996
+        ]
+      },
+      "first_quartile_update_latency_ms": {
+        "decision": "pass",
+        "legacy_upper_limit": 113.74915619999996,
+        "observed_p95": [
+          110.81551044999999,
+          110.4494359,
+          110.99170134999999
+        ]
+      },
+      "fresh_reload_latency_ms": {
+        "decision": "pass",
+        "legacy_upper_limit": 431.2426050000002,
+        "observed_p95": [
+          250.904568,
+          280.322839,
+          75.034425
+        ]
+      },
+      "history_load_latency_ms": {
+        "decision": "pass",
+        "legacy_upper_limit": 4.473583,
+        "observed_p95": [
+          2.53926615,
+          2.5040838,
+          2.57150105
+        ]
+      },
+      "last_quartile_update_latency_ms": {
+        "decision": "pass",
+        "legacy_upper_limit": 538.507603875,
+        "observed_p95": [
+          461.65121769999996,
+          449.4413661,
+          462.59327294999997
+        ]
+      },
+      "peak_rss_bytes": {
+        "decision": "pass",
+        "legacy_upper_limit": 862846976.0,
+        "observed": [
+          476790784.0,
+          525664256.0,
+          573898752.0
+        ]
+      },
+      "process_finalize_latency_ms": {
+        "decision": "pass",
+        "legacy_upper_limit": 121.24098129999999,
+        "observed_p95": [
+          100.98705829999999,
+          100.66313129999999,
+          101.5390091
+        ]
+      },
+      "recorder_append_latency_ms": {
+        "decision": "pass",
+        "legacy_upper_limit": 3.8313416,
+        "observed_p95": [
+          2.2712528,
+          2.2715923,
+          2.2990135499999997
+        ]
+      },
+      "rss_growth_bytes": {
+        "decision": "pass",
+        "legacy_upper_limit": 22380544.0,
+        "observed": [
+          16302080.0,
+          16875520.0,
+          18268160.0
+        ]
+      },
+      "update_latency_ms": {
+        "decision": "pass",
+        "legacy_upper_limit": 498.602420175,
+        "observed_p95": [
+          400.106677,
+          400.91887035,
+          401.12701035
+        ]
+      }
+    }
+  },
+  "limitations": [
+    "Canonical artifacts remain non-authoritative in Milestone 2.",
+    "Artifact growth is additive in dual-write mode and is measured but not gated against the legacy total-byte limit."
+  ],
+  "new_metrics": {
+    "canonical_update_append_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 14.0717205,
+        "measurement_floor": 1.0,
+        "relative_margin": 3.441868575,
+        "robust_margin": 0.9653055000000137,
+        "selected_margin": 3.441868575,
+        "upper_limit": 17.513589075
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 232,
+            "maximum": 172.776622,
+            "median": 0.369928,
+            "minimum": 0.342391,
+            "p95": 13.606590049999998
+          },
+          "run_id": "cce40a1a-d3f5-4273-910d-bd9fffe8d06c"
+        },
+        {
+          "distribution": {
+            "count": 232,
+            "maximum": 15.360485,
+            "median": 0.3716585,
+            "minimum": 0.340242,
+            "p95": 13.7674743
+          },
+          "run_id": "054e517b-6ae6-46cd-ad2d-eda79c1f3950"
+        },
+        {
+          "distribution": {
+            "count": 232,
+            "maximum": 242.39505,
+            "median": 0.3728985,
+            "minimum": 0.335611,
+            "p95": 14.0717205
+          },
+          "run_id": "88396cd3-aa6b-433d-8563-31072242bbb3"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "index_latency": {
+      "candidate_limit": {
+        "maximum_observed": 3.4161713499999995,
+        "measurement_floor": 1.0,
+        "relative_margin": 0.8528027874999998,
+        "robust_margin": 0.029761200000001153,
+        "selected_margin": 1.0,
+        "upper_limit": 4.416171349999999
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 3.596218,
+            "median": 1.7372605,
+            "minimum": 0.128371,
+            "p95": 3.3780750499999996
+          },
+          "run_id": "cce40a1a-d3f5-4273-910d-bd9fffe8d06c"
+        },
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 3.607378,
+            "median": 1.735321,
+            "minimum": 0.128278,
+            "p95": 3.4161713499999995
+          },
+          "run_id": "054e517b-6ae6-46cd-ad2d-eda79c1f3950"
+        },
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 3.569596,
+            "median": 1.746781,
+            "minimum": 0.128927,
+            "p95": 3.4112111499999993
+          },
+          "run_id": "88396cd3-aa6b-433d-8563-31072242bbb3"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "result_finalize_latency": {
+      "candidate_limit": {
+        "maximum_observed": 0.27620639999999996,
+        "measurement_floor": 1.0,
+        "relative_margin": 0.06891124999999998,
+        "robust_margin": 0.003368400000000271,
+        "selected_margin": 1.0,
+        "upper_limit": 1.2762064
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 0.294187,
+            "median": 0.2602235,
+            "minimum": 0.251502,
+            "p95": 0.2756449999999999
+          },
+          "run_id": "cce40a1a-d3f5-4273-910d-bd9fffe8d06c"
+        },
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 0.285057,
+            "median": 0.260371,
+            "minimum": 0.250982,
+            "p95": 0.2721356
+          },
+          "run_id": "054e517b-6ae6-46cd-ad2d-eda79c1f3950"
+        },
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 0.301723,
+            "median": 0.260936,
+            "minimum": 0.251352,
+            "p95": 0.27620639999999996
+          },
+          "run_id": "88396cd3-aa6b-433d-8563-31072242bbb3"
+        }
+      ],
+      "unit": "milliseconds"
+    }
+  },
+  "runs": {
+    "measured_count": 3,
+    "raw_reports": [
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_shadow_8x25_v1/20260815T071213555691Z_composed/report.json",
+        "role": "warmup",
+        "run_id": "dbf3609f-6644-4cd6-afc0-1b3102e46d4c",
+        "sha256": "679b14bd509f140366e2b28b23c65b803d60cbf18a24a0dc78299c96e2abaafd"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_shadow_8x25_v1/20260815T071600479691Z_composed/report.json",
+        "role": "measured",
+        "run_id": "cce40a1a-d3f5-4273-910d-bd9fffe8d06c",
+        "sha256": "457c8e6939531132c7513bb516468796c380c2accd6e26f49138e91c16b82786"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_shadow_8x25_v1/20260815T071952546659Z_composed/report.json",
+        "role": "measured",
+        "run_id": "054e517b-6ae6-46cd-ad2d-eda79c1f3950",
+        "sha256": "c4a032ea76e40d83eab850034431cb1d41f466c1d36ec00a6728cb4f3a192f34"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_shadow_8x25_v1/20260815T072346071716Z_composed/report.json",
+        "role": "measured",
+        "run_id": "88396cd3-aa6b-433d-8563-31072242bbb3",
+        "sha256": "cd142a570b9659cf75943a58c9f1a1e43353dd78456774a04a4dc76f8b7312e5"
+      }
+    ],
+    "report_set_sha256": "bcb074155830a0b43e08251ef6d1c466d668974392c8ab7ccd0ce7edd048e005",
+    "warmup_count": 1
+  },
+  "schema_name": "labcraft.calibration_storage_shadow_pi_baseline",
+  "schema_version": 1,
+  "source": {
+    "dirty_worktree": false,
+    "git_commit": "0f93e037c26c8fa8d165e433a129f918b671643e"
+  }
+}

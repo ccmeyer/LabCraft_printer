@@ -21,6 +21,12 @@ LEGACY_BASELINE_PATH = (
     / "baselines"
     / "calibration_storage_legacy_pi5_v1.json"
 )
+TRACKED_SHADOW_BASELINE_PATH = (
+    Path(__file__).resolve().parent
+    / "performance"
+    / "baselines"
+    / "calibration_storage_shadow_pi5_v1.json"
+)
 
 
 def _legacy_baseline() -> dict:
@@ -72,6 +78,29 @@ def _shadow_report_set(reports: list[dict]) -> dict:
     )
     report_set["compatibility"]["workload"] = copy.deepcopy(reports[0]["workload"])
     return report_set
+
+
+def test_tracked_shadow_baseline_has_qualified_identity_counts_and_decision():
+    baseline = json.loads(TRACKED_SHADOW_BASELINE_PATH.read_text(encoding="utf-8"))
+
+    assert baseline["baseline_id"] == BASELINE_ID
+    assert baseline["source"] == {
+        "dirty_worktree": False,
+        "git_commit": "0f93e037c26c8fa8d165e433a129f918b671643e",
+    }
+    assert baseline["classification"] == {
+        "status": "pass",
+        "threshold_maturity": "candidate",
+    }
+    assert baseline["legacy_comparison"]["decision"] == "pass"
+    assert baseline["exact_counts"] == {
+        **EXPECTED_COUNTS,
+        "key_evidence_probe_capture_count": 2,
+    }
+    target = baseline["compatibility"]["environment"]["target_pi"]
+    assert target["pi_model"] == "Raspberry Pi 5 Model B Rev 1.0"
+    assert target["filesystem"]["storage_class"] == "nvme"
+    assert target["filesystem"]["filesystem_type"] == "ext4"
 
 
 def test_shadow_baseline_preserves_counts_and_freezes_new_timing_limits():
