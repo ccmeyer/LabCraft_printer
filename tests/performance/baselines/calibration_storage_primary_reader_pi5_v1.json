@@ -1,0 +1,553 @@
+{
+  "artifact_growth": {
+    "per_run": [
+      {
+        "calibration_json_bytes": 7970868,
+        "inventory": {
+          "by_extension": {
+            ".csv": {
+              "bytes": 145,
+              "count": 2
+            },
+            ".jpg": {
+              "bytes": 670,
+              "count": 2
+            },
+            ".json": {
+              "bytes": 12126029,
+              "count": 832
+            },
+            ".jsonl": {
+              "bytes": 10462994,
+              "count": 814
+            },
+            ".lock": {
+              "bytes": 92,
+              "count": 1
+            },
+            ".log": {
+              "bytes": 146,
+              "count": 1
+            },
+            "no_extension": {
+              "bytes": 21,
+              "count": 1
+            }
+          },
+          "root": "/tmp/LabCraft/SIL/composed-sessions/20260815T185605758480Z-372b3109-a56"
+        },
+        "run_id": "372b3109-a563-4a06-acd0-e66fd79c262c",
+        "scenario_total_bytes": 22590097
+      },
+      {
+        "calibration_json_bytes": 7970868,
+        "inventory": {
+          "by_extension": {
+            ".csv": {
+              "bytes": 145,
+              "count": 2
+            },
+            ".jpg": {
+              "bytes": 670,
+              "count": 2
+            },
+            ".json": {
+              "bytes": 12126029,
+              "count": 832
+            },
+            ".jsonl": {
+              "bytes": 10462994,
+              "count": 814
+            },
+            ".lock": {
+              "bytes": 92,
+              "count": 1
+            },
+            ".log": {
+              "bytes": 146,
+              "count": 1
+            },
+            "no_extension": {
+              "bytes": 21,
+              "count": 1
+            }
+          },
+          "root": "/tmp/LabCraft/SIL/composed-sessions/20260815T190004324361Z-336a9ed9-fbf"
+        },
+        "run_id": "336a9ed9-fbf9-493a-8507-482df96dafbd",
+        "scenario_total_bytes": 22590097
+      },
+      {
+        "calibration_json_bytes": 7970868,
+        "inventory": {
+          "by_extension": {
+            ".csv": {
+              "bytes": 145,
+              "count": 2
+            },
+            ".jpg": {
+              "bytes": 670,
+              "count": 2
+            },
+            ".json": {
+              "bytes": 12126029,
+              "count": 832
+            },
+            ".jsonl": {
+              "bytes": 10462994,
+              "count": 814
+            },
+            ".lock": {
+              "bytes": 92,
+              "count": 1
+            },
+            ".log": {
+              "bytes": 146,
+              "count": 1
+            },
+            "no_extension": {
+              "bytes": 21,
+              "count": 1
+            }
+          },
+          "root": "/tmp/LabCraft/SIL/composed-sessions/20260815T190403937281Z-47590a3a-324"
+        },
+        "run_id": "47590a3a-3240-47d9-8c9c-019d5fa5158f",
+        "scenario_total_bytes": 22590097
+      }
+    ]
+  },
+  "baseline_id": "calibration_storage_primary_reader_pi5_v1",
+  "classification": {
+    "status": "pass",
+    "threshold_maturity": "candidate"
+  },
+  "compatibility": {
+    "environment": {
+      "architecture": "aarch64",
+      "cpu_identifier": "unknown",
+      "operating_system": "Linux",
+      "os_release": "6.12.20+rpt-rpi-2712",
+      "python_executable": "/usr/bin/python3.11",
+      "python_implementation": "CPython",
+      "python_version": "3.11.2",
+      "qt": {
+        "binding": "real",
+        "platform": "offscreen",
+        "pyside_version": "6.7.1",
+        "qt_version": "6.7.1"
+      },
+      "target_pi": {
+        "filesystem": {
+          "filesystem_type": "ext4",
+          "mount_source": "/dev/nvme0n1p2[/home/labcraft/LabCraft_printer/verification_reports/virtual_workflows/pi-sil]",
+          "storage_class": "nvme"
+        },
+        "lane": "raspberry_pi_sil",
+        "pi_model": "Raspberry Pi 5 Model B Rev 1.0"
+      }
+    },
+    "host_label": "pi5-calibration-storage-primary-reader-v1",
+    "report_schema_name": "labcraft.virtual_workflow_report",
+    "report_schema_version": 1,
+    "run_mode": "offscreen_pi_sil",
+    "safety": {
+      "hardware_access_allowed": false,
+      "hardware_interfaces": {
+        "GPIO": false,
+        "MCU": false,
+        "balance": false,
+        "camera": false,
+        "firmware_update": false,
+        "serial": false
+      },
+      "pi_sil": {
+        "network_unshared": true,
+        "private_dev": true,
+        "root_read_only": true,
+        "sandbox_method": "bubblewrap_private_dev_v1"
+      },
+      "simulated_port": "SIMULATED",
+      "simulation": true
+    },
+    "scenario_name": "calibration_storage_primary_reader",
+    "scenario_version": "1",
+    "timing_policy": "simulated_command_durations_x1000",
+    "workload": {
+      "capture_mode": "structured_only_proxy",
+      "completion_count": 200,
+      "expected_update_count": 232,
+      "fixture_path": "tools/virtual_workflows/fixtures/calibration_storage_contract_legacy_baseline_8x25_v1.json",
+      "fixture_schema_version": 1,
+      "fixture_sha256": "0a2b57a0ea07bbe437ee3037c9ca2a9331a38dbdcae5fbb908e8390d8f592621",
+      "head_count": 8,
+      "key_evidence_probe_capture_count": 2,
+      "large_process_ordinal_per_head": 25,
+      "large_update_count_per_process": 5,
+      "process_runs_per_head": 25,
+      "speed_multiplier": 1000.0,
+      "structured_process_runs": 200,
+      "timeout_seconds": 1800.0,
+      "workload_hash": "f99bdfc4150c98d0d2a37fd43d3cf4353ca1b20240152cfb264c89c9800ff341",
+      "workload_id": "calibration_storage_primary_reader_8x25_v1"
+    }
+  },
+  "created_at_utc": "2026-08-15T19:08:18.216553Z",
+  "exact_counts": {
+    "canonical_index_event_count": 200,
+    "canonical_result_count": 200,
+    "canonical_update_count": 232,
+    "integrity_failure_count": 0,
+    "key_evidence_probe_capture_count": 2,
+    "legacy_run_envelope_count": 201,
+    "process_run_count": 200,
+    "recording_count": 200,
+    "update_count": 232,
+    "workload_capture_count": 0
+  },
+  "host_label": "pi5-calibration-storage-primary-reader-v1",
+  "limitations": [
+    "Image analysis, camera acquisition, firmware, and physical hardware behavior are outside this baseline."
+  ],
+  "milestone3_comparison": {
+    "baseline_id": "calibration_storage_authoritative_pi5_v1",
+    "baseline_sha256": "379dc373e2684f3743c0fee21b7cc28cb046f777e5f0cc30b2b06187d2efaf40",
+    "decision": "pass",
+    "metrics": {
+      "calibration_rewrite_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 505.55588926250005,
+        "observed_p95": [
+          402.75843480000003,
+          403.1340306,
+          403.07040525
+        ]
+      },
+      "canonical_update_append_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 17.694213112499998,
+        "observed_p95": [
+          13.72596575,
+          13.737481899999999,
+          13.94139105
+        ]
+      },
+      "first_quartile_update_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 141.00450201249998,
+        "observed_p95": [
+          111.19418245,
+          111.07739934999998,
+          111.20187964999998
+        ]
+      },
+      "fresh_reload_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 95.354067,
+        "observed_p95": [
+          69.728484,
+          70.013351,
+          70.232246
+        ]
+      },
+      "history_load_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 3.46483355,
+        "observed_p95": [
+          0.97752515,
+          0.97801705,
+          0.9924726499999998
+        ]
+      },
+      "index_latency": {
+        "decision": "pass",
+        "milestone3_upper_limit": 4.48551595,
+        "observed_p95": [
+          3.41507345,
+          3.4335967499999995,
+          3.3823074999999996
+        ]
+      },
+      "last_quartile_update_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 575.8676432249999,
+        "observed_p95": [
+          452.39877614999995,
+          453.9420318,
+          453.4191641
+        ]
+      },
+      "peak_rss_bytes": {
+        "decision": "pass",
+        "milestone3_upper_limit": 862846976.0,
+        "observed": [
+          477970432.0,
+          526352384.0,
+          575078400.0
+        ]
+      },
+      "process_finalize_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 121.47911048750001,
+        "observed_p95": [
+          98.23509489999999,
+          97.71158299999999,
+          97.0837504
+        ]
+      },
+      "recorder_append_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 3.8568638,
+        "observed_p95": [
+          2.8160577499999997,
+          2.7759614999999997,
+          3.0048992500000002
+        ]
+      },
+      "result_finalize_latency": {
+        "decision": "pass",
+        "milestone3_upper_limit": 1.2990521,
+        "observed_p95": [
+          0.29364225,
+          0.29867509999999997,
+          0.29874445
+        ]
+      },
+      "rss_growth_bytes": {
+        "decision": "pass",
+        "milestone3_upper_limit": 22380544.0,
+        "observed": [
+          22298624.0,
+          20791296.0,
+          20267008.0
+        ]
+      },
+      "update_latency_ms": {
+        "decision": "pass",
+        "milestone3_upper_limit": 507.38090245,
+        "observed_p95": [
+          405.2347559,
+          405.63904994999996,
+          404.26460015
+        ]
+      }
+    }
+  },
+  "reader_integrity": {
+    "conflict_count": 0,
+    "fallback_count": 0,
+    "routine_recursive_scans": 0,
+    "routine_result_bundle_reads": 0
+  },
+  "reader_metrics": {
+    "index_read_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 295.735499,
+        "measurement_floor": 1.0,
+        "relative_margin": 73.1356605,
+        "robust_margin": 2.3618280000000595,
+        "selected_margin": 73.1356605,
+        "upper_limit": 368.8711595
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 1,
+            "maximum": 292.542642,
+            "median": 292.542642,
+            "minimum": 292.542642,
+            "p95": 292.542642
+          },
+          "run_id": "372b3109-a563-4a06-acd0-e66fd79c262c"
+        },
+        {
+          "distribution": {
+            "count": 1,
+            "maximum": 295.735499,
+            "median": 295.735499,
+            "minimum": 295.735499,
+            "p95": 295.735499
+          },
+          "run_id": "336a9ed9-fbf9-493a-8507-482df96dafbd"
+        },
+        {
+          "distribution": {
+            "count": 1,
+            "maximum": 292.149004,
+            "median": 292.149004,
+            "minimum": 292.149004,
+            "p95": 292.149004
+          },
+          "run_id": "47590a3a-3240-47d9-8c9c-019d5fa5158f"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "recheck_context_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 1.8601952499999999,
+        "measurement_floor": 1.0,
+        "relative_margin": 0.46477925,
+        "robust_margin": 0.006469499999999684,
+        "selected_margin": 1.0,
+        "upper_limit": 2.86019525
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 8,
+            "maximum": 1.813941,
+            "median": 1.5388465,
+            "minimum": 1.520791,
+            "p95": 1.7334987499999999
+          },
+          "run_id": "372b3109-a563-4a06-acd0-e66fd79c262c"
+        },
+        {
+          "distribution": {
+            "count": 8,
+            "maximum": 1.991256,
+            "median": 1.5412615,
+            "minimum": 1.529067,
+            "p95": 1.859117
+          },
+          "run_id": "336a9ed9-fbf9-493a-8507-482df96dafbd"
+        },
+        {
+          "distribution": {
+            "count": 8,
+            "maximum": 1.983383,
+            "median": 1.5321954999999998,
+            "minimum": 1.51101,
+            "p95": 1.8601952499999999
+          },
+          "run_id": "47590a3a-3240-47d9-8c9c-019d5fa5158f"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "selected_validation_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 646.19474525,
+        "measurement_floor": 1.0,
+        "relative_margin": 154.8669608375,
+        "robust_margin": 160.36141140000018,
+        "selected_margin": 160.36141140000018,
+        "upper_limit": 806.5561566500002
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 8,
+            "maximum": 572.519639,
+            "median": 563.931277,
+            "minimum": 385.910168,
+            "p95": 570.6553899
+          },
+          "run_id": "372b3109-a563-4a06-acd0-e66fd79c262c"
+        },
+        {
+          "distribution": {
+            "count": 8,
+            "maximum": 620.574858,
+            "median": 496.9122095,
+            "minimum": 388.02351,
+            "p95": 619.46784335
+          },
+          "run_id": "336a9ed9-fbf9-493a-8507-482df96dafbd"
+        },
+        {
+          "distribution": {
+            "count": 8,
+            "maximum": 647.347458,
+            "median": 517.4207165,
+            "minimum": 391.232849,
+            "p95": 646.19474525
+          },
+          "run_id": "47590a3a-3240-47d9-8c9c-019d5fa5158f"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "summary_materialization_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 109.37857224999999,
+        "measurement_floor": 1.0,
+        "relative_margin": 27.1848525875,
+        "robust_margin": 0.8782974000000365,
+        "selected_margin": 27.1848525875,
+        "upper_limit": 136.56342483749998
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 8,
+            "maximum": 108.638294,
+            "median": 108.4643685,
+            "minimum": 108.031288,
+            "p95": 108.59302745
+          },
+          "run_id": "372b3109-a563-4a06-acd0-e66fd79c262c"
+        },
+        {
+          "distribution": {
+            "count": 8,
+            "maximum": 108.757876,
+            "median": 108.61268100000001,
+            "minimum": 108.035594,
+            "p95": 108.73941035
+          },
+          "run_id": "336a9ed9-fbf9-493a-8507-482df96dafbd"
+        },
+        {
+          "distribution": {
+            "count": 8,
+            "maximum": 109.929677,
+            "median": 108.10185,
+            "minimum": 107.939256,
+            "p95": 109.37857224999999
+          },
+          "run_id": "47590a3a-3240-47d9-8c9c-019d5fa5158f"
+        }
+      ],
+      "unit": "milliseconds"
+    }
+  },
+  "runs": {
+    "measured_count": 3,
+    "raw_reports": [
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_primary_reader_8x25_v1/20260815T185211965182Z_composed/report.json",
+        "role": "warmup",
+        "run_id": "05ed4f6f-da85-4b95-9d5f-8381433924b7",
+        "sha256": "6e0d9367e15be877d3215f7ea33d58c09eaffd0c85fa74edfff95627e13530df"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_primary_reader_8x25_v1/20260815T185605758263Z_composed/report.json",
+        "role": "measured",
+        "run_id": "372b3109-a563-4a06-acd0-e66fd79c262c",
+        "sha256": "5399cba4a352a633623da37fb02dbc5a50c5dd0c2a025d525c03d662768a856f"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_primary_reader_8x25_v1/20260815T190004324177Z_composed/report.json",
+        "role": "measured",
+        "run_id": "336a9ed9-fbf9-493a-8507-482df96dafbd",
+        "sha256": "9a6057107babe4ebd838fd65f6bbb724fb2ee0c894c719c7e443030239fd57c9"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_primary_reader_8x25_v1/20260815T190403937094Z_composed/report.json",
+        "role": "measured",
+        "run_id": "47590a3a-3240-47d9-8c9c-019d5fa5158f",
+        "sha256": "7dfd59db1491646b065411af158eeeba3c3c08f5e827e4ae1a75e93f13caa991"
+      }
+    ],
+    "report_set_sha256": "614610ecd34d61dc7dc3c9f50e7cac59f70185e2ab607adbdc90b0b4ff02e0c7",
+    "warmup_count": 1
+  },
+  "schema_name": "labcraft.calibration_storage_primary_reader_pi_baseline",
+  "schema_version": 1,
+  "source": {
+    "dirty_worktree": false,
+    "git_commit": "62d0e74ed1c4566237d8c75bf1c5399259b52d4f"
+  }
+}

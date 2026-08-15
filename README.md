@@ -2536,6 +2536,14 @@ This qualification covers structured persistence and reader integrity only. It
 does not exercise camera acquisition, image analysis, physical motion,
 pressure response, dispense behavior, firmware, or device protocols.
 
+Milestone 4A was qualified on 2026-08-15 from clean commit `62d0e74e` on the
+Raspberry Pi 5 NVMe/ext4 lane. The tracked candidate baseline is
+`tests/performance/baselines/calibration_storage_primary_reader_pi5_v1.json`;
+it passes every inherited Milestone 3 timing/RSS limit and records zero reader
+integrity, fallback, or conflict events. Exact report hashes, reader limits,
+host-test results, synchronization evidence, and rollback details are in
+`docs/calibration_recording_store_milestone_4a_completion.md`.
+
 ## Raspberry Pi Software-In-The-Loop
 
 The target-Pi SIL lane runs the same real-UI workflow on Raspberry Pi CPU and

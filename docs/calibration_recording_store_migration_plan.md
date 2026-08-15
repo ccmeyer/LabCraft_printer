@@ -834,13 +834,14 @@ Exit criteria:
 
 Rollback: switch reader preference to legacy; dual writes continue.
 
-Implementation status (2026-08-15): the Qt-free primary reader, typed summary
-projection, commit-gated current-session cache, exact selection/recheck
-resolution, schema-v2 application references, explicit repair CLI, and the
-registered lifecycle/stress SIL scenarios are implemented. Host lifecycle and
-the 200-process/232-update stress workload pass. Final milestone completion is
-pending the clean-commit Raspberry Pi qualification, tracked candidate
-baseline, completion record, and final local/origin/Pi synchronization.
+Completed 2026-08-15. The Qt-free primary reader, typed summary projection,
+commit-gated current-session cache, exact selection/recheck resolution,
+schema-v2 application references, explicit repair CLI, and registered
+lifecycle/stress SIL scenarios pass. The clean-commit Raspberry Pi 5
+qualification preserves the frozen 200-process/232-update workload, passes all
+Milestone 3 timing and RSS limits, and records zero integrity, fallback, or
+conflict events. The tracked evidence, limitations, and rollback procedure are
+recorded in `docs/calibration_recording_store_milestone_4a_completion.md`.
 
 ### Milestone 4B: secondary reader cutover
 
