@@ -2441,6 +2441,17 @@ Run and freeze the qualified Pi candidate with:
   --output tests\performance\baselines\calibration_storage_authoritative_pi5_v1.json
 ```
 
+The tracked Milestone 3 candidate is
+`tests/performance/baselines/calibration_storage_authoritative_pi5_v1.json`.
+It was qualified from clean commit
+`430123e0312d308a5ee8fb4be87b869d9aad6f27` on the same Raspberry Pi 5
+NVMe/ext4, Python 3.11.2, and PySide/Qt 6.7.1 identity as Milestone 2. All
+200-run/232-update/result/index counts are exact, integrity failures are zero,
+and every Milestone 2 timing/RSS comparison passes. See
+`docs/calibration_recording_store_milestone_3_completion.md` for raw report
+hashes, measured distributions, candidate limits, artifact growth, and the
+qualification boundary.
+
 Set `LABCRAFT_CALIBRATION_STORE_AUTHORITATIVE=0` and restart the application
 for operational rollback to the Milestone 2 legacy-authoritative checkbox and
 recorder-toggle behavior. This leaves additive canonical artifacts intact.

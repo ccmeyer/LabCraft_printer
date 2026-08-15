@@ -1,6 +1,6 @@
 # Calibration Recording Store Migration: Milestone 0 Contract and Plan
 
-Status: Milestones 0, 1, and 2 complete; qualified shadow-store Pi candidate baseline frozen
+Status: Milestones 0, 1, 2, and 3 complete; authoritative-store Pi candidate baseline frozen
 
 Prepared: 2026-08-14
 
@@ -810,6 +810,12 @@ Exit criteria:
 
 Rollback: feature flag restores legacy-authoritative completion and current
 recorder toggle while retaining any additive new artifacts.
+
+Completed 2026-08-15. The authoritative lifecycle and frozen 8-head x 25-run
+SIL scenarios pass, the full Python suite passes, and the qualified Raspberry
+Pi 5 candidate passes every Milestone 2 timing and RSS comparison with zero
+integrity failures. The tracked evidence and operational rollback details are
+recorded in `docs/calibration_recording_store_milestone_3_completion.md`.
 
 ### Milestone 4A: primary reader cutover
 

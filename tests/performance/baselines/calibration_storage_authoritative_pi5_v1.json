@@ -1,0 +1,850 @@
+{
+  "artifact_growth": {
+    "comparison_policy": "measured_additive_not_shadow_gated",
+    "per_run": [
+      {
+        "calibration_json_bytes": 7970868,
+        "inventory": {
+          "by_extension": {
+            ".csv": {
+              "bytes": 145,
+              "count": 2
+            },
+            ".jpg": {
+              "bytes": 670,
+              "count": 2
+            },
+            ".json": {
+              "bytes": 20075589,
+              "count": 828
+            },
+            ".jsonl": {
+              "bytes": 10436088,
+              "count": 810
+            },
+            ".lock": {
+              "bytes": 92,
+              "count": 1
+            },
+            ".log": {
+              "bytes": 146,
+              "count": 1
+            },
+            "no_extension": {
+              "bytes": 21,
+              "count": 1
+            }
+          },
+          "root": "/tmp/LabCraft/SIL/composed-sessions/20260815T084752761338Z-a83c7b7d-475"
+        },
+        "run_id": "a83c7b7d-475e-48f8-9f4b-75358e45b050",
+        "scenario_total_bytes": 30512751
+      },
+      {
+        "calibration_json_bytes": 7970868,
+        "inventory": {
+          "by_extension": {
+            ".csv": {
+              "bytes": 145,
+              "count": 2
+            },
+            ".jpg": {
+              "bytes": 670,
+              "count": 2
+            },
+            ".json": {
+              "bytes": 20075589,
+              "count": 828
+            },
+            ".jsonl": {
+              "bytes": 10436088,
+              "count": 810
+            },
+            ".lock": {
+              "bytes": 92,
+              "count": 1
+            },
+            ".log": {
+              "bytes": 146,
+              "count": 1
+            },
+            "no_extension": {
+              "bytes": 21,
+              "count": 1
+            }
+          },
+          "root": "/tmp/LabCraft/SIL/composed-sessions/20260815T085147878630Z-341a8602-b87"
+        },
+        "run_id": "341a8602-b87c-48a0-94ab-456fce3ed238",
+        "scenario_total_bytes": 30512751
+      },
+      {
+        "calibration_json_bytes": 7970868,
+        "inventory": {
+          "by_extension": {
+            ".csv": {
+              "bytes": 145,
+              "count": 2
+            },
+            ".jpg": {
+              "bytes": 670,
+              "count": 2
+            },
+            ".json": {
+              "bytes": 20075589,
+              "count": 828
+            },
+            ".jsonl": {
+              "bytes": 10436088,
+              "count": 810
+            },
+            ".lock": {
+              "bytes": 92,
+              "count": 1
+            },
+            ".log": {
+              "bytes": 146,
+              "count": 1
+            },
+            "no_extension": {
+              "bytes": 21,
+              "count": 1
+            }
+          },
+          "root": "/tmp/LabCraft/SIL/composed-sessions/20260815T085543820533Z-97ca88bd-7ba"
+        },
+        "run_id": "97ca88bd-7baf-435c-8112-8e8c39b7f68c",
+        "scenario_total_bytes": 30512751
+      }
+    ]
+  },
+  "baseline_id": "calibration_storage_authoritative_pi5_v1",
+  "classification": {
+    "status": "pass",
+    "threshold_maturity": "candidate"
+  },
+  "compatibility": {
+    "environment": {
+      "architecture": "aarch64",
+      "cpu_identifier": "unknown",
+      "operating_system": "Linux",
+      "os_release": "6.12.20+rpt-rpi-2712",
+      "python_executable": "/usr/bin/python3.11",
+      "python_implementation": "CPython",
+      "python_version": "3.11.2",
+      "qt": {
+        "binding": "real",
+        "platform": "offscreen",
+        "pyside_version": "6.7.1",
+        "qt_version": "6.7.1"
+      },
+      "target_pi": {
+        "filesystem": {
+          "filesystem_type": "ext4",
+          "mount_source": "/dev/nvme0n1p2[/home/labcraft/LabCraft_printer/verification_reports/virtual_workflows/pi-sil]",
+          "storage_class": "nvme"
+        },
+        "lane": "raspberry_pi_sil",
+        "pi_model": "Raspberry Pi 5 Model B Rev 1.0"
+      }
+    },
+    "host_label": "pi5-calibration-storage-authoritative-v1",
+    "report_schema_name": "labcraft.virtual_workflow_report",
+    "report_schema_version": 1,
+    "run_mode": "offscreen_pi_sil",
+    "safety": {
+      "hardware_access_allowed": false,
+      "hardware_interfaces": {
+        "GPIO": false,
+        "MCU": false,
+        "balance": false,
+        "camera": false,
+        "firmware_update": false,
+        "serial": false
+      },
+      "pi_sil": {
+        "network_unshared": true,
+        "private_dev": true,
+        "root_read_only": true,
+        "sandbox_method": "bubblewrap_private_dev_v1"
+      },
+      "simulated_port": "SIMULATED",
+      "simulation": true
+    },
+    "scenario_name": "calibration_storage_authoritative",
+    "scenario_version": "1",
+    "timing_policy": "simulated_command_durations_x1000",
+    "workload": {
+      "capture_mode": "structured_only_proxy",
+      "completion_count": 200,
+      "expected_update_count": 232,
+      "fixture_path": "tools/virtual_workflows/fixtures/calibration_storage_contract_legacy_baseline_8x25_v1.json",
+      "fixture_schema_version": 1,
+      "fixture_sha256": "0a2b57a0ea07bbe437ee3037c9ca2a9331a38dbdcae5fbb908e8390d8f592621",
+      "head_count": 8,
+      "key_evidence_probe_capture_count": 2,
+      "large_process_ordinal_per_head": 25,
+      "large_update_count_per_process": 5,
+      "process_runs_per_head": 25,
+      "speed_multiplier": 1000.0,
+      "structured_process_runs": 200,
+      "timeout_seconds": 1800.0,
+      "workload_hash": "f99bdfc4150c98d0d2a37fd43d3cf4353ca1b20240152cfb264c89c9800ff341",
+      "workload_id": "calibration_storage_authoritative_8x25_v1"
+    }
+  },
+  "created_at_utc": "2026-08-15T09:00:00.081752Z",
+  "exact_counts": {
+    "canonical_index_event_count": 200,
+    "canonical_result_count": 200,
+    "canonical_update_count": 232,
+    "integrity_failure_count": 0,
+    "key_evidence_probe_capture_count": 2,
+    "legacy_run_envelope_count": 201,
+    "process_run_count": 200,
+    "recording_count": 200,
+    "update_count": 232,
+    "workload_capture_count": 0
+  },
+  "host_label": "pi5-calibration-storage-authoritative-v1",
+  "limitations": [
+    "Image analysis, camera acquisition, firmware, and physical hardware behavior are outside this baseline.",
+    "Artifact growth is additive during legacy dual-writing and is measured but not gated against the Milestone 2 total-byte observation."
+  ],
+  "metrics": {
+    "calibration_rewrite_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 404.64209200000005,
+        "measurement_floor": 1.0,
+        "relative_margin": 100.9137972625,
+        "robust_margin": 2.6338718999998036,
+        "selected_margin": 100.9137972625,
+        "upper_limit": 505.55588926250005
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 432,
+            "maximum": 460.225358,
+            "median": 229.11046299999998,
+            "minimum": 0.358096,
+            "p95": 403.65518905
+          },
+          "run_id": "a83c7b7d-475e-48f8-9f4b-75358e45b050"
+        },
+        {
+          "distribution": {
+            "count": 432,
+            "maximum": 459.509781,
+            "median": 228.70761349999998,
+            "minimum": 0.371189,
+            "p95": 403.2162104
+          },
+          "run_id": "341a8602-b87c-48a0-94ab-456fce3ed238"
+        },
+        {
+          "distribution": {
+            "count": 432,
+            "maximum": 463.315013,
+            "median": 229.44790799999998,
+            "minimum": 0.391078,
+            "p95": 404.64209200000005
+          },
+          "run_id": "97ca88bd-7baf-435c-8112-8e8c39b7f68c"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "canonical_update_append_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 14.193993899999999,
+        "measurement_floor": 1.0,
+        "relative_margin": 3.5002192125,
+        "robust_margin": 0.7643391000000008,
+        "selected_margin": 3.5002192125,
+        "upper_limit": 17.694213112499998
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 232,
+            "maximum": 14.651124,
+            "median": 0.391356,
+            "minimum": 0.358449,
+            "p95": 13.873486999999999
+          },
+          "run_id": "a83c7b7d-475e-48f8-9f4b-75358e45b050"
+        },
+        {
+          "distribution": {
+            "count": 232,
+            "maximum": 14.746586,
+            "median": 0.3925865,
+            "minimum": 0.362411,
+            "p95": 14.00087685
+          },
+          "run_id": "341a8602-b87c-48a0-94ab-456fce3ed238"
+        },
+        {
+          "distribution": {
+            "count": 232,
+            "maximum": 14.83701,
+            "median": 0.3798735,
+            "minimum": 0.360337,
+            "p95": 14.193993899999999
+          },
+          "run_id": "97ca88bd-7baf-435c-8112-8e8c39b7f68c"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "first_quartile_update_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 112.94162549999999,
+        "measurement_floor": 1.0,
+        "relative_margin": 28.062876512499994,
+        "robust_margin": 4.14071670000007,
+        "selected_margin": 28.062876512499994,
+        "upper_limit": 141.00450201249998
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 58,
+            "maximum": 141.860547,
+            "median": 59.220347000000004,
+            "minimum": 1.208978,
+            "p95": 111.45461594999999
+          },
+          "run_id": "a83c7b7d-475e-48f8-9f4b-75358e45b050"
+        },
+        {
+          "distribution": {
+            "count": 58,
+            "maximum": 143.187187,
+            "median": 59.0779585,
+            "minimum": 1.239234,
+            "p95": 112.94162549999999
+          },
+          "run_id": "341a8602-b87c-48a0-94ab-456fce3ed238"
+        },
+        {
+          "distribution": {
+            "count": 58,
+            "maximum": 143.755184,
+            "median": 58.952377,
+            "minimum": 1.252566,
+            "p95": 112.25150604999997
+          },
+          "run_id": "97ca88bd-7baf-435c-8112-8e8c39b7f68c"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "fresh_reload_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 76.466275,
+        "measurement_floor": 1.0,
+        "relative_margin": 18.887792,
+        "robust_margin": 3.5138520000000426,
+        "selected_margin": 18.887792,
+        "upper_limit": 95.354067
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 1,
+            "maximum": 74.965526,
+            "median": 74.965526,
+            "minimum": 74.965526,
+            "p95": 74.965526
+          },
+          "run_id": "a83c7b7d-475e-48f8-9f4b-75358e45b050"
+        },
+        {
+          "distribution": {
+            "count": 1,
+            "maximum": 75.551168,
+            "median": 75.551168,
+            "minimum": 75.551168,
+            "p95": 75.551168
+          },
+          "run_id": "341a8602-b87c-48a0-94ab-456fce3ed238"
+        },
+        {
+          "distribution": {
+            "count": 1,
+            "maximum": 76.466275,
+            "median": 76.466275,
+            "minimum": 76.466275,
+            "p95": 76.466275
+          },
+          "run_id": "97ca88bd-7baf-435c-8112-8e8c39b7f68c"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "history_load_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 2.46483355,
+        "measurement_floor": 1.0,
+        "relative_margin": 0.602971425,
+        "robust_margin": 0.07308359999999858,
+        "selected_margin": 1.0,
+        "upper_limit": 3.46483355
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 8,
+            "maximum": 2.400431,
+            "median": 2.3841254999999997,
+            "minimum": 2.350375,
+            "p95": 2.3997051000000003
+          },
+          "run_id": "a83c7b7d-475e-48f8-9f4b-75358e45b050"
+        },
+        {
+          "distribution": {
+            "count": 8,
+            "maximum": 2.466558,
+            "median": 2.4481965,
+            "minimum": 2.434965,
+            "p95": 2.46483355
+          },
+          "run_id": "341a8602-b87c-48a0-94ab-456fce3ed238"
+        },
+        {
+          "distribution": {
+            "count": 8,
+            "maximum": 2.412592,
+            "median": 2.4015545,
+            "minimum": 2.375666,
+            "p95": 2.4118857
+          },
+          "run_id": "97ca88bd-7baf-435c-8112-8e8c39b7f68c"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "index_latency": {
+      "candidate_limit": {
+        "maximum_observed": 3.4855159499999995,
+        "measurement_floor": 1.0,
+        "relative_margin": 0.8569186249999998,
+        "robust_margin": 0.19998719999999803,
+        "selected_margin": 1.0,
+        "upper_limit": 4.48551595
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 164.686684,
+            "median": 1.829178,
+            "minimum": 0.132335,
+            "p95": 3.4855159499999995
+          },
+          "run_id": "a83c7b7d-475e-48f8-9f4b-75358e45b050"
+        },
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 4.048682,
+            "median": 1.7942665,
+            "minimum": 0.128372,
+            "p95": 3.3943432999999996
+          },
+          "run_id": "341a8602-b87c-48a0-94ab-456fce3ed238"
+        },
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 3.671083,
+            "median": 1.7649029999999999,
+            "minimum": 0.142334,
+            "p95": 3.4276744999999993
+          },
+          "run_id": "97ca88bd-7baf-435c-8112-8e8c39b7f68c"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "last_quartile_update_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 461.649492,
+        "measurement_floor": 1.0,
+        "relative_margin": 114.21815122499999,
+        "robust_margin": 5.946056099999396,
+        "selected_margin": 114.21815122499999,
+        "upper_limit": 575.8676432249999
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 58,
+            "maximum": 487.188476,
+            "median": 401.82599500000003,
+            "minimum": 342.887947,
+            "p95": 461.649492
+          },
+          "run_id": "a83c7b7d-475e-48f8-9f4b-75358e45b050"
+        },
+        {
+          "distribution": {
+            "count": 58,
+            "maximum": 485.219979,
+            "median": 401.767566,
+            "minimum": 343.208695,
+            "p95": 455.88159555000004
+          },
+          "run_id": "341a8602-b87c-48a0-94ab-456fce3ed238"
+        },
+        {
+          "distribution": {
+            "count": 58,
+            "maximum": 490.250067,
+            "median": 402.7507025,
+            "minimum": 344.219471,
+            "p95": 456.87260489999994
+          },
+          "run_id": "97ca88bd-7baf-435c-8112-8e8c39b7f68c"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "process_finalize_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 97.38156500000001,
+        "measurement_floor": 1.0,
+        "relative_margin": 24.0975454875,
+        "robust_margin": 5.9482983000000615,
+        "selected_margin": 24.0975454875,
+        "upper_limit": 121.47911048750001
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 235.929146,
+            "median": 54.735357,
+            "minimum": 5.613436,
+            "p95": 97.38156500000001
+          },
+          "run_id": "a83c7b7d-475e-48f8-9f4b-75358e45b050"
+        },
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 104.674319,
+            "median": 54.246952,
+            "minimum": 5.115975,
+            "p95": 93.60873754999994
+          },
+          "run_id": "341a8602-b87c-48a0-94ab-456fce3ed238"
+        },
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 100.279257,
+            "median": 54.675208,
+            "minimum": 3.840032,
+            "p95": 96.39018195
+          },
+          "run_id": "97ca88bd-7baf-435c-8112-8e8c39b7f68c"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "recorder_append_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 2.8568638,
+        "measurement_floor": 1.0,
+        "relative_margin": 0.7072987125,
+        "robust_margin": 0.16601370000000149,
+        "selected_margin": 1.0,
+        "upper_limit": 3.8568638
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 232,
+            "maximum": 3.125828,
+            "median": 0.18653950000000002,
+            "minimum": 0.110112,
+            "p95": 2.7894581
+          },
+          "run_id": "a83c7b7d-475e-48f8-9f4b-75358e45b050"
+        },
+        {
+          "distribution": {
+            "count": 232,
+            "maximum": 3.217345,
+            "median": 0.1875385,
+            "minimum": 0.106093,
+            "p95": 2.82919485
+          },
+          "run_id": "341a8602-b87c-48a0-94ab-456fce3ed238"
+        },
+        {
+          "distribution": {
+            "count": 232,
+            "maximum": 3.246711,
+            "median": 0.1874,
+            "minimum": 0.110056,
+            "p95": 2.8568638
+          },
+          "run_id": "97ca88bd-7baf-435c-8112-8e8c39b7f68c"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "result_finalize_latency": {
+      "candidate_limit": {
+        "maximum_observed": 0.29905209999999993,
+        "measurement_floor": 1.0,
+        "relative_margin": 0.074178825,
+        "robust_margin": 0.0018009000000003272,
+        "selected_margin": 1.0,
+        "upper_limit": 1.2990521
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 0.347671,
+            "median": 0.2806055,
+            "minimum": 0.267725,
+            "p95": 0.29905209999999993
+          },
+          "run_id": "a83c7b7d-475e-48f8-9f4b-75358e45b050"
+        },
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 0.332132,
+            "median": 0.27942849999999997,
+            "minimum": 0.270873,
+            "p95": 0.29641514999999996
+          },
+          "run_id": "341a8602-b87c-48a0-94ab-456fce3ed238"
+        },
+        {
+          "distribution": {
+            "count": 200,
+            "maximum": 0.355207,
+            "median": 0.2795485,
+            "minimum": 0.267687,
+            "p95": 0.2967153
+          },
+          "run_id": "97ca88bd-7baf-435c-8112-8e8c39b7f68c"
+        }
+      ],
+      "unit": "milliseconds"
+    },
+    "update_latency_ms": {
+      "candidate_limit": {
+        "maximum_observed": 405.93257355000003,
+        "measurement_floor": 1.0,
+        "relative_margin": 101.44832889999999,
+        "robust_margin": 0.8355477000003475,
+        "selected_margin": 101.44832889999999,
+        "upper_limit": 507.38090245
+      },
+      "per_run": [
+        {
+          "distribution": {
+            "count": 232,
+            "maximum": 487.188476,
+            "median": 230.6385365,
+            "minimum": 1.208978,
+            "p95": 405.5855564
+          },
+          "run_id": "a83c7b7d-475e-48f8-9f4b-75358e45b050"
+        },
+        {
+          "distribution": {
+            "count": 232,
+            "maximum": 485.219979,
+            "median": 230.65977650000002,
+            "minimum": 1.239234,
+            "p95": 405.93257355000003
+          },
+          "run_id": "341a8602-b87c-48a0-94ab-456fce3ed238"
+        },
+        {
+          "distribution": {
+            "count": 232,
+            "maximum": 490.250067,
+            "median": 230.719833,
+            "minimum": 1.252566,
+            "p95": 405.79331559999997
+          },
+          "run_id": "97ca88bd-7baf-435c-8112-8e8c39b7f68c"
+        }
+      ],
+      "unit": "milliseconds"
+    }
+  },
+  "runs": {
+    "measured_count": 3,
+    "raw_reports": [
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_authoritative_8x25_v1/20260815T084402598823Z_composed/report.json",
+        "role": "warmup",
+        "run_id": "b6849cc9-3b96-428d-97dd-fe99be3df531",
+        "sha256": "6a0af6873ffdf8897125b84adeda36badfa081bf198738399621ceb0c5e143d9"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_authoritative_8x25_v1/20260815T084752761127Z_composed/report.json",
+        "role": "measured",
+        "run_id": "a83c7b7d-475e-48f8-9f4b-75358e45b050",
+        "sha256": "9b58e1e8751c40ec77d9b077a9a762b2e6955171d6bb0b07c6d954a0229044d0"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_authoritative_8x25_v1/20260815T085147878450Z_composed/report.json",
+        "role": "measured",
+        "run_id": "341a8602-b87c-48a0-94ab-456fce3ed238",
+        "sha256": "b394992252fd78235d865f8a95888bd03f091101f3e35d8b8d5bdde10ff51a56"
+      },
+      {
+        "path": "verification_reports/virtual_workflows/pi-sil/calibration_storage_authoritative_8x25_v1/20260815T085543820337Z_composed/report.json",
+        "role": "measured",
+        "run_id": "97ca88bd-7baf-435c-8112-8e8c39b7f68c",
+        "sha256": "254411d841191844206b0537376189d4e9f7d2dcd78087795b1783744ff09e8d"
+      }
+    ],
+    "report_set_sha256": "81cfccfd5854a622444c5867884e99f2cfd6497aaaf73519bb1c60ece45a7d7c",
+    "warmup_count": 1
+  },
+  "schema_name": "labcraft.calibration_storage_authoritative_pi_baseline",
+  "schema_version": 1,
+  "shadow_comparison": {
+    "baseline_id": "calibration_storage_shadow_pi5_v1",
+    "baseline_sha256": "6557555ddf84e3e56f97f39510039d4894a1ce20c4b6b48670e102ee50b83108",
+    "decision": "pass",
+    "metrics": {
+      "calibration_rewrite_latency_ms": {
+        "decision": "pass",
+        "observed_p95": [
+          403.65518905,
+          403.2162104,
+          404.64209200000005
+        ],
+        "shadow_upper_limit": 496.4958423375
+      },
+      "canonical_update_append_latency_ms": {
+        "decision": "pass",
+        "observed_p95": [
+          13.873486999999999,
+          14.00087685,
+          14.193993899999999
+        ],
+        "shadow_upper_limit": 17.513589075
+      },
+      "first_quartile_update_latency_ms": {
+        "decision": "pass",
+        "observed_p95": [
+          111.45461594999999,
+          112.94162549999999,
+          112.25150604999997
+        ],
+        "shadow_upper_limit": 113.74915619999996
+      },
+      "fresh_reload_latency_ms": {
+        "decision": "pass",
+        "observed_p95": [
+          74.965526,
+          75.551168,
+          76.466275
+        ],
+        "shadow_upper_limit": 431.2426050000002
+      },
+      "history_load_latency_ms": {
+        "decision": "pass",
+        "observed_p95": [
+          2.3997051000000003,
+          2.46483355,
+          2.4118857
+        ],
+        "shadow_upper_limit": 4.473583
+      },
+      "index_latency": {
+        "decision": "pass",
+        "observed_p95": [
+          3.4855159499999995,
+          3.3943432999999996,
+          3.4276744999999993
+        ],
+        "shadow_upper_limit": 4.416171349999999
+      },
+      "last_quartile_update_latency_ms": {
+        "decision": "pass",
+        "observed_p95": [
+          461.649492,
+          455.88159555000004,
+          456.87260489999994
+        ],
+        "shadow_upper_limit": 538.507603875
+      },
+      "peak_rss_bytes": {
+        "decision": "pass",
+        "observed": [
+          477200384.0,
+          525500416.0,
+          574668800.0
+        ],
+        "shadow_upper_limit": 862846976.0
+      },
+      "process_finalize_latency_ms": {
+        "decision": "pass",
+        "observed_p95": [
+          97.38156500000001,
+          93.60873754999994,
+          96.39018195
+        ],
+        "shadow_upper_limit": 121.24098129999999
+      },
+      "recorder_append_latency_ms": {
+        "decision": "pass",
+        "observed_p95": [
+          2.7894581,
+          2.82919485,
+          2.8568638
+        ],
+        "shadow_upper_limit": 3.8313416
+      },
+      "result_finalize_latency": {
+        "decision": "pass",
+        "observed_p95": [
+          0.29905209999999993,
+          0.29641514999999996,
+          0.2967153
+        ],
+        "shadow_upper_limit": 1.2762064
+      },
+      "rss_growth_bytes": {
+        "decision": "pass",
+        "observed": [
+          17465344.0,
+          15777792.0,
+          15908864.0
+        ],
+        "shadow_upper_limit": 22380544.0
+      },
+      "update_latency_ms": {
+        "decision": "pass",
+        "observed_p95": [
+          405.5855564,
+          405.93257355000003,
+          405.79331559999997
+        ],
+        "shadow_upper_limit": 498.602420175
+      }
+    }
+  },
+  "source": {
+    "dirty_worktree": false,
+    "git_commit": "430123e0312d308a5ee8fb4be87b869d9aad6f27"
+  }
+}
