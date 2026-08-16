@@ -1699,7 +1699,10 @@ class CalibrationManager(QObject):
         # Milestone 7: canonical structured persistence is unconditional.  Keep
         # detecting the former rollback values so an old deployment cannot
         # silently hide or discard new canonical results.
-        self._capture_retention_policy = CaptureRetentionPolicy.KEY_EVIDENCE
+        # Preserve every recorder-requested frame by default until the
+        # process-specific key-evidence designations have been reviewed for
+        # offline diagnostic usefulness.
+        self._capture_retention_policy = CaptureRetentionPolicy.FULL
         self._process_recorder = CalibrationProcessRecorder(model)
         self._shadow_store_enabled = True
         self._calibration_recording_store = None
@@ -1964,7 +1967,7 @@ class CalibrationManager(QObject):
 
     def get_capture_retention_policy(self) -> str:
         return CaptureRetentionPolicy.parse(
-            getattr(self, "_capture_retention_policy", CaptureRetentionPolicy.KEY_EVIDENCE)
+            getattr(self, "_capture_retention_policy", CaptureRetentionPolicy.FULL)
         ).storage_name
 
     def set_capture_retention_policy(self, policy) -> bool:

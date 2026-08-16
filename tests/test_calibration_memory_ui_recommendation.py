@@ -533,6 +533,7 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert dialog.manual_group.parentWidget() is dialog.debug_tab_content
     assert dialog.stream_capture_group.parentWidget() is dialog.debug_tab_content
     assert dialog.capture_retention_combo.parentWidget() is dialog.run_options_group
+    assert dialog.capture_retention_combo.currentData() == "full"
     assert dialog.enable_calibration_memory_checkbox.parentWidget() is dialog.run_options_group
     assert dialog.calibration_tabs.count() == 4
     assert [dialog.calibration_tabs.tabText(idx) for idx in range(dialog.calibration_tabs.count())] == [

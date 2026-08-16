@@ -115,6 +115,15 @@ def test_manager_policy_is_session_scoped_busy_guarded_and_compatibility_safe():
     assert manager.get_capture_retention_policy() == "full"
 
 
+def test_manager_defaults_new_session_to_full(tmp_path):
+    model = _model(tmp_path)
+    model.machine_state_updated = SignalStub()
+
+    manager = CalibrationManager(model)
+
+    assert manager.get_capture_retention_policy() == "full"
+
+
 def test_obsolete_authority_rollback_does_not_disable_structured_persistence(
     tmp_path, monkeypatch
 ):

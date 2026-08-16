@@ -2768,7 +2768,9 @@ The legacy calibration writer has been removed from the production path.
 `calibration.json` is a read-only typed-fallback source; new updates, terminal
 results, and index events are committed only through `calibration_recordings`
 and `calibration_index.jsonl`. The Capture retention selector controls pixels,
-not structured persistence.
+not structured persistence. Each application session defaults to `Full` so
+every recorder-requested image is available for offline calibration diagnosis;
+operators may select a lower-retention policy for future runs.
 
 The proving tool scans only explicitly named experiment directories, validates
 indexed terminal bundles, hashes every source file before and after collection,

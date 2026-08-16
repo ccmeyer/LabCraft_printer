@@ -3731,7 +3731,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         policy_getter = getattr(manager, "get_capture_retention_policy", None)
         selected_policy = str(
-            policy_getter() if callable(policy_getter) else "key_evidence"
+            policy_getter() if callable(policy_getter) else "full"
         )
         selected_index = self.capture_retention_combo.findData(selected_policy)
         self.capture_retention_combo.setCurrentIndex(max(0, selected_index))
@@ -10309,7 +10309,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         combo = getattr(self, "capture_retention_combo", None)
         if combo is None:
             return False
-        policy = str(combo.currentData() or "key_evidence")
+        policy = str(combo.currentData() or "full")
         manager = self.model.calibration_manager
         accepted = bool(manager.set_capture_retention_policy(policy))
         if not accepted:

@@ -499,8 +499,8 @@ from an enable/disable checkbox to capture retention:
 | Policy | Saved pixels | Required structured evidence |
 | --- | --- | --- |
 | `structured_only` | None | Metadata, canonical updates, result, index, events/analysis policy, and explicit `capture_omitted` evidence |
-| `key_evidence` | Process-designated key frames only | All structured evidence plus selected captures; recommended default |
-| `full` | Every recorder-requested capture | All structured evidence and all captures |
+| `key_evidence` | Process-designated key frames only | All structured evidence plus selected captures; available after process-specific evidence designations are reviewed |
+| `full` | Every recorder-requested capture | All structured evidence and all captures; conservative session default for offline diagnostics |
 
 Every capture request still receives a capture ID and metadata. Under
 `structured_only`, the store records that pixel retention was intentionally
