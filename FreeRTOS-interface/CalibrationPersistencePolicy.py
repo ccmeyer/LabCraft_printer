@@ -1,8 +1,8 @@
-"""Calibration legacy-writer policy for the canonical storage cutover.
+"""Persisted compatibility policy from the canonical storage cutover.
 
-This module is deliberately Qt-free.  Experiment designs persist only the
-declared policy; process-local environment overrides are evaluated by the
-calibration manager at application start.
+The v1 field remains readable so experiment designs do not need a schema rewrite.
+As of Milestone 7 it is informational: production calibration writes are always
+canonical and the legacy writer is unavailable.
 """
 
 from __future__ import annotations
@@ -53,11 +53,11 @@ def legacy_compatible_policy(
 
 
 def load_calibration_storage_policy(value: Any) -> CalibrationStoragePolicy:
-    """Load a persisted policy, conservatively retaining legacy writes.
+    """Load the retained v1 policy without enabling a legacy writer.
 
     Missing policy is the expected shape for historical experiments.  Invalid
-    or future policy documents also retain the compatibility writer and expose
-    a warning to diagnostics instead of risking loss of the legacy copy.
+    or future policy documents expose a warning to diagnostics. Runtime writer
+    behavior is deliberately not selected in this Qt-free compatibility parser.
     """
 
     if value is None:

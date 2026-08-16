@@ -12,18 +12,21 @@ from CalibrationClasses.Model import CalibrationManager
 from CalibrationClasses.View import DropletImagingDialog
 
 
-class _DummyProcess:
+class DummyProcess:
     phase_name = "nozzle_position"
+    calibration_storage_result_kind = "operational"
 
 
-class _NonVerdictProcess:
+class NonVerdictProcess:
     phase_name = "head_prime"
     supports_operator_verdict = False
+    calibration_storage_result_kind = "operational"
 
 
-class _CleanupProcess:
+class CleanupProcess:
     phase_name = "nozzle_position"
     supports_operator_verdict = True
+    calibration_storage_result_kind = "operational"
 
     def __init__(self):
         self.stageChanged = SignalStub()
@@ -65,9 +68,9 @@ def _dummy_model(tmp_path):
 def test_manager_submits_pending_process_verdict(tmp_path):
     model = _dummy_model(tmp_path)
     mgr = CalibrationManager(model)
-    mgr._canonical_store_authoritative = False
+    mgr.begin_session(model.experiment_model.calibration_file_path, notes="verdict")
 
-    proc = _DummyProcess()
+    proc = DummyProcess()
     mgr._begin_process_recording(proc)
     try:
         mgr._pending_process_verdict = mgr._build_pending_process_verdict_context(
@@ -100,9 +103,9 @@ def test_manager_submits_pending_process_verdict(tmp_path):
 def test_non_verdict_process_does_not_create_pending_verdict_context(tmp_path):
     model = _dummy_model(tmp_path)
     mgr = CalibrationManager(model)
-    mgr._canonical_store_authoritative = False
+    mgr.begin_session(model.experiment_model.calibration_file_path, notes="non-verdict")
 
-    proc = _NonVerdictProcess()
+    proc = NonVerdictProcess()
     mgr._begin_process_recording(proc)
     try:
         pending = mgr._build_pending_process_verdict_context(proc, default_outcome="success")
@@ -115,9 +118,9 @@ def test_non_verdict_process_does_not_create_pending_verdict_context(tmp_path):
 def test_on_calibration_completed_cleans_up_process_and_sets_pending_verdict(tmp_path, monkeypatch):
     model = _dummy_model(tmp_path)
     mgr = CalibrationManager(model)
-    mgr._canonical_store_authoritative = False
+    mgr.begin_session(model.experiment_model.calibration_file_path, notes="cleanup")
     mgr._emit_readiness = lambda: None
-    proc = _CleanupProcess()
+    proc = CleanupProcess()
     mgr.activeCalibration = proc
     mgr._begin_process_recording(proc)
 
@@ -125,7 +128,7 @@ def test_on_calibration_completed_cleans_up_process_and_sets_pending_verdict(tmp
 
     pending = mgr.get_pending_process_verdict()
     assert pending is not None
-    assert pending["process_name"] == "_CleanupProcess"
+    assert pending["process_name"] == "CleanupProcess"
     assert proc.cleaned is True
     assert proc.deleted is True
     assert mgr.activeCalibration is None

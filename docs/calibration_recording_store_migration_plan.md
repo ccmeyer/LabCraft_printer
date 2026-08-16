@@ -933,10 +933,35 @@ not rerun. Final evidence is recorded in
 
 Scope:
 
-- Retain operational evidence over an agreed proving period.
-- Remove dead legacy writer code only after no required reader depends on it.
+- Retire the production legacy writer now that no required reader depends on it.
+- Retain operational evidence over a minimum 14-day proving period with at
+  least 20 completed calibrations across three printer heads.
 - Preserve the legacy reader indefinitely unless a separate approved plan
   retires it.
+- Require two passing compact Pi qualifications and a resolved issue ledger.
+- Do not create a release candidate, release tag, or offline bundle; release
+  work remains a separate user-controlled activity after unrelated changes.
+
+Implementation contract:
+
+- Structured persistence and the canonical primary/secondary readers are
+  unconditional. The persisted v1 writer-policy field remains readable but is
+  informational.
+- `calibration.json` may be opened only for typed historical fallback. Session
+  begin/end, data updates, and cleanup never create, rewrite, rename, or delete
+  it.
+- Obsolete rollback values fail calibration startup with an actionable error;
+  they never silently select missing writer code.
+- The proving collector accepts only explicit experiment directories, validates
+  indexed bundles, hashes opened sources before/after, emits redacted reports to
+  a new path, and prints flushed progress records.
+- The evaluator gates duration, completed-calibration/head counts, source
+  immutability, bundle integrity, zero storage errors, a resolved issue ledger,
+  and two compact Pi report sets.
+- Automated qualification reuses the 16-process new-store-only lifecycle and
+  one 0-warmup/1-measured Pi pass. The 200-process/232-update workload is not
+  rerun because writer/index/reader performance was already qualified and this
+  slice removes an unused writer path.
 
 Exit criteria:
 
@@ -944,11 +969,21 @@ Exit criteria:
   proving period.
 - Documentation and operator controls describe structured persistence and
   capture retention accurately.
-- Rollback remains possible through the last release that contains the legacy
-  writer.
+- The implementation and compact SIL qualification pass before real calibration
+  data collection begins.
+- Operational proving remains explicitly incomplete until the time, volume,
+  head-diversity, issue, and second-Pi gates are satisfied.
 
 Rollback: deploy the prior qualified release and re-enable dual-writing; do
 not modify historical files.
+
+Implementation completed on 2026-08-15. Canonical writes/readers are mandatory,
+the production legacy writer is unavailable, historical documents remain
+read-only, and the operational proving collector/evaluator is available. The
+implementation record is
+`docs/calibration_recording_store_milestone_7_implementation.md`. Milestone 7
+operational proving is intentionally still open pending real Pi calibration data;
+that evidence will not create release artifacts.
 
 ### Deferred milestone: image-analysis SIL
 

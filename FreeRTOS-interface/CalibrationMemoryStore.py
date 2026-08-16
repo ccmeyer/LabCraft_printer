@@ -1105,12 +1105,6 @@ class CalibrationMemoryStore:
 
         run = None
         canonical_snapshot = self._canonical_session_snapshot(calibration_manager)
-        if canonical_snapshot is not None and not list(
-            canonical_snapshot.get("result_refs") or ()
-        ):
-            # Compatibility-only/manual manager updates have no committed
-            # terminal bundle and must retain their legacy summary source.
-            canonical_snapshot = None
         run_idx = getattr(calibration_manager, "_run_idx", None)
         data = getattr(calibration_manager, "data", {}) or {}
         runs = data.get("runs") or []

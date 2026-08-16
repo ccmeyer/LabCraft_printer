@@ -73,19 +73,20 @@ def test_scripted_process_uses_real_manager_writers_and_capture_drain(qapp, tmp_
 
         evidence = [runner.run_case(case) for case in selected]
 
-        assert evidence[0].legacy_update_hashes == selected[0].expected_update_hashes
+        assert evidence[0].legacy_update_hashes == ()
         assert evidence[0].recorder_update_hashes == selected[0].expected_update_hashes
         assert evidence[1].capture_count == 2
         assert evidence[1].capture_bytes > 0
-        assert evidence[2].recording_dir is None
-        assert evidence[2].recorder_update_hashes == ()
-        assert runner.metrics.snapshot()["calibration_rewrite_count"] >= 7
+        assert evidence[2].recording_dir is not None
+        assert evidence[2].recorder_update_hashes == selected[2].expected_update_hashes
+        assert runner.metrics.snapshot()["calibration_rewrite_count"] == 0
+        assert not calibration_path.exists()
         runner.restore()
     finally:
         assert session.close()
 
 
-def test_scripted_process_writes_canonical_shadow_when_recorder_is_disabled(
+def test_scripted_process_keeps_structured_diagnostics_when_pixels_are_disabled(
     qapp, tmp_path
 ):
     session = _session(qapp, tmp_path / "shadow-session")
@@ -111,8 +112,8 @@ def test_scripted_process_writes_canonical_shadow_when_recorder_is_disabled(
         evidence = runner.run_case(selected)
 
         assert evidence.recording_dir is not None
-        assert evidence.diagnostic_recording_enabled is False
-        assert evidence.recorder_update_hashes == ()
+        assert evidence.diagnostic_recording_enabled is True
+        assert evidence.recorder_update_hashes == selected.expected_update_hashes
         assert evidence.canonical_update_hashes == selected.expected_update_hashes
         assert evidence.canonical_result_kind == "none"
         assert evidence.canonical_result_outcome == "completed"
@@ -158,13 +159,14 @@ def test_authoritative_canonical_only_process_never_creates_legacy_file(
         assert not list(calibration_path.parent.glob("calibration.json.*"))
         diagnostics = runner.manager.get_legacy_calibration_writer_diagnostics()
         assert diagnostics["write_count"] == 0
-        assert diagnostics["suppressed_write_count"] >= 3
+        assert diagnostics["suppressed_write_count"] == 0
+        assert diagnostics["legacy_writer_available"] is False
         runner.restore()
     finally:
         assert session.close()
 
 
-def test_shadow_append_failure_preserves_legacy_completion(qapp, tmp_path, monkeypatch):
+def test_canonical_append_failure_is_fail_closed(qapp, tmp_path, monkeypatch):
     session = _session(qapp, tmp_path / "shadow-failure-session")
     try:
         _catalog, cases = load_catalog()
@@ -192,15 +194,14 @@ def test_shadow_append_failure_preserves_legacy_completion(qapp, tmp_path, monke
 
         monkeypatch.setattr(CalibrationRecordingStore, "append_update", fail_append)
 
-        with pytest.raises(CalibrationStorageContractError, match="canonical payload"):
+        with pytest.raises(CalibrationStorageContractError, match="payload mismatch"):
             runner.run_case(selected)
 
-        legacy = json.loads(calibration_path.read_text(encoding="utf-8"))
-        assert len(legacy["runs"][0]["steps"][selected.phase_name]) == 2
-        assert completions == [True]
+        assert not calibration_path.exists()
+        assert completions == []
         assert runner.manager.activeCalibration is None
         diagnostics = runner.manager.get_shadow_storage_diagnostics()
-        assert [row["kind"] for row in diagnostics].count("update_append_failed") == 2
+        assert [row["kind"] for row in diagnostics].count("update_append_failed") == 1
         result_path = next(
             calibration_path.parent.glob("calibration_recordings/*/*/result.json")
         )
@@ -245,11 +246,10 @@ def test_authoritative_append_failure_blocks_legacy_write_and_completion(
             raise OSError("injected authoritative append failure")
 
         monkeypatch.setattr(CalibrationRecordingStore, "append_update", fail_append)
-        with pytest.raises(CalibrationStorageContractError, match="legacy calibration"):
+        with pytest.raises(CalibrationStorageContractError, match="payload mismatch"):
             runner.run_case(selected)
 
-        legacy = json.loads(calibration_path.read_text(encoding="utf-8"))
-        assert legacy["runs"][0]["steps"].get(selected.phase_name, []) == []
+        assert not calibration_path.exists()
         assert completions == []
         assert len(errors) == 1
         assert "update_append_failed" in errors[0].lower()
@@ -299,11 +299,10 @@ def test_authoritative_run_creation_failure_prevents_process_start(
 
         monkeypatch.setattr(CalibrationRecordingStore, "start_run", fail_start)
         runner.manager.calibrationError.connect(errors.append)
-        with pytest.raises(CalibrationStorageContractError, match="legacy calibration"):
+        with pytest.raises(CalibrationStorageContractError, match="payload mismatch"):
             runner.run_case(selected)
 
-        legacy = json.loads(calibration_path.read_text(encoding="utf-8"))
-        assert legacy["runs"][0]["steps"].get(selected.phase_name, []) == []
+        assert not calibration_path.exists()
         assert starts == []
         assert len(errors) == 1
         assert "storage could not be opened" in errors[0].lower()

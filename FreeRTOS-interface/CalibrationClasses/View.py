@@ -3720,35 +3720,23 @@ class DropletImagingDialog(QtWidgets.QDialog):
         run_options_v.setSpacing(6)
 
         manager = self.model.calibration_manager
-        authoritative_storage = bool(
-            getattr(manager, "is_calibration_store_authoritative", lambda: False)()
+        capture_row = QtWidgets.QHBoxLayout()
+        capture_row.addWidget(QtWidgets.QLabel("Capture Retention:"))
+        self.capture_retention_combo = QtWidgets.QComboBox()
+        self.capture_retention_combo.addItem("Structured only", "structured_only")
+        self.capture_retention_combo.addItem("Key evidence", "key_evidence")
+        self.capture_retention_combo.addItem("Full", "full")
+        self.capture_retention_combo.setToolTip(
+            "Structured calibration results are always saved. This controls retained image pixels for future runs."
         )
-        if authoritative_storage:
-            capture_row = QtWidgets.QHBoxLayout()
-            capture_row.addWidget(QtWidgets.QLabel("Capture Retention:"))
-            self.capture_retention_combo = QtWidgets.QComboBox()
-            self.capture_retention_combo.addItem("Structured only", "structured_only")
-            self.capture_retention_combo.addItem("Key evidence", "key_evidence")
-            self.capture_retention_combo.addItem("Full", "full")
-            self.capture_retention_combo.setToolTip(
-                "Structured calibration results are always saved. This controls retained image pixels for future runs."
-            )
-            selected_policy = str(manager.get_capture_retention_policy())
-            selected_index = self.capture_retention_combo.findData(selected_policy)
-            self.capture_retention_combo.setCurrentIndex(max(0, selected_index))
-            capture_row.addWidget(self.capture_retention_combo, 1)
-            run_options_v.addLayout(capture_row)
-        else:
-            self.record_calibration_checkbox = QtWidgets.QCheckBox("Record Calibration Runs")
-            self.record_calibration_checkbox.setToolTip(
-                "When enabled, calibration runs save captures/events/analysis to calibration_recordings."
-            )
-            try:
-                rec_enabled = bool(manager.get_record_mode_enabled())
-            except Exception:
-                rec_enabled = bool(getattr(manager, "record_mode_enabled", True))
-            self.record_calibration_checkbox.setChecked(rec_enabled)
-            run_options_v.addWidget(self.record_calibration_checkbox)
+        policy_getter = getattr(manager, "get_capture_retention_policy", None)
+        selected_policy = str(
+            policy_getter() if callable(policy_getter) else "key_evidence"
+        )
+        selected_index = self.capture_retention_combo.findData(selected_policy)
+        self.capture_retention_combo.setCurrentIndex(max(0, selected_index))
+        capture_row.addWidget(self.capture_retention_combo, 1)
+        run_options_v.addLayout(capture_row)
 
         self.export_calibration_records_button = QtWidgets.QPushButton(
             self.EXPORT_CALIBRATION_RECORDS_TEXT
@@ -4434,8 +4422,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         self.online_stream_tail_apply_button.clicked.connect(self.apply_online_stream_tail_start_override)
         self.online_stream_tail_reset_button.clicked.connect(self.reset_online_stream_tail_start_override)
-        if hasattr(self, "record_calibration_checkbox"):
-            self.record_calibration_checkbox.toggled.connect(self.set_record_mode_enabled)
         if hasattr(self, "capture_retention_combo"):
             self.capture_retention_combo.currentIndexChanged.connect(
                 self.set_capture_retention_policy
@@ -8176,31 +8162,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if hasattr(self, "stream_capture_group"):
             self._sync_stream_capture_panel_state()
 
-        if hasattr(self, "record_calibration_checkbox"):
-            droplet_sequence_busy_getter = getattr(
-                getattr(self.model, "calibration_manager", None),
-                "is_droplet_calibration_sequence_busy",
-                None,
-            )
-            droplet_sequence_busy = False
-            if callable(droplet_sequence_busy_getter):
-                try:
-                    droplet_sequence_busy = bool(droplet_sequence_busy_getter())
-                except Exception:
-                    droplet_sequence_busy = False
-            sequence_busy_getter = getattr(
-                getattr(self.model, "calibration_manager", None),
-                "is_stream_calibration_sequence_busy",
-                None,
-            )
-            sequence_busy = False
-            if callable(sequence_busy_getter):
-                try:
-                    sequence_busy = bool(sequence_busy_getter())
-                except Exception:
-                    sequence_busy = False
-            if sequence_busy or droplet_sequence_busy:
-                self.record_calibration_checkbox.setEnabled(False)
         if hasattr(self, "capture_retention_combo"):
             self.capture_retention_combo.setEnabled(not busy)
 
@@ -11217,8 +11178,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._recompute_stream_calibration_sequence_button_state()
             self._recompute_droplet_calibration_sequence_button_state()
 
-        if hasattr(self, "record_calibration_checkbox"):
-            self.record_calibration_checkbox.setEnabled(not stream_busy and not block_new_starts)
         if hasattr(self, "capture_retention_combo"):
             self.capture_retention_combo.setEnabled(not stream_busy and not block_new_starts)
 

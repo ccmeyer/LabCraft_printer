@@ -59,14 +59,15 @@ def test_fresh_experiment_persists_policy_without_seeding_calibration_json(tmp_p
     assert not list(root.glob("calibration.json.*"))
 
 
-def test_manager_suppresses_every_legacy_save_for_canonical_only_policy(tmp_path):
+def test_manager_retires_every_legacy_save_entry_point(tmp_path):
     model = _manager_model(tmp_path)
     manager = CalibrationManager(model)
     manager.update_calibration_file_path(model.experiment_model.calibration_file_path)
     manager.set_calibration_storage_policy(new_experiment_policy())
 
     manager.begin_session(model.experiment_model.calibration_file_path)
-    manager.save_calibration_data(model.experiment_model.calibration_file_path)
+    with pytest.raises(RuntimeError, match="retired"):
+        manager.save_calibration_data(model.experiment_model.calibration_file_path)
     manager.end_session()
 
     path = Path(model.experiment_model.calibration_file_path)
@@ -75,22 +76,24 @@ def test_manager_suppresses_every_legacy_save_for_canonical_only_policy(tmp_path
     diagnostics = manager.get_legacy_calibration_writer_diagnostics()
     assert diagnostics["effective_enabled"] is False
     assert diagnostics["write_count"] == 0
-    assert diagnostics["suppressed_write_count"] == 3
+    assert diagnostics["suppressed_write_count"] == 0
+    assert diagnostics["effective_reason"] == "writer_retired"
 
 
-def test_historical_policy_keeps_existing_dual_writer(tmp_path):
+def test_historical_document_is_loaded_read_only_and_remains_byte_identical(tmp_path):
     model = _manager_model(tmp_path)
+    path = Path(model.experiment_model.calibration_file_path)
+    original = b'{"runs":[{"run_id":"historical","outcome":"completed","calibrations":{}}]}\n'
+    path.write_bytes(original)
     manager = CalibrationManager(model)
     manager.update_calibration_file_path(model.experiment_model.calibration_file_path)
 
     manager.begin_session(model.experiment_model.calibration_file_path)
     manager.end_session()
 
-    path = Path(model.experiment_model.calibration_file_path)
-    document = json.loads(path.read_text(encoding="utf-8"))
-    assert len(document["runs"]) == 1
-    assert document["runs"][0]["outcome"] == "completed"
-    assert manager.get_legacy_calibration_writer_diagnostics()["write_count"] == 2
+    assert path.read_bytes() == original
+    assert manager.data["runs"][0]["run_id"] == "historical"
+    assert manager.get_legacy_calibration_writer_diagnostics()["write_count"] == 0
 
 
 @pytest.mark.parametrize(
@@ -102,7 +105,7 @@ def test_historical_policy_keeps_existing_dual_writer(tmp_path):
         ({"LABCRAFT_CALIBRATION_SECONDARY_READER": "legacy"}, "secondary_legacy_reader"),
     ],
 )
-def test_compatibility_modes_force_legacy_writer(
+def test_obsolete_compatibility_modes_block_calibration_startup(
     tmp_path, monkeypatch, environment, reason
 ):
     for key, value in environment.items():
@@ -112,13 +115,14 @@ def test_compatibility_modes_force_legacy_writer(
     manager.update_calibration_file_path(model.experiment_model.calibration_file_path)
     manager.set_calibration_storage_policy(new_experiment_policy())
 
-    manager.begin_session(model.experiment_model.calibration_file_path)
-    manager.end_session()
-
     diagnostics = manager.get_legacy_calibration_writer_diagnostics()
-    assert diagnostics["effective_enabled"] is True
-    assert diagnostics["effective_reason"] == reason
-    assert Path(model.experiment_model.calibration_file_path).is_file()
+    assert diagnostics["effective_enabled"] is False
+    assert diagnostics["effective_reason"] == "writer_retired"
+    persistence = manager.get_calibration_persistence_diagnostics()
+    assert persistence["calibration_start_blocked"] is True
+    assert environment.keys() <= persistence["obsolete_flags"].keys()
+    assert reason
+    assert not Path(model.experiment_model.calibration_file_path).exists()
 
 
 def test_policy_cannot_change_during_active_session(tmp_path):

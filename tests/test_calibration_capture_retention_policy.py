@@ -115,7 +115,7 @@ def test_manager_policy_is_session_scoped_busy_guarded_and_compatibility_safe():
     assert manager.get_capture_retention_policy() == "full"
 
 
-def test_authority_rollback_environment_restores_legacy_recorder_semantics(
+def test_obsolete_authority_rollback_does_not_disable_structured_persistence(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("LABCRAFT_CALIBRATION_STORE_AUTHORITATIVE", "0")
@@ -123,7 +123,8 @@ def test_authority_rollback_environment_restores_legacy_recorder_semantics(
     model.machine_state_updated = SignalStub()
     manager = CalibrationManager(model)
 
-    assert manager.is_calibration_store_authoritative() is False
+    assert manager.is_calibration_store_authoritative() is True
+    assert manager.get_calibration_storage_start_block_message()
     manager.set_record_mode_enabled(False)
     assert manager.get_record_mode_enabled() is False
     assert manager.get_shadow_store_enabled() is True

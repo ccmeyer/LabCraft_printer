@@ -60,7 +60,6 @@ from GravimetricLedger import (
 from CalibrationRecordingStore import (
     CaptureRetentionPolicy,
     CalibrationRecordingStore,
-    CalibrationStoreError,
     LEGACY_REF_SCHEMA_NAME,
     LEGACY_REF_SCHEMA_VERSION,
     semantic_sha256 as calibration_storage_sha256,
@@ -71,7 +70,6 @@ from CalibrationStorageContracts import (
 )
 from CalibrationPersistencePolicy import (
     CalibrationStoragePolicy,
-    LegacyWriterMode,
     legacy_compatible_policy,
     normalize_calibration_storage_policy,
 )
@@ -1698,16 +1696,12 @@ class CalibrationManager(QObject):
 
         # Recorder mode: captures per-process runtime telemetry for offline replay/debug.
         self.record_mode_enabled = True
-        self._canonical_store_authoritative = (
-            str(os.environ.get("LABCRAFT_CALIBRATION_STORE_AUTHORITATIVE", "1")).strip()
-            != "0"
-        )
+        # Milestone 7: canonical structured persistence is unconditional.  Keep
+        # detecting the former rollback values so an old deployment cannot
+        # silently hide or discard new canonical results.
         self._capture_retention_policy = CaptureRetentionPolicy.KEY_EVIDENCE
         self._process_recorder = CalibrationProcessRecorder(model)
-        self._shadow_store_enabled = (
-            str(os.environ.get("LABCRAFT_CALIBRATION_STORE_SHADOW", "1")).strip()
-            != "0"
-        )
+        self._shadow_store_enabled = True
         self._calibration_recording_store = None
         self._active_shadow_run = None
         self._last_shadow_run = None
@@ -1716,50 +1710,53 @@ class CalibrationManager(QObject):
         self._shadow_storage_diagnostics = []
         self._calibration_recordings_root = None
         self._calibration_index_path = None
-        configured_reader = str(
-            os.environ.get("LABCRAFT_CALIBRATION_PRIMARY_READER", "canonical")
-        ).strip().lower()
-        if configured_reader not in {"canonical", "legacy"}:
-            LOGGER.warning(
-                "Invalid LABCRAFT_CALIBRATION_PRIMARY_READER=%r; using canonical",
-                configured_reader,
-            )
-            configured_reader = "canonical"
-        self._calibration_reader_preference = configured_reader
-        configured_secondary_reader = str(
-            os.environ.get("LABCRAFT_CALIBRATION_SECONDARY_READER", "canonical")
-        ).strip().lower()
-        if configured_secondary_reader not in {"canonical", "legacy"}:
-            LOGGER.warning(
-                "Invalid LABCRAFT_CALIBRATION_SECONDARY_READER=%r; using canonical",
-                configured_secondary_reader,
-            )
-            configured_secondary_reader = "canonical"
-        self._calibration_secondary_reader_preference = configured_secondary_reader
+        self._calibration_reader_preference = "canonical"
+        self._calibration_secondary_reader_preference = "canonical"
         self._legacy_reader_fallback_enabled = str(
             os.environ.get("LABCRAFT_CALIBRATION_LEGACY_FALLBACK", "1")
         ).strip() != "0"
-        legacy_writer_value = str(
-            os.environ.get("LABCRAFT_CALIBRATION_LEGACY_WRITER", "0")
-        ).strip()
-        if legacy_writer_value not in {"0", "1"}:
-            LOGGER.warning(
-                "Invalid LABCRAFT_CALIBRATION_LEGACY_WRITER=%r; using 0",
-                legacy_writer_value,
+        obsolete_values = {
+            "LABCRAFT_CALIBRATION_LEGACY_WRITER": (
+                str(os.environ.get("LABCRAFT_CALIBRATION_LEGACY_WRITER", "0")).strip(),
+                {"0", ""},
+            ),
+            "LABCRAFT_CALIBRATION_STORE_AUTHORITATIVE": (
+                str(os.environ.get("LABCRAFT_CALIBRATION_STORE_AUTHORITATIVE", "1")).strip(),
+                {"1", ""},
+            ),
+            "LABCRAFT_CALIBRATION_STORE_SHADOW": (
+                str(os.environ.get("LABCRAFT_CALIBRATION_STORE_SHADOW", "1")).strip(),
+                {"1", ""},
+            ),
+            "LABCRAFT_CALIBRATION_PRIMARY_READER": (
+                str(os.environ.get("LABCRAFT_CALIBRATION_PRIMARY_READER", "canonical")).strip().lower(),
+                {"canonical", ""},
+            ),
+            "LABCRAFT_CALIBRATION_SECONDARY_READER": (
+                str(os.environ.get("LABCRAFT_CALIBRATION_SECONDARY_READER", "canonical")).strip().lower(),
+                {"canonical", ""},
+            ),
+        }
+        self._obsolete_calibration_storage_flags = {
+            name: value
+            for name, (value, accepted) in obsolete_values.items()
+            if value not in accepted
+        }
+        if self._obsolete_calibration_storage_flags:
+            LOGGER.error(
+                "Retired calibration storage settings block new calibrations: %s",
+                ", ".join(sorted(self._obsolete_calibration_storage_flags)),
             )
-            legacy_writer_value = "0"
-        self._legacy_writer_rollback_enabled = legacy_writer_value == "1"
         self._calibration_storage_policy = legacy_compatible_policy(
             source="manager_default"
         )
-        self._legacy_writer_write_count = 0
-        self._legacy_writer_suppressed_write_count = 0
-        self._legacy_writer_last_operation = ""
         self._calibration_recording_reader = None
         self._calibration_reader_diagnostics = {}
         self._completed_canonical_session_cache = {}
         self._canonical_session_result_cache = []
         self._active_calibration_session_state = None
+        self._active_session_payloads = {}
+        self._active_session_phase_update_counts = {}
         self._calibration_history_revision = 0
         self._capture_performance_diagnostics_enabled = False
 
@@ -1882,7 +1879,7 @@ class CalibrationManager(QObject):
     # ------------- Per-process recorder -------------
 
     def is_calibration_store_authoritative(self) -> bool:
-        return bool(getattr(self, "_canonical_store_authoritative", False))
+        return True
 
     def set_calibration_storage_policy(self, policy) -> CalibrationStoragePolicy:
         normalized = normalize_calibration_storage_policy(policy)
@@ -1898,7 +1895,7 @@ class CalibrationManager(QObject):
                 "calibration storage policy cannot change during an active session"
             )
         if normalized.warning:
-            LOGGER.warning("%s; retaining legacy-compatible writes", normalized.warning)
+            LOGGER.warning("%s; the retired legacy writer remains unavailable", normalized.warning)
         self._calibration_storage_policy = normalized
         return normalized
 
@@ -1910,47 +1907,60 @@ class CalibrationManager(QObject):
         )
 
     def _legacy_calibration_writer_reason(self) -> str:
-        if not self.is_calibration_store_authoritative():
-            return "authoritative_store_rollback"
-        if bool(getattr(self, "_legacy_writer_rollback_enabled", False)):
-            return "legacy_writer_rollback"
-        if str(getattr(self, "_calibration_reader_preference", "canonical")) == "legacy":
-            return "primary_legacy_reader"
-        if str(
-            getattr(self, "_calibration_secondary_reader_preference", "canonical")
-        ) == "legacy":
-            return "secondary_legacy_reader"
-        if (
-            self.get_calibration_storage_policy().legacy_writer_mode
-            is LegacyWriterMode.LEGACY_COMPATIBLE
-        ):
-            return "legacy_compatible_experiment"
-        return "canonical_only_experiment"
+        return "writer_retired"
 
     def is_legacy_calibration_writer_enabled(self) -> bool:
-        return self._legacy_calibration_writer_reason() != "canonical_only_experiment"
+        """Compatibility query retained for integrations; it is always false."""
 
-    def get_legacy_calibration_writer_diagnostics(self) -> dict[str, Any]:
+        return False
+
+    def get_calibration_persistence_diagnostics(self) -> dict[str, Any]:
         policy = self.get_calibration_storage_policy()
         path = str(self.calibration_file_path or "")
+        obsolete = dict(getattr(self, "_obsolete_calibration_storage_flags", {}) or {})
         return {
-            "schema_name": "labcraft.calibration_storage.legacy_writer_diagnostics",
-            "schema_version": 1,
+            "schema_name": "labcraft.calibration_storage.runtime_diagnostics",
+            "schema_version": 2,
+            "canonical_authoritative": True,
+            "legacy_writer_available": False,
             "declared_mode": policy.legacy_writer_mode.value,
+            "declared_mode_inert": True,
             "policy_source": str(policy.source),
             "policy_warning": str(policy.warning),
-            "effective_enabled": self.is_legacy_calibration_writer_enabled(),
-            "effective_reason": self._legacy_calibration_writer_reason(),
+            "effective_enabled": False,
+            "effective_reason": "writer_retired",
             "calibration_json_path": path,
             "calibration_json_exists": bool(path and os.path.isfile(path)),
-            "write_count": int(getattr(self, "_legacy_writer_write_count", 0)),
-            "suppressed_write_count": int(
-                getattr(self, "_legacy_writer_suppressed_write_count", 0)
-            ),
-            "last_operation": str(
-                getattr(self, "_legacy_writer_last_operation", "")
-            ),
+            "obsolete_flags": obsolete,
+            "calibration_start_blocked": bool(obsolete),
         }
+
+    def get_legacy_calibration_writer_diagnostics(self) -> dict[str, Any]:
+        """Deprecated alias for the non-writing runtime diagnostics."""
+
+        diagnostics = self.get_calibration_persistence_diagnostics()
+        diagnostics.update(
+            {
+                "write_count": 0,
+                "suppressed_write_count": 0,
+                "last_operation": "writer_retired",
+            }
+        )
+        return diagnostics
+
+    def get_obsolete_calibration_storage_flags(self) -> dict[str, str]:
+        return dict(getattr(self, "_obsolete_calibration_storage_flags", {}) or {})
+
+    def get_calibration_storage_start_block_message(self) -> str:
+        flags = self.get_obsolete_calibration_storage_flags()
+        if not flags:
+            return ""
+        names = ", ".join(sorted(flags))
+        return (
+            "Calibration storage rollback settings are retired. Remove "
+            f"{names} from the environment and restart the application before "
+            "starting a calibration. Historical calibration data remains readable."
+        )
 
     def get_capture_retention_policy(self) -> str:
         return CaptureRetentionPolicy.parse(
@@ -1959,7 +1969,9 @@ class CalibrationManager(QObject):
 
     def set_capture_retention_policy(self, policy) -> bool:
         selected = CaptureRetentionPolicy.parse(policy)
-        busy = self.activeCalibration is not None or bool(self.calibration_queue)
+        busy = getattr(self, "activeCalibration", None) is not None or bool(
+            getattr(self, "calibration_queue", ()) or ()
+        )
         busy = busy or self.has_open_stream_gravimetric_capture()
         if busy:
             self.calibrationStageChanged.emit(
@@ -1975,21 +1987,19 @@ class CalibrationManager(QObject):
         return True
 
     def set_shadow_store_enabled(self, enabled: bool):
-        """Developer rollback switch; unrelated to the operator recorder toggle."""
-        if self.is_calibration_store_authoritative() and not bool(enabled):
+        """Compatibility shim; canonical structured persistence cannot be disabled."""
+        if not bool(enabled):
             raise RuntimeError(
-                "canonical storage cannot be disabled while authoritative mode is active"
+                "canonical calibration storage is mandatory; the shadow rollback is retired"
             )
-        self._shadow_store_enabled = bool(enabled)
+        self._shadow_store_enabled = True
         store = getattr(self, "_calibration_recording_store", None)
         if store is not None:
-            store.enabled = bool(enabled)
-        return self._shadow_store_enabled
+            store.enabled = True
+        return True
 
     def get_shadow_store_enabled(self) -> bool:
-        return self.is_calibration_store_authoritative() or bool(
-            getattr(self, "_shadow_store_enabled", False)
-        )
+        return True
 
     def get_shadow_storage_diagnostics(self):
         return [dict(item) for item in self._shadow_storage_diagnostics]
@@ -2030,16 +2040,10 @@ class CalibrationManager(QObject):
         return self._calibration_recording_store
 
     def get_calibration_reader_preference(self):
-        if not self.is_calibration_store_authoritative():
-            return "legacy"
-        return str(getattr(self, "_calibration_reader_preference", "canonical"))
+        return "canonical"
 
     def get_calibration_secondary_reader_preference(self):
-        if not self.is_calibration_store_authoritative():
-            return "legacy"
-        return str(
-            getattr(self, "_calibration_secondary_reader_preference", "canonical")
-        )
+        return "canonical"
 
     def get_current_calibration_session_snapshot(self):
         """Return the bounded in-memory source used by secondary writers."""
@@ -2052,6 +2056,14 @@ class CalibrationManager(QObject):
                 getattr(self, "_completed_canonical_session_cache", {}) or {}
             ).items()
         }
+        for phase, payloads in dict(
+            getattr(self, "_active_session_payloads", {}) or {}
+        ).items():
+            target = phase_payloads.setdefault(str(phase), [])
+            for payload in list(payloads or ()):
+                item = dict(payload)
+                if item not in target:
+                    target.append(item)
         return {
             **state,
             "calibration_session_id": session_id,
@@ -3737,18 +3749,12 @@ class CalibrationManager(QObject):
             return None
 
     def set_record_mode_enabled(self, enabled: bool):
-        if self.is_calibration_store_authoritative():
-            return self.set_capture_retention_policy(
-                "full" if bool(enabled) else "structured_only"
-            )
-        self.record_mode_enabled = bool(enabled)
-        state = "enabled" if self.record_mode_enabled else "disabled"
-        self.calibrationStageChanged.emit(f"Calibration recorder {state}.", "dark_blue")
+        return self.set_capture_retention_policy(
+            "full" if bool(enabled) else "structured_only"
+        )
 
     def get_record_mode_enabled(self) -> bool:
-        if self.is_calibration_store_authoritative():
-            return self.get_capture_retention_policy() != "structured_only"
-        return bool(getattr(self, "record_mode_enabled", False))
+        return self.get_capture_retention_policy() != "structured_only"
 
     def set_calibration_memory_enabled(self, enabled: bool):
         store = self._get_calibration_memory_store()
@@ -3988,21 +3994,14 @@ class CalibrationManager(QObject):
         if phase_key:
             summary["calibration_phase"] = phase_key
 
-        try:
-            run = self.data["runs"][self._run_idx]
-        except Exception:
-            run = None
-        if not isinstance(run, dict):
-            return summary
-
-        steps = run.get("steps") or {}
         step_payloads = []
-        if phase_key and isinstance(steps, dict):
-            step_payloads = list(steps.get(phase_key) or [])
+        if phase_key:
+            step_payloads = list(
+                (getattr(self, "_active_session_payloads", {}) or {}).get(
+                    phase_key, ()
+                )
+            )
         summary["step_count"] = len(step_payloads)
-        flat_measurements = run.get("flat_measurements")
-        if isinstance(flat_measurements, list):
-            summary["flat_measurement_count"] = len(flat_measurements)
 
         if not step_payloads:
             return summary
@@ -4147,8 +4146,8 @@ class CalibrationManager(QObject):
     def begin_session(self, calibration_file_path: str, notes: str = None):
         """
         Start a new calibration run under the given directory.
-        Loads calibration.json when present and opens a new in-memory run
-        envelope. Persistence of the compatibility document is policy-driven.
+        Loads calibration.json only as read-only historical compatibility data
+        and opens canonical current-session state. No legacy run is appended.
         """
         # print(f"Starting calibration session in {experiment_dir}")
         # if not os.path.exists(experiment_dir):
@@ -4166,20 +4165,16 @@ class CalibrationManager(QObject):
         self._reset_calibration_memory_prior_runtime()
         self._reset_online_stream_prior_runtime()
         print(f"Calibration file path: {self.calibration_file_path}")
-        # Load if exists
+        # Historical compatibility loading is read-only. Corruption is exposed
+        # by the typed reader; it must never rename or rewrite the source file.
         if os.path.exists(self.calibration_file_path):
             try:
                 with open(self.calibration_file_path, "r") as f:
-                    self.data = json.load(f)
+                    self.data = self._normalize_loaded_calibration_data(json.load(f))
             except Exception:
-                # Corrupted? Keep a backup and start fresh structure
-                if self.is_legacy_calibration_writer_enabled():
-                    backup = self.calibration_file_path + ".corrupt." + time.strftime("%Y%m%d-%H%M%S")
-                    try:
-                        os.rename(self.calibration_file_path, backup)
-                    except Exception:
-                        pass
                 self.data = {"schema_version": 1, "runs": []}
+        else:
+            self.data = {"schema_version": 1, "runs": []}
 
         # Build run envelope
         self._run_id = str(uuid.uuid4())
@@ -4195,35 +4190,16 @@ class CalibrationManager(QObject):
             "notes": notes or "",
         }
         stock_identity = self._build_calibration_stock_identity_snapshot()
-        run_meta = {
-            "run_id": self._run_id,
-            "started_at": started_at,
-            "ended_at": None,
-            "outcome": None,
-            "error_message": "",
-            **stock_identity,
-            "notes": notes or "",
-            "steps": {k: [] for k in set(self.PHASE_ALIASES.values())},
-            "flat_measurements": []
-        }
-        if (
-            self.is_calibration_store_authoritative()
-            and self.is_legacy_calibration_writer_enabled()
-        ):
-            run_meta["canonical_storage"] = {
-                "schema_name": "labcraft.calibration_recording.legacy_session_authority",
-                "schema_version": 1,
-                "structured_persistence_required": True,
-            }
-        self.data.setdefault("schema_version", 1)
-        self.data.setdefault("runs", [])
-        self.data["runs"].append(run_meta)
-        self._run_idx = len(self.data["runs"]) - 1
-        self._save_atomic(operation="begin_session")
+        self._active_calibration_session_state.update(stock_identity)
+        # `_run_idx` remains a compatibility sentinel for older session code.
+        # It no longer indexes self.data, which is historical and read-only.
+        self._run_idx = 0
+        self._active_session_payloads = {}
+        self._active_session_phase_update_counts = {}
         self._start_calibration_memory_run(notes=notes)
 
         self.calibrationStageChanged.emit(
-            f"Calibration session started (run_id={self._run_id}, stock={run_meta['stock_solution']})",
+            f"Calibration session started (run_id={self._run_id}, stock={stock_identity['stock_solution']})",
             "dark_blue"
         )
         self.characterizationSummaryUpdated.emit()
@@ -4246,11 +4222,8 @@ class CalibrationManager(QObject):
 
     def end_session(self, *, outcome: str = "completed", error_message: str = "", emit_stage: bool = True):
         """Stamp end time for the current run."""
-        if self._run_idx is not None and 0 <= self._run_idx < len(self.data.get("runs", [])):
+        if self._run_idx is not None and self._active_calibration_session_state:
             ended_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            self.data["runs"][self._run_idx]["ended_at"] = ended_at
-            self.data["runs"][self._run_idx]["outcome"] = str(outcome or "completed")
-            self.data["runs"][self._run_idx]["error_message"] = str(error_message or "")
             session_state = dict(self._active_calibration_session_state or {})
             session_state.update(
                 {
@@ -4260,7 +4233,6 @@ class CalibrationManager(QObject):
                 }
             )
             self._active_calibration_session_state = session_state
-            self._save_atomic(operation="end_session")
             self._write_calibration_memory_summary()
             if emit_stage:
                 self.calibrationStageChanged.emit("Calibration session ended", "purple")
@@ -4288,16 +4260,16 @@ class CalibrationManager(QObject):
         self._completed_canonical_session_cache = {}
         self._canonical_session_result_cache = []
         self._active_calibration_session_state = None
+        self._active_session_payloads = {}
+        self._active_session_phase_update_counts = {}
         self._reset_calibration_memory_prior_runtime()
         self._reset_online_stream_prior_runtime()
         self._reset_calibration_memory_ui_recommendation_state()
 
-    # Back-compat: keep these, but redirect through session I/O
     def create_calibration_file(self, file_path):
-        """Creates a brand-new file and clears any prior data."""
-        os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
-        self.calibration_file_path = file_path
-        self.remove_all_calibrations()
+        raise RuntimeError(
+            "calibration.json writing was retired; canonical calibration storage is mandatory"
+        )
 
     @staticmethod
     def _normalize_loaded_calibration_data(payload):
@@ -4327,6 +4299,9 @@ class CalibrationManager(QObject):
             # experiment loading is a read-only ownership transition.
             self._run_id = None
             self._run_idx = None
+            self._active_calibration_session_state = None
+            self._active_session_payloads = {}
+            self._active_session_phase_update_counts = {}
             self._reset_calibration_memory_prior_runtime()
             self._reset_online_stream_prior_runtime()
             self._reset_calibration_memory_ui_recommendation_state()
@@ -4343,10 +4318,14 @@ class CalibrationManager(QObject):
                 self.data = {"schema_version": 1, "runs": []}
         else:
             self.data = {"schema_version": 1, "runs": []}
+        self._calibration_history_revision = int(
+            getattr(self, "_calibration_history_revision", 0)
+        ) + 1
 
     def save_calibration_data(self, file_path):
-        self.calibration_file_path = file_path
-        self._save_atomic(operation="compatibility_save")
+        raise RuntimeError(
+            "calibration.json writing was retired; canonical calibration storage is mandatory"
+        )
 
     def load_calibration_data(self, file_path):
         self.calibration_file_path = file_path
@@ -4381,34 +4360,9 @@ class CalibrationManager(QObject):
                 self.data = {"schema_version": 1, "runs": []}
 
     def remove_all_calibrations(self):
-        self.data = {"schema_version": 1, "runs": []}
-        self._save_atomic(operation="remove_all")
-
-    def _save_atomic(self, *, operation: str = "legacy_save"):
-        """Atomically persist the compatibility document when policy allows it."""
-        self._legacy_writer_last_operation = str(operation or "legacy_save")
-        if not self.is_legacy_calibration_writer_enabled():
-            self._legacy_writer_suppressed_write_count = int(
-                getattr(self, "_legacy_writer_suppressed_write_count", 0)
-            ) + 1
-            return False
-        if not self.calibration_file_path:
-            # safe default so nothing is lost silently
-            self.calibration_file_path = os.path.abspath("calibration.json")
-            self.calibrationStageChanged.emit(
-                f"Warning: calibration_file_path not set — writing to {self.calibration_file_path}", "red"
-            )
-        with self._lock:
-            tmp = self.calibration_file_path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(self.data, f, indent=2, default=numpy_encoder)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.calibration_file_path)
-        self._legacy_writer_write_count = int(
-            getattr(self, "_legacy_writer_write_count", 0)
-        ) + 1
-        return True
+        raise RuntimeError(
+            "calibration.json deletion was retired; historical calibration data is read-only"
+        )
 
     # ------------- Calibration queue -------------
 
@@ -4521,6 +4475,21 @@ class CalibrationManager(QObject):
 
     def start_active_calibration(self):
         if self.activeCalibration is not None:
+            storage_block = self.get_calibration_storage_start_block_message()
+            if storage_block:
+                process_obj = self.activeCalibration
+                self.clear_calibration_queue()
+                try:
+                    release_fn = getattr(process_obj, "release_runtime_resources", None)
+                    if callable(release_fn):
+                        release_fn()
+                except Exception:
+                    pass
+                self.activeCalibration = None
+                self.calibrationStageChanged.emit(storage_block, "red")
+                self.calibrationError.emit(storage_block)
+                self.calibrationQueueCompleted.emit()
+                return
             if self._is_volume_calibration_audit_process(self.activeCalibration):
                 experiment_model = getattr(self.model, "experiment_model", None)
                 lock_plan = getattr(experiment_model, "lock_execution_plan", None)
@@ -9126,9 +9095,11 @@ class CalibrationManager(QObject):
         payload["meta"] = meta
         payload["phase"] = phase_key
 
-        run = self.data["runs"][self._run_idx]
-        legacy_step_index = len(run["steps"].setdefault(phase_key, []))
-        legacy_writer_enabled = self.is_legacy_calibration_writer_enabled()
+        phase_counts = getattr(self, "_active_session_phase_update_counts", None)
+        if not isinstance(phase_counts, dict):
+            phase_counts = {}
+            self._active_session_phase_update_counts = phase_counts
+        source_step_index = int(phase_counts.get(phase_key, 0))
         canonical_update = None
         shadow_run = getattr(self, "_active_shadow_run", None)
         store = getattr(self, "_calibration_recording_store", None)
@@ -9142,93 +9113,31 @@ class CalibrationManager(QObject):
                     legacy_source={
                         "source_run_id": self._run_id,
                         "source_phase_key": phase_key,
-                        "source_step_index": legacy_step_index,
+                        "source_step_index": source_step_index,
                     },
-                    include_legacy_reference=(
-                        self.is_calibration_store_authoritative()
-                        and legacy_writer_enabled
-                    ),
+                    include_legacy_reference=False,
                 )
-                if self.is_calibration_store_authoritative():
-                    payload = dict(canonical_update.document["payload"])
+                payload = dict(canonical_update.document["payload"])
             except Exception as exc:
                 self._record_shadow_storage_failure(
                     "update_append_failed", exc, run=shadow_run
                 )
-                if self.is_calibration_store_authoritative():
-                    self._abort_active_process_for_storage_failure(
-                        "update_append_failed", exc
-                    )
-                    return
+                self._abort_active_process_for_storage_failure(
+                    "update_append_failed", exc
+                )
+                return
 
         self._update_stream_capture_online_summary_from_payload(
             payload,
             phase_key=phase_key,
         )
 
-        # In authoritative mode, prove semantic parity before exposing the
-        # legacy step.  The payload is the exact canonical payload returned by
-        # append_update(), including its canonical reference.
-        if (
-            canonical_update is not None
-            and self.is_calibration_store_authoritative()
-            and legacy_writer_enabled
-        ):
-            try:
-                if not store.record_parity(
-                    shadow_run,
-                    update_id=canonical_update.update_id,
-                    legacy_payload=payload,
-                ):
-                    raise CalibrationStoreError(
-                        "canonical and legacy payloads diverged"
-                    )
-            except Exception as exc:
-                self._record_shadow_storage_failure(
-                    "parity_check_failed", exc, run=shadow_run
-                )
-                self._abort_active_process_for_storage_failure(
-                    "parity_check_failed", exc
-                )
-                return
-
-        # Append to steps
-        run["steps"][phase_key].append(payload)
-
-        # Optional: emit flat rows if droplet arrays present (from droplet_search / characterization)
-        # self._try_append_flat_rows_from_payload(run, phase_key, payload)
-
-        try:
-            # Preserve the long-standing zero-argument seam used by focused
-            # process tests and integrations; _save_atomic remains the sole
-            # writer-policy guard.
-            self._save_atomic()
-        except Exception as exc:
-            try:
-                run["steps"][phase_key].pop()
-            except Exception:
-                pass
-            if self.is_calibration_store_authoritative():
-                self._record_shadow_storage_failure(
-                    "legacy_dual_write_failed", exc, run=shadow_run
-                )
-                self._abort_active_process_for_storage_failure(
-                    "legacy_dual_write_failed", exc
-                )
-                return
-            raise
-
-        if canonical_update is not None and not self.is_calibration_store_authoritative():
-            try:
-                parity_matched = store.record_parity(
-                    shadow_run,
-                    update_id=canonical_update.update_id,
-                    legacy_payload=run["steps"][phase_key][legacy_step_index],
-                )
-            except Exception as exc:
-                self._record_shadow_storage_failure(
-                    "parity_check_failed", exc, run=shadow_run
-                )
+        session_payloads = getattr(self, "_active_session_payloads", None)
+        if not isinstance(session_payloads, dict):
+            session_payloads = {}
+            self._active_session_payloads = session_payloads
+        session_payloads.setdefault(phase_key, []).append(dict(payload))
+        phase_counts[phase_key] = source_step_index + 1
 
         self.record_analysis(
             {
@@ -9318,22 +9227,26 @@ class CalibrationManager(QObject):
         return bool(str(tail_phase.get("status") or "") == "captured")
 
     def _latest_online_stream_calibration_payload(self) -> dict | None:
-        try:
-            self.ensure_loaded()
-        except Exception:
-            pass
-        runs = list((getattr(self, "data", {}) or {}).get("runs") or [])
-        run = None
-        try:
-            if self._run_idx is not None:
-                run = runs[int(self._run_idx)]
-        except Exception:
-            run = None
-        if run is None and runs:
-            run = runs[-1]
-        if not isinstance(run, dict):
-            return None
-        steps = list((run.get("steps") or {}).get("online_stream_calibration") or [])
+        phase_key = self._resolve_phase_key("online_stream_calibration")
+        steps = list(
+            (getattr(self, "_active_session_payloads", {}) or {}).get(
+                phase_key, ()
+            )
+        )
+        if not steps:
+            steps = list(
+                (getattr(self, "_completed_canonical_session_cache", {}) or {}).get(
+                    phase_key, ()
+                )
+            )
+        if not steps:
+            # Typed historical compatibility for a legacy-only session. This is
+            # read-only and is never used as the destination for the override.
+            runs = list((getattr(self, "data", {}) or {}).get("runs") or [])
+            if runs:
+                steps = list(
+                    (dict(runs[-1]).get("steps") or {}).get(phase_key) or []
+                )
         for step in reversed(steps):
             payload = dict(step or {})
             if self._online_stream_payload_has_captured_tail(payload):
@@ -9372,10 +9285,69 @@ class CalibrationManager(QObject):
             source_payload,
             tail_start_delay_from_emergence_us,
         )
-        self._append_calibration_step_payload(
-            payload,
-            phase_key="online_stream_calibration",
-        )
+        standalone_run = None
+        store = getattr(self, "_calibration_recording_store", None)
+        if getattr(self, "_active_shadow_run", None) is None:
+            if self._run_idx is None:
+                self.begin_session(
+                    self.model.experiment_model.get_calibration_file_path(),
+                    notes="auto-started online stream tail override",
+                )
+            store = self._ensure_calibration_recording_store()
+            diagnostics = self.get_calibration_persistence_diagnostics()
+            standalone_run = store.start_run(
+                calibration_session_id=self._run_id,
+                process_name="OnlineStreamCalibrationProcess",
+                phase_name="online_stream_calibration",
+                result_kind="calibration",
+                identity=self._build_calibration_stock_identity_snapshot(),
+                capture_policy_requested="structured_only",
+                capture_policy_effective="structured_only",
+                provenance={
+                    "storage_policy": {
+                        "schema_name": diagnostics["schema_name"],
+                        "schema_version": diagnostics["schema_version"],
+                        "declared_mode": diagnostics["declared_mode"],
+                        "effective_enabled": diagnostics["effective_enabled"],
+                        "effective_reason": diagnostics["effective_reason"],
+                    }
+                },
+            )
+            self._active_shadow_run = standalone_run
+        try:
+            update_count_before = len(
+                getattr(self._active_shadow_run, "updates", ()) or ()
+            )
+            self._append_calibration_step_payload(
+                payload,
+                phase_key="online_stream_calibration",
+            )
+            if standalone_run is not None:
+                if len(standalone_run.updates) != update_count_before + 1:
+                    raise RuntimeError(
+                        "canonical online stream tail override update was not committed"
+                    )
+                contract = process_storage_contract("OnlineStreamCalibrationProcess")
+                summary = build_terminal_summary(
+                    "OnlineStreamCalibrationProcess",
+                    contract,
+                    standalone_run,
+                    "completed",
+                )
+                commit = store.finalize_run(
+                    standalone_run,
+                    outcome="completed",
+                    summary_projection=summary,
+                )
+                self._last_shadow_run = standalone_run
+                self._last_shadow_commit = commit
+                self._register_terminal_canonical_run(standalone_run, commit)
+                self._register_completed_canonical_run(
+                    standalone_run, summary_projection=summary
+                )
+        finally:
+            if standalone_run is not None:
+                self._active_shadow_run = None
         result = dict(payload.get("result") or {})
         manual_override = dict(result.get("manual_override") or {})
         self._append_calibration_memory_observation(
@@ -9511,13 +9483,15 @@ class CalibrationManager(QObject):
             return None
 
     def _process_missing(self, proc_cls, *args, **kwargs) -> list[str]:
+        storage_block = self.get_calibration_storage_start_block_message()
+        prefix = [storage_block] if storage_block else []
         fn = getattr(proc_cls, "missing_requirements", None)
         if callable(fn):
             try:
-                return list(fn(self, *args, **kwargs)) or []
+                return prefix + (list(fn(self, *args, **kwargs)) or [])
             except TypeError:
-                return list(fn(self)) or []
-        return []
+                return prefix + (list(fn(self)) or [])
+        return prefix
 
     @staticmethod
     def _process_owns_calibration_memory_session(proc_or_cls) -> bool:
@@ -9554,6 +9528,11 @@ class CalibrationManager(QObject):
 
     def _try_start_process(self, proc_cls, *args, **kwargs) -> bool:
         kwargs = dict(kwargs or {})
+        storage_block = self.get_calibration_storage_start_block_message()
+        if storage_block:
+            self.calibrationStageChanged.emit(storage_block, "red")
+            self.calibrationError.emit(storage_block)
+            return False
         allow_stream_capture_session = bool(kwargs.pop("_allow_stream_capture_session", False))
         stream_capture_queue_phase = str(kwargs.pop("_stream_capture_queue_phase", "") or "").strip()
         allow_stream_calibration_sequence = bool(
@@ -10730,13 +10709,8 @@ class CalibrationManager(QObject):
             diagnostics = {"primary": "legacy_unconfigured", "row_count": len(rows), "issue_count": 0}
             self._calibration_reader_diagnostics = diagnostics
             return {"rows": rows, "issues": [], "diagnostics": diagnostics}
-        legacy_document = (
-            self.data
-            if self.is_legacy_calibration_writer_enabled()
-            else {"schema_version": 1, "runs": []}
-        )
         snapshot = reader.history_snapshot(
-            legacy_document=legacy_document,
+            legacy_document=self.data,
             cache_revision=int(getattr(self, "_calibration_history_revision", 0)),
         )
         current_identity = self._build_calibration_stock_identity_snapshot()

@@ -586,15 +586,17 @@ def _functional_contract_assertions(runtime: JourneyRuntime) -> None:
             provenance_ok = provenance_ok and (
                 policy.get("declared_mode") == "canonical_only"
                 and policy.get("effective_enabled") is False
-                and policy.get("effective_reason") == "canonical_only_experiment"
+                and policy.get("effective_reason") == "writer_retired"
             )
         cutover_ok = (
             not calibration_path.exists()
             and not list(calibration_path.parent.glob("calibration.json.*"))
             and writer.get("declared_mode") == "canonical_only"
             and writer.get("effective_enabled") is False
+            and writer.get("legacy_writer_available") is False
+            and writer.get("effective_reason") == "writer_retired"
             and int(writer.get("write_count") or 0) == 0
-            and int(writer.get("suppressed_write_count") or 0) >= 32
+            and int(writer.get("suppressed_write_count") or 0) == 0
             and all(not row["legacy_update_hashes"] for row in process_rows)
             and len(result_paths) == 16
             and provenance_ok
@@ -733,7 +735,7 @@ def _functional_contract_assertions(runtime: JourneyRuntime) -> None:
 
 
 def _run_legacy_writer_canaries(runtime: JourneyRuntime) -> dict[str, Any]:
-    """Prove historical compatibility and the explicit rollback in one update each."""
+    """Prove the retained legacy reader without invoking the retired writer."""
 
     _catalog, cases = load_catalog(
         runtime.fixture_path,
@@ -749,9 +751,7 @@ def _run_legacy_writer_canaries(runtime: JourneyRuntime) -> dict[str, Any]:
         memory_store.set_memory_enabled(False)
     root = Path(runtime.context.scenario_root) / "legacy-writer-canaries"
     historical_path = root / "historical" / "calibration.json"
-    rollback_path = root / "rollback" / "calibration.json"
     historical_path.parent.mkdir(parents=True, exist_ok=True)
-    rollback_path.parent.mkdir(parents=True, exist_ok=True)
     historical_path.write_text(
         json.dumps({"schema_version": 1, "runs": []}, indent=2),
         encoding="utf-8",
@@ -773,28 +773,11 @@ def _run_legacy_writer_canaries(runtime: JourneyRuntime) -> dict[str, Any]:
         historical = historical_runner.run_case(selected).as_dict()
         historical_writer = manager.get_legacy_calibration_writer_diagnostics()
         historical_runner.restore()
-
-        prior_rollback = bool(getattr(manager, "_legacy_writer_rollback_enabled", False))
-        manager._legacy_writer_rollback_enabled = True
-        try:
-            rollback_runner = StorageContractRunner(
-                model=runtime.context.model,
-                controller=runtime.context.controller,
-                machine=runtime.context.machine,
-                app=runtime.context.app,
-                calibration_file_path=rollback_path,
-                timeout_seconds=runtime.harness.config.timeout_seconds,
-                authoritative_mode=True,
-                legacy_writer_mode="canonical_only",
-            )
-            rollback = rollback_runner.run_case(selected).as_dict()
-            rollback_writer = manager.get_legacy_calibration_writer_diagnostics()
-            rollback_runner.restore()
-        finally:
-            manager._legacy_writer_rollback_enabled = prior_rollback
     finally:
         if memory_store is not None:
             memory_store.set_memory_enabled(prior_memory_enabled)
+
+    historical_after_run = file_sha256(historical_path)
 
     prepared = runtime.observations["prepared_experiment"]
     main_path = Path(prepared["calibration_file"])
@@ -804,23 +787,20 @@ def _run_legacy_writer_canaries(runtime: JourneyRuntime) -> dict[str, Any]:
     manager._calibration_secondary_reader_preference = "canonical"
     exact = (
         historical_before == historical_after_open
+        and historical_before == historical_after_run
         and historical_path.is_file()
-        and historical_writer["effective_reason"] == "legacy_compatible_experiment"
-        and historical["legacy_update_hashes"] == historical["update_hashes"]
+        and historical_writer["effective_reason"] == "writer_retired"
+        and historical_writer["legacy_writer_available"] is False
+        and historical["legacy_update_hashes"] == ()
         and historical["canonical_update_hashes"] == historical["update_hashes"]
-        and rollback_path.is_file()
-        and rollback_writer["effective_reason"] == "legacy_writer_rollback"
-        and rollback["legacy_update_hashes"] == rollback["update_hashes"]
-        and rollback["canonical_update_hashes"] == rollback["update_hashes"]
         and not main_path.exists()
     )
     evidence = {
         "exact": exact,
         "historical_open_hash_preserved": historical_before == historical_after_open,
+        "historical_run_hash_preserved": historical_before == historical_after_run,
         "historical_writer": historical_writer,
         "historical_process": historical,
-        "rollback_writer": rollback_writer,
-        "rollback_process": rollback,
         "main_calibration_json_absent": not main_path.exists(),
     }
     runtime.observations["legacy_writer_canaries"] = evidence
@@ -1681,7 +1661,7 @@ def _functional_payload(
         ),
         limitations=(
             (
-                "New experiments use canonical-only structured persistence; historical and rollback canaries retain legacy dual-writing."
+                "Canonical structured persistence is mandatory; the retired writer never creates or rewrites calibration.json, while historical files remain readable."
                 if _new_store_only_enabled(runtime)
                 else "Canonical run artifacts are authoritative for new writes while application discovery remains on the legacy schema until Milestone 4."
                 if _authoritative_enabled(runtime)

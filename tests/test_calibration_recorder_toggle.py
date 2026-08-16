@@ -30,16 +30,18 @@ class _FakeRecorder:
 def test_set_record_mode_enabled_updates_state_and_emits_stage():
     mgr = CalibrationManager.__new__(CalibrationManager)
     mgr.record_mode_enabled = True
+    mgr.activeCalibration = None
+    mgr.calibration_queue = []
     mgr.calibrationStageChanged = SignalStub()
 
     mgr.set_record_mode_enabled(False)
     assert mgr.get_record_mode_enabled() is False
     assert mgr.calibrationStageChanged.calls
-    assert "disabled" in mgr.calibrationStageChanged.calls[-1][0][0].lower()
+    assert "structured only" in mgr.calibrationStageChanged.calls[-1][0][0].lower()
 
     mgr.set_record_mode_enabled(True)
     assert mgr.get_record_mode_enabled() is True
-    assert "enabled" in mgr.calibrationStageChanged.calls[-1][0][0].lower()
+    assert "full" in mgr.calibrationStageChanged.calls[-1][0][0].lower()
 
 
 def test_finalize_process_recording_finalizes_active_run_even_when_disabled():

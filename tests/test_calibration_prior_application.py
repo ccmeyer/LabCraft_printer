@@ -346,7 +346,7 @@ def test_lookup_failures_do_not_block_seed_start_session(tmp_path, monkeypatch):
     assert kwargs == {}
     assert runtime["looked_up"] is False
     assert runtime["lookup_skipped_reason"] == "lookup_error"
-    assert Path(model.experiment_model.calibration_file_path).exists()
+    assert not Path(model.experiment_model.calibration_file_path).exists()
 
 
 def test_run_summary_records_prior_application_and_usefulness(tmp_path):
@@ -361,6 +361,7 @@ def test_run_summary_records_prior_application_and_usefulness(tmp_path):
 
     manager = CalibrationManager(model)
     manager.begin_session(model.experiment_model.calibration_file_path, notes="summary logging")
+    run_id = manager._run_id
     kwargs = manager._prepare_calibration_memory_prior_application(PressureBandCalibrationProcess, {})
     manager.record_calibration_memory_prior_probe(
         phase_name="pressure_scan",
@@ -381,8 +382,7 @@ def test_run_summary_records_prior_application_and_usefulness(tmp_path):
     )
     manager.end_session()
 
-    calibration_json = json.loads(Path(model.experiment_model.calibration_file_path).read_text(encoding="utf-8"))
-    run_id = calibration_json["runs"][0]["run_id"]
+    assert not Path(model.experiment_model.calibration_file_path).exists()
     summary_path = Path(store.get_run_paths(run_id)["run_summary_path"])
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
 

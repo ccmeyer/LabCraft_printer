@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from CalibrationRecordingReader import CalibrationRecordingReader
 from CalibrationRecordingStore import CalibrationRecordingStore
 from CalibrationStorageContracts import build_terminal_summary, process_storage_contract
@@ -113,12 +115,12 @@ def test_reader_legacy_fallback_and_authority_missing_index(tmp_path):
     assert dict(snapshot.rows[0])["blocked"] is True
 
 
-def test_reader_canonical_only_and_legacy_preference(tmp_path):
+def test_reader_canonical_only_and_rejects_retired_legacy_primary(tmp_path):
     _write_case(tmp_path, legacy=False)
     canonical = CalibrationRecordingReader(tmp_path).history_snapshot()
     assert dict(canonical.rows[0])["reader_state"] == "canonical_only"
-    legacy = CalibrationRecordingReader(tmp_path, primary="legacy").history_snapshot()
-    assert legacy.rows == ()
+    with pytest.raises(ValueError, match="retired"):
+        CalibrationRecordingReader(tmp_path, primary="legacy")
 
 
 def test_reader_resolves_exact_canonical_session_without_legacy_document(tmp_path):

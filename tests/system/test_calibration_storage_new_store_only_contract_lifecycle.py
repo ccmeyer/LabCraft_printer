@@ -38,7 +38,9 @@ def test_calibration_storage_new_store_only_contract(qapp, tmp_path):
     assert writer["declared_mode"] == "canonical_only"
     assert writer["effective_enabled"] is False
     assert writer["write_count"] == 0
-    assert writer["suppressed_write_count"] > 0
+    assert writer["suppressed_write_count"] == 0
+    assert writer["legacy_writer_available"] is False
+    assert writer["effective_reason"] == "writer_retired"
     assert storage["calibration_sha256"] is None
     assert storage["legacy_writer_canaries"]["exact"] is True
     assert not any(report["safety"]["hardware_interfaces"].values())

@@ -225,9 +225,12 @@ class CalibrationRecordingReader:
         self.index_path = (self.experiment_dir / "calibration_index.jsonl").resolve()
         self.legacy_path = (self.experiment_dir / "calibration.json").resolve()
         normalized = str(primary or "canonical").strip().lower()
-        if normalized not in {"canonical", "legacy"}:
-            raise ValueError("primary reader must be canonical or legacy")
-        self.primary = normalized
+        if normalized != "canonical":
+            raise ValueError(
+                "legacy-primary calibration reading is retired; use the canonical "
+                "reader with typed legacy fallback"
+            )
+        self.primary = "canonical"
         self.allow_legacy_fallback = bool(allow_legacy_fallback)
         self.include_migrated = (
             str(os.environ.get("LABCRAFT_CALIBRATION_MIGRATED_RESULTS", "1")).strip()
@@ -392,18 +395,6 @@ class CalibrationRecordingReader:
         except CalibrationStoreCorruptionError as exc:
             legacy_rows = []
             issues.append(CalibrationReaderIssue("legacy_corrupt", str(exc), CalibrationReaderState.UNAVAILABLE))
-
-        if self.primary == "legacy":
-            rows = []
-            for row in legacy_rows:
-                item = dict(row)
-                item["reader_state"] = CalibrationReaderState.LEGACY_ONLY.value
-                item["selection_fingerprint"] = _application_fingerprint(item)
-                rows.append(item)
-            snapshot = self._snapshot(
-                rows, issues, index_events=0, legacy_rows=len(legacy_rows)
-            )
-            return self._remember_snapshot(snapshot, cache_revision)
 
         try:
             events = self._index_events()
@@ -588,6 +579,12 @@ class CalibrationRecordingReader:
                     "code": "canonical_storage_unavailable",
                     "message": "The authority-marked canonical calibration is no longer committed in the index.",
                     "row": _thaw(blocked_legacy[0]),
+                }
+            if selected_row.get("result_id"):
+                return {
+                    "ok": False,
+                    "code": "canonical_storage_unavailable",
+                    "message": "The selected canonical calibration is no longer committed in the index.",
                 }
             return {"ok": False, "code": "selection_changed", "message": "The selected calibration is no longer uniquely available."}
         fresh = _thaw(matches[0])

@@ -1,8 +1,7 @@
-"""Durable per-process calibration storage.
+"""Durable authoritative per-process calibration storage.
 
-Milestone 2 uses this store in shadow mode: callers may diagnose failures and
-continue through the legacy writer, but artifacts produced here already obey
-the canonical v1 update/result/index contract.
+New calibration writes use the canonical update/result/index contract.  The
+legacy calibration document is a read-only compatibility source.
 """
 
 from __future__ import annotations

@@ -26,9 +26,15 @@ def _manager(monkeypatch, *, authoritative="1", primary=None, fallback=None):
 
 def test_primary_reader_flags_and_authority_rollback(monkeypatch):
     assert _manager(monkeypatch).get_calibration_reader_preference() == "canonical"
-    assert _manager(monkeypatch, primary="legacy").get_calibration_reader_preference() == "legacy"
-    assert _manager(monkeypatch, authoritative="0", primary="canonical").get_calibration_reader_preference() == "legacy"
-    assert _manager(monkeypatch, primary="invalid").get_calibration_reader_preference() == "canonical"
+    legacy = _manager(monkeypatch, primary="legacy")
+    assert legacy.get_calibration_reader_preference() == "canonical"
+    assert legacy.get_calibration_storage_start_block_message()
+    rollback = _manager(monkeypatch, authoritative="0", primary="canonical")
+    assert rollback.get_calibration_reader_preference() == "canonical"
+    assert rollback.get_calibration_storage_start_block_message()
+    invalid = _manager(monkeypatch, primary="invalid")
+    assert invalid.get_calibration_reader_preference() == "canonical"
+    assert invalid.get_calibration_storage_start_block_message()
 
 
 def test_completed_cache_excludes_uncommitted_and_wrong_session(monkeypatch, tmp_path):

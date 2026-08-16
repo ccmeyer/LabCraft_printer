@@ -223,6 +223,10 @@ def _seed_open_session(mgr):
             }
         ],
     }
+    mgr._active_session_payloads = {
+        phase: [dict(payload) for payload in payloads]
+        for phase, payloads in mgr.data["runs"][0]["steps"].items()
+    }
 
 
 def _install_terminal_stubs(mgr):
@@ -348,7 +352,7 @@ def test_start_active_calibration_records_volume_process_started(tmp_path, proce
     mgr._begin_process_recording = Mock(
         side_effect=lambda process_obj: setattr(
             process_obj, "_recorder_run_dir", "calibration_recordings/start-run"
-        )
+        ) or True
     )
 
     mgr.start_active_calibration()
@@ -368,7 +372,7 @@ def test_non_volume_calibration_process_is_not_audited(tmp_path):
     proc = _FakeCalibrationProcess()
     mgr.activeCalibration = proc
     mgr.clear_pending_process_verdict = Mock()
-    mgr._begin_process_recording = Mock()
+    mgr._begin_process_recording = Mock(return_value=True)
 
     mgr.start_active_calibration()
 
@@ -387,7 +391,7 @@ def test_volume_calibration_locks_execution_plan_before_recording_or_start(tmp_p
         side_effect=lambda reason: events.append(("lock", reason))
     )
     mgr.clear_pending_process_verdict = Mock()
-    mgr._begin_process_recording = Mock(side_effect=lambda _proc: events.append("record"))
+    mgr._begin_process_recording = Mock(side_effect=lambda _proc: events.append("record") or True)
 
     mgr.start_active_calibration()
 
@@ -403,7 +407,7 @@ def test_volume_calibration_lock_failure_prevents_process_start(tmp_path):
         side_effect=OSError("disk unavailable")
     )
     mgr.clear_pending_process_verdict = Mock()
-    mgr._begin_process_recording = Mock()
+    mgr._begin_process_recording = Mock(return_value=True)
 
     mgr.start_active_calibration()
 
@@ -441,7 +445,7 @@ def test_on_calibration_completed_records_compact_process_completed(tmp_path):
     assert event["level"] == "info"
     assert event["details"]["outcome"] == "completed"
     assert summary["step_count"] == 1
-    assert summary["flat_measurement_count"] == 2
+    assert "flat_measurement_count" not in summary
     assert summary["volume_nL"] == 42.5
     assert summary["cv_pct"] == 4.2
     assert summary["print_pressure_psi"] == 1.2
@@ -465,7 +469,7 @@ def test_calibration_audit_stock_identity_handles_partial_stock(tmp_path):
     proc = _FakeVolumeCalibrationProcess()
     mgr.activeCalibration = proc
     mgr.clear_pending_process_verdict = Mock()
-    mgr._begin_process_recording = Mock()
+    mgr._begin_process_recording = Mock(return_value=True)
 
     mgr.start_active_calibration()
 
@@ -533,7 +537,7 @@ def test_audit_failure_does_not_block_calibration_lifecycle(tmp_path):
     proc = _FakeVolumeCalibrationProcess()
     mgr.activeCalibration = proc
     mgr.clear_pending_process_verdict = Mock()
-    mgr._begin_process_recording = Mock()
+    mgr._begin_process_recording = Mock(return_value=True)
     mgr.start_active_calibration()
     assert proc.started is True
 

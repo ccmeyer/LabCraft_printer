@@ -2467,17 +2467,12 @@ carry `labcraft.calibration_recording.summary_projection` v1 rows, and applied
 execution-calibration records use schema v2 with nullable result, process-run,
 and update identities. Existing schema-v1 application records remain readable.
 
-Reader rollback is session-start configuration:
-
-```powershell
-$env:LABCRAFT_CALIBRATION_PRIMARY_READER = "legacy"
-```
-
-The default is `canonical`. Set
+The canonical reader is mandatory as of Milestone 7. Set
 `LABCRAFT_CALIBRATION_LEGACY_FALLBACK=0` to reject historical unmarked legacy
 fallback. Authority-marked incomplete/corrupt data and canonical/legacy parity
-conflicts are always blocked. `LABCRAFT_CALIBRATION_STORE_AUTHORITATIVE=0`
-continues to force the broader Milestone 3 legacy rollback.
+conflicts are always blocked. Obsolete writer/reader rollback environment values
+block new calibration startup with a diagnostic instead of silently selecting a
+retired persistence path.
 
 Index repair is never automatic. Preview an offline rebuild first, using the
 exact experiment directory, then repeat with `--apply` only after reviewing the
@@ -2722,22 +2717,16 @@ canonical recording store without creating or rewriting `calibration.json`:
 ```
 
 Designs created before this field existed remain `legacy_compatible`, so their
-existing `calibration.json` behavior is preserved. A design-only duplicate is
+existing `calibration.json` remains readable but is never rewritten. A design-only duplicate is
 a new design and therefore starts canonical-only with no copied calibration
 history. Structured persistence remains mandatory and capture retention remains
 independent.
 
-The emergency writer rollback is session-scoped through the environment and
-requires an application restart:
-
-```powershell
-$env:LABCRAFT_CALIBRATION_LEGACY_WRITER = "1"
-```
-
-The broader authoritative-store rollback and either legacy-reader selection
-also retain the compatibility writer. Remove the variable and restart to
-return a canonical-only design to its persisted policy. No rollback deletes
-canonical artifacts or historical files.
+Milestone 7 retired the emergency writer and legacy-primary-reader switches.
+`LABCRAFT_CALIBRATION_LEGACY_WRITER=1`,
+`LABCRAFT_CALIBRATION_STORE_AUTHORITATIVE=0`, or a legacy primary/secondary
+reader selection now blocks new calibration startup until the value is removed
+and the application is restarted. Historical files remain readable.
 
 Run the focused and compact lifecycle coverage with:
 
@@ -2753,8 +2742,8 @@ Run the focused and compact lifecycle coverage with:
 
 The lifecycle emits flushed `SIL_PROGRESS` checkpoints for setup, all 16
 fixture processes, secondary consumers, and fresh application. It proves the
-main experiment performs zero legacy writes while one historical canary and
-one explicit rollback canary still dual-write. It normally completes in about
+main experiment performs zero legacy writes while one historical canary remains
+byte-identical as canonical data is added beside it. It normally completes in about
 15 seconds on the Windows host. Milestone 6 does not rerun the retired
 200-process/232-update workload; the Pi gate is one compact measured pass:
 
@@ -2769,9 +2758,50 @@ one explicit rollback canary still dual-write. It normally completes in about
 ```
 
 This coverage claims canonical structured persistence, canonical readers, and
-legacy-writer compatibility only. It does not claim camera/image-analysis
+legacy-reader compatibility only. It does not claim camera/image-analysis
 correctness, physical calibration quality, firmware, motion, pressure response,
 or dispense behavior.
+
+### Calibration recording store Milestone 7 proving period
+
+The legacy calibration writer has been removed from the production path.
+`calibration.json` is a read-only typed-fallback source; new updates, terminal
+results, and index events are committed only through `calibration_recordings`
+and `calibration_index.jsonl`. The Capture retention selector controls pixels,
+not structured persistence.
+
+The proving tool scans only explicitly named experiment directories, validates
+indexed terminal bundles, hashes every source file before and after collection,
+redacts head/stock identities, refuses to overwrite reports, and prints flushed
+`CALIBRATION_STORAGE_PROVING_PROGRESS` lines:
+
+```powershell
+.\env\Scripts\python.exe -m tools.calibration_storage_proving init `
+  --campaign-id calibration-store-m7 `
+  --source-commit <deployed-commit> `
+  --output verification_reports\calibration-proving\campaign.json
+
+.\env\Scripts\python.exe -m tools.calibration_storage_proving collect `
+  --campaign verification_reports\calibration-proving\campaign.json `
+  --experiment-dir <explicit-experiment-directory> `
+  --output verification_reports\calibration-proving\snapshot-YYYYMMDD.json
+
+.\env\Scripts\python.exe -m tools.calibration_storage_proving evaluate `
+  --campaign verification_reports\calibration-proving\campaign.json `
+  --snapshot <snapshot-1.json> --snapshot <snapshot-2.json> `
+  --issue-ledger docs\calibration_storage_proving_issue_ledger_template.json `
+  --pi-report-set <pi-report-set-1.json> --pi-report-set <pi-report-set-2.json> `
+  --output verification_reports\calibration-proving\assessment.json
+```
+
+The gate requires at least 14 days, 20 completed calibrations across three
+printer heads, two passing compact Pi report sets, unchanged sources, and no
+open storage/integrity issues. Copy the issue-ledger template and set its
+campaign ID before use. The compact SIL remains the 16-process
+`calibration_storage_new_store_only_contract_v1` scenario (normally about 15
+seconds); the retired 200-process workload is not part of Milestone 7.
+
+Milestone 7 does not create release candidates, tags, or offline bundles.
 
 ## Raspberry Pi Software-In-The-Loop
 

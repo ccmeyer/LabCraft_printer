@@ -175,12 +175,7 @@ class CalibrationMemoryAggregator:
         self.reagent_memory_path = os.path.join(self.indices_dir, "reagent_memory.json")
         self.head_type_memory_path = os.path.join(self.indices_dir, "head_type_memory.json")
         self.recommendation_index_path = os.path.join(self.indices_dir, "recommendation_index.json")
-        configured = str(
-            os.environ.get("LABCRAFT_CALIBRATION_SECONDARY_READER", "canonical")
-        ).strip().lower()
-        self.secondary_reader_preference = (
-            configured if configured in {"canonical", "legacy"} else "canonical"
-        )
+        self.secondary_reader_preference = "canonical"
         self.allow_legacy_fallback = str(
             os.environ.get("LABCRAFT_CALIBRATION_LEGACY_FALLBACK", "1")
         ).strip() != "0"
@@ -709,7 +704,7 @@ class CalibrationMemoryAggregator:
             == "labcraft.calibration_memory.canonical_session_ref"
             and int(refs.get("schema_version") or 0) == 1
         )
-        if not canonical or self.secondary_reader_preference == "legacy":
+        if not canonical:
             run = self._load_legacy_authoritative_run(summary, cache)
             return {
                 "run": run,

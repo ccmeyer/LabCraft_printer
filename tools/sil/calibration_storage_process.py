@@ -408,8 +408,11 @@ class StorageContractRunner:
         self.calibration_file_path = Path(calibration_file_path).resolve()
         self.timeout_seconds = float(timeout_seconds)
         self.metrics = metrics or StorageMetricsCollector()
-        self.shadow_store_enabled = bool(shadow_store_enabled)
-        self.authoritative_mode = bool(authoritative_mode)
+        # Milestone 7 keeps these constructor parameters for old callers, but
+        # SIL now exercises the only production mode: authoritative canonical
+        # storage with no legacy writer.
+        self.shadow_store_enabled = True
+        self.authoritative_mode = True
         self.legacy_writer_mode = str(legacy_writer_mode)
         self._previous_head = None
         self._previous_gripper_slot = None
@@ -460,11 +463,9 @@ class StorageContractRunner:
         return rows
 
     def restore(self) -> None:
-        self.manager._canonical_store_authoritative = False
         self.manager.set_record_mode_enabled(self._previous_record_mode_enabled)
-        self.manager.set_shadow_store_enabled(self._previous_shadow_store_enabled)
+        self.manager.set_shadow_store_enabled(True)
         self.manager._capture_retention_policy = self._previous_capture_policy
-        self.manager._canonical_store_authoritative = self._previous_authoritative_mode
         self.manager.set_calibration_storage_policy(self._previous_storage_policy)
         rack = self.model.rack_model
         if self._identity_overridden:
@@ -488,25 +489,11 @@ class StorageContractRunner:
 
     def _instrument_current_writers(self):
         manager = self.manager
-        original_save = manager._save_atomic
         recorder = manager._process_recorder
         original_analysis = recorder.append_analysis
         store = manager._ensure_calibration_recording_store()
         original_canonical_append = store.append_update
         original_canonical_finalize = store.finalize_run
-
-        def measured_save(*args, **kwargs):
-            started = time.perf_counter_ns()
-            try:
-                return original_save(*args, **kwargs)
-            finally:
-                self.metrics.calibration_rewrite_latency_ms.append(
-                    (time.perf_counter_ns() - started) / 1_000_000.0
-                )
-                if self.calibration_file_path.is_file():
-                    self.metrics.calibration_rewrite_sizes.append(
-                        self.calibration_file_path.stat().st_size
-                    )
 
         def measured_analysis(record):
             started = time.perf_counter_ns()
@@ -535,13 +522,10 @@ class StorageContractRunner:
                 self.metrics.index_latency_ms.append(float(commit.index_latency_ms))
             return commit
 
-        manager._save_atomic = measured_save
         recorder.append_analysis = measured_analysis
-        if self.shadow_store_enabled or self.authoritative_mode:
-            store.append_update = measured_canonical_append
-            store.finalize_run = measured_canonical_finalize
+        store.append_update = measured_canonical_append
+        store.finalize_run = measured_canonical_finalize
         return (
-            original_save,
             original_analysis,
             store,
             original_canonical_append,
@@ -550,26 +534,21 @@ class StorageContractRunner:
 
     def run_case(self, case: ScriptedCalibrationCase) -> StorageProcessEvidence:
         self._activate_identity(case.identity)
-        self.manager._canonical_store_authoritative = self.authoritative_mode
         desired_storage_policy = normalize_calibration_storage_policy(
             self.legacy_writer_mode
         )
         if self.manager.get_calibration_storage_policy() != desired_storage_policy:
             self.manager.set_calibration_storage_policy(desired_storage_policy)
-        if self.authoritative_mode:
-            self.manager.record_mode_enabled = True
-            policy_name = (
-                "structured_only"
-                if not case.record_mode_enabled
-                else str(case.capture_mode).replace("_proxy", "")
-            )
-            self.manager.set_capture_retention_policy(
-                CaptureRetentionPolicy.parse(policy_name)
-            )
-            self.manager._shadow_store_enabled = True
-        else:
-            self.manager.set_record_mode_enabled(case.record_mode_enabled)
-            self.manager.set_shadow_store_enabled(self.shadow_store_enabled)
+        self.manager.record_mode_enabled = True
+        policy_name = (
+            "structured_only"
+            if not case.record_mode_enabled
+            else str(case.capture_mode).replace("_proxy", "")
+        )
+        self.manager.set_capture_retention_policy(
+            CaptureRetentionPolicy.parse(policy_name)
+        )
+        self.manager._shadow_store_enabled = True
         self.manager.begin_session(
             str(self.calibration_file_path),
             notes="SIL storage-contract fixture",
@@ -596,16 +575,15 @@ class StorageContractRunner:
                 emit_stage=False,
             )
         finally:
-            self.manager._save_atomic = originals[0]
-            self.manager._process_recorder.append_analysis = originals[1]
-            originals[2].append_update = originals[3]
-            originals[2].finalize_run = originals[4]
+            self.manager._process_recorder.append_analysis = originals[0]
+            originals[1].append_update = originals[2]
+            originals[1].finalize_run = originals[3]
         evidence = inspect_current_writer_case(
             self.calibration_file_path,
             case=case,
             run_id=run_id,
             recording_dir=recording_dir,
-            legacy_required=self.manager.is_legacy_calibration_writer_enabled(),
+            legacy_required=False,
         )
         if evidence.update_hashes != case.expected_update_hashes:
             raise CalibrationStorageContractError(
@@ -634,27 +612,26 @@ class StorageContractRunner:
             raise CalibrationStorageContractError(
                 f"recorder payload mismatch for {case.process_id}"
             )
-        if self.shadow_store_enabled or self.authoritative_mode:
-            if evidence.canonical_update_hashes != evidence.update_hashes:
-                raise CalibrationStorageContractError(
-                    f"canonical payload mismatch for {case.process_id}"
-                )
-            if not evidence.canonical_valid:
-                raise CalibrationStorageContractError(
-                    f"canonical run validation failed for {case.process_id}"
-                )
-            if evidence.canonical_result_kind != case.result_kind:
-                raise CalibrationStorageContractError(
-                    f"canonical result kind mismatch for {case.process_id}"
-                )
-            if evidence.canonical_result_outcome != case.terminal_outcome:
-                raise CalibrationStorageContractError(
-                    f"canonical result outcome mismatch for {case.process_id}"
-                )
-            if evidence.canonical_index_event_count != 1:
-                raise CalibrationStorageContractError(
-                    f"canonical index event mismatch for {case.process_id}"
-                )
+        if evidence.canonical_update_hashes != evidence.update_hashes:
+            raise CalibrationStorageContractError(
+                f"canonical payload mismatch for {case.process_id}"
+            )
+        if not evidence.canonical_valid:
+            raise CalibrationStorageContractError(
+                f"canonical run validation failed for {case.process_id}"
+            )
+        if evidence.canonical_result_kind != case.result_kind:
+            raise CalibrationStorageContractError(
+                f"canonical result kind mismatch for {case.process_id}"
+            )
+        if evidence.canonical_result_outcome != case.terminal_outcome:
+            raise CalibrationStorageContractError(
+                f"canonical result outcome mismatch for {case.process_id}"
+            )
+        if evidence.canonical_index_event_count != 1:
+            raise CalibrationStorageContractError(
+                f"canonical index event mismatch for {case.process_id}"
+            )
         return evidence
 
 

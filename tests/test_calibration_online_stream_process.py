@@ -25,6 +25,7 @@ from CalibrationClasses.Model import (  # noqa: E402
     CalibrationManager,
     OnlineStreamCalibrationProcess,
 )
+from CalibrationRecordingStore import CalibrationRecordingStore  # noqa: E402
 from CaptureTypes import CaptureStatus  # noqa: E402
 from Controller import Controller  # noqa: E402
 
@@ -592,6 +593,7 @@ def test_try_start_process_blocks_when_stream_capture_session_is_open():
 def test_try_start_process_allows_stream_capture_internal_queue_step():
     class _StreamCaptureQueueProcess:
         owns_calibration_memory_session = False
+        calibration_storage_result_kind = "operational"
 
         def __init__(self, manager, model, *args, **kwargs):
             self.manager = manager
@@ -634,6 +636,7 @@ def test_try_start_process_bypass_still_blocks_non_queue_or_non_running_states()
     class _OnlineStreamQueueProcess:
         owns_calibration_memory_session = False
         supports_operator_verdict = False
+        calibration_storage_result_kind = "operational"
 
         def __init__(self, calibration_manager, model, *args, **kwargs):
             self.calibration_manager = calibration_manager
@@ -701,6 +704,7 @@ def test_try_start_process_blocks_when_stream_calibration_sequence_is_open():
 def test_try_start_process_allows_stream_calibration_sequence_internal_queue_step():
     class _SequenceQueueProcess:
         owns_calibration_memory_session = False
+        calibration_storage_result_kind = "operational"
 
         def __init__(self, manager, model, *args, **kwargs):
             self.manager = manager
@@ -758,6 +762,7 @@ def test_try_start_process_blocks_when_droplet_calibration_sequence_is_open():
 def test_try_start_process_allows_droplet_calibration_sequence_internal_queue_step():
     class _SequenceQueueProcess:
         owns_calibration_memory_session = False
+        calibration_storage_result_kind = "operational"
 
         def __init__(self, manager, model, *args, **kwargs):
             self.manager = manager
@@ -3835,6 +3840,14 @@ def test_calibration_manager_tail_start_override_appends_superseding_stream_step
     mgr.activeCalibration = None
     mgr._run_id = "run_1"
     mgr._run_idx = 0
+    mgr._active_session_payloads = {"online_stream_calibration": [source_payload]}
+    mgr._active_session_phase_update_counts = {"online_stream_calibration": 1}
+    mgr._active_shadow_run = None
+    mgr._calibration_recording_store = CalibrationRecordingStore(tmp_path)
+    mgr.calibration_file_path = str(tmp_path / "calibration.json")
+    mgr._completed_canonical_session_cache = {}
+    mgr._canonical_session_result_cache = []
+    mgr._calibration_history_revision = 0
     mgr.data = {
         "schema_version": 1,
         "runs": [
@@ -3852,7 +3865,6 @@ def test_calibration_manager_tail_start_override_appends_superseding_stream_step
     mgr._build_calibration_stock_identity_snapshot = lambda: {"stock_solution": "water"}
     mgr._update_stream_capture_online_summary_from_payload = lambda *args, **kwargs: None
     mgr.record_analysis = lambda record: None
-    mgr._save_atomic = lambda: None
     mgr.ensure_loaded = lambda: None
     mgr.characterizationSummaryUpdated = Recorder()
     memory_observations = []
@@ -3870,7 +3882,7 @@ def test_calibration_manager_tail_start_override_appends_superseding_stream_step
 
     payload = CalibrationManager.apply_online_stream_tail_start_override(mgr, 4050)
 
-    steps = mgr.data["runs"][0]["steps"]["online_stream_calibration"]
+    steps = mgr._active_session_payloads["online_stream_calibration"]
     assert len(steps) == 2
     assert steps[0]["result"]["tail_phase"]["tail_start_delay_from_emergence_us"] == 3900
     corrected = steps[1]["result"]
@@ -3879,6 +3891,18 @@ def test_calibration_manager_tail_start_override_appends_superseding_stream_step
     assert corrected["predicted_stream_duration_us"] == 4050
     assert abs(corrected["predicted_volume_nl"] - (-1.2 + 0.0187 * 4050)) < 1e-9
     assert payload["result"]["learned_tail_start_offset_us"] == 4050
+    index_rows, ignored_tail = CalibrationRecordingStore.read_jsonl(
+        tmp_path / "calibration_index.jsonl"
+    )
+    assert ignored_tail is False
+    assert len(index_rows) == 1
+    result_path = tmp_path / index_rows[0]["result_relpath"]
+    validated = CalibrationRecordingStore.validate_run(result_path.parent)
+    assert validated["result"]["outcome"] == "completed"
+    assert validated["updates"][0]["payload"]["result"]["tail_phase"][
+        "tail_start_delay_from_emergence_us"
+    ] == 4050
+    assert not (tmp_path / "calibration.json").exists()
     assert mgr.characterizationSummaryUpdated.calls
     assert memory_observations[-1][0] == "online_stream_tail_start_override"
     assert audit_events[-1][0] == "online_stream_tail_start_override"

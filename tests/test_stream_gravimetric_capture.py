@@ -2146,7 +2146,7 @@ def test_stream_capture_panel_state_locks_manual_controls_and_suppresses_verdict
     assert dialog.flash_duration_spinbox.isEnabled() is False
     assert dialog.calibrate_timecourse_button.isEnabled() is False
     assert dialog.calibrate_online_stream_button.isEnabled() is False
-    assert dialog.record_calibration_checkbox.isEnabled() is False
+    assert dialog.capture_retention_combo.isEnabled() is False
     assert dialog.stream_capture_online_mode_checkbox.isEnabled() is False
     assert dialog._stream_capture_mass_dialog is not None
     assert dialog._stream_capture_mass_dialog.isVisible() is True

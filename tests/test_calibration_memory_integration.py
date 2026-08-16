@@ -326,17 +326,16 @@ def test_calibration_manager_writes_sidecar_summary_and_observations(tmp_path):
     assert summary["observation_capture_level"] == "compact"
 
 
-def test_calibration_json_run_metadata_records_stock_concentration(tmp_path):
+def test_canonical_session_metadata_records_stock_concentration_without_legacy_file(tmp_path):
     model = _make_model(tmp_path)
     _set_loaded_stock(model)
     manager = CalibrationManager(model)
 
     manager.begin_session(model.experiment_model.calibration_file_path, notes="stock identity")
 
-    run = manager.data["runs"][-1]
+    run = manager.get_current_calibration_session_snapshot()
     _assert_glycerol_stock_fields(run)
-    saved = json.loads(Path(model.experiment_model.calibration_file_path).read_text(encoding="utf-8"))
-    _assert_glycerol_stock_fields(saved["runs"][-1])
+    assert not Path(model.experiment_model.calibration_file_path).exists()
 
 
 def test_process_recorder_meta_records_stock_concentration(tmp_path):
@@ -360,7 +359,7 @@ def test_calibration_step_metadata_records_stock_concentration(tmp_path):
 
     manager.onCalibrationDataUpdated({"result": {"mean_volume": 10.01}})
 
-    step = manager.data["runs"][-1]["steps"]["droplet_search"][-1]
+    step = manager.get_current_calibration_session_snapshot()["phase_payloads"]["droplet_search"][-1]
     _assert_glycerol_stock_fields(step["meta"])
 
 
@@ -412,10 +411,10 @@ def test_calibration_memory_failures_do_not_break_calibration(tmp_path, capsys, 
     assert "[CalibrationMemory]" in captured.out
 
     calibration_json = Path(model.experiment_model.calibration_file_path)
-    assert calibration_json.exists()
-    saved = json.loads(calibration_json.read_text(encoding="utf-8"))
-    assert saved["runs"]
-    assert saved["runs"][0]["steps"]["droplet_search"][0]["result"]["mean_volume"] == 10.01
+    assert not calibration_json.exists()
+    assert manager.get_current_calibration_session_snapshot()["phase_payloads"][
+        "droplet_search"
+    ][0]["result"]["mean_volume"] == 10.01
 
 
 def test_begin_session_records_advisory_prior_without_changing_behavior(tmp_path):
@@ -499,6 +498,7 @@ def test_memory_disabled_skips_sidecar_run_lookup_and_observations(tmp_path):
 
     manager.begin_session(model.experiment_model.calibration_file_path, notes="memory disabled")
     manager.activeCalibration = SimpleNamespace(phase_name="droplet_search")
+    run_id = manager._run_id
     process = BaseCalibrationProcess(manager, model)
     process.phase_name = "droplet_search"
     process._record_event("candidate_found", {"flash_delay_us": 4300})
@@ -652,6 +652,7 @@ def test_verbose_capture_level_restores_process_event_mirroring(tmp_path):
     manager = CalibrationManager(model)
 
     manager.begin_session(model.experiment_model.calibration_file_path, notes="verbose")
+    run_id = manager._run_id
     manager.activeCalibration = SimpleNamespace(phase_name="droplet_search")
     process = BaseCalibrationProcess(manager, model)
     process.phase_name = "droplet_search"
@@ -659,7 +660,7 @@ def test_verbose_capture_level_restores_process_event_mirroring(tmp_path):
     process._record_analysis({"kind": "characterization_frame", "volume_nL": 9.91})
     manager.end_session()
 
-    run_dir = Path(store.get_run_paths(manager.data["runs"][-1]["run_id"])["run_dir"])
+    run_dir = Path(store.get_run_paths(run_id)["run_dir"])
     observations = [
         json.loads(line)
         for line in (run_dir / "observations.jsonl").read_text(encoding="utf-8").splitlines()
@@ -732,9 +733,10 @@ def test_ui_recommendation_events_are_flushed_into_sidecar_run(tmp_path):
     )
 
     manager.begin_session(model.experiment_model.calibration_file_path, notes="ui recommendation")
+    run_id = manager._run_id
     manager.end_session()
 
-    run_dir = Path(store.get_run_paths(manager.data["runs"][-1]["run_id"])["run_dir"])
+    run_dir = Path(store.get_run_paths(run_id)["run_dir"])
     observations = [
         json.loads(line)
         for line in (run_dir / "observations.jsonl").read_text(encoding="utf-8").splitlines()
@@ -753,7 +755,7 @@ def test_ui_recommendation_events_are_flushed_into_sidecar_run(tmp_path):
     )
 
 
-def test_online_stream_manager_lifecycle_auto_closes_completed_session_and_reuses_learned_prior(tmp_path, monkeypatch):
+def test_online_stream_manager_lifecycle_excludes_uncommitted_fake_run_from_prior(tmp_path, monkeypatch):
     model = _make_model(tmp_path)
     store = model.calibration_memory_store
     manager = CalibrationManager(model)
@@ -763,6 +765,7 @@ def test_online_stream_manager_lifecycle_auto_closes_completed_session_and_reuse
         phase_name = "online_stream_calibration"
         owns_calibration_memory_session = True
         supports_operator_verdict = False
+        calibration_storage_result_kind = "calibration"
 
         @staticmethod
         def missing_requirements(cm):
@@ -773,6 +776,7 @@ def test_online_stream_manager_lifecycle_auto_closes_completed_session_and_reuse
             self.model = model
 
     monkeypatch.setattr(manager, "start_active_calibration", lambda: None)
+    monkeypatch.setattr(manager, "_finalize_process_recording", lambda *args, **kwargs: {"ok": True})
     monkeypatch.setattr(manager, "_record_stream_capture_process_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(manager, "_complete_stream_capture_queue_success", lambda: None)
     monkeypatch.setattr(manager, "_emit_readiness", lambda: None)
@@ -799,13 +803,10 @@ def test_online_stream_manager_lifecycle_auto_closes_completed_session_and_reuse
     )
     manager_b.end_session()
 
-    assert resolved["result_priors"]["candidate_found"] is True
-    assert resolved["result_priors"]["applied_flow_start_offset_us"] == 850
-    assert resolved["result_priors"]["applied_tail_start_offset_us"] == 4100
-    assert resolved["result_priors"]["source_run_ids"] == [first_run_id]
+    assert resolved["result_priors"]["candidate_found"] is False
 
 
-def test_online_stream_stopped_session_is_closed_and_not_reused_as_prior(tmp_path, monkeypatch):
+def test_online_stream_stopped_and_uncommitted_fake_sessions_are_not_reused_as_prior(tmp_path, monkeypatch):
     model = _make_model(tmp_path)
     store = model.calibration_memory_store
     manager = CalibrationManager(model)
@@ -815,6 +816,7 @@ def test_online_stream_stopped_session_is_closed_and_not_reused_as_prior(tmp_pat
         phase_name = "online_stream_calibration"
         owns_calibration_memory_session = True
         supports_operator_verdict = False
+        calibration_storage_result_kind = "calibration"
 
         @staticmethod
         def missing_requirements(cm):
@@ -841,6 +843,7 @@ def test_online_stream_stopped_session_is_closed_and_not_reused_as_prior(tmp_pat
     manager_b = CalibrationManager(model)
     manager_b._canonical_store_authoritative = False
     monkeypatch.setattr(manager_b, "start_active_calibration", lambda: None)
+    monkeypatch.setattr(manager_b, "_finalize_process_recording", lambda *args, **kwargs: {"ok": True})
     monkeypatch.setattr(manager_b, "_record_stream_capture_process_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(manager_b, "_complete_stream_capture_queue_success", lambda: None)
     monkeypatch.setattr(manager_b, "_emit_readiness", lambda: None)
@@ -864,10 +867,7 @@ def test_online_stream_stopped_session_is_closed_and_not_reused_as_prior(tmp_pat
     )
     manager_c.end_session()
 
-    assert resolved["result_priors"]["candidate_found"] is True
-    assert resolved["result_priors"]["applied_flow_start_offset_us"] == 900
-    assert resolved["result_priors"]["applied_tail_start_offset_us"] == 4200
-    assert resolved["result_priors"]["source_run_ids"] == [completed_run_id]
+    assert resolved["result_priors"]["candidate_found"] is False
 
 
 def test_online_stream_auto_started_session_preserves_prior_runtime_in_summary(tmp_path, monkeypatch):
@@ -886,6 +886,7 @@ def test_online_stream_auto_started_session_preserves_prior_runtime_in_summary(t
     manager = CalibrationManager(model)
     manager._canonical_store_authoritative = False
     monkeypatch.setattr(manager, "start_active_calibration", lambda: None)
+    monkeypatch.setattr(manager, "_finalize_process_recording", lambda *args, **kwargs: {"ok": True})
     monkeypatch.setattr(manager, "_record_stream_capture_process_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(manager, "_complete_stream_capture_queue_success", lambda: None)
     monkeypatch.setattr(manager, "_emit_readiness", lambda: None)
