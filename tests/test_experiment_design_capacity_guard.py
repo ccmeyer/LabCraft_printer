@@ -60,7 +60,9 @@ def _build_capacity_dialog(
         explicit_wells=explicit_wells,
     )
     dialog.status_lbl = QLabel("")
-    dialog.summary_lbl = QLabel("")
+    dialog.summary_total_reactions_value_lbl = QLabel("")
+    dialog.summary_available_wells_value_lbl = QLabel("")
+    dialog.summary_worst_nonfill_value_lbl = QLabel("")
     dialog._set_status = ExperimentDesignDialog._set_status.__get__(dialog, ExperimentDesignDialog)
 
     dialog.start_row_spin = QSpinBox()
@@ -233,11 +235,10 @@ def test_summary_shows_available_wells_and_highlights_required_when_over_capacit
 
     ExperimentDesignDialog._update_summary_labels(dialog, total_reactions=5, worst_nonfill_nL=123.0)
 
-    text = dialog.summary_lbl.text()
-    assert "Available wells = 4" in text
-    assert "Worst non-fill volume = 123 nL" in text
-    assert "color:#8a0303" in text
-    assert ">5<" in text
+    assert dialog.summary_total_reactions_value_lbl.text() == "5"
+    assert dialog.summary_available_wells_value_lbl.text() == "4"
+    assert dialog.summary_worst_nonfill_value_lbl.text() == "123 nL"
+    assert "color:#8a0303" in dialog.summary_total_reactions_value_lbl.styleSheet()
 
 
 def test_summary_shows_plain_required_when_within_capacity(qapp):
@@ -245,10 +246,10 @@ def test_summary_shows_plain_required_when_within_capacity(qapp):
 
     ExperimentDesignDialog._update_summary_labels(dialog, total_reactions=3, worst_nonfill_nL=10.0)
 
-    text = dialog.summary_lbl.text()
-    assert "Total reactions = 3" in text
-    assert "Available wells = 4" in text
-    assert "color:#8a0303" not in text
+    assert dialog.summary_total_reactions_value_lbl.text() == "3"
+    assert dialog.summary_available_wells_value_lbl.text() == "4"
+    assert dialog.summary_worst_nonfill_value_lbl.text() == "10 nL"
+    assert dialog.summary_total_reactions_value_lbl.styleSheet() == ""
 
 
 def test_summary_uses_custom_well_selection_capacity(qapp):
@@ -261,9 +262,8 @@ def test_summary_uses_custom_well_selection_capacity(qapp):
 
     ExperimentDesignDialog._update_summary_labels(dialog, total_reactions=4, worst_nonfill_nL=5.0)
 
-    text = dialog.summary_lbl.text()
-    assert "Available wells = 3" in text
-    assert "color:#8a0303" in text
+    assert dialog.summary_available_wells_value_lbl.text() == "3"
+    assert "color:#8a0303" in dialog.summary_total_reactions_value_lbl.styleSheet()
 
 
 def test_upload_design_warns_immediately_for_invalid_selected_plate(monkeypatch, qapp, experiment_model_factory):
@@ -278,7 +278,6 @@ def test_upload_design_warns_immediately_for_invalid_selected_plate(monkeypatch,
     )
     dialog.main_window = SimpleNamespace(model=runtime_model)
     dialog.status_lbl = QLabel("")
-    dialog.summary_lbl = QLabel("")
     dialog._set_status = ExperimentDesignDialog._set_status.__get__(dialog, ExperimentDesignDialog)
     dialog._load_factors_into_table = Mock()
     dialog._update_metadata_from_controls = Mock()

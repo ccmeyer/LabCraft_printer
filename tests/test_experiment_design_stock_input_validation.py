@@ -88,7 +88,6 @@ def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None
     dialog.status_lbl = QLabel("")
     dialog.stock_table_status_lbl = QLabel("")
     dialog.stock_table = QTableWidget(0, 9)
-    dialog.summary_lbl = QLabel("")
     dialog.allow_two_chk = QCheckBox()
     dialog.v_spin = QDoubleSpinBox()
     dialog.v_spin.setRange(1.0, 1_000_000.0)
@@ -600,6 +599,25 @@ def test_busy_context_can_suppress_progress_dialog(monkeypatch, qapp):
         calls.append("inside")
 
     assert calls == ["inside"]
+
+
+def test_busy_context_uses_dedicated_failure_status_callback(qapp):
+    status_messages = []
+    failure_messages = []
+
+    with pytest.raises(RuntimeError):
+        with View._BusyUiContext(
+            None,
+            "Working...",
+            status_setter=status_messages.append,
+            failure_status_setter=failure_messages.append,
+            failure_message="Update failed.",
+            show_dialog=False,
+        ):
+            raise RuntimeError("boom")
+
+    assert status_messages == ["Working..."]
+    assert failure_messages == ["Update failed."]
 
 
 def test_recompute_silent_suppresses_modal_busy_dialog(qapp):
@@ -1319,7 +1337,7 @@ def _build_finish_dialog():
     dialog._apply_target_color_state = lambda: None
     dialog._ensure_experiment_dir = lambda: None
     dialog._persist_design_identity_registry_entries = lambda: None
-    dialog._set_status = lambda msg: setattr(dialog, "_last_status", msg)
+    dialog._set_status = lambda msg, severity="info": setattr(dialog, "_last_status", msg)
     dialog.accept = lambda: setattr(dialog, "_accepted", True)
     return dialog
 

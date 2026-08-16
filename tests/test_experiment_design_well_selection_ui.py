@@ -69,7 +69,9 @@ def _dialog_stub(*, included_wells=None, manual=False, excluded=None, rows=3, co
     dialog.start_col_spin = QSpinBox()
     dialog.start_col_spin.setValue(start_col)
     dialog.status_lbl = QLabel("")
-    dialog.summary_lbl = QLabel("")
+    dialog.summary_total_reactions_value_lbl = QLabel("")
+    dialog.summary_available_wells_value_lbl = QLabel("")
+    dialog.summary_worst_nonfill_value_lbl = QLabel("")
     dialog.well_selection_summary_lbl = QLabel("")
     dialog.well_selection_btn = QPushButton()
     dialog._progress_protected = False

@@ -9771,6 +9771,7 @@ class _BusyUiContext:
         *,
         widgets: Sequence[Any] | None = None,
         status_setter=None,
+        failure_status_setter=None,
         failure_message: str | None = None,
         show_dialog: bool = True,
     ):
@@ -9778,6 +9779,7 @@ class _BusyUiContext:
         self.message = str(message or "Working...")
         self.widgets = [widget for widget in (widgets or []) if widget is not None]
         self.status_setter = status_setter
+        self.failure_status_setter = failure_status_setter
         self.failure_message = failure_message
         self.show_dialog = bool(show_dialog)
         self._enabled_states: list[tuple[Any, bool]] = []
@@ -9848,8 +9850,10 @@ class _BusyUiContext:
                 pass
         self._enabled_states.clear()
 
-        if exc_type is not None and callable(self.status_setter) and self.failure_message:
-            self.status_setter(self.failure_message)
+        if exc_type is not None and self.failure_message:
+            setter = self.failure_status_setter or self.status_setter
+            if callable(setter):
+                setter(self.failure_message)
 
         app = QApplication.instance()
         if app is not None:
@@ -11143,6 +11147,8 @@ class ExperimentDesignDialog(QDialog):
     REAGENT_COLUMN_MINIMUM_WIDTH = 170
     REAGENT_COLUMN_COMPACT_AFTER = 3
 
+    STATUS_SEVERITIES = {"info", "success", "warning", "error"}
+
     PROGRESS_POLICY_RESUME = "resume"
     PROGRESS_POLICY_RESET = "reset"
     PROGRESS_POLICY_COPY = "copy"
@@ -11209,6 +11215,9 @@ class ExperimentDesignDialog(QDialog):
         self._auto_update_suspended: bool = False
         self._design_optimization_dirty: bool = True
         self._last_optimization_result: dict | None = None
+        self._status_severity: str = "info"
+        self._status_tip_text: str = ""
+        self._stock_table_stale_active: bool = False
 
 
         # Debounced auto-update timer (4)
@@ -11292,7 +11301,6 @@ class ExperimentDesignDialog(QDialog):
         # Add "Max / Rxn (nL)" column
         self.stock_table_status_lbl = QLabel("", self.stock_information_region)
         self.stock_table_status_lbl.setWordWrap(True)
-        self.stock_table_status_lbl.setStyleSheet("color:#666; font-style: italic;")
         self.stock_table_status_lbl.setVisible(False)
 
         self.stock_table = QTableWidget(0, 9, self.stock_information_region)
@@ -11537,11 +11545,32 @@ class ExperimentDesignDialog(QDialog):
         self.design_information_panel.setSizePolicy(
             QSizePolicy.Fixed, QSizePolicy.Expanding
         )
+        self.design_information_panel.setObjectName("designInformationPanel")
         design_information_layout = QVBoxLayout(self.design_information_panel)
 
-        self.summary_lbl = QLabel("Summary: —", self.design_information_panel)
-        self.summary_lbl.setWordWrap(True)
-        design_information_layout.addWidget(self.summary_lbl)
+        summary_heading = QLabel("Design Summary", self.design_information_panel)
+        summary_heading.setStyleSheet("font-weight: 600;")
+        design_information_layout.addWidget(summary_heading)
+
+        design_summary_grid = QGridLayout()
+        design_summary_grid.setColumnStretch(0, 1)
+        design_summary_grid.setColumnStretch(1, 0)
+        summary_rows = (
+            ("Total reactions", "summary_total_reactions_value_lbl", "0"),
+            ("Available wells", "summary_available_wells_value_lbl", "n/a"),
+            ("Worst non-fill volume", "summary_worst_nonfill_value_lbl", "0 nL"),
+        )
+        for row, (label_text, attribute_name, initial_value) in enumerate(summary_rows):
+            design_summary_grid.addWidget(
+                QLabel(label_text, self.design_information_panel), row, 0
+            )
+            value_label = QLabel(initial_value, self.design_information_panel)
+            value_label.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            setattr(self, attribute_name, value_label)
+            design_summary_grid.addWidget(value_label, row, 1)
+        design_information_layout.addLayout(design_summary_grid)
 
         messages_heading = QLabel("Messages and Tips", self.design_information_panel)
         messages_heading.setStyleSheet("font-weight: 600;")
@@ -11563,25 +11592,52 @@ class ExperimentDesignDialog(QDialog):
             QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize
         )
 
+        self.stock_warning_heading_lbl = QLabel(
+            "Stock Solution Warning", design_messages_content
+        )
+        self.stock_warning_heading_lbl.setStyleSheet(
+            "color:#8a0303; font-weight:600;"
+        )
+        self.stock_warning_heading_lbl.setVisible(False)
+        design_messages_layout.addWidget(self.stock_warning_heading_lbl)
+
         self.stock_table_status_lbl.setParent(design_messages_content)
         self.stock_table_status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.stock_table_status_lbl.setStyleSheet("")
         self.stock_table_status_lbl.setSizePolicy(
             QSizePolicy.Ignored, QSizePolicy.Preferred
         )
         design_messages_layout.addWidget(self.stock_table_status_lbl)
 
+        self.status_heading_lbl = QLabel("Status", design_messages_content)
+        self.status_heading_lbl.setStyleSheet("font-weight:600;")
+        design_messages_layout.addWidget(self.status_heading_lbl)
+
         self.status_lbl = QLabel("", design_messages_content)
         self.status_lbl.setWordWrap(True)
         self.status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.status_lbl.setStyleSheet("color:#666; font-style: italic;")
         self.status_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         design_messages_layout.addWidget(self.status_lbl)
+
+        self.tip_heading_lbl = QLabel("Tip", design_messages_content)
+        self.tip_heading_lbl.setStyleSheet("color:#666; font-weight:600;")
+        self.tip_heading_lbl.setVisible(False)
+        design_messages_layout.addWidget(self.tip_heading_lbl)
+
+        self.tip_lbl = QLabel("", design_messages_content)
+        self.tip_lbl.setWordWrap(True)
+        self.tip_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.tip_lbl.setStyleSheet("color:#666; font-style:italic;")
+        self.tip_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.tip_lbl.setVisible(False)
+        design_messages_layout.addWidget(self.tip_lbl)
 
         self.design_messages_scroll.setWidget(design_messages_content)
         design_information_layout.addWidget(self.design_messages_scroll, stretch=1)
         self._stock_information_layout.addWidget(
             self.design_information_panel, stretch=0
         )
+        self._refresh_design_information_style()
         right.addWidget(self.stock_information_region, stretch=1)
 
         controls_col.addStretch(1)
@@ -12399,7 +12455,8 @@ class ExperimentDesignDialog(QDialog):
             if getattr(self, "_design_optimization_dirty", False):
                 self._set_status(
                     "Experiment changes are pending. Press Update Reactions and Stock "
-                    "Solutions to apply them."
+                    "Solutions to apply them.",
+                    severity="warning",
                 )
             self._update_run_button_dirty_state()
             return
@@ -12475,7 +12532,8 @@ class ExperimentDesignDialog(QDialog):
             if getattr(self, "_design_optimization_dirty", False):
                 self._set_status(
                     "Experiment changes are pending. Press Update Reactions and Stock "
-                    "Solutions to apply them."
+                    "Solutions to apply them.",
+                    severity="warning",
                 )
             self._update_run_button_dirty_state()
             return
@@ -12992,7 +13050,7 @@ class ExperimentDesignDialog(QDialog):
                 "Reaction preview/export requires a current generated design when explicit "
                 "well assignments are active."
             )
-            self._set_status(message)
+            self._set_status(message, severity="error")
             return False
 
         if self._can_reuse_current_generated_design():
@@ -13258,7 +13316,7 @@ class ExperimentDesignDialog(QDialog):
             )
         except ValueError as e:
             message = str(e)
-            self._set_status(message)
+            self._set_status(message, severity="error")
             QMessageBox.warning(self, "Invalid well assignments", message)
             return False
 
@@ -13303,7 +13361,11 @@ class ExperimentDesignDialog(QDialog):
             self._auto_update_suspended = previous_suspended
 
         self._refresh_all_lock_states()
-        self._set_status("Imported design cleared. Add reagents or import another design.")
+        self._set_tip("")
+        self._set_status(
+            "Imported design cleared. Add reagents or import another design.",
+            severity="success",
+        )
 
     def _manual_assignments_active(self) -> bool:
         """
@@ -13957,7 +14019,7 @@ class ExperimentDesignDialog(QDialog):
         )
         self._set_stock_table_stale(True, stale_msg)
         summary = self._summarize_issue_map(volume_issues, stale=True, stale_message=stale_msg)
-        self._set_status(summary)
+        self._set_status(summary, severity="error")
         if show_dialog:
             QMessageBox.warning(self, title, summary)
         return True
@@ -13970,14 +14032,19 @@ class ExperimentDesignDialog(QDialog):
                 tgt_edit.setToolTip("")
 
     def _set_stock_table_stale(self, stale: bool, message: str = ""):
+        self._stock_table_stale_active = bool(stale)
         if hasattr(self, "stock_table_status_lbl") and self.stock_table_status_lbl is not None:
             self.stock_table_status_lbl.setText(message if stale else "")
             self.stock_table_status_lbl.setVisible(bool(stale and message))
+        heading = getattr(self, "stock_warning_heading_lbl", None)
+        if heading is not None:
+            heading.setVisible(bool(stale and message))
         if hasattr(self, "stock_table") and self.stock_table is not None:
             self.stock_table.setStyleSheet(
                 "QTableWidget { border:1px solid #8a0303; }"
                 if stale else ""
             )
+        self._refresh_design_information_style()
         
     def _rebuild_model_from_table(self):
         """Clear and rebuild factors in the model based on the table."""
@@ -14127,7 +14194,8 @@ class ExperimentDesignDialog(QDialog):
                         "reason",
                         "Reactions and stock solutions could not be updated.",
                     )
-                )
+                ),
+                severity="error",
             )
             return
 
@@ -14154,7 +14222,7 @@ class ExperimentDesignDialog(QDialog):
             elif any(abs(float(row.get("abs_error", 0.0))) > 1e-12 for row in rows):
                 approximate.append(self._key_label(key))
 
-        parts = []
+        parts = ["Reactions and stock solutions updated."]
         if unreachable:
             parts.append(
                 "Some targets remain unreachable under the selected stock settings: "
@@ -14176,11 +14244,13 @@ class ExperimentDesignDialog(QDialog):
                 + ("..." if len(bounded_search) > 4 else "")
                 + "."
             )
-        if approximate or preview:
-            parts.append("Hover a Targets field to inspect the actual achieved concentrations.")
-        if not parts:
-            parts.append("Reactions and stock solutions updated.")
-        self._set_status(" ".join(parts))
+        severity = "warning" if unreachable or bounded_search else "success"
+        self._set_status(" ".join(parts), severity=severity)
+        self._set_tip(
+            "Hover a Targets field to inspect the actual achieved concentrations."
+            if approximate or preview
+            else ""
+        )
 
     def _preflight_design_size(
         self,
@@ -14258,7 +14328,7 @@ class ExperimentDesignDialog(QDialog):
                 )
             except Exception:
                 pass
-        self._set_status(message)
+        self._set_status(message, severity="error")
         if refresh_lock_states:
             self._refresh_all_lock_states()
         return False, {
@@ -14281,7 +14351,7 @@ class ExperimentDesignDialog(QDialog):
     ) -> tuple[bool, dict | None]:
         if self._gripper_edit_lock_is_active():
             message = self.GRIPPER_LOCK_STATUS
-            self._set_status(message)
+            self._set_status(message, severity="warning")
             return False, {
                 "best": None,
                 "reason": message,
@@ -14293,7 +14363,7 @@ class ExperimentDesignDialog(QDialog):
                 "This experiment is locked. Reactions and stock solutions cannot be "
                 "changed."
             )
-            self._set_status(message)
+            self._set_status(message, severity="warning")
             return False, {
                 "best": None,
                 "reason": message,
@@ -14340,7 +14410,7 @@ class ExperimentDesignDialog(QDialog):
                 )
             self._set_stock_table_stale(True, stale_msg)
             summary = self._summarize_issue_map(input_issues, stale=True, stale_message=stale_msg)
-            self._set_status(summary)
+            self._set_status(summary, severity="error")
             if refresh_lock_states:
                 self._refresh_all_lock_states()
             if show_failure_dialog:
@@ -14358,6 +14428,9 @@ class ExperimentDesignDialog(QDialog):
                 or "Updating reactions and stock solutions... this may take a moment on Raspberry Pi.",
                 widgets=self._design_busy_widgets(),
                 status_setter=self._set_status,
+                failure_status_setter=lambda message: self._set_status(
+                    message, severity="error"
+                ),
                 failure_message="Reactions and stock solutions could not be updated.",
                 show_dialog=show_busy_dialog,
             ):
@@ -14396,7 +14469,7 @@ class ExperimentDesignDialog(QDialog):
                 stale=True,
                 stale_message=stale_msg,
             )
-            self._set_status(summary)
+            self._set_status(summary, severity="error")
             if refresh_lock_states:
                 self._refresh_all_lock_states()
             if show_failure_dialog:
@@ -14881,16 +14954,20 @@ class ExperimentDesignDialog(QDialog):
         except Exception:
             available_wells = None
 
-        required_html = str(total_reactions)
-        if available_wells is not None and int(total_reactions) > int(available_wells):
-            required_html = f"<span style='color:#8a0303; font-weight:600;'>{int(total_reactions)}</span>"
-
-        available_text = str(available_wells) if available_wells is not None else "n/a"
-        self.summary_lbl.setText(
-            "Summary: "
-            f"Total reactions = {required_html}  |  "
-            f"Available wells = {available_text}  |  "
-            f"Worst non-fill volume = {self._fmt_num(worst_nonfill_nL)} nL"
+        total_label = self.summary_total_reactions_value_lbl
+        total_label.setText(str(int(total_reactions)))
+        over_capacity = (
+            available_wells is not None
+            and int(total_reactions) > int(available_wells)
+        )
+        total_label.setStyleSheet(
+            "color:#8a0303; font-weight:600;" if over_capacity else ""
+        )
+        self.summary_available_wells_value_lbl.setText(
+            str(available_wells) if available_wells is not None else "n/a"
+        )
+        self.summary_worst_nonfill_value_lbl.setText(
+            f"{self._fmt_num(worst_nonfill_nL)} nL"
         )
         self._update_well_selection_summary()
     
@@ -15000,6 +15077,7 @@ class ExperimentDesignDialog(QDialog):
         - Create Experiments/<name>/ with initial files
         - Refresh UI
         """
+        self._set_tip("")
         main_window = getattr(self, "main_window", None)
         if main_window is not None and hasattr(
             main_window, "start_new_experiment_session"
@@ -15007,14 +15085,14 @@ class ExperimentDesignDialog(QDialog):
             try:
                 main_window.start_new_experiment_session()
             except Exception as e:
-                self._set_status(f"New experiment failed: {e}")
+                self._set_status(f"New experiment failed: {e}", severity="error")
                 QMessageBox.warning(self, "Cannot start new experiment", str(e))
                 return
         elif hasattr(self.model, "reset_experiment_model"):
             try:
                 self.model.reset_experiment_model()
             except Exception as e:
-                self._set_status(f"New experiment failed (reset_experiment_model): {e}")
+                self._set_status(f"New experiment failed (reset_experiment_model): {e}", severity="error")
                 return
         else:
             # Fallback: do a safe manual reset for the new ExperimentModel
@@ -15056,7 +15134,7 @@ class ExperimentDesignDialog(QDialog):
                 if hasattr(self.model, "initialize_experiment"):
                     self.model.initialize_experiment()
             except Exception as e:
-                self._set_status(f"New experiment failed (fallback): {e}")
+                self._set_status(f"New experiment failed (fallback): {e}", severity="error")
                 return
 
         self._progress_reset_confirmed = False
@@ -15084,7 +15162,10 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_editor_lifecycle_state()
         self._refresh_editable_copy_availability()
 
-        self._set_status(f"New experiment created: {getattr(self.model, 'experiment_dir_path', '(unsaved yet)')}")
+        self._set_status(
+            f"New experiment created: {getattr(self.model, 'experiment_dir_path', '(unsaved yet)')}",
+            severity="success",
+        )
 
     def _on_save_design(self):
         """
@@ -15092,7 +15173,10 @@ class ExperimentDesignDialog(QDialog):
         If needed, optimize/generate so stock table is fresh in the preview.
         """
         if self._model_execution_is_read_only(self.model):
-            self._set_status("This experiment is locked and cannot be saved as changes.")
+            self._set_status(
+                "This experiment is locked and cannot be saved as changes.",
+                severity="warning",
+            )
             return
         ok, res = self._run_design_optimization_flow(
             show_failure_dialog=True,
@@ -15125,11 +15209,12 @@ class ExperimentDesignDialog(QDialog):
                 )
                 self._apply_requested = True
                 self._set_status(
-                    f"Experiment saved: {self.model.experiment_file_path}"
+                    f"Experiment saved: {self.model.experiment_file_path}",
+                    severity="success",
                 )
             except Exception as exc:
                 message = "The experiment could not be saved. See the application logs for details."
-                self._set_status(message)
+                self._set_status(message, severity="error")
                 print(f"[ExperimentDesignDialog] finalize-save error: {exc}")
                 QMessageBox.warning(
                     self,
@@ -15141,7 +15226,10 @@ class ExperimentDesignDialog(QDialog):
         # Ensure folder exists / name is current, then save
         self._ensure_experiment_dir()
         self.model.save_experiment()
-        self._set_status(f"Design saved to: {self.model.experiment_file_path}")
+        self._set_status(
+            f"Design saved to: {self.model.experiment_file_path}",
+            severity="success",
+        )
 
     def _on_duplicate_design(self):
         source_file, source_dir, source_error = (
@@ -15210,7 +15298,9 @@ class ExperimentDesignDialog(QDialog):
                 f"The source parent folder is not writable: {destination_parent}"
             )
             QMessageBox.warning(self, "Could not create editable copy", message)
-            self._set_status(f"Could not create editable copy: {message}")
+            self._set_status(
+                f"Could not create editable copy: {message}", severity="error"
+            )
             return
 
         new_experiment_path = (destination_parent / new_name).resolve()
@@ -15226,7 +15316,8 @@ class ExperimentDesignDialog(QDialog):
                 f"A folder named '{new_name}' already exists{collision_detail}.",
             )
             self._set_status(
-                f"Could not create editable copy; folder already exists: {new_experiment_path}"
+                f"Could not create editable copy; folder already exists: {new_experiment_path}",
+                severity="error",
             )
             return
 
@@ -15239,7 +15330,9 @@ class ExperimentDesignDialog(QDialog):
         except Exception as e:
             message = str(e) or "The editable copy could not be created."
             QMessageBox.warning(self, "Could not create editable copy", message)
-            self._set_status(f"Could not create editable copy: {message}")
+            self._set_status(
+                f"Could not create editable copy: {message}", severity="error"
+            )
             return
 
         self._progress_reset_confirmed = False
@@ -15260,7 +15353,8 @@ class ExperimentDesignDialog(QDialog):
 
         self._set_status(
             f"Editable copy created from: {source_dir}. "
-            f"New experiment: {new_experiment_path}"
+            f"New experiment: {new_experiment_path}",
+            severity="success",
         )
 
     def _on_load_design(self):
@@ -15278,9 +15372,14 @@ class ExperimentDesignDialog(QDialog):
         if not exp_dir:
             return
 
+        self._set_tip("")
+
         path = os.path.join(exp_dir, "experiment_design.json")
         if not os.path.exists(path):
-            self._set_status(f"No 'experiment_design.json' found in: {exp_dir}")
+            self._set_status(
+                f"No 'experiment_design.json' found in: {exp_dir}",
+                severity="error",
+            )
             return
 
         progress_path = os.path.join(exp_dir, "progress.json")
@@ -15396,13 +15495,16 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_all_lock_states()
 
         if legacy_read_only or execution_locked:
-            self._set_status(self._progress_lock_status_message)
+            self._set_status(self._progress_lock_status_message, severity="warning")
         elif progress_policy == self.PROGRESS_POLICY_RESUME:
-            self._set_status(self._progress_lock_status_message)
+            self._set_status(self._progress_lock_status_message, severity="warning")
         elif progress_policy == self.PROGRESS_POLICY_RESET:
-            self._set_status(f"Design loaded from: {exp_dir}. Saved progress deleted; edits are enabled.")
+            self._set_status(
+                f"Design loaded from: {exp_dir}. Saved progress deleted; edits are enabled.",
+                severity="success",
+            )
         else:
-            self._set_status(f"Design loaded from: {exp_dir}")
+            self._set_status(f"Design loaded from: {exp_dir}", severity="success")
 
     def _on_finish(self):
         """
@@ -15447,7 +15549,7 @@ class ExperimentDesignDialog(QDialog):
                     "The older experiment could not be displayed. See the application "
                     "logs for details."
                 )
-                self._set_status(message)
+                self._set_status(message, severity="error")
                 QMessageBox.warning(
                     self,
                     "Could not view older experiment",
@@ -15518,7 +15620,7 @@ class ExperimentDesignDialog(QDialog):
                         "logs for details."
                     )
                 )
-                self._set_status(message)
+                self._set_status(message, severity="error")
                 QMessageBox.warning(
                     self,
                     (
@@ -15581,7 +15683,9 @@ class ExperimentDesignDialog(QDialog):
             self._ensure_experiment_dir()
             self.model.save_experiment()
 
-        self._set_status("Design finalized and saved. Closing...")
+        self._set_status(
+            "Design finalized and saved. Closing...", severity="success"
+        )
 
         # Propagate the experiment to the main window
         try:
@@ -15599,7 +15703,7 @@ class ExperimentDesignDialog(QDialog):
                 self._apply_requested = True
         except Exception as e:
             message = str(e) or "Unknown error applying the experiment design."
-            self._set_status(message)
+            self._set_status(message, severity="error")
             QMessageBox.warning(self, "Could not apply experiment design", message)
             print(f"[ExperimentDesignDialog] finish handoff error: {e}")
             return
@@ -15607,9 +15711,78 @@ class ExperimentDesignDialog(QDialog):
         # Close dialog after explicit apply.
         self.accept()
 
-    def _set_status(self, msg: str):
-        self.status_lbl.setToolTip(msg)
-        self.status_lbl.setText(msg)
+    def _effective_status_severity(self) -> str:
+        if bool(getattr(self, "_stock_table_stale_active", False)):
+            return "error"
+        severity = str(getattr(self, "_status_severity", "info") or "info")
+        return severity if severity in self.STATUS_SEVERITIES else "info"
+
+    def _refresh_design_information_style(self):
+        severity = self._effective_status_severity()
+        border_color = {
+            "error": "#8a0303",
+            "warning": "#c58a00",
+        }.get(severity, "#8c8c8c")
+
+        panel = getattr(self, "design_information_panel", None)
+        if panel is not None:
+            panel.setStyleSheet(
+                "QGroupBox#designInformationPanel {"
+                f" border:2px solid {border_color};"
+                " border-radius:4px; margin-top:8px;"
+                "}"
+                "QGroupBox#designInformationPanel::title {"
+                " subcontrol-origin:margin; subcontrol-position:top left;"
+                " left:8px; padding:0 4px;"
+                "}"
+            )
+
+        heading = getattr(self, "status_heading_lbl", None)
+        if heading is not None:
+            heading_text = {
+                "error": "Error",
+                "warning": "Warning",
+                "success": "Ready",
+                "info": "Status",
+            }[severity]
+            heading_color = {
+                "error": "#8a0303",
+                "warning": "#996515",
+            }.get(severity)
+            heading.setText(heading_text)
+            heading.setStyleSheet(
+                f"color:{heading_color}; font-weight:600;"
+                if heading_color
+                else "font-weight:600;"
+            )
+
+        tip_visible = bool(getattr(self, "_status_tip_text", "")) and severity != "error"
+        for attribute_name in ("tip_heading_lbl", "tip_lbl"):
+            widget = getattr(self, attribute_name, None)
+            if widget is not None:
+                widget.setVisible(tip_visible)
+
+    def _set_tip(self, msg: str = ""):
+        message = str(msg or "")
+        self._status_tip_text = message
+        label = getattr(self, "tip_lbl", None)
+        if label is not None:
+            label.setToolTip(message)
+            label.setText(message)
+        self._refresh_design_information_style()
+
+    def _set_status(self, msg: str, severity: str = "info"):
+        normalized = str(severity or "info").lower()
+        if normalized not in self.STATUS_SEVERITIES:
+            raise ValueError(f"Unsupported status severity: {severity}")
+        message = str(msg or "")
+        self._status_severity = normalized
+        self.status_lbl.setToolTip(message)
+        self.status_lbl.setText(message)
+        if normalized == "error":
+            self._set_tip("")
+        else:
+            self._refresh_design_information_style()
 
     @staticmethod
     def _fmt_stock_conc_display(x, sig_figs: int = 3) -> str:

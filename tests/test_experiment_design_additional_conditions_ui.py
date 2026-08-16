@@ -214,7 +214,7 @@ def test_unique_conditions_button_count_refreshes_after_new_experiment(qapp):
     dialog._refresh_stock_table = lambda: None
     dialog._update_summary_labels = lambda: None
     dialog._refresh_all_prior_availability = lambda: None
-    dialog._set_status = lambda message: setattr(dialog, "_last_status", message)
+    dialog._set_status = lambda message, severity="info": setattr(dialog, "_last_status", message)
 
     ExperimentDesignDialog._update_unique_conditions_button_label(dialog)
     assert dialog.unique_conditions_btn.text() == "Additional Conditions (1)..."

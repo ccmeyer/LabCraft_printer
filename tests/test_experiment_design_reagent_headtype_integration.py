@@ -693,6 +693,13 @@ def test_experiment_designer_uses_grouped_wide_layout_without_export_action(qapp
     assert dialog.design_information_panel.parentWidget() is dialog.stock_information_region
     assert dialog.design_messages_scroll.isAncestorOf(dialog.status_lbl)
     assert dialog.design_messages_scroll.isAncestorOf(dialog.stock_table_status_lbl)
+    assert dialog.design_messages_scroll.isAncestorOf(dialog.tip_lbl)
+    assert not hasattr(dialog, "summary_lbl")
+    assert dialog.summary_total_reactions_value_lbl.alignment() & Qt.AlignRight
+    assert dialog.summary_available_wells_value_lbl.alignment() & Qt.AlignRight
+    assert dialog.summary_worst_nonfill_value_lbl.alignment() & Qt.AlignRight
+    assert dialog.status_lbl.styleSheet() == ""
+    assert dialog.stock_table_status_lbl.styleSheet() == ""
     assert not hasattr(dialog, "export_reaction_preview_btn")
     assert dialog.reset_upload_btn.text() == "Clear Imported Design"
     assert dialog.reset_upload_btn.isHidden() is True
@@ -765,6 +772,9 @@ def test_stock_warning_and_general_status_coexist_in_information_panel(qapp):
     assert dialog.status_lbl.text() == status_message
     assert dialog.stock_table_status_lbl.text() == stock_warning
     assert dialog.stock_table_status_lbl.isVisible() is True
+    assert dialog.stock_warning_heading_lbl.isVisible() is True
+    assert dialog.status_heading_lbl.text() == "Error"
+    assert "border:2px solid #8a0303" in dialog.design_information_panel.styleSheet()
     assert dialog.design_messages_scroll.isAncestorOf(dialog.status_lbl)
     assert dialog.design_messages_scroll.isAncestorOf(dialog.stock_table_status_lbl)
     assert dialog.stock_table.styleSheet() == "QTableWidget { border:1px solid #8a0303; }"
@@ -774,7 +784,84 @@ def test_stock_warning_and_general_status_coexist_in_information_panel(qapp):
     assert dialog.status_lbl.text() == status_message
     assert dialog.stock_table_status_lbl.text() == ""
     assert dialog.stock_table_status_lbl.isVisible() is False
+    assert dialog.stock_warning_heading_lbl.isVisible() is False
     assert dialog.stock_table.styleSheet() == ""
+    dialog.close()
+
+
+def test_design_information_summary_uses_structured_rows(qapp):
+    dialog = _build_real_dialog()
+    dialog._available_wells_for_selected_plate = lambda: (4, "test plate")
+
+    dialog._update_summary_labels(total_reactions=5, worst_nonfill_nL=12.5)
+
+    assert dialog.summary_total_reactions_value_lbl.text() == "5"
+    assert dialog.summary_available_wells_value_lbl.text() == "4"
+    assert dialog.summary_worst_nonfill_value_lbl.text() == "12.5 nL"
+    assert "color:#8a0303" in dialog.summary_total_reactions_value_lbl.styleSheet()
+
+    dialog._update_summary_labels(total_reactions=3, worst_nonfill_nL=10.0)
+
+    assert dialog.summary_total_reactions_value_lbl.text() == "3"
+    assert dialog.summary_total_reactions_value_lbl.styleSheet() == ""
+    dialog.close()
+
+
+def test_design_information_severity_and_tip_states(qapp):
+    dialog = _build_real_dialog()
+    dialog.show()
+    qapp.processEvents()
+    before_geometry = dialog.design_information_panel.geometry().getRect()
+
+    dialog._set_status("Update completed.", severity="success")
+    dialog._set_tip("Hover a Targets field for details.")
+    qapp.processEvents()
+
+    assert dialog.status_heading_lbl.text() == "Ready"
+    assert dialog.tip_lbl.isVisible() is True
+    assert "Hover a Targets field" not in dialog.status_lbl.text()
+    assert "border:2px solid #8c8c8c" in dialog.design_information_panel.styleSheet()
+
+    dialog._set_status("The design cannot be generated.", severity="error")
+    qapp.processEvents()
+
+    assert dialog.status_heading_lbl.text() == "Error"
+    assert dialog.tip_lbl.text() == ""
+    assert dialog.tip_lbl.isVisible() is False
+    assert "border:2px solid #8a0303" in dialog.design_information_panel.styleSheet()
+    assert dialog.design_information_panel.geometry().getRect() == before_geometry
+
+    dialog._set_status("Check the selected settings.", severity="warning")
+    assert dialog.status_heading_lbl.text() == "Warning"
+    assert "border:2px solid #c58a00" in dialog.design_information_panel.styleSheet()
+
+    dialog._set_stock_table_stale(True, "Stock solutions are stale.")
+    dialog._set_status("Update completed.", severity="success")
+    assert dialog.status_heading_lbl.text() == "Error"
+    assert "border:2px solid #8a0303" in dialog.design_information_panel.styleSheet()
+
+    dialog._set_stock_table_stale(False, "")
+    assert dialog.status_heading_lbl.text() == "Ready"
+    assert "border:2px solid #8c8c8c" in dialog.design_information_panel.styleSheet()
+    dialog.close()
+
+
+def test_optimization_guidance_does_not_replace_success_status(qapp):
+    dialog = _build_real_dialog()
+    dialog.model.plans_per_option = {("Reagent A", None): {"n_stocks": 1}}
+    dialog.model.get_target_preview_map = lambda: {
+        ("Reagent A", None): [
+            {"reachable": True, "abs_error": 0.05},
+        ]
+    }
+
+    dialog._update_optimization_status(
+        {"best": True, "two_stock_search_limited_keys": []}
+    )
+
+    assert dialog.status_lbl.text() == "Reactions and stock solutions updated."
+    assert dialog.tip_lbl.text().startswith("Hover a Targets field")
+    assert dialog.status_heading_lbl.text() == "Ready"
     dialog.close()
 
 

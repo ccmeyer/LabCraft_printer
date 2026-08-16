@@ -194,7 +194,7 @@ def _make_preview_action_dialog(preview_df, tmp_path=None):
     dialog._manual_assignments_active = lambda: False
     dialog._can_reuse_current_generated_design = lambda: False
     dialog._has_current_generated_design = lambda: True
-    dialog._set_status = lambda message: setattr(dialog, "_last_status", message)
+    dialog._set_status = lambda message, severity="info": setattr(dialog, "_last_status", message)
     dialog._optimization_calls = []
 
     def run_flow(**kwargs):
