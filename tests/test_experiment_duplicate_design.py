@@ -112,7 +112,8 @@ def test_duplicate_design_from_source_creates_fresh_run_state(tmp_path):
         "records": {},
     }
     assert json.loads((duplicate_dir / "progress.json").read_text(encoding="utf-8")) == {}
-    assert json.loads((duplicate_dir / "calibration.json").read_text(encoding="utf-8")) == {}
+    assert duplicate_design["calibration_storage"]["legacy_writer_mode"] == "canonical_only"
+    assert not (duplicate_dir / "calibration.json").exists()
     assert not (duplicate_dir / "calibration_recordings").exists()
     assert not (duplicate_dir / "calibration_index.jsonl").exists()
     storage_paths = duplicate_model.get_calibration_storage_paths()

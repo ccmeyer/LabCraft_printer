@@ -41,6 +41,9 @@ from tools.virtual_workflows.report import ComposedReportPayload
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+NEW_STORE_ONLY_CATALOG_PATH = CATALOG_PATH.with_name(
+    "catalog_new_store_only_v1.json"
+)
 PERFORMANCE_FIXTURE_PATH = (
     Path(__file__).resolve().parent
     / "fixtures"
@@ -56,6 +59,7 @@ PRIMARY_READER_FUNCTIONAL_ID = "calibration_storage_primary_reader_contract_v1"
 PRIMARY_READER_PERFORMANCE_ID = "calibration_storage_primary_reader_8x25_v1"
 SECONDARY_READER_FUNCTIONAL_ID = "calibration_storage_secondary_reader_contract_v1"
 SECONDARY_READER_PERFORMANCE_ID = "calibration_storage_secondary_reader_8x25_v1"
+NEW_STORE_ONLY_FUNCTIONAL_ID = "calibration_storage_new_store_only_contract_v1"
 FUNCTIONAL_SCENARIO = "calibration_storage_contract"
 PERFORMANCE_SCENARIO = "calibration_storage_legacy_baseline"
 SHADOW_FUNCTIONAL_SCENARIO = "calibration_storage_shadow_contract"
@@ -66,6 +70,7 @@ PRIMARY_READER_FUNCTIONAL_SCENARIO = "calibration_storage_primary_reader_contrac
 PRIMARY_READER_PERFORMANCE_SCENARIO = "calibration_storage_primary_reader"
 SECONDARY_READER_FUNCTIONAL_SCENARIO = "calibration_storage_secondary_reader_contract"
 SECONDARY_READER_PERFORMANCE_SCENARIO = "calibration_storage_secondary_reader"
+NEW_STORE_ONLY_FUNCTIONAL_SCENARIO = "calibration_storage_new_store_only_contract"
 
 
 def _shadow_enabled(runtime: JourneyRuntime) -> bool:
@@ -83,6 +88,7 @@ def _authoritative_enabled(runtime: JourneyRuntime) -> bool:
         PRIMARY_READER_PERFORMANCE_ID,
         SECONDARY_READER_FUNCTIONAL_ID,
         SECONDARY_READER_PERFORMANCE_ID,
+        NEW_STORE_ONLY_FUNCTIONAL_ID,
     }
 
 
@@ -92,6 +98,7 @@ def _primary_reader_enabled(runtime: JourneyRuntime) -> bool:
         PRIMARY_READER_PERFORMANCE_ID,
         SECONDARY_READER_FUNCTIONAL_ID,
         SECONDARY_READER_PERFORMANCE_ID,
+        NEW_STORE_ONLY_FUNCTIONAL_ID,
     }
 
 
@@ -99,11 +106,16 @@ def _secondary_reader_enabled(runtime: JourneyRuntime) -> bool:
     return runtime.definition.registry_id in {
         SECONDARY_READER_FUNCTIONAL_ID,
         SECONDARY_READER_PERFORMANCE_ID,
+        NEW_STORE_ONLY_FUNCTIONAL_ID,
     }
 
 
 def _canonical_enabled(runtime: JourneyRuntime) -> bool:
     return _shadow_enabled(runtime) or _authoritative_enabled(runtime)
+
+
+def _new_store_only_enabled(runtime: JourneyRuntime) -> bool:
+    return runtime.definition.registry_id == NEW_STORE_ONLY_FUNCTIONAL_ID
 
 FUNCTIONAL_ACTIONS = frozenset(
     {
@@ -141,6 +153,9 @@ FUNCTIONAL_ASSERTIONS = (
     "calibration.storage.fresh_reload_exact",
     "calibration.storage.ui_application_exact",
     "artifacts.cleanup_complete",
+)
+NEW_STORE_ONLY_ASSERTIONS = FUNCTIONAL_ASSERTIONS + (
+    "calibration.storage.legacy_writer_cutover",
 )
 PERFORMANCE_ACTIONS = frozenset(
     {
@@ -184,6 +199,14 @@ def _functional_fixture() -> tuple[dict[str, Any], Path]:
     return catalog, CATALOG_PATH.resolve()
 
 
+def _new_store_only_fixture() -> tuple[dict[str, Any], Path]:
+    catalog, _cases = load_catalog(
+        NEW_STORE_ONLY_CATALOG_PATH,
+        expected_fixture_id=NEW_STORE_ONLY_FUNCTIONAL_ID,
+    )
+    return catalog, NEW_STORE_ONLY_CATALOG_PATH.resolve()
+
+
 def _performance_fixture() -> tuple[dict[str, Any], Path]:
     payload = json.loads(PERFORMANCE_FIXTURE_PATH.read_text(encoding="utf-8"))
     workload = payload.get("workload") or {}
@@ -200,8 +223,15 @@ def _performance_fixture() -> tuple[dict[str, Any], Path]:
 
 
 def _prepare_minimal_experiment(runtime: JourneyRuntime) -> dict[str, Any]:
+    from CalibrationPersistencePolicy import legacy_compatible_policy
+
     context = runtime.context
     experiment = context.experiment_model
+    if not _new_store_only_enabled(runtime):
+        experiment.calibration_storage_policy = legacy_compatible_policy(
+            source="storage_contract_compatibility"
+        )
+        experiment._sync_calibration_storage_policy_to_manager()
     experiment.factors = []
     experiment.add_additive(
         "SIL Storage Reagent",
@@ -323,7 +353,14 @@ def _summary_oracle_projection(rows: list[Mapping[str, Any]]) -> list[dict[str, 
 
 def _run_functional_catalog(runtime: JourneyRuntime) -> dict[str, Any]:
     prepared = runtime.observations["prepared_experiment"]
-    catalog, fixture_cases = load_catalog(runtime.fixture_path)
+    catalog, fixture_cases = load_catalog(
+        runtime.fixture_path,
+        expected_fixture_id=(
+            NEW_STORE_ONLY_FUNCTIONAL_ID
+            if _new_store_only_enabled(runtime)
+            else FUNCTIONAL_ID
+        ),
+    )
     metrics = StorageMetricsCollector()
     runner = StorageContractRunner(
         model=runtime.context.model,
@@ -335,6 +372,11 @@ def _run_functional_catalog(runtime: JourneyRuntime) -> dict[str, Any]:
         metrics=metrics,
         shadow_store_enabled=_shadow_enabled(runtime),
         authoritative_mode=_authoritative_enabled(runtime),
+        legacy_writer_mode=(
+            "canonical_only"
+            if _new_store_only_enabled(runtime)
+            else "legacy_compatible"
+        ),
     )
     runtime.register_restorable("calibration_storage_runner", runner)
     runner.manager._calibration_reader_preference = (
@@ -376,7 +418,23 @@ def _run_functional_catalog(runtime: JourneyRuntime) -> dict[str, Any]:
         if all(row.get(key) == value for key, value in target_coordinates.items())
     ]
     if len(target_rows) != 1:
-        raise RuntimeError("legacy parity target row did not resolve uniquely")
+        observed = [
+            {
+                key: row.get(key)
+                for key in (
+                    "source_run_id",
+                    "source_phase_key",
+                    "source_step_index",
+                    "source_pressure_index",
+                    "reader_state",
+                )
+            }
+            for row in application_rows
+        ]
+        raise RuntimeError(
+            "legacy parity target row did not resolve uniquely: "
+            f"expected={target_coordinates!r}, observed={observed!r}"
+        )
 
     process_summary_rows = {}
     for case, process_evidence in executed:
@@ -455,7 +513,12 @@ def _run_functional_catalog(runtime: JourneyRuntime) -> dict[str, Any]:
         "target_coordinates": target_coordinates,
         "target_row": dict(target_rows[0]),
         "metrics": metrics.snapshot(),
-        "calibration_sha256": file_sha256(prepared["calibration_file"]),
+        "calibration_sha256": (
+            file_sha256(prepared["calibration_file"])
+            if Path(prepared["calibration_file"]).is_file()
+            else None
+        ),
+        "legacy_writer": runner.manager.get_legacy_calibration_writer_diagnostics(),
         "inventory": file_inventory(runtime.context.scenario_root),
     }
     runtime.observations["functional_storage"] = evidence
@@ -473,7 +536,11 @@ def _functional_contract_assertions(runtime: JourneyRuntime) -> None:
             observed["process_summary_rows"]["online-stream-five-update"]
         )
     parity_ok = all(
-        row["update_hashes"] == row["legacy_update_hashes"]
+        (
+            row["legacy_update_hashes"] == ()
+            if _new_store_only_enabled(runtime)
+            else row["update_hashes"] == row["legacy_update_hashes"]
+        )
         and (
             row["recorder_update_hashes"] == row["update_hashes"]
             if row["diagnostic_recording_enabled"]
@@ -504,6 +571,60 @@ def _functional_contract_assertions(runtime: JourneyRuntime) -> None:
             sources=("calibration.json", "analysis.jsonl", "fixture_catalog"),
         )
     )
+
+    if _new_store_only_enabled(runtime):
+        prepared = runtime.observations["prepared_experiment"]
+        calibration_path = Path(prepared["calibration_file"])
+        writer = dict(observed["legacy_writer"])
+        result_paths = sorted(
+            calibration_path.parent.glob("calibration_recordings/*/*/result.json")
+        )
+        provenance_ok = True
+        for result_path in result_paths:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            policy = dict((result.get("provenance") or {}).get("storage_policy") or {})
+            provenance_ok = provenance_ok and (
+                policy.get("declared_mode") == "canonical_only"
+                and policy.get("effective_enabled") is False
+                and policy.get("effective_reason") == "canonical_only_experiment"
+            )
+        cutover_ok = (
+            not calibration_path.exists()
+            and not list(calibration_path.parent.glob("calibration.json.*"))
+            and writer.get("declared_mode") == "canonical_only"
+            and writer.get("effective_enabled") is False
+            and int(writer.get("write_count") or 0) == 0
+            and int(writer.get("suppressed_write_count") or 0) >= 32
+            and all(not row["legacy_update_hashes"] for row in process_rows)
+            and len(result_paths) == 16
+            and provenance_ok
+            and bool((runtime.observations.get("legacy_writer_canaries") or {}).get("exact"))
+        )
+        runtime.add_assertion(
+            _assertion(
+                "calibration.storage.legacy_writer_cutover",
+                cutover_ok,
+                {
+                    "calibration_json_exists": calibration_path.exists(),
+                    "temporary_legacy_paths": [
+                        str(path.name)
+                        for path in calibration_path.parent.glob("calibration.json.*")
+                    ],
+                    "writer_diagnostics": writer,
+                    "canonical_result_count": len(result_paths),
+                    "provenance_ok": provenance_ok,
+                    "canaries": dict(
+                        runtime.observations.get("legacy_writer_canaries") or {}
+                    ),
+                },
+                checkpoint="new_store_only_writers",
+                sources=(
+                    "CalibrationManager.get_legacy_calibration_writer_diagnostics",
+                    "calibration_recordings/*/*/result.json",
+                    "experiment directory inventory",
+                ),
+            )
+        )
     lifecycle_ok = (
         observed["process_count"] == 16
         and observed["successful_processes"] == 14
@@ -608,7 +729,102 @@ def _functional_contract_assertions(runtime: JourneyRuntime) -> None:
             checkpoint="capture_scaffolding",
             sources=("calibration_recordings/captures",),
         )
+        )
+
+
+def _run_legacy_writer_canaries(runtime: JourneyRuntime) -> dict[str, Any]:
+    """Prove historical compatibility and the explicit rollback in one update each."""
+
+    _catalog, cases = load_catalog(
+        runtime.fixture_path,
+        expected_fixture_id=NEW_STORE_ONLY_FUNCTIONAL_ID,
     )
+    selected = next(case for case in cases if case.process_id == "droplet-emergence")
+    manager = runtime.context.model.calibration_manager
+    memory_store = getattr(runtime.context.model, "calibration_memory_store", None)
+    prior_memory_enabled = (
+        bool(memory_store.get_memory_enabled()) if memory_store is not None else False
+    )
+    if memory_store is not None:
+        memory_store.set_memory_enabled(False)
+    root = Path(runtime.context.scenario_root) / "legacy-writer-canaries"
+    historical_path = root / "historical" / "calibration.json"
+    rollback_path = root / "rollback" / "calibration.json"
+    historical_path.parent.mkdir(parents=True, exist_ok=True)
+    rollback_path.parent.mkdir(parents=True, exist_ok=True)
+    historical_path.write_text(
+        json.dumps({"schema_version": 1, "runs": []}, indent=2),
+        encoding="utf-8",
+    )
+    historical_before = file_sha256(historical_path)
+    manager.update_calibration_file_path(str(historical_path))
+    historical_after_open = file_sha256(historical_path)
+    try:
+        historical_runner = StorageContractRunner(
+            model=runtime.context.model,
+            controller=runtime.context.controller,
+            machine=runtime.context.machine,
+            app=runtime.context.app,
+            calibration_file_path=historical_path,
+            timeout_seconds=runtime.harness.config.timeout_seconds,
+            authoritative_mode=True,
+            legacy_writer_mode="legacy_compatible",
+        )
+        historical = historical_runner.run_case(selected).as_dict()
+        historical_writer = manager.get_legacy_calibration_writer_diagnostics()
+        historical_runner.restore()
+
+        prior_rollback = bool(getattr(manager, "_legacy_writer_rollback_enabled", False))
+        manager._legacy_writer_rollback_enabled = True
+        try:
+            rollback_runner = StorageContractRunner(
+                model=runtime.context.model,
+                controller=runtime.context.controller,
+                machine=runtime.context.machine,
+                app=runtime.context.app,
+                calibration_file_path=rollback_path,
+                timeout_seconds=runtime.harness.config.timeout_seconds,
+                authoritative_mode=True,
+                legacy_writer_mode="canonical_only",
+            )
+            rollback = rollback_runner.run_case(selected).as_dict()
+            rollback_writer = manager.get_legacy_calibration_writer_diagnostics()
+            rollback_runner.restore()
+        finally:
+            manager._legacy_writer_rollback_enabled = prior_rollback
+    finally:
+        if memory_store is not None:
+            memory_store.set_memory_enabled(prior_memory_enabled)
+
+    prepared = runtime.observations["prepared_experiment"]
+    main_path = Path(prepared["calibration_file"])
+    manager.update_calibration_file_path(str(main_path))
+    manager.set_calibration_storage_policy("canonical_only")
+    manager._calibration_reader_preference = "canonical"
+    manager._calibration_secondary_reader_preference = "canonical"
+    exact = (
+        historical_before == historical_after_open
+        and historical_path.is_file()
+        and historical_writer["effective_reason"] == "legacy_compatible_experiment"
+        and historical["legacy_update_hashes"] == historical["update_hashes"]
+        and historical["canonical_update_hashes"] == historical["update_hashes"]
+        and rollback_path.is_file()
+        and rollback_writer["effective_reason"] == "legacy_writer_rollback"
+        and rollback["legacy_update_hashes"] == rollback["update_hashes"]
+        and rollback["canonical_update_hashes"] == rollback["update_hashes"]
+        and not main_path.exists()
+    )
+    evidence = {
+        "exact": exact,
+        "historical_open_hash_preserved": historical_before == historical_after_open,
+        "historical_writer": historical_writer,
+        "historical_process": historical,
+        "rollback_writer": rollback_writer,
+        "rollback_process": rollback,
+        "main_calibration_json_absent": not main_path.exists(),
+    }
+    runtime.observations["legacy_writer_canaries"] = evidence
+    return evidence
 
 
 def _stage_fresh_selection(runtime: JourneyRuntime) -> dict[str, Any]:
@@ -694,6 +910,9 @@ def _inspect_applied_record(
 
 
 def _functional_body(runtime: JourneyRuntime) -> None:
+    resource_sampler = ProcessResourceSampler() if _new_store_only_enabled(runtime) else None
+    if resource_sampler is not None:
+        resource_sampler.start()
     runtime.emit_progress("setup", completed=0, total=1)
     runtime.add_assertion(simulation_identity_assertion(runtime.context))
     runtime.harness.run_action(
@@ -709,10 +928,16 @@ def _functional_body(runtime: JourneyRuntime) -> None:
     )
     runtime.harness.run_action(
         "calibration.inspect_storage_artifacts",
-        lambda: {"status": "validated"},
+        lambda: (
+            _run_legacy_writer_canaries(runtime)
+            if _new_store_only_enabled(runtime)
+            else {"status": "validated"}
+        ),
         surface=InteractionSurface.HARNESS,
     )
     _functional_contract_assertions(runtime)
+    if resource_sampler is not None:
+        resource_sampler.sample()
     if _secondary_reader_enabled(runtime):
         prepared_path = Path(
             runtime.observations["prepared_experiment"]["calibration_file"]
@@ -757,6 +982,7 @@ def _functional_body(runtime: JourneyRuntime) -> None:
         surface=InteractionSurface.HARNESS,
     )
     manager = runtime.context.model.calibration_manager
+    staged_identity = manager._build_calibration_stock_identity_snapshot()
     try:
         raw_after_summary = manager.get_characterization_summary_rows()
         after_summary = _summary_projection(raw_after_summary)
@@ -765,6 +991,8 @@ def _functional_body(runtime: JourneyRuntime) -> None:
             "fresh calibration summary reload failed after staging persisted identity"
         ) from exc
     fresh_ok = after_summary == before_summary
+    if _new_store_only_enabled(runtime):
+        fresh_ok = fresh_ok and not Path(prepared["calibration_file"]).exists()
     reader_diagnostics = manager.get_calibration_reader_diagnostics()
     runtime.add_assertion(
         _assertion(
@@ -777,6 +1005,7 @@ def _functional_body(runtime: JourneyRuntime) -> None:
                 "fresh_reload_latency_ms": fresh_reload_ms,
                 "loader": reload_evidence,
                 "reader_diagnostics": reader_diagnostics,
+                "staged_identity": staged_identity,
             },
             checkpoint="fresh_application",
             sources=("ExperimentLoaderDriver", "CalibrationManager"),
@@ -856,6 +1085,10 @@ def _functional_body(runtime: JourneyRuntime) -> None:
             ),
         )
     )
+    if resource_sampler is not None:
+        resource_sampler.sample()
+        resource_sampler.stop()
+        runtime.observations["functional_resources"] = resource_sampler.snapshot()
 
 
 def _build_performance_cases() -> tuple[ScriptedCalibrationCase, ...]:
@@ -1173,17 +1406,22 @@ def _exercise_secondary_consumers(
     aggregator = memory_store.aggregator
     aggregator.secondary_reader_preference = "canonical"
     held_path = calibration_path.with_name(".calibration.json.sil-held")
-    original_hash = file_sha256(calibration_path)
+    legacy_present = calibration_path.is_file()
+    original_hash = file_sha256(calibration_path) if legacy_present else None
     memory_started = time.perf_counter_ns()
-    calibration_path.replace(held_path)
+    if legacy_present:
+        calibration_path.replace(held_path)
     try:
         memory_result = aggregator.rebuild()
         memory_diagnostics = aggregator.get_source_diagnostics()
     finally:
-        held_path.replace(calibration_path)
+        if legacy_present:
+            held_path.replace(calibration_path)
     memory_latency = (time.perf_counter_ns() - memory_started) / 1_000_000.0
-    if file_sha256(calibration_path) != original_hash:
+    if legacy_present and file_sha256(calibration_path) != original_hash:
         raise RuntimeError("secondary-consumer probe changed calibration.json")
+    if not legacy_present and calibration_path.exists():
+        raise RuntimeError("secondary-consumer probe created calibration.json")
     usable_memory = [row for row in memory_diagnostics if row.get("usable")]
     if not usable_memory or any(
         int((row.get("diagnostics") or {}).get("calibration_json_reads") or 0)
@@ -1222,9 +1460,13 @@ def _exercise_secondary_consumers(
     archive = Path(export_result["archive_path"])
     with zipfile.ZipFile(archive, "r") as handle:
         members = set(handle.namelist())
-    required = {"calibration.json", "calibration_index.jsonl", "manifest.json"}
+    required = {"calibration_index.jsonl", "manifest.json"}
+    if legacy_present:
+        required.add("calibration.json")
     if not required <= members or not any(name.endswith("/result.json") for name in members):
         raise RuntimeError("calibration export omitted canonical or legacy evidence")
+    if not legacy_present and "calibration.json" in members:
+        raise RuntimeError("canonical-only export invented calibration.json")
     runtime.emit_progress("secondary_export", completed=1, total=1)
 
     audit_path = experiment_dir / "experiment_audit.jsonl"
@@ -1249,7 +1491,12 @@ def _exercise_secondary_consumers(
         "export_archive_bytes": archive.stat().st_size,
         "export_member_count": len(members),
         "canonical_audit_ref_count": canonical_audit_ref_count,
-        "legacy_hash_preserved": True,
+        "legacy_present": legacy_present,
+        "legacy_hash_preserved": (
+            file_sha256(calibration_path) == original_hash
+            if legacy_present
+            else not calibration_path.exists()
+        ),
         "consumer_error_count": 0,
     }
 
@@ -1421,13 +1668,22 @@ def _functional_payload(
                     "secondary_consumers": dict(
                         runtime.observations.get("secondary_consumers") or {}
                     ),
+                    "legacy_writer_canaries": dict(
+                        runtime.observations.get("legacy_writer_canaries") or {}
+                    ),
                     "metrics": metrics,
                 }
             },
         },
+        resources=dict(
+            runtime.observations.get("functional_resources")
+            or {"status": "not_available", "values": {}}
+        ),
         limitations=(
             (
-                "Canonical run artifacts are authoritative for new writes while application discovery remains on the legacy schema until Milestone 4."
+                "New experiments use canonical-only structured persistence; historical and rollback canaries retain legacy dual-writing."
+                if _new_store_only_enabled(runtime)
+                else "Canonical run artifacts are authoritative for new writes while application discovery remains on the legacy schema until Milestone 4."
                 if _authoritative_enabled(runtime)
                 else (
                     "Canonical run artifacts are non-authoritative shadow evidence; all application readers remain on the legacy schema."
@@ -1634,6 +1890,22 @@ SECONDARY_READER_FUNCTIONAL_DEFINITION = JourneyDefinition(
     summary_builder=_summary,
 )
 
+NEW_STORE_ONLY_FUNCTIONAL_DEFINITION = JourneyDefinition(
+    registry_id=NEW_STORE_ONLY_FUNCTIONAL_ID,
+    scenario_name=NEW_STORE_ONLY_FUNCTIONAL_SCENARIO,
+    scenario_version="1",
+    workload_id=NEW_STORE_ONLY_FUNCTIONAL_ID,
+    required_action_ids=FUNCTIONAL_ACTIONS,
+    required_ui_action_ids=FUNCTIONAL_UI_ACTIONS,
+    required_assertion_ids=NEW_STORE_ONLY_ASSERTIONS,
+    required_screenshots=frozenset(),
+    fixture_loader=_new_store_only_fixture,
+    body=_functional_body,
+    artifact_assertion=_artifact_assertion,
+    payload_builder=_functional_payload,
+    summary_builder=_summary,
+)
+
 SECONDARY_READER_PERFORMANCE_DEFINITION = JourneyDefinition(
     registry_id=SECONDARY_READER_PERFORMANCE_ID,
     scenario_name=SECONDARY_READER_PERFORMANCE_SCENARIO,
@@ -1658,6 +1930,8 @@ __all__ = [
     "AUTHORITATIVE_PERFORMANCE_ID",
     "FUNCTIONAL_DEFINITION",
     "FUNCTIONAL_ID",
+    "NEW_STORE_ONLY_FUNCTIONAL_DEFINITION",
+    "NEW_STORE_ONLY_FUNCTIONAL_ID",
     "PERFORMANCE_DEFINITION",
     "PERFORMANCE_ID",
     "PRIMARY_READER_FUNCTIONAL_DEFINITION",

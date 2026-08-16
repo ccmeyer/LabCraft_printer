@@ -1,6 +1,6 @@
 # Calibration Recording Store Migration: Milestone 0 Contract and Plan
 
-Status: Milestones 0, 1, 2, and 3 complete; authoritative-store Pi candidate baseline frozen
+Status: Milestones 0 through 5 complete; Milestone 6 implementation qualification in progress
 
 Prepared: 2026-08-14
 

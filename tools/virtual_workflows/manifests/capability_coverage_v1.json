@@ -436,6 +436,18 @@
       "max_evidence_age_days": 30
     },
     {
+      "id": "calibration.storage_new_store_only",
+      "risk": "Removing routine legacy writes could hide canonical-reader defects, regress historical compatibility, or make the rollback writer ineffective.",
+      "owner_role": "calibration storage maintainers",
+      "status": "covered",
+      "required_verification_layers": ["contract", "host_sil", "pi_sil"],
+      "active_scenario_ids": ["calibration_storage_new_store_only_contract_v1"],
+      "required_assertion_ids": ["calibration.storage.legacy_writer_cutover", "calibration.storage.fresh_reload_exact", "calibration.storage.ui_application_exact"],
+      "related_source_areas": ["FreeRTOS-interface/CalibrationPersistencePolicy.py", "FreeRTOS-interface/CalibrationClasses/Model.py", "FreeRTOS-interface/Model.py", "tools/virtual_workflows/calibration_storage_journeys.py"],
+      "limitations": ["The short scenario validates structured synthetic calibration data without image analysis, camera acquisition, physical hardware, or the retired 200-process workload."],
+      "max_evidence_age_days": 30
+    },
+    {
       "id": "calibration.storage_historical_conversion",
       "risk": "Offline historical conversion could mutate source records, create ambiguous provenance, or expose incomplete generated bundles to canonical readers.",
       "owner_role": "calibration storage maintainers",
@@ -942,6 +954,26 @@
       "pi_safety_evidence": ["preflight", "hardware_proof"]
     },
     {
+      "id": "calibration_storage_new_store_only_contract_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "calibration_storage_new_store_only_contract_v1",
+      "workload_fixture_id": "calibration_storage_new_store_only_contract_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/calibration_storage_contract/catalog_new_store_only_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil", "pi_sil"],
+      "timeout_seconds": 180,
+      "action_ids": ["app.launch_simulated", "fixture.prepare_calibration_storage", "calibration.run_scripted_processes", "calibration.inspect_storage_artifacts", "experiment.activate_authoritative", "app.close_simulated_session", "experiment.load_authoritative_via_ui", "artifact.capture_milestone", "experiment.activate_authoritative_via_ui", "calibration.stage_persisted_selection", "calibration.open_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "calibration.storage.fixture_parity", "calibration.storage.legacy_writer_cutover", "calibration.storage.lifecycle_exact", "calibration.storage.summary_isolation", "calibration.storage.capture_policy_exact", "calibration.storage.fresh_reload_exact", "calibration.storage.ui_application_exact", "artifacts.cleanup_complete"],
+      "capability_ids": ["sil.hardware_isolation.host", "calibration.storage_new_store_only"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["Canonical-only persistence uses synthetic structured data and does not execute image analysis or physical hardware."],
+      "test_node_ids": ["tests/system/test_calibration_storage_new_store_only_contract_lifecycle.py::test_calibration_storage_new_store_only_contract"],
+      "pi_safety_evidence": ["preflight", "hardware_proof"]
+    },
+    {
       "id": "calibration_storage_historical_conversion_contract_v1",
       "version": 1,
       "status": "active",
@@ -976,7 +1008,7 @@
       "status": "active",
       "kind": "lifecycle",
       "platform": "windows_sil",
-      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "legacy_experiment_read_only_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1", "print_array_mixed_mode_24x2_v1", "print_array_disconnect_mid_array_24_v1", "randomized_calibration_reload_execution_v1", "calibration_storage_contract_v1", "calibration_storage_shadow_contract_v1", "calibration_storage_authoritative_contract_v1", "calibration_storage_primary_reader_contract_v1", "calibration_storage_secondary_reader_contract_v1", "calibration_storage_historical_conversion_contract_v1"],
+      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "legacy_experiment_read_only_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1", "print_array_mixed_mode_24x2_v1", "print_array_disconnect_mid_array_24_v1", "randomized_calibration_reload_execution_v1", "calibration_storage_contract_v1", "calibration_storage_shadow_contract_v1", "calibration_storage_authoritative_contract_v1", "calibration_storage_primary_reader_contract_v1", "calibration_storage_secondary_reader_contract_v1", "calibration_storage_historical_conversion_contract_v1", "calibration_storage_new_store_only_contract_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -1932,6 +1964,12 @@
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.calibration_storage.processes",
         "test_node_ids": ["tests/system/test_calibration_storage_contract_lifecycle.py::test_calibration_storage_contract_full_lifecycle"]
+      },
+      {
+        "id": "calibration.storage.legacy_writer_cutover",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.calibration_storage.legacy_writer",
+        "test_node_ids": ["tests/system/test_calibration_storage_new_store_only_contract_lifecycle.py::test_calibration_storage_new_store_only_contract"]
       },
       {
         "id": "calibration.storage.lifecycle_exact",

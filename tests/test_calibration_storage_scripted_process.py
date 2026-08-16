@@ -123,6 +123,47 @@ def test_scripted_process_writes_canonical_shadow_when_recorder_is_disabled(
         assert session.close()
 
 
+def test_authoritative_canonical_only_process_never_creates_legacy_file(
+    qapp, tmp_path
+):
+    session = _session(qapp, tmp_path / "canonical-only-session")
+    try:
+        _catalog, cases = load_catalog()
+        selected = next(
+            case for case in cases if case.process_id == "legacy-parity-two-update"
+        )
+        calibration_path = tmp_path / "canonical-only" / "calibration.json"
+        calibration_path.parent.mkdir()
+        em = session.components.model.experiment_model
+        em.experiment_dir_path = str(calibration_path.parent)
+        em.calibration_file_path = str(calibration_path)
+        runner = StorageContractRunner(
+            model=session.components.model,
+            controller=session.components.controller,
+            machine=session.components.machine,
+            app=qapp,
+            calibration_file_path=calibration_path,
+            authoritative_mode=True,
+            legacy_writer_mode="canonical_only",
+        )
+
+        evidence = runner.run_case(selected)
+
+        assert evidence.legacy_update_hashes == ()
+        assert evidence.canonical_update_hashes == selected.expected_update_hashes
+        assert evidence.canonical_result_outcome == "completed"
+        assert evidence.canonical_index_event_count == 1
+        assert evidence.canonical_valid is True
+        assert not calibration_path.exists()
+        assert not list(calibration_path.parent.glob("calibration.json.*"))
+        diagnostics = runner.manager.get_legacy_calibration_writer_diagnostics()
+        assert diagnostics["write_count"] == 0
+        assert diagnostics["suppressed_write_count"] >= 3
+        runner.restore()
+    finally:
+        assert session.close()
+
+
 def test_shadow_append_failure_preserves_legacy_completion(qapp, tmp_path, monkeypatch):
     session = _session(qapp, tmp_path / "shadow-failure-session")
     try:

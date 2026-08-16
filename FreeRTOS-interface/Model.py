@@ -118,6 +118,11 @@ from RegulatorProfiles import (
     default_local_profile_path,
     factory_default_document,
 )
+from CalibrationPersistencePolicy import (
+    CalibrationStoragePolicy,
+    load_calibration_storage_policy,
+    new_experiment_policy,
+)
 
 from LocalConfig import get_calibration_memory_root, get_machine_config_path
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
@@ -543,6 +548,9 @@ class ExperimentModel(QObject):
             "start_col": 0,
             "well_selection": self._default_well_selection(),
         }
+        self.calibration_storage_policy: CalibrationStoragePolicy = (
+            new_experiment_policy()
+        )
         self.stock_prep_state: Dict[str, Any] = self._default_stock_prep_state()
         self.applied_imaging_calibrations: Dict[str, Any] = {
             "schema_version": 1,
@@ -7110,6 +7118,7 @@ class ExperimentModel(QObject):
         self._ensure_well_selection_metadata()
         data: Dict[str, object] = {
             "metadata": self.metadata,
+            "calibration_storage": self.calibration_storage_policy.to_document(),
             "stock_prep": self.stock_prep_state,
             "applied_imaging_calibrations": self._normalize_applied_imaging_calibrations(
                 getattr(self, "applied_imaging_calibrations", None)
@@ -7232,6 +7241,10 @@ class ExperimentModel(QObject):
         # owned by this model so callers can continue using the exact persisted
         # payload for authoritative design-hash validation.
         self.metadata = copy.deepcopy(d.get("metadata", self.metadata))
+        self.calibration_storage_policy = load_calibration_storage_policy(
+            d.get("calibration_storage")
+        )
+        self._sync_calibration_storage_policy_to_manager()
         self.stock_prep_state = self._normalize_stock_prep_state(d.get("stock_prep"))
         self.additional_conditions = self._normalize_additional_conditions(
             d.get("additional_conditions")
@@ -7380,6 +7393,7 @@ class ExperimentModel(QObject):
         self._calibration_manager = mgr
         if self.calibration_file_path and hasattr(mgr, "update_calibration_file_path"):
             mgr.update_calibration_file_path(self.calibration_file_path)
+        self._sync_calibration_storage_policy_to_manager()
         if self.experiment_dir_path and hasattr(mgr, "update_calibration_storage_paths"):
             mgr.update_calibration_storage_paths(
                 experiment_dir=self.experiment_dir_path,
@@ -7405,6 +7419,18 @@ class ExperimentModel(QObject):
 
     def get_calibration_file_path(self) -> Optional[str]:
         return self.calibration_file_path
+
+    def get_calibration_storage_policy(self) -> CalibrationStoragePolicy:
+        return self.calibration_storage_policy
+
+    def get_calibration_storage_policy_document(self) -> Dict[str, Any]:
+        return self.calibration_storage_policy.to_document()
+
+    def _sync_calibration_storage_policy_to_manager(self):
+        manager = self._calibration_manager
+        setter = getattr(manager, "set_calibration_storage_policy", None)
+        if callable(setter):
+            setter(self.calibration_storage_policy)
 
     def get_calibration_storage_paths(self) -> Dict[str, Optional[str]]:
         """Return the canonical and compatibility paths for this experiment."""
@@ -7516,10 +7542,6 @@ class ExperimentModel(QObject):
             self.create_key_file()
             self.create_concentration_key_file()
 
-        # optional calibration file
-        if self.calibration_file_path and not os.path.exists(self.calibration_file_path):
-            with open(self.calibration_file_path, "w") as f:
-                f.write("{}")
         if self._calibration_manager is not None:
             if hasattr(self._calibration_manager, "begin_session"):
                 self._calibration_manager.begin_session(self.calibration_file_path)
@@ -7556,6 +7578,7 @@ class ExperimentModel(QObject):
         self.concentration_key_file_path = os.path.join(self.experiment_dir_path, "concentration_key.csv")
         if self._calibration_manager is not None and hasattr(self._calibration_manager, "update_calibration_file_path"):
             self._calibration_manager.update_calibration_file_path(self.calibration_file_path)
+        self._sync_calibration_storage_policy_to_manager()
         if self._calibration_manager is not None and hasattr(
             self._calibration_manager, "update_calibration_storage_paths"
         ):
@@ -12109,6 +12132,7 @@ class ExperimentModel(QObject):
             new_name,
             copy_applied_imaging_calibrations=copy_applied_imaging_calibrations,
         )
+        payload["calibration_storage"] = new_experiment_policy().to_document()
 
         staging = Path(tempfile.mkdtemp(
             prefix=f".{destination.name}.staging-", dir=destination.parent
@@ -12138,7 +12162,6 @@ class ExperimentModel(QObject):
             draft.generate_experiment()
             draft.save_experiment()
             draft._atomic_json_dump(draft.progress_file_path, {})
-            draft._atomic_json_dump(draft.calibration_file_path, {})
             with open(draft.experiment_file_path, "r", encoding="utf-8") as handle:
                 staged_payload = json.load(handle)
             validator = ExperimentModel(prof=profile)
@@ -12531,6 +12554,8 @@ class ExperimentModel(QObject):
             "start_col": 0,
             "well_selection": self._default_well_selection(),
         }
+        self.calibration_storage_policy = new_experiment_policy()
+        self._sync_calibration_storage_policy_to_manager()
         self.stock_prep_state = self._default_stock_prep_state()
         self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(None)
         self.manual_refuel_checks = self._normalize_manual_refuel_checks(None)

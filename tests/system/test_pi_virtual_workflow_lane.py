@@ -837,6 +837,38 @@ def test_remote_wrapper_allows_short_historical_conversion_pi_contract(tmp_path)
     assert "Dry run complete" in result.stdout
 
 
+def test_remote_wrapper_allows_short_new_store_only_pi_contract(tmp_path):
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("PowerShell is unavailable")
+    identity = tmp_path / "pi-sil-test-identity"
+    identity.write_text("test-only-placeholder", encoding="utf-8")
+    result = subprocess.run(
+        [
+            powershell, "-ExecutionPolicy", "Bypass", "-File", str(REMOTE_TOOL),
+            "-PiHost", "pi-test", "-SshIdentityFile", str(identity),
+            "-Scenario", "calibration_storage_new_store_only_contract_v1",
+            "-HostLabel", "pi5-calibration-storage-new-store-only-v1",
+            "-WarmupRuns", "0", "-MeasuredRuns", "1",
+            "-SpeedMultiplier", "1000", "-TimeoutSeconds", "180", "-DryRun",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "'calibration_storage_new_store_only_contract_v1'" in result.stdout
+    assert "--warmup-runs" in result.stdout
+    assert "--measured-runs" in result.stdout
+    assert "'--emit-report-set'" in result.stdout
+    assert "--timeout-seconds" in result.stdout
+    assert "180" in result.stdout
+    assert str(identity) in result.stdout
+    assert "BatchMode=yes" in result.stdout
+    assert "Dry run complete" in result.stdout
+
+
 @pytest.mark.parametrize(
     ("suite_id", "replay_expected"),
     [("pi_primary", True), ("pi_stress", False)],

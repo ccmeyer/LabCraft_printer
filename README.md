@@ -2706,6 +2706,73 @@ source immutability only. It does not claim camera/image-analysis correctness,
 physical calibration quality, firmware, motion, pressure response, or dispense
 behavior.
 
+### Calibration recording store Milestone 6
+
+New experiment designs now persist this explicit storage policy and use the
+canonical recording store without creating or rewriting `calibration.json`:
+
+```json
+{
+  "calibration_storage": {
+    "schema_name": "labcraft.calibration_storage.policy",
+    "schema_version": 1,
+    "legacy_writer_mode": "canonical_only"
+  }
+}
+```
+
+Designs created before this field existed remain `legacy_compatible`, so their
+existing `calibration.json` behavior is preserved. A design-only duplicate is
+a new design and therefore starts canonical-only with no copied calibration
+history. Structured persistence remains mandatory and capture retention remains
+independent.
+
+The emergency writer rollback is session-scoped through the environment and
+requires an application restart:
+
+```powershell
+$env:LABCRAFT_CALIBRATION_LEGACY_WRITER = "1"
+```
+
+The broader authoritative-store rollback and either legacy-reader selection
+also retain the compatibility writer. Remove the variable and restart to
+return a canonical-only design to its persisted policy. No rollback deletes
+canonical artifacts or historical files.
+
+Run the focused and compact lifecycle coverage with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_calibration_legacy_writer_policy.py `
+  tests\test_calibration_storage_scripted_process.py `
+  tests\test_experiment_duplicate_design.py
+
+.\env\Scripts\python.exe -m pytest -q -s --run-sil-lifecycle `
+  tests\system\test_calibration_storage_new_store_only_contract_lifecycle.py
+```
+
+The lifecycle emits flushed `SIL_PROGRESS` checkpoints for setup, all 16
+fixture processes, secondary consumers, and fresh application. It proves the
+main experiment performs zero legacy writes while one historical canary and
+one explicit rollback canary still dual-write. It normally completes in about
+15 seconds on the Windows host. Milestone 6 does not rerun the retired
+200-process/232-update workload; the Pi gate is one compact measured pass:
+
+```powershell
+.\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -Scenario calibration_storage_new_store_only_contract_v1 `
+  -HostLabel pi5-calibration-storage-new-store-only-v1 `
+  -WarmupRuns 0 -MeasuredRuns 1 `
+  -SpeedMultiplier 1000 -TimeoutSeconds 180
+```
+
+This coverage claims canonical structured persistence, canonical readers, and
+legacy-writer compatibility only. It does not claim camera/image-analysis
+correctness, physical calibration quality, firmware, motion, pressure response,
+or dispense behavior.
+
 ## Raspberry Pi Software-In-The-Loop
 
 The target-Pi SIL lane runs the same real-UI workflow on Raspberry Pi CPU and

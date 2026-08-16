@@ -262,12 +262,16 @@ def load_fixture(path: str | Path) -> tuple[dict[str, Any], tuple[ScriptedCalibr
     return payload, tuple(cases)
 
 
-def load_catalog(path: str | Path = CATALOG_PATH) -> tuple[dict[str, Any], tuple[ScriptedCalibrationCase, ...]]:
+def load_catalog(
+    path: str | Path = CATALOG_PATH,
+    *,
+    expected_fixture_id: str = "calibration_storage_contract_v1",
+) -> tuple[dict[str, Any], tuple[ScriptedCalibrationCase, ...]]:
     catalog_path = Path(path).resolve()
     catalog = _load_json_object(catalog_path)
     if catalog.get("schema_id") != CATALOG_SCHEMA_ID or catalog.get("schema_version") != CATALOG_SCHEMA_VERSION:
         raise CalibrationStorageContractError("unsupported storage-contract catalog")
-    if catalog.get("fixture_id") != "calibration_storage_contract_v1":
+    if catalog.get("fixture_id") != expected_fixture_id:
         raise CalibrationStorageContractError("catalog fixture_id drifted")
     expected_count = int((catalog.get("workload") or {}).get("completion_count", 0))
     refs = catalog.get("fixtures")

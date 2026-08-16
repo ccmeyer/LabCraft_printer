@@ -26,6 +26,9 @@ from CalibrationRecordingStore import (  # noqa: E402
     CalibrationRecordingStore,
     CaptureRetentionPolicy,
 )
+from CalibrationPersistencePolicy import (  # noqa: E402
+    normalize_calibration_storage_policy,
+)
 from simulation.machine import SimulatedMachine  # noqa: E402
 
 from .calibration_storage_contract import (  # noqa: E402
@@ -215,6 +218,10 @@ class ScriptedCalibrationProcess(BaseCalibrationProcess):
             update = run.updates[step_index] if step_index < len(run.updates) else None
             if update is not None:
                 row["update_id"] = str(update["update_id"])
+                row["update_index"] = int(update.get("update_index") or step_index)
+                row["update_payload_sha256"] = str(
+                    update.get("payload_sha256") or ""
+                )
             row["process_run_id"] = run.process_run_id
             row["source_run_id"] = run.calibration_session_id
             rows.append(row)
@@ -224,6 +231,9 @@ class ScriptedCalibrationProcess(BaseCalibrationProcess):
             and bool(run.updates)
         )
         return {
+            "schema_name": "labcraft.calibration_recording.summary_projection",
+            "schema_version": 1,
+            "adapter": "scripted_storage_contract",
             "application_eligible": bool(eligible),
             "status": "eligible" if eligible else "not_applicable",
             "row_count": len(rows),
@@ -379,6 +389,7 @@ class StorageContractRunner:
         metrics: StorageMetricsCollector | None = None,
         shadow_store_enabled: bool = False,
         authoritative_mode: bool = False,
+        legacy_writer_mode: str = "legacy_compatible",
     ):
         runtime_context = getattr(controller, "runtime_context", None)
         if runtime_context is not SIMULATION_RUNTIME_CONTEXT:
@@ -399,6 +410,7 @@ class StorageContractRunner:
         self.metrics = metrics or StorageMetricsCollector()
         self.shadow_store_enabled = bool(shadow_store_enabled)
         self.authoritative_mode = bool(authoritative_mode)
+        self.legacy_writer_mode = str(legacy_writer_mode)
         self._previous_head = None
         self._previous_gripper_slot = None
         self._previous_record_mode_enabled = self.manager.get_record_mode_enabled()
@@ -407,6 +419,7 @@ class StorageContractRunner:
             self.manager.is_calibration_store_authoritative()
         )
         self._previous_capture_policy = self.manager.get_capture_retention_policy()
+        self._previous_storage_policy = self.manager.get_calibration_storage_policy()
         self._identity_overridden = False
 
     def _activate_identity(self, identity: Mapping[str, Any]) -> None:
@@ -452,6 +465,7 @@ class StorageContractRunner:
         self.manager.set_shadow_store_enabled(self._previous_shadow_store_enabled)
         self.manager._capture_retention_policy = self._previous_capture_policy
         self.manager._canonical_store_authoritative = self._previous_authoritative_mode
+        self.manager.set_calibration_storage_policy(self._previous_storage_policy)
         rack = self.model.rack_model
         if self._identity_overridden:
             rack.gripper_printer_head = self._previous_head
@@ -481,10 +495,10 @@ class StorageContractRunner:
         original_canonical_append = store.append_update
         original_canonical_finalize = store.finalize_run
 
-        def measured_save():
+        def measured_save(*args, **kwargs):
             started = time.perf_counter_ns()
             try:
-                return original_save()
+                return original_save(*args, **kwargs)
             finally:
                 self.metrics.calibration_rewrite_latency_ms.append(
                     (time.perf_counter_ns() - started) / 1_000_000.0
@@ -537,7 +551,13 @@ class StorageContractRunner:
     def run_case(self, case: ScriptedCalibrationCase) -> StorageProcessEvidence:
         self._activate_identity(case.identity)
         self.manager._canonical_store_authoritative = self.authoritative_mode
+        desired_storage_policy = normalize_calibration_storage_policy(
+            self.legacy_writer_mode
+        )
+        if self.manager.get_calibration_storage_policy() != desired_storage_policy:
+            self.manager.set_calibration_storage_policy(desired_storage_policy)
         if self.authoritative_mode:
+            self.manager.record_mode_enabled = True
             policy_name = (
                 "structured_only"
                 if not case.record_mode_enabled
@@ -585,14 +605,25 @@ class StorageContractRunner:
             case=case,
             run_id=run_id,
             recording_dir=recording_dir,
+            legacy_required=self.manager.is_legacy_calibration_writer_enabled(),
         )
         if evidence.update_hashes != case.expected_update_hashes:
             raise CalibrationStorageContractError(
                 f"fixture update hash mismatch for {case.process_id}"
             )
-        if evidence.legacy_update_hashes != evidence.update_hashes:
+        if (
+            self.manager.is_legacy_calibration_writer_enabled()
+            and evidence.legacy_update_hashes != evidence.update_hashes
+        ):
             raise CalibrationStorageContractError(
                 f"legacy calibration payload mismatch for {case.process_id}"
+            )
+        if (
+            not self.manager.is_legacy_calibration_writer_enabled()
+            and evidence.legacy_update_hashes
+        ):
+            raise CalibrationStorageContractError(
+                f"canonical-only process unexpectedly wrote legacy data for {case.process_id}"
             )
         expected_recorder = (
             evidence.update_hashes
@@ -659,14 +690,24 @@ def inspect_current_writer_case(
     case: ScriptedCalibrationCase,
     run_id: str,
     recording_dir: str | Path | None,
+    legacy_required: bool = True,
 ) -> StorageProcessEvidence:
-    calibration = json.loads(Path(calibration_file_path).read_text(encoding="utf-8"))
+    legacy_path = Path(calibration_file_path)
+    calibration = (
+        json.loads(legacy_path.read_text(encoding="utf-8"))
+        if legacy_path.is_file()
+        else {"runs": []}
+    )
     matches = [run for run in calibration.get("runs", []) if str(run.get("run_id")) == str(run_id)]
-    if len(matches) != 1:
+    if legacy_required and len(matches) != 1:
         raise CalibrationStorageContractError(
             f"expected one legacy calibration run {run_id}; observed {len(matches)}"
         )
-    run = matches[0]
+    if not legacy_required and matches:
+        raise CalibrationStorageContractError(
+            f"canonical-only run {run_id} appeared in legacy calibration data"
+        )
+    run = matches[0] if matches else {"steps": {}}
     legacy_steps = list((run.get("steps") or {}).get(case.phase_name) or [])
     legacy_hashes = tuple(semantic_sha256(normalized_legacy_step(step)) for step in legacy_steps)
     recorder_hashes: tuple[str, ...] = ()

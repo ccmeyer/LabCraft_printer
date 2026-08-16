@@ -58,7 +58,7 @@ def test_initialize_experiment_sets_audit_path_without_logging(tmp_path):
     assert audit_path == Path(em.experiment_dir_path) / "experiment_audit.jsonl"
     assert Path(em.experiment_file_path).exists()
     assert Path(em.progress_file_path).exists()
-    assert Path(em.calibration_file_path).exists()
+    assert not Path(em.calibration_file_path).exists()
     assert not audit_path.exists()
 
 
