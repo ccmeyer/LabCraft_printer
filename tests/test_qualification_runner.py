@@ -93,13 +93,13 @@ def _raw_gripper_stress_selftest():
                 "test_id": 2511,
                 "name": "gripper_refresh_hold_3psi_factory",
                 "pass": True,
-                "metrics": {"psi": 3000, "refresh_ms": 30000, "pulse_int": 10000, "ready": 0, "timeout": 0, "focus": 1, "trace": 1, "sc": 48, "stride": 5, "sample_ms": 25},
+                "metrics": {"mode": 1, "pending": 1, "idle_delta": 0, "disp1": 1, "refresh_delta": 1, "pulse_done": 32000, "rearm": 1, "disp2": 1, "cooldown_ms": 3005, "cooldown_ok": 1, "pulses": 9, "ready": 0, "timeout": 0, "trace": 1},
             },
             {
                 "test_id": 2512,
                 "name": "gripper_motion_raster_3psi_factory",
                 "pass": True,
-                "metrics": {"psi": 3000, "pc": 1, "pz": 91500, "z_to": 0, "z_home_to": 0, "xy_home_to": 0, "move_to": 0, "guard": 0, "bound": 0, "park_to": 0, "ready": 0, "timeout": 0, "focus": 1, "trace": 1, "sc": 64, "stride": 5, "sample_ms": 25},
+                "metrics": {"mode": 1, "pending": 1, "refresh_delta": 0, "pulse_done": 32000, "moves": 384, "pulses": 10, "motion_only": 1, "move_to": 0, "guard": 0, "bound": 0, "ready": 0, "timeout": 0, "trace": 1},
             },
             {
                 "test_id": 2513,
@@ -111,6 +111,7 @@ def _raw_gripper_stress_selftest():
         "host_checks": [
             {"name": "hello_ack", "pass": True, "details": {"seq8": 1}},
             {"name": "goodbye_skipped", "pass": True, "details": {"reason": "operator_gated_gripper_teardown"}},
+            {"name": "selftest_progress_watchdog", "pass": True, "details": {"progress_count": 10}},
         ],
     }
 
@@ -579,7 +580,7 @@ def _gripper_manifest_ref():
 
 
 def _gripper_stress_manifest_ref():
-    return "gripper_seal_stress_v1"
+    return "gripper_seal_stress_v2"
 
 
 def _xy_motion_manifest_ref():
@@ -1467,13 +1468,30 @@ def test_gripper_seal_stress_uses_gripper_prompts_teardown_and_enriches_report(t
         invocation.raw_report_path.write_text(json.dumps(_raw_gripper_stress_selftest()), encoding="utf-8")
         return 0
 
+    def fake_production_path_runner(**kwargs):
+        events.append("production-path")
+        Path(kwargs["artifact_path"]).write_text(
+            json.dumps({"schema_version": "gripper_refresh_production_hil_v1", "pass": True}),
+            encoding="utf-8",
+        )
+        return {
+            "name": "gripper_refresh_production_path",
+            "pass": True,
+            "details": {"artifact_path": str(kwargs["artifact_path"])},
+        }
+
     def fake_gripper_control(action, port, baud):
         events.append(f"machine:{action}:{port}:{baud}")
         return 0
 
     def fake_generate_gripper_artifacts(artifacts):
         generated_artifacts.append(artifacts.run_dir)
-        return SimpleNamespace(report_metrics={2510: {"d3": 22, "rej_py": 0}, 2512: {"drop_mean": 12, "rej_py": 0}})
+        return SimpleNamespace(report_metrics={
+            2510: {"d1": 10, "d2": 15, "d3": 22, "d3_max": 22, "rej_py": 0},
+            2511: {"drop_mean": 12, "drop_span": 20, "rej_py": 0},
+            2512: {"drop_mean": 12, "drop_span": 20, "rej_py": 0},
+            2513: {"p_pre": 10, "p_post": 12, "p_delta": 2, "r_pre": 11, "r_post": 13, "r_delta": 2, "rej_py": 0},
+        })
 
     monkeypatch.setattr(qualification_runner, "generate_gripper_trace_artifacts", fake_generate_gripper_artifacts)
 
@@ -1490,6 +1508,7 @@ def test_gripper_seal_stress_uses_gripper_prompts_teardown_and_enriches_report(t
         invoker=fake_invoker,
         prompter=fake_prompter,
         gripper_control=fake_gripper_control,
+        production_path_runner=fake_production_path_runner,
     )
 
     assert result.returncode == 0
@@ -1498,6 +1517,7 @@ def test_gripper_seal_stress_uses_gripper_prompts_teardown_and_enriches_report(t
         "machine:preflight_print:/dev/ttyAMA0:115200",
         "machine:preflight_refuel:/dev/ttyAMA0:115200",
         "prompt:valves",
+        "production-path",
         "self-test",
         "prompt:support",
         "machine:release:/dev/ttyAMA0:115200",
@@ -1511,6 +1531,51 @@ def test_gripper_seal_stress_uses_gripper_prompts_teardown_and_enriches_report(t
     assert report_row["metrics"]["d3"] == 22
     raw_row = next(row for row in json.loads(result.raw_selftest_path.read_text(encoding="utf-8"))["results"] if row["test_id"] == 2510)
     assert "d3" not in raw_row["metrics"]
+
+
+def test_gripper_production_path_failure_skips_selftest_but_runs_supported_teardown(tmp_path):
+    events = []
+
+    def fail_if_invoked(_invocation):
+        raise AssertionError("firmware stress rows must be skipped after production-path failure")
+
+    def fake_production_path_runner(**kwargs):
+        Path(kwargs["artifact_path"]).write_text(
+            json.dumps({"schema_version": "gripper_refresh_production_hil_v1", "pass": False}),
+            encoding="utf-8",
+        )
+        return {
+            "name": "gripper_refresh_production_path",
+            "pass": False,
+            "details": {"error": {"message": "timing failure"}},
+        }
+
+    def fake_gripper_control(action, _port, _baud):
+        events.append(action)
+        return 0
+
+    result = run_qualification(
+        manifest_ref="gripper_seal_stress_v2",
+        port="/dev/ttyAMA0",
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        fixture_id="dummy_blocked_head_motion_v1",
+        operator_prompts=True,
+        invoker=fail_if_invoked,
+        prompter=lambda _message: None,
+        gripper_control=fake_gripper_control,
+        production_path_runner=fake_production_path_runner,
+    )
+
+    assert result.returncode == 3
+    assert events == ["preflight_print", "preflight_refuel", "release", "off", "shutdown"]
+    checks = {item["name"]: item for item in result.report["host_checks"]}
+    assert checks["gripper_refresh_production_path"]["pass"] is False
+    assert checks["selftest_skipped_after_production_path_failure"]["pass"] is False
+    assert checks["gripper_teardown_release"]["pass"] is True
+    assert checks["gripper_teardown_off"]["pass"] is True
+    assert checks["gripper_teardown_shutdown"]["pass"] is True
 
 
 def test_gripper_teardown_release_succeeds_on_retry(tmp_path, monkeypatch):
@@ -1666,10 +1731,59 @@ def test_gripper_seal_preflight_failure_aborts_before_selftest(tmp_path):
     )
 
     assert result.returncode == 3
-    assert events == ["prompt", "preflight_print", "preflight_refuel"]
+    assert events == [
+        "prompt",
+        "preflight_print",
+        "preflight_refuel",
+        "prompt",
+        "release",
+        "prompt",
+        "off",
+        "shutdown",
+    ]
     host_checks = {item["name"]: item for item in result.report["host_checks"]}
     assert host_checks["gripper_valve_preflight_print"]["pass"] is True
     assert host_checks["gripper_valve_preflight_refuel"]["pass"] is False
+    assert host_checks["selftest_skipped_after_hardware_preflight_failure"]["pass"] is False
+    assert host_checks["gripper_teardown_release"]["pass"] is True
+    assert host_checks["gripper_teardown_off"]["pass"] is True
+    assert host_checks["gripper_teardown_shutdown"]["pass"] is True
+
+
+def test_gripper_preflight_exception_stops_further_preflight_and_runs_teardown(tmp_path):
+    events = []
+
+    def fake_gripper_control(action, _port, _baud):
+        events.append(action)
+        if action == "preflight_print":
+            raise KeyboardInterrupt("operator interrupted preflight")
+        return 0
+
+    result = run_qualification(
+        manifest_ref=_gripper_stress_manifest_ref(),
+        port="/dev/ttyAMA0",
+        baud=115200,
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        fixture_id="dummy_blocked_head_motion_v1",
+        operator_prompts=True,
+        invoker=lambda _invocation: (_ for _ in ()).throw(
+            AssertionError("self-test must not run after preflight interruption")
+        ),
+        prompter=lambda _message: None,
+        gripper_control=fake_gripper_control,
+        production_path_runner=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("production path must not run after preflight interruption")
+        ),
+    )
+
+    assert result.returncode == 3
+    assert events == ["preflight_print", "release", "off", "shutdown"]
+    checks = {item["name"]: item for item in result.report["host_checks"]}
+    assert checks["gripper_valve_preflight_print"]["pass"] is False
+    assert checks["gripper_valve_preflight_print"]["details"]["error"]["type"] == "KeyboardInterrupt"
+    assert checks["gripper_teardown_shutdown"]["pass"] is True
 
 
 def test_gripper_seal_raw_report_conversion_skips_prompts_and_invoker(tmp_path):

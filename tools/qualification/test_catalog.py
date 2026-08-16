@@ -136,8 +136,8 @@ TEST_CATALOG: dict[int, TestCatalogEntry] = {
     2502: TestCatalogEntry(2502, "Gripper seal hold duration", "Longer dummy-head seal hold and decay behavior."),
     2503: TestCatalogEntry(2503, "Gripper seal repeatability", "Repeated dummy-head seal retention and span."),
     2510: TestCatalogEntry(2510, "Gripper static pressure matrix", "Python-derived dummy-head seal pressure-drop response for 1, 2, and 3 psi long regulator-quiet pressure challenges with refresh disabled, using one unmeasured conditioning pulse per pressure before five measured decimated traces per channel."),
-    2511: TestCatalogEntry(2511, "Gripper refreshed 3 psi hold", "Normal gripper refresh behavior during repeated 3 psi long pressure challenges over an extended hold, captured with decimated pressure traces."),
-    2512: TestCatalogEntry(2512, "Gripper raster motion stress", "Dummy-head gripper seal behavior during a Z-clearance-preflighted, homed, operator-confirmed evaporation-plate setup, Z lower to 91500, 384-well XY raster with normal refresh and repeated 3 psi regulator-quiet pressure challenges using decimated traces, then Z home and park."),
+    2511: TestCatalogEntry(2511, "Gripper deferred-refresh boundary", "Deferred refresh remains pending during idle and direct 3 psi pressure traces, is claimed exactly once after a production Printer dispense, rearms after pump-off, and delays the next dispense through the 3000 ms cooldown."),
+    2512: TestCatalogEntry(2512, "Gripper raster motion stress", "A pending deferred refresh remains non-actuating during the Z-clearance-preflighted, homed, operator-confirmed 384-well XY raster and direct 3 psi pressure traces, followed by Z home and park."),
     2513: TestCatalogEntry(2513, "Gripper post-motion seal compare", "Python-derived pre/post raster 3 psi static seal comparison from decimated traces to detect motion-induced seal degradation."),
 }
 

@@ -5,7 +5,7 @@
   "description": "Runs only the gripper seal stress qualification suite for focused teardown and seal validation.",
   "steps": [
     {
-      "manifest": "gripper_seal_stress_v1",
+      "manifest": "gripper_seal_stress_v2",
       "fixture": "dummy_blocked_head_motion_v1",
       "timeout_ms": 900000,
       "notes": "Load the dummy blocked head only when prompted; keep the XY envelope clear."

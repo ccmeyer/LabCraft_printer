@@ -54,7 +54,7 @@ def test_load_builtin_machine_full_campaign():
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "valve_characterization_v1",
-        "gripper_seal_stress_v1",
+        "gripper_seal_stress_v2",
     ]
     assert [step.fixture_id for step in campaign.steps] == [
         "motion_full_envelope_v1",
@@ -71,7 +71,7 @@ def test_load_builtin_gripper_stress_campaign():
     assert campaign.campaign_id == "gripper_seal_stress_campaign_v1"
     assert campaign.name == "Gripper Seal Stress Qualification"
     assert campaign.requires_operator_prompts is True
-    assert [step.manifest_id for step in campaign.steps] == ["gripper_seal_stress_v1"]
+    assert [step.manifest_id for step in campaign.steps] == ["gripper_seal_stress_v2"]
     assert [step.fixture_id for step in campaign.steps] == ["dummy_blocked_head_motion_v1"]
     assert [step.timeout_ms for step in campaign.steps] == [900000]
 
@@ -151,7 +151,7 @@ def test_run_campaign_runs_steps_in_order_and_writes_parent_artifacts(tmp_path):
         "motion_envelope_v1",
         "pressure_regulator_v1",
         "valve_characterization_v1",
-        "gripper_seal_stress_v1",
+        "gripper_seal_stress_v2",
     ]
     assert [call["fixture_id"] for call in calls] == [
         "motion_full_envelope_v1",
@@ -185,7 +185,7 @@ def test_run_gripper_stress_campaign_invokes_only_gripper_suite(tmp_path):
     )
 
     assert result.returncode == 0
-    assert [call["manifest_ref"] for call in calls] == ["gripper_seal_stress_v1"]
+    assert [call["manifest_ref"] for call in calls] == ["gripper_seal_stress_v2"]
     assert [call["fixture_id"] for call in calls] == ["dummy_blocked_head_motion_v1"]
     assert [call["timeout_ms"] for call in calls] == [900000]
 
@@ -295,7 +295,7 @@ def test_campaign_cli_dry_run_prints_queue_without_invocation(capsys):
     assert rc == 0
     assert "Full Machine Qualification" in captured.out
     assert "motion_envelope_v1" in captured.out
-    assert "gripper_seal_stress_v1" in captured.out
+    assert "gripper_seal_stress_v2" in captured.out
 
 
 def test_campaign_cli_dry_run_prints_gripper_only_queue(capsys):
@@ -307,7 +307,7 @@ def test_campaign_cli_dry_run_prints_gripper_only_queue(capsys):
     captured = capsys.readouterr()
     assert rc == 0
     assert "Gripper Seal Stress Qualification" in captured.out
-    assert "gripper_seal_stress_v1" in captured.out
+    assert "gripper_seal_stress_v2" in captured.out
     assert "motion_envelope_v1" not in captured.out
 
 

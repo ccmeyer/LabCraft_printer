@@ -9,6 +9,7 @@ param(
   [string]$Mode = "Full",
   [string]$Port = "/dev/ttyAMA0",
   [string]$Config = "Debug",
+  [string]$IdentityFile = "",
   [int]$SelfTestTimeoutMs = 120000,
   [int]$ProgressTimeoutMs = 30000,
   [int]$ActivityTimeoutMs = 120000,
@@ -60,6 +61,13 @@ Require-Cmd "scp"
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 Push-Location $RepoRoot
 $sshTarget = "${PiUser}@${PiHost}"
+$sshOptions = @()
+$scpOptions = @()
+if (-not [string]::IsNullOrWhiteSpace($IdentityFile)) {
+  $identityPath = (Resolve-Path $IdentityFile).Path
+  $sshOptions += @("-i", $identityPath)
+  $scpOptions += @("-i", $identityPath)
+}
 try {
   $LocalBinAbs = Resolve-Path $LocalBin
   if (-not (Test-Path $LocalSelfTest)) { Fail "Missing $LocalSelfTest. Did you add tools/run_selftest.py?" }
@@ -80,7 +88,7 @@ try {
   $remoteBenchmarkReport = "$RemoteRepo/hil_reports/selftest_${ts}_camera_benchmark.json"
 
   Write-Host "=== Upload to Pi ==="
-  ssh "$sshTarget" "mkdir -p '$remoteBinDir' '$remoteToolsDir' '$remoteHilDir' '$RemoteRepo/hil_reports'"
+  & ssh @sshOptions "$sshTarget" "mkdir -p '$remoteBinDir' '$remoteToolsDir' '$remoteHilDir' '$RemoteRepo/hil_reports'"
   $remoteBinFile  = "$remoteBinDir/LabCraft_firmware.bin"
   $remoteSelfTest = "$remoteToolsDir/run_selftest.py"
   $remoteCameraBenchmark = "$remoteToolsDir/camera_flash_benchmark.py"
@@ -94,10 +102,10 @@ try {
   $scpReportSource   = "${sshTarget}:$remoteReport"
   $scpBenchmarkReportSource = "${sshTarget}:$remoteBenchmarkReport"
 
-scp "$($LocalBinAbs.Path)" $scpBinTarget
-  scp "$LocalSelfTest" $scpSelfTestTarget
-  scp "$LocalCameraBenchmark" $scpCameraBenchmarkTarget
-  scp "$LocalFlashAndTest" $scpFlashAndTestTarget
+  & scp @scpOptions "$($LocalBinAbs.Path)" $scpBinTarget
+  & scp @scpOptions "$LocalSelfTest" $scpSelfTestTarget
+  & scp @scpOptions "$LocalCameraBenchmark" $scpCameraBenchmarkTarget
+  & scp @scpOptions "$LocalFlashAndTest" $scpFlashAndTestTarget
 
   # 3) Run flash + selftest on Pi
   if ([string]::IsNullOrWhiteSpace($RemoteVenv)) {
@@ -155,7 +163,7 @@ $(($flashArgs | ForEach-Object { "'$_'" }) -join " ")
 $cmd = $cmd -replace "`r", ""
 
   Write-Host "=== Flash + selftest on Pi ==="
-  ssh "$sshTarget" bash -lc $cmd
+  & ssh @sshOptions "$sshTarget" bash -lc $cmd
   if ($LASTEXITCODE -ne 0) { Fail "Pi flash/selftest failed." }
 
   # 4) Pull report back
@@ -164,10 +172,10 @@ $cmd = $cmd -replace "`r", ""
   $localReport = Join-Path $localReportDir ("selftest_$ts.json")
 
   Write-Host "=== Download report ==="
-  scp $scpReportSource       "$localReport"
+  & scp @scpOptions $scpReportSource "$localReport"
   if ($CameraBenchmark.IsPresent) {
     $localBenchmark = Join-Path $localReportDir ("selftest_${ts}_camera_benchmark.json")
-    scp $scpBenchmarkReportSource "$localBenchmark"
+    & scp @scpOptions $scpBenchmarkReportSource "$localBenchmark"
     if ($LASTEXITCODE -eq 0) {
       Write-Host "Benchmark report: $localBenchmark"
     } else {

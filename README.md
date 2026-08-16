@@ -3834,6 +3834,48 @@ Outputs in `hil_reports/`:
 - `selftest_<timestamp>.json`
 - `selftest_<timestamp>_camera_benchmark.json` (when benchmark enabled)
 
+### Production-path gripper refresh FULL HIL
+
+Milestone 4 adds an operator-gated two-layer qualification for deferred gripper
+refresh. It first runs the ordinary FULL flash/self-test lane, then exercises the
+public production command sequence (safe 1 psi print-pressure setup/readiness,
+`CLOSE_GRIPPER`, print profile `p1=1`, real print-only dispense boundaries,
+profile disable, and calibration profile `p1=0`) before selector `2599` runs
+firmware rows `2510`-`2513`.
+
+Prerequisites are Windows OpenSSH (`ssh`/`scp`), the Pi checkout and virtualenv,
+an existing `local/machine_identity.json` on the Pi, the dummy blocked head,
+the evaporation plate, and an operator present for the complete run. Start it
+from the repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File firmware/scripts/run_gripper_refresh_hil_windows.ps1 `
+  -PiHost 192.168.0.33
+```
+
+The wrapper requires an explicit `RUN` confirmation before flashing. It uploads
+the exact qualification Python/JSON files, uses an interactive SSH terminal for
+fixture and support prompts, and downloads the selected run under
+`hil_reports/m4_gripper_refresh_<timestamp>/` even when qualification fails.
+That directory contains `production_path.json`, `raw_selftest.json`,
+`report.json`, `summary.csv`, and exported trace/plot artifacts.
+
+The production-wire check requires a fast pre-expiry dispense, a host-observed
+`3000..7000 ms` delay between the dispense that claims a pending refresh and the
+next dispense, and two fast dispenses after a 31-second `p1=0` window. Its
+setup uses existing production commands to regulate print pressure to 1 psi and
+requires fresh status showing the regulator active and within the firmware
+ready band before dispense timing begins. Its failure path disables the profile,
+deregulates print pressure, and falls back to `CLEAR`; it never releases, turns
+off, or shuts down the gripper before the operator support prompt. If SSH
+cannot allocate an interactive terminal, rerun from a normal PowerShell console.
+If the Pi identity is missing, restore the machine's existing identity rather
+than creating an ad-hoc value for a qualification run.
+For key-based SSH, add `-IdentityFile path\to\pi_key`; the option is passed
+through to both the ordinary FULL runner and the selected qualification.
+The upload loop is compatible with the Windows PowerShell 5.1 included with
+Windows; no PowerShell 7-only path APIs are required.
+
 The camera benchmark supports `flash_only`, `print_then_flash`, and
 `coordinated_flash` modes. `flash_only` defaults to one warm-up trigger cycle
 before counted qualification cycles. Use

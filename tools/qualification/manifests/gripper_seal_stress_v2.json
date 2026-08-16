@@ -1,0 +1,120 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "gripper_seal_stress_v2",
+  "name": "Production-Path Gripper Refresh and Seal Stress v2",
+  "profile": "FULL",
+  "lifecycle": "active",
+  "description": "Operator-gated two-layer qualification of production print-profile signaling, deferred gripper refresh at dispense boundaries, calibration p1=0 behavior, dummy-head pressure traces, and print-like XY raster motion.",
+  "expected_test_ids": [2510, 2511, 2512, 2513],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": true,
+  "selftest_args": [
+    "--gripper-seal-stress-suite",
+    "--pressure-trace",
+    "--activity-timeout-ms",
+    "120000",
+    "--status-only-timeout-ms",
+    "120000"
+  ],
+  "required_host_checks": [
+    "gripper_refresh_production_path",
+    "selftest_progress_watchdog"
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "dummy_blocked_head_motion_v1",
+      "required_for": [2510, 2511, 2512, 2513],
+      "operator_note": "Run locally only with the dummy blocked printer head loaded and supported when prompted. The production-wire preflight closes the gripper, exercises p1=1 and p1=0 print-profile windows with one-droplet print-only dispenses, and never moves the gantry. Firmware homes Z before row 2512, moves to the plate start with Z up, waits for evaporation-plate confirmation, lowers to Z=91500, rasters, returns to plate start, homes Z, and parks. Keep the operator physically present, verify the clear XY envelope, and provide a soft support/catch path before release."
+    }
+  ],
+  "analysis_rules": {
+    "2510": {
+      "category": "gripper",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "pulse_ms": {"maturity": "candidate", "equals": 2000},
+        "pulses": {"maturity": "candidate", "min": 30},
+        "cond": {"maturity": "candidate", "equals": 3},
+        "reps": {"maturity": "candidate", "equals": 5},
+        "ready": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "focus": {"maturity": "candidate", "equals": 1},
+        "trace": {"maturity": "candidate", "equals": 1},
+        "sc": {"maturity": "candidate", "min": 1},
+        "stride": {"maturity": "candidate", "equals": 5},
+        "sample_ms": {"maturity": "candidate", "equals": 25},
+        "d1": {"maturity": "informational"},
+        "d2": {"maturity": "informational"},
+        "d3": {"maturity": "informational"},
+        "d3_max": {"maturity": "candidate", "max": 250},
+        "rej_py": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2511": {
+      "category": "gripper",
+      "failure_domain": "firmware_timing",
+      "metrics": {
+        "mode": {"maturity": "acceptance", "equals": 1},
+        "pending": {"maturity": "acceptance", "equals": 1},
+        "idle_delta": {"maturity": "acceptance", "equals": 0},
+        "disp1": {"maturity": "acceptance", "equals": 1},
+        "refresh_delta": {"maturity": "acceptance", "equals": 1},
+        "pulse_done": {"maturity": "informational"},
+        "rearm": {"maturity": "acceptance", "equals": 1},
+        "disp2": {"maturity": "acceptance", "equals": 1},
+        "cooldown_ms": {"maturity": "acceptance", "min": 3000, "max": 7000},
+        "cooldown_ok": {"maturity": "acceptance", "equals": 1},
+        "pulses": {"maturity": "candidate", "min": 1},
+        "ready": {"maturity": "acceptance", "equals": 0},
+        "timeout": {"maturity": "acceptance", "equals": 0},
+        "trace": {"maturity": "acceptance", "equals": 1},
+        "drop_mean": {"maturity": "informational"},
+        "drop_span": {"maturity": "candidate", "max": 250},
+        "rej_py": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2512": {
+      "category": "gripper",
+      "failure_domain": "firmware_motion",
+      "metrics": {
+        "mode": {"maturity": "acceptance", "equals": 1},
+        "pending": {"maturity": "acceptance", "equals": 1},
+        "refresh_delta": {"maturity": "acceptance", "equals": 0},
+        "pulse_done": {"maturity": "informational"},
+        "moves": {"maturity": "acceptance", "equals": 384},
+        "pulses": {"maturity": "candidate", "min": 1},
+        "motion_only": {"maturity": "acceptance", "equals": 1},
+        "move_to": {"maturity": "acceptance", "equals": 0},
+        "guard": {"maturity": "acceptance", "equals": 0},
+        "bound": {"maturity": "acceptance", "equals": 0},
+        "ready": {"maturity": "acceptance", "equals": 0},
+        "timeout": {"maturity": "acceptance", "equals": 0},
+        "trace": {"maturity": "acceptance", "equals": 1},
+        "drop_mean": {"maturity": "informational"},
+        "drop_span": {"maturity": "candidate", "max": 300},
+        "rej_py": {"maturity": "candidate", "equals": 0}
+      }
+    },
+    "2513": {
+      "category": "gripper",
+      "failure_domain": "machine_performance",
+      "metrics": {
+        "psi": {"maturity": "candidate", "equals": 3000},
+        "ready": {"maturity": "candidate", "equals": 0},
+        "timeout": {"maturity": "candidate", "equals": 0},
+        "focus": {"maturity": "candidate", "equals": 1},
+        "trace": {"maturity": "candidate", "equals": 1},
+        "sc": {"maturity": "candidate", "min": 1},
+        "stride": {"maturity": "candidate", "equals": 5},
+        "sample_ms": {"maturity": "candidate", "equals": 25},
+        "p_pre": {"maturity": "informational"},
+        "p_post": {"maturity": "informational"},
+        "p_delta": {"maturity": "candidate", "max": 150},
+        "r_pre": {"maturity": "informational"},
+        "r_post": {"maturity": "informational"},
+        "r_delta": {"maturity": "candidate", "max": 150},
+        "rej_py": {"maturity": "candidate", "equals": 0}
+      }
+    }
+  }
+}

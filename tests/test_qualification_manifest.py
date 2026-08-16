@@ -96,14 +96,21 @@ def test_load_gripper_seal_manifest_requires_local_operator_fixture():
 
 
 def test_load_gripper_seal_stress_manifest_requires_motion_dummy_head_fixture():
-    manifest = load_manifest("gripper_seal_stress_v1")
+    archived = load_manifest("gripper_seal_stress_v1")
+    manifest = load_manifest("gripper_seal_stress_v2")
 
-    assert manifest.manifest_id == "gripper_seal_stress_v1"
+    assert archived.lifecycle == "archived"
+    assert manifest.manifest_id == "gripper_seal_stress_v2"
+    assert manifest.lifecycle == "active"
     assert manifest.profile == "FULL"
     assert manifest.expected_test_ids == (2510, 2511, 2512, 2513)
     assert manifest.enforce_expected_test_ids is True
     assert manifest.requires_operator_prompts is True
-    assert manifest.selftest_args == ("--gripper-seal-stress-suite", "--pressure-trace")
+    assert manifest.selftest_args[:2] == ("--gripper-seal-stress-suite", "--pressure-trace")
+    assert manifest.required_host_checks == (
+        "gripper_refresh_production_path",
+        "selftest_progress_watchdog",
+    )
     assert {item["fixture_id"] for item in manifest.fixtures} == {"dummy_blocked_head_motion_v1"}
     assert "Firmware homes Z" in manifest.fixtures[0]["operator_note"]
     assert "evaporation-plate confirmation" in manifest.fixtures[0]["operator_note"]
@@ -112,21 +119,23 @@ def test_load_gripper_seal_stress_manifest_requires_motion_dummy_head_fixture():
     assert manifest.analysis_rules["2510"]["metrics"]["pulses"]["min"] == 30
     assert manifest.analysis_rules["2510"]["metrics"]["cond"]["equals"] == 3
     assert manifest.analysis_rules["2510"]["metrics"]["reps"]["equals"] == 5
-    assert manifest.analysis_rules["2511"]["metrics"]["refresh_ms"]["equals"] == 30000
-    assert manifest.analysis_rules["2512"]["metrics"]["pc"]["equals"] == 1
-    assert manifest.analysis_rules["2512"]["metrics"]["pz"]["equals"] == 91500
-    assert manifest.analysis_rules["2512"]["metrics"]["z_to"]["equals"] == 0
-    assert manifest.analysis_rules["2512"]["metrics"]["z_home_to"]["equals"] == 0
-    assert manifest.analysis_rules["2512"]["metrics"]["xy_home_to"]["equals"] == 0
+    assert manifest.analysis_rules["2511"]["metrics"]["mode"]["equals"] == 1
+    assert manifest.analysis_rules["2511"]["metrics"]["cooldown_ms"] == {
+        "maturity": "acceptance", "min": 3000, "max": 7000
+    }
+    assert manifest.analysis_rules["2512"]["metrics"]["pending"]["equals"] == 1
+    assert manifest.analysis_rules["2512"]["metrics"]["refresh_delta"]["equals"] == 0
+    assert manifest.analysis_rules["2512"]["metrics"]["moves"]["equals"] == 384
+    assert manifest.analysis_rules["2512"]["metrics"]["motion_only"]["equals"] == 1
     assert manifest.analysis_rules["2512"]["metrics"]["guard"]["equals"] == 0
     assert "park_x" not in manifest.analysis_rules["2512"]["metrics"]
     assert "park_y" not in manifest.analysis_rules["2512"]["metrics"]
-    assert manifest.analysis_rules["2512"]["metrics"]["park_to"]["equals"] == 0
+    assert "park_to" not in manifest.analysis_rules["2512"]["metrics"]
     assert manifest.analysis_rules["2510"]["metrics"]["stride"]["equals"] == 5
     assert manifest.analysis_rules["2510"]["metrics"]["sample_ms"]["equals"] == 25
-    assert manifest.analysis_rules["2512"]["metrics"]["stride"]["equals"] == 5
-    assert manifest.analysis_rules["2512"]["metrics"]["sample_ms"]["equals"] == 25
-    assert manifest.analysis_rules["2512"]["metrics"]["sc"]["min"] == 1
+    assert "stride" not in manifest.analysis_rules["2512"]["metrics"]
+    assert "sample_ms" not in manifest.analysis_rules["2512"]["metrics"]
+    assert "sc" not in manifest.analysis_rules["2512"]["metrics"]
     assert manifest.analysis_rules["2513"]["metrics"]["p_delta"]["maturity"] == "candidate"
     assert manifest.analysis_rules["2513"]["metrics"]["rej_py"]["equals"] == 0
 

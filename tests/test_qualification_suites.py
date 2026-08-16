@@ -18,7 +18,7 @@ def test_discover_suite_entries_lists_current_manifests():
         "factory_acceptance_v2",
         "factory_acceptance_v3",
         "gripper_seal_v1",
-        "gripper_seal_stress_v1",
+        "gripper_seal_stress_v2",
         "xy_motion_v1",
         "motion_timing_v1",
         "profile_lut_benchmark_v1",
@@ -35,7 +35,7 @@ def test_discover_suite_entries_lists_current_manifests():
     assert [entry.manifest_id for entry in entries[:9]] == [
         "factory_acceptance_v3",
         "gripper_seal_v1",
-        "gripper_seal_stress_v1",
+        "gripper_seal_stress_v2",
         "xy_motion_v1",
         "motion_timing_v1",
         "motion_envelope_v1",
@@ -69,7 +69,7 @@ def test_gripper_suite_exposes_operator_fixture_requirement():
 
 def test_gripper_stress_suite_exposes_operator_fixture_and_catalog_rows():
     entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
-    gripper = entries["gripper_seal_stress_v1"].manifest
+    gripper = entries["gripper_seal_stress_v2"].manifest
 
     assert gripper.requires_operator_prompts is True
     assert required_fixture_ids(gripper) == ("dummy_blocked_head_motion_v1",)
@@ -79,19 +79,15 @@ def test_gripper_stress_suite_exposes_operator_fixture_and_catalog_rows():
     assert list(rows) == [2510, 2511, 2512, 2513]
     assert rows[2510].name == "Gripper static pressure matrix"
     assert "conditioning pulse" in rows[2510].evaluates
-    assert rows[2511].name == "Gripper refreshed 3 psi hold"
+    assert rows[2511].name == "Gripper deferred-refresh boundary"
     assert rows[2512].name == "Gripper raster motion stress"
     assert rows[2513].name == "Gripper post-motion seal compare"
     assert all(row.subsystem == "Gripper" for row in rows.values())
-    assert "z_home_to" in rows[2512].metrics
-    assert "pc" in rows[2512].metrics
-    assert "pz" in rows[2512].metrics
-    assert "z_to" in rows[2512].metrics
-    assert "xy_home_to" in rows[2512].metrics
-    assert "park_to" in rows[2512].metrics
-    assert "Z-clearance" in rows[2512].evaluates
-    assert "operator-confirmed evaporation-plate setup" in rows[2512].evaluates
-    assert "Z lower to 91500" in rows[2512].evaluates
+    assert "mode" in rows[2512].metrics
+    assert "pending" in rows[2512].metrics
+    assert "refresh_delta" in rows[2512].metrics
+    assert "motion_only" in rows[2512].metrics
+    assert "384-well" in rows[2512].evaluates
     assert "384-well XY raster" in rows[2512].evaluates
     assert "pre/post raster" in rows[2513].evaluates
 

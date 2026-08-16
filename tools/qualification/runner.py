@@ -19,6 +19,7 @@ from .gripper_trace_artifacts import (
     enrich_raw_selftest_with_gripper_metrics,
     generate_gripper_trace_artifacts,
 )
+from .gripper_refresh_production import run_gripper_refresh_production_path
 from .valve_trace_artifacts import (
     ValveTraceArtifacts,
     enrich_raw_selftest_with_valve_metrics,
@@ -26,7 +27,12 @@ from .valve_trace_artifacts import (
 )
 
 DEFAULT_MANIFEST_REF = "factory_acceptance_v3"
-GRIPPER_OPERATOR_MANIFEST_IDS = {"gripper_seal_v1", "gripper_seal_stress_v1"}
+GRIPPER_OPERATOR_MANIFEST_IDS = {
+    "gripper_seal_v1",
+    "gripper_seal_stress_v1",
+    "gripper_seal_stress_v2",
+}
+GRIPPER_REFRESH_PRODUCTION_MANIFEST_IDS = {"gripper_seal_stress_v2"}
 GRIPPER_RELEASE_ATTEMPTS = 3
 GRIPPER_CLEANUP_ATTEMPTS = 2
 GRIPPER_TEARDOWN_RETRY_DELAY_S = 0.5
@@ -54,6 +60,7 @@ class QualificationRunResult:
 SelfTestInvoker = Callable[[SelfTestInvocation], int]
 OperatorPrompter = Callable[[str], None]
 GripperControl = Callable[[str, str, int], int]
+ProductionPathRunner = Callable[..., dict]
 
 
 def _repo_root() -> Path:
@@ -316,7 +323,7 @@ def _maybe_generate_valve_trace_artifacts(manifest: QualificationManifest, artif
 
 
 def _maybe_generate_gripper_trace_artifacts(manifest: QualificationManifest, artifacts: RunArtifacts) -> GripperTraceArtifacts | None:
-    if manifest.manifest_id != "gripper_seal_stress_v1":
+    if manifest.manifest_id not in {"gripper_seal_stress_v1", "gripper_seal_stress_v2"}:
         return None
     try:
         return generate_gripper_trace_artifacts(artifacts)
@@ -365,6 +372,7 @@ def run_qualification(
     invoker: SelfTestInvoker = default_selftest_invoker,
     prompter: OperatorPrompter = default_operator_prompter,
     gripper_control: GripperControl = default_gripper_control,
+    production_path_runner: ProductionPathRunner = run_gripper_refresh_production_path,
 ) -> QualificationRunResult:
     manifest = load_manifest(manifest_ref)
     if raw_report_path is None and manifest.lifecycle != "active":
@@ -454,6 +462,7 @@ def run_qualification(
                 prompter,
             )
 
+    hardware_preflight_failed = False
     if manifest.requires_operator_prompts and gripper_seal_manifest:
         _record_prompt(
             interactions,
@@ -465,70 +474,128 @@ def run_qualification(
             ("preflight_print", "gripper_valve_preflight_print"),
             ("preflight_refuel", "gripper_valve_preflight_refuel"),
         ):
-            rc = int(gripper_control(action, port, int(baud)))
+            try:
+                rc = int(gripper_control(action, port, int(baud)))
+                error_details = None
+            except BaseException as exc:
+                rc = 3
+                error_details = {"type": type(exc).__name__, "message": str(exc)}
             preflight_host_checks.append(
                 {
                     "name": check_name,
                     "pass": rc == 0,
-                    "details": {"action": action, "returncode": rc},
+                    "details": {
+                        "action": action,
+                        "returncode": rc,
+                        **({"error": error_details} if error_details is not None else {}),
+                    },
                     "timestamp": _now_iso(),
                 }
             )
+            if error_details is not None:
+                break
         if not all(item["pass"] for item in preflight_host_checks):
-            raw_selftest = _raw_missing_report(manifest, 3)
-            raw_selftest["host_checks"] = preflight_host_checks
-            write_json_atomic(artifacts.raw_selftest_path, raw_selftest)
-            report = write_qualification_artifacts(
-                raw_selftest,
-                manifest,
-                identity,
-                artifacts,
-                raw_source_path=artifacts.raw_selftest_path,
-                selftest_returncode=3,
-                fixture_id=fixture_id,
-                operator_interactions=interactions,
-            )
-            return QualificationRunResult(
-                returncode=3,
-                run_dir=artifacts.run_dir,
-                raw_selftest_path=artifacts.raw_selftest_path,
-                report_path=artifacts.report_path,
-                summary_csv_path=artifacts.summary_csv_path,
-                report=report,
-            )
-        _record_prompt(
-            interactions,
-            "confirm_valve_clicks",
-            "Confirm you heard or felt the print/refuel valve clicks.",
-            prompter,
-        )
+            hardware_preflight_failed = True
+        else:
+            try:
+                _record_prompt(
+                    interactions,
+                    "confirm_valve_clicks",
+                    "Confirm you heard or felt the print/refuel valve clicks.",
+                    prompter,
+                )
+            except BaseException as exc:
+                hardware_preflight_failed = True
+                preflight_host_checks.append(
+                    {
+                        "name": "gripper_valve_preflight_confirmation",
+                        "pass": False,
+                        "details": {"type": type(exc).__name__, "message": str(exc)},
+                        "timestamp": _now_iso(),
+                    }
+                )
 
-    command = _build_selftest_command(
-        run_selftest_path=run_selftest_path,
-        port=port,
-        baud=baud,
-        profile=manifest.profile,
-        raw_report_path=artifacts.raw_selftest_path,
-        timeout_ms=timeout_ms,
-        progress_jsonl=progress_jsonl,
-        extra_args=manifest.selftest_args,
-    )
-    invocation = SelfTestInvocation(
-        command=command,
-        raw_report_path=artifacts.raw_selftest_path,
-        manifest=manifest,
-        identity=identity,
-        artifacts=artifacts,
-    )
-    selftest_returncode = int(invoker(invocation))
+    production_path_failed = hardware_preflight_failed
+    if (
+        manifest.manifest_id in GRIPPER_REFRESH_PRODUCTION_MANIFEST_IDS
+        and not hardware_preflight_failed
+    ):
+        try:
+            production_check = production_path_runner(
+                port=port,
+                baud=int(baud),
+                artifact_path=artifacts.run_dir / "production_path.json",
+            )
+        except BaseException as exc:
+            production_check = {
+                "name": "gripper_refresh_production_path",
+                "pass": False,
+                "details": {
+                    "artifact_path": str(artifacts.run_dir / "production_path.json"),
+                    "error": {"type": type(exc).__name__, "message": str(exc)},
+                },
+                "timestamp": _now_iso(),
+            }
+        preflight_host_checks.append(production_check)
+        production_path_failed = not bool(production_check.get("pass"))
 
-    if artifacts.raw_selftest_path.exists():
-        raw_selftest = json.loads(artifacts.raw_selftest_path.read_text(encoding="utf-8"))
+    if production_path_failed:
+        selftest_returncode = 3
+        raw_selftest = _raw_missing_report(manifest, selftest_returncode)
+        raw_selftest["host_checks"] = [
+            {
+                "name": (
+                    "selftest_skipped_after_hardware_preflight_failure"
+                    if hardware_preflight_failed
+                    else "selftest_skipped_after_production_path_failure"
+                ),
+                "pass": False,
+                "details": {"manifest_id": manifest.manifest_id},
+                "timestamp": _now_iso(),
+            }
+        ]
+        write_json_atomic(artifacts.raw_selftest_path, raw_selftest)
         raw_source_path: Path | None = artifacts.raw_selftest_path
     else:
-        raw_selftest = _raw_missing_report(manifest, selftest_returncode)
-        write_json_atomic(artifacts.raw_selftest_path, raw_selftest)
-        raw_source_path = artifacts.raw_selftest_path
+        command = _build_selftest_command(
+            run_selftest_path=run_selftest_path,
+            port=port,
+            baud=baud,
+            profile=manifest.profile,
+            raw_report_path=artifacts.raw_selftest_path,
+            timeout_ms=timeout_ms,
+            progress_jsonl=progress_jsonl,
+            extra_args=manifest.selftest_args,
+        )
+        invocation = SelfTestInvocation(
+            command=command,
+            raw_report_path=artifacts.raw_selftest_path,
+            manifest=manifest,
+            identity=identity,
+            artifacts=artifacts,
+        )
+        try:
+            selftest_returncode = int(invoker(invocation))
+        except BaseException as exc:
+            selftest_returncode = 3
+            raw_selftest = _raw_missing_report(manifest, selftest_returncode)
+            raw_selftest["host_checks"] = [
+                {
+                    "name": "selftest_invoker_exception",
+                    "pass": False,
+                    "details": {"type": type(exc).__name__, "message": str(exc)},
+                    "timestamp": _now_iso(),
+                }
+            ]
+            write_json_atomic(artifacts.raw_selftest_path, raw_selftest)
+
+        if artifacts.raw_selftest_path.exists():
+            raw_selftest = json.loads(artifacts.raw_selftest_path.read_text(encoding="utf-8"))
+            raw_source_path = artifacts.raw_selftest_path
+        else:
+            raw_selftest = _raw_missing_report(manifest, selftest_returncode)
+            write_json_atomic(artifacts.raw_selftest_path, raw_selftest)
+            raw_source_path = artifacts.raw_selftest_path
 
     if manifest.requires_operator_prompts and gripper_seal_manifest:
         host_checks = preflight_host_checks + list(raw_selftest.get("host_checks") or [])
@@ -611,6 +678,8 @@ def run_qualification(
             }
         )
         raw_selftest["host_checks"] = host_checks
+        write_json_atomic(artifacts.raw_selftest_path, raw_selftest)
+        raw_source_path = artifacts.raw_selftest_path
 
     valve_artifacts = _maybe_generate_valve_trace_artifacts(manifest, artifacts)
     gripper_artifacts = _maybe_generate_gripper_trace_artifacts(manifest, artifacts)
