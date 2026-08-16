@@ -145,6 +145,8 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 - `firmware/Core/Inc/Gripper.h`, `firmware/Core/Src/Gripper.cpp`
 - Key functions:
   - `Gripper::open`, `Gripper::close`, `Gripper::stopPump`, `Gripper::refreshTaskEntry`
+- `firmware/Core/Inc/GripperRefreshPolicy.h`, `firmware/Core/Src/GripperRefreshPolicy.cpp`
+  - Pure, host-tested deferred-refresh state policy. It owns enable/disable state, pending-refresh coalescing, pulse-completion timing, and dispense-cooldown calculations without HAL or FreeRTOS dependencies. Runtime gripper and printer code do not consume it yet.
 
 ### Command/comms and orchestration
 

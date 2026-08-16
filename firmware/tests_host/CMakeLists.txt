@@ -55,6 +55,7 @@ add_executable(fw_tests
     tests/test_flash_output_state.cpp
     tests/test_printer_completion_bits.cpp
     tests/test_printer_control_policy.cpp
+    tests/test_gripper_refresh_policy.cpp
     tests/test_diagnostic_result_emitter.cpp
     tests/test_tmc2208_configuration.cpp
     tests/test_motion_unit_scale.cpp
@@ -97,6 +98,7 @@ add_executable(fw_tests
     ../Core/Src/FlashSafety.cpp
     ../Core/Src/FlashCyclePolicy.cpp
     ../Core/Src/PrinterControlPolicy.cpp
+    ../Core/Src/GripperRefreshPolicy.cpp
 )
 
 target_include_directories(fw_tests PRIVATE
