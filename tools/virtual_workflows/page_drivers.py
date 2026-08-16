@@ -2547,12 +2547,46 @@ class ArrayDriver(_QTestSurfaceDriver):
         return self.view.well_plate_widget.start_print_array_button
 
     def _require_control(self, text: str, *, enabled: bool = True) -> None:
+        self.inspect_control(expected_text=text, expected_enabled=enabled)
+
+    def inspect_control(
+        self,
+        *,
+        expected_text: str | None = None,
+        expected_enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        """Capture and optionally validate the real print-array control."""
+
+        self.context.pump_events()
         button = self.control
-        if button.text() != text or bool(button.isEnabled()) is not bool(enabled):
+        loaded_array_getter = getattr(
+            self.context.controller,
+            "get_loaded_array_control_state",
+            None,
+        )
+        loaded_array = (
+            loaded_array_getter() if callable(loaded_array_getter) else {}
+        )
+        evidence = {
+            "text": str(button.text()),
+            "enabled": bool(button.isEnabled()),
+            "visible": bool(button.isVisible()),
+            "array_state": str(self.context.controller.get_array_run_state()),
+            "loaded_array": dict(loaded_array or {}),
+        }
+        if (
+            expected_text is not None
+            and evidence["text"] != str(expected_text)
+        ) or (
+            expected_enabled is not None
+            and evidence["enabled"] is not bool(expected_enabled)
+        ):
             raise RuntimeError(
-                f"expected {text!r} array control (enabled={enabled}); observed "
-                f"{button.text()!r} (enabled={button.isEnabled()})"
+                f"expected {expected_text!r} array control "
+                f"(enabled={expected_enabled}); observed {evidence['text']!r} "
+                f"(enabled={evidence['enabled']})"
             )
+        return evidence
 
     def click_start(self) -> None:
         self.click(self.control)
@@ -2561,6 +2595,7 @@ class ArrayDriver(_QTestSurfaceDriver):
         self,
         expected_dialogs: list[tuple[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
+        self._require_control("Start Array")
         dialogs = self.click_with_message_boxes(
             self.control,
             expected_dialogs or [
@@ -2575,6 +2610,7 @@ class ArrayDriver(_QTestSurfaceDriver):
             lambda: self.context.controller.get_array_run_state() == "running",
             "started array running state",
         )
+        self._require_control("Stop After Well")
         return dialogs
 
     def start_and_cancel_manual_refuel_guard(
@@ -2588,6 +2624,7 @@ class ArrayDriver(_QTestSurfaceDriver):
         before_plan = self.context.experiment_model.get_execution_plan_snapshot()
         before_state = self.context.controller.get_array_run_state()
         before_completed = int(completion_count())
+        self._require_control("Start Array")
         dialogs = self.click_with_message_boxes(
             self.control,
             [
@@ -2651,6 +2688,7 @@ class ArrayDriver(_QTestSurfaceDriver):
             lambda: self.context.controller.get_array_run_state() == "running",
             "resumed array running state",
         )
+        self._require_control("Stop After Well")
         return {
             "dialogs": dialogs,
             "array_state": self.context.controller.get_array_run_state(),

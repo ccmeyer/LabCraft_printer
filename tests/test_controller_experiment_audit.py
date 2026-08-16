@@ -88,7 +88,7 @@ def test_print_array_records_requested_and_started_events():
 
 def test_print_array_resume_ready_records_resumed_event():
     c = _make_audited_controller(
-        wells=[FakeWell("A1", 0), FakeWell("A2", 7)],
+        wells=[FakeWell("A1", 0, target=5), FakeWell("A2", 7)],
         initial_state="resume_ready",
     )
     c.model.machine_model.transport_paused = True

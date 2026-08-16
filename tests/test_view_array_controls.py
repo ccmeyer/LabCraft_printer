@@ -34,6 +34,7 @@ def _make_widget(
     yes_no_responses=None,
     bypass_result=None,
     completed_view=False,
+    loaded_array_state=None,
 ):
     if preflight is None:
         preflight = {"ok": True, "code": "ok", "message": "", "record": None}
@@ -43,6 +44,14 @@ def _make_widget(
         dock_context = {"required": False, "reasons": [], "title": "", "message": ""}
     if bypass_result is None:
         bypass_result = {"status": "bypassed", "source": "print_array_preflight"}
+    if loaded_array_state is None:
+        loaded_array_state = (
+            "no_head"
+            if not has_head
+            else "in_progress"
+            if array_state == "resume_ready"
+            else "not_started"
+        )
     widget = WellPlateWidget.__new__(WellPlateWidget)
     widget.color_dict = {
         "dark_blue": "#123456",
@@ -54,6 +63,7 @@ def _make_widget(
         print_array=Mock(),
         request_array_soft_stop=Mock(),
         get_array_run_state=lambda: array_state,
+        get_loaded_array_control_state=lambda: {"state": loaded_array_state},
         get_print_array_imaging_calibration_preflight=Mock(return_value=preflight),
         get_print_array_refuel_check_preflight=Mock(return_value=refuel_preflight),
         record_manual_refuel_check_bypass=Mock(return_value=bypass_result),
@@ -119,9 +129,61 @@ def test_well_plate_widget_refreshes_array_runner_buttons():
     assert widget.start_print_array_button.enabled is False
 
     widget.controller.get_array_run_state = lambda: "resume_ready"
+    widget.controller.get_loaded_array_control_state = lambda: {
+        "state": "in_progress"
+    }
     WellPlateWidget.update_start_print_array_button(widget)
     assert widget.start_print_array_button.text == "Resume Print"
     assert widget.start_print_array_button.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("loaded_array_state", "expected_text", "expected_enabled"),
+    [
+        ("complete", "Array Complete", False),
+        ("no_array", "No Array", False),
+        ("unavailable", "Array Unavailable", False),
+        ("no_head", "Start Array", False),
+    ],
+)
+def test_well_plate_widget_projects_non_actionable_loaded_array_states(
+    loaded_array_state,
+    expected_text,
+    expected_enabled,
+):
+    widget = _make_widget(loaded_array_state=loaded_array_state)
+
+    WellPlateWidget.update_start_print_array_button(widget)
+    WellPlateWidget.start_print_array(widget)
+
+    assert widget.start_print_array_button.text == expected_text
+    assert widget.start_print_array_button.enabled is expected_enabled
+    widget.main_window.popup_yes_no.assert_not_called()
+    widget.controller.print_array.assert_not_called()
+
+
+def test_loaded_reagent_progress_controls_start_and_resume_independent_of_global_state():
+    partial = _make_widget(array_state="idle", loaded_array_state="in_progress")
+    untouched = _make_widget(
+        array_state="resume_ready",
+        loaded_array_state="not_started",
+    )
+
+    WellPlateWidget.update_start_print_array_button(partial)
+    WellPlateWidget.start_print_array(partial)
+    WellPlateWidget.update_start_print_array_button(untouched)
+    WellPlateWidget.start_print_array(untouched)
+
+    assert partial.start_print_array_button.text == "Resume Print"
+    partial.main_window.popup_yes_no.assert_called_once_with(
+        "Resume Print Array",
+        "Are you sure you want to resume the print array?",
+    )
+    assert untouched.start_print_array_button.text == "Start Array"
+    untouched.main_window.popup_yes_no.assert_any_call(
+        "Start Print Array",
+        "Are you sure you want to start the print array?",
+    )
 
 
 def test_completed_execution_view_disables_start_and_never_dispatches():

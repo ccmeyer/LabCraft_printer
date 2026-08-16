@@ -178,6 +178,13 @@ class StateProjectionBuilder:
     def _controller_state(self) -> dict[str, Any]:
         controller = self.session.components.controller
         context = _safe_attr(controller, "_array_context") or {}
+        loaded_array = _safe_call(
+            controller,
+            "get_loaded_array_control_state",
+            {"state": "unavailable"},
+        )
+        if not isinstance(loaded_array, Mapping):
+            loaded_array = {"state": "unavailable"}
         pass_summary = {
             key: _value(context.get(key))
             for key in (
@@ -190,6 +197,7 @@ class StateProjectionBuilder:
         }
         return {
             "array_state": controller.get_array_run_state(),
+            "loaded_array": dict(loaded_array),
             "active_pass": pass_summary or None,
             "last_transport_fault": bool(
                 _safe_attr(controller, "_last_transport_fault_debug_bundle_context")
@@ -643,20 +651,42 @@ class StateProjectionBuilder:
         if controller_layer.get("available") and ui_layer.get("available"):
             controller = controller_layer.get("state") or {}
             ui = ui_layer.get("state") or {}
-            expected_text = {
-                "running": "Stop After Well",
-                "stop_requested": "Stop Pending",
-                "resume_ready": "Resume Print",
-            }.get(str(controller.get("array_state")), "Start Array")
+            array_state = str(controller.get("array_state"))
+            loaded_array_state = str(
+                (controller.get("loaded_array") or {}).get("state")
+                or "unavailable"
+            )
+            if array_state == "running":
+                expected_text, expected_enabled = "Stop After Well", True
+            elif array_state == "stop_requested":
+                expected_text, expected_enabled = "Stop Pending", False
+            else:
+                expected_text, expected_enabled = {
+                    "complete": ("Array Complete", False),
+                    "no_array": ("No Array", False),
+                    "unavailable": ("Array Unavailable", False),
+                    "in_progress": ("Resume Print", True),
+                    "not_started": ("Start Array", True),
+                    "no_head": ("Start Array", False),
+                }.get(loaded_array_state, ("Array Unavailable", False))
             array_buttons = [
                 button
                 for button in (ui.get("primary_controls") or [])
                 if str(button.get("text"))
-                in {"Start Array", "Stop After Well", "Stop Pending", "Resume Print"}
+                in {
+                    "Start Array",
+                    "Stop After Well",
+                    "Stop Pending",
+                    "Resume Print",
+                    "Array Complete",
+                    "No Array",
+                    "Array Unavailable",
+                }
             ]
             if array_buttons:
-                domain_counts["controller_ui"] = 1
+                domain_counts["controller_ui"] = 2
                 actual_text = str(array_buttons[0].get("text"))
+                actual_enabled = bool(array_buttons[0].get("enabled"))
                 if actual_text != expected_text:
                     mismatches.append(
                         {
@@ -664,6 +694,15 @@ class StateProjectionBuilder:
                             "field": "array_control_text",
                             "controller": expected_text,
                             "ui": actual_text,
+                        }
+                    )
+                if actual_enabled != expected_enabled:
+                    mismatches.append(
+                        {
+                            "domain": "controller_ui",
+                            "field": "array_control_enabled",
+                            "controller": expected_enabled,
+                            "ui": actual_enabled,
                         }
                     )
 

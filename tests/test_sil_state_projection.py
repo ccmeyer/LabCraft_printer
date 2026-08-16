@@ -122,6 +122,9 @@ def test_projection_is_read_only_and_persistence_is_explicit(qapp, tmp_path, mon
         assert simulator_state["current_print_pressure_raw"] == 0
         assert simulator_state["current_print_pressure_psi"] == -1.8746
         assert model_state["current_print_pressure"] == 0
+        assert frequent["layers"]["controller"]["state"]["loaded_array"][
+            "state"
+        ] == "no_head"
         assert frequent["reconciliation"]["status"] == "ok"
         assert frequent["layers"]["persistence"]["state"] == {
             "status": "not_captured"
@@ -487,10 +490,18 @@ def test_reconciliation_reports_controller_rack_and_persistence_domains():
                 "transport_paused": False,
             },
         },
-        "controller": {"available": True, "state": {"array_state": "running"}},
+        "controller": {
+            "available": True,
+            "state": {
+                "array_state": "running",
+                "loaded_array": {"state": "not_started"},
+            },
+        },
         "ui": {
             "available": True,
-            "state": {"primary_controls": [{"text": "Start Array"}]},
+            "state": {
+                "primary_controls": [{"text": "Start Array", "enabled": True}]
+            },
         },
         "rack_head": {
             "available": True,
@@ -541,7 +552,7 @@ def test_reconciliation_reports_controller_rack_and_persistence_domains():
     reconciliation = StateProjectionBuilder._reconcile(layers)
     assert reconciliation["status"] == "mismatch"
     assert reconciliation["domains"]["simulator_model"] > 0
-    assert reconciliation["domains"]["controller_ui"] == 1
+    assert reconciliation["domains"]["controller_ui"] == 2
     assert reconciliation["domains"]["rack_head"] == 1
     assert reconciliation["domains"]["experiment_persistence"] == 2
     assert reconciliation["domains"]["calibration_persistence"] == 2
@@ -551,3 +562,48 @@ def test_reconciliation_reports_controller_rack_and_persistence_domains():
         "experiment_persistence",
         "calibration_persistence",
     }
+
+
+@pytest.mark.parametrize(
+    ("array_state", "loaded_state", "text", "enabled"),
+    [
+        ("idle", "no_head", "Start Array", False),
+        ("idle", "no_array", "No Array", False),
+        ("idle", "not_started", "Start Array", True),
+        ("idle", "in_progress", "Resume Print", True),
+        ("resume_ready", "not_started", "Start Array", True),
+        ("resume_ready", "in_progress", "Resume Print", True),
+        ("idle", "complete", "Array Complete", False),
+        ("idle", "unavailable", "Array Unavailable", False),
+        ("running", "in_progress", "Stop After Well", True),
+        ("stop_requested", "in_progress", "Stop Pending", False),
+    ],
+)
+def test_reconciliation_projects_loaded_reagent_array_controls(
+    array_state,
+    loaded_state,
+    text,
+    enabled,
+):
+    reconciliation = StateProjectionBuilder._reconcile(
+        {
+            "simulator": {"available": True, "state": {}},
+            "model_machine": {"available": True, "state": {}},
+            "controller": {
+                "available": True,
+                "state": {
+                    "array_state": array_state,
+                    "loaded_array": {"state": loaded_state},
+                },
+            },
+            "ui": {
+                "available": True,
+                "state": {
+                    "primary_controls": [{"text": text, "enabled": enabled}]
+                },
+            },
+        }
+    )
+
+    assert reconciliation["status"] == "ok"
+    assert reconciliation["domains"]["controller_ui"] == 2

@@ -5021,7 +5021,13 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.model.experiment_loaded.connect(self.on_experiment_loaded)
         self.model.rack_model.gripper_updated.connect(self.gripper_update_handler)
         self.model.well_plate.well_state_changed_signal.connect(self.update_well_colors)
+        self.model.well_plate.well_state_changed_signal.connect(
+            self.update_start_print_array_button
+        )
         self.model.well_plate.clear_all_wells_signal.connect(self.update_well_colors)
+        self.model.well_plate.clear_all_wells_signal.connect(
+            self.update_start_print_array_button
+        )
         self.model.well_plate.plate_format_changed_signal.connect(self.update_grid)
         self.model.well_plate.plate_summary_changed_signal.connect(self._update_plate_summary)
         self.model.rack_model.gripper_updated.connect(self.update_start_print_array_button)
@@ -5088,6 +5094,27 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         color = self.color_dict[active_color] if enabled else self.color_dict['darker_gray']
         button.setStyleSheet(f"background-color: {color}; color: white;")
 
+    def _loaded_array_control_state(self):
+        getter = getattr(self.controller, "get_loaded_array_control_state", None)
+        if callable(getter):
+            try:
+                result = dict(getter() or {})
+            except Exception:
+                result = {"state": "unavailable"}
+            result["state"] = str(result.get("state") or "unavailable")
+            return result
+
+        has_head = self.model.rack_model.gripper_printer_head is not None
+        if not has_head:
+            return {"state": "no_head"}
+        state_getter = getattr(self.controller, "get_array_run_state", None)
+        array_state = state_getter() if callable(state_getter) else "idle"
+        return {
+            "state": (
+                "in_progress" if array_state == "resume_ready" else "not_started"
+            )
+        }
+
     def update_start_print_array_button(self, *_args):
         read_only_view_getter = getattr(
             self.model, "is_read_only_experiment_view_active", None
@@ -5111,7 +5138,6 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             )
             return
 
-        has_head = self.model.rack_model.gripper_printer_head is not None
         state_getter = getattr(self.controller, "get_array_run_state", None)
         array_state = state_getter() if callable(state_getter) else "idle"
 
@@ -5125,13 +5151,39 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             self._set_array_button_state(self.start_print_array_button, False, 'dark_red')
             return
 
-        if array_state == "resume_ready":
+        loaded_array_state = self._loaded_array_control_state().get("state")
+        if loaded_array_state == "complete":
+            self.start_print_array_button.setText("Array Complete")
+            self._set_array_button_state(
+                self.start_print_array_button, False, 'dark_blue'
+            )
+            return
+
+        if loaded_array_state == "no_array":
+            self.start_print_array_button.setText("No Array")
+            self._set_array_button_state(
+                self.start_print_array_button, False, 'dark_blue'
+            )
+            return
+
+        if loaded_array_state == "unavailable":
+            self.start_print_array_button.setText("Array Unavailable")
+            self._set_array_button_state(
+                self.start_print_array_button, False, 'dark_blue'
+            )
+            return
+
+        if loaded_array_state == "in_progress":
             self.start_print_array_button.setText("Resume Print")
-            self._set_array_button_state(self.start_print_array_button, has_head, 'dark_blue')
+            self._set_array_button_state(self.start_print_array_button, True, 'dark_blue')
             return
 
         self.start_print_array_button.setText("Start Array")
-        self._set_array_button_state(self.start_print_array_button, has_head, 'dark_blue')
+        self._set_array_button_state(
+            self.start_print_array_button,
+            loaded_array_state == "not_started",
+            'dark_blue',
+        )
 
     def start_print_array(self):
         read_only_view_getter = getattr(
@@ -5154,9 +5206,13 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         if array_state == "stop_requested":
             return
 
+        loaded_array_state = self._loaded_array_control_state().get("state")
+        if loaded_array_state not in {"not_started", "in_progress"}:
+            return
+
         if not self.controller.check_if_all_completed():
             return
-        is_resume = array_state == "resume_ready"
+        is_resume = loaded_array_state == "in_progress"
         title = "Resume Print Array" if is_resume else "Start Print Array"
         message = "Are you sure you want to resume the print array?" if is_resume else "Are you sure you want to start the print array?"
         response = self.main_window.popup_yes_no(title, message)

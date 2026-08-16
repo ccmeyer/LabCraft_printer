@@ -83,6 +83,31 @@ def test_composed_multi_stock_lifecycle_report(qapp, tmp_path):
         "stock_2_printing",
         "completed",
     ]
+    milestone_controls = {
+        row["name"]: (row.get("evidence") or {}).get("array_control")
+        for row in workflow["lifecycle_milestones"]
+    }
+    assert {
+        name: (control["text"], control["enabled"])
+        for name, control in milestone_controls.items()
+        if control is not None
+    } == {
+        "stock_1_ready": ("Start Array", True),
+        "stock_1_printing": ("Stop After Well", True),
+        "stock_1_completed": ("Array Complete", False),
+        "stock_2_staged": ("Start Array", True),
+        "stock_2_printing": ("Stop After Well", True),
+        "completed": ("Start Array", False),
+    }
+    return_controls = [
+        row["evidence"]["array_control_before_return"]
+        for row in actions
+        if row["action_id"] == "head.return_via_ui"
+        and "array_control_before_return" in row["evidence"]
+    ]
+    assert [
+        (control["text"], control["enabled"]) for control in return_controls
+    ] == [("Array Complete", False), ("Array Complete", False)]
 
     persistence = report["metrics"]["persistence"]["values"]
     exchange = persistence["multi_stock_head_exchange"]

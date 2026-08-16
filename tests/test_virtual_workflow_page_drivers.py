@@ -330,6 +330,7 @@ def test_array_driver_start_waits_for_running_state(qapp):
         )
         if answer == QtWidgets.QMessageBox.StandardButton.Yes:
             state["value"] = "running"
+            button.setText("Stop After Well")
 
     button.clicked.connect(drive_control)
     window.show()

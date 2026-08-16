@@ -22,7 +22,7 @@ class Emitter:
 
 
 class FakeWell:
-    def __init__(self, well_id, remaining, coords=None):
+    def __init__(self, well_id, remaining, coords=None, target=None):
         self.well_id = well_id
         row = ''.join(ch for ch in self.well_id if ch.isalpha()).upper()
         col = ''.join(ch for ch in self.well_id if ch.isdigit())
@@ -33,8 +33,12 @@ class FakeWell:
             row_num = row_num * 26 + (ord(ch) - ord('A') + 1)
         self.row_num = row_num - 1
         self.remaining = int(remaining)
+        self.target = int(remaining if target is None else target)
         self.coords = coords or {"X": 1, "Y": 2, "Z": 3}
         self.record_calls = []
+
+    def get_target_droplets(self, _stock_id):
+        return self.target
 
     def get_remaining_droplets(self, _stock_id):
         return self.remaining
@@ -236,6 +240,55 @@ def _make_controller(
     c.model.machine_model.clear_evap_plate_dock_check_required = _clear_dock_checks
     c.model.machine_model.clear_evap_plate_dock_check_required_after_reset = _clear_reset_dock_check
     return c
+
+
+@pytest.mark.parametrize(
+    ("printer_head", "wells", "expected_state", "expected_remaining"),
+    [
+        (None, [FakeWell("A1", 5)], "no_head", 0),
+        (_make_printer_head(stock_id=""), [FakeWell("A1", 5)], "unavailable", 0),
+        (_make_printer_head(), [FakeWell("A1", 0, target=0)], "no_array", 0),
+        (_make_printer_head(), [FakeWell("A1", 7, target=7)], "not_started", 7),
+        (_make_printer_head(), [FakeWell("A1", 3, target=7)], "in_progress", 3),
+        (_make_printer_head(), [FakeWell("A1", 0, target=7)], "complete", 0),
+    ],
+)
+def test_loaded_array_control_state_is_scoped_to_loaded_reagent(
+    printer_head,
+    wells,
+    expected_state,
+    expected_remaining,
+):
+    c = _make_controller(
+        well_plate=FakeWellPlate(wells),
+        printer_head=printer_head,
+    )
+
+    state = Controller.get_loaded_array_control_state(c)
+
+    assert state["state"] == expected_state
+    assert state["remaining_droplets"] == expected_remaining
+
+
+@pytest.mark.parametrize(
+    "well",
+    [
+        FakeWell("A1", 0, target=0),
+        FakeWell("A1", 0, target=7),
+    ],
+)
+def test_print_array_does_not_dispatch_a_non_actionable_loaded_array(well):
+    c = _make_controller(
+        well_plate=FakeWellPlate([well]),
+        printer_head=_make_printer_head(),
+        initial_state="resume_ready",
+    )
+
+    Controller.print_array(c)
+
+    assert c.get_array_run_state() == "resume_ready"
+    c.print_droplets.assert_not_called()
+    assert c._array_context is None
 
 
 def _parking_move_side_effect(*args, on_complete=None, **kwargs):
@@ -1059,7 +1112,9 @@ def test_print_array_skips_row_overshoot_when_neighbor_coordinates_are_invalid()
 
 
 def test_print_array_resume_ready_starts_next_incomplete_well():
-    completed = FakeWell("A1", 0, {"X": 10, "Y": 20, "Z": 30})
+    completed = FakeWell(
+        "A1", 0, {"X": 10, "Y": 20, "Z": 30}, target=5
+    )
     remaining = FakeWell("A2", 7, {"X": 40, "Y": 50, "Z": 60})
     c = _make_controller(
         well_plate=FakeWellPlate([completed, remaining]),
@@ -1132,7 +1187,9 @@ def test_print_array_restores_captured_custom_accels_on_completion_when_gentle_a
 
 
 def test_print_array_resume_ready_reapplies_and_restores_array_accels():
-    completed = FakeWell("A1", 0, {"X": 10, "Y": 20, "Z": 30})
+    completed = FakeWell(
+        "A1", 0, {"X": 10, "Y": 20, "Z": 30}, target=5
+    )
     remaining = FakeWell("A2", 7, {"X": 40, "Y": 50, "Z": 60})
     c = _make_controller(
         well_plate=FakeWellPlate([completed, remaining]),
@@ -1161,7 +1218,9 @@ def test_print_array_resume_ready_reapplies_and_restores_array_accels():
 
 
 def test_print_array_resume_ready_resumes_transport_before_queueing():
-    completed = FakeWell("A1", 0, {"X": 10, "Y": 20, "Z": 30})
+    completed = FakeWell(
+        "A1", 0, {"X": 10, "Y": 20, "Z": 30}, target=5
+    )
     remaining = FakeWell("A2", 7, {"X": 40, "Y": 50, "Z": 60})
     c = _make_controller(
         well_plate=FakeWellPlate([completed, remaining]),
@@ -1881,7 +1940,7 @@ def test_normal_array_park_failure_latches_dock_check():
 
 def test_resume_array_blocks_when_persistent_dock_confirmation_required():
     c = _make_controller(
-        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        well_plate=FakeWellPlate([FakeWell("A1", 5, target=10)]),
         printer_head=_make_printer_head(),
         initial_state="resume_ready",
     )

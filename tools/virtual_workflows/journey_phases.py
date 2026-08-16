@@ -952,6 +952,10 @@ def run_soft_stop_boundary(
     )
     request_evidence = dict(request.get("evidence") or {})
     request_evidence["maximum_completion_catchup"] = spec.maximum_completion_catchup
+    request_evidence["array_control"] = ArrayDriver(context).inspect_control(
+        expected_text="Stop Pending",
+        expected_enabled=False,
+    )
     observed["soft_stop_request"] = request_evidence
     capture_milestone(
         context, spec.stop_requested_milestone, evidence=request_evidence
@@ -969,6 +973,10 @@ def run_soft_stop_boundary(
         evidence={
             "completed_count": len(completed),
             "array_state": context.controller.get_array_run_state(),
+            "array_control": ArrayDriver(context).inspect_control(
+                expected_text="Resume Print",
+                expected_enabled=True,
+            ),
         },
     )
     quiescence_row = observe_stopped_quiescence(
@@ -1058,7 +1066,13 @@ def resume_soft_stopped_array(
     capture_milestone(
         context,
         milestone_name,
-        evidence={"array_state": context.controller.get_array_run_state()},
+        evidence={
+            "array_state": context.controller.get_array_run_state(),
+            "array_control": ArrayDriver(context).inspect_control(
+                expected_text="Stop After Well",
+                expected_enabled=True,
+            ),
+        },
     )
     return evidence
 
@@ -1388,6 +1402,10 @@ def run_precalibrated_stock_passes(
                 or str(active.printer_head_id) != spec.printer_head_id
             ):
                 raise RuntimeError("precalibrated stock-pass return identity drifted")
+            array_control = array.inspect_control(
+                expected_text="Array Complete",
+                expected_enabled=False,
+            )
             rack.unload(slot)
             returned_head_ids.append(spec.printer_head_id)
             return {
@@ -1398,6 +1416,7 @@ def run_precalibrated_stock_passes(
                 "queue_drained_before": bool(
                     runtime.context.machine.check_if_all_completed()
                 ),
+                "array_control_before_return": array_control,
                 "returned": True,
             }
 
@@ -1431,6 +1450,12 @@ def run_precalibrated_stock_passes(
             )
         )
         if spec.capture_completed_milestone:
+            array_control = array.inspect_control(
+                expected_text=(
+                    "Start Array" if returned_before_validation else "Array Complete"
+                ),
+                expected_enabled=False,
+            )
             capture_milestone(
                 runtime.context,
                 spec.completed_milestone,
@@ -1438,6 +1463,7 @@ def run_precalibrated_stock_passes(
                     "stock_id": spec.stock_id,
                     "printer_head_id": spec.printer_head_id,
                     "completion_count": spec.expected_completion_count,
+                    "array_control": array_control,
                 },
             )
         if after_pass is not None:
@@ -1882,13 +1908,22 @@ def _run_stock_pass(
         stock_id = str(active.get_stock_id())
         state_before = context.controller.get_array_run_state()
         drained_before = bool(context.machine.check_if_all_completed())
+        array_control = None
+        if spec.expected_start_outcome == "running":
+            array_control = ArrayDriver(context).inspect_control(
+                expected_text="Array Complete",
+                expected_enabled=False,
+            )
         rack.unload(slot)
         returned_head_ids.append(head_id)
-        return {
+        evidence = {
             "slot": slot, "stock_id": stock_id, "printer_head_id": head_id,
             "array_state_before": state_before,
             "queue_drained_before": drained_before, "returned": True,
         }
+        if array_control is not None:
+            evidence["array_control_before_return"] = array_control
+        return evidence
 
     runtime.run_steps(
         (
@@ -2199,10 +2234,22 @@ def _run_stock_pass(
             )
         )
     if spec.ready_milestone:
+        evidence = {
+            "array_control": ArrayDriver(context).inspect_control(
+                expected_text="Start Array",
+                expected_enabled=True,
+            )
+        }
+        if spec.detailed_evidence:
+            evidence.update(
+                {
+                    "stock_id": spec.stock_id,
+                    "printer_head_id": spec.printer_head_id,
+                }
+            )
         capture_milestone(
             context, spec.ready_milestone,
-            evidence={"stock_id": spec.stock_id, "printer_head_id": spec.printer_head_id}
-            if spec.detailed_evidence else None,
+            evidence=evidence,
         )
 
     from PySide6 import QtWidgets
@@ -2266,9 +2313,17 @@ def _run_stock_pass(
         )
     )
     if spec.printing_milestone:
+        evidence = {
+            "array_control": array.inspect_control(
+                expected_text="Stop After Well",
+                expected_enabled=True,
+            )
+        }
+        if spec.detailed_evidence:
+            evidence["stock_id"] = spec.stock_id
         capture_milestone(
             context, spec.printing_milestone,
-            evidence={"stock_id": spec.stock_id} if spec.detailed_evidence else None,
+            evidence=evidence,
         )
     if active_phase is not None:
         active_phase(runtime, spec)
@@ -2335,11 +2390,23 @@ def _run_stock_pass(
             )
         )
     if spec.completed_milestone:
+        array_control = ArrayDriver(context).inspect_control(
+            expected_text=(
+                "Start Array" if returned_before_boundary else "Array Complete"
+            ),
+            expected_enabled=False,
+        )
+        evidence = {"array_control": array_control}
+        if spec.detailed_evidence:
+            evidence.update(
+                {
+                    "stock_id": spec.stock_id,
+                    "completion_count": spec.expected_completion_count,
+                }
+            )
         capture_milestone(
             context, spec.completed_milestone,
-            evidence={"stock_id": spec.stock_id,
-                      "completion_count": spec.expected_completion_count}
-            if spec.detailed_evidence else None,
+            evidence=evidence,
         )
 
     if spec.return_head and not returned_before_boundary:

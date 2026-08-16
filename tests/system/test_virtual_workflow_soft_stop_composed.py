@@ -72,6 +72,22 @@ def test_composed_soft_stop_resume_report(qapp, tmp_path):
         "resumed",
         "completed",
     ]
+    milestone_controls = {
+        row["name"]: (row.get("evidence") or {}).get("array_control")
+        for row in workflow["lifecycle_milestones"]
+    }
+    assert {
+        name: (control["text"], control["enabled"])
+        for name, control in milestone_controls.items()
+        if control is not None
+    } == {
+        "ready": ("Start Array", True),
+        "printing": ("Stop After Well", True),
+        "stop_requested": ("Stop Pending", False),
+        "stopped": ("Resume Print", True),
+        "resumed": ("Stop After Well", True),
+        "completed": ("Array Complete", False),
+    }
     persistence = report["metrics"]["persistence"]["values"]
     assert persistence["paused_boundary"]["checkpoint_state"] == "paused"
     assert persistence["quiescence"]["starting_completion_count"] == (

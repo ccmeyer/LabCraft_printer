@@ -4045,6 +4045,85 @@ class Controller(QObject):
         """Return the current array runner state."""
         return str(getattr(self, "_array_state", "idle") or "idle")
 
+    def get_loaded_array_control_state(self):
+        """Return print progress for the reagent in the loaded printer head."""
+        result = {
+            "state": "no_head",
+            "stock_id": None,
+            "target_well_count": 0,
+            "completed_well_count": 0,
+            "target_droplets": 0,
+            "remaining_droplets": 0,
+            "error": None,
+        }
+
+        try:
+            rack_model = getattr(self.model, "rack_model", None)
+            getter = getattr(rack_model, "get_gripper_printer_head", None)
+            printer_head = getter() if callable(getter) else getattr(
+                rack_model, "gripper_printer_head", None
+            )
+            if printer_head is None:
+                return result
+
+            stock_getter = getattr(printer_head, "get_stock_id", None)
+            stock_id = stock_getter() if callable(stock_getter) else None
+            result["stock_id"] = None if stock_id is None else str(stock_id)
+            if not stock_id:
+                result["state"] = "unavailable"
+                result["error"] = "The loaded printer head has no stock ID."
+                return result
+
+            well_plate = getattr(self.model, "well_plate", None)
+            wells_getter = getattr(
+                well_plate, "get_all_wells_with_reactions", None
+            )
+            if not callable(wells_getter):
+                raise RuntimeError("well-plate reaction lookup is unavailable")
+            wells = list(
+                wells_getter(
+                    fill_by="rows",
+                    serpentine=bool(
+                        getattr(
+                            self,
+                            "_array_print_serpentine",
+                            ARRAY_PRINT_SERPENTINE,
+                        )
+                    ),
+                )
+                or []
+            )
+
+            for well in wells:
+                target_getter = getattr(well, "get_target_droplets", None)
+                remaining_getter = getattr(well, "get_remaining_droplets", None)
+                if not callable(target_getter) or not callable(remaining_getter):
+                    raise RuntimeError("well droplet progress is unavailable")
+                target = max(0, int(target_getter(stock_id) or 0))
+                if target <= 0:
+                    continue
+                remaining = max(0, int(remaining_getter(stock_id) or 0))
+                remaining = min(target, remaining)
+                result["target_well_count"] += 1
+                result["target_droplets"] += target
+                result["remaining_droplets"] += remaining
+                if remaining == 0:
+                    result["completed_well_count"] += 1
+
+            if result["target_well_count"] == 0:
+                result["state"] = "no_array"
+            elif result["remaining_droplets"] == 0:
+                result["state"] = "complete"
+            elif result["remaining_droplets"] < result["target_droplets"]:
+                result["state"] = "in_progress"
+            else:
+                result["state"] = "not_started"
+            return result
+        except Exception as exc:
+            result["state"] = "unavailable"
+            result["error"] = str(exc) or exc.__class__.__name__
+            return result
+
     def start_new_experiment_session(self, *, base_dir=None):
         return self.model.start_new_experiment_session(
             array_runner_idle=self.get_array_run_state() == "idle",
@@ -6247,7 +6326,6 @@ class Controller(QObject):
         wells_with_droplets = self._get_array_remaining_wells(current_stock_id)
         if not wells_with_droplets:
             self._array_context = None
-            self._set_array_run_state("idle")
             return False
 
         self._array_context = {
@@ -7328,6 +7406,30 @@ class Controller(QObject):
             print('Cannot print: No printer head is loaded')
             return
 
+        loaded_array = self.get_loaded_array_control_state()
+        loaded_array_state = str(loaded_array.get("state") or "unavailable")
+        if loaded_array_state in {"complete", "no_array"}:
+            print(
+                "Cannot print: "
+                + (
+                    "The loaded reagent array is already complete"
+                    if loaded_array_state == "complete"
+                    else "The loaded reagent has no assigned array"
+                )
+            )
+            return
+        if loaded_array_state not in {"not_started", "in_progress"}:
+            message = str(
+                loaded_array.get("error")
+                or "The loaded reagent array status could not be determined."
+            )
+            self.error_occurred_signal.emit('Error', message)
+            print(f'Cannot print: {message}')
+            return
+        request_kind = (
+            "resume" if loaded_array_state == "in_progress" else "start"
+        )
+
         authoritative_preflight = getattr(
             experiment_model, "validate_authoritative_print_context", None
         )
@@ -7472,14 +7574,14 @@ class Controller(QObject):
             "print_array_requested",
             "Print array request accepted",
             details={
-                "request_kind": "resume" if starting_state == "resume_ready" else "start",
+                "request_kind": request_kind,
                 "imaging_calibration_override": bool(imaging_calibration_override),
                 "settings_mismatch_override": bool(settings_mismatch_override),
                 "evap_plate_dock_confirmed": bool(evap_plate_dock_confirmed),
                 "evap_plate_dock_check_reasons": list(dock_check.get("reasons") or []),
             },
         )
-        if starting_state == "resume_ready":
+        if request_kind == "resume":
             self._record_print_array_audit_event(
                 "print_array_resumed",
                 "Print array resumed",
