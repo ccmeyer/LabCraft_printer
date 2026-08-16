@@ -247,6 +247,27 @@ def test_build_report_set_preserves_run_boundaries_and_excludes_warmup(tmp_path)
     assert report_set["noise"]["status"] == "acceptable"
 
 
+def test_short_calibration_migration_report_set_needs_no_print_latency_metrics(
+    tmp_path,
+):
+    report = _report(run_id="migration-short")
+    report["workload"]["workload_id"] = (
+        "calibration_storage_historical_conversion_contract_v1"
+    )
+    report["metrics"]["responsiveness"] = {
+        "status": "not_applicable",
+        "values": {},
+    }
+    paths = _write_reports(tmp_path, "migration", [report])
+
+    report_set = build_report_set(paths, host_label="pi5-migration-short")
+
+    assert report_set["metric_profile"] == "calibration_storage_reference_v1"
+    assert report_set["functional"]["status"] == "pass"
+    assert report_set["runs"]["measured_count"] == 1
+    assert report_set["metrics"] == {}
+
+
 def test_baseline_is_compact_clean_and_candidate_by_default(tmp_path):
     baseline = _baseline(tmp_path)
 
