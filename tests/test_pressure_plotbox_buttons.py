@@ -168,7 +168,11 @@ def _make_controller(events, *, queue_clear=True, imaging_preflight=None, refuel
         connect_droplet_camera_signals=Mock(
             side_effect=lambda: events.append("connect_droplet_camera_signals")
         ),
-        enable_print_profile=Mock(side_effect=lambda: events.append("enable_print_profile")),
+        enable_print_profile=Mock(
+            side_effect=lambda *, deferred_gripper_refresh=False: events.append("enable_print_profile")
+        ),
+        disable_print_profile=Mock(side_effect=lambda: events.append("disable_print_profile")),
+        clear_command_queue=Mock(),
         get_print_array_imaging_calibration_preflight=Mock(return_value=imaging_preflight),
         get_print_array_refuel_check_preflight=Mock(return_value=refuel_preflight),
     )
@@ -866,11 +870,199 @@ def test_current_profile_calibrate_pressure_opens_droplet_imager_at_camera(monke
         "enable_print_profile",
         "droplet_dialog_init",
         "droplet_dialog_exec",
+        "disable_print_profile",
     ]
     main_window.popup_yes_no.assert_not_called()
     controller.move_to_location.assert_not_called()
     model.reload_refuel_model.assert_not_called()
+    controller.enable_print_profile.assert_called_once_with(
+        deferred_gripper_refresh=False,
+    )
+    controller.disable_print_profile.assert_called_once_with()
     assert box._pressure_render_suspended is False
+
+
+def test_nested_refuel_window_shares_calibration_profile_lease(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            regulating_refuel_pressure=True,
+            current_location="camera",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    class _RefuelDialog:
+        def __init__(self, *_args):
+            self.finished = _SignalStub()
+            events.append("refuel_dialog_init")
+
+        def exec(self):
+            events.append("refuel_dialog_exec")
+            return 0
+
+    class _DropletDialog:
+        def __init__(self, *_args, **_kwargs):
+            self.finished = _SignalStub()
+            events.append("droplet_dialog_init")
+
+        def exec(self):
+            events.append("droplet_dialog_exec")
+            box._launch_refuel_camera_dialog()
+            assert controller.disable_print_profile.call_count == 0
+            return 0
+
+    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
+    monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _DropletDialog)
+    monkeypatch.setattr(View.CalibrationClasses, "RefuelCameraWindow", _RefuelDialog)
+
+    box.calibrate_pressure()
+
+    controller.enable_print_profile.assert_called_once_with(
+        deferred_gripper_refresh=False,
+    )
+    controller.disable_print_profile.assert_called_once_with()
+    assert events == [
+        "disconnect_droplet_camera_signals",
+        "reload_droplet_model",
+        "connect_droplet_camera_signals",
+        "enable_print_profile",
+        "droplet_dialog_init",
+        "droplet_dialog_exec",
+        "refuel_dialog_init",
+        "refuel_dialog_exec",
+        "disable_print_profile",
+    ]
+
+
+def test_calibration_profile_enable_rejection_prevents_dialog_construction(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(
+        _FakeMachineModel(regulating_print_pressure=True, current_location="camera"),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    controller.enable_print_profile = Mock(return_value=False)
+    box = PressurePlotBox(main_window, model, controller)
+    _patch_droplet_launch(
+        monkeypatch,
+        events,
+        main_window=main_window,
+        model=model,
+        controller=controller,
+    )
+
+    box.calibrate_pressure()
+
+    controller.disable_print_profile.assert_not_called()
+    assert "droplet_dialog_init" not in events
+    assert popups == [
+        (
+            "Calibration Profile Failed",
+            "Could not queue the calibration pressure profile. The calibration window was not opened.",
+        )
+    ]
+
+
+def test_calibration_profile_constructor_failure_releases_lease(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(_FakeMachineModel(), events, printer_head=object())
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    class _FailingDialog:
+        def __init__(self, *_args, **_kwargs):
+            raise RuntimeError("injected constructor failure")
+
+    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
+    monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _FailingDialog)
+
+    with pytest.raises(RuntimeError, match="injected constructor failure"):
+        box._launch_droplet_imager_dialog()
+
+    controller.enable_print_profile.assert_called_once_with(
+        deferred_gripper_refresh=False,
+    )
+    controller.disable_print_profile.assert_called_once_with()
+    assert box._calibration_profile_leases == {}
+
+
+def test_calibration_profile_disable_failure_uses_queue_clear_fallback(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(_FakeMachineModel(), events, printer_head=object())
+    controller = _make_controller(events)
+    controller.disable_print_profile = Mock(return_value=False)
+    box = PressurePlotBox(main_window, model, controller)
+    _patch_droplet_launch(
+        monkeypatch,
+        events,
+        main_window=main_window,
+        model=model,
+        controller=controller,
+    )
+
+    box._launch_droplet_imager_dialog()
+
+    controller.clear_command_queue.assert_called_once_with()
+    assert popups == [
+        (
+            "Calibration Profile Cleanup Failed",
+            "Could not queue the calibration pressure-profile disable command. Verify the machine is idle before continuing.",
+        )
+    ]
+
+
+def test_nozzle_dataset_capture_uses_calibration_profile_lease(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(_FakeMachineModel(), events, printer_head=object())
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+
+    class _DatasetDialog:
+        def __init__(self, *_args):
+            events.append("dataset_dialog_init")
+
+        def exec(self):
+            events.append("dataset_dialog_exec")
+            return 0
+
+    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
+    monkeypatch.setattr(
+        View.CalibrationClasses,
+        "NozzlePositionDatasetCaptureWindow",
+        _DatasetDialog,
+    )
+
+    box.nozzle_position_dataset_capture()
+
+    controller.enable_print_profile.assert_called_once_with(
+        deferred_gripper_refresh=False,
+    )
+    controller.disable_print_profile.assert_called_once_with()
+    assert events == [
+        "disconnect_droplet_camera_signals",
+        "reload_droplet_model",
+        "connect_droplet_camera_signals",
+        "enable_print_profile",
+        "dataset_dialog_init",
+        "dataset_dialog_exec",
+        "disable_print_profile",
+    ]
 
 
 def test_current_profile_calibrate_pressure_rejects_duplicate_while_droplet_dialog_open(monkeypatch, qapp):
@@ -923,6 +1115,7 @@ def test_current_profile_calibrate_pressure_rejects_duplicate_while_droplet_dial
         "enable_print_profile",
         "droplet_dialog_init",
         "droplet_dialog_exec",
+        "disable_print_profile",
     ]
     assert popups == [
         (
@@ -1060,6 +1253,7 @@ def test_current_profile_calibrate_pressure_rejects_duplicate_while_camera_move_
         "enable_print_profile",
         "droplet_dialog_init",
         "droplet_dialog_exec",
+        "disable_print_profile",
     ]
     assert box.calibrate_pressure_button.isEnabled()
 
@@ -1131,12 +1325,14 @@ def test_current_profile_calibrate_pressure_allows_relaunch_after_droplet_dialog
         "enable_print_profile",
         "droplet_dialog_init",
         "droplet_dialog_exec",
+        "disable_print_profile",
         "disconnect_droplet_camera_signals",
         "reload_droplet_model",
         "connect_droplet_camera_signals",
         "enable_print_profile",
         "droplet_dialog_init",
         "droplet_dialog_exec",
+        "disable_print_profile",
     ]
     assert popups == []
     assert box.calibrate_pressure_button.isEnabled()
@@ -1166,6 +1362,7 @@ def test_current_profile_refuel_camera_opens_refuel_dialog_at_camera(monkeypatch
         "enable_print_profile",
         "refuel_dialog_init",
         "refuel_dialog_exec",
+        "disable_print_profile",
     ]
     model.reload_refuel_model.assert_not_called()
     main_window.popup_yes_no.assert_not_called()
@@ -1222,6 +1419,7 @@ def test_current_profile_refuel_camera_rejects_duplicate_while_dialog_open(monke
         "enable_print_profile",
         "refuel_dialog_init",
         "refuel_dialog_exec",
+        "disable_print_profile",
     ]
     assert popups == [
         (
@@ -1275,9 +1473,11 @@ def test_current_profile_refuel_camera_allows_relaunch_after_dialog_cleanup(monk
         "enable_print_profile",
         "refuel_dialog_init",
         "refuel_dialog_exec",
+        "disable_print_profile",
         "enable_print_profile",
         "refuel_dialog_init",
         "refuel_dialog_exec",
+        "disable_print_profile",
     ]
     assert popups == []
     assert box.refuel_camera_button.isEnabled()
@@ -1992,6 +2192,7 @@ def test_current_profile_calibrate_pressure_moves_then_launches_droplet_imager(m
         "enable_print_profile",
         "droplet_dialog_init",
         "droplet_dialog_exec",
+        "disable_print_profile",
     ]
     assert popups == []
 
@@ -2035,6 +2236,7 @@ def test_current_profile_refuel_camera_moves_then_launches_refuel_dialog(monkeyp
         "enable_print_profile",
         "refuel_dialog_init",
         "refuel_dialog_exec",
+        "disable_print_profile",
     ]
     model.reload_refuel_model.assert_not_called()
     controller.disconnect_droplet_camera_signals.assert_not_called()
@@ -2085,6 +2287,7 @@ def test_current_profile_refuel_camera_rejects_duplicate_while_camera_move_pendi
         "enable_print_profile",
         "refuel_dialog_init",
         "refuel_dialog_exec",
+        "disable_print_profile",
     ]
     assert box.refuel_camera_button.isEnabled()
 

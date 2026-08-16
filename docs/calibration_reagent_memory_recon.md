@@ -6,7 +6,7 @@ This report is based on repository inspection only. I did not run the UI or hard
 
 ## Concise Architecture Summary
 
-- The active non-legacy droplet-volume workflow starts from `FreeRTOS-interface/View.py`, in `PressurePlotBox.droplet_imager()`, which reloads the droplet calibration stack, reconnects controller/camera signals, enables the print pressure profile, and opens `CalibrationClasses.DropletImagingDialog`.
+- The active non-legacy droplet-volume workflow starts from `FreeRTOS-interface/View.py`, in `PressurePlotBox.droplet_imager()`, which reloads the droplet calibration stack, reconnects controller/camera signals, acquires the shared physical-calibration print-profile lease with `deferred_gripper_refresh=False`, and opens `CalibrationClasses.DropletImagingDialog`. Nested physical dialogs share this lease; the last window to close disables the profile.
 - Inside `FreeRTOS-interface/CalibrationClasses/View.py`, `DropletImagingDialog` is the main orchestration UI. It exposes direct start buttons for individual calibration processes and an automated `Calibrate All` queue.
 - The orchestration core is `FreeRTOS-interface/CalibrationClasses/Model.py`, in `CalibrationManager`. It starts processes, brokers movement/capture/settings requests through controller signals, persists per-run summaries into `calibration.json`, and publishes summary rows back to the UI.
 - Image capture is split across two layers:
@@ -40,8 +40,9 @@ What it does:
 2. reloads `CalibrationClasses`
 3. `model.reload_droplet_model()`
 4. `controller.connect_droplet_camera_signals()`
-5. `controller.enable_print_profile()`
+5. acquires the shared calibration-profile lease, which sends `controller.enable_print_profile(deferred_gripper_refresh=False)` for the first physical window
 6. opens `CalibrationClasses.DropletImagingDialog`
+7. releases the lease in `finally`; the last release sends `controller.disable_print_profile()`
 
 Within `DropletImagingDialog`, the volume-relevant start buttons are:
 
@@ -240,6 +241,8 @@ Important detail:
 
 - Actual image acquisition in the modern path is local async camera capture in `DropletCamera.capture_with_retry_async()`.
 - The controller then receives the frame in `_on_image_captured()` and forwards it into `DropletCameraModel.update_image()`.
+- Droplet and stream **Calibrate All** each queue one explicit `CLOSE_GRIPPER` before their calibration queue. They do not rewrite or restore gripper refresh parameters; the firmware-enforced post-pulse cooldown protects the first dispense.
+- Standalone stream gravimetric capture starts its calibration queue directly and performs no gripper pulse. Its `gripper_refresh_suspended` log field records that the enclosing `p1=0` calibration profile disabled periodic refresh.
 
 ### F. Image capture and droplet analysis
 

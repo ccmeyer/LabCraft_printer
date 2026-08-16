@@ -2912,8 +2912,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         "awaiting_ending_balance_ready",
         "awaiting_ending_balance_mass",
         "awaiting_ending_balance_confirmation",
-        "pending_gripper_restore",
-        "restoring_gripper_refresh",
     }
 
     def __init__(
@@ -3063,16 +3061,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._imager_close_retry_count = 0
         self._imager_force_close_requested = False
         self._imager_force_close_prompt_active = False
-        self._stream_capture_gripper_preamble_attempted = False
-        self._stream_capture_gripper_restore_attempted = False
         self._stream_capture_loading_move_attempted = False
         self._stream_capture_camera_return_attempted = False
         self._stream_capture_starting_loading_move_attempted = False
         self._stream_capture_starting_camera_return_attempted = False
         self._stream_calibration_sequence_gripper_preamble_attempted = False
-        self._stream_calibration_sequence_gripper_restore_attempted = False
         self._droplet_calibration_sequence_gripper_preamble_attempted = False
-        self._droplet_calibration_sequence_gripper_restore_attempted = False
         self._printer_head_recovery_dialog = None
         self._printer_head_cleaning_dialog = None
         self._optics_session_active = False
@@ -7877,10 +7871,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "error_message": "",
             "session_id": None,
             "session_outcome": None,
-            "gripper_refresh_period_snapshot_ms": None,
-            "gripper_pulse_duration_snapshot_ms": None,
-            "gripper_was_open": None,
-            "gripper_refresh_suspended": False,
         }
 
     def _get_droplet_calibration_sequence_state(self):
@@ -7899,10 +7889,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "error_message": "",
             "session_id": None,
             "session_outcome": None,
-            "gripper_refresh_period_snapshot_ms": None,
-            "gripper_pulse_duration_snapshot_ms": None,
-            "gripper_was_open": None,
-            "gripper_refresh_suspended": False,
         }
 
     @staticmethod
@@ -10530,20 +10516,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return False
         return True
 
-    def _begin_stream_calibration_sequence_gripper_restore(self):
-        result = self.controller.begin_stream_calibration_sequence_gripper_restore()
-        if isinstance(result, tuple) and result and (result[0] is False):
-            return False
-        return True
-
     def _begin_droplet_calibration_sequence_gripper_preamble(self):
         result = self.controller.begin_droplet_calibration_sequence_gripper_preamble()
-        if isinstance(result, tuple) and result and (result[0] is False):
-            return False
-        return True
-
-    def _begin_droplet_calibration_sequence_gripper_restore(self):
-        result = self.controller.begin_droplet_calibration_sequence_gripper_restore()
         if isinstance(result, tuple) and result and (result[0] is False):
             return False
         return True
@@ -10660,18 +10634,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return False
         return True
 
-    def _begin_stream_capture_gripper_preamble(self):
-        result = self.controller.begin_stream_gravimetric_capture_gripper_preamble()
-        if isinstance(result, tuple) and result and (result[0] is False):
-            return False
-        return True
-
-    def _begin_stream_capture_gripper_restore(self):
-        result = self.controller.begin_stream_gravimetric_capture_gripper_restore()
-        if isinstance(result, tuple) and result and (result[0] is False):
-            return False
-        return True
-
     def _ensure_stream_capture_followup_state(self, *_args):
         if getattr(self, "_stream_capture_dialog_closing", False):
             return
@@ -10694,24 +10656,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._close_stream_capture_mass_dialog()
             return
 
-        if status == "pending_gripper_refresh":
-            if not self._stream_capture_gripper_preamble_attempted:
-                self._stream_capture_gripper_preamble_attempted = True
-                self._begin_stream_capture_gripper_preamble()
-            self._close_stream_capture_mass_dialog()
-            return
-
         if status == "pending_loading_move":
             if not self._stream_capture_loading_move_attempted:
                 self._stream_capture_loading_move_attempted = True
                 self._begin_stream_capture_loading_move()
-            self._close_stream_capture_mass_dialog()
-            return
-
-        if status == "pending_gripper_restore":
-            if not self._stream_capture_gripper_restore_attempted:
-                self._stream_capture_gripper_restore_attempted = True
-                self._begin_stream_capture_gripper_restore()
             self._close_stream_capture_mass_dialog()
             return
 
@@ -10732,12 +10680,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         else:
             self._close_stream_capture_mass_dialog()
 
-        if status not in {"pending_gripper_refresh", "refreshing_gripper", "suspending_gripper_refresh"}:
-            self._stream_capture_gripper_preamble_attempted = False
         if status not in {"pending_loading_move", "moving_to_loading"}:
             self._stream_capture_loading_move_attempted = False
-        if status not in {"pending_gripper_restore", "restoring_gripper_refresh"}:
-            self._stream_capture_gripper_restore_attempted = False
         if status not in {"pending_camera_return", "returning_to_camera"}:
             self._stream_capture_camera_return_attempted = False
         if status not in {"pending_starting_loading_move", "moving_to_starting_loading"}:
@@ -10755,16 +10699,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 self._begin_stream_calibration_sequence_gripper_preamble()
             return
 
-        if status == "pending_gripper_restore":
-            if not self._stream_calibration_sequence_gripper_restore_attempted:
-                self._stream_calibration_sequence_gripper_restore_attempted = True
-                self._begin_stream_calibration_sequence_gripper_restore()
-            return
-
-        if status not in {"pending_gripper_refresh", "refreshing_gripper", "suspending_gripper_refresh"}:
+        if status not in {"pending_gripper_refresh", "refreshing_gripper"}:
             self._stream_calibration_sequence_gripper_preamble_attempted = False
-        if status not in {"pending_gripper_restore", "restoring_gripper_refresh"}:
-            self._stream_calibration_sequence_gripper_restore_attempted = False
 
     def _ensure_droplet_calibration_sequence_followup_state(self, *_args):
         state = self._get_droplet_calibration_sequence_state()
@@ -10776,16 +10712,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 self._begin_droplet_calibration_sequence_gripper_preamble()
             return
 
-        if status == "pending_gripper_restore":
-            if not self._droplet_calibration_sequence_gripper_restore_attempted:
-                self._droplet_calibration_sequence_gripper_restore_attempted = True
-                self._begin_droplet_calibration_sequence_gripper_restore()
-            return
-
-        if status not in {"pending_gripper_refresh", "refreshing_gripper", "suspending_gripper_refresh"}:
+        if status not in {"pending_gripper_refresh", "refreshing_gripper"}:
             self._droplet_calibration_sequence_gripper_preamble_attempted = False
-        if status not in {"pending_gripper_restore", "restoring_gripper_refresh"}:
-            self._droplet_calibration_sequence_gripper_restore_attempted = False
 
     def _complete_stream_gravimetric_capture_from_popup(self, ending_mass_mg: float):
         state = self._get_stream_capture_state()
@@ -10931,7 +10859,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             warning_text = str(analysis_warnings or "")
 
         self.stream_capture_status_label.setText(status_message)
-        if error_message and status in {"error", "stopped", "pending_loading_move", "pending_camera_return", "pending_gripper_restore"}:
+        if error_message and status in {"error", "stopped", "pending_loading_move", "pending_camera_return"}:
             self.stream_capture_status_label.setStyleSheet("color: darkred; font-weight: 600;")
         elif status in {
             "awaiting_starting_baseline_choice",
@@ -10953,13 +10881,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "moving_to_starting_loading",
             "pending_starting_camera_return",
             "returning_to_starting_camera",
-            "pending_gripper_refresh",
-            "refreshing_gripper",
-            "suspending_gripper_refresh",
             "pending_loading_move",
             "moving_to_loading",
-            "pending_gripper_restore",
-            "restoring_gripper_refresh",
         }:
             self.stream_capture_status_label.setStyleSheet("color: darkblue; font-weight: 600;")
         else:
@@ -11034,9 +10957,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     "awaiting_starting_camera_return_ready",
                     "pending_starting_camera_return",
                     "returning_to_starting_camera",
-                    "pending_gripper_refresh",
-                    "refreshing_gripper",
-                    "suspending_gripper_refresh",
                     "running",
                     "pending_loading_move",
                     "moving_to_loading",
@@ -11044,8 +10964,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     "awaiting_ending_balance_ready",
                     "awaiting_ending_balance_mass",
                     "awaiting_ending_balance_confirmation",
-                    "pending_gripper_restore",
-                    "restoring_gripper_refresh",
                     "pending_camera_return",
                     "returning_to_camera",
                 }
@@ -11060,9 +10978,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "awaiting_starting_camera_return_ready",
                 "pending_starting_camera_return",
                 "returning_to_starting_camera",
-                "pending_gripper_refresh",
-                "refreshing_gripper",
-                "suspending_gripper_refresh",
                 "running",
                 "pending_loading_move",
                 "moving_to_loading",
@@ -11070,8 +10985,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "awaiting_ending_balance_ready",
                 "awaiting_ending_balance_mass",
                 "awaiting_ending_balance_confirmation",
-                "pending_gripper_restore",
-                "restoring_gripper_refresh",
                 "pending_camera_return",
                 "returning_to_camera",
             }
@@ -11094,9 +11007,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "awaiting_starting_camera_return_ready",
             "pending_starting_camera_return",
             "returning_to_starting_camera",
-            "pending_gripper_refresh",
-            "refreshing_gripper",
-            "suspending_gripper_refresh",
             "running",
             "pending_loading_move",
             "moving_to_loading",
@@ -11104,8 +11014,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "awaiting_ending_balance_ready",
             "awaiting_ending_balance_mass",
             "awaiting_ending_balance_confirmation",
-            "pending_gripper_restore",
-            "restoring_gripper_refresh",
             "pending_camera_return",
             "returning_to_camera",
             "error",
@@ -14587,7 +14495,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             pass
         self.stop_droplet_camera()
         self._set_stream_capture_read_camera_enabled(False)
-        self.controller.disable_print_profile()
         self._remove_droplet_capture_raw_attempt_filter()
         self._stop_live_pressure_rendering()
         event.accept()
@@ -15301,10 +15208,6 @@ class NozzlePositionDatasetCaptureWindow(QtWidgets.QDialog):
             self.controller.stop_droplet_camera()
         except Exception as exc:
             print(f"[NozzleDataset] stop_droplet_camera failed: {exc}")
-        try:
-            self.controller.disable_print_profile()
-        except Exception as exc:
-            print(f"[NozzleDataset] disable_print_profile failed: {exc}")
 
     def done(self, r):
         self._shutdown_camera_resources()
@@ -16049,10 +15952,6 @@ class RefuelCameraWindow(QtWidgets.QDialog):
             print(f"[RefuelCamera] end_dataset_session failed: {exc}")
         self._set_capture_idle()
         self.stop_camera()
-        try:
-            self.controller.disable_print_profile()
-        except Exception as exc:
-            print(f"[RefuelCamera] disable_print_profile failed: {exc}")
         event.accept()
         super().closeEvent(event)
 

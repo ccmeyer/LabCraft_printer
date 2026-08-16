@@ -160,6 +160,7 @@ class _StableMassService:
 
 
 def _controller_with_manager(manager, *, service=None, state="streaming"):
+    manager.start_calibration_queue = lambda: None
     controller = Controller.__new__(Controller)
     controller.model = SimpleNamespace(calibration_manager=manager)
     controller.experimental_features = ExperimentalFeatures(True)
@@ -246,7 +247,7 @@ def _complete_balance_ending_and_return(manager, controller, service, mass="12.5
         _stable_result(service.requests[-1], mass)
     )
     assert controller.confirm_stream_gravimetric_ending_mass() == (True, "")
-    assert manager.mark_stream_gravimetric_capture_gripper_restored() == (True, "")
+    assert manager.begin_stream_gravimetric_capture_camera_return() == (True, "")
     assert manager.mark_stream_gravimetric_capture_camera_reached() == (True, "")
 
 
@@ -552,7 +553,7 @@ def test_controller_stages_candidate_without_starting_session_until_confirmation
     assert controller.begin_stream_gravimetric_starting_camera_return() == (True, "")
     assert controller.on_stream_gravimetric_starting_camera_reached() == (True, "")
     started = manager.get_stream_gravimetric_capture_state()
-    assert started["status"] == "pending_gripper_refresh"
+    assert started["status"] == "running"
     assert started["starting_mass_mg"] == 12.34
     assert started["mass_source"] == "veritas_balance"
     assert started["starting_mass_origin"] == "measured"
@@ -761,7 +762,7 @@ def test_loading_reached_requires_explicit_ending_read_and_confirmed_save(tmp_pa
         notes="confirmed ending",
     ) == (True, "")
     saved = manager.get_stream_gravimetric_capture_state()
-    assert saved["status"] == "pending_gripper_restore"
+    assert saved["status"] == "pending_camera_return"
     assert saved["ending_mass_mg"] == 12.5
     assert saved["ending_mass_source"] == "veritas_balance"
 
@@ -793,7 +794,7 @@ def test_confirmed_ending_mass_is_offered_and_explicitly_reused(tmp_path):
 
     assert controller.use_previous_stream_gravimetric_starting_mass() == (True, "")
     started = manager.get_stream_gravimetric_capture_state()
-    assert started["status"] == "pending_gripper_refresh"
+    assert started["status"] == "running"
     assert started["starting_mass_mg"] == 12.5
     assert started["starting_mass_origin"] == "carried_forward"
     assert started["carried_from_session_id"] == source_session_id
@@ -1394,7 +1395,7 @@ def test_manual_fallback_state_preserves_inputs_and_confirmed_state_reflects_mas
     dialog._stream_capture_last_status = "awaiting_starting_balance_confirmation"
     dialog._sync_stream_capture_panel_state(
         {
-            "status": "pending_gripper_refresh",
+            "status": "running",
             "status_message": "Starting.",
             "starting_mass_mg": 12.34,
             "rep": 6,

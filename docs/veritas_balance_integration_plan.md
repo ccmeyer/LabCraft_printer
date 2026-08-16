@@ -113,9 +113,7 @@ remains a later slice gated by confirmation-mode hardware evidence.
 
 `-> CalibrationManager.start_stream_gravimetric_capture(...)`
 
-`-> gripper refresh/suspend preamble`
-
-`-> existing calibration queue`
+`-> direct existing calibration queue (no gripper pulse or parameter rewrite)`
 
 `-> Controller/Machine_FreeRTOS existing print, motion, pressure, and camera commands`
 
@@ -136,6 +134,8 @@ remains a later slice gated by confirmation-mode hardware evidence.
 `-> StreamCaptureMassEntryDialog`
 
 `-> Controller.finalize_stream_gravimetric_capture(ending_mass_mg, ...)`
+
+`-> pending camera return (no gripper-restore phase)`
 
 `-> CalibrationManager._build_stream_capture_metadata_row()`
 

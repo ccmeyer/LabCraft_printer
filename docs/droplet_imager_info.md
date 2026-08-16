@@ -35,7 +35,7 @@ The droplet imager is split across three layers:
 ### UI and controller
 
 - `FreeRTOS-interface/View.py`
-  - `View.droplet_imager()` reloads the calibration UI/model, reconnects signals, enables the print profile, and opens `CalibrationClasses.View.DropletImagingDialog`.
+  - `View.droplet_imager()` reloads the calibration UI/model, reconnects signals, acquires the shared physical-calibration print-profile lease with `deferred_gripper_refresh=False`, and opens `CalibrationClasses.View.DropletImagingDialog`. Nested refuel/dataset windows share the lease, and the last physical window releases it.
 
 - `FreeRTOS-interface/CalibrationClasses/View.py`
   - `DropletImagingDialog.__init__()` starts the local Pi camera via `controller.start_droplet_camera()` and tells the MCU to start flash-trigger monitoring via `controller.start_read_camera()`.
@@ -47,6 +47,7 @@ The droplet imager is split across three layers:
 
 - `FreeRTOS-interface/Controller.py`
   - `connect_droplet_camera_signals()` wires calibration-manager capture/move/settings requests to controller handlers and connects `machine.droplet_camera.image_captured_signal` to `_on_image_captured()`.
+  - Droplet and stream **Calibrate All** use a close-only gripper preamble. Standalone stream gravimetric capture has no gripper preamble or parameter-restoration phase.
   - `handle_capture_request()` stores a pending callback and starts an async capture through `machine.capture_droplet_image()`.
   - `_on_image_captured()` pulls the chosen frame from `machine.droplet_camera`, forwards it into `model.droplet_camera_model.update_image(...)`, and resolves the pending callback for the active calibration process.
   - `_on_capture_failed()` resolves the pending callback with `None` and emits `calibration_manager.captureFailed`.

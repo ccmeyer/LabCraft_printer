@@ -73,7 +73,7 @@ def test_refuel_camera_window_is_dataset_first_ui(qapp):
     assert not hasattr(dialog, "level_chart_view")
 
 
-def test_refuel_camera_window_close_event_stops_camera_and_disables_print_profile(qapp):
+def test_refuel_camera_window_close_event_stops_camera_without_owning_print_profile(qapp):
     dialog, _model, controller = _make_dialog(
         qapp,
         capture_return=np.zeros((8, 8, 3), dtype=np.uint8),
@@ -86,7 +86,7 @@ def test_refuel_camera_window_close_event_stops_camera_and_disables_print_profil
 
     assert not dialog.timer.isActive()
     controller.stop_refuel_camera.assert_called_once_with()
-    controller.disable_print_profile.assert_called_once_with()
+    controller.disable_print_profile.assert_not_called()
     assert event.isAccepted()
 
 
@@ -110,7 +110,7 @@ def test_refuel_camera_window_close_keeps_monitor_owned_camera_running(qapp):
     assert model.refuel_camera_model.is_refuel_monitor_camera_active() is True
     controller.start_refuel_camera.assert_called_once_with()
     controller.stop_refuel_camera.assert_not_called()
-    controller.disable_print_profile.assert_called_once_with()
+    controller.disable_print_profile.assert_not_called()
     assert event.isAccepted()
 
 

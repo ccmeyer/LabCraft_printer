@@ -1742,7 +1742,7 @@ def test_refuel_monitor_close_stops_camera_before_dialog_cleanup(monkeypatch, qa
     assert refuel_model.is_refuel_monitor_camera_active() is False
     controller.stop_refuel_camera.assert_called_once_with()
     controller.stop_droplet_camera.assert_called_once_with()
-    controller.disable_print_profile.assert_called_once_with()
+    controller.disable_print_profile.assert_not_called()
 
 
 def test_refuel_monitor_close_does_not_auto_export_without_debug_diagnostics(monkeypatch, qapp, tmp_path):

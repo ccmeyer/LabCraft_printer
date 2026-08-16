@@ -1657,7 +1657,6 @@ class CalibrationManager(QObject):
         "pressure_trajectory",
         "pressure_sweep_characterization",
     )
-    STREAM_CAPTURE_PARKED_GRIPPER_REFRESH_MS = 1_000_000
     STREAM_METADATA_HEADERS = [
         "Dataset name",
         "Print PW",
@@ -4577,13 +4576,7 @@ class CalibrationManager(QObject):
         self._cancel_pw_apply_wait()
         self.clear_pending_process_verdict(reason="process_stopped")
         droplet_sequence_open = self.has_open_droplet_calibration_sequence()
-        droplet_sequence_status = str(
-            (getattr(self, "_droplet_calibration_sequence_state", None) or {}).get("status") or "idle"
-        )
         stream_sequence_open = self.has_open_stream_calibration_sequence()
-        stream_sequence_status = str(
-            (getattr(self, "_stream_calibration_sequence_state", None) or {}).get("status") or "idle"
-        )
 
         if self.activeCalibration is not None:
             # Prefer graceful finalize if the process supports it
@@ -4630,15 +4623,11 @@ class CalibrationManager(QObject):
                 error_message="Calibration terminated by user",
             )
         if droplet_sequence_open:
-            if droplet_sequence_status in {"pending_gripper_restore", "restoring_gripper_refresh"}:
-                return
             self._mark_droplet_calibration_sequence_terminal_state(
                 status="stopped",
                 error_message="Calibration terminated by user",
             )
         if stream_sequence_open:
-            if stream_sequence_status in {"pending_gripper_restore", "restoring_gripper_refresh"}:
-                return
             self._mark_stream_calibration_sequence_terminal_state(
                 status="stopped",
                 error_message="Calibration terminated by user",
@@ -5559,13 +5548,6 @@ class CalibrationManager(QObject):
             self.calibrationError.emit(message)
             return False
 
-        gripper_snapshot, gripper_error = self._get_gripper_refresh_snapshot()
-        if not gripper_snapshot:
-            message = str(gripper_error or "Unable to snapshot current gripper refresh settings.")
-            self.calibrationStageChanged.emit(message, "red")
-            self.calibrationError.emit(message)
-            return False
-
         pressure_scan_mode = self._normalize_droplet_sequence_pressure_scan_mode(pressure_scan_mode)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._droplet_calibration_sequence_state = self._build_default_droplet_calibration_sequence_state()
@@ -5576,10 +5558,6 @@ class CalibrationManager(QObject):
                 "error_message": "",
                 "session_id": f"droplet_calibration_sequence_{ts}_{uuid.uuid4().hex[:8]}",
                 "session_outcome": None,
-                "gripper_refresh_period_snapshot_ms": int(gripper_snapshot["refresh_period_ms"]),
-                "gripper_pulse_duration_snapshot_ms": int(gripper_snapshot["pulse_duration_ms"]),
-                "gripper_was_open": bool(gripper_snapshot["gripper_open"]),
-                "gripper_refresh_suspended": False,
                 "pressure_scan_mode": str(pressure_scan_mode),
             }
         )
@@ -5608,13 +5586,6 @@ class CalibrationManager(QObject):
             self.calibrationError.emit(message)
             return False
 
-        gripper_snapshot, gripper_error = self._get_gripper_refresh_snapshot()
-        if not gripper_snapshot:
-            message = str(gripper_error or "Unable to snapshot current gripper refresh settings.")
-            self.calibrationStageChanged.emit(message, "red")
-            self.calibrationError.emit(message)
-            return False
-
         missing = self._stream_calibration_sequence_missing_requirements()
         if missing:
             message = "Stream Calibration Sequence prerequisites missing: " + ", ".join(missing)
@@ -5631,10 +5602,6 @@ class CalibrationManager(QObject):
                 "error_message": "",
                 "session_id": f"stream_calibration_sequence_{ts}_{uuid.uuid4().hex[:8]}",
                 "session_outcome": None,
-                "gripper_refresh_period_snapshot_ms": int(gripper_snapshot["refresh_period_ms"]),
-                "gripper_pulse_duration_snapshot_ms": int(gripper_snapshot["pulse_duration_ms"]),
-                "gripper_was_open": bool(gripper_snapshot["gripper_open"]),
-                "gripper_refresh_suspended": False,
             }
         )
         self._emit_stream_calibration_sequence_state_changed()
@@ -5868,10 +5835,6 @@ class CalibrationManager(QObject):
             "sidecar_outcome": None,
             "saved_dataset_name": None,
             "session_outcome": None,
-            "post_restore_action": None,
-            "gripper_refresh_period_snapshot_ms": None,
-            "gripper_pulse_duration_snapshot_ms": None,
-            "gripper_was_open": None,
             "gripper_refresh_suspended": False,
             "mass_source": "manual",
             "ending_mass_source": "manual",
@@ -6020,10 +5983,6 @@ class CalibrationManager(QObject):
             "status_message": str(status_message or "Ready to begin stream calibration sequence."),
             "error_message": "",
             "session_id": None,
-            "gripper_refresh_period_snapshot_ms": None,
-            "gripper_pulse_duration_snapshot_ms": None,
-            "gripper_was_open": None,
-            "gripper_refresh_suspended": False,
             "pressure_scan_mode": "band",
             "session_outcome": None,
         }
@@ -6058,12 +6017,7 @@ class CalibrationManager(QObject):
         return status in {
             "pending_gripper_refresh",
             "refreshing_gripper",
-            "suspending_gripper_refresh",
             "running",
-            "pending_gripper_restore",
-            "restoring_gripper_refresh",
-            "error",
-            "stopped",
         }
 
     def is_stream_calibration_sequence_busy(self) -> bool:
@@ -6071,10 +6025,7 @@ class CalibrationManager(QObject):
         return status in {
             "pending_gripper_refresh",
             "refreshing_gripper",
-            "suspending_gripper_refresh",
             "running",
-            "pending_gripper_restore",
-            "restoring_gripper_refresh",
         }
 
     def _build_default_droplet_calibration_sequence_state(self, *, status_message: str | None = None):
@@ -6083,10 +6034,6 @@ class CalibrationManager(QObject):
             "status_message": str(status_message or "Ready to begin droplet calibration sequence."),
             "error_message": "",
             "session_id": None,
-            "gripper_refresh_period_snapshot_ms": None,
-            "gripper_pulse_duration_snapshot_ms": None,
-            "gripper_was_open": None,
-            "gripper_refresh_suspended": False,
             "session_outcome": None,
         }
 
@@ -6120,12 +6067,7 @@ class CalibrationManager(QObject):
         return status in {
             "pending_gripper_refresh",
             "refreshing_gripper",
-            "suspending_gripper_refresh",
             "running",
-            "pending_gripper_restore",
-            "restoring_gripper_refresh",
-            "error",
-            "stopped",
         }
 
     def is_droplet_calibration_sequence_busy(self) -> bool:
@@ -6133,10 +6075,7 @@ class CalibrationManager(QObject):
         return status in {
             "pending_gripper_refresh",
             "refreshing_gripper",
-            "suspending_gripper_refresh",
             "running",
-            "pending_gripper_restore",
-            "restoring_gripper_refresh",
         }
 
     def get_stream_gravimetric_capture_state(self):
@@ -6176,9 +6115,6 @@ class CalibrationManager(QObject):
             "awaiting_starting_camera_return_ready",
             "pending_starting_camera_return",
             "returning_to_starting_camera",
-            "pending_gripper_refresh",
-            "refreshing_gripper",
-            "suspending_gripper_refresh",
             "running",
             "pending_loading_move",
             "moving_to_loading",
@@ -6186,8 +6122,6 @@ class CalibrationManager(QObject):
             "awaiting_ending_balance_ready",
             "awaiting_ending_balance_mass",
             "awaiting_ending_balance_confirmation",
-            "pending_gripper_restore",
-            "restoring_gripper_refresh",
             "pending_camera_return",
             "returning_to_camera",
             "error",
@@ -6206,9 +6140,6 @@ class CalibrationManager(QObject):
             "awaiting_starting_camera_return_ready",
             "pending_starting_camera_return",
             "returning_to_starting_camera",
-            "pending_gripper_refresh",
-            "refreshing_gripper",
-            "suspending_gripper_refresh",
             "running",
             "pending_loading_move",
             "moving_to_loading",
@@ -6216,8 +6147,6 @@ class CalibrationManager(QObject):
             "awaiting_ending_balance_ready",
             "awaiting_ending_balance_mass",
             "awaiting_ending_balance_confirmation",
-            "pending_gripper_restore",
-            "restoring_gripper_refresh",
             "pending_camera_return",
             "returning_to_camera",
         }
@@ -6228,52 +6157,6 @@ class CalibrationManager(QObject):
             or self.has_open_stream_calibration_sequence()
             or self.has_open_droplet_calibration_sequence()
         )
-
-    def _get_gripper_refresh_snapshot(self):
-        machine_model = getattr(self.model, "machine_model", None)
-        if machine_model is None:
-            return None, "Machine model is unavailable; cannot snapshot gripper settings."
-
-        refresh_period = None
-        pulse_duration = None
-        getter = getattr(machine_model, "get_gripper_settings", None)
-        if callable(getter):
-            try:
-                refresh_period, pulse_duration = getter()
-            except Exception:
-                refresh_period, pulse_duration = None, None
-
-        if refresh_period is None:
-            refresh_period = getattr(machine_model, "gripper_refresh_period", None)
-        if pulse_duration is None:
-            pulse_duration = getattr(machine_model, "gripper_pulse_duration", None)
-
-        gripper_open = getattr(machine_model, "gripper_open", None)
-        if gripper_open is None:
-            state_getter = getattr(machine_model, "get_gripper_open", None)
-            if callable(state_getter):
-                try:
-                    gripper_open = state_getter()
-                except Exception:
-                    gripper_open = None
-
-        refresh_period = self._stream_capture_int_or_none(refresh_period)
-        pulse_duration = self._stream_capture_int_or_none(pulse_duration)
-        if refresh_period is None or int(refresh_period) <= 0:
-            return None, "Current gripper refresh period is unavailable; refresh the machine status before starting."
-        if pulse_duration is None or int(pulse_duration) <= 0:
-            return None, "Current gripper pulse duration is unavailable; refresh the machine status before starting."
-        if gripper_open is None:
-            return None, "Current gripper valve state is unavailable; refresh the machine status before starting."
-
-        return {
-            "refresh_period_ms": int(refresh_period),
-            "pulse_duration_ms": int(pulse_duration),
-            "gripper_open": bool(gripper_open),
-        }, ""
-
-    def _get_stream_capture_gripper_snapshot(self):
-        return self._get_gripper_refresh_snapshot()
 
     def _current_flash_count(self):
         try:
@@ -6641,14 +6524,6 @@ class CalibrationManager(QObject):
         )
         if not bool(self._stream_capture_state.get("sidecar_written")):
             self._write_stream_capture_log(outcome=str(status or "error"), error_message=error_message)
-        if bool(self._stream_capture_state.get("gripper_refresh_suspended")):
-            self._stream_capture_state["post_restore_action"] = "terminal"
-            self._stream_capture_state["status"] = "pending_gripper_restore"
-            self._stream_capture_state["status_message"] = (
-                f"{self._stream_capture_state['status_message']} Restoring gripper auto-refresh settings."
-            ).strip()
-            self._emit_stream_capture_state_changed()
-            return
         self._emit_stream_capture_state_changed()
 
     def _complete_stream_capture_queue_success(self):
@@ -6669,43 +6544,9 @@ class CalibrationManager(QObject):
         self._stream_capture_state["error_message"] = ""
         self._emit_stream_capture_state_changed()
 
-    def begin_stream_gravimetric_capture_gripper_refresh(self):
-        status = str((self._stream_capture_state or {}).get("status") or "idle")
-        if status != "pending_gripper_refresh":
-            return False, "Stream gravimetric capture is not ready for gripper refresh."
-        self._stream_capture_state["status"] = "refreshing_gripper"
-        self._stream_capture_state["status_message"] = (
-            "Refreshing gripper vacuum before stream gravimetric capture."
-        )
-        self._stream_capture_state["error_message"] = ""
-        self._emit_stream_capture_state_changed()
-        return True, ""
-
-    def begin_stream_gravimetric_capture_gripper_suspend(self):
-        status = str((self._stream_capture_state or {}).get("status") or "idle")
-        if status not in {"refreshing_gripper", "pending_gripper_refresh", "suspending_gripper_refresh"}:
-            return False, "Stream gravimetric capture is not ready to pause gripper refresh."
-        self._stream_capture_state["status"] = "suspending_gripper_refresh"
-        self._stream_capture_state["status_message"] = (
-            "Pausing gripper auto-refresh before stream gravimetric capture."
-        )
-        self._stream_capture_state["error_message"] = ""
-        self._emit_stream_capture_state_changed()
-        return True, ""
-
-    def mark_stream_gravimetric_capture_gripper_suspended(self):
-        status = str((self._stream_capture_state or {}).get("status") or "idle")
-        if status not in {"suspending_gripper_refresh", "pending_gripper_refresh", "refreshing_gripper"}:
-            return False, "Stream gravimetric capture is not waiting for gripper suspension."
-
-        self._stream_capture_state["gripper_refresh_suspended"] = True
-        self._stream_capture_state["status"] = "running"
-        self._stream_capture_state["status_message"] = (
-            "Running nozzle, focus, emergence, and stream capture sequence."
-        )
-        self._stream_capture_state["error_message"] = ""
-        self._emit_stream_capture_state_changed()
-
+    def _start_stream_gravimetric_capture_queue(self):
+        if str((self._stream_capture_state or {}).get("status") or "idle") != "running":
+            return False, "Stream gravimetric capture is not ready to start."
         queue = self._build_stream_capture_queue_for_mode(
             (self._stream_capture_state or {}).get("capture_mode")
         )
@@ -6720,16 +6561,8 @@ class CalibrationManager(QObject):
             )
         return True, ""
 
-    def report_stream_gravimetric_capture_gripper_preamble_failure(self, error_message=""):
-        message = str(error_message or "Failed to prepare the gripper for stream gravimetric capture.")
-        if not self.has_open_stream_gravimetric_capture():
-            return False, "No active stream gravimetric capture session."
-        self._mark_stream_capture_terminal_state(status="error", error_message=message)
-        return True, ""
-
-    def _apply_stream_gravimetric_capture_post_restore_action(self):
-        action = str((self._stream_capture_state or {}).get("post_restore_action") or "").strip().lower()
-        self._stream_capture_state["post_restore_action"] = None
+    def _apply_stream_gravimetric_capture_post_action(self, action):
+        action = str(action or "").strip().lower()
 
         if action == "saved_camera_return":
             dataset_name = str((self._stream_capture_state or {}).get("saved_dataset_name") or "").strip()
@@ -6781,111 +6614,22 @@ class CalibrationManager(QObject):
         self._emit_stream_capture_state_changed()
         return True, ""
 
-    def _queue_stream_gravimetric_capture_gripper_restore(self, *, post_restore_action: str):
-        self._stream_capture_state["post_restore_action"] = str(post_restore_action or "")
-        if not bool((self._stream_capture_state or {}).get("gripper_refresh_suspended")):
-            return self._apply_stream_gravimetric_capture_post_restore_action()
-
-        action = str(post_restore_action or "").strip().lower()
-        if action == "saved_camera_return":
-            status_message = "Restoring gripper auto-refresh settings before returning to camera."
-        elif action == "discard_camera_return":
-            status_message = "Discarding this run and restoring gripper auto-refresh settings."
-        elif action == "discard_reset_idle":
-            status_message = "Restoring gripper auto-refresh settings before discarding this run."
-        else:
-            status_message = "Restoring gripper auto-refresh settings."
-
-        self._stream_capture_state["status"] = "pending_gripper_restore"
-        self._stream_capture_state["status_message"] = status_message
-        self._stream_capture_state["error_message"] = ""
-        self._emit_stream_capture_state_changed()
-        return True, ""
-
-    def begin_stream_gravimetric_capture_gripper_restore(self):
-        status = str((self._stream_capture_state or {}).get("status") or "idle")
-        if status != "pending_gripper_restore":
-            return False, "Stream gravimetric capture is not waiting to restore gripper refresh."
-        self._stream_capture_state["status"] = "restoring_gripper_refresh"
-        self._stream_capture_state["status_message"] = "Restoring gripper auto-refresh settings."
-        self._emit_stream_capture_state_changed()
-        return True, ""
-
-    def mark_stream_gravimetric_capture_gripper_restored(self):
-        status = str((self._stream_capture_state or {}).get("status") or "idle")
-        if status not in {"pending_gripper_restore", "restoring_gripper_refresh"}:
-            return False, "Stream gravimetric capture is not waiting for gripper restore."
-        action = str((self._stream_capture_state or {}).get("post_restore_action") or "").strip().lower()
-        self._stream_capture_state["gripper_refresh_suspended"] = False
-        if action != "terminal":
-            self._stream_capture_state["error_message"] = ""
-        return self._apply_stream_gravimetric_capture_post_restore_action()
-
-    def report_stream_gravimetric_capture_gripper_restore_failure(self, error_message=""):
-        message = str(error_message or "Failed to restore gripper auto-refresh settings.")
-        status = str((self._stream_capture_state or {}).get("status") or "idle")
-        if status not in {"pending_gripper_restore", "restoring_gripper_refresh"}:
-            return False, "Stream gravimetric capture is not waiting for gripper restore."
-        self._stream_capture_state["status"] = "pending_gripper_restore"
-        self._stream_capture_state["status_message"] = (
-            f"{message} Resolve the issue and reopen the imager to retry."
-        )
-        self._stream_capture_state["error_message"] = message
-        self._emit_stream_capture_state_changed()
-        return True, ""
-
-    def _queue_droplet_calibration_sequence_gripper_restore(self, *, status_message: str | None = None):
-        if not bool((self._droplet_calibration_sequence_state or {}).get("gripper_refresh_suspended")):
-            if str((self._droplet_calibration_sequence_state or {}).get("session_outcome") or "") == "completed":
-                self._reset_droplet_calibration_sequence_state(
-                    status_message="Droplet calibration sequence completed."
-                )
-                self.calibrationStageChanged.emit(
-                    "Droplet calibration sequence completed.",
-                    "green",
-                )
-            return True, ""
-
-        self._droplet_calibration_sequence_state["status"] = "pending_gripper_restore"
-        self._droplet_calibration_sequence_state["status_message"] = str(
-            status_message or "Restoring gripper auto-refresh settings."
-        )
-        self._droplet_calibration_sequence_state["error_message"] = ""
-        self._emit_droplet_calibration_sequence_state_changed()
-        return True, ""
-
     def _mark_droplet_calibration_sequence_terminal_state(self, *, status: str, error_message: str = ""):
         if not self.has_open_droplet_calibration_sequence():
             return
         message = str(error_message or f"Droplet calibration sequence {status}.")
-        current_status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
-        self._droplet_calibration_sequence_state["session_outcome"] = str(status or "error")
-        self._droplet_calibration_sequence_state["error_message"] = message
-
-        if bool((self._droplet_calibration_sequence_state or {}).get("gripper_refresh_suspended")):
-            self._queue_droplet_calibration_sequence_gripper_restore(
-                status_message=f"{message} Restoring gripper auto-refresh settings.",
-            )
-            return
-
-        if current_status == "pending_gripper_refresh":
-            self._reset_droplet_calibration_sequence_state()
-            return
-
-        self._droplet_calibration_sequence_state["status"] = str(status or "error")
-        self._droplet_calibration_sequence_state["status_message"] = message
-        self._emit_droplet_calibration_sequence_state_changed()
+        self._reset_droplet_calibration_sequence_state(status_message=message)
 
     def _complete_droplet_calibration_sequence_queue_success(self):
         if str((self._droplet_calibration_sequence_state or {}).get("status") or "") != "running":
             return
-        self._droplet_calibration_sequence_state["session_outcome"] = "completed"
-        self._droplet_calibration_sequence_state["status"] = "pending_gripper_restore"
-        self._droplet_calibration_sequence_state["status_message"] = (
-            "Droplet calibration sequence complete. Restoring gripper auto-refresh settings."
+        self._reset_droplet_calibration_sequence_state(
+            status_message="Droplet calibration sequence completed."
         )
-        self._droplet_calibration_sequence_state["error_message"] = ""
-        self._emit_droplet_calibration_sequence_state_changed()
+        self.calibrationStageChanged.emit(
+            "Droplet calibration sequence completed.",
+            "green",
+        )
 
     def begin_droplet_calibration_sequence_gripper_refresh(self):
         status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
@@ -6899,43 +6643,11 @@ class CalibrationManager(QObject):
         self._emit_droplet_calibration_sequence_state_changed()
         return True, ""
 
-    def begin_droplet_calibration_sequence_gripper_suspend(self):
+    def mark_droplet_calibration_sequence_gripper_refreshed(self, expected_session_id):
+        state = self._droplet_calibration_sequence_state or {}
         status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
-        if status not in {
-            "refreshing_gripper",
-            "pending_gripper_refresh",
-            "suspending_gripper_refresh",
-            "error",
-            "stopped",
-        }:
-            return False, "Droplet calibration sequence is not ready to pause gripper refresh."
-        self._droplet_calibration_sequence_state["status"] = "suspending_gripper_refresh"
-        self._droplet_calibration_sequence_state["status_message"] = (
-            "Pausing gripper auto-refresh before droplet calibration sequence."
-        )
-        self._droplet_calibration_sequence_state["error_message"] = ""
-        self._emit_droplet_calibration_sequence_state_changed()
-        return True, ""
-
-    def mark_droplet_calibration_sequence_gripper_suspended(self):
-        status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
-        if status not in {
-            "suspending_gripper_refresh",
-            "pending_gripper_refresh",
-            "refreshing_gripper",
-            "error",
-            "stopped",
-        }:
-            return False, "Droplet calibration sequence is not waiting for gripper suspension."
-
-        self._droplet_calibration_sequence_state["gripper_refresh_suspended"] = True
-        self._droplet_calibration_sequence_state["error_message"] = ""
-
-        session_outcome = str((self._droplet_calibration_sequence_state or {}).get("session_outcome") or "")
-        if session_outcome in {"error", "stopped"}:
-            return self._queue_droplet_calibration_sequence_gripper_restore(
-                status_message="Restoring gripper auto-refresh settings.",
-            )
+        if status != "refreshing_gripper" or str(state.get("session_id") or "") != str(expected_session_id or ""):
+            return False, "Droplet calibration sequence is no longer waiting for this gripper pulse."
 
         self._droplet_calibration_sequence_state["status"] = "running"
         self._droplet_calibration_sequence_state["status_message"] = (
@@ -6966,102 +6678,26 @@ class CalibrationManager(QObject):
             status="error",
             error_message=message,
         )
-        return True, ""
-
-    def begin_droplet_calibration_sequence_gripper_restore(self):
-        status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
-        if status != "pending_gripper_restore":
-            return False, "Droplet calibration sequence is not waiting to restore gripper refresh."
-        self._droplet_calibration_sequence_state["status"] = "restoring_gripper_refresh"
-        self._droplet_calibration_sequence_state["status_message"] = "Restoring gripper auto-refresh settings."
-        self._emit_droplet_calibration_sequence_state_changed()
-        return True, ""
-
-    def mark_droplet_calibration_sequence_gripper_restored(self):
-        status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
-        if status not in {"pending_gripper_restore", "restoring_gripper_refresh"}:
-            return False, "Droplet calibration sequence is not waiting for gripper restore."
-        outcome = str((self._droplet_calibration_sequence_state or {}).get("session_outcome") or "")
-        self._droplet_calibration_sequence_state["gripper_refresh_suspended"] = False
-
-        if outcome == "completed":
-            self._reset_droplet_calibration_sequence_state(
-                status_message="Droplet calibration sequence completed."
-            )
-            self.calibrationStageChanged.emit(
-                "Droplet calibration sequence completed.",
-                "green",
-            )
-            return True, ""
-
-        self._reset_droplet_calibration_sequence_state()
-        return True, ""
-
-    def report_droplet_calibration_sequence_gripper_restore_failure(self, error_message=""):
-        message = str(error_message or "Failed to restore gripper auto-refresh settings.")
-        status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
-        if status not in {"pending_gripper_restore", "restoring_gripper_refresh"}:
-            return False, "Droplet calibration sequence is not waiting for gripper restore."
-        self._droplet_calibration_sequence_state["status"] = "pending_gripper_restore"
-        self._droplet_calibration_sequence_state["status_message"] = (
-            f"{message} Resolve the issue and reopen the imager to retry."
-        )
-        self._droplet_calibration_sequence_state["error_message"] = message
-        self._emit_droplet_calibration_sequence_state_changed()
-        return True, ""
-
-    def _queue_stream_calibration_sequence_gripper_restore(self, *, status_message: str | None = None):
-        if not bool((self._stream_calibration_sequence_state or {}).get("gripper_refresh_suspended")):
-            if str((self._stream_calibration_sequence_state or {}).get("session_outcome") or "") == "completed":
-                self._reset_stream_calibration_sequence_state(
-                    status_message="Stream calibration sequence completed."
-                )
-                self.calibrationStageChanged.emit(
-                    "Stream calibration sequence completed.",
-                    "green",
-                )
-            return True, ""
-
-        self._stream_calibration_sequence_state["status"] = "pending_gripper_restore"
-        self._stream_calibration_sequence_state["status_message"] = str(
-            status_message or "Restoring gripper auto-refresh settings."
-        )
-        self._stream_calibration_sequence_state["error_message"] = ""
-        self._emit_stream_calibration_sequence_state_changed()
+        self.calibrationStageChanged.emit(message, "red")
+        self.calibrationError.emit(message)
         return True, ""
 
     def _mark_stream_calibration_sequence_terminal_state(self, *, status: str, error_message: str = ""):
         if not self.has_open_stream_calibration_sequence():
             return
         message = str(error_message or f"Stream calibration sequence {status}.")
-        current_status = str((self._stream_calibration_sequence_state or {}).get("status") or "idle")
-        self._stream_calibration_sequence_state["session_outcome"] = str(status or "error")
-        self._stream_calibration_sequence_state["error_message"] = message
-
-        if bool((self._stream_calibration_sequence_state or {}).get("gripper_refresh_suspended")):
-            self._queue_stream_calibration_sequence_gripper_restore(
-                status_message=f"{message} Restoring gripper auto-refresh settings.",
-            )
-            return
-
-        if current_status == "pending_gripper_refresh":
-            self._reset_stream_calibration_sequence_state()
-            return
-
-        self._stream_calibration_sequence_state["status"] = str(status or "error")
-        self._stream_calibration_sequence_state["status_message"] = message
-        self._emit_stream_calibration_sequence_state_changed()
+        self._reset_stream_calibration_sequence_state(status_message=message)
 
     def _complete_stream_calibration_sequence_queue_success(self):
         if str((self._stream_calibration_sequence_state or {}).get("status") or "") != "running":
             return
-        self._stream_calibration_sequence_state["session_outcome"] = "completed"
-        self._stream_calibration_sequence_state["status"] = "pending_gripper_restore"
-        self._stream_calibration_sequence_state["status_message"] = (
-            "Stream calibration sequence complete. Restoring gripper auto-refresh settings."
+        self._reset_stream_calibration_sequence_state(
+            status_message="Stream calibration sequence completed."
         )
-        self._stream_calibration_sequence_state["error_message"] = ""
-        self._emit_stream_calibration_sequence_state_changed()
+        self.calibrationStageChanged.emit(
+            "Stream calibration sequence completed.",
+            "green",
+        )
 
     def begin_stream_calibration_sequence_gripper_refresh(self):
         status = str((self._stream_calibration_sequence_state or {}).get("status") or "idle")
@@ -7075,43 +6711,11 @@ class CalibrationManager(QObject):
         self._emit_stream_calibration_sequence_state_changed()
         return True, ""
 
-    def begin_stream_calibration_sequence_gripper_suspend(self):
-        status = str((self._stream_calibration_sequence_state or {}).get("status") or "idle")
-        if status not in {
-            "refreshing_gripper",
-            "pending_gripper_refresh",
-            "suspending_gripper_refresh",
-            "error",
-            "stopped",
-        }:
-            return False, "Stream calibration sequence is not ready to pause gripper refresh."
-        self._stream_calibration_sequence_state["status"] = "suspending_gripper_refresh"
-        self._stream_calibration_sequence_state["status_message"] = (
-            "Pausing gripper auto-refresh before stream calibration sequence."
-        )
-        self._stream_calibration_sequence_state["error_message"] = ""
-        self._emit_stream_calibration_sequence_state_changed()
-        return True, ""
-
-    def mark_stream_calibration_sequence_gripper_suspended(self):
-        status = str((self._stream_calibration_sequence_state or {}).get("status") or "idle")
-        if status not in {
-            "suspending_gripper_refresh",
-            "pending_gripper_refresh",
-            "refreshing_gripper",
-            "error",
-            "stopped",
-        }:
-            return False, "Stream calibration sequence is not waiting for gripper suspension."
-
-        self._stream_calibration_sequence_state["gripper_refresh_suspended"] = True
-        self._stream_calibration_sequence_state["error_message"] = ""
-
-        session_outcome = str((self._stream_calibration_sequence_state or {}).get("session_outcome") or "")
-        if session_outcome in {"error", "stopped"}:
-            return self._queue_stream_calibration_sequence_gripper_restore(
-                status_message="Restoring gripper auto-refresh settings.",
-            )
+    def mark_stream_calibration_sequence_gripper_refreshed(self, expected_session_id):
+        state = self._stream_calibration_sequence_state or {}
+        status = str(state.get("status") or "idle")
+        if status != "refreshing_gripper" or str(state.get("session_id") or "") != str(expected_session_id or ""):
+            return False, "Stream calibration sequence is no longer waiting for this gripper pulse."
 
         self._stream_calibration_sequence_state["status"] = "running"
         self._stream_calibration_sequence_state["status_message"] = (
@@ -7142,48 +6746,8 @@ class CalibrationManager(QObject):
             status="error",
             error_message=message,
         )
-        return True, ""
-
-    def begin_stream_calibration_sequence_gripper_restore(self):
-        status = str((self._stream_calibration_sequence_state or {}).get("status") or "idle")
-        if status != "pending_gripper_restore":
-            return False, "Stream calibration sequence is not waiting to restore gripper refresh."
-        self._stream_calibration_sequence_state["status"] = "restoring_gripper_refresh"
-        self._stream_calibration_sequence_state["status_message"] = "Restoring gripper auto-refresh settings."
-        self._emit_stream_calibration_sequence_state_changed()
-        return True, ""
-
-    def mark_stream_calibration_sequence_gripper_restored(self):
-        status = str((self._stream_calibration_sequence_state or {}).get("status") or "idle")
-        if status not in {"pending_gripper_restore", "restoring_gripper_refresh"}:
-            return False, "Stream calibration sequence is not waiting for gripper restore."
-        outcome = str((self._stream_calibration_sequence_state or {}).get("session_outcome") or "")
-        self._stream_calibration_sequence_state["gripper_refresh_suspended"] = False
-
-        if outcome == "completed":
-            self._reset_stream_calibration_sequence_state(
-                status_message="Stream calibration sequence completed."
-            )
-            self.calibrationStageChanged.emit(
-                "Stream calibration sequence completed.",
-                "green",
-            )
-            return True, ""
-
-        self._reset_stream_calibration_sequence_state()
-        return True, ""
-
-    def report_stream_calibration_sequence_gripper_restore_failure(self, error_message=""):
-        message = str(error_message or "Failed to restore gripper auto-refresh settings.")
-        status = str((self._stream_calibration_sequence_state or {}).get("status") or "idle")
-        if status not in {"pending_gripper_restore", "restoring_gripper_refresh"}:
-            return False, "Stream calibration sequence is not waiting for gripper restore."
-        self._stream_calibration_sequence_state["status"] = "pending_gripper_restore"
-        self._stream_calibration_sequence_state["status_message"] = (
-            f"{message} Resolve the issue and reopen the imager to retry."
-        )
-        self._stream_calibration_sequence_state["error_message"] = message
-        self._emit_stream_calibration_sequence_state_changed()
+        self.calibrationStageChanged.emit(message, "red")
+        self.calibrationError.emit(message)
         return True, ""
 
     def begin_stream_gravimetric_capture_loading_move(self):
@@ -7561,10 +7125,6 @@ class CalibrationManager(QObject):
             if starting_mass is None:
                 return False, "Starting mass is required.", None
 
-        gripper_snapshot, gripper_error = self._get_gripper_refresh_snapshot()
-        if not gripper_snapshot:
-            return False, str(gripper_error or "Unable to snapshot current gripper refresh settings."), None
-
         settings = self.get_current_settings()
         condition_snapshot = self._build_stream_capture_condition_snapshot(settings)
         suggested_rep = self._suggest_stream_capture_rep(condition_snapshot)
@@ -7586,9 +7146,6 @@ class CalibrationManager(QObject):
             "capture_process_name": str(capture_mode_config.get("process_name") or ""),
             "metadata_csv_path": self._resolve_stream_capture_metadata_csv_path(),
             "stream_capture_log_path": self._resolve_stream_capture_log_path(),
-            "gripper_refresh_period_snapshot_ms": int(gripper_snapshot["refresh_period_ms"]),
-            "gripper_pulse_duration_snapshot_ms": int(gripper_snapshot["pulse_duration_ms"]),
-            "gripper_was_open": bool(gripper_snapshot["gripper_open"]),
         }
 
     def _build_stream_gravimetric_capture_start_state(
@@ -7650,11 +7207,7 @@ class CalibrationManager(QObject):
             "sidecar_outcome": None,
             "saved_dataset_name": None,
             "session_outcome": None,
-            "post_restore_action": None,
-            "gripper_refresh_period_snapshot_ms": int(prepared["gripper_refresh_period_snapshot_ms"]),
-            "gripper_pulse_duration_snapshot_ms": int(prepared["gripper_pulse_duration_snapshot_ms"]),
-            "gripper_was_open": bool(prepared["gripper_was_open"]),
-            "gripper_refresh_suspended": False,
+            "gripper_refresh_suspended": True,
             "mass_source": str(mass_source),
             "ending_mass_source": "manual",
             "starting_mass_origin": (
@@ -7718,8 +7271,8 @@ class CalibrationManager(QObject):
         self._stream_capture_state = self._build_stream_gravimetric_capture_start_state(
             prepared,
             session_id=(session_id or f"stream_capture_{ts}_{uuid.uuid4().hex[:8]}"),
-            status="pending_gripper_refresh",
-            status_message="Refreshing gripper vacuum before stream gravimetric capture.",
+            status="running",
+            status_message="Running nozzle, focus, emergence, and stream capture sequence.",
             starting_mass_mg=starting_mass,
             starting_flash=starting_flash,
             mass_source=mass_source,
@@ -7763,7 +7316,7 @@ class CalibrationManager(QObject):
         )
         self._sync_stream_gravimetric_baseline_summary()
         self._emit_stream_capture_state_changed()
-        return True, ""
+        return self._start_stream_gravimetric_capture_queue()
 
     def start_stream_gravimetric_capture(self, starting_mass_mg, rep_override=None, notes="", capture_mode="timecourse"):
         ok, message, prepared = self._prepare_stream_gravimetric_capture_start(
@@ -8030,9 +7583,6 @@ class CalibrationManager(QObject):
             "capture_process_name": str(state.get("capture_process_name") or ""),
             "metadata_csv_path": state.get("metadata_csv_path"),
             "stream_capture_log_path": state.get("stream_capture_log_path"),
-            "gripper_refresh_period_snapshot_ms": int(state.get("gripper_refresh_period_snapshot_ms") or 0),
-            "gripper_pulse_duration_snapshot_ms": int(state.get("gripper_pulse_duration_snapshot_ms") or 0),
-            "gripper_was_open": bool(state.get("gripper_was_open")),
         }
 
     def use_previous_stream_gravimetric_starting_mass(self):
@@ -8398,9 +7948,7 @@ class CalibrationManager(QObject):
         dataset_name = str(row.get("Dataset name") or "")
         self._stream_capture_state["saved_dataset_name"] = dataset_name
         self._stream_capture_state["session_outcome"] = "saved"
-        self._queue_stream_gravimetric_capture_gripper_restore(
-            post_restore_action="saved_camera_return",
-        )
+        self._apply_stream_gravimetric_capture_post_action("saved_camera_return")
         self.calibrationStageChanged.emit(
             f"Saved stream metadata row for {dataset_name}.",
             "green",
@@ -8499,10 +8047,7 @@ class CalibrationManager(QObject):
             "moving_to_starting_loading",
             "pending_starting_camera_return",
             "returning_to_starting_camera",
-            "refreshing_gripper",
-            "suspending_gripper_refresh",
             "moving_to_loading",
-            "restoring_gripper_refresh",
             "returning_to_camera",
         }:
             return False, "Wait for the current stream gravimetric capture action to finish before discarding it."
@@ -8511,8 +8056,6 @@ class CalibrationManager(QObject):
             self._stream_capture_state["balance_fallback_reason"] = str(reason or "")
             self._emit_stream_capture_state_changed()
             return True, ""
-        if status == "pending_gripper_restore":
-            return False, "Wait for gripper auto-refresh settings to be restored before discarding this session."
         if status in {"pending_camera_return"} and str((self._stream_capture_state or {}).get("sidecar_outcome") or "") == "saved":
             return False, "The current stream gravimetric capture row has already been saved."
         if status == "running":
@@ -8522,7 +8065,6 @@ class CalibrationManager(QObject):
             outcome = (
                 "discarded"
                 if status in {
-                    "pending_gripper_refresh",
                     "running",
                     "pending_loading_move",
                     "awaiting_mass",
@@ -8538,7 +8080,6 @@ class CalibrationManager(QObject):
                 error_message=str(reason or ""),
             )
 
-        session_id = str((self._stream_capture_state or {}).get("session_id") or "")
         self._stream_capture_state["session_outcome"] = "discarded"
         try:
             self.clear_pending_process_verdict(reason="stream_capture_discarded")
@@ -8552,27 +8093,9 @@ class CalibrationManager(QObject):
             "awaiting_ending_balance_mass",
             "awaiting_ending_balance_confirmation",
         }:
-            return self._queue_stream_gravimetric_capture_gripper_restore(
-                post_restore_action="discard_camera_return",
-            )
+            return self._apply_stream_gravimetric_capture_post_action("discard_camera_return")
 
-        if bool((self._stream_capture_state or {}).get("gripper_refresh_suspended")):
-            return self._queue_stream_gravimetric_capture_gripper_restore(
-                post_restore_action="discard_reset_idle",
-            )
-
-        self._reset_stream_gravimetric_capture_state(
-            status_message=(
-                f"Discarded stream gravimetric capture {session_id}."
-                if session_id
-                else "Discarded stream gravimetric capture."
-            ),
-        )
-        self.calibrationStageChanged.emit(
-            "Discarded stream gravimetric capture.",
-            "orange",
-        )
-        return True, ""
+        return self._apply_stream_gravimetric_capture_post_action("discard_reset_idle")
 
     # ------------- Getters (alias-aware) -------------
 

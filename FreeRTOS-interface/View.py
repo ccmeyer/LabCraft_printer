@@ -3006,6 +3006,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._manual_refuel_check_dialog = None
         self._manual_refuel_check_launch_pending = False
         self._manual_refuel_check_after_imager_pending = False
+        self._calibration_profile_leases = {}
         self._simulation_calibration_generate_callback = None
         self._simulation_calibration_availability_callback = None
         self._simulation_manual_refuel_outcome_callback = None
@@ -3814,6 +3815,61 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             "The manual refuel check is already opening or open. Close it before starting another check.",
         )
 
+    def _acquire_calibration_profile_lease(self, owner):
+        """Keep the p1=0 print profile active while a physical calibration window exists."""
+        leases = self._calibration_profile_leases
+        if not leases:
+            try:
+                queued = self.controller.enable_print_profile(
+                    deferred_gripper_refresh=False,
+                )
+            except Exception as exc:
+                self.popup_message_signal.emit(
+                    "Calibration Profile Failed",
+                    f"Could not enable the calibration pressure profile: {exc}",
+                )
+                return None
+            if queued is False:
+                self.popup_message_signal.emit(
+                    "Calibration Profile Failed",
+                    "Could not queue the calibration pressure profile. The calibration window was not opened.",
+                )
+                return None
+
+        token = object()
+        leases[token] = str(owner or "physical calibration window")
+        return token
+
+    def _release_calibration_profile_lease(self, token):
+        """Release one lease and tear down the profile after the final window closes."""
+        leases = self._calibration_profile_leases
+        if token is None or token not in leases:
+            return True
+        leases.pop(token, None)
+        if leases:
+            return True
+
+        cleanup_error = ""
+        try:
+            queued = self.controller.disable_print_profile()
+            if queued is False:
+                cleanup_error = "Could not queue the calibration pressure-profile disable command."
+        except Exception as exc:
+            cleanup_error = f"Could not disable the calibration pressure profile: {exc}"
+
+        if not cleanup_error:
+            return True
+
+        try:
+            self.controller.clear_command_queue()
+        except Exception as exc:
+            cleanup_error = f"{cleanup_error} Queue-clear fallback also failed: {exc}"
+        self.popup_message_signal.emit(
+            "Calibration Profile Cleanup Failed",
+            f"{cleanup_error} Verify the machine is idle before continuing.",
+        )
+        return False
+
     def calibrate_pressure(self):
         """Calibrate the pressure for a specific printer head."""
         # if not self.controller.check_if_all_completed():
@@ -3849,13 +3905,16 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         self._set_droplet_imager_launch_pending(True)
         droplet_imaging_dialog = None
+        profile_lease = None
         try:
             self.controller.disconnect_droplet_camera_signals()
             importlib.reload(CalibrationClasses.View)
             importlib.reload(CalibrationClasses)
             self.model.reload_droplet_model()
             self.controller.connect_droplet_camera_signals()
-            self.controller.enable_print_profile()
+            profile_lease = self._acquire_calibration_profile_lease("droplet imager")
+            if profile_lease is None:
+                return
             droplet_imaging_dialog = CalibrationClasses.DropletImagingDialog(
                 self.main_window,
                 self.model,
@@ -3874,6 +3933,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                     pass
             droplet_imaging_dialog.exec()
         finally:
+            self._release_calibration_profile_lease(profile_lease)
             self._clear_droplet_imager_launch_state(droplet_imaging_dialog)
 
     def _launch_simulation_calibration_dialog(self):
@@ -4131,10 +4191,13 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
         self._set_refuel_camera_launch_pending(True)
         refuel_camera_dialog = None
+        profile_lease = None
         try:
             importlib.reload(CalibrationClasses.View)
             importlib.reload(CalibrationClasses)
-            self.controller.enable_print_profile()
+            profile_lease = self._acquire_calibration_profile_lease("refuel camera")
+            if profile_lease is None:
+                return
             refuel_camera_dialog = CalibrationClasses.RefuelCameraWindow(
                 self.main_window,
                 self.model,
@@ -4152,6 +4215,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                     pass
             refuel_camera_dialog.exec()
         finally:
+            self._release_calibration_profile_lease(profile_lease)
             self._clear_refuel_camera_launch_state(refuel_camera_dialog)
 
     def _launch_manual_refuel_check_dialog(self):
@@ -4539,9 +4603,14 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         importlib.reload(CalibrationClasses)
         self.model.reload_droplet_model()
         self.controller.connect_droplet_camera_signals()
-        self.controller.enable_print_profile()
-        dlg = CalibrationClasses.NozzlePositionDatasetCaptureWindow(self.main_window, self.model, self.controller)
-        dlg.exec()
+        profile_lease = self._acquire_calibration_profile_lease("nozzle-position dataset capture")
+        if profile_lease is None:
+            return
+        try:
+            dlg = CalibrationClasses.NozzlePositionDatasetCaptureWindow(self.main_window, self.model, self.controller)
+            dlg.exec()
+        finally:
+            self._release_calibration_profile_lease(profile_lease)
 
     def print_calibration_droplets(self,num_droplets):
         print('Printing calibration droplets:',num_droplets,self.target_pressure)

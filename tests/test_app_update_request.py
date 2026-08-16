@@ -754,7 +754,7 @@ def test_controller_app_update_blockers_cover_busy_states(tmp_path):
         is_pulsewidth_sweep_active=lambda: True,
         get_stream_gravimetric_capture_state=lambda: {"status": "pending_loading_move"},
         get_stream_calibration_sequence_state=lambda: {"status": "running"},
-        get_droplet_calibration_sequence_state=lambda: {"status": "pending_gripper_restore"},
+        get_droplet_calibration_sequence_state=lambda: {"status": "refreshing_gripper"},
     )
 
     blockers = controller.get_app_update_blockers()
@@ -771,7 +771,7 @@ def test_controller_app_update_blockers_cover_busy_states(tmp_path):
     assert "Pulse-width sweep is active." in blockers
     assert "Stream gravimetric capture state is pending_loading_move." in blockers
     assert "Stream calibration sequence state is running." in blockers
-    assert "Droplet calibration sequence state is pending_gripper_restore." in blockers
+    assert "Droplet calibration sequence state is refreshing_gripper." in blockers
 
 
 @pytest.mark.parametrize(
