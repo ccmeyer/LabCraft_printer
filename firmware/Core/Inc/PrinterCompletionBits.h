@@ -21,4 +21,10 @@ constexpr bool printerDispenseResultIsRecoverableNoAck(PrinterDispenseResult res
          result == PrinterDispenseResult::FlashScheduleFailed;
 }
 
+constexpr bool printerDispenseResultCanClaimDeferredRefresh(
+    PrinterDispenseResult result)
+{
+  return result == PrinterDispenseResult::Completed;
+}
+
 #endif // INC_PRINTERCOMPLETIONBITS_H_

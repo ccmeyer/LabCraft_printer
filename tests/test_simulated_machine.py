@@ -264,6 +264,25 @@ def test_supported_commands_update_state_and_callbacks(qapp, test_profile):
     assert home_events == ["home"]
 
 
+def test_print_profile_simulates_deferred_refresh_signaling(qapp, test_profile):
+    machine = _make_machine(qapp, test_profile)
+
+    assert machine.enable_print_profile(deferred_gripper_refresh=True)
+    _wait_until(qapp, machine.check_if_all_completed)
+    assert machine.state.print_profile_enabled is True
+    assert machine.state.deferred_gripper_refresh_enabled is True
+
+    assert machine.enable_print_profile()
+    _wait_until(qapp, machine.check_if_all_completed)
+    assert machine.state.print_profile_enabled is True
+    assert machine.state.deferred_gripper_refresh_enabled is False
+
+    assert machine.disable_print_profile()
+    _wait_until(qapp, machine.check_if_all_completed)
+    assert machine.state.print_profile_enabled is False
+    assert machine.state.deferred_gripper_refresh_enabled is False
+
+
 def test_manual_refuel_commands_use_normal_queue_and_update_pressure(
     qapp,
     test_profile,

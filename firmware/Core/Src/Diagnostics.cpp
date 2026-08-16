@@ -364,6 +364,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 				  };
 
                   auto finishSelfTestNow = [&]() -> DiagnosticsSummary {
+                    // Every diagnostic exit is also a deferred-refresh teardown.
+                    MX_GRIPPER_DisableDeferredRefresh();
                     comm->setStatusPaused(true);
                     uint8_t donePayload[64] = {0};
                     const size_t doneLen = DiagnosticResultEmitter::buildDonePayload(
@@ -1485,7 +1487,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         xEventGroupClearBits(_doneEvents, BIT_GRIPPER_DONE);
                         MX_GRIPPER_Close();
                         const bool gripperClosed = waitBitsWithTimeout(BIT_GRIPPER_DONE, 7000u);
-                        MX_GRIPPER_StopRefresh();
+                        MX_GRIPPER_DisableDeferredRefresh();
                         if (!gripperClosed) {
                           MX_GRIPPER_SetRefreshPeriodMs(originalRefreshMs);
                           closeStressPressurePath();
@@ -1553,7 +1555,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 
                         GripperStressRowSummary row2511{};
                         MX_GRIPPER_SetRefreshPeriodMs(kStressRefreshMs);
-                        MX_GRIPPER_StartRefresh();
+                        const uint32_t row2511RefreshStartCount =
+                            Gripper::instance().getRefreshPulseCount();
+                        const bool row2511ModeEnabled =
+                            Gripper::instance().enableDeferredRefresh();
                         sendProgressStage("gripper_refresh_hold");
                         const uint32_t refreshStartMs = HAL_GetTick();
                         uint16_t refreshSeq = 0u;
@@ -1589,30 +1594,94 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             break;
                           }
                         }
-                        char metrics2511[256];
+                        const uint32_t row2511IdleRefreshDelta =
+                            Gripper::instance().getRefreshPulseCount() -
+                            row2511RefreshStartCount;
+                        const bool row2511PendingBeforeDispense =
+                            Gripper::instance().hasPendingRefresh();
+                        const bool row2511PendingTimerStopped =
+                            !Gripper::instance().isRefreshTimerArmed();
+
+                        // Exercise the real Printer boundary. Completion must
+                        // start exactly one claimed refresh before signalling.
+                        xEventGroupClearBits(_doneEvents, BIT_PRINTING_DONE);
+                        const bool row2511FirstQueued = printer->enqueueWithTimeout(
+                            1u, 20u, PulseMode::BOTH, pdMS_TO_TICKS(250u),
+                            BIT_PRINTING_DONE, false, 0u, pdMS_TO_TICKS(2000u));
+                        const bool row2511FirstDone = row2511FirstQueued &&
+                            waitBitsWithTimeout(BIT_PRINTING_DONE, 10000u);
+                        const bool row2511RefreshStarted = row2511FirstDone &&
+                            Gripper::instance().isRefreshing() &&
+                            (Gripper::instance().getRefreshPulseCount() ==
+                             row2511RefreshStartCount + 1u);
+
+                        const uint32_t row2511PulseWaitStartMs = HAL_GetTick();
+                        while (!_selfTestAbortRequested &&
+                               Gripper::instance().isRefreshing() &&
+                               ((HAL_GetTick() - row2511PulseWaitStartMs) < 7000u)) {
+                          Watchdog_CheckIn(CRASH_TASK_ORCH);
+                          vTaskDelay(msToAtLeast1Tick(10u));
+                        }
+                        const bool row2511PulseCompleted = row2511RefreshStarted &&
+                            !Gripper::instance().isRefreshing();
+                        const uint32_t row2511PulseCompletionMs =
+                            Gripper::instance().getLastPulseCompletionTickMs();
+                        const bool row2511TimerRearmed = row2511PulseCompleted &&
+                            Gripper::instance().isRefreshTimerArmed() &&
+                            !Gripper::instance().hasPendingRefresh();
+
+                        // Queue the next production dispense immediately. Its
+                        // completion cannot occur inside the 3000 ms cooldown.
+                        xEventGroupClearBits(_doneEvents, BIT_PRINTING_DONE);
+                        const bool row2511SecondQueued = row2511PulseCompleted &&
+                            printer->enqueueWithTimeout(
+                                1u, 20u, PulseMode::BOTH, pdMS_TO_TICKS(250u),
+                                BIT_PRINTING_DONE, false, 0u, pdMS_TO_TICKS(2000u));
+                        const bool row2511SecondDone = row2511SecondQueued &&
+                            waitBitsWithTimeout(BIT_PRINTING_DONE, 10000u);
+                        const uint32_t row2511CooldownDelayMs =
+                            row2511SecondDone
+                                ? HAL_GetTick() - row2511PulseCompletionMs
+                                : 0u;
+                        const bool row2511CooldownOk = row2511SecondDone &&
+                            row2511CooldownDelayMs >= Gripper::DISPENSE_COOLDOWN_MS;
+                        const uint32_t row2511RefreshDelta =
+                            Gripper::instance().getRefreshPulseCount() -
+                            row2511RefreshStartCount;
+                        row2511.pass = row2511.pass && row2511ModeEnabled &&
+                            row2511PendingBeforeDispense &&
+                            row2511PendingTimerStopped &&
+                            (row2511IdleRefreshDelta == 0u) &&
+                            row2511FirstDone && row2511RefreshStarted &&
+                            row2511PulseCompleted && row2511TimerRearmed &&
+                            row2511SecondDone && row2511CooldownOk &&
+                            (row2511RefreshDelta == 1u) &&
+                            !_selfTestAbortRequested;
+
+                        char metrics2511[224];
                         snprintf(metrics2511,
                                  sizeof(metrics2511),
-                                 "psi=3000;pulse_ms=%lu;pulse_int=%lu;dur_ms=%lu;pulses=%lu;refresh_ms=%lu;refresh=%u;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;ec=%lu;stride=%lu;sample_ms=%lu",
-                                 static_cast<unsigned long>(kStressPulseMs),
-                                 static_cast<unsigned long>(kStressPulseIntervalMs),
-                                 static_cast<unsigned long>(kStressRefreshHoldMs),
+                                 "mode=%u;pending=%u;idle_delta=%lu;disp1=%u;refresh_delta=%lu;pulse_done=%lu;rearm=%u;disp2=%u;cooldown_ms=%lu;cooldown_ok=%u;pulses=%lu;ready=%lu;timeout=%lu;trace=%u",
+                                 static_cast<unsigned>(row2511ModeEnabled ? 1u : 0u),
+                                 static_cast<unsigned>(row2511PendingBeforeDispense ? 1u : 0u),
+                                 static_cast<unsigned long>(row2511IdleRefreshDelta),
+                                 static_cast<unsigned>(row2511FirstDone ? 1u : 0u),
+                                 static_cast<unsigned long>(row2511RefreshDelta),
+                                 static_cast<unsigned long>(row2511PulseCompletionMs),
+                                 static_cast<unsigned>(row2511TimerRearmed ? 1u : 0u),
+                                 static_cast<unsigned>(row2511SecondDone ? 1u : 0u),
+                                 static_cast<unsigned long>(row2511CooldownDelayMs),
+                                 static_cast<unsigned>(row2511CooldownOk ? 1u : 0u),
                                  static_cast<unsigned long>(row2511.pulses),
-                                 static_cast<unsigned long>(kStressRefreshMs),
-                                 static_cast<unsigned>(Gripper::instance().isRefreshing() ? 1u : 0u),
                                  static_cast<unsigned long>(row2511.ready),
                                  static_cast<unsigned long>(row2511.timeout),
-                                 static_cast<unsigned long>(row2511.freshTo),
-                                 static_cast<unsigned>((row2511.traceFail == 0u) ? 1u : 0u),
-                                 static_cast<unsigned long>(row2511.sc),
-                                 static_cast<unsigned long>(row2511.ec),
-                                 static_cast<unsigned long>(kStressTraceSampleStride),
-                                 static_cast<unsigned long>(kStressTraceSampleMs));
+                                 static_cast<unsigned>((row2511.traceFail == 0u) ? 1u : 0u));
                         if (!runOne(2511u, "gripper_refresh_hold_3psi_factory", row2511.pass, metrics2511)) {
                           return finishSelfTestNow();
                         }
 
                         GripperStressRowSummary comparePre{};
-                        MX_GRIPPER_StopRefresh();
+                        MX_GRIPPER_DisableDeferredRefresh();
                         for (uint8_t channel = 0u; channel < 2u && !_selfTestAbortRequested; ++channel) {
                           char traceName[56];
                           snprintf(traceName,
@@ -1641,6 +1710,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         uint32_t plateConfirmed = 0u;
                         uint32_t zPlateTimeout = 0u;
                         bool zPlateMoveStarted = false;
+                        uint32_t row2512RefreshStartCount = 0u;
+                        uint32_t row2512PulseCompletionBefore = 0u;
+                        bool row2512ModeEnabled = false;
+                        bool row2512PendingObserved = false;
+                        bool row2512RefreshActuated = false;
                         const char* row2512Gate = nullptr;
                         MotionQualificationMath::AxisHomeSample xStressHome{};
                         MotionQualificationMath::AxisHomeSample yStressHome{};
@@ -1765,12 +1839,23 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           }
                           if (evapSetupOk) {
                           MX_GRIPPER_SetRefreshPeriodMs(kStressRefreshMs);
-                          MX_GRIPPER_StartRefresh();
+                          row2512RefreshStartCount =
+                              Gripper::instance().getRefreshPulseCount();
+                          row2512PulseCompletionBefore =
+                              Gripper::instance().getLastPulseCompletionTickMs();
+                          row2512ModeEnabled =
+                              Gripper::instance().enableDeferredRefresh();
 
                           sendProgressStage("gripper_motion_raster");
                           const uint32_t rasterStartMs = HAL_GetTick();
                           uint32_t nextPulseDueMs = 0u;
                           while (!_selfTestAbortRequested && routeIndex < totalPoints) {
+                            row2512PendingObserved = row2512PendingObserved ||
+                                Gripper::instance().hasPendingRefresh();
+                            row2512RefreshActuated = row2512RefreshActuated ||
+                                Gripper::instance().isRefreshing() ||
+                                (Gripper::instance().getRefreshPulseCount() !=
+                                 row2512RefreshStartCount);
                             const uint32_t elapsedMs = HAL_GetTick() - rasterStartMs;
                             if (elapsedMs >= nextPulseDueMs) {
                               pulseSeq++;
@@ -1871,6 +1956,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               break;
                             }
                           }
+                          row2512PendingObserved = row2512PendingObserved ||
+                              Gripper::instance().hasPendingRefresh();
+                          row2512RefreshActuated = row2512RefreshActuated ||
+                              Gripper::instance().isRefreshing() ||
+                              (Gripper::instance().getRefreshPulseCount() !=
+                               row2512RefreshStartCount);
                           if (!_selfTestAbortRequested && moveTimeout == 0u && guardViolation == 0u && boundViolation == 0u) {
                             sendProgressStage("gripper_motion_return_plate_start");
                             if (!pointSafe(kStressPlateStartX, kStressPlateStartY)) {
@@ -1925,8 +2016,23 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             plateConfirmed == 1u) {
                           row2512Gate = "evap_plate_teardown";
                         }
+                        const bool row2512PendingAtEnd =
+                            Gripper::instance().hasPendingRefresh();
+                        const uint32_t row2512RefreshDelta =
+                            Gripper::instance().getRefreshPulseCount() -
+                            row2512RefreshStartCount;
+                        const uint32_t row2512PulseCompletionAfter =
+                            Gripper::instance().getLastPulseCompletionTickMs();
+                        MX_GRIPPER_DisableDeferredRefresh();
                         row2512.pass = row2512.pass &&
                                        !_selfTestAbortRequested &&
+                                       row2512ModeEnabled &&
+                                       row2512PendingObserved &&
+                                       row2512PendingAtEnd &&
+                                       !row2512RefreshActuated &&
+                                       (row2512RefreshDelta == 0u) &&
+                                       (row2512PulseCompletionAfter ==
+                                        row2512PulseCompletionBefore) &&
                                        (zHomeTimeout == 0u) &&
                                        (xyHomeTimeout == 0u) &&
                                        (plateConfirmed == 1u) &&
@@ -1944,25 +2050,20 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         char metrics2512[224];
                         snprintf(metrics2512,
                                  sizeof(metrics2512),
-                                 "psi=3000;pc=%lu;pz=%ld;z_to=%lu;z_home_to=%lu;pulses=%lu;moves=%lu;xy_home_to=%lu;move_to=%lu;guard=%lu;bound=%lu;park_to=%lu;ready=%lu;timeout=%lu;fresh_to=%lu;focus=1;trace=%u;sc=%lu;stride=%lu;sample_ms=%lu",
-                                 static_cast<unsigned long>(plateConfirmed),
-                                 static_cast<long>(kStressEvapPlateZ),
-                                 static_cast<unsigned long>(zPlateTimeout),
-                                 static_cast<unsigned long>(zHomeTimeout),
-                                 static_cast<unsigned long>(row2512.pulses),
+                                 "mode=%u;pending=%u;refresh_delta=%lu;pulse_done=%lu;moves=%lu;pulses=%lu;motion_only=%u;move_to=%lu;guard=%lu;bound=%lu;ready=%lu;timeout=%lu;trace=%u",
+                                 static_cast<unsigned>(row2512ModeEnabled ? 1u : 0u),
+                                 static_cast<unsigned>(row2512PendingObserved ? 1u : 0u),
+                                 static_cast<unsigned long>(row2512RefreshDelta),
+                                 static_cast<unsigned long>(row2512PulseCompletionAfter),
                                  static_cast<unsigned long>(moveCount),
-                                 static_cast<unsigned long>(xyHomeTimeout),
+                                 static_cast<unsigned long>(row2512.pulses),
+                                 static_cast<unsigned>(row2512RefreshActuated ? 0u : 1u),
                                  static_cast<unsigned long>(moveTimeout),
                                  static_cast<unsigned long>(guardViolation),
                                  static_cast<unsigned long>(boundViolation),
-                                 static_cast<unsigned long>(parkTimeout),
                                  static_cast<unsigned long>(row2512.ready),
                                  static_cast<unsigned long>(row2512.timeout),
-                                 static_cast<unsigned long>(row2512.freshTo),
-                                 static_cast<unsigned>((row2512.traceFail == 0u) ? 1u : 0u),
-                                 static_cast<unsigned long>(row2512.sc),
-                                 static_cast<unsigned long>(kStressTraceSampleStride),
-                                 static_cast<unsigned long>(kStressTraceSampleMs));
+                                 static_cast<unsigned>((row2512.traceFail == 0u) ? 1u : 0u));
                         if (!runOne(2512u, "gripper_motion_raster_3psi_factory", row2512.pass, metrics2512)) {
                           return finishSelfTestNow();
                         }
@@ -1984,7 +2085,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         }
 
                         GripperStressRowSummary comparePost{};
-                        MX_GRIPPER_StopRefresh();
+                        MX_GRIPPER_DisableDeferredRefresh();
                         for (uint8_t channel = 0u; channel < 2u && !_selfTestAbortRequested; ++channel) {
                           char traceName[56];
                           snprintf(traceName,
@@ -2298,7 +2399,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         MX_GRIPPER_Close();
                         gripperCloseCount++;
                         const bool gripperCommandOk = waitForBit(BIT_GRIPPER_DONE);
-                        MX_GRIPPER_StopRefresh();
+                        MX_GRIPPER_DisableDeferredRefresh();
 
                         if (!gripperCommandOk || !sensor || !printer) {
                           closePressurePath();

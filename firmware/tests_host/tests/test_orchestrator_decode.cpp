@@ -26,3 +26,27 @@ TEST(OrchestratorDecode, UnknownOpcodeFallsBackToNoOp) {
     UNSIGNED_LONGS_EQUAL(0u, intent.value);
     UNSIGNED_LONGS_EQUAL(0u, intent.waitMs);
 }
+
+TEST(OrchestratorDecode, PrintProfileZeroDisablesDeferredRefresh) {
+    const auto intent = OrchestratorDecode::decodeIntent({0x60u, 0u, 0u, 0u});
+    LONGS_EQUAL((int)OrchestratorDecode::Action::EnablePrintProfile,
+                (int)intent.action);
+    CHECK_FALSE(intent.deferredGripperRefresh);
+    CHECK_TRUE(intent.parameterValid);
+}
+
+TEST(OrchestratorDecode, PrintProfileOneEnablesDeferredRefresh) {
+    const auto intent = OrchestratorDecode::decodeIntent({0x60u, 1u, 0u, 0u});
+    LONGS_EQUAL((int)OrchestratorDecode::Action::EnablePrintProfile,
+                (int)intent.action);
+    CHECK_TRUE(intent.deferredGripperRefresh);
+    CHECK_TRUE(intent.parameterValid);
+}
+
+TEST(OrchestratorDecode, InvalidPrintProfileValueIsSafeDisabled) {
+    const auto intent = OrchestratorDecode::decodeIntent({0x60u, 2u, 0u, 0u});
+    LONGS_EQUAL((int)OrchestratorDecode::Action::EnablePrintProfile,
+                (int)intent.action);
+    CHECK_FALSE(intent.deferredGripperRefresh);
+    CHECK_FALSE(intent.parameterValid);
+}

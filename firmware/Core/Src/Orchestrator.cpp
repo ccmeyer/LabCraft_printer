@@ -284,6 +284,9 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 	    switch (cmd.cmd) {
 			case CMD_HELLO: {
 			  CrashLog_SetBootStage(CRASH_BOOT_STAGE_HELLO_RX);
+			  // Timer APIs are not ISR-safe. The orchestrator task applies the
+			  // gripper session reset on its next pass.
+			  _gripperRefreshResetRequested = true;
 			  // Reset any stale state and request HELLO_ACK
 			  discardPressureRegulatorResume();
 			  _paused = _xyMotionFailureLatched; _pauseRequested = false;
@@ -949,6 +952,10 @@ void Orchestrator::_run() {
   Watchdog_EnableTask(CRASH_TASK_ORCH);
   for (;;) {
 	  Watchdog_CheckIn(CRASH_TASK_ORCH);
+	  if (_gripperRefreshResetRequested) {
+	    _gripperRefreshResetRequested = false;
+	    MX_GRIPPER_DisableDeferredRefresh();
+	  }
 	  drainAckQueue();
 	  if (_autonomousHomeFailureRequested) {
 	    _autonomousHomeFailureRequested = false;
@@ -1076,6 +1083,7 @@ void Orchestrator::_run() {
         Comm::instance()->setStatusPaused(true);
         Logger::instance()->log("[Clear] finalization begin\r\n");
         _pressurePauseDeferred = false;
+		MX_GRIPPER_DisableDeferredRefresh();
 
         cancelActiveHomesForPause();
         cancelCurrent();
@@ -1616,19 +1624,32 @@ void Orchestrator::executeCommand(const Command &cmd) {
 			break;
 		}
 		case CMD_ENABLE_PRINT_PROFILE: {
+			  const auto intent = OrchestratorDecode::decodeIntent(
+			      {static_cast<uint8_t>(cmd.cmd), cmd.p1u(), cmd.p2u(), cmd.p3u()});
+			  MX_GRIPPER_SetRefreshPeriodMs(30000u);
+			  if (intent.deferredGripperRefresh) {
+			    MX_GRIPPER_EnableDeferredRefresh();
+			  } else {
+			    MX_GRIPPER_DisableDeferredRefresh();
+			    if (!intent.parameterValid) {
+			      Logger::instance()->log(
+			          "[Gripper] invalid ENABLE_PRINT_PROFILE p1=%lu; refresh disabled\r\n",
+			          static_cast<unsigned long>(cmd.p1u()));
+			    }
+			  }
 			  PressureRegulator::regP().setPrintProfile(true);
 			#if (LC_PRESSURE_PORTS > 1)
 			  PressureRegulator::regR().setPrintProfile(true);
 			#endif
-			  MX_GRIPPER_SetRefreshPeriodMs(30000);
-
 			  break;
-	    } case CMD_DISABLE_PRINT_PROFILE: {
+		    } case CMD_DISABLE_PRINT_PROFILE: {
+			  // Stop/clear refresh before pressure-profile teardown so no stale
+			  // pending work can cross the profile boundary.
+			  MX_GRIPPER_DisableDeferredRefresh();
 			  PressureRegulator::regP().setPrintProfile(false);
 			#if (LC_PRESSURE_PORTS > 1)
 			  PressureRegulator::regR().setPrintProfile(false);
 			#endif
-			  MX_GRIPPER_SetRefreshPeriodMs(120000);
 			  break;
 			} case CMD_SET_GRIPPER_PARAMS: {
 				  // p1 = Refresh, p2 = Pulse duration

@@ -77,7 +77,7 @@ extern void MX_GANTRY_MoveBy(int32_t dx, int32_t dy, int32_t dz, uint32_t feedHz
 extern void MX_GRIPPER_Init(void);
 extern void MX_GRIPPER_Open(void);
 extern void MX_GRIPPER_Close(void);
-extern void MX_GRIPPER_StopRefresh(void);
+extern void MX_GRIPPER_DisableDeferredRefresh(void);
 
 extern void MX_PRINTER_Init(uint32_t printPulseUs, uint32_t refuelPulseUs);
 extern void MX_PRINTER_COMPARE_MATCH(TIM_HandleTypeDef* htim);

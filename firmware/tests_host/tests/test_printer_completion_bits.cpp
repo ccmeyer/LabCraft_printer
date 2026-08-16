@@ -34,3 +34,11 @@ TEST(PrinterCompletionBitsTests, RecoverableNoAckResultsAreClassified) {
     CHECK_TRUE(printerDispenseResultIsRecoverableNoAck(PrinterDispenseResult::GateTimeout));
     CHECK_TRUE(printerDispenseResultIsRecoverableNoAck(PrinterDispenseResult::FlashScheduleFailed));
 }
+
+TEST(PrinterCompletionBitsTests, OnlyCompletedDispenseCanClaimDeferredRefresh) {
+    CHECK_FALSE(printerDispenseResultCanClaimDeferredRefresh(PrinterDispenseResult::Idle));
+    CHECK_TRUE(printerDispenseResultCanClaimDeferredRefresh(PrinterDispenseResult::Completed));
+    CHECK_FALSE(printerDispenseResultCanClaimDeferredRefresh(PrinterDispenseResult::Cancelled));
+    CHECK_FALSE(printerDispenseResultCanClaimDeferredRefresh(PrinterDispenseResult::GateTimeout));
+    CHECK_FALSE(printerDispenseResultCanClaimDeferredRefresh(PrinterDispenseResult::FlashScheduleFailed));
+}

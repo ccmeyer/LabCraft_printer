@@ -856,7 +856,9 @@ def test_print_array_prefetches_one_lookahead_well():
         call("pause", z_offset=-5000),
         call("pause", ignore_safe_height=True),
     ]
-    c.enable_print_profile.assert_called_once_with()
+    c.enable_print_profile.assert_called_once_with(
+        deferred_gripper_refresh=True
+    )
     assert c.command_events == [
         ("move_to_location", ("pause",), {"z_offset": -5000}),
         ("move_to_location", ("pause",), {"ignore_safe_height": True}),
@@ -875,6 +877,36 @@ def test_print_array_prefetches_one_lookahead_well():
     assert [item["well_id"] for item in c._array_context["queued_wells"]] == ["A1", "A2"]
     assert c._array_context["pause_departure_pending"] is False
     assert c.get_array_run_state() == "running"
+
+
+def test_print_array_close_queue_failure_runs_hard_abort_cleanup():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    c.close_gripper.return_value = False
+
+    Controller.print_array(c)
+
+    c.enable_print_profile.assert_not_called()
+    c.machine.clear_command_queue.assert_called_once_with()
+    assert c.get_array_run_state() == "idle"
+
+
+def test_print_array_profile_queue_failure_runs_hard_abort_cleanup():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    c.enable_print_profile.return_value = False
+
+    Controller.print_array(c)
+
+    c.enable_print_profile.assert_called_once_with(
+        deferred_gripper_refresh=True
+    )
+    c.machine.clear_command_queue.assert_called_once_with()
+    assert c.get_array_run_state() == "idle"
 
 
 def test_controller_two_well_lookahead_soak_preserves_intent_order():
@@ -1038,6 +1070,9 @@ def test_print_array_resume_ready_starts_next_incomplete_well():
     Controller.print_array(c)
 
     c.set_absolute_coordinates.assert_called_once_with(40, 50, 60, override=True)
+    c.enable_print_profile.assert_called_once_with(
+        deferred_gripper_refresh=True
+    )
     c.machine.set_axis_accel.assert_not_called()
     c.machine.wait_ms.assert_called_once_with(ARRAY_PAUSE_DEPARTURE_SETTLE_MS)
     assert c.print_droplets.call_args.args[0] == 7
@@ -2064,6 +2099,7 @@ def test_handle_array_well_complete_refill_required_parks_and_becomes_resume_rea
     )
 
     assert c.get_array_run_state() == "resume_ready"
+    c.disable_print_profile.assert_called_once_with()
     assert c.machine.set_axis_accel.call_args_list == _restore_calls()
     assert c.update_slots_signal.calls == [()]
     assert c.error_occurred_signal.calls[-1] == ("Error", "Printer head needs to be reloaded")
@@ -2116,6 +2152,7 @@ def test_clear_command_queue_resets_array_runner_state():
 
     c.machine.clear_command_queue.assert_called_once_with()
     c.model.machine_model.clear_command_queue.assert_called_once_with()
+    c.disable_print_profile.assert_called_once_with()
     assert c.machine.set_axis_accel.call_args_list == _restore_calls()
     c.update_expected_with_current.assert_called_once_with()
     assert c.get_array_run_state() == "idle"

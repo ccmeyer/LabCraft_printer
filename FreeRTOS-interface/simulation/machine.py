@@ -661,8 +661,10 @@ class SimulatedMachine(QtCore.QObject):
             self.state.refuel_pulse_width_us = p1
         elif command_type == "ENABLE_PRINT_PROFILE":
             self.state.print_profile_enabled = True
+            self.state.deferred_gripper_refresh_enabled = p1 == 1
         elif command_type == "DISABLE_PRINT_PROFILE":
             self.state.print_profile_enabled = False
+            self.state.deferred_gripper_refresh_enabled = False
         elif command_type in {"DISPENSE", "DISPENSE_PRINT", "DISPENSE_REFUEL"}:
             self.state.dispense_frequency_hz = max(1, p2)
         elif command_type == "OPEN_GRIPPER":
@@ -1123,9 +1125,17 @@ class SimulatedMachine(QtCore.QObject):
             trace_metadata=trace_metadata,
         )
 
-    def enable_print_profile(self, handler=None, kwargs=None, manual=False):
+    def enable_print_profile(
+        self,
+        handler=None,
+        kwargs=None,
+        manual=False,
+        *,
+        deferred_gripper_refresh=False,
+    ):
         return self._queue(
             "ENABLE_PRINT_PROFILE",
+            1 if bool(deferred_gripper_refresh) else 0,
             handler=handler,
             kwargs=kwargs,
             manual=manual,

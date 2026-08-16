@@ -185,6 +185,7 @@ class SimulatedMachineState:
     z_accel: int = 0
 
     print_profile_enabled: bool = False
+    deferred_gripper_refresh_enabled: bool = False
     gripper_open: bool = False
     gripper_active: bool = False
 
@@ -238,6 +239,7 @@ class SimulatedMachineState:
             "Motors_enabled": self.motors_enabled,
             "Homed": self.homed,
             "Print_profile_enabled": self.print_profile_enabled,
+            "Deferred_gripper_refresh_enabled": self.deferred_gripper_refresh_enabled,
             "Grip_open": self.gripper_open,
             "Grip_active": self.gripper_active,
             "Simulation_connected": self.connected,

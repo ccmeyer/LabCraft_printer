@@ -6,14 +6,10 @@
  */
 
 #include "Gripper.h"
+#include "Logger.h"
 #include "Orchestrator.h"
-#include "FreeRTOS.h"
-#include "timers.h"
-#include "task.h"
 #include "event_groups.h"
-#include "semphr.h"
 
-// singleton
 Gripper& Gripper::instance() {
   static Gripper g;
   return g;
@@ -25,9 +21,7 @@ Gripper::Gripper()
   : _pumpPort(nullptr), _pumpPin(0),
     _valvePort(nullptr), _valvePin(0),
     _refreshTimer(nullptr), _pumpOffTimer(nullptr),
-    _refreshPeriod(0), _pulseDuration(0), _callerTask(nullptr),
-    _refreshTask(nullptr), _refreshEnabled(false), _isRefreshing(false),
-    _gateHeld(false)
+    _refreshPeriod(0), _pulseDuration(0)
 {}
 
 void Gripper::begin(GPIO_TypeDef* pumpPort, uint16_t pumpPin,
@@ -35,19 +29,22 @@ void Gripper::begin(GPIO_TypeDef* pumpPort, uint16_t pumpPin,
                     TickType_t refreshPeriodTicks,
                     TickType_t pulseDurationTicks)
 {
-  _pumpPort       = pumpPort;   _pumpPin   = pumpPin;
-  _valvePort      = valvePort;  _valvePin  = valvePin;
-  _refreshPeriod  = refreshPeriodTicks;
-  _pulseDuration  = pulseDurationTicks;
-  _busy = false;
-  _refreshEnabled = false;
+  _pumpPort = pumpPort;
+  _pumpPin = pumpPin;
+  _valvePort = valvePort;
+  _valvePin = valvePin;
+  _refreshPeriod = refreshPeriodTicks;
+  _pulseDuration = pulseDurationTicks;
+  _isRefreshing = false;
+  _gateHeld = false;
+  _explicitCommandPulse = false;
+  GripperRefreshPolicy::initialize(_refreshPolicy);
 
-  // --- GPIO setup ---
   __HAL_RCC_GPIOD_CLK_ENABLE();
   GPIO_InitTypeDef gi = {};
-  gi.Pin   = _pumpPin;
-  gi.Mode  = GPIO_MODE_OUTPUT_PP;
-  gi.Pull  = GPIO_NOPULL;
+  gi.Pin = _pumpPin;
+  gi.Mode = GPIO_MODE_OUTPUT_PP;
+  gi.Pull = GPIO_NOPULL;
   gi.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(_pumpPort, &gi);
   HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_RESET);
@@ -57,148 +54,233 @@ void Gripper::begin(GPIO_TypeDef* pumpPort, uint16_t pumpPin,
   HAL_GPIO_Init(_valvePort, &gi);
   HAL_GPIO_WritePin(_valvePort, _valvePin, GPIO_PIN_RESET);
 
-  // --- create vacuum gate if not yet created (initially AVAILABLE)
   if (_vacuumGate == nullptr) {
     _vacuumGate = xSemaphoreCreateBinary();
     configASSERT(_vacuumGate != nullptr);
     xSemaphoreGive(_vacuumGate);
   }
 
-  // --- Timers (do NOT start refresh yet) ---
+  // Deferred expiry is one-shot. It records pending work only.
   _refreshTimer = xTimerCreate(
-    "GripRef",
-    _refreshPeriod,        // ticks (auto-reload)
-    pdTRUE,
-    this,
-    Gripper::refreshTimerCallback
-  );
-
+      "GripRef", _refreshPeriod, pdFALSE, this,
+      Gripper::refreshTimerCallback);
   _pumpOffTimer = xTimerCreate(
-    "GripOff",
-    _pulseDuration,        // ticks (one-shot)
-    pdFALSE,
-    this,
-    Gripper::pumpOffTimerCallback
-  );
-
-  // --- create refresh worker task
-  xTaskCreate(Gripper::refreshTaskEntry, "GRP_REFR", 256, this,
-              tskIDLE_PRIORITY + 1, &_refreshTask);
+      "GripOff", _pulseDuration, pdFALSE, this,
+      Gripper::pumpOffTimerCallback);
+  configASSERT(_refreshTimer != nullptr);
+  configASSERT(_pumpOffTimer != nullptr);
 }
 
-// --- generic helpers
 bool Gripper::lockVacuumGate(TickType_t waitTicks) {
-  if (_vacuumGate == nullptr) return false;
-  if (xSemaphoreTake(_vacuumGate, waitTicks) == pdTRUE) {
-    // NOTE: Only set _gateHeld for gripper-owned sections.
-    // Printer takes the gate too, but it WON'T set _gateHeld.
-    return true;
-  }
-  return false;
+  return _vacuumGate != nullptr &&
+         xSemaphoreTake(_vacuumGate, waitTicks) == pdTRUE;
 }
 
 void Gripper::unlockVacuumGate() {
-  if (_vacuumGate) {
+  if (_vacuumGate != nullptr) {
     xSemaphoreGive(_vacuumGate);
   }
 }
 
 void Gripper::open() {
-  if (_busy) return;        // simple guard; orchestrator should serialize
-  _busy = true;
-
-  // --- block until we own the vacuum window
-  if (!lockVacuumGate(portMAX_DELAY)) {
-    _busy = false;
-    return;
-  }
-  _gateHeld = true;
-  _isRefreshing = true;
-  _refreshEnabled = true;
-
-  recordPumpPulse(false);
-  // start refreshing from now on
-  if (_refreshTimer) {
-    xTimerStart(_refreshTimer, 0);
-  }
-
-  // apply vacuum
-  HAL_GPIO_WritePin(_valvePort, _valvePin, GPIO_PIN_SET);
-  // turn pump on
-  HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_SET);
-  // schedule pump off
-  xTimerStart(_pumpOffTimer, 0);
+  explicitPulse(GPIO_PIN_SET, false);
 }
-
 
 void Gripper::close() {
-  if (_busy) return;        // simple guard; orchestrator should serialize
-  _busy = true;
+  explicitPulse(GPIO_PIN_RESET, true);
+}
 
-  // --- block until we own the vacuum window
+void Gripper::explicitPulse(GPIO_PinState valveState,
+                            bool resetRefreshTelemetry) {
+  // Waiting here is intentional: an explicit command queued behind an active
+  // deferred pulse must eventually complete and signal the orchestrator.
   if (!lockVacuumGate(portMAX_DELAY)) {
-    _busy = false;
+    EventGroupHandle_t eg = Orchestrator::getDoneEvents();
+    if (eg != nullptr) xEventGroupSetBits(eg, BIT_GRIPPER_DONE);
     return;
   }
+
   _gateHeld = true;
-  _isRefreshing = true;
-  _refreshEnabled = true;
-  _refreshPulseCount = 0;
-  _lastClosePulseTickMs = HAL_GetTick();
-  _hasClosePulseTelemetry = true;
-  recordPumpPulse(false);
-
-  // start refreshing from now on
-  if (_refreshTimer) {
-    xTimerStart(_refreshTimer, 0);
+  if (resetRefreshTelemetry) {
+    _refreshPulseCount = 0;
+    _lastClosePulseTickMs = HAL_GetTick();
+    _hasClosePulseTelemetry = true;
   }
-
-  // vent (valve low)
-  HAL_GPIO_WritePin(_valvePort, _valvePin, GPIO_PIN_RESET);
-  // turn pump on
-  HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_SET);
-  // schedule pump off
-  xTimerStart(_pumpOffTimer, 0);
+  HAL_GPIO_WritePin(_valvePort, _valvePin, valveState);
+  if (!beginPumpPulse(false, true)) {
+    completeFailedPulse(false, true);
+  }
 }
 
+bool Gripper::beginPumpPulse(bool backgroundRefresh, bool explicitCommand) {
+  // Arm pump-off before energizing the pump. A timer queue failure can then
+  // never leave the pump stuck on.
+  if (_pumpOffTimer == nullptr ||
+      xTimerChangePeriod(_pumpOffTimer, _pulseDuration, 0) != pdPASS) {
+    if (_pumpPort != nullptr) {
+      HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_RESET);
+    }
+    Logger::instance()->log("[Gripper] pump-off timer arm failed\r\n");
+    return false;
+  }
+
+  taskENTER_CRITICAL();
+  _isRefreshing = true;
+  _explicitCommandPulse = explicitCommand;
+  taskEXIT_CRITICAL();
+  recordPumpPulse(backgroundRefresh);
+  HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_SET);
+  return true;
+}
+
+void Gripper::completeFailedPulse(bool backgroundRefresh,
+                                  bool explicitCommand) {
+  taskENTER_CRITICAL();
+  _isRefreshing = false;
+  _explicitCommandPulse = false;
+  if (backgroundRefresh) {
+    (void)GripperRefreshPolicy::markRefreshDue(_refreshPolicy);
+  }
+  taskEXIT_CRITICAL();
+
+  if (_gateHeld && _vacuumGate != nullptr) {
+    _gateHeld = false;
+    xSemaphoreGive(_vacuumGate);
+  }
+  if (explicitCommand) {
+    EventGroupHandle_t eg = Orchestrator::getDoneEvents();
+    if (eg != nullptr) xEventGroupSetBits(eg, BIT_GRIPPER_DONE);
+  }
+}
 
 void Gripper::stopPump() {
-  HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_RESET);
+  if (_pumpPort != nullptr) {
+    HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_RESET);
+  }
 }
 
-void Gripper::stopRefresh() {
-  _refreshEnabled = false;
-  if (_refreshTimer) {
-    xTimerStop(_refreshTimer, 0);
+bool Gripper::startOrResetRefreshTimer() {
+  if (_refreshTimer == nullptr ||
+      xTimerChangePeriod(_refreshTimer, _refreshPeriod, 0) != pdPASS) {
+    disablePolicyAfterTimerFailure("start/reset");
+    return false;
   }
-  HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_RESET);
+  return true;
 }
 
-void Gripper::startRefresh() {
-  _refreshEnabled = true;
-  if (_refreshTimer) {
-    xTimerStart(_refreshTimer, 0);
+void Gripper::disablePolicyAfterTimerFailure(const char* operation) {
+  taskENTER_CRITICAL();
+  (void)GripperRefreshPolicy::disable(_refreshPolicy);
+  taskEXIT_CRITICAL();
+  Logger::instance()->log("[Gripper] refresh timer %s failed; deferred mode disabled\r\n",
+                          operation != nullptr ? operation : "command");
+}
+
+bool Gripper::enableDeferredRefresh() {
+  taskENTER_CRITICAL();
+  (void)GripperRefreshPolicy::enableDeferred(_refreshPolicy);
+  taskEXIT_CRITICAL();
+  return startOrResetRefreshTimer();
+}
+
+void Gripper::disableDeferredRefresh() {
+  taskENTER_CRITICAL();
+  (void)GripperRefreshPolicy::disable(_refreshPolicy);
+  taskEXIT_CRITICAL();
+  if (_refreshTimer != nullptr && xTimerStop(_refreshTimer, 0) != pdPASS) {
+    disablePolicyAfterTimerFailure("stop");
   }
+}
+
+bool Gripper::isDeferredRefreshEnabled() const {
+  taskENTER_CRITICAL();
+  const bool enabled = GripperRefreshPolicy::isDeferred(_refreshPolicy);
+  taskEXIT_CRITICAL();
+  return enabled;
+}
+
+bool Gripper::hasPendingRefresh() const {
+  taskENTER_CRITICAL();
+  const bool pending = GripperRefreshPolicy::hasPending(_refreshPolicy);
+  taskEXIT_CRITICAL();
+  return pending;
+}
+
+bool Gripper::markRefreshDue() {
+  taskENTER_CRITICAL();
+  const bool marked = GripperRefreshPolicy::markRefreshDue(_refreshPolicy);
+  taskEXIT_CRITICAL();
+  return marked;
+}
+
+uint32_t Gripper::remainingDispenseCooldownMs() const {
+  taskENTER_CRITICAL();
+  const uint32_t remaining = GripperRefreshPolicy::remainingDispenseCooldownMs(
+      _refreshPolicy, HAL_GetTick(), DISPENSE_COOLDOWN_MS);
+  taskEXIT_CRITICAL();
+  return remaining;
+}
+
+uint32_t Gripper::getLastPulseCompletionTickMs() const {
+  taskENTER_CRITICAL();
+  const uint32_t completion = _refreshPolicy.lastPulseCompletionMs;
+  taskEXIT_CRITICAL();
+  return completion;
+}
+
+bool Gripper::isRefreshTimerArmed() const {
+  return _refreshTimer != nullptr &&
+         xTimerIsTimerActive(_refreshTimer) != pdFALSE;
+}
+
+bool Gripper::isRefreshing() const {
+  taskENTER_CRITICAL();
+  const bool refreshing = _isRefreshing;
+  taskEXIT_CRITICAL();
+  return refreshing;
+}
+
+bool Gripper::claimPendingRefreshAfterDispenseWithGateHeld() {
+  taskENTER_CRITICAL();
+  const bool claimed =
+      GripperRefreshPolicy::claimPendingAfterDispense(_refreshPolicy);
+  taskEXIT_CRITICAL();
+  if (!claimed) {
+    return false;
+  }
+
+  if (_refreshTimer != nullptr && xTimerIsTimerActive(_refreshTimer) != pdFALSE &&
+      xTimerStop(_refreshTimer, 0) != pdPASS) {
+    disablePolicyAfterTimerFailure("stop before pulse");
+    return false;
+  }
+
+  // Printer already owns the semaphore. From this point the Gripper owns the
+  // responsibility to release it when the pump-off callback completes.
+  _gateHeld = true;
+  if (!beginPumpPulse(true, false)) {
+    completeFailedPulse(true, false);
+    return true;
+  }
+  return true;
 }
 
 void Gripper::forceOff() {
-  _refreshEnabled = false;
-  if (_refreshTimer) {
-    xTimerStop(_refreshTimer, 0);
-  }
-  if (_pumpOffTimer) {
-    xTimerStop(_pumpOffTimer, 0);
-  }
+  taskENTER_CRITICAL();
+  GripperRefreshPolicy::initialize(_refreshPolicy);
+  _isRefreshing = false;
+  _explicitCommandPulse = false;
+  taskEXIT_CRITICAL();
+
+  if (_refreshTimer != nullptr) (void)xTimerStop(_refreshTimer, 0);
+  if (_pumpOffTimer != nullptr) (void)xTimerStop(_pumpOffTimer, 0);
   if (_pumpPort != nullptr) {
     HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_RESET);
   }
   if (_valvePort != nullptr) {
     HAL_GPIO_WritePin(_valvePort, _valvePin, GPIO_PIN_RESET);
   }
-
-  _isRefreshing = false;
-  _busy = false;
-  if (_gateHeld && _vacuumGate) {
+  if (_gateHeld && _vacuumGate != nullptr) {
     _gateHeld = false;
     xSemaphoreGive(_vacuumGate);
   } else {
@@ -206,28 +288,15 @@ void Gripper::forceOff() {
   }
 }
 
-// ==== runtime setters/getters ====
-
 void Gripper::setRefreshPeriodTicks(TickType_t ticks) {
   _refreshPeriod = ticks;
-  if (_refreshTimer) {
-    BaseType_t wasActive = xTimerIsTimerActive(_refreshTimer);
-    xTimerChangePeriod(_refreshTimer, ticks, 0);  // this (re)starts…
-    if (!wasActive) {
-      xTimerStop(_refreshTimer, 0);              // …so stop to preserve state
-    }
+  if (isDeferredRefreshEnabled()) {
+    (void)startOrResetRefreshTimer();
   }
 }
 
 void Gripper::setPulseDurationTicks(TickType_t ticks) {
   _pulseDuration = ticks;
-  if (_pumpOffTimer) {
-    BaseType_t wasActive = xTimerIsTimerActive(_pumpOffTimer);
-    xTimerChangePeriod(_pumpOffTimer, ticks, 0);
-    if (!wasActive) {
-      xTimerStop(_pumpOffTimer, 0);
-    }
-  }
 }
 
 void Gripper::setRefreshPeriodMs(uint32_t ms) {
@@ -239,78 +308,46 @@ void Gripper::setPulseDurationMs(uint32_t ms) {
 }
 
 uint32_t Gripper::getRefreshPeriodMs() const {
-  return (uint32_t)(_refreshPeriod * portTICK_PERIOD_MS);
+  return static_cast<uint32_t>(_refreshPeriod * portTICK_PERIOD_MS);
 }
 
 uint32_t Gripper::getPulseDurationMs() const {
-  return (uint32_t)(_pulseDuration * portTICK_PERIOD_MS);
+  return static_cast<uint32_t>(_pulseDuration * portTICK_PERIOD_MS);
 }
 
-
-// ==== private ====
-
-//void Gripper::refreshTimerCallback(TimerHandle_t) {
-//  // just pulse the pump again
-//  Gripper::instance().pulsePump();
-//}
-
-// do NOT pulse in the timer callback; just notify the worker task
 void Gripper::refreshTimerCallback(TimerHandle_t xTimer) {
   Gripper* self = static_cast<Gripper*>(pvTimerGetTimerID(xTimer));
-  if (self && self->_refreshTask && self->_refreshEnabled) {
-    // coalesces if multiple periods elapse
-    xTaskNotifyGive(self->_refreshTask);
+  if (self != nullptr) {
+    (void)self->markRefreshDue();
   }
 }
 
-// Refresh worker (runs in task context; can block on semaphore)
-void Gripper::refreshTaskEntry(void* pv) {
-  auto* self = static_cast<Gripper*>(pv);
-  for (;;) {
-    // wait for a refresh period tick
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+void Gripper::pumpOffTimerCallback(TimerHandle_t xTimer) {
+  Gripper* self = static_cast<Gripper*>(pvTimerGetTimerID(xTimer));
+  if (self == nullptr) return;
 
-    // if already in a refresh pulse (open/close/previous refresh), skip
-    if (!self->_refreshEnabled || self->_isRefreshing) {
-      continue;
-    }
+  HAL_GPIO_WritePin(self->_pumpPort, self->_pumpPin, GPIO_PIN_RESET);
+  const uint32_t completedMs = HAL_GetTick();
+  taskENTER_CRITICAL();
+  const bool explicitCommand = self->_explicitCommandPulse;
+  self->_explicitCommandPulse = false;
+  self->_isRefreshing = false;
+  const auto directive = GripperRefreshPolicy::recordPulseCompleted(
+      self->_refreshPolicy, completedMs);
+  taskEXIT_CRITICAL();
 
-    // Take the vacuum window; will block if a print job is active
-    if (!self->lockVacuumGate(portMAX_DELAY)) {
-      continue; // unexpected, but safe to skip
-    }
-    if (!self->_refreshEnabled) {
-      self->unlockVacuumGate();
-      continue;
-    }
-    self->_gateHeld     = true;
-    self->_isRefreshing = true;
-
-    // Perform the pulse
-    self->pulsePump();
-    // Gate is released later by pumpOffTimerCallback
-  }
-}
-
-void Gripper::pumpOffTimerCallback(TimerHandle_t) {
-  auto &g = Gripper::instance();
-  // turn pump off
-  HAL_GPIO_WritePin(g._pumpPort, g._pumpPin, GPIO_PIN_RESET);
-
-  // signal done to orchestrator (timer callback runs in daemon task, not ISR)
-  EventGroupHandle_t eg = Orchestrator::getDoneEvents();
-  if (eg) {
-    xEventGroupSetBits(eg, BIT_GRIPPER_DONE);
+  if (directive == GripperRefreshPolicy::PeriodicTimerDirective::StartOrReset) {
+    (void)self->startOrResetRefreshTimer();
   }
 
-  // Mark refresh complete and release the vacuum gate if we own it
-  g._isRefreshing = false;
-  if (g._gateHeld && g._vacuumGate) {
-    g._gateHeld = false;
-    xSemaphoreGive(g._vacuumGate);
+  if (self->_gateHeld && self->_vacuumGate != nullptr) {
+    self->_gateHeld = false;
+    xSemaphoreGive(self->_vacuumGate);
   }
-
-  g._busy = false;
+  if (explicitCommand) {
+    EventGroupHandle_t eg = Orchestrator::getDoneEvents();
+    if (eg != nullptr) xEventGroupSetBits(eg, BIT_GRIPPER_DONE);
+  }
 }
 
 void Gripper::recordPumpPulse(bool backgroundRefresh) {
@@ -323,37 +360,39 @@ void Gripper::recordPumpPulse(bool backgroundRefresh) {
   }
 }
 
-void Gripper::pulsePump() {
-  recordPumpPulse(true);
-  HAL_GPIO_WritePin(_pumpPort, _pumpPin, GPIO_PIN_SET);
-  xTimerStart(_pumpOffTimer, 0);
-}
-
-// ==== C API wrappers ====
 extern "C" {
 
 void MX_GRIPPER_Init(void) {
-  // pump=PD13, valve=PA8, refresh=30000ms, pulse=800ms
   Gripper::instance().begin(
-    GPIOD, GPIO_PIN_13,
-    GPIOA, GPIO_PIN_8,
-    pdMS_TO_TICKS(60000),
-    pdMS_TO_TICKS(800)
-  );
+      GPIOD, GPIO_PIN_13,
+      GPIOA, GPIO_PIN_8,
+      pdMS_TO_TICKS(60000),
+      pdMS_TO_TICKS(800));
 }
 
-void MX_GRIPPER_Open(void)  { Gripper::instance().open(); }
+void MX_GRIPPER_Open(void) { Gripper::instance().open(); }
 void MX_GRIPPER_Close(void) { Gripper::instance().close(); }
-void MX_GRIPPER_StopRefresh(void) { Gripper::instance().stopRefresh(); }
-void MX_GRIPPER_StartRefresh(void) { Gripper::instance().startRefresh(); }
-void MX_GRIPPER_StopPump(void)    { Gripper::instance().stopPump(); }
-void MX_GRIPPER_ForceOff(void)    { Gripper::instance().forceOff(); }
+void MX_GRIPPER_StopPump(void) { Gripper::instance().stopPump(); }
+void MX_GRIPPER_EnableDeferredRefresh(void) {
+  (void)Gripper::instance().enableDeferredRefresh();
+}
+void MX_GRIPPER_DisableDeferredRefresh(void) {
+  Gripper::instance().disableDeferredRefresh();
+}
+void MX_GRIPPER_ForceOff(void) { Gripper::instance().forceOff(); }
 
-// New: Orchestrator-facing setters/getters (ms)
-void     MX_GRIPPER_SetRefreshPeriodMs(uint32_t ms) { Gripper::instance().setRefreshPeriodMs(ms); }
-void     MX_GRIPPER_SetPulseDurationMs(uint32_t ms) { Gripper::instance().setPulseDurationMs(ms); }
-uint32_t MX_GRIPPER_GetRefreshPeriodMs(void)        { return Gripper::instance().getRefreshPeriodMs(); }
-uint32_t MX_GRIPPER_GetPulseDurationMs(void)        { return Gripper::instance().getPulseDurationMs(); }
+void MX_GRIPPER_SetRefreshPeriodMs(uint32_t ms) {
+  Gripper::instance().setRefreshPeriodMs(ms);
+}
+void MX_GRIPPER_SetPulseDurationMs(uint32_t ms) {
+  Gripper::instance().setPulseDurationMs(ms);
+}
+uint32_t MX_GRIPPER_GetRefreshPeriodMs(void) {
+  return Gripper::instance().getRefreshPeriodMs();
+}
+uint32_t MX_GRIPPER_GetPulseDurationMs(void) {
+  return Gripper::instance().getPulseDurationMs();
+}
 
 BaseType_t MX_VACUUM_Lock(TickType_t waitTicks) {
   return Gripper::instance().lockVacuumGate(waitTicks) ? pdTRUE : pdFALSE;

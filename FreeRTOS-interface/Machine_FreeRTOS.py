@@ -7741,8 +7741,24 @@ class Machine(QObject):
         rate_hz = self._get_dispense_rate_hz()
         return self.add_command_to_queue('DISPENSE_REFUEL',int(droplet_count),rate_hz,0,handler=handler,kwargs=kwargs,manual=manual)
     
-    def enable_print_profile(self, handler=None, kwargs=None, manual=False):
-        return self.add_command_to_queue('ENABLE_PRINT_PROFILE', 0, 0, 0, handler=handler, kwargs=kwargs, manual=manual)
+    def enable_print_profile(
+        self,
+        handler=None,
+        kwargs=None,
+        manual=False,
+        *,
+        deferred_gripper_refresh=False,
+    ):
+        refresh_mode = 1 if bool(deferred_gripper_refresh) else 0
+        return self.add_command_to_queue(
+            'ENABLE_PRINT_PROFILE',
+            refresh_mode,
+            0,
+            0,
+            handler=handler,
+            kwargs=kwargs,
+            manual=manual,
+        )
     
     def disable_print_profile(self, handler=None, kwargs=None, manual=False):
         return self.add_command_to_queue('DISABLE_PRINT_PROFILE', 0, 0, 0, handler=handler, kwargs=kwargs, manual=manual)

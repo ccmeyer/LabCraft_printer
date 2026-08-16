@@ -363,6 +363,36 @@ void Printer::taskLoop() {
         continue;
       }
 
+      // A gripper pulse perturbs droplet volume briefly. Hold the vacuum gate
+      // while waiting so no other gripper action can move the cooldown anchor,
+      // but remain responsive to pause/cancel notifications.
+      while (!commandCancelled()) {
+        if (!waitAtDropletBoundary()) {
+          break;
+        }
+        const uint32_t cooldownMs =
+            Gripper::instance().remainingDispenseCooldownMs();
+        if (cooldownMs == 0u) {
+          break;
+        }
+        TickType_t waitTicks = pdMS_TO_TICKS(cooldownMs);
+        if (waitTicks == 0u) waitTicks = 1u;
+        if (waitTicks > gatePollTicks) waitTicks = gatePollTicks;
+        (void)ulTaskNotifyTake(pdTRUE, waitTicks);
+      }
+      if (commandCancelled()) {
+        Gripper::instance().unlockVacuumGate();
+        recordDispenseResult(PrinterDispenseResult::Cancelled,
+                             cmd.flashCycleId);
+        _remaining = 0;
+        if (cmd.completionBit != 0u) {
+          xEventGroupSetBits(Orchestrator::getDoneEvents(), cmd.completionBit);
+        }
+        PrinterControlPolicy::acknowledgePause(_control, false);
+        _commandActive = false;
+        continue;
+      }
+
       const uint32_t rateHz = (_dispenseHz == 0u) ? 1u : _dispenseHz;
       TickType_t periodTicks = pdMS_TO_TICKS(1000u / rateHz);
       if (periodTicks == 0) periodTicks = 1;
@@ -518,14 +548,21 @@ void Printer::taskLoop() {
         _totalDispensed++;
         _remaining--;
       }
-      // --- always release the vacuum window at job end
-      Gripper::instance().unlockVacuumGate();
-
       if (commandResult == PrinterDispenseResult::Completed && commandCancelled()) {
         commandResult = PrinterDispenseResult::Cancelled;
       }
       if (commandResult != PrinterDispenseResult::Completed) {
         _remaining = 0;
+      }
+
+      // Only a successful production dispense may consume pending refresh.
+      // The pulse starts before completion is signalled, allowing array motion
+      // to continue while the pump/cooldown window protects the next dispense.
+      const bool gateTransferredToGripper =
+          printerDispenseResultCanClaimDeferredRefresh(commandResult) &&
+          Gripper::instance().claimPendingRefreshAfterDispenseWithGateHeld();
+      if (!gateTransferredToGripper) {
+        Gripper::instance().unlockVacuumGate();
       }
       recordDispenseResult(commandResult, cmd.flashCycleId);
 

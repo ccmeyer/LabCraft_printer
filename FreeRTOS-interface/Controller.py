@@ -4035,6 +4035,9 @@ class Controller(QObject):
         self.machine.clear_command_queue()
         self.model.machine_model.clear_command_queue()
         if self.get_array_run_state() != "idle":
+            context = getattr(self, "_array_context", None)
+            if isinstance(context, dict):
+                context["array_clear_fallback_requested"] = True
             self._complete_array_finalize("hard_abort")
         try:
             self.update_expected_with_current()
@@ -4794,7 +4797,7 @@ class Controller(QObject):
                 self._complete_array_finalize("soft_stop")
                 return
 
-        self.disable_print_profile()
+        self._queue_array_profile_disable_once(clear_on_failure=False)
         context["soft_stop_phase"] = "parking"
 
         def _finish_after_park():
@@ -6275,6 +6278,8 @@ class Controller(QObject):
             ),
             "array_accels_lowered": False,
             "array_accels_restored": False,
+            "print_profile_enable_queued": False,
+            "print_profile_disable_queued": False,
             "row_start_overshoot_steps": int(
                 getattr(self, "_array_row_start_overshoot_steps", ARRAY_ROW_START_OVERSHOOT_STEPS)
             ),
@@ -6689,7 +6694,7 @@ class Controller(QObject):
             self._complete_array_finalize(reason)
             return False
 
-        self.disable_print_profile()
+        self._queue_array_profile_disable_once(clear_on_failure=True)
 
         def _finish_after_park():
             self._complete_array_finalize(reason)
@@ -6701,9 +6706,47 @@ class Controller(QObject):
             return False
         return True
 
+    def _queue_array_profile_disable_once(self, *, clear_on_failure=False):
+        """Queue one profile teardown for the active array, with CLEAR fallback."""
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return False
+        if context.get("print_profile_disable_queued"):
+            return True
+        # Older/restored contexts predate this marker and represent an active
+        # array; a newly-created context explicitly starts it as False.
+        if context.get("print_profile_enable_queued", True) is False:
+            return True
+
+        context["print_profile_disable_queued"] = True
+        try:
+            queued = self.disable_print_profile()
+        except Exception:
+            queued = False
+        if queued is not False:
+            return True
+
+        if clear_on_failure and not context.get("array_clear_fallback_requested"):
+            context["array_clear_fallback_requested"] = True
+            try:
+                self.machine.clear_command_queue()
+                self.model.machine_model.clear_command_queue()
+            except Exception:
+                pass
+        return False
+
     def _complete_array_finalize(self, reason):
         reason = str(reason or "completed")
+        self._queue_array_profile_disable_once(clear_on_failure=reason == "hard_abort")
         if reason == "hard_abort":
+            context = getattr(self, "_array_context", None)
+            if isinstance(context, dict) and not context.get("array_clear_fallback_requested"):
+                context["array_clear_fallback_requested"] = True
+                try:
+                    self.machine.clear_command_queue()
+                    self.model.machine_model.clear_command_queue()
+                except Exception:
+                    pass
             self._mark_evap_plate_dock_check_required("array_hard_abort")
         context = getattr(self, "_array_context", None)
         if isinstance(context, dict) and context.get("array_finalize_after_accel_restore"):
@@ -7446,7 +7489,13 @@ class Controller(QObject):
                 details={"transport_resumed": transport_resumed},
             )
         
-        self.close_gripper()
+        if self.close_gripper() is False:
+            self.error_occurred_signal.emit(
+                'Print Array Error',
+                'Failed to queue the initial gripper close command',
+            )
+            self._complete_array_finalize("hard_abort")
+            return
         # self.wait_command()
 
         self.move_to_location('pause',z_offset=-5000)
@@ -7456,7 +7505,14 @@ class Controller(QObject):
             return
         # self.machine.change_acceleration(16000)
         # self.enter_print_mode()
-        self.enable_print_profile()
+        if self.enable_print_profile(deferred_gripper_refresh=True) is False:
+            self.error_occurred_signal.emit(
+                'Print Array Error',
+                'Failed to enable the print-array pressure and gripper profile',
+            )
+            self._complete_array_finalize("hard_abort")
+            return
+        self._array_context["print_profile_enable_queued"] = True
 
         self._set_array_run_state("running")
         lookahead_added = self._fill_array_lookahead()
@@ -7467,13 +7523,15 @@ class Controller(QObject):
                 details={"lookahead_added": bool(lookahead_added)},
             )
             
-    def enable_print_profile(self):
+    def enable_print_profile(self, *, deferred_gripper_refresh=False):
         """Enable the print profile."""
-        self.machine.enable_print_profile()
+        return self.machine.enable_print_profile(
+            deferred_gripper_refresh=deferred_gripper_refresh
+        )
 
     def disable_print_profile(self):
         """Disable the print profile."""
-        self.machine.disable_print_profile()
+        return self.machine.disable_print_profile()
     
     def start_refuel_camera(self):
         if self._reject_physical_action("refuel camera start") is not None:

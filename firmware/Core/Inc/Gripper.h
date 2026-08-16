@@ -12,43 +12,44 @@
 #include "FreeRTOS.h"
 #include "timers.h"
 #include "semphr.h"
-#include "task.h"
+#include "GripperRefreshPolicy.h"
 
 class Gripper {
 public:
+  static constexpr uint32_t DISPENSE_COOLDOWN_MS = 3000u;
+
   static Gripper& instance();
 
-  /** Initialize pump + valve GPIO and timers
-   *  pumpPort/pumpPin: GPIO for pump control (active HIGH)
-   *  valvePort/valvePin: GPIO for valve (HIGH=open grip, LOW=release)
-   *  refreshPeriodTicks: how often to re-pulse pump (ticks)
-   *  pulseDurationTicks: how long each pulse lasts (ticks)
-   */
   void begin(GPIO_TypeDef* pumpPort, uint16_t pumpPin,
              GPIO_TypeDef* valvePort, uint16_t valvePin,
              TickType_t refreshPeriodTicks,
              TickType_t pulseDurationTicks);
 
-  /// Open gripper (apply vacuum), then pulse pump
+  // Explicit commands issue one pulse but never enable periodic refresh.
   void open();
-  /// Close gripper (vent), then pulse pump
   void close();
-  /// Immediately turn pump off (stop vacuum)
   void stopPump();
-  /// Stop pump refresh
-  void stopRefresh();
-  /// Resume background refresh without issuing an immediate open/close pulse
-  void startRefresh();
-  /// Force gripper hardware to a safe idle state
   void forceOff();
 
-  // ---- Runtime setters/getters (ticks) ----
+  // Deferred refresh is enabled only for a production print-profile window.
+  bool enableDeferredRefresh();
+  void disableDeferredRefresh();
+  bool isDeferredRefreshEnabled() const;
+  bool hasPendingRefresh() const;
+  uint32_t remainingDispenseCooldownMs() const;
+
+  // Printer calls this only after a successful dispense while it still owns
+  // the shared gate. True transfers responsibility for releasing that gate.
+  bool claimPendingRefreshAfterDispenseWithGateHeld();
+
+  // Test/diagnostic visibility. Normal expiry reaches this through the timer.
+  bool markRefreshDue();
+
   void      setRefreshPeriodTicks(TickType_t ticks);
   void      setPulseDurationTicks(TickType_t ticks);
   TickType_t getRefreshPeriodTicks() const { return _refreshPeriod; }
   TickType_t getPulseDurationTicks() const { return _pulseDuration; }
 
-  // ---- Convenience setters/getters (ms) ----
   void     setRefreshPeriodMs(uint32_t ms);
   void     setPulseDurationMs(uint32_t ms);
   uint32_t getRefreshPeriodMs() const;
@@ -57,27 +58,26 @@ public:
   uint32_t getRefreshPulseCount() const { return _refreshPulseCount; }
   uint32_t getLastPumpPulseTickMs() const { return _lastPumpPulseTickMs; }
   uint32_t getLastClosePulseTickMs() const { return _lastClosePulseTickMs; }
+  uint32_t getLastPulseCompletionTickMs() const;
+  bool     isRefreshTimerArmed() const;
   bool     hasPumpPulseTelemetry() const { return _hasPumpPulseTelemetry; }
   bool     hasClosePulseTelemetry() const { return _hasClosePulseTelemetry; }
 
-  // ---- coordination helpers ----
-  bool lockVacuumGate(TickType_t waitTicks);   // take the gate (Printer uses this at job start)
-  void unlockVacuumGate();                     // release the gate (Printer uses this at job end)
-  bool isRefreshing() const { return _isRefreshing; }
-
-
+  bool lockVacuumGate(TickType_t waitTicks);
+  void unlockVacuumGate();
+  bool isRefreshing() const;
 
 private:
   Gripper();
   static void refreshTimerCallback(TimerHandle_t xTimer);
   static void pumpOffTimerCallback(TimerHandle_t xTimer);
 
-  static void refreshTaskEntry(void* pv);
-
-  bool _busy = false;
-
+  void explicitPulse(GPIO_PinState valveState, bool resetRefreshTelemetry);
+  bool beginPumpPulse(bool backgroundRefresh, bool explicitCommand);
+  void completeFailedPulse(bool backgroundRefresh, bool explicitCommand);
+  bool startOrResetRefreshTimer();
+  void disablePolicyAfterTimerFailure(const char* operation);
   void recordPumpPulse(bool backgroundRefresh);
-  void pulsePump();
 
   GPIO_TypeDef* _pumpPort;
   uint16_t      _pumpPin;
@@ -87,17 +87,14 @@ private:
   TimerHandle_t _refreshTimer;
   TimerHandle_t _pumpOffTimer;
 
-  TickType_t    _refreshPeriod;   // ticks
-  TickType_t    _pulseDuration;   // ticks
+  TickType_t    _refreshPeriod;
+  TickType_t    _pulseDuration;
 
-  TaskHandle_t _callerTask = nullptr;	// For blocking the Open/Close action
-
-  // ---- synchronization state ----
-  static SemaphoreHandle_t _vacuumGate;  // binary semaphore shared with Printer
-  TaskHandle_t   _refreshTask = nullptr; // worker that performs refresh pulses
-  volatile bool  _refreshEnabled = false; // true while background refresh may pulse
-  volatile bool  _isRefreshing = false;  // true while a refresh/open/close pulse is active
-  bool           _gateHeld     = false;  // true if THIS gripper instance took the gate
+  static SemaphoreHandle_t _vacuumGate;
+  volatile bool  _isRefreshing = false;
+  bool           _gateHeld = false;
+  bool           _explicitCommandPulse = false;
+  GripperRefreshPolicy::State _refreshPolicy{};
 
   volatile uint32_t _pumpPulseCount = 0;
   volatile uint32_t _refreshPulseCount = 0;
@@ -107,7 +104,6 @@ private:
   volatile bool     _hasClosePulseTelemetry = false;
 };
 
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -116,8 +112,8 @@ void MX_GRIPPER_Init(void);
 void MX_GRIPPER_Open(void);
 void MX_GRIPPER_Close(void);
 void MX_GRIPPER_StopPump(void);
-void MX_GRIPPER_StopRefresh(void);
-void MX_GRIPPER_StartRefresh(void);
+void MX_GRIPPER_EnableDeferredRefresh(void);
+void MX_GRIPPER_DisableDeferredRefresh(void);
 void MX_GRIPPER_ForceOff(void);
 
 void     MX_GRIPPER_SetRefreshPeriodMs(uint32_t ms);

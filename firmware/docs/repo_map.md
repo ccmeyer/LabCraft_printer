@@ -144,9 +144,11 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 
 - `firmware/Core/Inc/Gripper.h`, `firmware/Core/Src/Gripper.cpp`
 - Key functions:
-  - `Gripper::open`, `Gripper::close`, `Gripper::stopPump`, `Gripper::refreshTaskEntry`
+  - `Gripper::open`, `Gripper::close`, `Gripper::enableDeferredRefresh`, `Gripper::disableDeferredRefresh`, `Gripper::claimPendingRefreshAfterDispenseWithGateHeld`
+  - Explicit open/close commands issue one pulse but do not enable periodic behavior. Deferred expiry is a one-shot timer callback that only marks pending work; it never starts the pump or waits on the shared vacuum gate.
+  - After a successful dispense, `Printer` transfers its already-held gate to `Gripper` when pending work is claimed. The deferred pulse starts before print completion is signalled, the interval rearms from pump-off completion, and the next dispense waits through a fixed `3000 ms` cooldown. Motion and other non-dispense commands remain available during that cooldown.
 - `firmware/Core/Inc/GripperRefreshPolicy.h`, `firmware/Core/Src/GripperRefreshPolicy.cpp`
-  - Pure, host-tested deferred-refresh state policy. It owns enable/disable state, pending-refresh coalescing, pulse-completion timing, and dispense-cooldown calculations without HAL or FreeRTOS dependencies. Runtime gripper and printer code do not consume it yet.
+  - Pure, host-tested deferred-refresh state policy. It owns enable/disable state, pending-refresh coalescing, pulse-completion timing, and wrap-safe dispense-cooldown calculations without HAL or FreeRTOS dependencies. Production `Gripper`, `Printer`, and `Orchestrator` consume this policy under short critical sections.
 
 ### Command/comms and orchestration
 
@@ -181,6 +183,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - Legacy valve pulse diagnostics `2401 print_valve_pulse_drop_repeatability_factory`, `2402 refuel_valve_pulse_drop_repeatability_factory`, and `2403 dual_valve_interaction_factory` are retired from default FULL/factory acceptance runs after producing non-actionable pressure-drop warnings.
   - Standalone valve characterization diagnostics `2473`-`2479` live in `DiagnosticsRunner::runSelfTest`, reuse `PressureTraceRecorder` and `Printer::enqueueWithTimeout`, restore pulse widths/regulator targets through the existing trace runner, and publish trace artifacts for Python-side valve analysis.
   - Gripper seal diagnostics `2501 gripper_seal_closed_decay_factory`, `2502 gripper_seal_hold_duration_factory`, and `2503 gripper_seal_repeatability_factory` live in `DiagnosticsRunner::runSelfTest` behind the explicit selector `2500`; they are not part of default FULL, home P/R regulators through the existing async regulator-home task path so the orchestrator can keep checking into the watchdog, run two unscored conditioning bursts, recharge to `1 psi`, pause regulators during repeated `Printer` diagnostic extended one-pulse print/refuel valve bursts, keep regulator vent valves closed during measurement, keep the gripper closed through firmware execution, emit a normal done frame on setup failures when possible, close pressure paths at exit, and require Python operator-gated teardown plus normal `GOODBYE` shutdown after fixture removal.
+  - Operator-gated stress rows `2511` and `2512` use the production `DeferredUntilDispense` path. Row `2511` proves expiry remains non-actuating through idle/direct pressure traces, a successful `Printer::enqueueWithTimeout()` boundary claims exactly one pulse, the timer rearms only after pump-off, and the next dispense is delayed at least `3000 ms`. Row `2512` permits expiry during the motion raster and proves motion/direct diagnostic pulses neither consume pending work nor actuate the gripper. Metrics report mode, pending state, refresh-count delta, pulse-completion tick, and measured cooldown where applicable; every diagnostic exit disables deferred mode.
   - `SelfTestCommandPolicy` resolves the logical self-test `run_id` and optional timeout TLVs independently from transport `seq32`, keeping HIL self-test compatible with the sliding-window queue-ACK transport.
   - `OrchestratorCompletionPolicy` centralizes the pure “did an interruptible command really finish?” bookkeeping used to decide when executed/retired frontiers may advance after pause-aware waits. Normal ABS_XY retirement additionally requires accepted startup, shared two-bit completion, a completed coordinated terminal reason, and exact endpoint/target agreement. Limit, planner, rejection, and mismatch outcomes latch a fail-closed transport pause until successful CLEAR or GOODBYE cleanup; pause and intentional clear/shutdown interruption remain resumable or safely cancelable.
   - `RegulatorPausePolicy` owns the host-tested one-shot active-channel snapshot used to stop pressure regulation for manual pause, restore only previously active channels on resume, and discard restoration state on clear or session shutdown.
@@ -362,8 +365,8 @@ Common parse path for host->MCU commands:
 | `0x43` | `CMD_HOME_XY` | host->MCU | `p1=fastHz`, `p2=slowHz`, `p3=backoffSteps` | `executeCommand` (`startHomeAsync`) | n/a |
 | `0x44` | `CMD_HOME_PR_BOTH` | host->MCU | `p1=fastHz`, `p2=slowHz`, `p3=backoffSteps` | `executeCommand` (`startRegHomeAsync`) | n/a |
 | `0x50` | `CMD_WAIT` | host->MCU | `p1=waitMs` | `executeCommand` (`pauseAwareDelayTicks`) | n/a |
-| `0x60` | `CMD_ENABLE_PRINT_PROFILE` | host->MCU | none | `executeCommand` | n/a |
-| `0x61` | `CMD_DISABLE_PRINT_PROFILE` | host->MCU | none | `executeCommand` | n/a |
+| `0x60` | `CMD_ENABLE_PRINT_PROFILE` | host->MCU | `p1=0`: pressure profile on + deferred refresh off; `p1=1`: pressure profile on + fresh 30 s deferred interval; other values are logged and safely treated as refresh off | `executeCommand` | n/a |
+| `0x61` | `CMD_DISABLE_PRINT_PROFILE` | host->MCU | none; disables/clears/stops deferred refresh before pressure teardown | `executeCommand` | n/a |
 | `0x62` | `CMD_SET_GRIPPER_PARAMS` | host->MCU | `p1=refreshMs`, `p2=pulseMs` | `executeCommand` | n/a |
 | `0x65` | `CMD_REFUEL_VACUUM_ENTER` | host->MCU | `p1=targetRaw`, `p2=prepPositionSteps`, `p3=moveHz` | `executeCommand` (`enterRefuelVacuumModeWithAsyncHome`) | dual-port only |
 | `0x66` | `CMD_REFUEL_VACUUM_SET_TARGET` | host->MCU | `p1=targetRaw` | `executeCommand` (`regR().setVacuumTargetSafe`) | dual-port only |

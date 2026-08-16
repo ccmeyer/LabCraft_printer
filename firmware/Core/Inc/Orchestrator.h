@@ -290,6 +290,7 @@ public:
 	  volatile bool _acknowledgeRequested = false;
 	  volatile bool _shutdownRequested = false;
 	  volatile bool _selfTestAbortRequested = false;
+	  volatile bool _gripperRefreshResetRequested = false;
 
 
 

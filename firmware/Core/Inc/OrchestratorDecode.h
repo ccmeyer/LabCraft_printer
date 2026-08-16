@@ -10,7 +10,8 @@ enum class Action : uint8_t {
   SetAxisMaxSpeed,
   SetAxisAccel,
   SetAxisProfile,
-  Wait
+  Wait,
+  EnablePrintProfile
 };
 
 struct CommandView {
@@ -25,6 +26,8 @@ struct Intent {
   uint8_t axis = 0;
   uint32_t value = 0;
   uint32_t waitMs = 0;
+  bool deferredGripperRefresh = false;
+  bool parameterValid = true;
 };
 
 Intent decodeIntent(const CommandView& cmd);

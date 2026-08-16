@@ -164,6 +164,40 @@ TEST(GripperRefreshPolicyTests, DisablePreservesActiveCooldown)
         GripperRefreshPolicy::remainingDispenseCooldownMs(state, 125u, 50u));
 }
 
+TEST(GripperRefreshPolicyTests, DisableDuringClaimedPulsePreventsTimerRearm)
+{
+    GripperRefreshPolicy::State state{};
+    GripperRefreshPolicy::enableDeferred(state);
+    GripperRefreshPolicy::markRefreshDue(state);
+    CHECK_TRUE(GripperRefreshPolicy::claimPendingAfterDispense(state));
+
+    GripperRefreshPolicy::disable(state);
+    const auto directive = GripperRefreshPolicy::recordPulseCompleted(state, 100u);
+
+    CHECK_FALSE(GripperRefreshPolicy::isDeferred(state));
+    UNSIGNED_LONGS_EQUAL(
+        directiveValue(GripperRefreshPolicy::PeriodicTimerDirective::None),
+        directiveValue(directive));
+    UNSIGNED_LONGS_EQUAL(
+        25u,
+        GripperRefreshPolicy::remainingDispenseCooldownMs(state, 125u, 50u));
+}
+
+TEST(GripperRefreshPolicyTests, ExplicitPulseCompletionReanchorsDeferredInterval)
+{
+    GripperRefreshPolicy::State state{};
+    GripperRefreshPolicy::enableDeferred(state);
+    GripperRefreshPolicy::markRefreshDue(state);
+
+    const auto directive = GripperRefreshPolicy::recordPulseCompleted(state, 250u);
+
+    CHECK_FALSE(GripperRefreshPolicy::hasPending(state));
+    UNSIGNED_LONGS_EQUAL(250u, state.lastPulseCompletionMs);
+    UNSIGNED_LONGS_EQUAL(
+        directiveValue(GripperRefreshPolicy::PeriodicTimerDirective::StartOrReset),
+        directiveValue(directive));
+}
+
 TEST(GripperRefreshPolicyTests, CooldownHandlesZeroAndBoundaryTimes)
 {
     GripperRefreshPolicy::State state{};
