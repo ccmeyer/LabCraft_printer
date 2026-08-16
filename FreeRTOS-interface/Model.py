@@ -9058,6 +9058,138 @@ class ExperimentModel(QObject):
         plan = self.get_execution_plan_snapshot()
         return bool(plan is not None and plan.state is not ExecutionPlanState.PREPARED)
 
+    def get_calibration_application_eligibility(
+        self,
+        *,
+        printer_head=None,
+        stock_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return whether a calibration may change the current design/execution.
+
+        Running and recording calibration diagnostics is intentionally independent
+        from this decision. This method only controls applying a measured result
+        to the experiment design or authoritative execution plan.
+        """
+        resolved_stock_id = stock_id or self._printer_head_stock_id(printer_head)
+        if resolved_stock_id not in (None, ""):
+            resolved_stock_id = str(resolved_stock_id)
+
+        def _result(ok: bool, code: str, message: str) -> dict[str, Any]:
+            return {
+                "ok": bool(ok),
+                "code": str(code),
+                "message": str(message),
+                "stock_id": resolved_stock_id,
+            }
+
+        if self.is_read_only_legacy_execution() or (
+            getattr(self, "_execution_plan_reload_read_only", False)
+            and not self.is_authoritative_execution_runtime_active()
+        ):
+            return _result(
+                False,
+                "read_only_execution",
+                "Historical experiments are read-only; calibration results cannot modify them.",
+            )
+
+        plan = self.get_execution_plan_snapshot()
+        if (
+            plan is not None
+            and self.get_execution_plan_source() == "legacy_reconstruction"
+        ):
+            return _result(
+                False,
+                "read_only_execution",
+                "Historical experiments are read-only; calibration results cannot modify them.",
+            )
+
+        if not resolved_stock_id:
+            return _result(
+                False,
+                "missing_stock_context",
+                "The loaded printer-head stock identity is unavailable.",
+            )
+
+        if plan is None:
+            return _result(
+                True,
+                "mutable_design",
+                "This calibration result may be applied to the experiment design.",
+            )
+
+        if plan.state is ExecutionPlanState.COMPLETED:
+            return _result(
+                False,
+                "terminal_execution",
+                "This experiment is complete. Rechecks and calibrations can still be recorded, "
+                "but this result cannot modify the completed execution.",
+            )
+        if plan.state is ExecutionPlanState.ABORTED:
+            return _result(
+                False,
+                "terminal_execution",
+                "This execution was aborted. Rechecks and calibrations can still be recorded, "
+                "but this result cannot modify the aborted execution.",
+            )
+        if plan.state not in {
+            ExecutionPlanState.PREPARED,
+            ExecutionPlanState.ACTIVE,
+        }:
+            return _result(
+                False,
+                "terminal_execution",
+                "This execution is not in a state that permits calibration changes.",
+            )
+
+        if (
+            self.get_execution_plan_source() == "persisted_execution_plan"
+            and not self.is_authoritative_execution_runtime_active()
+        ):
+            return _result(
+                False,
+                "inactive_persisted_execution",
+                "The persisted execution is analysis only until it is explicitly activated.",
+            )
+
+        stocks = {stock.stock_id: stock for stock in plan.stocks}
+        if resolved_stock_id not in stocks:
+            return _result(
+                False,
+                "stock_not_in_execution",
+                "The loaded printer-head stock is not part of this execution plan.",
+            )
+
+        try:
+            added_droplets = self._added_droplets_for_stock(resolved_stock_id)
+        except Exception as exc:
+            return _result(
+                False,
+                "progress_unavailable",
+                f"Calibration application eligibility could not read execution progress: {exc}",
+            )
+        if added_droplets > 0:
+            return _result(
+                False,
+                "printed_progress",
+                "This printer head has already dispensed droplets in this execution; "
+                "its calibration can no longer be changed.",
+            )
+
+        try:
+            self._validate_runtime_matches_execution_plan(plan)
+        except Exception as exc:
+            return _result(
+                False,
+                "runtime_unavailable",
+                f"Calibration application requires the active finalized runtime: {exc}",
+            )
+
+        return _result(
+            True,
+            "execution_stock_eligible",
+            "This calibration result may be applied to the execution plan.",
+        )
+
     def _execution_progress_reference(self) -> ProgressExecutionReference | None:
         plan = self.get_execution_plan_snapshot()
         if plan is None or self.get_execution_plan_source() == "legacy_reconstruction":
@@ -10330,6 +10462,10 @@ class ExperimentModel(QObject):
         calibration_payload: dict,
         timestamp_utc: str | None = None,
     ) -> dict:
+        eligibility = self.get_calibration_application_eligibility(stock_id=stock_id)
+        if not eligibility["ok"]:
+            raise RuntimeError(eligibility["message"])
+
         printing_mode = normalize_printing_mode(printing_mode)
         self._last_authoritative_calibration_transition = None
         if (

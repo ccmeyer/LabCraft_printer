@@ -170,6 +170,22 @@ def test_registered_randomized_calibration_reload_execution_report(qapp, tmp_pat
         assertion_id: "pass"
         for assertion_id in RANDOMIZED_CALIBRATION_REQUIRED_ASSERTIONS
     }
+    completed_reload = next(
+        row
+        for row in workflow["assertion_results"]
+        if row["assertion_id"] == "execution.completed_terminal_reload_exact"
+    )
+    loader_evidence = completed_reload["evidence"]["loader"]
+    assert loader_evidence["checks"][
+        "printer_head_diagnostics_disabled"
+    ] is True
+    assert loader_evidence["checks"][
+        "printer_head_diagnostics_tooltip"
+    ] is True
+    assert loader_evidence["printer_head_diagnostics_enabled"] is False
+    assert "Historical experiments are analysis-only" in loader_evidence[
+        "printer_head_diagnostics_tooltip"
+    ]
     assert set(report["artifacts"]["screenshots"]) == set(
         RANDOMIZED_CALIBRATION_REQUIRED_SCREENSHOTS
     )

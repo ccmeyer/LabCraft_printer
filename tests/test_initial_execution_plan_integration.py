@@ -10,6 +10,7 @@ import pytest
 import Model as model_module
 from AuthoritativeExecutionLoad import inspect_authoritative_execution
 from ExecutionPlan import ExecutionPlanState, canonical_sha256, load_execution_plan
+from ExecutionPlanRevision import build_terminal_revision
 from ExecutionProgressStore import (
     decode_execution_progress,
     serialize_execution_progress,
@@ -807,6 +808,134 @@ def test_calibration_rejects_stock_with_printed_progress_without_new_revision(
 
     assert Path(em.execution_plan_file_path).read_bytes() == before_plan
     assert sorted(Path(em.execution_plan_revisions_dir_path).glob("revision_*.json")) == before_history
+
+
+def test_calibration_application_eligibility_allows_mutable_design(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+
+    result = em.get_calibration_application_eligibility(stock_id="draft-stock")
+
+    assert result == {
+        "ok": True,
+        "code": "mutable_design",
+        "message": "This calibration result may be applied to the experiment design.",
+        "stock_id": "draft-stock",
+    }
+
+
+def test_calibration_application_eligibility_is_stock_specific_after_progress(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    active = em.lock_execution_plan("printing_started")
+    printed_stock = next(stock for stock in active.stocks if stock.factor_name == "PURE_MM")
+    unprinted_stock = next(stock for stock in active.stocks if stock.stock_id != printed_stock.stock_id)
+
+    assert em.get_calibration_application_eligibility(
+        stock_id=printed_stock.stock_id
+    )["ok"] is True
+    assert em.get_calibration_application_eligibility(
+        stock_id=unprinted_stock.stock_id
+    )["ok"] is True
+
+    em._execution_plan_source = "persisted_execution_plan"
+    em._execution_plan_reload_read_only = True
+    em._authoritative_runtime_active = True
+    activated = em.get_calibration_application_eligibility(
+        stock_id=unprinted_stock.stock_id
+    )
+    assert activated["ok"] is True
+    assert activated["code"] == "execution_stock_eligible"
+
+    progress = json.loads(Path(em.progress_file_path).read_text(encoding="utf-8"))
+    stock_values = progress["added_droplets"][printed_stock.stock_id]
+    target_index = next(index for index, value in enumerate(stock_values) if value is not None)
+    stock_values[target_index] = 1
+    Path(em.progress_file_path).write_text(
+        serialize_execution_progress(progress),
+        encoding="utf-8",
+    )
+    em.read_progress_file(em.progress_file_path)
+
+    printed = em.get_calibration_application_eligibility(
+        stock_id=printed_stock.stock_id
+    )
+    unprinted = em.get_calibration_application_eligibility(
+        stock_id=unprinted_stock.stock_id
+    )
+
+    assert printed["ok"] is False
+    assert printed["code"] == "printed_progress"
+    assert "already dispensed" in printed["message"]
+    assert unprinted["ok"] is True
+    assert unprinted["code"] == "execution_stock_eligible"
+
+
+@pytest.mark.parametrize(
+    ("terminal_state", "message_fragment"),
+    (
+        (ExecutionPlanState.COMPLETED, "experiment is complete"),
+        (ExecutionPlanState.ABORTED, "execution was aborted"),
+    ),
+)
+def test_terminal_execution_disables_apply_without_writing(
+    experiment_model_factory,
+    terminal_state,
+    message_fragment,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    active = em.lock_execution_plan("printing_started")
+    stock = active.stocks[0]
+    terminal_counts = {
+        well.well_id: {
+            dispense.stock_id: (
+                dispense.target_dispenses
+                if terminal_state is ExecutionPlanState.COMPLETED
+                else 0
+            )
+            for dispense in well.dispenses
+        }
+        for well in active.wells
+    }
+    terminal = build_terminal_revision(
+        active,
+        state=terminal_state,
+        added_counts_by_well=terminal_counts,
+        reason="test_terminal_calibration_eligibility",
+    )
+    em._execution_plan_snapshot = terminal
+    em._last_authoritative_calibration_transition = "unchanged"
+    before = _directory_bytes(Path(em.experiment_dir_path))
+
+    eligibility = em.get_calibration_application_eligibility(stock_id=stock.stock_id)
+
+    assert eligibility["ok"] is False
+    assert eligibility["code"] == "terminal_execution"
+    assert message_fragment in eligibility["message"]
+    with pytest.raises(RuntimeError, match=message_fragment):
+        em.apply_execution_calibration(
+            stock_id=stock.stock_id,
+            new_effective_volume_nL=stock.effective_volume_nL,
+            printing_mode=stock.printing_mode,
+            printer_head_id="head-terminal",
+            factor_name=stock.factor_name,
+            option_name=stock.option_name,
+            is_fill=stock.units == "--",
+            calibration_payload={"pw_us": 1400, "pressure_psi": 1.2},
+        )
+
+    assert em._last_authoritative_calibration_transition == "unchanged"
+    assert _directory_bytes(Path(em.experiment_dir_path)) == before
 
 
 def test_lock_retry_repairs_progress_after_durable_revision_partial_failure(

@@ -936,8 +936,11 @@ The standard Python test selection runs one composed real-UI SIL scenario:
 `virtual_print_array_24_v1`, covering A1 through A24 with one virtual stock.
 It constructs the real MainWindow, Controller, Model, 16-by-24 plate widget,
 authoritative execution files, and simulated machine. It must complete within
-30 seconds and retain the normal report-v1 evidence and four named
-screenshots.
+60 seconds and retain the normal report-v1 evidence and four named
+screenshots. After the final well completes, the same live session reopens the
+printer-head calibration dialog and generates a synthetic diagnostic result.
+The report proves the preview and diagnostic controls remain available while
+Apply is unavailable and authoritative execution artifacts remain unchanged.
 
 Run the standard smoke directly with:
 
@@ -958,6 +961,19 @@ Longer composed SIL tiers are opt-in:
 
 .\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle
 ```
+
+To exercise the completed-execution fresh-session boundary directly, run:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q --run-sil-lifecycle `
+  tests\system\test_virtual_workflow_randomized_calibration_lifecycle.py
+```
+
+This reload check requires the printer-head diagnostic launcher to be disabled
+with historical-analysis guidance and verifies that activation causes no
+machine or simulator dispatch. If either boundary fails, retain the generated
+report and inspect the `execution.completed_terminal_reload_exact` or
+`calibration.post_completion_diagnostics_available` assertion evidence.
 
 The lifecycle command runs create/finalize, prepared rename/refinalize,
 post-start lock/editable-copy, and the 24-well soft-stop/resume workflow.

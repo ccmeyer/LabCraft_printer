@@ -9240,6 +9240,57 @@ class DropletImagingDialog(QtWidgets.QDialog):
             button.setToolTip(str(reason or "Select a usable characterization result to preview a new ejection volume."))
             button.setStyleSheet(neutral_style)
 
+    def _get_bridge_apply_eligibility(self):
+        experiment_model = getattr(getattr(self, "model", None), "experiment_model", None)
+        getter = getattr(
+            experiment_model,
+            "get_calibration_application_eligibility",
+            None,
+        )
+        if not callable(getter):
+            # Lightweight service/test models may not expose authoritative
+            # execution state. Preserve their existing mutable-design behavior.
+            return {
+                "ok": True,
+                "code": "eligibility_unavailable",
+                "message": "",
+                "stock_id": None,
+            }
+        try:
+            loaded_head_getter = getattr(self, "_get_loaded_printer_head", None)
+            printer_head = loaded_head_getter() if callable(loaded_head_getter) else None
+            result = getter(printer_head=printer_head)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "code": "eligibility_unavailable",
+                "message": f"Calibration application eligibility is unavailable: {exc}",
+                "stock_id": None,
+            }
+        if not isinstance(result, dict):
+            return {
+                "ok": False,
+                "code": "eligibility_unavailable",
+                "message": "Calibration application eligibility is unavailable.",
+                "stock_id": None,
+            }
+        return {
+            "ok": bool(result.get("ok")),
+            "code": str(result.get("code") or "eligibility_unavailable"),
+            "message": str(result.get("message") or ""),
+            "stock_id": result.get("stock_id"),
+        }
+
+    @staticmethod
+    def _bridge_status_with_apply_eligibility(status, eligibility):
+        text = str(status or "").strip()
+        if bool((eligibility or {}).get("ok")):
+            return text
+        reason = str((eligibility or {}).get("message") or "").strip()
+        if not reason or reason in text:
+            return text
+        return f"{text} {reason}".strip()
+
     def _has_applied_calibration_design_context(self):
         if bool(getattr(self, "service_mode", False)):
             return False
@@ -12934,6 +12985,32 @@ class DropletImagingDialog(QtWidgets.QDialog):
         resolved_row = candidate_validation.get("row")
         if isinstance(resolved_row, dict):
             raw = dict(resolved_row)
+
+        eligibility_getter = getattr(self, "_get_bridge_apply_eligibility", None)
+        eligibility = (
+            eligibility_getter()
+            if callable(eligibility_getter)
+            else DropletImagingDialog._get_bridge_apply_eligibility(self)
+        )
+        if not eligibility.get("ok"):
+            reason = str(
+                eligibility.get("message")
+                or "This calibration result cannot be applied to the experiment."
+            )
+            self._set_bridge_apply_button_state("unavailable", reason)
+            self.bridge_status_label.setText(
+                self._bridge_status_with_apply_eligibility(
+                    self.bridge_status_label.text(),
+                    eligibility,
+                )
+            )
+            QtWidgets.QMessageBox.information(
+                self,
+                "Apply unavailable",
+                reason,
+            )
+            return
+
         mode_pair_getter = getattr(self, "_bridge_result_mode_pair", None)
         if callable(mode_pair_getter):
             current_mode, result_mode = mode_pair_getter(raw)
@@ -14081,13 +14158,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "original_printing_mode": original_mode,
                 "applied_printing_mode": applied_mode,
             }
-            if self._selected_summary_row_matches_applied(raw):
+            eligibility = self._get_bridge_apply_eligibility()
+            if not eligibility.get("ok"):
+                self._set_bridge_apply_button_state(
+                    "unavailable",
+                    eligibility.get("message"),
+                )
+            elif self._selected_summary_row_matches_applied(raw):
                 self._set_bridge_apply_button_state("applied")
             else:
                 self._set_bridge_apply_button_state("ready")
-            self.bridge_status_label.setText(
+            status = (
                 f"{status_prefix}Preview uses the selected result ejection volume of {mean_nL:.3f} nL."
                 f"{mode_switch_suffix}"
+            )
+            self.bridge_status_label.setText(
+                self._bridge_status_with_apply_eligibility(status, eligibility)
             )
             return
 
@@ -14119,7 +14205,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "applied_printing_mode": applied_mode,
         }
         can_apply = self._bridge_preview_payload["n_stocks"] == 1
-        if can_apply and self._selected_summary_row_matches_applied(raw):
+        eligibility = self._get_bridge_apply_eligibility()
+        if can_apply and not eligibility.get("ok"):
+            self._set_bridge_apply_button_state(
+                "unavailable",
+                eligibility.get("message"),
+            )
+        elif can_apply and self._selected_summary_row_matches_applied(raw):
             self._set_bridge_apply_button_state("applied")
         elif can_apply:
             self._set_bridge_apply_button_state("ready")
@@ -14129,9 +14221,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "Apply supports single-stock reagents only right now.",
             )
         if can_apply:
-            self.bridge_status_label.setText(
+            status = (
                 f"{status_prefix}Preview uses the selected result ejection volume of {mean_nL:.3f} nL."
                 f"{mode_switch_suffix}"
+            )
+            self.bridge_status_label.setText(
+                self._bridge_status_with_apply_eligibility(status, eligibility)
             )
         else:
             self.bridge_status_label.setText(

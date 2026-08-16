@@ -1,5 +1,6 @@
 import json
 import time
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -130,6 +131,13 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
         item["action_id"] for item in workflow["action_results"]
     } == COMPOSED_SMOKE_ACTION_IDS
     assert {item["status"] for item in workflow["action_results"]} == {"pass"}
+    action_counts = Counter(
+        item["action_id"] for item in workflow["action_results"]
+    )
+    assert action_counts["calibration.open_via_ui"] == 2
+    assert action_counts["calibration.generate_via_ui"] == 2
+    assert action_counts["calibration.select_via_ui"] == 2
+    assert action_counts["calibration.apply_via_ui"] == 1
     surfaces = {
         item["action_id"]: item["interaction_surface"]
         for item in workflow["action_results"]
@@ -148,6 +156,17 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
         for item in workflow["assertion_results"]
     }
     assert decisions == {item: "pass" for item in SMOKE_REQUIRED_ASSERTIONS}
+
+    diagnostics = workflow["post_completion_diagnostics"]
+    assert diagnostics["failed_checks"] == []
+    assert all(diagnostics["checks"].values())
+    assert diagnostics["boundary"]["plan_state"] == "completed"
+    assert diagnostics["launch"]["button_enabled"] is True
+    assert diagnostics["preview"]["preview_rows"] > 0
+    assert diagnostics["preview"]["load_selected_enabled"] is True
+    assert diagnostics["preview"]["apply_state"] == "unavailable"
+    assert diagnostics["preview"]["apply_enabled"] is False
+    assert diagnostics["before"] == diagnostics["after"]
 
     launch = next(
         item

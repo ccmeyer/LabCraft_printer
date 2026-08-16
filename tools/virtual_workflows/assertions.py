@@ -23,6 +23,12 @@ from tools.virtual_workflows.dispense_counts import (
 )
 
 
+POST_COMPLETION_CALIBRATION_MESSAGE = (
+    "This experiment is complete. Rechecks and calibrations can still be recorded, "
+    "but this result cannot modify the completed execution."
+)
+
+
 @dataclass(frozen=True)
 class AssertionResult:
     assertion_id: str
@@ -2216,6 +2222,168 @@ def calibration_assertion(
         "execution.applied_calibration_valid",
         "calibrated",
         ("model", "simulator", "persistence"),
+        inspect,
+    )
+
+
+def post_completion_diagnostics_assertion(
+    *,
+    before: Any,
+    after: Any,
+    boundary: Mapping[str, Any],
+    launch: Mapping[str, Any],
+    generated: Mapping[str, Any],
+    selected: Mapping[str, Any],
+    preview: Mapping[str, Any],
+    expected_stock_id: str,
+    expected_printer_head_id: str,
+) -> AssertionResult:
+    """Prove same-session diagnostics cannot mutate a completed execution."""
+
+    def inspect() -> tuple[bool, Mapping[str, Any]]:
+        observed_boundary = dict(boundary)
+        observed_launch = dict(launch)
+        observed_generated = dict(generated)
+        observed_selected = dict(selected)
+        observed_preview = dict(preview)
+        checks = {
+            "completed_live_boundary": (
+                observed_boundary.get("plan_state") == "completed"
+                and observed_boundary.get("array_state") == "idle"
+                and bool(observed_boundary.get("queue_drained"))
+                and not bool(observed_boundary.get("historical_read_only"))
+            ),
+            "matching_head_remains_loaded": (
+                bool(observed_launch.get("head_present"))
+                and observed_launch.get("stock_id") == expected_stock_id
+                and observed_launch.get("printer_head_id")
+                == expected_printer_head_id
+            ),
+            "diagnostics_launch_available": (
+                bool(observed_launch.get("button_enabled"))
+                and not bool(observed_launch.get("historical_read_only"))
+            ),
+            "diagnostic_result_generated": bool(
+                observed_generated.get("result_fingerprint")
+            ),
+            "diagnostic_result_selected": (
+                bool(observed_selected.get("result_fingerprint"))
+                and observed_selected.get("result_fingerprint")
+                == observed_generated.get("result_fingerprint")
+            ),
+            "preview_visible": (
+                bool(observed_preview.get("payload"))
+                and int(observed_preview.get("preview_rows", 0) or 0) > 0
+            ),
+            "ordinary_calibration_controls_available": bool(
+                observed_preview.get("calibrate_all_enabled")
+            ),
+            "load_selected_available": bool(
+                observed_preview.get("load_selected_enabled")
+            ),
+            "apply_unavailable": (
+                observed_preview.get("apply_state") == "unavailable"
+                and not bool(observed_preview.get("apply_enabled"))
+            ),
+            "completion_reason_visible": (
+                POST_COMPLETION_CALIBRATION_MESSAGE
+                in str(observed_preview.get("apply_tooltip") or "")
+                and POST_COMPLETION_CALIBRATION_MESSAGE
+                in str(observed_preview.get("status") or "")
+            ),
+            "dialog_closed": not bool(
+                observed_boundary.get("dialog_visible_after")
+            ),
+            "no_errors_or_unexpected_dialogs": (
+                int(observed_boundary.get("error_count", -1)) == 0
+                and int(
+                    observed_boundary.get("unexpected_dialog_count", -1)
+                )
+                == 0
+            ),
+            "design_immutable": (
+                before.design_json == after.design_json
+                and before.design_sha256 == after.design_sha256
+                and before.plan_design_sha256 == after.plan_design_sha256
+                and before.key_rows_json == after.key_rows_json
+                and before.concentration_rows_json
+                == after.concentration_rows_json
+            ),
+            "plan_immutable": (
+                before.plan_json == after.plan_json
+                and before.plan_id == after.plan_id
+                and before.plan_revision == after.plan_revision
+                and before.plan_state == after.plan_state == "completed"
+                and before.history_json == after.history_json
+            ),
+            "progress_immutable": (
+                before.progress_schema_version
+                == after.progress_schema_version
+                and before.progress_plan_id == after.progress_plan_id
+                and before.progress_plan_revision
+                == after.progress_plan_revision
+                and before.progress_targets == after.progress_targets
+                and before.total_added_droplets
+                == after.total_added_droplets
+                and before.completed_well_ids == after.completed_well_ids
+            ),
+            "resume_boundary_immutable": (
+                before.resume_present == after.resume_present
+                and before.resume_state == after.resume_state
+                and before.resume_plan_id == after.resume_plan_id
+                and before.resume_plan_revision == after.resume_plan_revision
+                and before.resume_intent_count == after.resume_intent_count == 0
+            ),
+            "applied_calibration_linkage_immutable": (
+                before.calibration_present == after.calibration_present
+                and before.calibration_record_count
+                == after.calibration_record_count
+                and before.manual_refuel_check_count
+                == after.manual_refuel_check_count
+            ),
+            "authoritative_bundles_valid": bool(
+                before.bundle_valid and after.bundle_valid
+            ),
+        }
+        evidence = {
+            "checks": checks,
+            "failed_checks": [
+                name for name, passed in checks.items() if not passed
+            ],
+            "boundary": observed_boundary,
+            "launch": observed_launch,
+            "generated": observed_generated,
+            "selected": observed_selected,
+            "preview": observed_preview,
+            "before": {
+                "plan_id": before.plan_id,
+                "plan_revision": before.plan_revision,
+                "plan_state": before.plan_state,
+                "design_sha256": before.design_sha256,
+                "total_added_droplets": before.total_added_droplets,
+                "completed_well_ids": list(before.completed_well_ids),
+                "resume_state": before.resume_state,
+                "resume_intent_count": before.resume_intent_count,
+                "calibration_record_count": before.calibration_record_count,
+            },
+            "after": {
+                "plan_id": after.plan_id,
+                "plan_revision": after.plan_revision,
+                "plan_state": after.plan_state,
+                "design_sha256": after.design_sha256,
+                "total_added_droplets": after.total_added_droplets,
+                "completed_well_ids": list(after.completed_well_ids),
+                "resume_state": after.resume_state,
+                "resume_intent_count": after.resume_intent_count,
+                "calibration_record_count": after.calibration_record_count,
+            },
+        }
+        return all(checks.values()), evidence
+
+    return evaluate_assertion(
+        "calibration.post_completion_diagnostics_available",
+        "post_completion_diagnostics",
+        ("ui", "model", "persistence", "simulator"),
         inspect,
     )
 

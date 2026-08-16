@@ -317,6 +317,13 @@ def _build_experiment_model(current_stock, *, current_mode="droplet"):
         get_fill_reagent_name=lambda: "Fill",
         find_option_by_reagent_name=_find_option_by_reagent_name,
         find_key_for_reagent=_find_key_for_reagent,
+        get_execution_plan_snapshot=lambda: None,
+        get_calibration_application_eligibility=lambda **_kwargs: {
+            "ok": True,
+            "code": "mutable_design",
+            "message": "This calibration result may be applied to the experiment design.",
+            "stock_id": str(current_stock),
+        },
         get_plan_for_key=_get_plan_for_key,
         preview_requantized_for_option=_preview_requantized_for_option,
         apply_droplet_volume_for_option=_apply_droplet_volume_for_option,
@@ -755,6 +762,154 @@ def test_recheck_selected_button_enables_and_dispatches_selected_row(monkeypatch
     assert calls
     assert calls[0]["source_phase_key"] == "pressure_sweep_characterization"
     assert calls[0]["delay_us"] == 9000
+
+
+def test_completed_execution_keeps_diagnostics_available_but_disables_apply(
+    monkeypatch,
+    qapp,
+    tmp_path,
+):
+    completion_message = (
+        "This experiment is complete. Rechecks and calibrations can still be recorded, "
+        "but this result cannot modify the completed execution."
+    )
+    trajectory_result = {
+        "pressures": [
+            {"pressure": 1.2, "fit": {"vx_px_per_us": 0.02, "vy_px_per_us": 0.05}},
+        ],
+        "valid_fit_pressures": [1.2],
+        "nozzle_center_px": [100, 100],
+        "emergence_time_us": 4000,
+    }
+    runs = [
+        _make_run(
+            "run_complete",
+            trajectory_result=trajectory_result,
+            sweep_entries=[
+                {
+                    "timestamp": "2026-03-17T11:00:00Z",
+                    "pw_us": 1400,
+                    "pressure_psi": 1.20,
+                    "delay_us": 9000,
+                    "mean_position_machine": {"X": 1234, "Y": 2000, "Z": 7654},
+                    "nominal_target_xyz": [1200, 2000, 7600],
+                    "nozzle_center_px": [100, 100],
+                    "nozzle_center_machine": {"X": 1000, "Y": 2000, "Z": 9000},
+                    "emergence_time_us": 4000,
+                    "mean_nL": 9.8,
+                    "cv_pct": 4.2,
+                    "valid": True,
+                }
+            ],
+        )
+    ]
+    experiment_model = _build_experiment_model("Water")
+    experiment_model.get_execution_plan_snapshot = lambda: SimpleNamespace()
+    experiment_model.get_calibration_application_eligibility = Mock(
+        return_value={
+            "ok": False,
+            "code": "terminal_execution",
+            "message": completion_message,
+            "stock_id": "Water",
+        }
+    )
+    dialog, _manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        active_run_id="run_complete",
+        experiment_model=experiment_model,
+    )
+    recheck_calls = []
+    dialog.controller.start_droplet_recheck_characterization = (
+        lambda row: recheck_calls.append(dict(row)) or True
+    )
+
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+    dialog._update_load_button_state()
+    dialog._update_recheck_button_state()
+
+    assert dialog.bridge_table.rowCount() == 1
+    assert not dialog.bridge_apply_btn.isEnabled()
+    assert completion_message in dialog.bridge_apply_btn.toolTip()
+    assert completion_message in dialog.bridge_status_label.text()
+    assert dialog.load_selected_button.isEnabled()
+    assert dialog.recheck_selected_button.isEnabled()
+
+    dialog.recheck_selected_button.click()
+    assert recheck_calls
+
+    dialog.deleteLater()
+
+
+def test_apply_rechecks_eligibility_before_mutating_stale_preview(
+    monkeypatch,
+    qapp,
+    tmp_path,
+):
+    runs = [
+        _make_run(
+            "run_stale",
+            sweep_entries=[
+                {
+                    "timestamp": "2026-03-18T09:00:00Z",
+                    "pw_us": 1400,
+                    "pressure_psi": 1.20,
+                    "mean_nL": 10.0,
+                    "cv_pct": 4.0,
+                    "valid": True,
+                },
+            ],
+        )
+    ]
+    completion_message = (
+        "This experiment is complete. Rechecks and calibrations can still be recorded, "
+        "but this result cannot modify the completed execution."
+    )
+    state = {"complete": False}
+    experiment_model = _build_experiment_model("Water")
+    experiment_model.get_execution_plan_snapshot = lambda: SimpleNamespace()
+    experiment_model.get_calibration_application_eligibility = lambda **_kwargs: {
+        "ok": not state["complete"],
+        "code": "terminal_execution" if state["complete"] else "execution_stock_eligible",
+        "message": completion_message if state["complete"] else "",
+        "stock_id": "Water",
+    }
+    apply_mock = Mock(wraps=experiment_model.apply_droplet_volume_for_option)
+    experiment_model.apply_droplet_volume_for_option = apply_mock
+    info_calls = []
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "information",
+        lambda *args, **kwargs: info_calls.append((args, kwargs)),
+    )
+    dialog, _manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        active_run_id="run_stale",
+        experiment_model=experiment_model,
+    )
+
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+    assert dialog.bridge_apply_btn.isEnabled()
+
+    state["complete"] = True
+    dialog._apply_previewed_droplet_volume()
+
+    apply_mock.assert_not_called()
+    assert not dialog.bridge_apply_btn.isEnabled()
+    assert completion_message in dialog.bridge_apply_btn.toolTip()
+    assert completion_message in dialog.bridge_status_label.text()
+    assert info_calls
+    assert info_calls[-1][0][1] == "Apply unavailable"
+    assert info_calls[-1][0][2] == completion_message
+
+    dialog.deleteLater()
 
 
 def test_characterization_summary_rows_include_latest_stream_result_once_and_flag_invalid_streams(tmp_path):

@@ -88,6 +88,18 @@
       "max_evidence_age_days": 30
     },
     {
+      "id": "calibration.post_completion_diagnostics",
+      "risk": "Terminal completion could prevent same-session printer-head diagnostics or allow a diagnostic result to mutate completed execution artifacts.",
+      "owner_role": "calibration verification maintainers",
+      "status": "covered",
+      "required_verification_layers": ["contract", "host_sil"],
+      "active_scenario_ids": ["print_array_smoke_24_v1"],
+      "required_assertion_ids": ["calibration.post_completion_diagnostics_available"],
+      "related_source_areas": ["FreeRTOS-interface/View.py", "FreeRTOS-interface/CalibrationClasses/View.py", "FreeRTOS-interface/Model.py"],
+      "limitations": ["The host SIL uses a synthetic full calibration; trajectory-aware Recheck dispatch remains focused Qt integration coverage and no physical camera, pressure, or droplet behavior is claimed."],
+      "max_evidence_age_days": 2
+    },
+    {
       "id": "experiment.editor_create_finalize",
       "risk": "A user may be unable to create and finalize an experiment through the editor.",
       "owner_role": "experiment lifecycle maintainers",
@@ -525,8 +537,8 @@
       "supported_platforms": ["windows_sil"],
       "timeout_seconds": 60,
       "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "machine.configure_print_settings_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.wait_for_completions", "artifact.capture_milestone", "scenario.teardown"],
-      "assertion_ids": ["sil.host_hardware_disabled", "machine.normal_ui_ready", "experiment.prepared_bundle_valid", "execution.rack_head_associated", "execution.applied_calibration_valid", "execution.terminal_bundle_valid", "artifacts.cleanup_complete"],
-      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.terminal_bundle"],
+      "assertion_ids": ["sil.host_hardware_disabled", "machine.normal_ui_ready", "experiment.prepared_bundle_valid", "execution.rack_head_associated", "execution.applied_calibration_valid", "execution.terminal_bundle_valid", "calibration.post_completion_diagnostics_available", "artifacts.cleanup_complete"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "execution.array_happy_path", "execution.terminal_bundle", "calibration.post_completion_diagnostics"],
       "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
       "expected_outcome": "pass",
       "limitations": ["The standard smoke proves application-facing SIL correctness, not sustained performance, firmware, or physical printing."],
@@ -1609,6 +1621,12 @@
         "id": "execution.applied_calibration_valid",
         "evidence_kind": "report_path",
         "evidence_path": "metrics.workflow.values.assertion_results",
+        "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
+      },
+      {
+        "id": "calibration.post_completion_diagnostics_available",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.workflow.values.post_completion_diagnostics",
         "test_node_ids": ["tests/system/test_virtual_workflow_smoke.py::test_standard_smoke_completes_with_required_evidence"]
       },
       {

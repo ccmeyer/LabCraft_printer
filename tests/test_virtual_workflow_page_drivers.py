@@ -729,6 +729,14 @@ def test_completed_loader_inspects_terminal_bundle_without_activation(
     stock_prep_button.setEnabled(False)
     calibration_button = QtWidgets.QPushButton()
     calibration_button.setEnabled(False)
+    printer_head_calibration_button = QtWidgets.QPushButton(
+        "Calibrate Printer head"
+    )
+    printer_head_calibration_button.setEnabled(False)
+    printer_head_calibration_button.setToolTip(
+        "Historical experiments are analysis-only. Return to a live experiment "
+        "to run printer-head diagnostics."
+    )
     main_view = QtWidgets.QWidget()
     main_view.well_plate_widget = SimpleNamespace(
         well_labels=[[completed_label]],
@@ -738,6 +746,9 @@ def test_completed_loader_inspects_terminal_bundle_without_activation(
     )
     main_view.experiment_task_list = SimpleNamespace(
         next_label=QtWidgets.QLabel("Next: Experiment complete")
+    )
+    main_view.pressure_box = SimpleNamespace(
+        calibrate_pressure_button=printer_head_calibration_button
     )
     main_view.show()
     context = _context(qapp, main_view)
@@ -794,6 +805,10 @@ def test_completed_loader_inspects_terminal_bundle_without_activation(
     assert evidence["display_projection_performed"] is True
     assert evidence["runtime_assignments"] == {"A1": "reaction-1"}
     assert evidence["runtime_assignment_count"] == 1
+    assert evidence["printer_head_diagnostics_enabled"] is False
+    assert "Historical experiments are analysis-only" in evidence[
+        "printer_head_diagnostics_tooltip"
+    ]
     assert evidence["runtime_assignments_sha256"] == (
         evidence["expected_assignments_sha256"]
     )

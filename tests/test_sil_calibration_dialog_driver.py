@@ -279,6 +279,9 @@ class _Dialog(QtWidgets.QDialog):
             )
         self.bridge_apply_btn = QtWidgets.QPushButton("Apply selected calibration to design")
         self.bridge_apply_btn.setEnabled(True)
+        self._bridge_apply_button_state = "available"
+        self.load_selected_button = QtWidgets.QPushButton("Load selected")
+        self.recheck_selected_button = QtWidgets.QPushButton("Recheck")
         self.bridge_apply_btn.clicked.connect(
             lambda: QtWidgets.QMessageBox.information(self, "Applied", "Applied")
         )
@@ -346,6 +349,11 @@ def test_calibration_dialog_driver_uses_visible_qt_controls(qapp):
     ]
     assert selected["synthetic"] is True
     assert preview["apply_enabled"] is True
+    assert preview["apply_state"] == "available"
+    assert preview["apply_tooltip"] == ""
+    assert preview["load_selected_enabled"] is True
+    assert preview["recheck_enabled"] is True
+    assert preview["calibrate_all_enabled"] is True
     assert preview["payload"]["new_droplet_nL"] == row["mean_nL"]
     assert preview["visible_table"] == {
         "headers": [

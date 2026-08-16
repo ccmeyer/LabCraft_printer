@@ -3026,6 +3026,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.model.machine_model.machine_state_updated.connect(self.update_regulation_button_state)
         self.model.machine_model.regulation_state_changed.connect(self.update_regulation_button)
         self.model.machine_model.printing_parameters_updated.connect(self.update_printing_controls)
+        experiment_loaded_signal = getattr(self.model, "experiment_loaded", None)
+        if experiment_loaded_signal is not None:
+            experiment_loaded_signal.connect(self._refresh_droplet_imager_button_state)
         transport_fault_signal = getattr(self.controller, "transport_fault_ui_signal", None)
         if transport_fault_signal is not None:
             transport_fault_signal.connect(self.handle_transport_fault_ui)
@@ -3633,9 +3636,26 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             or getattr(self, "_droplet_imager_dialog", None) is not None
         )
 
+    def _historical_experiment_is_read_only(self):
+        getter = getattr(self.model, "is_read_only_experiment_view_active", None)
+        return bool(callable(getter) and getter())
+
+    @staticmethod
+    def _historical_calibration_unavailable_message():
+        return (
+            "Historical experiments are analysis-only. Return to a live experiment "
+            "to run printer-head diagnostics."
+        )
+
     def _refresh_droplet_imager_button_state(self):
         button = getattr(self, "calibrate_pressure_button", None)
-        if button is not None and not self.legacy_mode:
+        if button is None:
+            return
+        if self._historical_experiment_is_read_only():
+            button.setEnabled(False)
+            button.setToolTip(self._historical_calibration_unavailable_message())
+            return
+        if not self.legacy_mode:
             simulation_mode = bool(
                 getattr(
                     getattr(self.main_window, "runtime_context", None),
@@ -3656,6 +3676,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 )
             else:
                 button.setEnabled(not self._droplet_imager_launch_is_active())
+                button.setToolTip("")
 
     def bind_simulation_workflows(
         self,
@@ -3872,6 +3893,14 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def calibrate_pressure(self):
         """Calibrate the pressure for a specific printer head."""
+        if self._historical_experiment_is_read_only():
+            self._refresh_droplet_imager_button_state()
+            self.popup_message_signal.emit(
+                "Historical Experiment Read-Only",
+                self._historical_calibration_unavailable_message(),
+            )
+            return
+
         # if not self.controller.check_if_all_completed():
         #     self.popup_message_signal.emit("Cannot calibrate pressure","Please wait for the current actions to complete")
         #     return
@@ -4272,6 +4301,14 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         """Open the droplet imager dialog after verifying prerequisites."""
         if self._droplet_imager_launch_is_active():
             self._reject_duplicate_droplet_imager_launch()
+            return
+
+        if self._historical_experiment_is_read_only():
+            self._refresh_droplet_imager_button_state()
+            self.popup_message_signal.emit(
+                "Historical Experiment Read-Only",
+                self._historical_calibration_unavailable_message(),
+            )
             return
 
         if getattr(self.main_window, "runtime_context", None) is SIMULATION_RUNTIME_CONTEXT:

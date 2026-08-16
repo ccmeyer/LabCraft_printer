@@ -127,13 +127,21 @@ def _make_main_window(profile, popups, *, popup_response=QMessageBox.StandardBut
     )
 
 
-def _make_model(machine_model, events, *, printer_head=None):
+def _make_model(
+    machine_model,
+    events,
+    *,
+    printer_head=None,
+    read_only_experiment=False,
+):
     return SimpleNamespace(
         machine_model=machine_model,
+        experiment_loaded=_SignalStub(),
         rack_model=SimpleNamespace(get_gripper_printer_head=Mock(return_value=printer_head)),
         print_profiles=[dict(profile) for profile in _PRINT_PROFILES],
         reload_droplet_model=Mock(side_effect=lambda: events.append("reload_droplet_model")),
         reload_refuel_model=Mock(side_effect=lambda: events.append("reload_refuel_model")),
+        is_read_only_experiment_view_active=lambda: bool(read_only_experiment),
     )
 
 
@@ -880,6 +888,84 @@ def test_current_profile_calibrate_pressure_opens_droplet_imager_at_camera(monke
     )
     controller.disable_print_profile.assert_called_once_with()
     assert box._pressure_render_suspended is False
+
+
+def test_same_session_completion_keeps_printer_head_calibration_available(qapp):
+    events = []
+    popups = []
+    model = _make_model(
+        _FakeMachineModel(regulating_print_pressure=True, current_location="camera"),
+        events,
+        printer_head=object(),
+        read_only_experiment=False,
+    )
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        model,
+        _make_controller(events),
+    )
+
+    box._refresh_droplet_imager_button_state()
+
+    assert box.calibrate_pressure_button.isEnabled()
+    assert box.calibrate_pressure_button.toolTip() == ""
+
+
+def test_historical_read_only_view_disables_and_rejects_calibration_launch(qapp):
+    events = []
+    popups = []
+    controller = _make_controller(events)
+    model = _make_model(
+        _FakeMachineModel(regulating_print_pressure=True, current_location="camera"),
+        events,
+        printer_head=object(),
+        read_only_experiment=True,
+    )
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        model,
+        controller,
+    )
+
+    box._refresh_droplet_imager_button_state()
+    box.droplet_imager()
+
+    assert not box.calibrate_pressure_button.isEnabled()
+    assert "Historical experiments are analysis-only" in box.calibrate_pressure_button.toolTip()
+    assert popups == [
+        (
+            "Historical Experiment Read-Only",
+            "Historical experiments are analysis-only. Return to a live experiment "
+            "to run printer-head diagnostics.",
+        )
+    ]
+    controller.check_if_all_completed.assert_not_called()
+    assert events == []
+
+
+def test_experiment_load_refreshes_historical_calibration_launch_state(qapp):
+    events = []
+    popups = []
+    read_only = {"active": False}
+    model = _make_model(
+        _FakeMachineModel(regulating_print_pressure=True, current_location="camera"),
+        events,
+        printer_head=object(),
+    )
+    model.is_read_only_experiment_view_active = lambda: read_only["active"]
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        model,
+        _make_controller(events),
+    )
+
+    assert box.calibrate_pressure_button.isEnabled()
+
+    read_only["active"] = True
+    model.experiment_loaded.emit()
+
+    assert not box.calibrate_pressure_button.isEnabled()
+    assert "Historical experiments are analysis-only" in box.calibrate_pressure_button.toolTip()
 
 
 def test_nested_refuel_window_shares_calibration_profile_lease(monkeypatch, qapp):

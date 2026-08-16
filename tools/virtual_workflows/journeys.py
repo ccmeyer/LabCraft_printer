@@ -55,6 +55,7 @@ from tools.virtual_workflows.assertions import (
     multi_stock_prepared_assertion,
     execution_lifecycle_assertions,
     prepared_execution_assertion,
+    post_completion_diagnostics_assertion,
     rack_head_assertion,
     real_application_assertion,
     randomized_joined_design_assertion,
@@ -116,7 +117,11 @@ from tools.virtual_workflows.journey_phases import (
     run_clean_authoritative_session_rotation_boundary,
     run_precalibrated_stock_passes,
 )
-from tools.virtual_workflows.page_drivers import ExperimentLoaderDriver
+from tools.virtual_workflows.page_drivers import (
+    CalibrationDialogDriver,
+    ExperimentLoaderDriver,
+    MachineControlsDriver,
+)
 from tools.virtual_workflows.report import ComposedReportPayload
 from tools.virtual_workflows.joined_interaction_cases import (
     DESIGN_A_STOCK_ID,
@@ -238,6 +243,7 @@ SMOKE_REQUIRED_ASSERTIONS = (
     "execution.rack_head_associated",
     "execution.applied_calibration_valid",
     "execution.terminal_bundle_valid",
+    "calibration.post_completion_diagnostics_available",
     "artifacts.cleanup_complete",
 )
 REGRESSION_REQUIRED_ASSERTIONS = (
@@ -1359,6 +1365,119 @@ def _multi_passes(runtime: JourneyRuntime) -> tuple[StockPassSpec, ...]:
     return tuple(result)
 
 
+def _run_post_completion_diagnostics(
+    runtime: JourneyRuntime,
+    stock_pass: StockPassSpec,
+) -> None:
+    """Exercise printer-head diagnostics after the terminal live boundary."""
+
+    context = runtime.context
+    machine = MachineControlsDriver(context)
+    before = capture_authoritative_bundle(context)
+    launch = machine.inspect_calibration_launch_state()
+    from ExecutionCalibrationStore import load_execution_calibrations
+
+    calibration_records = load_execution_calibrations(
+        context.experiment_model.execution_calibrations_file_path
+    ).records.values()
+    applied_record = next(
+        record
+        for record in calibration_records
+        if str(record.stock_id) == stock_pass.stock_id
+    )
+    expected_printer_head_id = str(applied_record.printer_head_id)
+    dialog_state: dict[str, Any] = {}
+
+    def open_calibration() -> Mapping[str, Any]:
+        dialog = machine.open_calibration_dialog()
+        dialog_state["dialog"] = dialog
+        return {
+            **launch,
+            "window_title": str(dialog.windowTitle() or ""),
+            "dialog_visible": bool(dialog.isVisible()),
+        }
+
+    runtime.harness.run_action(
+        "calibration.open_via_ui",
+        open_calibration,
+    )
+    calibration = CalibrationDialogDriver(
+        context.app,
+        dialog_state["dialog"],
+        timeout_seconds=min(20.0, context.deadline.remaining_seconds()),
+    )
+    generated: dict[str, Any] = {}
+
+    def generate() -> Mapping[str, Any]:
+        result = calibration.generate_from_tab(stock_pass.calibration_mode)
+        generated.update(result)
+        return {
+            "stock_id": stock_pass.stock_id,
+            "result_fingerprint": result.get("synthetic_result_fingerprint"),
+            "printing_mode": result.get("printing_mode"),
+        }
+
+    generated_evidence = runtime.harness.run_action(
+        "calibration.generate_via_ui",
+        generate,
+    )["evidence"]
+    preview: dict[str, Any] = {}
+
+    def select_and_close() -> Mapping[str, Any]:
+        selected = calibration.select_result(
+            str(generated["synthetic_result_fingerprint"])
+        )
+        preview.update(
+            json.loads(json.dumps(calibration.inspect_preview(), sort_keys=True))
+        )
+        calibration.close()
+        return {
+            "stock_id": stock_pass.stock_id,
+            "result_fingerprint": selected.get(
+                "synthetic_result_fingerprint"
+            ),
+            "dialog_visible_after": bool(
+                dialog_state["dialog"].isVisible()
+            ),
+        }
+
+    selected_evidence = runtime.harness.run_action(
+        "calibration.select_via_ui",
+        select_and_close,
+    )["evidence"]
+    after = capture_authoritative_bundle(context)
+    plan = context.experiment_model.get_execution_plan_snapshot()
+    read_only_getter = getattr(
+        context.model, "is_read_only_experiment_view_active", None
+    )
+    boundary = {
+        "plan_state": str(plan.state.value),
+        "array_state": context.controller.get_array_run_state(),
+        "queue_drained": bool(context.machine.check_if_all_completed()),
+        "historical_read_only": bool(
+            callable(read_only_getter) and read_only_getter()
+        ),
+        "dialog_visible_after": bool(dialog_state["dialog"].isVisible()),
+        "unexpected_dialog_count": len(context.unexpected_dialogs),
+        "error_count": len(context.errors),
+    }
+    assertion = post_completion_diagnostics_assertion(
+        before=before,
+        after=after,
+        boundary=boundary,
+        launch=launch,
+        generated=generated_evidence,
+        selected=selected_evidence,
+        preview=preview,
+        expected_stock_id=stock_pass.stock_id,
+        expected_printer_head_id=expected_printer_head_id,
+    )
+    runtime.add_assertion(assertion)
+    runtime.observations["post_completion_diagnostics"] = dict(
+        assertion.evidence
+    )
+
+
 def _smoke_body(runtime: JourneyRuntime) -> None:
     expected_wells = _well_ids(runtime.fixture)
     runtime.observations["expected_wells"] = expected_wells
@@ -1419,6 +1538,8 @@ def _smoke_body(runtime: JourneyRuntime) -> None:
             expected_well_ids=expected_wells,
         )
     )
+    if profile is None:
+        _run_post_completion_diagnostics(runtime, stock_pass)
 
 
 def _editor_body(runtime: JourneyRuntime) -> None:
@@ -4136,6 +4257,9 @@ def _smoke_payload(
             "well_update_count": len(completed),
             "array_states": list(runtime.context.array_states),
             "array_complete_count": len(runtime.observations.get("array_completions", ())),
+            "post_completion_diagnostics": dict(
+                runtime.observations.get("post_completion_diagnostics") or {}
+            ),
             "cleanup_results": [dict(teardown)],
         },
         queue=(

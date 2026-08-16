@@ -346,11 +346,42 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert smoke["suite_ids"] == ["standard"]
     assert smoke["supported_platforms"] == ["windows_sil"]
     assert smoke["pi_safety_evidence"] == []
+    assert "calibration.post_completion_diagnostics_available" in smoke[
+        "assertion_ids"
+    ]
+    assert "calibration.post_completion_diagnostics" in smoke[
+        "capability_ids"
+    ]
 
     capabilities = {
         capability["id"]: capability for capability in payload["capabilities"]
     }
     assert capabilities["execution.refill_resume"]["status"] == "deferred"
+    assert capabilities["calibration.post_completion_diagnostics"] == {
+        "id": "calibration.post_completion_diagnostics",
+        "risk": (
+            "Terminal completion could prevent same-session printer-head diagnostics "
+            "or allow a diagnostic result to mutate completed execution artifacts."
+        ),
+        "owner_role": "calibration verification maintainers",
+        "status": "covered",
+        "required_verification_layers": ["contract", "host_sil"],
+        "active_scenario_ids": ["print_array_smoke_24_v1"],
+        "required_assertion_ids": [
+            "calibration.post_completion_diagnostics_available"
+        ],
+        "related_source_areas": [
+            "FreeRTOS-interface/View.py",
+            "FreeRTOS-interface/CalibrationClasses/View.py",
+            "FreeRTOS-interface/Model.py",
+        ],
+        "limitations": [
+            "The host SIL uses a synthetic full calibration; trajectory-aware "
+            "Recheck dispatch remains focused Qt integration coverage and no "
+            "physical camera, pressure, or droplet behavior is claimed."
+        ],
+        "max_evidence_age_days": 2,
+    }
     assert capabilities["experiment.editor_create_finalize"]["status"] == "covered"
     assert capabilities["experiment.prepared_reopen"]["status"] == "covered"
     assert capabilities["experiment.design_plan_consistency"]["status"] == "covered"

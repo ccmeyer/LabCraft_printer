@@ -433,6 +433,31 @@ class MainWindowDriver(_QTestSurfaceDriver):
 class MachineControlsDriver(_QTestSurfaceDriver):
     """QTest mechanics for normal connection, motor, and pressure controls."""
 
+    def inspect_calibration_launch_state(self) -> dict[str, Any]:
+        """Capture the normal printer-head calibration launch boundary."""
+
+        button = self.view.pressure_box.calibrate_pressure_button
+        rack = self.context.model.rack_model
+        head = rack.get_gripper_printer_head()
+        read_only_getter = getattr(
+            self.context.model, "is_read_only_experiment_view_active", None
+        )
+        return {
+            "button_text": str(button.text() or ""),
+            "button_enabled": bool(button.isEnabled()),
+            "button_tooltip": str(button.toolTip() or ""),
+            "historical_read_only": bool(
+                callable(read_only_getter) and read_only_getter()
+            ),
+            "head_present": head is not None,
+            "printer_head_id": (
+                str(getattr(head, "printer_head_id", "") or "")
+                if head is not None
+                else None
+            ),
+            "stock_id": str(head.get_stock_id()) if head is not None else None,
+        }
+
     def connect(self) -> None:
         button = self.view.connection_widget.machine_connect_button
         if button.text() != "Connect":
@@ -1827,6 +1852,10 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             )
             array_state = self.context.controller.get_array_run_state()
             start_button = plate_widget.start_print_array_button
+            calibration_button = (
+                self.context.view.pressure_box.calibrate_pressure_button
+            )
+            calibration_tooltip = str(calibration_button.toolTip() or "")
             guide = self.context.view.experiment_task_list
             dispatch_after = dispatch_snapshot()
             checks = {
@@ -1871,6 +1900,13 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                     not plate_widget.stock_prep_button.isEnabled()
                     and not plate_widget.calibration_button.isEnabled()
                 ),
+                "printer_head_diagnostics_disabled": not bool(
+                    calibration_button.isEnabled()
+                ),
+                "printer_head_diagnostics_tooltip": (
+                    "Historical experiments are analysis-only"
+                    in calibration_tooltip
+                ),
                 "guide_reports_complete": guide.next_label.text()
                 == "Next: Experiment complete",
                 "no_machine_or_simulator_dispatch": dispatch_after
@@ -1888,6 +1924,10 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 "array_state": array_state,
                 "action_label": "View Completed Experiment",
                 "action_enabled": True,
+                "printer_head_diagnostics_enabled": bool(
+                    calibration_button.isEnabled()
+                ),
+                "printer_head_diagnostics_tooltip": calibration_tooltip,
                 "status_text": status_text,
                 "banner_text": banner_text,
                 "activation_performed": False,
@@ -3259,6 +3299,19 @@ class CalibrationDialogDriver:
             "status": self.dialog.bridge_status_label.text(),
             "apply_enabled": self.dialog.bridge_apply_btn.isEnabled(),
             "apply_text": self.dialog.bridge_apply_btn.text(),
+            "apply_state": str(
+                getattr(self.dialog, "_bridge_apply_button_state", "") or ""
+            ),
+            "apply_tooltip": str(self.dialog.bridge_apply_btn.toolTip() or ""),
+            "load_selected_enabled": bool(
+                self.dialog.load_selected_button.isEnabled()
+            ),
+            "recheck_enabled": bool(
+                self.dialog.recheck_selected_button.isEnabled()
+            ),
+            "calibrate_all_enabled": bool(
+                self.dialog.calibrate_all_button.isEnabled()
+            ),
             "preview_rows": table.rowCount(),
             "visible_table": {
                 "headers": headers,
@@ -3354,7 +3407,13 @@ class CalibrationDialogDriver:
         if state["error"] is not None:
             raise state["error"]
         if steps:
-            raise RuntimeError("expected calibration Apply dialog sequence did not complete")
+            raise RuntimeError(
+                "expected calibration Apply dialog sequence did not complete; "
+                f"enabled={self.dialog.bridge_apply_btn.isEnabled()} "
+                f"state={getattr(self.dialog, '_bridge_apply_button_state', None)!r} "
+                f"tooltip={self.dialog.bridge_apply_btn.toolTip()!r} "
+                f"status={self.dialog.bridge_status_label.text()!r}"
+            )
         return list(state["handled"])
 
     def apply_expected_failure(
