@@ -51,6 +51,26 @@ Host validation completed on 2026-08-15:
 - Pi orchestration contract passed;
 - full Python suite passed: 4,809 passed, 147 skipped in 328.24 seconds.
 
+Compact Pi qualification completed on 2026-08-15 local time
+(2026-08-16 UTC):
+
+- implementation commit: `9bb79930ebfa18e323362d4b732af5e15b45edcd`;
+- host: Raspberry Pi 5 Model B Rev 1.0, NVMe/ext4, Python 3.11.2,
+  PySide/Qt 6.7.1;
+- scenario: `calibration_storage_new_store_only_contract_v1`;
+- workload: 16 processes, 17 updates, 14 successful, one stopped, and one
+  failed;
+- run policy: zero warmups, one measured run, speed multiplier 1,000, and a
+  180-second scenario timeout;
+- result: functional pass, no dirty tracked state, no injected stalls, and
+  hardware access disabled under the Pi SIL sandbox;
+- report-set SHA-256:
+  `5f9b350c5bd5305404b929b9463cd9177b18958481901caf8cfa3fee8ea0dfca`.
+
+This is the first of the two compact Pi report sets required by the proving
+evaluator. It is correctness evidence, not a release candidate, performance
+baseline, or substitute for the planned real-calibration proving period.
+
 No firmware, device protocol, camera, image-analysis, motion, pressure, dispense,
 historical experiment, release-candidate, tag, or offline-bundle change is part of
 this implementation.
