@@ -1,0 +1,41 @@
+{
+  "schema_id": "labcraft.calibration_history_conversion_fixture",
+  "schema_version": 1,
+  "fixture_id": "calibration_storage_historical_conversion_contract_v1",
+  "workload": {"completion_count": 12},
+  "identity": {
+    "printer_head_id": "sil-migration-head-1",
+    "stock_id": "sil-migration-stock-1",
+    "reagent_name": "SIL Migration Reagent",
+    "stock_solution": "SIL Migration Reagent - 1.0 x",
+    "concentration": "1.0",
+    "units": "x"
+  },
+  "cases": [
+    {"case_id": "nozzle-position-unique", "phase": "nozzle_position", "outcome": "completed", "evidence": "unique", "result": {"X": 100, "Y": 200, "Z": 300, "flash_delay": 40}},
+    {"case_id": "nozzle-focus-none", "phase": "nozzle_focus", "outcome": "completed", "evidence": "none", "result": {"best_focus": 17, "valid": true}},
+    {"case_id": "emergence-unique", "phase": "droplet_emergence", "outcome": "completed", "evidence": "unique", "result": {"pressure": 1.1, "emergence_time_us": 1250, "valid": true}},
+    {"case_id": "pressure-band-none", "phase": "pressure_scan", "outcome": "completed", "evidence": "none", "result": {"selected_pressure_psi": 1.25, "valid": true}},
+    {"case_id": "trajectory-none", "phase": "trajectory", "outcome": "completed", "evidence": "none", "result": {"valid_fit_count": 3, "valid": true}},
+    {"case_id": "pressure-sweep-unique", "phase": "pressure_sweep_characterization", "outcome": "completed", "evidence": "unique", "result": {"pressures": [{"pressure": 1.2, "mean_volume": 9.8, "cv_volume_percent": 3.1, "valid": true}, {"pressure": 1.3, "mean_volume": 10.4, "cv_volume_percent": 3.0, "valid": true}]}},
+    {"case_id": "droplet-search-none", "phase": "droplet_search", "outcome": "completed", "evidence": "none", "result": {"pressure": 1.3, "mean_nL": 10.4, "valid": true}},
+    {"case_id": "online-stream-unique", "phase": "online_stream_calibration", "outcome": "completed", "evidence": "unique", "result": {"condition": {"print_pulse_width_us": 1400, "print_pressure_psi": 1.3}, "predicted_volume_nl": 25.0, "predicted_stream_duration_us": 9000, "flow_phase": {"fit_status": "ok"}, "tail_phase": {"status": "captured"}}},
+    {"case_id": "pressure-stopped", "phase": "pressure_calibration", "outcome": "stopped", "evidence": "none", "result": {"pressure": 1.2, "valid": false}},
+    {"case_id": "recheck-ambiguous", "phase": "droplet_recheck", "outcome": "completed", "evidence": "ambiguous", "result": {"pressures": [{"pressure": 1.2, "mean_volume": 9.7, "valid": true}]}},
+    {"case_id": "unsupported-phase", "phase": "historical_custom_phase", "outcome": "completed", "evidence": "none", "result": {"value": 1}},
+    {"case_id": "already-canonical", "phase": "pressure_sweep_characterization", "outcome": "completed", "evidence": "already_canonical", "result": {"pressures": [{"pressure": 1.4, "mean_volume": 11.0, "cv_volume_percent": 2.8, "valid": true}]}}
+  ],
+  "expected_counts": {
+    "source_step_count": 12,
+    "convert_count": 9,
+    "already_canonical_count": 1,
+    "already_generated_count": 0,
+    "skipped_count": 2,
+    "conflict_count": 0,
+    "generated_count": 9
+  },
+  "limitations": [
+    "storage conversion only; no camera, image analysis, physical calibration quality, firmware, or protocol coverage",
+    "contains no raw images or full measurement streams"
+  ]
+}

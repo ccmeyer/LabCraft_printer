@@ -96,8 +96,9 @@ def test_lifecycle_suite_preserves_manifest_order_and_per_scenario_timeouts():
         "calibration_storage_authoritative_contract_v1",
         "calibration_storage_primary_reader_contract_v1",
         "calibration_storage_secondary_reader_contract_v1",
+        "calibration_storage_historical_conversion_contract_v1",
     ]
-    assert [row["order"] for row in plan["scenarios"]] == list(range(1, 16))
+    assert [row["order"] for row in plan["scenarios"]] == list(range(1, 17))
     assert {row["seed"] for row in plan["scenarios"]} == {7}
     assert [row["timeout_seconds"] for row in plan["scenarios"]] == [
         60.0,
@@ -115,6 +116,7 @@ def test_lifecycle_suite_preserves_manifest_order_and_per_scenario_timeouts():
         600.0,
         600.0,
         600.0,
+        120.0,
     ]
 
 

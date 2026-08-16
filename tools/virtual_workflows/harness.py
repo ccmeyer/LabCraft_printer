@@ -236,6 +236,7 @@ class AutomationHarness:
         if self.closed:
             raise RuntimeError("automation harness is closed")
         try:
+            print("[SIL] application launch: importing simulation runtime", flush=True)
             from tools.sil.session import (
                 ArtifactRetentionPolicy,
                 QtOwnership,
@@ -260,6 +261,7 @@ class AutomationHarness:
                 else QtOwnership.OWNED
             )
 
+            print("[SIL] application launch: creating isolated session", flush=True)
             session = SimulationSession.create(
                 SimulationSessionConfigV1(
                     # QTest coverage requires controls to be visible even when
@@ -285,8 +287,11 @@ class AutomationHarness:
             self.context.scenario_root = self.scenario_root
             if prelaunch_prepare is not None:
                 prelaunch_prepare(self.scenario_root)
+            print("[SIL] application launch: validating Qt environment", flush=True)
             font = apply_and_validate_sil_application_font(session.app)
+            print("[SIL] application launch: composing MVC", flush=True)
             view = session.launch()
+            print("[SIL] application launch: MVC ready", flush=True)
             components = session.components
             context = self.context
             context.app = session.app

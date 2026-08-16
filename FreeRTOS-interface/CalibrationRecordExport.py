@@ -34,6 +34,7 @@ class CalibrationRecordExportError(Exception):
 OPTIONAL_EXPERIMENT_FILES = (
     "calibration_index.jsonl",
     "calibration.json",
+    "calibration_history_migration.json",
     "experiment_design.json",
     "progress.json",
     "experiment_audit.jsonl",

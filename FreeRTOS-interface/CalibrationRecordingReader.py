@@ -218,6 +218,7 @@ class CalibrationRecordingReader:
         *,
         primary: str = "canonical",
         allow_legacy_fallback: bool = True,
+        include_migrated: bool | None = None,
     ):
         self.experiment_dir = Path(experiment_dir).expanduser().resolve()
         self.recordings_root = (self.experiment_dir / "calibration_recordings").resolve()
@@ -228,6 +229,15 @@ class CalibrationRecordingReader:
             raise ValueError("primary reader must be canonical or legacy")
         self.primary = normalized
         self.allow_legacy_fallback = bool(allow_legacy_fallback)
+        self.include_migrated = (
+            str(os.environ.get("LABCRAFT_CALIBRATION_MIGRATED_RESULTS", "1")).strip()
+            != "0"
+            if include_migrated is None
+            else bool(include_migrated)
+        )
+        self.migration_manifest_path = (
+            self.experiment_dir / "calibration_history_migration.json"
+        ).resolve()
         self._history_cache_revision: Any = None
         self._history_cache: CalibrationHistorySnapshot | None = None
 
@@ -268,7 +278,64 @@ class CalibrationRecordingReader:
                 raise CalibrationStoreCorruptionError(f"duplicate result identity {result_id}")
             seen_events[event_id] = encoded
             seen_results[result_id] = result_hash
-        return events
+        return [event for event in events if self._migration_event_available(event)]
+
+    def _migration_manifest(self) -> dict[str, Any]:
+        if not self.migration_manifest_path.is_file():
+            return {}
+        try:
+            value = json.loads(self.migration_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            value = {}
+        return dict(value) if isinstance(value, dict) else {}
+
+    def _migration_event_available(self, event: Mapping[str, Any]) -> bool:
+        provenance = dict(event.get("provenance") or {})
+        if provenance.get("kind") != "historical_conversion":
+            return True
+        if not self.include_migrated:
+            return False
+        manifest = self._migration_manifest()
+        if (
+            manifest.get("schema_name")
+            != "labcraft.calibration_history_migration_manifest"
+            or manifest.get("schema_version") != 1
+            or manifest.get("status") != "completed"
+            or manifest.get("manifest_id") != provenance.get("manifest_id")
+        ):
+            return False
+        matches = [
+            row
+            for row in list(manifest.get("generated") or ())
+            if isinstance(row, Mapping)
+            and row.get("item_id") == provenance.get("item_id")
+            and row.get("result_id") == event.get("result_id")
+            and row.get("result_sha256") == event.get("result_sha256")
+        ]
+        return len(matches) == 1
+
+    def _migrated_nonapplicable_coordinates(self) -> set[tuple[str, str, int | None]]:
+        if not self.include_migrated:
+            return set()
+        manifest = self._migration_manifest()
+        if manifest.get("status") != "completed":
+            return set()
+        generated_ids = {
+            str(row.get("item_id") or "")
+            for row in list(manifest.get("generated") or ())
+            if isinstance(row, Mapping)
+        }
+        return {
+            (
+                str(row.get("source_run_id") or ""),
+                str(row.get("source_phase_key") or ""),
+                _safe_int(row.get("source_step_index")),
+            )
+            for row in list(manifest.get("items") or ())
+            if isinstance(row, Mapping)
+            and str(row.get("item_id") or "") in generated_ids
+            and str(row.get("outcome") or "") != "completed"
+        }
 
     @staticmethod
     def _canonical_projection_rows(event: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -347,10 +414,18 @@ class CalibrationRecordingReader:
             issues.append(CalibrationReaderIssue("index_invalid", str(exc), CalibrationReaderState.UNAVAILABLE))
 
         legacy_by_update: dict[str, list[dict[str, Any]]] = {}
+        legacy_by_coordinate: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
         for row in legacy_rows:
             update_id = str(row.get("update_id") or "")
             if update_id:
                 legacy_by_update.setdefault(update_id, []).append(row)
+            coordinate = (
+                str(row.get("source_run_id") or ""),
+                str(row.get("source_phase_key") or ""),
+                _safe_int(row.get("source_step_index")),
+                _safe_int(row.get("source_pressure_index")),
+            )
+            legacy_by_coordinate.setdefault(coordinate, []).append(row)
 
         rows: list[dict[str, Any]] = []
         consumed_legacy: set[int] = set()
@@ -379,6 +454,22 @@ class CalibrationRecordingReader:
                 update_id = str(canonical.get("update_id") or "")
                 matches = legacy_by_update.get(update_id, [])
                 matched = next((item for item in matches if _safe_int(item.get("source_pressure_index")) == _safe_int(canonical.get("source_pressure_index"))), None)
+                projection_provenance = dict(
+                    (event.get("summary_projection") or {}).get("provenance") or {}
+                )
+                if (
+                    matched is None
+                    and projection_provenance.get("kind") == "historical_conversion"
+                ):
+                    coordinate = (
+                        str(canonical.get("source_run_id") or ""),
+                        str(canonical.get("source_phase_key") or ""),
+                        _safe_int(canonical.get("source_step_index")),
+                        _safe_int(canonical.get("source_pressure_index")),
+                    )
+                    coordinate_matches = legacy_by_coordinate.get(coordinate, [])
+                    if len(coordinate_matches) == 1:
+                        matched = coordinate_matches[0]
                 state = CalibrationReaderState.CANONICAL_ONLY
                 if matched is not None:
                     consumed_legacy.add(id(matched))
@@ -402,8 +493,15 @@ class CalibrationRecordingReader:
                 canonical["selection_fingerprint"] = _application_fingerprint(canonical)
                 rows.append(canonical)
 
+        nonapplicable_coordinates = self._migrated_nonapplicable_coordinates()
         for legacy_row in legacy_rows:
             if id(legacy_row) in consumed_legacy:
+                continue
+            if (
+                str(legacy_row.get("source_run_id") or ""),
+                str(legacy_row.get("source_phase_key") or ""),
+                _safe_int(legacy_row.get("source_step_index")),
+            ) in nonapplicable_coordinates:
                 continue
             item = dict(legacy_row)
             if item.get("legacy_authority_marked"):
@@ -448,6 +546,7 @@ class CalibrationRecordingReader:
         diagnostics = {
             "primary": self.primary,
             "legacy_fallback_enabled": self.allow_legacy_fallback,
+            "migrated_results_enabled": self.include_migrated,
             "index_path": str(self.index_path),
             "index_event_count": int(index_events),
             "legacy_row_count": int(legacy_rows),
@@ -508,6 +607,17 @@ class CalibrationRecordingReader:
             validated = CalibrationRecordingStore.validate_run(result_path.parent)
             result = dict(validated["result"])
             meta = dict(validated.get("run_meta") or {})
+            provenance = dict(result.get("provenance") or {})
+            if provenance.get("kind") == "historical_conversion":
+                matching_event = {
+                    "result_id": result.get("result_id"),
+                    "result_sha256": result.get("result_sha256"),
+                    "provenance": provenance,
+                }
+                if not self._migration_event_available(matching_event):
+                    raise CalibrationStoreCorruptionError(
+                        "historical conversion manifest does not validate the result"
+                    )
             if result.get("result_id") != fresh.get("result_id") or result.get("result_sha256") != fresh.get("result_sha256"):
                 raise CalibrationStoreCorruptionError("result identity or hash changed")
             update_matches = [item for item in validated["updates"] if item.get("update_id") == fresh.get("update_id")]
@@ -590,6 +700,7 @@ class CalibrationRecordingReader:
         canonical_error: Exception | None = None
         index_event_count = 0
         bundle_read_count = 0
+        migrated_updates: list[dict[str, Any]] = []
 
         try:
             events = self._index_events()
@@ -659,6 +770,8 @@ class CalibrationRecordingReader:
                         "canonical session contains a parity mismatch"
                     )
                 updates = [dict(item) for item in validated.get("updates") or ()]
+                if dict(result.get("provenance") or {}).get("kind") == "historical_conversion":
+                    migrated_updates.extend(updates)
                 phase_name = str(result.get("phase_name") or event.get("phase_name") or "")
                 if str(result.get("outcome") or "") == "completed":
                     phase_payloads.setdefault(phase_name, []).extend(
@@ -708,6 +821,26 @@ class CalibrationRecordingReader:
                 pass
 
         authority_marked = bool(legacy_run and _authority_marked(legacy_run))
+        if canonical_error is None and legacy_run is not None and migrated_updates:
+            try:
+                legacy_steps = dict(legacy_run.get("steps") or {})
+                for update in migrated_updates:
+                    source = dict(update.get("legacy_source") or {})
+                    phase = str(source.get("source_phase_key") or "")
+                    step_index = _safe_int(source.get("source_step_index"))
+                    phase_steps = list(legacy_steps.get(phase) or ())
+                    if step_index is None or not 0 <= step_index < len(phase_steps):
+                        raise CalibrationStoreCorruptionError(
+                            "migrated update source coordinates no longer resolve"
+                        )
+                    if semantic_sha256(phase_steps[step_index]) != update.get(
+                        "payload_sha256"
+                    ):
+                        raise CalibrationStoreCorruptionError(
+                            "migrated update no longer matches calibration.json"
+                        )
+            except (TypeError, ValueError, CalibrationStoreCorruptionError) as exc:
+                canonical_error = exc
         if canonical_error is None:
             state = CalibrationReaderState.CANONICAL_ONLY
             if legacy_run is not None:

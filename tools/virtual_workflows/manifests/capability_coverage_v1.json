@@ -436,6 +436,18 @@
       "max_evidence_age_days": 30
     },
     {
+      "id": "calibration.storage_historical_conversion",
+      "risk": "Offline historical conversion could mutate source records, create ambiguous provenance, or expose incomplete generated bundles to canonical readers.",
+      "owner_role": "calibration storage maintainers",
+      "status": "covered",
+      "required_verification_layers": ["contract", "host_sil", "pi_sil"],
+      "active_scenario_ids": ["calibration_storage_historical_conversion_contract_v1"],
+      "required_assertion_ids": ["calibration.migration.plan_exact", "calibration.migration.source_immutable", "calibration.migration.reader_application_exact", "calibration.migration.export_exact", "calibration.migration.idempotent"],
+      "related_source_areas": ["FreeRTOS-interface/CalibrationHistoricalConversion.py", "FreeRTOS-interface/CalibrationRecordingReader.py", "tools/convert_calibration_history.py", "tools/virtual_workflows/calibration_history_conversion_journey.py"],
+      "limitations": ["The short fixture validates offline structured conversion and reader use; it does not execute image analysis, camera acquisition, physical hardware, or the retired 200-process workload."],
+      "max_evidence_age_days": 30
+    },
+    {
       "id": "hardware.motion_pressure_droplet",
       "risk": "Software evidence could be misrepresented as physical print-quality evidence.",
       "owner_role": "hardware verification maintainers",
@@ -928,6 +940,26 @@
       "limitations": ["The Pi workload measures canonical secondary consumers with synthetic structured data and no workload pixels."],
       "test_node_ids": ["tests/system/test_calibration_storage_secondary_reader_performance.py::test_calibration_storage_secondary_reader_8x25_workload"],
       "pi_safety_evidence": ["preflight", "hardware_proof"]
+    },
+    {
+      "id": "calibration_storage_historical_conversion_contract_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "calibration_storage_historical_conversion_contract_v1",
+      "workload_fixture_id": "calibration_storage_historical_conversion_contract_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/calibration_history_conversion_contract_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil", "pi_sil"],
+      "timeout_seconds": 120,
+      "action_ids": ["app.launch_simulated", "app.close_simulated_session", "machine.connect_via_ui", "fixture.prepare_calibration_storage", "calibration.inspect_storage_artifacts", "calibration.stage_persisted_selection", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "calibration.migration.plan_exact", "calibration.migration.source_immutable", "calibration.migration.reader_application_exact", "calibration.migration.export_exact", "calibration.migration.idempotent", "artifacts.cleanup_complete"],
+      "capability_ids": ["sil.hardware_isolation.host", "sil.hardware_isolation.pi", "calibration.storage_historical_conversion"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["This is a compact 12-step offline conversion correctness workload; it does not run the previous 200-process stress workload or claim image-analysis or hardware coverage."],
+      "test_node_ids": ["tests/system/test_calibration_history_conversion_contract_lifecycle.py::test_historical_conversion_short_lifecycle"],
+      "pi_safety_evidence": ["preflight", "hardware_proof"]
     }
   ],
   "suites": [
@@ -944,7 +976,7 @@
       "status": "active",
       "kind": "lifecycle",
       "platform": "windows_sil",
-      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "legacy_experiment_read_only_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1", "print_array_mixed_mode_24x2_v1", "print_array_disconnect_mid_array_24_v1", "randomized_calibration_reload_execution_v1", "calibration_storage_contract_v1", "calibration_storage_shadow_contract_v1", "calibration_storage_authoritative_contract_v1", "calibration_storage_primary_reader_contract_v1", "calibration_storage_secondary_reader_contract_v1"],
+      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "legacy_experiment_read_only_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1", "print_array_mixed_mode_24x2_v1", "print_array_disconnect_mid_array_24_v1", "randomized_calibration_reload_execution_v1", "calibration_storage_contract_v1", "calibration_storage_shadow_contract_v1", "calibration_storage_authoritative_contract_v1", "calibration_storage_primary_reader_contract_v1", "calibration_storage_secondary_reader_contract_v1", "calibration_storage_historical_conversion_contract_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -1954,6 +1986,36 @@
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.calibration_storage.key_evidence_probe",
         "test_node_ids": ["tests/system/test_calibration_storage_contract_performance.py::test_calibration_storage_legacy_8x25_workload"]
+      },
+      {
+        "id": "calibration.migration.plan_exact",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.calibration_history_conversion.plan_counts",
+        "test_node_ids": ["tests/system/test_calibration_history_conversion_contract_lifecycle.py::test_historical_conversion_short_lifecycle"]
+      },
+      {
+        "id": "calibration.migration.source_immutable",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.calibration_history_conversion.reader_export.source_immutable",
+        "test_node_ids": ["tests/system/test_calibration_history_conversion_contract_lifecycle.py::test_historical_conversion_short_lifecycle"]
+      },
+      {
+        "id": "calibration.migration.reader_application_exact",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.calibration_history_conversion.reader_export.resolved_code",
+        "test_node_ids": ["tests/system/test_calibration_history_conversion_contract_lifecycle.py::test_historical_conversion_short_lifecycle"]
+      },
+      {
+        "id": "calibration.migration.export_exact",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.calibration_history_conversion.reader_export.required_files_present",
+        "test_node_ids": ["tests/system/test_calibration_history_conversion_contract_lifecycle.py::test_historical_conversion_short_lifecycle"]
+      },
+      {
+        "id": "calibration.migration.idempotent",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.calibration_history_conversion.reader_export.idempotent",
+        "test_node_ids": ["tests/system/test_calibration_history_conversion_contract_lifecycle.py::test_historical_conversion_short_lifecycle"]
       }
     ]
   }

@@ -56,6 +56,9 @@ from tools.virtual_workflows.calibration_storage_journeys import (
     SHADOW_FUNCTIONAL_ID as CALIBRATION_STORAGE_SHADOW_CONTRACT_ID,
     SHADOW_PERFORMANCE_ID as CALIBRATION_STORAGE_SHADOW_PERFORMANCE_ID,
 )
+from tools.virtual_workflows.calibration_history_conversion_journey import (
+    SCENARIO_ID as CALIBRATION_STORAGE_HISTORICAL_CONVERSION_ID,
+)
 from tools.virtual_workflows.actions import ACTION_INTERACTION_SURFACES
 from tools.virtual_workflows.joined_interaction_cases import (
     JOINED_INTERACTION_CASE_ID,
@@ -110,6 +113,7 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         CALIBRATION_STORAGE_PRIMARY_READER_PERFORMANCE_ID,
         CALIBRATION_STORAGE_SECONDARY_READER_CONTRACT_ID,
         CALIBRATION_STORAGE_SECONDARY_READER_PERFORMANCE_ID,
+        CALIBRATION_STORAGE_HISTORICAL_CONVERSION_ID,
     )
 
     for scenario_id in (WORKLOAD_ID, STRESS_WORKLOAD_ID, SMOKE_WORKLOAD_ID):
@@ -191,6 +195,7 @@ def test_tracked_manifest_validates_and_describes_current_truth():
                 CALIBRATION_STORAGE_AUTHORITATIVE_CONTRACT_ID,
                 CALIBRATION_STORAGE_PRIMARY_READER_CONTRACT_ID,
                 CALIBRATION_STORAGE_SECONDARY_READER_CONTRACT_ID,
+                CALIBRATION_STORAGE_HISTORICAL_CONVERSION_ID,
     ]
     rename_scenario = _row(
         payload,

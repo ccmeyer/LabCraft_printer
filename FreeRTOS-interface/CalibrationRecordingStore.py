@@ -138,10 +138,18 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _stable_id(kind: str, process_run_id: str, ordinal: int | None = None) -> str:
+def stable_recording_id(
+    kind: str, process_run_id: str, ordinal: int | None = None
+) -> str:
+    """Return the canonical deterministic identity for one run artifact."""
+
     suffix = kind if ordinal is None else f"{kind}:{int(ordinal)}"
     value = uuid.uuid5(_ID_NAMESPACE, f"{process_run_id}:{suffix}")
     return f"{kind}_{value}"
+
+
+def _stable_id(kind: str, process_run_id: str, ordinal: int | None = None) -> str:
+    return stable_recording_id(kind, process_run_id, ordinal)
 
 
 def _ensure_safe_component(value: str, *, label: str) -> str:
@@ -200,6 +208,7 @@ class CalibrationRunHandle:
     capture_policy_requested: str
     capture_policy_effective: str
     identity: dict[str, Any]
+    provenance: dict[str, Any]
     started_at_utc: str
     run_dir: Path
     updates_path: Path
@@ -402,7 +411,7 @@ class CalibrationRecordingStore:
         recorder_summary: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         recorder = dict(recorder_summary or {})
-        return {
+        document = {
             "schema_name": RUN_META_SCHEMA_NAME,
             "schema_version": RUN_META_SCHEMA_VERSION,
             "run_id": run.process_run_id,
@@ -446,6 +455,9 @@ class CalibrationRecordingStore:
             "capture_omitted_count": int(recorder.get("capture_omitted_count", 0)),
             "capture_failed_count": int(recorder.get("capture_failed_count", 0)),
         }
+        if run.provenance:
+            document["provenance"] = dict(run.provenance)
+        return document
 
     def start_run(
         self,
@@ -459,6 +471,7 @@ class CalibrationRecordingStore:
         capture_policy_effective: str | None = None,
         process_run_id: str | None = None,
         warnings: Iterable[Mapping[str, Any]] = (),
+        provenance: Mapping[str, Any] | None = None,
     ) -> CalibrationRunHandle:
         if not self.enabled:
             raise CalibrationStoreValidationError("canonical shadow store is disabled")
@@ -525,6 +538,7 @@ class CalibrationRecordingStore:
             capture_policy_requested=requested_policy.storage_name,
             capture_policy_effective=effective_policy.storage_name,
             identity=_identity_snapshot(identity),
+            provenance=_normalize_json(dict(provenance or {})),
             started_at_utc=self._clock(),
             run_dir=run_dir,
             updates_path=updates_path,
@@ -579,6 +593,8 @@ class CalibrationRecordingStore:
             "payload_sha256": semantic_sha256(normalized_payload),
             "payload": normalized_payload,
         }
+        if run.provenance:
+            document["provenance"] = dict(run.provenance)
         if legacy_source is not None:
             document["legacy_source"] = _normalize_json(dict(legacy_source))
         self._append_jsonl(run.updates_path, document, stage="update_append")
@@ -695,6 +711,8 @@ class CalibrationRecordingStore:
                 ),
                 "warnings": list(run.warnings),
             }
+            if run.provenance:
+                result_body["provenance"] = dict(run.provenance)
             result_document = {
                 **result_body,
                 "result_sha256": semantic_sha256(result_body),
@@ -732,6 +750,8 @@ class CalibrationRecordingStore:
             "identity_projection": dict(run.identity),
             "summary_projection": dict(result_document["summary_projection"]),
         }
+        if run.provenance:
+            index_document["provenance"] = dict(run.provenance)
         index_started = time.perf_counter_ns()
         self._append_index_once(index_document)
         index_latency = (time.perf_counter_ns() - index_started) / 1_000_000.0
@@ -895,8 +915,7 @@ class CalibrationRecordingStore:
                         f"conflicting result identity: {result_id}"
                     )
                 seen_results[result_id] = result_hash
-                valid.append(
-                    {
+                index_document = {
                         "schema_name": INDEX_SCHEMA_NAME,
                         "schema_version": INDEX_SCHEMA_VERSION,
                         "event_kind": "result_committed",
@@ -922,7 +941,9 @@ class CalibrationRecordingStore:
                             result.get("summary_projection") or {}
                         ),
                     }
-                )
+                if result.get("provenance"):
+                    index_document["provenance"] = dict(result["provenance"])
+                valid.append(index_document)
             except CalibrationStoreError as exc:
                 invalid.append(
                     {
@@ -968,6 +989,11 @@ class CalibrationRecordingStore:
             "semantic_sha256": semantic_sha256(valid),
         }
 
+    def commit_index_event(self, payload: Mapping[str, Any]) -> bool:
+        """Idempotently publish one already-validated canonical result event."""
+
+        return self._append_index_once(_normalize_json(dict(payload)))
+
 
 __all__ = [
     "CaptureRetentionPolicy",
@@ -990,4 +1016,5 @@ __all__ = [
     "TerminalResultV1",
     "canonical_json_bytes",
     "semantic_sha256",
+    "stable_recording_id",
 ]

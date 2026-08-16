@@ -2617,6 +2617,95 @@ The complete consumer inventory is tracked at
 Image-analysis SIL, historical conversion, stopping legacy writes, firmware,
 and physical-device behavior remain outside this milestone.
 
+### Calibration recording store Milestone 5
+
+Milestone 5 provides an explicit offline converter for historical
+`calibration.json` records. It creates additive canonical run bundles, index
+events, and `calibration_history_migration.json`; it never rewrites the source
+`calibration.json` or matching diagnostic recordings. Ambiguous diagnostic
+links and unsupported shapes are reported and skipped instead of guessed.
+
+Always begin with a dry run against one exact experiment directory:
+
+```powershell
+.\env\Scripts\python.exe tools\convert_calibration_history.py `
+  --experiment-dir <exact-experiment-directory>
+
+.\env\Scripts\python.exe tools\convert_calibration_history.py `
+  --experiment-dir <exact-experiment-directory> --apply
+
+.\env\Scripts\python.exe tools\convert_calibration_history.py `
+  --experiment-dir <exact-experiment-directory> --resume
+
+.\env\Scripts\python.exe tools\convert_calibration_history.py `
+  --experiment-dir <exact-experiment-directory> --validate
+```
+
+The default text progress is flushed immediately. Use `--progress json` for
+machine-readable `CALIBRATION_MIGRATION_PROGRESS` lines or `--progress none`
+for quiet operation. A completed conversion is idempotent; interrupted work
+must be continued explicitly with `--resume`. The CLI refuses the repository,
+the complete `Experiments` directory, the user's home directory, and a
+filesystem root as conversion targets.
+
+To create a review fixture from selected historical shapes, use the separate
+sanitizer with explicit `RUN_INDEX:PHASE:STEP_INDEX` selectors and a new output
+path. It hashes every selected source before and after, refuses to overwrite,
+redacts identities/timestamps/paths/notes, and never copies pixels:
+
+```powershell
+.\env\Scripts\python.exe -m tools.sil.calibration_history_conversion_sanitizer `
+  --source <experiment>\calibration.json `
+  --fixture-id <review-fixture-id> `
+  --select 0:pressure_sweep_characterization:0 `
+  --output <new-fixture-path>.json
+```
+
+Generated migration results are included by default after their completed
+manifest validates. To hide all generated conversion results without deleting
+anything, set the following value and restart the application:
+
+```powershell
+$env:LABCRAFT_CALIBRATION_MIGRATED_RESULTS = "0"
+```
+
+Run the focused and compact lifecycle coverage with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_calibration_history_conversion_fixtures.py `
+  tests\test_calibration_history_conversion.py `
+  tests\test_calibration_history_conversion_failures.py `
+  tests\test_calibration_history_conversion_cli.py
+
+.\env\Scripts\python.exe -m pytest -q -s --run-sil-lifecycle `
+  tests\system\test_calibration_history_conversion_contract_lifecycle.py
+```
+
+The lifecycle converts a reviewed 12-step fixture into nine canonical bundles,
+retains one already-canonical record, reports two explicit skips, fresh-loads
+the real MVC composition, applies one migrated calibration through the
+simulator, and validates export and idempotence. It normally completes in a
+few seconds and prints MVC, planning, bundle, index, validation, reload, and
+export checkpoints. Milestone 5 intentionally does not rerun the earlier
+200-process/232-update performance workload; the converter does not change the
+online writer path. The Pi gate is likewise one compact run:
+
+```powershell
+.\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -Scenario calibration_storage_historical_conversion_contract_v1 `
+  -HostLabel pi5-calibration-storage-migration-v1 `
+  -WarmupRuns 0 -MeasuredRuns 1 `
+  -SpeedMultiplier 1000 -TimeoutSeconds 120
+```
+
+This coverage claims structured storage conversion, canonical-reader use, and
+source immutability only. It does not claim camera/image-analysis correctness,
+physical calibration quality, firmware, motion, pressure response, or dispense
+behavior.
+
 ## Raspberry Pi Software-In-The-Loop
 
 The target-Pi SIL lane runs the same real-UI workflow on Raspberry Pi CPU and

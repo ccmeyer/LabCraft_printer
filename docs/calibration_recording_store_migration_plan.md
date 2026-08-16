@@ -889,6 +889,16 @@ Exit criteria:
 
 Rollback: stop using generated additive artifacts; source data is untouched.
 
+Implementation completed on 2026-08-15. The converter defaults to dry-run,
+requires one explicit experiment, records deterministic migration provenance,
+supports explicit resume and validation, and exposes generated bundles only
+after a completed manifest validates. The typed reader and export path consume
+the additive artifacts while preserving legacy fallbacks. A reviewed 12-step
+fixture and one short composed Windows/Pi lifecycle replace the unrelated
+200-process writer workload for this offline-only milestone. Final host and Pi
+evidence is recorded in
+`docs/calibration_recording_store_milestone_5_completion.md`.
+
 ### Milestone 6: stop legacy writes for new experiments
 
 Scope:

@@ -390,6 +390,19 @@ _SCENARIO_DEFINITIONS = {
         supports_injected_stall=False,
         supports_report_sets=True,
     ),
+    "calibration_storage_historical_conversion_contract_v1": ScenarioDefinition(
+        registry_id="calibration_storage_historical_conversion_contract_v1",
+        workload_id="calibration_storage_historical_conversion_contract_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "calibration_history_conversion_contract_v1.json"
+        ),
+        expected_completion_count=12,
+        scenario_name="calibration_storage_historical_conversion_contract",
+        runner_family="composed_journey",
+        supports_pi_evidence=True,
+        supports_injected_stall=False,
+        supports_report_sets=True,
+    ),
 }
 REGISTERED_SCENARIOS: Mapping[str, ScenarioDefinition] = MappingProxyType(
     _SCENARIO_DEFINITIONS

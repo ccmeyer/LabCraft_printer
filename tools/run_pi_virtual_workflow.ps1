@@ -17,7 +17,8 @@ param(
     "calibration_storage_shadow_8x25_v1",
     "calibration_storage_authoritative_8x25_v1",
     "calibration_storage_primary_reader_8x25_v1",
-    "calibration_storage_secondary_reader_8x25_v1"
+    "calibration_storage_secondary_reader_8x25_v1",
+    "calibration_storage_historical_conversion_contract_v1"
   )]
   [string]$Scenario = "virtual_print_array_96_v1",
 
