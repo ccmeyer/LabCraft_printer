@@ -1,6 +1,6 @@
 # Calibration Recording Store Migration: Milestone 0 Contract and Plan
 
-Status: Milestones 0 through 5 complete; Milestone 6 implementation qualification in progress
+Status: Milestones 0 through 6 complete; new experiments use canonical-only persistence
 
 Prepared: 2026-08-14
 
@@ -916,6 +916,18 @@ Exit criteria:
 
 Rollback: re-enable legacy writer. Existing new-store artifacts remain
 additive and readable.
+
+Implementation completed on 2026-08-15. New and design-only duplicated
+experiments persist an explicit canonical-only storage policy; historical
+designs without the policy remain legacy-compatible. All legacy document
+writes pass through one policy guard. `LABCRAFT_CALIBRATION_LEGACY_WRITER=1`,
+the broader authoritative-store rollback, or a selected legacy reader retains
+dual-writing for compatibility. The compact 16-process storage-contract SIL
+proves zero main-experiment legacy writes, fresh canonical reload/application,
+secondary readers, one historical canary, and one rollback canary. The Pi gate
+uses 0 warmups and 1 measured compact run; the retired 200-process workload is
+not rerun. Final evidence is recorded in
+`docs/calibration_recording_store_milestone_6_completion.md`.
 
 ### Milestone 7: proving period and writer retirement
 

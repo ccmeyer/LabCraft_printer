@@ -1,0 +1,77 @@
+{
+  "schema_name": "labcraft.calibration_storage.new_store_only_pi_baseline",
+  "schema_version": 1,
+  "status": "candidate_single_sample",
+  "qualified_at_utc": "2026-08-16T01:04:20.515153Z",
+  "source": {
+    "git_commit": "d1d2426f4b85001fece1c43b0fdcab52978419d7",
+    "dirty_worktree": false,
+    "measured_report_sha256": "dae80e46f546de7ff2e4b5da065a1882916e27b0f20389cc715e4c58e26a6bfb",
+    "report_set_sha256": "170064dfe2448ffb771b85de17b86c577c588b9d3fffc82a8409c6942f7b3ea7"
+  },
+  "environment": {
+    "host_label": "pi5-calibration-storage-new-store-only-v1",
+    "pi_model": "Raspberry Pi 5 Model B Rev 1.0",
+    "architecture": "aarch64",
+    "os_release": "6.12.20+rpt-rpi-2712",
+    "storage_class": "nvme",
+    "filesystem_type": "ext4",
+    "python_version": "3.11.2",
+    "pyside_version": "6.7.1",
+    "qt_version": "6.7.1",
+    "sandbox_method": "bubblewrap_private_dev_v1"
+  },
+  "workload": {
+    "workload_id": "calibration_storage_new_store_only_contract_v1",
+    "fixture_sha256": "f61ca72e8281ae7fa5b404da9e843ba0e1356c636ce8d02a81f9a0d91d7c6e6b",
+    "warmup_runs": 0,
+    "measured_runs": 1,
+    "process_count": 16,
+    "successful_processes": 14,
+    "stopped_processes": 1,
+    "error_processes": 1,
+    "update_count": 17,
+    "canonical_result_count": 16
+  },
+  "correctness": {
+    "classification": "pass",
+    "canonical_only_main_experiment": true,
+    "calibration_json_created": false,
+    "legacy_write_count": 0,
+    "suppressed_legacy_write_attempts": 50,
+    "historical_canary_dual_write": true,
+    "rollback_canary_dual_write": true,
+    "fresh_reload_and_application": true,
+    "hardware_interfaces_enabled": 0,
+    "integrity_failures": 0
+  },
+  "observed": {
+    "scenario_duration_ms": 13830.906713,
+    "update_latency_p95_ms": 18.7484376,
+    "canonical_append_latency_p95_ms": 12.5112116,
+    "process_finalize_latency_p95_ms": 102.0087205,
+    "result_finalize_latency_p95_ms": 0.38686275,
+    "index_latency_p95_ms": 0.48486325,
+    "history_latency_p95_ms": 0.458447,
+    "fresh_reload_latency_ms": 972.060593,
+    "last_to_first_update_median_ratio": 1.0679990551,
+    "peak_rss_bytes": 432209920,
+    "rss_growth_bytes": 42221568,
+    "artifact_file_count": 162,
+    "artifact_bytes": 1625803
+  },
+  "candidate_upper_limits": {
+    "scenario_duration_ms": 17500,
+    "update_latency_p95_ms": 23.5,
+    "canonical_append_latency_p95_ms": 15.7,
+    "process_finalize_latency_p95_ms": 127.6,
+    "fresh_reload_latency_ms": 1216,
+    "last_to_first_update_median_ratio": 1.34,
+    "peak_rss_bytes": 540262400,
+    "artifact_bytes": 2032254
+  },
+  "limitations": [
+    "One measured run is a regression canary, not a statistically stable performance distribution.",
+    "The compact structured-data workload replaces the retired 200-process workload and does not claim camera, image-analysis, firmware, motion, pressure, or dispense behavior."
+  ]
+}
