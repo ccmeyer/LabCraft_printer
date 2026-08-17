@@ -4458,31 +4458,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.image_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.image_label.setStyleSheet("background-color: black; border: 1px solid #444; padding: 8px;")
 
-        self.image_viewport = QtWidgets.QWidget()
-        self.image_viewport.setObjectName("calibrationImageViewport")
-        self.image_viewport.setMinimumSize(480, 360)
-        self.image_viewport.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding,
-            QtWidgets.QSizePolicy.Expanding,
-        )
-        image_stack = QtWidgets.QStackedLayout(self.image_viewport)
-        image_stack.setContentsMargins(0, 0, 0, 0)
-        image_stack.setStackingMode(QtWidgets.QStackedLayout.StackAll)
-        image_stack.addWidget(self.image_label)
-
-        self.calibration_gripper_banner_overlay = QtWidgets.QWidget()
-        self.calibration_gripper_banner_overlay.setObjectName(
-            "calibrationGripperStatusOverlay"
-        )
-        self.calibration_gripper_banner_overlay.setAttribute(
-            QtCore.Qt.WA_TransparentForMouseEvents,
-            True,
-        )
-        banner_overlay_layout = QtWidgets.QVBoxLayout(
-            self.calibration_gripper_banner_overlay
-        )
-        banner_overlay_layout.setContentsMargins(12, 12, 12, 0)
-        banner_overlay_layout.setSpacing(0)
         self.calibration_gripper_status_banner = QtWidgets.QLabel()
         self.calibration_gripper_status_banner.setObjectName(
             "calibrationGripperStatusBanner"
@@ -4498,13 +4473,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "font-weight: 600; padding: 8px; border-radius: 4px;"
         )
         self.calibration_gripper_status_banner.hide()
-        banner_overlay_layout.addWidget(self.calibration_gripper_status_banner)
-        banner_overlay_layout.addStretch(1)
-        image_stack.addWidget(self.calibration_gripper_banner_overlay)
-        image_stack.setCurrentWidget(self.calibration_gripper_banner_overlay)
+
+        self.analysis_layout.addWidget(self.calibration_gripper_status_banner, 0)
 
         self._analysis_image_layout_index = self.analysis_layout.count()
-        self.analysis_layout.addWidget(self.image_viewport, 1)
+        self.analysis_layout.addWidget(self.image_label, 1)
 
         self.online_stream_plot_container = QtWidgets.QWidget()
         self.online_stream_plot_container.setObjectName("online_stream_plot_container")

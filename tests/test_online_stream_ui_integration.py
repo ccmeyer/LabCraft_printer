@@ -1382,6 +1382,30 @@ def test_calibrate_all_gripper_banner_shows_close_phase_for_both_modes(
     dialog.deleteLater()
 
 
+def test_calibrate_all_gripper_banner_is_above_direct_image_widget(
+    monkeypatch,
+    qapp,
+):
+    dialog, _manager, _controller = _build_dialog(monkeypatch, qapp)
+
+    banner_index = dialog.analysis_layout.indexOf(
+        dialog.calibration_gripper_status_banner
+    )
+    image_index = dialog.analysis_layout.indexOf(dialog.image_label)
+
+    assert banner_index >= 0
+    assert image_index == banner_index + 1
+    assert image_index == dialog._analysis_image_layout_index
+    assert dialog.analysis_layout.itemAt(image_index).widget() is dialog.image_label
+    assert dialog.analysis_layout.stretch(banner_index) == 0
+    assert dialog.analysis_layout.stretch(image_index) == 1
+    assert not hasattr(dialog, "image_viewport")
+    assert not hasattr(dialog, "calibration_gripper_banner_overlay")
+    assert dialog.calibration_gripper_status_banner.isHidden() is True
+
+    dialog.deleteLater()
+
+
 def test_calibrate_all_gripper_banner_counts_down_without_starting_calibration(
     monkeypatch,
     qapp,
@@ -1428,6 +1452,48 @@ def test_calibrate_all_gripper_banner_counts_down_without_starting_calibration(
     manager.dropletCalibrationSequenceStateChanged.emit(dict(state))
     qapp.processEvents()
     assert dialog.calibration_gripper_status_banner.isHidden() is True
+
+    dialog.deleteLater()
+
+
+def test_calibrate_all_gripper_banner_repeated_transitions_keep_layout_stable(
+    monkeypatch,
+    qapp,
+):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+    initial_layout_count = dialog.analysis_layout.count()
+    banner = dialog.calibration_gripper_status_banner
+    image_index = dialog._analysis_image_layout_index
+
+    for _ in range(100):
+        manager.droplet_sequence_state.update(
+            {
+                "status": "refreshing_gripper",
+                "gripper_phase": "closing",
+                "gripper_settle_deadline_monotonic_s": None,
+            }
+        )
+        manager.dropletCalibrationSequenceStateChanged.emit(
+            dict(manager.droplet_sequence_state)
+        )
+        manager.droplet_sequence_state.update(
+            {
+                "status": "running",
+                "gripper_phase": "idle",
+                "gripper_settle_deadline_monotonic_s": None,
+            }
+        )
+        manager.dropletCalibrationSequenceStateChanged.emit(
+            dict(manager.droplet_sequence_state)
+        )
+
+    qapp.processEvents()
+
+    assert dialog.analysis_layout.count() == initial_layout_count
+    assert dialog.analysis_layout.indexOf(banner) == image_index - 1
+    assert dialog.analysis_layout.itemAt(image_index).widget() is dialog.image_label
+    assert banner.isHidden() is True
+    assert dialog.gripper_settle_banner_timer.isActive() is False
 
     dialog.deleteLater()
 
