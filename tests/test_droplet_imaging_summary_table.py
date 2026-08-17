@@ -443,6 +443,7 @@ def _build_dialog(
         controller,
         post_apply_manual_refuel_check_callback=post_apply_manual_refuel_check_callback,
     )
+    dialog.activate_session()
     qapp.processEvents()
     dialog._bridge_refresh_design_labels()
     return dialog, manager

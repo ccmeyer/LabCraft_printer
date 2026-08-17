@@ -701,6 +701,7 @@ def _build_view_dialog(monkeypatch, qapp, *, manager=None, model=None, controlle
     if controller is None:
         controller = _ViewControllerStub(manager, model)
     dialog = DropletImagingDialog(SimpleNamespace(color_dict={}), model, controller)
+    dialog.activate_session()
     qapp.processEvents()
     return dialog, manager, controller
 

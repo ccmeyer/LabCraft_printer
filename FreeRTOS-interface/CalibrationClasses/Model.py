@@ -1763,6 +1763,7 @@ class CalibrationManager(QObject):
         self._in_progress_characterization_rows = {}
         self._calibration_history_revision = 0
         self._capture_performance_diagnostics_enabled = False
+        self._shutdown_complete = False
 
         # Persisted JSON
         self._lock = threading.Lock()
@@ -4446,7 +4447,6 @@ class CalibrationManager(QObject):
         return normalized
 
     def update_calibration_file_path(self, file_path):
-        os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
         previous_path = self.calibration_file_path
         path_changed = (
             previous_path is None
@@ -4454,18 +4454,10 @@ class CalibrationManager(QObject):
             != os.path.normcase(os.path.abspath(file_path))
         )
         if path_changed:
-            # Loading another experiment must not retain a run index belonging
-            # to the previous calibration document. Do not end that run here:
-            # experiment loading is a read-only ownership transition.
-            self._run_id = None
-            self._run_idx = None
-            self._active_calibration_session_state = None
-            self._active_session_payloads = {}
-            self._active_session_phase_update_counts = {}
-            self._in_progress_characterization_rows = {}
-            self._reset_calibration_memory_prior_runtime()
-            self._reset_online_stream_prior_runtime()
-            self._reset_calibration_memory_ui_recommendation_state()
+            self._require_idle_for_experiment_transition()
+        os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
+        if path_changed:
+            self._reset_experiment_scoped_state()
             experiment_dir = os.path.dirname(os.path.abspath(file_path)) or os.getcwd()
             self.update_calibration_storage_paths(experiment_dir=experiment_dir)
         self.calibration_file_path = file_path
@@ -4482,6 +4474,56 @@ class CalibrationManager(QObject):
         self._calibration_history_revision = int(
             getattr(self, "_calibration_history_revision", 0)
         ) + 1
+
+    def _require_idle_for_experiment_transition(self):
+        busy = bool(
+            self.activeCalibration is not None
+            or self.calibration_queue
+            or self._pw_sweep_active
+            or self.has_open_stream_gravimetric_capture()
+            or self.has_open_stream_calibration_sequence()
+            or self.has_open_droplet_calibration_sequence()
+        )
+        if busy:
+            raise RuntimeError(
+                "Cannot change experiments while calibration or capture work is active."
+            )
+
+    def _reset_experiment_scoped_state(self):
+        """Clear volatile calibration ownership before binding a new experiment."""
+        self._run_id = None
+        self._run_idx = None
+        self._completed_canonical_session_cache = {}
+        self._canonical_session_result_cache = []
+        self._active_calibration_session_state = None
+        self._active_session_payloads = {}
+        self._active_session_phase_update_counts = {}
+        self._in_progress_characterization_rows = {}
+        self._transient_characterization_candidate = None
+        self._historical_characterization_candidates = {}
+        self._last_pressure_scan_result = None
+        self._pressure_traj_result = None
+        self.background_image = None
+        self.nozzle_center = None
+        self.nozzle_center_image_position = None
+        self.nozzle_center_image_position_source = None
+        self.nozzle_detection_flash_delay_us = None
+        self.nozzle_detection_flash_delay_source = None
+        self.emergence_nozzle_center_image_position = None
+        self.real_nozzle_center_image_position = None
+        self.droplet_trajectory_vector = None
+        self.trajectory_delay = None
+        self.min_start_delay = None
+        self.intermediate_droplet_position = None
+        self._pending_process_verdict = None
+        self._stream_gravimetric_ejection_ledger = GravimetricEjectionLedger()
+        self._stream_gravimetric_reusable_baseline = None
+        self._reset_stream_gravimetric_capture_state()
+        self._reset_stream_calibration_sequence_state()
+        self._reset_droplet_calibration_sequence_state()
+        self._reset_calibration_memory_prior_runtime()
+        self._reset_online_stream_prior_runtime()
+        self._reset_calibration_memory_ui_recommendation_state()
 
     def save_calibration_data(self, file_path):
         raise RuntimeError(
@@ -4792,6 +4834,40 @@ class CalibrationManager(QObject):
                 error_message="Calibration terminated by user",
             )
         self.calibrationError.emit("Calibration terminated by user")
+
+    def is_idle(self):
+        return not bool(
+            self.activeCalibration is not None
+            or self.calibration_queue
+            or self._pw_sweep_active
+            or self.has_open_stream_gravimetric_capture()
+            or self.has_open_stream_calibration_sequence()
+            or self.has_open_droplet_calibration_sequence()
+        )
+
+    def shutdown(self):
+        """Idempotently release application-lifetime calibration resources."""
+        if self._shutdown_complete:
+            return False
+        if not self.is_idle():
+            raise RuntimeError(
+                "Calibration subsystem shutdown requires all calibration work to be idle."
+            )
+        self._cancel_pw_apply_wait()
+        try:
+            self._process_recorder.finalize_run(
+                "stopped", error_message="Application shutdown"
+            )
+        except Exception:
+            pass
+        try:
+            self.model.machine_state_updated.disconnect(self.update_offsets_from_nozzle)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            pass
+        self._calibration_recording_store = None
+        self._calibration_recording_reader = None
+        self._shutdown_complete = True
+        return True
 
     # =================== Pulse-Width Sweep Orchestration ===================
 
@@ -34281,6 +34357,7 @@ class DropletCameraModel(QObject):
         self._analysis_fp = None
         self._meta_lock = threading.Lock()
         self._analysis_lock = threading.Lock()
+        self._shutdown_complete = False
 
         # Track last saved capture
         self._last_saved = None  # dict with index/filename/path/etc.
@@ -34892,6 +34969,21 @@ class DropletCameraModel(QObject):
         print(f"[DropletCameraModel] Saving stopped (dir was {self._save_dir})")
         self._save_dir = None
         self._last_saved = None
+
+    def shutdown(self):
+        """Drain the image writer and clear application-lifetime camera state."""
+        if self._shutdown_complete:
+            return False
+        if self._saving_enabled:
+            self.stop_saving()
+        else:
+            self._stop_save_thread()
+        self.stop_analyzing()
+        self.reading = False
+        self.latest_frame = None
+        self.analyzed_image = None
+        self._shutdown_complete = True
+        return True
 
     def save_frame_with_metadata(self, frame: np.ndarray, *, capture_info: dict | None = None) -> dict | None:
         """
@@ -38565,6 +38657,7 @@ class RefuelCameraModel(QObject):
         self._analysis_timing_context = None
         self._analysis_in_progress = False
         self._burst_state = None
+        self._shutdown_complete = False
 
         self.attach_owner_model(owner_model)
 
@@ -40483,6 +40576,30 @@ class RefuelCameraModel(QObject):
                 },
             )
             self._finalize_recorder("completed")
+
+    def shutdown(self):
+        """Finalize refuel diagnostics and release any analysis worker."""
+        if self._shutdown_complete:
+            return False
+        if self._burst_state is not None:
+            self.cancel_burst("Application shutdown")
+        self.close_session()
+        thread = self.analysis_thread
+        if thread is not None:
+            try:
+                thread.requestInterruption()
+            except Exception:
+                pass
+            try:
+                if thread.isRunning():
+                    thread.wait(3000)
+            except Exception:
+                pass
+        self.analysis_thread = None
+        self._analysis_in_progress = False
+        self.refuel_monitor_camera_active = False
+        self._shutdown_complete = True
+        return True
 
     def classify_live_status(self, level=None):
         if level is None:

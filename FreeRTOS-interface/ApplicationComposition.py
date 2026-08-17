@@ -171,8 +171,21 @@ class ApplicationComponents:
         """Release Qt-owned construction objects without initiating hardware work."""
         if self._closed:
             return True
+        pressure_box = getattr(self.view, "pressure_box", None)
+        calibration_idle = getattr(pressure_box, "calibration_session_is_idle", None)
+        if callable(calibration_idle) and not calibration_idle():
+            return False
         if not _close_experimental_balance_service(self.balance_service):
             return False
+        shutdown_ui = getattr(pressure_box, "shutdown_calibration_ui", None)
+        if callable(shutdown_ui) and shutdown_ui() is False:
+            return False
+        shutdown_model = getattr(self.model, "shutdown_calibration_subsystem", None)
+        if callable(shutdown_model):
+            try:
+                shutdown_model()
+            except RuntimeError:
+                return False
         self._closed = True
 
         # Hiding a visible window can commit the editor that currently owns

@@ -132,6 +132,7 @@ def _launch_motion_capable_imager(monkeypatch, session, qapp):
     dialog.finished.connect(
         lambda _result=None, active=dialog: box._clear_droplet_imager_launch_state(active)
     )
+    dialog.activate_session(mode="calibration")
     dialog.open()
     qapp.processEvents()
     return dialog
@@ -968,11 +969,15 @@ def test_imager_head_cleaning_sil_round_trip_resume_and_exit(
         if not dialog.isVisible():
             # Production uses blocking exec() and clears this state in its finally block.
             box._clear_droplet_imager_launch_state(dialog)
-        _wait_for(
-            qapp,
-            lambda: not dialog.isVisible() and box._droplet_imager_dialog is None,
-            "imager exit at loading",
-        )
+            _wait_for(
+                qapp,
+                lambda: (
+                    not dialog.isVisible()
+                    and box._droplet_imager_dialog is dialog
+                    and box._droplet_imager_dialog_state == "inactive"
+                ),
+                "imager exit at loading",
+            )
         assert machine_model.get_current_position_dict() == loading_position
         assert controller.expected_location == "loading"
         assert box._pressure_render_suspended is False

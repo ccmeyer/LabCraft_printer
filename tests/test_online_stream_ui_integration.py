@@ -420,6 +420,9 @@ def _build_dialog(
     )
     controller.model = model
     dialog = DropletImagingDialog(SimpleNamespace(color_dict={}, model=model), model, controller, **dialog_kwargs)
+    dialog.activate_session(
+        mode="optics" if dialog_kwargs.get("service_mode") else "calibration"
+    )
     qapp.processEvents()
     return dialog, manager, controller
 

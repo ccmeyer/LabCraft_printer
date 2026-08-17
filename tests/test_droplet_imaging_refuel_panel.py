@@ -235,6 +235,7 @@ def _build_droplet_dialog(
         controller,
         open_refuel_camera_callback=open_refuel_camera_callback,
     )
+    dialog.activate_session()
     qapp.processEvents()
     return dialog, refuel_model, controller
 

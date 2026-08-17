@@ -2821,6 +2821,35 @@ seconds); the retired 200-process workload is not part of Milestone 7.
 
 Milestone 7 does not create release candidates, tags, or offline bundles.
 
+### Calibration dialog application-lifetime lifecycle
+
+The application constructs one calibration manager and one pair of calibration
+camera models at startup. The primary Droplet Imager window is constructed on
+first use and then reused. Closing it stops cameras and timers, disconnects its
+session-only callbacks, and releases the calibration pressure profile, while
+retaining completed prerequisites and the selected capture-retention policy.
+Changing experiments resets experiment-scoped calibration state on the same
+manager. Application shutdown performs the final writer and model cleanup.
+
+Run the focused lifecycle coverage and the short eight-reopen SIL scenario with:
+
+```powershell
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_calibration_subsystem_lifecycle.py `
+  tests\test_pressure_plotbox_buttons.py `
+  tests\test_controller_signal_scoping.py `
+  tests\test_safe_application_construction.py `
+  tests\test_droplet_imaging_refuel_panel.py
+
+.\env\Scripts\python.exe -m pytest -q -s --run-sil-lifecycle `
+  tests\system\test_calibration_dialog_reopen_lifecycle.py
+```
+
+The SIL scenario prints one `SIL_PROGRESS` JSON record containing stable object
+identities, callback and camera start/stop counts, hidden receiver counts,
+timer/thread observations, and capture latency. It uses simulated controllers
+and does not access camera, serial, GPIO, firmware, or other physical devices.
+
 ## Raspberry Pi Software-In-The-Loop
 
 The target-Pi SIL lane runs the same real-UI workflow on Raspberry Pi CPU and

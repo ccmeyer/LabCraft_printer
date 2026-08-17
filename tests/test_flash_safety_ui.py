@@ -137,6 +137,7 @@ def _build_droplet_dialog(monkeypatch, qapp):
         begin_droplet_calibration_sequence_gripper_restore=lambda: (True, ""),
     )
     dialog = DropletImagingDialog(SimpleNamespace(color_dict={}), model, controller)
+    dialog.activate_session()
     qapp.processEvents()
     return dialog, cam
 

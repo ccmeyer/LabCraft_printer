@@ -490,6 +490,7 @@ def _build_real_dialog_for_layout(monkeypatch, qapp, *, reset_quick_controls=Tru
     if main_window is None:
         main_window = SimpleNamespace(color_dict={})
     dialog = DropletImagingDialog(main_window, model, controller)
+    dialog.activate_session()
     return dialog
 
 

@@ -578,10 +578,16 @@ class MachineControlsDriver(_QTestSurfaceDriver):
         button = self.view.pressure_box.calibrate_pressure_button
         self.click(button)
         self.wait_until(
-            lambda: getattr(
-                self.view.pressure_box, "_droplet_imager_dialog", None
-            )
-            is not None,
+            lambda: (
+                getattr(self.view.pressure_box, "_droplet_imager_dialog", None)
+                is not None
+                and getattr(
+                    self.view.pressure_box,
+                    "_droplet_imager_dialog_state",
+                    "inactive",
+                )
+                == "active"
+            ),
             "normal calibration dialog",
         )
         dialog = self.view.pressure_box._droplet_imager_dialog

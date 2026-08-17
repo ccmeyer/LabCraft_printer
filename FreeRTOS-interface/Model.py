@@ -37,7 +37,6 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import matplotlib.pyplot as plt
 from enum import Enum
 import CalibrationClasses
-import importlib
 from CalibrationMemoryStore import CalibrationMemoryStore
 from ExperimentAuditLog import ExperimentAuditLog
 from ExecutionPlan import (
@@ -15548,23 +15547,29 @@ class Model(QObject):
         self.rack_model.rack_calibration_updated_signal.connect(self.update_rack_calibration)
         self.location_model.current_location_updated.connect(self.machine_model.update_current_location)
         self.droplet_camera_model.record_metadata_signal.connect(self.record_image_metadata)
+        self._calibration_subsystem_shutdown = False
 
-    def reload_refuel_model(self):
-        importlib.reload(CalibrationClasses.Model)
-        importlib.reload(CalibrationClasses)
-        self.refuel_camera_model = CalibrationClasses.RefuelCameraModel()
-        self.refuel_camera_model.attach_owner_model(self)
-
-    def reload_droplet_model(self):
-        self.droplet_camera_model.record_metadata_signal.disconnect()
-
-        importlib.reload(CalibrationClasses.Model)
-        importlib.reload(CalibrationClasses)
-        self.droplet_camera_model = CalibrationClasses.DropletCameraModel(self.pixel_step_conv_path)
-        self.calibration_manager = CalibrationClasses.CalibrationManager(self)
-        self.experiment_model.set_calibration_manager(self.calibration_manager)
-        self._initialize_calibration_memory_store()
-        self.droplet_camera_model.record_metadata_signal.connect(self.record_image_metadata)
+    def shutdown_calibration_subsystem(self):
+        """Release the application-owned calibration manager and camera models."""
+        if self._calibration_subsystem_shutdown:
+            return False
+        manager = self.calibration_manager
+        idle = getattr(manager, "is_idle", None)
+        if callable(idle) and not idle():
+            raise RuntimeError(
+                "Calibration subsystem shutdown requires calibration work to be idle."
+            )
+        try:
+            self.droplet_camera_model.record_metadata_signal.disconnect(
+                self.record_image_metadata
+            )
+        except (RuntimeError, TypeError, ValueError):
+            pass
+        self.droplet_camera_model.shutdown()
+        self.refuel_camera_model.shutdown()
+        manager.shutdown()
+        self._calibration_subsystem_shutdown = True
+        return True
 
     def _initialize_calibration_memory_store(self):
         try:

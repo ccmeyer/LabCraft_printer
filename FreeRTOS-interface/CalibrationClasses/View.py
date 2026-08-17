@@ -2885,6 +2885,7 @@ class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
 
 
 class DropletImagingDialog(QtWidgets.QDialog):
+    sessionDeactivated = QtCore.Signal(str)
     PRINT_PROFILE_PRESSURE_TOLERANCE = 0.005
     LIVE_PRESSURE_RENDER_INTERVAL_MS = 100
     REFUEL_LEVEL_CHART_WINDOW_SAMPLES = 100
@@ -2999,6 +3000,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             )
         self.service_mode = bool(service_mode)
         self.initial_tab = str(initial_tab or "").strip().lower()
+        self._session_state = "inactive"
+        self._session_mode = "optics" if self.service_mode else "calibration"
+        self._session_signal_connections = []
         self.open_refuel_camera_callback = open_refuel_camera_callback if callable(open_refuel_camera_callback) else None
         self.post_apply_manual_refuel_check_callback = (
             post_apply_manual_refuel_check_callback
@@ -3027,9 +3031,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.analysis_active = False
         self._read_camera_stream_armed = False
         self._read_camera_stream_reconciled = False
-        if not self.camera_free_mode:
-            self.start_droplet_camera()
-            self._arm_read_camera_stream_on_open()
 
         # Timer for periodic image capture
         self.camera_timer = QTimer(self)
@@ -4382,43 +4383,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._set_equal_panel_widths()
 
         # ---------------- Connections ----------------
-        self.model.droplet_camera_model.droplet_image_updated.connect(self.update_image)
-        self.model.droplet_camera_model.droplet_image_updated.connect(
-            self._on_droplet_capture_finished,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        self.model.droplet_camera_model.flash_signal.connect(self.update_flash_info)
-        self.model.calibration_manager.analyzedImageUpdated.connect(self.display_analyzed_image)
-        online_stream_debug_signal = getattr(self.model.calibration_manager, "onlineStreamDebugUpdated", None)
-        if online_stream_debug_signal is not None:
-            online_stream_debug_signal.connect(self.on_online_stream_debug_updated)
-        if self.refuel_camera_model is not None:
-            try:
-                self.refuel_camera_model.update_level_ui_signal.connect(self._schedule_refuel_level_panel_refresh)
-            except Exception:
-                pass
-
-        machine_model = getattr(self.model, "machine_model", None)
-        pressure_signal = getattr(machine_model, "pressure_updated", None)
-        if pressure_signal is not None:
-            pressure_signal.connect(self._refresh_current_pressure_values)
-            pressure_signal.connect(self._request_live_pressure_render)
-        printing_parameters_signal = getattr(
-            machine_model,
-            "printing_parameters_updated",
-            None,
-        )
-        if printing_parameters_signal is not None:
-            printing_parameters_signal.connect(self._sync_printing_controls_from_model)
-        machine_state_signal = getattr(machine_model, "machine_state_updated", None)
-        if machine_state_signal is not None:
-            machine_state_signal.connect(self._refresh_manual_control_lock_state)
-        transport_fault_signal = getattr(self.controller, "transport_fault_ui_signal", None)
-        if transport_fault_signal is not None:
-            transport_fault_signal.connect(self._handle_printing_controls_transport_fault)
-        controller_error_signal = getattr(self.controller, "error_occurred_signal", None)
-        if controller_error_signal is not None:
-            controller_error_signal.connect(self._handle_printer_head_cleaning_controller_error)
+        # Widget-local signals are permanent. Signals owned by the manager,
+        # cameras, machine, and controller are connected only while this
+        # reusable dialog has an active visible session.
 
         self.start_pressure_spin.valueChanged.connect(self.set_start_pressure)
         self.num_pressure_tests_spin.valueChanged.connect(self.set_num_pressure_tests)
@@ -4445,86 +4412,307 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_table.horizontalHeader().sectionClicked.connect(self._handle_summary_header_click)
         self.summary_table.selectionModel().selectionChanged.connect(self._on_summary_selection_changed)
 
-        self.model.calibration_manager.calibrationStageChanged.connect(self.update_stage_and_log)
-        self.model.calibration_manager.calibrationCompleted.connect(self.on_calibration_completed)
-        self.model.calibration_manager.calibrationCompleted.connect(self._retry_imager_close_after_stop)
-        self.model.calibration_manager.calibrationQueueCompleted.connect(self.on_calibration_queue_completed)
-        self.model.calibration_manager.calibrationQueueCompleted.connect(self._retry_imager_close_after_stop)
-        self.model.calibration_manager.calibrationError.connect(self.on_calibration_error)
-        self.model.calibration_manager.calibrationError.connect(self._retry_imager_close_after_stop)
-        self.model.calibration_manager.calibrationStageChanged.connect(self._on_refuel_calibration_stage_changed)
-        self.model.calibration_manager.calibrationCompleted.connect(self._on_refuel_calibration_completed)
-        self.model.calibration_manager.calibrationQueueCompleted.connect(self._on_refuel_calibration_queue_completed)
-        self.model.calibration_manager.calibrationError.connect(self._on_refuel_calibration_error)
-        capture_failed_signal = getattr(self.model.calibration_manager, "captureFailed", None)
-        if capture_failed_signal is not None:
-            capture_failed_signal.connect(self._on_droplet_capture_failed)
-            capture_failed_signal.connect(self._retry_imager_close_after_stop)
-        self.model.calibration_manager.position_diff_dict_signal.connect(self.update_position_diffs)
-        self.model.calibration_manager.characterizationSummaryUpdated.connect(self.populate_summary_table)
-        self.model.calibration_manager.calibrationStageChanged.connect(self._refresh_manual_control_lock_state)
-        self.model.calibration_manager.calibrationCompleted.connect(self._refresh_manual_control_lock_state)
-        self.model.calibration_manager.calibrationQueueCompleted.connect(self._refresh_manual_control_lock_state)
-        self.model.calibration_manager.calibrationError.connect(self._refresh_manual_control_lock_state)
-        stream_capture_signal = getattr(self.model.calibration_manager, "streamCaptureStateChanged", None)
-        if stream_capture_signal is not None:
-            stream_capture_signal.connect(self._sync_stream_capture_panel_state)
-            stream_capture_signal.connect(self._refresh_manual_control_lock_state)
-            stream_capture_signal.connect(self._ensure_stream_capture_followup_state)
-            stream_capture_signal.connect(self._on_refuel_stream_capture_state_changed)
-        stream_sequence_signal = getattr(
-            self.model.calibration_manager,
-            "streamCalibrationSequenceStateChanged",
-            None,
-        )
-        if stream_sequence_signal is not None:
-            stream_sequence_signal.connect(self._refresh_manual_control_lock_state)
-            stream_sequence_signal.connect(self._ensure_stream_calibration_sequence_followup_state)
-            stream_sequence_signal.connect(self._on_refuel_stream_sequence_state_changed)
-        droplet_sequence_signal = getattr(
-            self.model.calibration_manager,
-            "dropletCalibrationSequenceStateChanged",
-            None,
-        )
-        if droplet_sequence_signal is not None:
-            droplet_sequence_signal.connect(self._refresh_manual_control_lock_state)
-            droplet_sequence_signal.connect(self._ensure_droplet_calibration_sequence_followup_state)
-            droplet_sequence_signal.connect(self._on_refuel_droplet_sequence_state_changed)
-
-        self.model.calibration_manager.readinessChanged.connect(self.on_readiness_changed)
-        self.model.calibration_manager._emit_readiness()
-
-        self._sync_printing_controls_from_model(force=True)
         self._on_printing_controls_tab_changed()
 
-        if not self.camera_free_mode:
-            self.set_exposure_time(self.droplet_camera_model.exposure_time)
-            self.set_flash_delay(self.droplet_camera_model.flash_delay)
-            self.set_flash_duration(self.droplet_camera_model.flash_duration)
-            self.set_imaging_droplets(self.droplet_camera_model.num_droplets)
-            self.set_start_pressure(self.start_pressure_spin.value())
-            self.set_num_pressure_tests(self.num_pressure_tests_spin.value())
-            if self.initial_tab == "optics":
-                self.calibration_tabs.setCurrentWidget(self.optics_tab)
-            else:
-                self._apply_default_calibration_tab_from_printing_mode()
-        self.populate_summary_table()
         if self.result_presentation_only:
             self._apply_result_presentation_only_ui()
         elif self.simulation_workflow_mode:
             self._apply_simulation_workflow_ui()
-        else:
-            self._install_droplet_capture_raw_attempt_filter()
-            self._refresh_manual_control_lock_state()
-            self._refresh_optics_controls()
-            self._apply_flash_safety_ui_state()
-            self._sync_stream_capture_panel_state()
-            self._schedule_refuel_level_panel_refresh(force=True)
-            if self._is_refuel_tracking_enabled():
-                self._start_refuel_monitor()
-            QTimer.singleShot(0, self._ensure_stream_capture_followup_state)
-            QTimer.singleShot(0, self._ensure_stream_calibration_sequence_followup_state)
-            QTimer.singleShot(0, self._ensure_droplet_calibration_sequence_followup_state)
+
+    def session_is_active(self):
+        return self._session_state in {"opening", "active", "closing"}
+
+    def _connect_session_signal(self, signal, slot, connection_type=None):
+        if signal is None:
+            return
+        try:
+            if connection_type is None:
+                signal.connect(slot)
+            else:
+                signal.connect(slot, connection_type)
+        except TypeError:
+            signal.connect(slot)
+        self._session_signal_connections.append((signal, slot))
+
+    def _connect_external_session_signals(self):
+        if self._session_signal_connections:
+            return
+        camera = self.model.droplet_camera_model
+        manager = self.model.calibration_manager
+        machine = getattr(self.model, "machine_model", None)
+
+        self._connect_session_signal(camera.droplet_image_updated, self.update_image)
+        self._connect_session_signal(
+            camera.droplet_image_updated,
+            self._on_droplet_capture_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._connect_session_signal(camera.flash_signal, self.update_flash_info)
+        self._connect_session_signal(manager.analyzedImageUpdated, self.display_analyzed_image)
+        self._connect_session_signal(
+            getattr(manager, "onlineStreamDebugUpdated", None),
+            self.on_online_stream_debug_updated,
+        )
+        if self.refuel_camera_model is not None:
+            self._connect_session_signal(
+                getattr(self.refuel_camera_model, "update_level_ui_signal", None),
+                self._schedule_refuel_level_panel_refresh,
+            )
+
+        pressure_signal = getattr(machine, "pressure_updated", None)
+        self._connect_session_signal(pressure_signal, self._refresh_current_pressure_values)
+        self._connect_session_signal(pressure_signal, self._request_live_pressure_render)
+        self._connect_session_signal(
+            getattr(machine, "printing_parameters_updated", None),
+            self._sync_printing_controls_from_model,
+        )
+        self._connect_session_signal(
+            getattr(machine, "machine_state_updated", None),
+            self._refresh_manual_control_lock_state,
+        )
+        self._connect_session_signal(
+            getattr(self.controller, "transport_fault_ui_signal", None),
+            self._handle_printing_controls_transport_fault,
+        )
+        self._connect_session_signal(
+            getattr(self.controller, "error_occurred_signal", None),
+            self._handle_printer_head_cleaning_controller_error,
+        )
+
+        for signal, slot in (
+            (manager.calibrationStageChanged, self.update_stage_and_log),
+            (manager.calibrationCompleted, self.on_calibration_completed),
+            (manager.calibrationCompleted, self._retry_imager_close_after_stop),
+            (manager.calibrationQueueCompleted, self.on_calibration_queue_completed),
+            (manager.calibrationQueueCompleted, self._retry_imager_close_after_stop),
+            (manager.calibrationError, self.on_calibration_error),
+            (manager.calibrationError, self._retry_imager_close_after_stop),
+            (manager.calibrationStageChanged, self._on_refuel_calibration_stage_changed),
+            (manager.calibrationCompleted, self._on_refuel_calibration_completed),
+            (manager.calibrationQueueCompleted, self._on_refuel_calibration_queue_completed),
+            (manager.calibrationError, self._on_refuel_calibration_error),
+            (getattr(manager, "captureFailed", None), self._on_droplet_capture_failed),
+            (getattr(manager, "captureFailed", None), self._retry_imager_close_after_stop),
+            (manager.position_diff_dict_signal, self.update_position_diffs),
+            (manager.characterizationSummaryUpdated, self.populate_summary_table),
+            (manager.calibrationStageChanged, self._refresh_manual_control_lock_state),
+            (manager.calibrationCompleted, self._refresh_manual_control_lock_state),
+            (manager.calibrationQueueCompleted, self._refresh_manual_control_lock_state),
+            (manager.calibrationError, self._refresh_manual_control_lock_state),
+            (manager.readinessChanged, self.on_readiness_changed),
+        ):
+            self._connect_session_signal(signal, slot)
+
+        stream_capture = getattr(manager, "streamCaptureStateChanged", None)
+        for slot in (
+            self._sync_stream_capture_panel_state,
+            self._refresh_manual_control_lock_state,
+            self._ensure_stream_capture_followup_state,
+            self._on_refuel_stream_capture_state_changed,
+        ):
+            self._connect_session_signal(stream_capture, slot)
+        stream_sequence = getattr(manager, "streamCalibrationSequenceStateChanged", None)
+        for slot in (
+            self._refresh_manual_control_lock_state,
+            self._ensure_stream_calibration_sequence_followup_state,
+            self._on_refuel_stream_sequence_state_changed,
+        ):
+            self._connect_session_signal(stream_sequence, slot)
+        droplet_sequence = getattr(manager, "dropletCalibrationSequenceStateChanged", None)
+        for slot in (
+            self._refresh_manual_control_lock_state,
+            self._ensure_droplet_calibration_sequence_followup_state,
+            self._on_refuel_droplet_sequence_state_changed,
+        ):
+            self._connect_session_signal(droplet_sequence, slot)
+
+    def _disconnect_external_session_signals(self):
+        connections = list(reversed(self._session_signal_connections))
+        self._session_signal_connections = []
+        for signal, slot in connections:
+            try:
+                signal.disconnect(slot)
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                pass
+
+    def activate_session(self, mode="calibration"):
+        """Activate hardware and external callbacks for one visible session."""
+        if self._session_state == "shutdown":
+            raise RuntimeError("The calibration dialog has been shut down.")
+        normalized_mode = str(mode or "calibration").strip().lower()
+        if normalized_mode not in {"calibration", "optics"}:
+            raise ValueError("mode must be 'calibration' or 'optics'")
+        if self.session_is_active():
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            return False
+
+        self._session_state = "opening"
+        self._session_mode = normalized_mode
+        self.service_mode = normalized_mode == "optics"
+        self.initial_tab = "optics" if self.service_mode else ""
+        self._live_pressure_closing = False
+        self._stream_capture_dialog_closing = False
+        self._imager_force_close_requested = False
+        self._reset_imager_deferred_close_state()
+        self._connect_external_session_signals()
+        try:
+            if not self.camera_free_mode:
+                try:
+                    self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
+                except Exception:
+                    pass
+                self.start_droplet_camera()
+                self._session_camera_started = True
+                self._arm_read_camera_stream_on_open()
+                self.set_exposure_time(self.droplet_camera_model.exposure_time)
+                self.set_flash_delay(self.droplet_camera_model.flash_delay)
+                self.set_flash_duration(self.droplet_camera_model.flash_duration)
+                self.set_imaging_droplets(self.droplet_camera_model.num_droplets)
+                self.set_start_pressure(self.start_pressure_spin.value())
+                self.set_num_pressure_tests(self.num_pressure_tests_spin.value())
+                if self.service_mode:
+                    self.calibration_tabs.setCurrentWidget(self.optics_tab)
+                else:
+                    self._apply_default_calibration_tab_from_printing_mode()
+                self._install_droplet_capture_raw_attempt_filter()
+                self._refresh_manual_control_lock_state()
+                self._refresh_optics_controls()
+                self._apply_flash_safety_ui_state()
+                self._sync_stream_capture_panel_state()
+                self._schedule_refuel_level_panel_refresh(force=True)
+                if self._is_refuel_tracking_enabled():
+                    self._start_refuel_monitor()
+            self._sync_printing_controls_from_model(force=True)
+            self.populate_summary_table()
+            self.model.calibration_manager._emit_readiness()
+            if not self.camera_free_mode:
+                QTimer.singleShot(0, self._ensure_stream_capture_followup_state)
+                QTimer.singleShot(0, self._ensure_stream_calibration_sequence_followup_state)
+                QTimer.singleShot(0, self._ensure_droplet_calibration_sequence_followup_state)
+        except Exception:
+            self.deactivate_session(reason="activation_error")
+            raise
+        self._session_state = "active"
+        return True
+
+    def deactivate_session(self, reason="closed"):
+        """Release all run/session resources while retaining the dialog widgets."""
+        if self._session_state in {"inactive", "shutdown"}:
+            return False
+        force_close = str(reason or "").strip().lower() == "force_close"
+        self._session_state = "closing"
+        self._stream_capture_dialog_closing = True
+        for child_name in ("_printer_head_recovery_dialog", "_printer_head_cleaning_dialog"):
+            child = getattr(self, child_name, None)
+            if child is None:
+                continue
+            try:
+                closer = getattr(child, "close_for_parent", None)
+                closer() if callable(closer) else child.close()
+            except Exception:
+                pass
+            setattr(self, child_name, None)
+        if getattr(self, "_optics_session_active", False) and not force_close:
+            try:
+                self.model.droplet_camera_model.stop_saving()
+            except Exception:
+                pass
+            self._optics_session_active = False
+        elif self.saving_active and not force_close:
+            try:
+                self.model.droplet_camera_model.stop_saving()
+            except Exception:
+                pass
+        self._optics_session_active = False
+        self.saving_active = False
+        save_button = getattr(self, "save_button", None)
+        if save_button is not None:
+            save_button.setText("Save Images")
+        if self.analysis_active and not force_close:
+            try:
+                self.model.droplet_camera_model.stop_analyzing()
+            except Exception:
+                pass
+        self.analysis_active = False
+        analyze_button = getattr(self, "analyze_button", None)
+        if analyze_button is not None:
+            analyze_button.setText("Analyze Images")
+        try:
+            self._close_stream_capture_mass_dialog()
+        except Exception:
+            pass
+        try:
+            self._reset_online_stream_debug_view(hide=True)
+        except Exception:
+            pass
+        for timer_name in ("camera_timer", "refuel_monitor_timer", "refuel_panel_refresh_timer"):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+        if not self.camera_free_mode and not force_close:
+            try:
+                self._auto_export_refuel_performance_snapshot_on_close()
+            except Exception:
+                pass
+            try:
+                self._stop_refuel_monitor("Monitoring disabled")
+            except Exception:
+                pass
+            try:
+                self.controller.set_droplet_capture_profile("default")
+                self.controller.set_command_dispatch_interval(90)
+            except Exception:
+                pass
+            if bool(getattr(self, "_session_camera_started", False)):
+                try:
+                    self.stop_droplet_camera()
+                except Exception:
+                    pass
+            self._session_camera_started = False
+            try:
+                self._set_stream_capture_read_camera_enabled(False)
+            except Exception:
+                self._read_camera_stream_armed = False
+                self._read_camera_stream_reconciled = False
+            try:
+                self._remove_droplet_capture_raw_attempt_filter()
+            except Exception:
+                pass
+        elif force_close:
+            try:
+                self._remove_droplet_capture_raw_attempt_filter()
+            except Exception:
+                pass
+        try:
+            self._stop_live_pressure_rendering()
+        except Exception:
+            pass
+        self._disconnect_external_session_signals()
+        self._capture_request_pending = False
+        self.capturing = False
+        repeat_button = getattr(self, "repeat_capture_button", None)
+        if repeat_button is not None:
+            repeat_button.setText("Start Repeated Capture")
+        self._session_state = "inactive"
+        self.hide()
+        self.sessionDeactivated.emit(str(reason or "closed"))
+        return True
+
+    def shutdown(self):
+        """Permanently tear down the reusable dialog at application shutdown."""
+        if self._session_state == "shutdown":
+            return False
+        if self._session_state != "inactive":
+            self.deactivate_session(reason="shutdown")
+        self._disconnect_external_session_signals()
+        self._session_state = "shutdown"
+        self.hide()
+        return True
 
     def _apply_result_presentation_only_ui(self):
         manager = getattr(self.model, "calibration_manager", None)
@@ -10752,6 +10940,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._stream_capture_starting_camera_return_attempted = False
 
     def _ensure_stream_calibration_sequence_followup_state(self, *_args):
+        if self._session_state not in {"opening", "active"}:
+            return
         state = self._get_stream_calibration_sequence_state()
         status = str(state.get("status") or "idle")
 
@@ -10765,6 +10955,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._stream_calibration_sequence_gripper_preamble_attempted = False
 
     def _ensure_droplet_calibration_sequence_followup_state(self, *_args):
+        if self._session_state not in {"opening", "active"}:
+            return
         state = self._get_droplet_calibration_sequence_state()
         status = str(state.get("status") or "idle")
 
@@ -14334,6 +14526,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._imager_close_retry_count = 0
         self._stream_capture_dialog_closing = False
         self._imager_force_close_prompt_active = False
+        if getattr(self, "_session_state", None) == "closing":
+            self._session_state = "active"
 
     def _force_close_imager_prompt_message(self):
         return (
@@ -14455,6 +14649,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         except Exception:
             pass
 
+        self._session_state = "closing"
         capture_pending = self._capture_pending_for_close()
         first_request = not bool(getattr(self, "_imager_close_after_stop_requested", False))
         self._imager_close_after_stop_requested = True
@@ -14500,20 +14695,32 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._schedule_imager_close_retry(100)
 
     def done(self, result):
-        self._stop_live_pressure_rendering()
+        if self._session_state not in {"inactive", "shutdown"}:
+            if self._imager_close_blocked_by_capture_or_calibration():
+                self.close()
+                return
+            self.deactivate_session(reason="done")
         super().done(result)
+
+    def reject(self):
+        """Route Escape and programmatic rejection through the close contract."""
+        if self._session_state not in {"inactive", "shutdown"}:
+            if self._imager_close_blocked_by_capture_or_calibration():
+                self.close()
+                return
+            self.deactivate_session(reason="reject")
+        super().reject()
 
     def closeEvent(self, event):
         """Handle the closing of the dialog."""
         if bool(getattr(self, "_imager_force_close_requested", False)):
-            self._stop_live_pressure_rendering()
-            self._remove_droplet_capture_raw_attempt_filter()
             self._imager_force_close_requested = False
             self._imager_close_after_stop_requested = False
             self._imager_close_after_stop_started_monotonic = None
             self._imager_close_retry_count = 0
             self._imager_force_close_prompt_active = False
             self._stream_capture_dialog_closing = True
+            self.deactivate_session(reason="force_close")
             event.accept()
             return
 
@@ -14569,11 +14776,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 return
 
         if bool(getattr(self, "camera_free_mode", False)):
-            self._stop_live_pressure_rendering()
-            for timer_name in ("camera_timer", "refuel_monitor_timer", "refuel_panel_refresh_timer"):
-                timer = getattr(self, timer_name, None)
-                if timer is not None:
-                    timer.stop()
+            self.deactivate_session(reason="close")
             super().closeEvent(event)
             return
 
@@ -14584,39 +14787,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._imager_close_after_stop_requested = False
         self._imager_close_after_stop_started_monotonic = None
         self._imager_close_retry_count = 0
-        self._stream_capture_dialog_closing = True
-        recovery_dialog = getattr(self, "_printer_head_recovery_dialog", None)
-        if recovery_dialog is not None:
-            try:
-                recovery_dialog.close()
-            except Exception:
-                pass
-        cleaning_dialog = getattr(self, "_printer_head_cleaning_dialog", None)
-        if cleaning_dialog is not None:
-            try:
-                cleaning_dialog.close_for_parent()
-            except Exception:
-                pass
-        if getattr(self, "_optics_session_active", False):
-            try:
-                self.model.droplet_camera_model.stop_saving()
-            except Exception:
-                pass
-            self._optics_session_active = False
-        self._close_stream_capture_mass_dialog()
-        self._reset_online_stream_debug_view(hide=True)
-        self.camera_timer.stop()
-        self._auto_export_refuel_performance_snapshot_on_close()
-        self._stop_refuel_monitor("Monitoring disabled")
-        try:
-            self.controller.set_droplet_capture_profile("default")
-            self.controller.set_command_dispatch_interval(90)
-        except Exception:
-            pass
-        self.stop_droplet_camera()
-        self._set_stream_capture_read_camera_enabled(False)
-        self._remove_droplet_capture_raw_attempt_filter()
-        self._stop_live_pressure_rendering()
+        self.deactivate_session(reason="close")
         event.accept()
 
 

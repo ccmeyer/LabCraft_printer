@@ -371,6 +371,12 @@ class SignalStub:
     def connect(self, fn, *args, **kwargs):
         self._subs.append(fn)
 
+    def disconnect(self, fn=None):
+        if fn is None:
+            self._subs = []
+            return
+        self._subs.remove(fn)
+
     def emit(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         for fn in list(self._subs):

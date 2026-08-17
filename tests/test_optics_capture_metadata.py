@@ -1088,14 +1088,16 @@ def test_droplet_imager_close_ignores_stale_local_pending_when_coordinator_idle(
     dialog._stop_refuel_monitor = Mock()
     dialog.stop_droplet_camera = Mock()
     dialog._set_stream_capture_read_camera_enabled = Mock()
+    dialog.deactivate_session = Mock(
+        side_effect=lambda reason: setattr(dialog, "_capture_request_pending", False)
+    )
 
     DropletImagingDialog.closeEvent(dialog, event)
 
     assert event.accepted is True
     assert event.ignored is False
     assert dialog._capture_request_pending is False
-    controller.set_droplet_capture_profile.assert_called_once_with("default")
-    dialog.stop_droplet_camera.assert_called_once_with()
+    dialog.deactivate_session.assert_called_once_with(reason="close")
 
 
 def test_droplet_imager_close_defers_on_coordinator_pending_even_when_local_idle():
@@ -1283,6 +1285,7 @@ def test_droplet_imager_force_close_event_accepts_without_controller_cleanup():
     dialog.stop_droplet_camera = Mock()
     dialog._set_stream_capture_read_camera_enabled = Mock()
     dialog._stop_refuel_monitor = Mock()
+    dialog.deactivate_session = Mock()
 
     DropletImagingDialog.closeEvent(dialog, event)
 
@@ -1293,6 +1296,7 @@ def test_droplet_imager_force_close_event_accepts_without_controller_cleanup():
     assert dialog._imager_close_after_stop_started_monotonic is None
     assert dialog._imager_close_retry_count == 0
     assert dialog._stream_capture_dialog_closing is True
+    dialog.deactivate_session.assert_called_once_with(reason="force_close")
     controller.set_droplet_capture_profile.assert_not_called()
     controller.set_command_dispatch_interval.assert_not_called()
     controller.disable_print_profile.assert_not_called()

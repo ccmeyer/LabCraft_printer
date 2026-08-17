@@ -45,7 +45,6 @@ import cv2
 from utilities import ShortcutManager, apply_pressure_plot_style
 from ExperimentAuditReader import ExperimentAuditReader, build_audit_markdown
 import CalibrationClasses
-import importlib
 from typing import Mapping, Sequence, Optional, Any, List, Dict, Tuple, Set
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from ApplicationComposition import PRODUCTION_RUNTIME_CONTEXT, SIMULATION_RUNTIME_CONTEXT
@@ -1727,6 +1726,19 @@ class MainWindow(QMainWindow):
             )
             return
 
+        pressure_box = getattr(self, "pressure_box", None)
+        calibration_idle = getattr(pressure_box, "calibration_session_is_idle", None)
+        if callable(calibration_idle) and not calibration_idle():
+            focus_dialog = getattr(pressure_box, "_focus_active_droplet_imager_dialog", None)
+            if callable(focus_dialog):
+                focus_dialog()
+            self.popup_message(
+                "Calibration Still Active",
+                "Close the calibration, optics, or camera window before closing the application.",
+            )
+            event.ignore()
+            return
+
         update_close_requested = getattr(self, "_app_update_close_requested", False)
         if self.model.machine_model.is_connected():
             if update_close_requested:
@@ -3000,6 +3012,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._active_spinbox_highlight = None
         self._print_profile_apply_pending = False
         self._droplet_imager_dialog = None
+        self._droplet_imager_dialog_state = "inactive"
+        self._droplet_imager_profile_lease = None
+        self._droplet_imager_result_dialog = None
         self._droplet_imager_launch_pending = False
         self._refuel_camera_dialog = None
         self._refuel_camera_launch_pending = False
@@ -3633,7 +3648,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
     def _droplet_imager_launch_is_active(self):
         return bool(
             getattr(self, "_droplet_imager_launch_pending", False)
-            or getattr(self, "_droplet_imager_dialog", None) is not None
+            or getattr(self, "_droplet_imager_dialog_state", "inactive")
+            in {"opening", "active", "closing", "shutdown"}
+            or getattr(self, "_droplet_imager_result_dialog", None) is not None
         )
 
     def _historical_experiment_is_read_only(self):
@@ -3722,7 +3739,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         active_dialog = getattr(self, "_droplet_imager_dialog", None)
         cleared_active_dialog = dialog is None or active_dialog is dialog
         if cleared_active_dialog:
-            self._droplet_imager_dialog = None
+            if getattr(self, "_droplet_imager_dialog_state", "inactive") != "shutdown":
+                self._droplet_imager_dialog_state = "inactive"
             self.set_pressure_render_suspended(False)
         self._droplet_imager_launch_pending = False
         self._refresh_droplet_imager_button_state()
@@ -3730,8 +3748,97 @@ class PressurePlotBox(QtWidgets.QGroupBox):
     def _set_active_droplet_imager_dialog(self, dialog):
         """Make one constructed imager dialog the active pressure renderer."""
         self._droplet_imager_dialog = dialog
+        self._droplet_imager_dialog_state = "active" if dialog is not None else "inactive"
         self.set_pressure_render_suspended(dialog is not None)
         self._refresh_droplet_imager_button_state()
+
+    def _on_droplet_imager_session_deactivated(self, _reason=""):
+        lease = getattr(self, "_droplet_imager_profile_lease", None)
+        self._droplet_imager_profile_lease = None
+        self._release_calibration_profile_lease(lease)
+        self._clear_droplet_imager_launch_state(self._droplet_imager_dialog)
+
+    def _on_droplet_imager_finished(self, _result=None):
+        dialog = getattr(self, "_droplet_imager_dialog", None)
+        if dialog is not None and getattr(dialog, "session_is_active", lambda: False)():
+            dialog.deactivate_session(reason="finished")
+        self._on_droplet_imager_session_deactivated("finished")
+
+    def _create_primary_droplet_imager_dialog(self):
+        dialog = getattr(self, "_droplet_imager_dialog", None)
+        if dialog is not None:
+            return dialog
+        simulation_mode = (
+            getattr(self.main_window, "runtime_context", None)
+            is SIMULATION_RUNTIME_CONTEXT
+        )
+        kwargs = {
+            "open_refuel_camera_callback": self.refuel_camera,
+            "post_apply_manual_refuel_check_callback": (
+                self.request_manual_refuel_check_after_imager_close
+            ),
+        }
+        if simulation_mode:
+            kwargs.update(
+                simulation_workflow_mode=True,
+                synthetic_generation_callback=(
+                    self._simulation_calibration_generate_callback
+                ),
+                synthetic_availability_callback=(
+                    self._simulation_calibration_availability_callback
+                ),
+                synthetic_deferred_refuel_callback=(
+                    self._simulation_manual_refuel_deferred_callback
+                ),
+            )
+        dialog = CalibrationClasses.DropletImagingDialog(
+            self.main_window,
+            self.model,
+            self.controller,
+            **kwargs,
+        )
+        self._droplet_imager_dialog = dialog
+        dialog.finished.connect(self._on_droplet_imager_finished)
+        deactivated = getattr(dialog, "sessionDeactivated", None)
+        if deactivated is not None:
+            deactivated.connect(self._on_droplet_imager_session_deactivated)
+        return dialog
+
+    def _activate_primary_droplet_imager_dialog(self, *, mode):
+        if (
+            getattr(self, "_droplet_imager_dialog_state", "inactive")
+            in {"opening", "active", "closing", "shutdown"}
+            or getattr(self, "_droplet_imager_result_dialog", None) is not None
+        ):
+            self._reject_duplicate_droplet_imager_launch()
+            return self._droplet_imager_dialog
+        self._set_droplet_imager_launch_pending(True)
+        profile_lease = None
+        simulation_mode = (
+            getattr(self.main_window, "runtime_context", None)
+            is SIMULATION_RUNTIME_CONTEXT
+        )
+        if not simulation_mode:
+            profile_lease = self._acquire_calibration_profile_lease(
+                "manual optics" if mode == "optics" else "droplet imager"
+            )
+            if profile_lease is None:
+                self._clear_droplet_imager_launch_state(None)
+                return None
+        self._droplet_imager_profile_lease = profile_lease
+        self._droplet_imager_dialog_state = "opening"
+        dialog = None
+        try:
+            dialog = self._create_primary_droplet_imager_dialog()
+            dialog.activate_session(mode=mode)
+        except Exception:
+            self._droplet_imager_profile_lease = None
+            self._release_calibration_profile_lease(profile_lease)
+            self._clear_droplet_imager_launch_state(dialog)
+            raise
+        self._set_active_droplet_imager_dialog(dialog)
+        self._droplet_imager_launch_pending = False
+        return dialog
 
     def _focus_active_droplet_imager_dialog(self):
         dialog = getattr(self, "_droplet_imager_dialog", None)
@@ -3891,6 +3998,31 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         )
         return False
 
+    def calibration_session_is_idle(self):
+        return not bool(
+            self._droplet_imager_launch_is_active()
+            or self._refuel_camera_launch_is_active()
+            or self._manual_refuel_check_launch_is_active()
+            or self._calibration_profile_leases
+        )
+
+    def shutdown_calibration_ui(self):
+        """Destroy retained calibration UI after all visible sessions are idle."""
+        if not self.calibration_session_is_idle():
+            return False
+        dialog = getattr(self, "_droplet_imager_dialog", None)
+        if dialog is not None:
+            dialog.shutdown()
+            dialog.deleteLater()
+            self._droplet_imager_dialog = None
+        result_dialog = getattr(self, "_droplet_imager_result_dialog", None)
+        if result_dialog is not None:
+            result_dialog.shutdown()
+            result_dialog.deleteLater()
+            self._droplet_imager_result_dialog = None
+        self._droplet_imager_dialog_state = "shutdown"
+        return True
+
     def calibrate_pressure(self):
         """Calibrate the pressure for a specific printer head."""
         if self._historical_experiment_is_read_only():
@@ -3928,84 +4060,30 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def _launch_droplet_imager_dialog(self):
         """Open the droplet imager dialog after preflight checks have passed."""
-        if getattr(self, "_droplet_imager_dialog", None) is not None:
-            self._reject_duplicate_droplet_imager_launch()
-            return
-
-        self._set_droplet_imager_launch_pending(True)
-        droplet_imaging_dialog = None
-        profile_lease = None
+        dialog = self._activate_primary_droplet_imager_dialog(mode="calibration")
+        if dialog is None:
+            return None
         try:
-            self.controller.disconnect_droplet_camera_signals()
-            importlib.reload(CalibrationClasses.View)
-            importlib.reload(CalibrationClasses)
-            self.model.reload_droplet_model()
-            self.controller.connect_droplet_camera_signals()
-            profile_lease = self._acquire_calibration_profile_lease("droplet imager")
-            if profile_lease is None:
-                return
-            droplet_imaging_dialog = CalibrationClasses.DropletImagingDialog(
-                self.main_window,
-                self.model,
-                self.controller,
-                open_refuel_camera_callback=self.refuel_camera,
-                post_apply_manual_refuel_check_callback=self.request_manual_refuel_check_after_imager_close,
-            )
-            self._set_active_droplet_imager_dialog(droplet_imaging_dialog)
-            finished_signal = getattr(droplet_imaging_dialog, "finished", None)
-            if finished_signal is not None:
-                try:
-                    finished_signal.connect(
-                        lambda _result=None, dialog=droplet_imaging_dialog: self._clear_droplet_imager_launch_state(dialog)
-                    )
-                except Exception:
-                    pass
-            droplet_imaging_dialog.exec()
+            return dialog.exec()
         finally:
-            self._release_calibration_profile_lease(profile_lease)
-            self._clear_droplet_imager_launch_state(droplet_imaging_dialog)
+            if getattr(dialog, "session_is_active", lambda: False)():
+                dialog.deactivate_session(reason="exec_returned")
 
     def _launch_simulation_calibration_dialog(self):
         """Open the real calibration layout without any physical camera lifecycle."""
 
         if getattr(self.main_window, "runtime_context", None) is not SIMULATION_RUNTIME_CONTEXT:
             raise RuntimeError("Synthetic calibration workflow is simulation-only.")
-        if self._droplet_imager_launch_is_active():
-            self._reject_duplicate_droplet_imager_launch()
-            return self._droplet_imager_dialog
-        self._set_droplet_imager_launch_pending(True)
-        dialog = None
-        try:
-            dialog = CalibrationClasses.DropletImagingDialog(
-                self.main_window,
-                self.model,
-                self.controller,
-                post_apply_manual_refuel_check_callback=(
-                    self.request_manual_refuel_check_after_imager_close
-                ),
-                simulation_workflow_mode=True,
-                synthetic_generation_callback=(
-                    self._simulation_calibration_generate_callback
-                ),
-                synthetic_availability_callback=(
-                    self._simulation_calibration_availability_callback
-                ),
-                synthetic_deferred_refuel_callback=(
-                    self._simulation_manual_refuel_deferred_callback
-                ),
-            )
-            self._set_active_droplet_imager_dialog(dialog)
-            self._droplet_imager_launch_pending = False
-            finished_signal = getattr(dialog, "finished", None)
-            if finished_signal is not None:
-                finished_signal.connect(
-                    lambda _result=None, active=dialog: self._clear_droplet_imager_launch_state(active)
-                )
-            dialog.open()
-            return dialog
-        except Exception:
-            self._clear_droplet_imager_launch_state(dialog)
-            raise
+        dialog = self._activate_primary_droplet_imager_dialog(mode="calibration")
+        if dialog is not None:
+            try:
+                dialog.open()
+            except Exception:
+                if getattr(dialog, "session_is_active", lambda: False)():
+                    dialog.deactivate_session(reason="open_error")
+                self._on_droplet_imager_session_deactivated("open_error")
+                raise
+        return dialog
 
     def open_simulated_calibration_result(self, candidate_id):
         """Present one transient calibration result without a camera lifecycle."""
@@ -4038,59 +4116,45 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 result_presentation_only=True,
                 transient_candidate_id=str(candidate_id),
             )
-            self._set_active_droplet_imager_dialog(dialog)
+            self._droplet_imager_result_dialog = dialog
+            self.set_pressure_render_suspended(True)
             self._droplet_imager_launch_pending = False
             finished_signal = getattr(dialog, "finished", None)
             if finished_signal is not None:
-                finished_signal.connect(
-                    lambda _result=None, active=dialog: self._clear_droplet_imager_launch_state(active)
-                )
+                finished_signal.connect(self._on_droplet_imager_result_finished)
+            dialog.activate_session(mode="calibration")
             dialog.open()
             return dialog
         except Exception:
-            self._clear_droplet_imager_launch_state(dialog)
+            self._droplet_imager_result_dialog = None
+            self._clear_droplet_imager_launch_state(None)
+            if dialog is not None:
+                delete_later = getattr(dialog, "deleteLater", None)
+                if callable(delete_later):
+                    delete_later()
             raise
+
+    def _on_droplet_imager_result_finished(self, _result=None):
+        dialog = getattr(self, "_droplet_imager_result_dialog", None)
+        self._droplet_imager_result_dialog = None
+        self._droplet_imager_launch_pending = False
+        self.set_pressure_render_suspended(False)
+        self._refresh_droplet_imager_button_state()
+        if dialog is not None:
+            delete_later = getattr(dialog, "deleteLater", None)
+            if callable(delete_later):
+                delete_later()
 
     def _launch_manual_optics_calibration_dialog(self):
         """Open the droplet imager directly to the manual optics-calibration tab."""
-        if self._droplet_imager_launch_is_active():
-            self._reject_duplicate_droplet_imager_launch()
-            return self._droplet_imager_dialog
+        dialog = self._activate_primary_droplet_imager_dialog(mode="optics")
+        if dialog is None:
+            return None
         try:
-            self.controller.disconnect_droplet_camera_signals()
-        except Exception:
-            pass
-        importlib.reload(CalibrationClasses.View)
-        importlib.reload(CalibrationClasses)
-        try:
-            self.model.reload_droplet_model()
-        except Exception:
-            pass
-        try:
-            self.controller.connect_droplet_camera_signals()
-        except Exception:
-            pass
-        droplet_imaging_dialog = CalibrationClasses.DropletImagingDialog(
-            self.main_window,
-            self.model,
-            self.controller,
-            service_mode=True,
-            initial_tab="optics",
-            open_refuel_camera_callback=self.refuel_camera,
-        )
-        self._set_active_droplet_imager_dialog(droplet_imaging_dialog)
-        finished_signal = getattr(droplet_imaging_dialog, "finished", None)
-        if finished_signal is not None:
-            try:
-                finished_signal.connect(
-                    lambda _result=None, dialog=droplet_imaging_dialog: self._clear_droplet_imager_launch_state(dialog)
-                )
-            except Exception:
-                pass
-        try:
-            return droplet_imaging_dialog.exec()
+            return dialog.exec()
         finally:
-            self._clear_droplet_imager_launch_state(droplet_imaging_dialog)
+            if getattr(dialog, "session_is_active", lambda: False)():
+                dialog.deactivate_session(reason="exec_returned")
 
     def _guided_optics_location_pair(self):
         try:
@@ -4222,8 +4286,6 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         refuel_camera_dialog = None
         profile_lease = None
         try:
-            importlib.reload(CalibrationClasses.View)
-            importlib.reload(CalibrationClasses)
             profile_lease = self._acquire_calibration_profile_lease("refuel camera")
             if profile_lease is None:
                 return
@@ -4237,15 +4299,21 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             finished_signal = getattr(refuel_camera_dialog, "finished", None)
             if finished_signal is not None:
                 try:
-                    finished_signal.connect(
-                        lambda _result=None, dialog=refuel_camera_dialog: self._clear_refuel_camera_launch_state(dialog)
-                    )
+                    finished_signal.connect(self._on_refuel_camera_finished)
                 except Exception:
                     pass
             refuel_camera_dialog.exec()
         finally:
             self._release_calibration_profile_lease(profile_lease)
             self._clear_refuel_camera_launch_state(refuel_camera_dialog)
+
+    def _on_refuel_camera_finished(self, _result=None):
+        dialog = getattr(self, "_refuel_camera_dialog", None)
+        self._clear_refuel_camera_launch_state(dialog)
+        if dialog is not None:
+            delete_later = getattr(dialog, "deleteLater", None)
+            if callable(delete_later):
+                delete_later()
 
     def _launch_manual_refuel_check_dialog(self):
         """Open the manual refuel check dialog after preflight checks have passed."""
@@ -4260,9 +4328,6 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 getattr(self.main_window, "runtime_context", None)
                 is SIMULATION_RUNTIME_CONTEXT
             )
-            if not simulation_mode:
-                importlib.reload(CalibrationClasses.View)
-                importlib.reload(CalibrationClasses)
             readiness = None
             if simulation_mode and callable(self._simulation_manual_refuel_availability_callback):
                 readiness = self._simulation_manual_refuel_availability_callback()
@@ -4288,14 +4353,20 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             finished_signal = getattr(manual_dialog, "finished", None)
             if finished_signal is not None:
                 try:
-                    finished_signal.connect(
-                        lambda _result=None, dialog=manual_dialog: self._clear_manual_refuel_check_launch_state(dialog)
-                    )
+                    finished_signal.connect(self._on_manual_refuel_check_finished)
                 except Exception:
                     pass
             manual_dialog.exec()
         finally:
             self._clear_manual_refuel_check_launch_state(manual_dialog)
+
+    def _on_manual_refuel_check_finished(self, _result=None):
+        dialog = getattr(self, "_manual_refuel_check_dialog", None)
+        self._clear_manual_refuel_check_launch_state(dialog)
+        if dialog is not None:
+            delete_later = getattr(dialog, "deleteLater", None)
+            if callable(delete_later):
+                delete_later()
 
     def droplet_imager(self):
         """Open the droplet imager dialog after verifying prerequisites."""
@@ -4369,7 +4440,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._set_droplet_imager_launch_pending(True)
 
         def _launch_after_camera_move():
-            if getattr(self, "_droplet_imager_dialog", None) is not None:
+            if getattr(self, "_droplet_imager_dialog_state", "inactive") in {
+                "opening", "active", "closing", "shutdown"
+            }:
                 self._reject_duplicate_droplet_imager_launch()
                 return
             if not getattr(self, "_droplet_imager_launch_pending", False):
@@ -4537,7 +4610,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         def _launch_after_imager_closed():
             if not getattr(self, "_manual_refuel_check_after_imager_pending", False):
                 return
-            if getattr(self, "_droplet_imager_dialog", None) is not None:
+            if getattr(self, "_droplet_imager_dialog_state", "inactive") in {
+                "opening", "active", "closing"
+            }:
                 QtCore.QTimer.singleShot(0, _launch_after_imager_closed)
                 return
             queue_idle = False
@@ -4635,18 +4710,18 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def nozzle_position_dataset_capture(self):
         """Open the NozzlePosition checklist-driven dataset capture dialog."""
-        self.controller.disconnect_droplet_camera_signals()
-        importlib.reload(CalibrationClasses.View)
-        importlib.reload(CalibrationClasses)
-        self.model.reload_droplet_model()
-        self.controller.connect_droplet_camera_signals()
         profile_lease = self._acquire_calibration_profile_lease("nozzle-position dataset capture")
         if profile_lease is None:
             return
+        dlg = None
         try:
             dlg = CalibrationClasses.NozzlePositionDatasetCaptureWindow(self.main_window, self.model, self.controller)
             dlg.exec()
         finally:
+            if dlg is not None:
+                delete_later = getattr(dlg, "deleteLater", None)
+                if callable(delete_later):
+                    delete_later()
             self._release_calibration_profile_lease(profile_lease)
 
     def print_calibration_droplets(self,num_droplets):

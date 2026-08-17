@@ -248,8 +248,7 @@ def main():
                 os.environ
             ),
         )
-        if components.balance_service is not None:
-            app.aboutToQuit.connect(components.close)
+        app.aboutToQuit.connect(components.close)
         view = components.view
 
         def show_main_window():
@@ -267,11 +266,11 @@ def main():
         install_ui_freeze_watchdog(app)
         return app.exec()
     finally:
-        if components is not None and components.balance_service is not None:
+        if components is not None:
             if not components.close():
                 print(
-                    "Experimental balance service is still shutting down; "
-                    "no forced thread termination was attempted."
+                    "Application components are still active; no forced calibration, "
+                    "camera, or balance teardown was attempted."
                 )
         app_lock.unlock()
 

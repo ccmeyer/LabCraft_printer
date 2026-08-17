@@ -195,13 +195,30 @@ def _patch_droplet_launch(monkeypatch, events, *, main_window, model, controller
             assert callable(kwargs.get("open_refuel_camera_callback"))
             assert callable(kwargs.get("post_apply_manual_refuel_check_callback"))
             self.finished = _SignalStub()
+            self.sessionDeactivated = _SignalStub()
+            self._active = False
             events.append("droplet_dialog_init")
+
+        def activate_session(self, mode="calibration"):
+            self._active = True
+            events.append(f"droplet_dialog_activate:{mode}")
+
+        def deactivate_session(self, reason="closed"):
+            if not self._active:
+                return False
+            self._active = False
+            self.sessionDeactivated.emit(reason)
+            return True
+
+        def session_is_active(self):
+            return self._active
 
         def exec(self):
             events.append("droplet_dialog_exec")
+            self.deactivate_session("done")
+            self.finished.emit(0)
             return 0
 
-    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
     monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _DropletDialog)
 
 
@@ -218,7 +235,6 @@ def _patch_refuel_launch(monkeypatch, events, *, main_window, model, controller)
             events.append("refuel_dialog_exec")
             return 0
 
-    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
     monkeypatch.setattr(View.CalibrationClasses, "RefuelCameraWindow", _RefuelDialog)
 
 
@@ -248,7 +264,6 @@ def _patch_manual_refuel_launch(monkeypatch, events, *, main_window, model, cont
             events.append("manual_refuel_dialog_exec")
             return 0
 
-    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
     monkeypatch.setattr(View.CalibrationClasses, "ManualRefuelCheckDialog", _ManualRefuelDialog)
 
 
@@ -456,7 +471,8 @@ def test_stale_imager_cleanup_does_not_resume_active_renderer(qapp):
     assert box._droplet_imager_dialog is active_dialog
     assert box._pressure_render_suspended is True
     box._clear_droplet_imager_launch_state(active_dialog)
-    assert box._droplet_imager_dialog is None
+    assert box._droplet_imager_dialog is active_dialog
+    assert box._droplet_imager_dialog_state == "inactive"
     assert box._pressure_render_suspended is False
 
 
@@ -872,11 +888,9 @@ def test_current_profile_calibrate_pressure_opens_droplet_imager_at_camera(monke
     box.calibrate_pressure()
 
     assert events == [
-        "disconnect_droplet_camera_signals",
-        "reload_droplet_model",
-        "connect_droplet_camera_signals",
         "enable_print_profile",
         "droplet_dialog_init",
+        "droplet_dialog_activate:calibration",
         "droplet_dialog_exec",
         "disable_print_profile",
     ]
@@ -996,7 +1010,23 @@ def test_nested_refuel_window_shares_calibration_profile_lease(monkeypatch, qapp
     class _DropletDialog:
         def __init__(self, *_args, **_kwargs):
             self.finished = _SignalStub()
+            self.sessionDeactivated = _SignalStub()
+            self._active = False
             events.append("droplet_dialog_init")
+
+        def activate_session(self, mode="calibration"):
+            self._active = True
+            events.append(f"droplet_dialog_activate:{mode}")
+
+        def deactivate_session(self, reason="closed"):
+            if not self._active:
+                return False
+            self._active = False
+            self.sessionDeactivated.emit(reason)
+            return True
+
+        def session_is_active(self):
+            return self._active
 
         def exec(self):
             events.append("droplet_dialog_exec")
@@ -1004,7 +1034,6 @@ def test_nested_refuel_window_shares_calibration_profile_lease(monkeypatch, qapp
             assert controller.disable_print_profile.call_count == 0
             return 0
 
-    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
     monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _DropletDialog)
     monkeypatch.setattr(View.CalibrationClasses, "RefuelCameraWindow", _RefuelDialog)
 
@@ -1015,11 +1044,9 @@ def test_nested_refuel_window_shares_calibration_profile_lease(monkeypatch, qapp
     )
     controller.disable_print_profile.assert_called_once_with()
     assert events == [
-        "disconnect_droplet_camera_signals",
-        "reload_droplet_model",
-        "connect_droplet_camera_signals",
         "enable_print_profile",
         "droplet_dialog_init",
+        "droplet_dialog_activate:calibration",
         "droplet_dialog_exec",
         "refuel_dialog_init",
         "refuel_dialog_exec",
@@ -1071,7 +1098,6 @@ def test_calibration_profile_constructor_failure_releases_lease(monkeypatch, qap
         def __init__(self, *_args, **_kwargs):
             raise RuntimeError("injected constructor failure")
 
-    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
     monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _FailingDialog)
 
     with pytest.raises(RuntimeError, match="injected constructor failure"):
@@ -1127,7 +1153,6 @@ def test_nozzle_dataset_capture_uses_calibration_profile_lease(monkeypatch, qapp
             events.append("dataset_dialog_exec")
             return 0
 
-    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
     monkeypatch.setattr(
         View.CalibrationClasses,
         "NozzlePositionDatasetCaptureWindow",
@@ -1141,9 +1166,6 @@ def test_nozzle_dataset_capture_uses_calibration_profile_lease(monkeypatch, qapp
     )
     controller.disable_print_profile.assert_called_once_with()
     assert events == [
-        "disconnect_droplet_camera_signals",
-        "reload_droplet_model",
-        "connect_droplet_camera_signals",
         "enable_print_profile",
         "dataset_dialog_init",
         "dataset_dialog_exec",
@@ -1171,7 +1193,23 @@ def test_current_profile_calibrate_pressure_rejects_duplicate_while_droplet_dial
             assert callable(kwargs.get("open_refuel_camera_callback"))
             assert callable(kwargs.get("post_apply_manual_refuel_check_callback"))
             self.finished = _SignalStub()
+            self.sessionDeactivated = _SignalStub()
+            self._active = False
             events.append("droplet_dialog_init")
+
+        def activate_session(self, mode="calibration"):
+            self._active = True
+            events.append(f"droplet_dialog_activate:{mode}")
+
+        def deactivate_session(self, reason="closed"):
+            if not self._active:
+                return False
+            self._active = False
+            self.sessionDeactivated.emit(reason)
+            return True
+
+        def session_is_active(self):
+            return self._active
 
         def show(self):
             pass
@@ -1189,17 +1227,14 @@ def test_current_profile_calibrate_pressure_rejects_duplicate_while_droplet_dial
             assert box._pressure_render_suspended is True
             return 0
 
-    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
     monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _DropletDialog)
 
     box.calibrate_pressure()
 
     assert events == [
-        "disconnect_droplet_camera_signals",
-        "reload_droplet_model",
-        "connect_droplet_camera_signals",
         "enable_print_profile",
         "droplet_dialog_init",
+        "droplet_dialog_activate:calibration",
         "droplet_dialog_exec",
         "disable_print_profile",
     ]
@@ -1223,22 +1258,37 @@ def test_manual_optics_launch_transfers_and_restores_pressure_rendering(monkeypa
     box = PressurePlotBox(main_window, model, controller)
 
     class _OpticsDialog:
-        def __init__(self, *_args, **kwargs):
-            assert kwargs["service_mode"] is True
-            assert kwargs["initial_tab"] == "optics"
+        def __init__(self, *_args, **_kwargs):
             self.finished = _SignalStub()
+            self.sessionDeactivated = _SignalStub()
+            self._active = False
+
+        def activate_session(self, mode="calibration"):
+            assert mode == "optics"
+            self._active = True
+
+        def deactivate_session(self, reason="closed"):
+            if not self._active:
+                return False
+            self._active = False
+            self.sessionDeactivated.emit(reason)
+            return True
+
+        def session_is_active(self):
+            return self._active
 
         def exec(self):
             assert box._pressure_render_suspended is True
             events.append("optics_exec")
             return 7
 
-    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
     monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _OpticsDialog)
 
     assert box._launch_manual_optics_calibration_dialog() == 7
-    assert events[-1] == "optics_exec"
-    assert box._droplet_imager_dialog is None
+    assert "optics_exec" in events
+    assert events[-1] == "disable_print_profile"
+    assert box._droplet_imager_dialog is not None
+    assert box._droplet_imager_dialog_state == "inactive"
     assert box._pressure_render_suspended is False
 
 
@@ -1254,6 +1304,16 @@ def test_failed_simulation_dialog_open_restores_pressure_rendering(monkeypatch, 
     class _FailedDialog(View.QtWidgets.QDialog):
         def __init__(self, *_args, **_kwargs):
             super().__init__()
+            self._active = False
+
+        def activate_session(self, mode="calibration"):
+            self._active = True
+
+        def deactivate_session(self, reason="closed"):
+            self._active = False
+
+        def session_is_active(self):
+            return self._active
 
         def open(self):
             assert box._pressure_render_suspended is True
@@ -1263,7 +1323,8 @@ def test_failed_simulation_dialog_open_restores_pressure_rendering(monkeypatch, 
 
     with pytest.raises(RuntimeError, match="show failed"):
         box._launch_simulation_calibration_dialog()
-    assert box._droplet_imager_dialog is None
+    assert box._droplet_imager_dialog is not None
+    assert box._droplet_imager_dialog_state == "inactive"
     assert box._pressure_render_suspended is False
 
 
@@ -1286,6 +1347,16 @@ def test_result_only_dialog_transfers_pressure_rendering_until_finished(monkeypa
             super().__init__()
             assert kwargs["result_presentation_only"] is True
             assert kwargs["transient_candidate_id"] == "candidate-1"
+            self._active = False
+
+        def activate_session(self, mode="calibration"):
+            self._active = True
+
+        def deactivate_session(self, reason="closed"):
+            self._active = False
+
+        def session_is_active(self):
+            return self._active
 
     monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _ResultDialog)
 
@@ -1333,11 +1404,9 @@ def test_current_profile_calibrate_pressure_rejects_duplicate_while_camera_move_
     on_complete()
 
     assert events == [
-        "disconnect_droplet_camera_signals",
-        "reload_droplet_model",
-        "connect_droplet_camera_signals",
         "enable_print_profile",
         "droplet_dialog_init",
+        "droplet_dialog_activate:calibration",
         "droplet_dialog_exec",
         "disable_print_profile",
     ]
@@ -1383,40 +1452,25 @@ def test_current_profile_calibrate_pressure_allows_relaunch_after_droplet_dialog
     controller = _make_controller(events)
     box = PressurePlotBox(main_window, model, controller)
 
-    class _DropletDialog:
-        def __init__(self, main_window_arg, model_arg, controller_arg, **kwargs):
-            assert main_window_arg is main_window
-            assert model_arg is model
-            assert controller_arg is controller
-            assert callable(kwargs.get("open_refuel_camera_callback"))
-            assert callable(kwargs.get("post_apply_manual_refuel_check_callback"))
-            self.finished = _SignalStub()
-            events.append("droplet_dialog_init")
-
-        def exec(self):
-            events.append("droplet_dialog_exec")
-            self.finished.emit(0)
-            return 0
-
-    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
-    monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _DropletDialog)
+    _patch_droplet_launch(
+        monkeypatch,
+        events,
+        main_window=main_window,
+        model=model,
+        controller=controller,
+    )
 
     box.calibrate_pressure()
     box.calibrate_pressure()
 
     assert events == [
-        "disconnect_droplet_camera_signals",
-        "reload_droplet_model",
-        "connect_droplet_camera_signals",
         "enable_print_profile",
         "droplet_dialog_init",
+        "droplet_dialog_activate:calibration",
         "droplet_dialog_exec",
         "disable_print_profile",
-        "disconnect_droplet_camera_signals",
-        "reload_droplet_model",
-        "connect_droplet_camera_signals",
         "enable_print_profile",
-        "droplet_dialog_init",
+        "droplet_dialog_activate:calibration",
         "droplet_dialog_exec",
         "disable_print_profile",
     ]
@@ -1496,7 +1550,6 @@ def test_current_profile_refuel_camera_rejects_duplicate_while_dialog_open(monke
             box.refuel_camera()
             return 0
 
-    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
     monkeypatch.setattr(View.CalibrationClasses, "RefuelCameraWindow", _RefuelDialog)
 
     box.refuel_camera()
@@ -1549,7 +1602,6 @@ def test_current_profile_refuel_camera_allows_relaunch_after_dialog_cleanup(monk
             self.finished.emit(0)
             return 0
 
-    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
     monkeypatch.setattr(View.CalibrationClasses, "RefuelCameraWindow", _RefuelDialog)
 
     box.refuel_camera()
@@ -1955,6 +2007,7 @@ def test_current_profile_post_apply_request_waits_for_imager_cleanup(monkeypatch
     controller = _make_controller(events)
     box = PressurePlotBox(main_window, model, controller)
     box._droplet_imager_dialog = object()
+    box._droplet_imager_dialog_state = "active"
 
     monkeypatch.setattr(View.QtCore.QTimer, "singleShot", lambda _ms, callback: callbacks.append(callback))
     _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
@@ -1969,7 +2022,7 @@ def test_current_profile_post_apply_request_waits_for_imager_cleanup(monkeypatch
     assert controller.move_to_location.call_count == 0
     assert len(callbacks) == 1
 
-    box._droplet_imager_dialog = None
+    box._droplet_imager_dialog_state = "inactive"
     callbacks.pop(0)()
 
     controller.move_to_location.assert_called_once()
@@ -1995,13 +2048,14 @@ def test_current_profile_post_apply_request_waits_for_cleanup_queue(monkeypatch,
     controller.check_if_all_completed.side_effect = [False, False, True, True]
     box = PressurePlotBox(main_window, model, controller)
     box._droplet_imager_dialog = object()
+    box._droplet_imager_dialog_state = "active"
 
     monkeypatch.setattr(View.QtCore.QTimer, "singleShot", lambda _ms, callback: callbacks.append(callback))
     _patch_manual_refuel_launch(monkeypatch, events, main_window=main_window, model=model, controller=controller)
 
     assert box.request_manual_refuel_check_after_imager_close() is True
     callbacks.pop(0)()
-    box._droplet_imager_dialog = None
+    box._droplet_imager_dialog_state = "inactive"
 
     callbacks.pop(0)()
     assert controller.move_to_location.call_count == 0
@@ -2054,7 +2108,17 @@ def test_simulation_calibration_close_advances_manual_refuel_handoff(monkeypatch
             assert controller_arg is controller
             assert kwargs.get("simulation_workflow_mode") is True
             assert callable(kwargs.get("post_apply_manual_refuel_check_callback"))
+            self._active = False
             events.append("simulation_calibration_dialog_init")
+
+        def activate_session(self, mode="calibration"):
+            self._active = True
+
+        def deactivate_session(self, reason="closed"):
+            self._active = False
+
+        def session_is_active(self):
+            return self._active
 
     class _SimulationManualRefuelDialog:
         def __init__(self, main_window_arg, model_arg, controller_arg, **kwargs):
@@ -2090,7 +2154,8 @@ def test_simulation_calibration_close_advances_manual_refuel_handoff(monkeypatch
     dialog.close()
     qapp.processEvents()
 
-    assert box._droplet_imager_dialog is None
+    assert box._droplet_imager_dialog is dialog
+    assert box._droplet_imager_dialog_state == "inactive"
     assert box._pressure_render_suspended is False
     assert box.calibrate_pressure_button.isEnabled()
     assert box._manual_refuel_check_after_imager_pending is False
@@ -2152,7 +2217,6 @@ def test_current_profile_manual_refuel_check_rejects_duplicate_while_dialog_open
             box.manual_refuel_check()
             return 0
 
-    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
     monkeypatch.setattr(View.CalibrationClasses, "ManualRefuelCheckDialog", _ManualRefuelDialog)
 
     box.manual_refuel_check()
@@ -2272,11 +2336,9 @@ def test_current_profile_calibrate_pressure_moves_then_launches_droplet_imager(m
     on_complete()
 
     assert events == [
-        "disconnect_droplet_camera_signals",
-        "reload_droplet_model",
-        "connect_droplet_camera_signals",
         "enable_print_profile",
         "droplet_dialog_init",
+        "droplet_dialog_activate:calibration",
         "droplet_dialog_exec",
         "disable_print_profile",
     ]
@@ -2403,10 +2465,11 @@ def test_legacy_profile_calibrate_pressure_keeps_mass_calibration(monkeypatch, q
 
         def exec(self):
             events.append("droplet_dialog_exec")
+            self.deactivate_session("done")
+            self.finished.emit(0)
             return 0
 
     monkeypatch.setattr(View, "MassCalibrationDialog", _MassDialog)
-    monkeypatch.setattr(View.importlib, "reload", lambda module: module)
     monkeypatch.setattr(View.CalibrationClasses, "DropletImagingDialog", _DropletDialog)
 
     box.calibrate_pressure()
