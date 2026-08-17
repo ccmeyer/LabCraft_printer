@@ -12,6 +12,7 @@ from pathlib import PurePath
 from typing import Any, Mapping
 
 from CalibrationRecordingStore import CaptureRetentionPolicy
+from CalibrationResultGrouping import normalize_characterization_source_reference
 
 
 SUMMARY_PROJECTION_SCHEMA_NAME = "labcraft.calibration_recording.summary_projection"
@@ -319,14 +320,18 @@ def materialize_characterization_rows(
                 "printing_mode": "droplet",
             }
             for key in (
-                "recheck_source", "reference_mean_volume_nL", "volume_delta_nL",
+                "recheck_source", "recheck_root_source",
+                "reference_mean_volume_nL", "volume_delta_nL",
                 "volume_delta_percent", "quality_warning", "quality_warnings",
                 "circularity_warning", "circularity_min", "circularity_mean",
                 "circularity_warning_threshold",
             ):
                 value = _first(pressure.get(key), result.get(key))
                 if value is not None:
-                    row[key] = value
+                    if key in {"recheck_source", "recheck_root_source"}:
+                        row[key] = normalize_characterization_source_reference(value)
+                    else:
+                        row[key] = value
             rows.append(row)
         return rows
 

@@ -12,6 +12,10 @@ ensure_calibration_import_stubs()
 import CalibrationClasses.View as calibration_view
 from CalibrationClasses.Model import CalibrationManager
 from CalibrationClasses.View import DropletImagingDialog
+from CalibrationResultGrouping import (
+    build_characterization_source_reference,
+    enrich_characterization_result_sets,
+)
 
 
 DARK_BLUE = "#063f99"
@@ -87,6 +91,7 @@ def _make_run(
                 "result": {
                     "recheck": True,
                     "recheck_source": entry.get("recheck_source"),
+                    "recheck_root_source": entry.get("recheck_root_source"),
                     "nozzle_center_px": entry.get("nozzle_center_px"),
                     "nozzle_center_machine": entry.get("nozzle_center_machine"),
                     "emergence_time_us": entry.get("emergence_time_us"),
@@ -106,6 +111,7 @@ def _make_run(
                             "valid": entry.get("valid", True),
                             "invalid_reason": entry.get("invalid_reason"),
                             "recheck_source": entry.get("recheck_source"),
+                            "recheck_root_source": entry.get("recheck_root_source"),
                             "reference_mean_volume_nL": entry.get("reference_mean_volume_nL"),
                             "volume_delta_nL": entry.get("volume_delta_nL"),
                             "volume_delta_percent": entry.get("volume_delta_percent"),
@@ -710,6 +716,63 @@ def test_manual_current_pressure_sweep_search_row_can_be_rechecked(tmp_path):
     assert context["vec_steps_per_s"] is None
 
 
+def test_recheck_of_recheck_keeps_direct_canonical_audit_and_original_reference_volume(tmp_path):
+    _model, manager = _build_model_and_manager(tmp_path, [])
+    original = {
+        "result_id": "result-sweep",
+        "result_sha256": "sha-result-sweep",
+        "process_run_id": "process-sweep",
+        "update_id": "update-sweep",
+        "update_index": 3,
+        "update_payload_sha256": "sha-update-sweep",
+        "row_ordinal": 2,
+        "run_id": "session-1",
+        "phase_key": "pressure_sweep_characterization",
+        "step_index": 4,
+        "pressure_index": 2,
+        "mean_volume_nL": 10.0,
+        "cv_pct": 2.5,
+    }
+    selected_recheck = {
+        "result_id": "result-recheck-1",
+        "result_sha256": "sha-result-recheck-1",
+        "process_run_id": "process-recheck-1",
+        "update_id": "update-recheck-1",
+        "update_index": 0,
+        "update_payload_sha256": "sha-update-recheck-1",
+        "row_ordinal": 0,
+        "source_run_id": "session-1",
+        "source_phase_key": "droplet_recheck",
+        "source_step_index": 5,
+        "source_pressure_index": 0,
+        "phase": "recheck",
+        "timestamp": "2026-08-17T10:05:00Z",
+        "pw_us": 1400,
+        "pressure_psi": 0.62,
+        "delay_us": 9000,
+        "target_xyz": [100, 200, 300],
+        "targeting_mode": "manual_current_position",
+        "mean_nL": 9.8,
+        "cv_pct": 3.0,
+        "valid": True,
+        "recheck_source": dict(original),
+        "recheck_root_source": dict(original),
+    }
+    manager.resolve_characterization_selection = lambda row: {
+        "ok": True,
+        "row": dict(row),
+        "bundle": {},
+    }
+
+    context, missing = manager.build_droplet_recheck_context(selected_recheck)
+
+    assert missing == []
+    assert context["source_result"]["result_id"] == "result-recheck-1"
+    assert context["source_result"]["process_run_id"] == "process-recheck-1"
+    assert context["root_source_result"]["result_id"] == "result-sweep"
+    assert context["reference_mean_volume_nL"] == pytest.approx(10.0)
+
+
 def test_recheck_summary_rows_and_source_filter(monkeypatch, qapp, tmp_path):
     runs = [
         _make_run(
@@ -739,7 +802,18 @@ def test_recheck_summary_rows_and_source_filter(monkeypatch, qapp, tmp_path):
                     "mean_nL": 9.9,
                     "cv_pct": 3.9,
                     "valid": True,
-                    "recheck_source": {"run_id": "run_a"},
+                    "recheck_source": {
+                        "run_id": "run_a",
+                        "phase_key": "pressure_sweep_characterization",
+                        "step_index": 0,
+                        "pressure_index": 0,
+                    },
+                    "recheck_root_source": {
+                        "run_id": "run_a",
+                        "phase_key": "pressure_sweep_characterization",
+                        "step_index": 0,
+                        "pressure_index": 0,
+                    },
                     "reference_mean_volume_nL": 9.8,
                     "volume_delta_nL": 0.1,
                     "quality_warning": "Recheck droplet circularity was below the recommended threshold; volume was quantified with a low-circularity warning.",
@@ -762,20 +836,23 @@ def test_recheck_summary_rows_and_source_filter(monkeypatch, qapp, tmp_path):
     dialog._refresh_summary_filters()
 
     visible = _visible_summary_rows(dialog)
-    assert len(visible) == 1
-    assert visible[0]["phase"] == "recheck"
-    assert visible[0]["phase_label"] == "Recheck"
-    assert visible[0]["volume_delta_nL"] == 0.1
-    assert visible[0]["circularity_warning"] is True
-    assert visible[0]["quality_warning"].startswith("Recheck droplet circularity")
+    assert len(visible) == 2
+    assert visible[0]["row_role"] == "candidate"
+    assert visible[1]["phase"] == "recheck"
+    assert visible[1]["row_role"] == "recheck"
+    assert visible[1]["phase_label"] == "Recheck"
+    assert visible[1]["volume_delta_nL"] == 0.1
+    assert visible[1]["circularity_warning"] is True
+    assert visible[1]["quality_warning"].startswith("Recheck droplet circularity")
 
-    _select_visible_row(dialog, 0)
+    _select_visible_row(dialog, 1)
     qapp.processEvents()
     dialog._refresh_summary_detail_strip()
 
     assert "Source run run_a" in dialog.summary_detail_status_label.text()
     assert "Delta +0.100 nL" in dialog.summary_detail_status_label.text()
     assert "Warnings: Recheck droplet circularity" in dialog.summary_detail_status_label.text()
+    assert "Valid-round mean" in dialog.summary_detail_status_label.text()
 
 
 def test_recheck_selected_button_enables_and_dispatches_selected_row(monkeypatch, qapp, tmp_path):
@@ -1036,7 +1113,8 @@ def test_characterization_summary_rows_include_latest_stream_result_once_and_fla
     assert valid_row["tail_phase_status"] == "captured"
     assert valid_row["warnings"] == ["tail_prior_used"]
     assert valid_row["valid"] is True
-    assert valid_row["is_focus_run"] is True
+    assert valid_row["is_focus_run"] is False
+    assert invalid_row["is_latest_result_set"] is True
 
     assert invalid_row["valid"] is False
     assert invalid_row["invalid_reason"] == "tail_not_captured"
@@ -1124,7 +1202,7 @@ def test_pressure_sweep_focus_run_id_prefers_active_then_newest_matching_run(tmp
     assert manager.get_pressure_sweep_summary_focus_run_id() == "run_new"
 
 
-def test_results_table_defaults_to_focus_run_and_filters_update_count(monkeypatch, qapp, tmp_path):
+def test_results_table_defaults_to_latest_set_and_filters_update_count(monkeypatch, qapp, tmp_path):
     runs = [
         _make_run(
             "run_old",
@@ -1146,16 +1224,19 @@ def test_results_table_defaults_to_focus_run_and_filters_update_count(monkeypatc
     ]
     dialog, _manager = _build_dialog(monkeypatch, qapp, tmp_path, runs)
 
-    assert dialog.summary_current_run_checkbox.isChecked() is True
-    assert dialog.summary_table_proxy_model.rowCount() == 4
-    assert dialog.summary_count_label.text() == "Showing 4 of 5 results"
+    assert dialog.summary_result_set_combo.currentData() == "latest"
+    assert dialog.summary_table_proxy_model.rowCount() == 1
+    assert dialog.summary_count_label.text() == "Showing 1 of 5 results"
 
     dialog.summary_valid_only_checkbox.setChecked(True)
     qapp.processEvents()
-    assert dialog.summary_table_proxy_model.rowCount() == 2
-    assert dialog.summary_count_label.text() == "Showing 2 of 5 results"
+    assert dialog.summary_table_proxy_model.rowCount() == 1
+    assert dialog.summary_count_label.text() == "Showing 1 of 5 results"
 
     dialog.summary_valid_only_checkbox.setChecked(False)
+    dialog.summary_result_set_combo.setCurrentIndex(
+        dialog.summary_result_set_combo.findData("all")
+    )
     dialog.summary_source_combo.setCurrentIndex(dialog.summary_source_combo.findData("search"))
     qapp.processEvents()
     assert dialog.summary_table_proxy_model.rowCount() == 2
@@ -1215,6 +1296,190 @@ def test_results_table_sorts_numeric_columns_and_selection_payload_survives_prox
     assert dialog.bridge_table.item(0, 5).text() == "12.00"
     assert dialog.bridge_table.item(0, 6).text() == "+3.00"
 
+    dialog.deleteLater()
+
+
+def test_result_set_table_sort_keeps_rechecks_with_parent_and_source_filter_keeps_context(qapp):
+    candidate_a = {
+        "process_run_id": "sweep-a",
+        "update_id": "update-a",
+        "update_index": 0,
+        "row_ordinal": 0,
+        "phase": "sweep",
+        "phase_label": "Sweep",
+        "timestamp": "2026-08-17T10:00:00Z",
+        "timestamp_display": "2026-08-17 10:00:00",
+        "pw_us": 1400,
+        "pressure_psi": 0.62,
+        "mean_nL": 10.0,
+        "cv_pct": 2.0,
+        "valid": True,
+    }
+    candidate_b = {
+        **candidate_a,
+        "process_run_id": "sweep-b",
+        "update_id": "update-b",
+        "timestamp": "2026-08-17T11:00:00Z",
+        "timestamp_display": "2026-08-17 11:00:00",
+        "mean_nL": 8.0,
+    }
+    source = build_characterization_source_reference(candidate_a)
+    recheck_one = {
+        **candidate_a,
+        "process_run_id": "recheck-a",
+        "update_id": "update-r1",
+        "phase": "recheck",
+        "phase_label": "Recheck",
+        "timestamp": "2026-08-17T10:05:00Z",
+        "timestamp_display": "2026-08-17 10:05:00",
+        "mean_nL": 20.0,
+        "volume_delta_nL": 10.0,
+        "volume_delta_percent": 100.0,
+        "recheck_source": source,
+        "recheck_root_source": source,
+    }
+    recheck_two = {
+        **recheck_one,
+        "process_run_id": "recheck-b",
+        "update_id": "update-r2",
+        "timestamp": "2026-08-17T10:10:00Z",
+        "timestamp_display": "2026-08-17 10:10:00",
+        "mean_nL": 5.0,
+        "volume_delta_nL": -5.0,
+        "volume_delta_percent": -50.0,
+    }
+    rows = enrich_characterization_result_sets(
+        [candidate_b, recheck_two, candidate_a, recheck_one]
+    )
+    model = calibration_view.CharacterizationSummaryTableModel(include_recorded=True)
+    proxy = calibration_view.CharacterizationSummaryProxyModel()
+    proxy.setSourceModel(model)
+    model.set_rows(rows)
+
+    assert model.headerData(model.column_index("result_set_no"), Qt.Horizontal) == "Set"
+    assert model.headerData(model.column_index("timestamp_display"), Qt.Horizontal) == "Recorded"
+    assert model.headerData(model.column_index("volume_difference"), Qt.Horizontal) == "Difference"
+
+    mean_column = model.column_index("mean_nL")
+    proxy.sort(mean_column, Qt.DescendingOrder)
+    qapp.processEvents()
+
+    def visible_rows():
+        return [
+            model.raw_row_at(proxy.mapToSource(proxy.index(index, 0)).row())
+            for index in range(proxy.rowCount())
+        ]
+
+    sorted_rows = visible_rows()
+    assert [row["process_run_id"] for row in sorted_rows] == [
+        "sweep-a",
+        "recheck-a",
+        "recheck-b",
+        "sweep-b",
+    ]
+
+    proxy.sort(mean_column, Qt.AscendingOrder)
+    qapp.processEvents()
+    assert [row["process_run_id"] for row in visible_rows()] == [
+        "sweep-b",
+        "sweep-a",
+        "recheck-a",
+        "recheck-b",
+    ]
+
+    proxy.setSourceFilter("recheck")
+    qapp.processEvents()
+    filtered = visible_rows()
+    assert [row["row_role"] for row in filtered] == [
+        "candidate",
+        "recheck",
+        "recheck",
+    ]
+
+    with_invalid_parent = [dict(row) for row in rows]
+    for row in with_invalid_parent:
+        if row["process_run_id"] == "sweep-a":
+            row["valid"] = False
+    model.set_rows(enrich_characterization_result_sets(with_invalid_parent))
+    proxy.setSourceFilter("all")
+    proxy.setValidOnly(True)
+    qapp.processEvents()
+    filtered = visible_rows()
+    assert any(
+        row["process_run_id"] == "sweep-a" and row["row_role"] == "candidate"
+        for row in filtered
+    )
+    assert sum(row["row_role"] == "recheck" for row in filtered) == 2
+
+
+def test_explicit_set_and_selected_candidate_survive_live_refresh(monkeypatch, qapp, tmp_path):
+    dialog, manager = _build_dialog(monkeypatch, qapp, tmp_path, [])
+
+    def candidate(process_run_id, update_id, timestamp, volume):
+        return {
+            "process_run_id": process_run_id,
+            "update_id": update_id,
+            "update_index": 0,
+            "row_ordinal": 0,
+            "phase": "sweep",
+            "phase_label": "Sweep",
+            "timestamp": timestamp,
+            "timestamp_display": timestamp,
+            "pw_us": 1400,
+            "pressure_psi": 0.62,
+            "mean_nL": volume,
+            "cv_pct": 2.0,
+            "valid": True,
+        }
+
+    first = candidate("sweep-a", "update-a", "2026-08-17T10:00:00Z", 10.0)
+    second = candidate("sweep-b", "update-b", "2026-08-17T11:00:00Z", 11.0)
+    state = {"rows": [first, second]}
+    manager.get_characterization_summary_rows = lambda: [dict(row) for row in state["rows"]]
+    dialog.populate_summary_table()
+
+    first_set_key = next(
+        row["result_set_key"]
+        for row in dialog.summary_table_model.rows_snapshot()
+        if row["process_run_id"] == "sweep-a"
+    )
+    dialog.summary_result_set_combo.setCurrentIndex(
+        dialog.summary_result_set_combo.findData(first_set_key)
+    )
+    qapp.processEvents()
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+    _, selected_before = dialog._selected_summary_row()
+
+    source = build_characterization_source_reference(first)
+    recheck = {
+        **first,
+        "process_run_id": "recheck-a",
+        "update_id": "update-r1",
+        "phase": "recheck",
+        "phase_label": "Recheck",
+        "timestamp": "2026-08-17T10:05:00Z",
+        "timestamp_display": "2026-08-17T10:05:00Z",
+        "mean_nL": 9.9,
+        "volume_delta_nL": -0.1,
+        "volume_delta_percent": -1.0,
+        "recheck_source": source,
+        "recheck_root_source": source,
+    }
+    third = candidate("sweep-c", "update-c", "2026-08-17T12:00:00Z", 12.0)
+    state["rows"] = [third, recheck, second, first]
+    dialog.populate_summary_table()
+    qapp.processEvents()
+
+    assert dialog.summary_result_set_combo.currentData() == first_set_key
+    assert dialog.summary_table_proxy_model.rowCount() == 2
+    _, selected_after = dialog._selected_summary_row()
+    assert selected_after["row_identity_key"] == selected_before["row_identity_key"]
+
+    dialog._select_summary_result_set("latest")
+    qapp.processEvents()
+    latest = _visible_summary_rows(dialog)
+    assert [row["process_run_id"] for row in latest] == ["sweep-c"]
     dialog.deleteLater()
 
 
@@ -1457,6 +1722,10 @@ def test_results_detail_strip_and_load_button_reflect_selected_row(monkeypatch, 
         )
     ]
     dialog, _manager = _build_dialog(monkeypatch, qapp, tmp_path, runs, active_run_id="run_focus")
+    dialog.summary_result_set_combo.setCurrentIndex(
+        dialog.summary_result_set_combo.findData("all")
+    )
+    qapp.processEvents()
 
     rows = _visible_summary_rows(dialog)
     missing_pressure_row = next(idx for idx, row in enumerate(rows) if row["pressure_psi"] is None)
@@ -2147,6 +2416,10 @@ def test_selecting_different_summary_row_keeps_applied_row_highlight(monkeypatch
         active_run_id="run_focus",
         experiment_model=experiment_model,
     )
+    dialog.summary_result_set_combo.setCurrentIndex(
+        dialog.summary_result_set_combo.findData("all")
+    )
+    qapp.processEvents()
     dialog._apply_summary_sort(dialog.summary_table_model.column_index("mean_nL"), Qt.DescendingOrder)
     qapp.processEvents()
     _select_visible_row(dialog, 0)
@@ -2392,7 +2665,7 @@ def test_results_history_dialog_is_browse_only_and_defaults_to_all_rows(monkeypa
     history = dialog.open_characterization_history_dialog()
     qapp.processEvents()
 
-    assert history.history_current_run_only_checkbox.isChecked() is False
+    assert history.history_result_set_combo.currentData() == "all"
     assert history.history_table_proxy_model.rowCount() == 3
     assert history.history_table_model.column_index("timestamp_display") >= 0
     assert history.history_showing_label.text() == "Showing 3 of 3 results"

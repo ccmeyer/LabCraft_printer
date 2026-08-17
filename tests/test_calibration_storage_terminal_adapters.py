@@ -153,6 +153,60 @@ def test_pressure_sweep_completion_update_does_not_create_an_extra_result_row():
     ) == []
 
 
+def test_recheck_adapter_preserves_bounded_direct_and_root_source_references():
+    direct = {
+        "result_id": "result-recheck-1",
+        "process_run_id": "process-recheck-1",
+        "update_id": "update-recheck-1",
+        "row_ordinal": 0,
+    }
+    root = {
+        "result_id": "result-sweep-1",
+        "result_sha256": "sha-result-sweep-1",
+        "process_run_id": "process-sweep-1",
+        "update_id": "update-sweep-1",
+        "update_index": 2,
+        "update_payload_sha256": "sha-update-sweep-1",
+        "row_ordinal": 3,
+        "run_id": "session-1",
+        "phase_key": "pressure_sweep_characterization",
+        "step_index": 2,
+        "pressure_index": 3,
+        "mean_volume_nL": 10.0,
+    }
+    rows = materialize_characterization_rows(
+        {
+            "timestamp": "2026-08-17T10:05:00Z",
+            "result": {
+                "recheck": True,
+                "recheck_source": direct,
+                "recheck_root_source": root,
+                "pressures": [
+                    {
+                        "pressure": 0.62,
+                        "mean_volume": 9.9,
+                        "valid": True,
+                        "recheck_source": direct,
+                        "recheck_root_source": root,
+                    }
+                ],
+            },
+        },
+        {
+            "source_run_id": "session-1",
+            "source_phase_key": "droplet_recheck",
+            "source_step_index": 3,
+        },
+        process_run_id="process-recheck-2",
+        update_id="update-recheck-2",
+        update_index=0,
+        update_payload_sha256="sha-update-recheck-2",
+    )
+
+    assert rows[0]["recheck_source"] == direct
+    assert rows[0]["recheck_root_source"] == root
+
+
 def test_dataset_adapter_counts_frames_without_embedding_the_stream():
     contract = process_storage_contract("DropletTimecourseProcess")
     run = SimpleNamespace(

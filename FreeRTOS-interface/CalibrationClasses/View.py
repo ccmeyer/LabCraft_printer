@@ -24,6 +24,11 @@ from pathlib import Path
 import cv2
 from utilities import ShortcutManager, apply_pressure_plot_style
 from CalibrationRecordExport import CalibrationRecordExportError, export_calibration_records
+from CalibrationResultGrouping import (
+    characterization_candidate_rollup,
+    characterization_result_set_options,
+    enrich_characterization_result_sets,
+)
 from .Model import NozzlePositionChecklistStore
 from hardware.null_devices import NullCamera
 from ApplicationComposition import SIMULATION_RUNTIME_CONTEXT
@@ -952,17 +957,21 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
                 "sort": lambda row: 0 if self._is_applied_row(row) else 1,
             },
             {
-                "key": "run_no",
-                "label": "Run",
+                "key": "result_set_no",
+                "label": "Set",
                 "alignment": right,
-                "display": lambda row: "" if row.get("run_no") is None else str(row.get("run_no")),
-                "sort": lambda row: row.get("run_no"),
+                "display": lambda row: (
+                    "Unlinked"
+                    if row.get("row_role") == "unlinked_recheck"
+                    else ("" if row.get("result_set_no") is None else str(row.get("result_set_no")))
+                ),
+                "sort": lambda row: row.get("result_set_no"),
             },
             {
                 "key": "phase_label",
                 "label": "Source",
                 "alignment": left,
-                "display": lambda row: str(row.get("phase_label") or ""),
+                "display": self._display_source,
                 "sort": lambda row: str(row.get("phase_label") or "").lower(),
             },
         ]
@@ -1000,6 +1009,13 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
                     "sort": lambda row: row.get("mean_nL"),
                 },
                 {
+                    "key": "volume_difference",
+                    "label": "Difference",
+                    "alignment": right,
+                    "display": self._display_difference,
+                    "sort": lambda row: row.get("volume_delta_nL"),
+                },
+                {
                     "key": "cv_pct",
                     "label": "CV (%)",
                     "alignment": right,
@@ -1016,6 +1032,29 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
             ]
         )
         return columns
+
+    @staticmethod
+    def _display_source(row):
+        role = str(row.get("row_role") or "")
+        if role == "recheck":
+            return f"\u21b3 Recheck {row.get('recheck_no') or ''}".rstrip()
+        if role == "unlinked_recheck":
+            return "\u21b3 Unlinked recheck"
+        return str(row.get("phase_label") or "")
+
+    @staticmethod
+    def _display_difference(row):
+        if str(row.get("row_role") or "") not in {"recheck", "unlinked_recheck"}:
+            return "\u2014"
+        try:
+            delta = float(row.get("volume_delta_nL"))
+        except (TypeError, ValueError):
+            return "\u2014"
+        try:
+            percent = float(row.get("volume_delta_percent"))
+        except (TypeError, ValueError):
+            return f"{delta:+.3f}"
+        return f"{delta:+.3f} ({percent:+.1f}%)"
 
     def columns(self):
         return self._columns
@@ -1050,6 +1089,9 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
         if row < 0 or row >= len(self._rows):
             return None
         return dict(self._rows[row])
+
+    def rows_snapshot(self):
+        return [dict(row) for row in self._rows]
 
     def rowCount(self, parent=QtCore.QModelIndex()):
         if parent.isValid():
@@ -1125,7 +1167,7 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
 class CharacterizationSummaryProxyModel(QtCore.QSortFilterProxyModel):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._current_run_only = False
+        self._result_set_filter = "all"
         self._valid_only = False
         self._source_filter = "all"
 
@@ -1146,10 +1188,16 @@ class CharacterizationSummaryProxyModel(QtCore.QSortFilterProxyModel):
         return model.raw_row_at(source_row) or {}
 
     def setCurrentRunOnly(self, enabled):
-        enabled = bool(enabled)
-        if self._current_run_only == enabled:
+        """Compatibility shim for tests and extensions using the former run toggle."""
+        self.setResultSetFilter("latest" if enabled else "all")
+
+    def setResultSetFilter(self, selection):
+        normalized = str(selection or "all").strip()
+        if normalized == "":
+            normalized = "all"
+        if self._result_set_filter == normalized:
             return
-        self._current_run_only = enabled
+        self._result_set_filter = normalized
         self.invalidateFilter()
 
     def setValidOnly(self, enabled):
@@ -1168,24 +1216,114 @@ class CharacterizationSummaryProxyModel(QtCore.QSortFilterProxyModel):
         self._source_filter = normalized
         self.invalidateFilter()
 
+    def _matches_result_set(self, row):
+        if self._result_set_filter == "latest":
+            return bool(row.get("is_latest_result_set"))
+        if self._result_set_filter not in {"all", "latest"}:
+            return str(row.get("result_set_key") or "") == self._result_set_filter
+        return True
+
+    def _matches_source(self, row):
+        if self._source_filter == "all":
+            return True
+        source_key = row.get("source_filter_key") or row.get("phase")
+        return str(source_key or "").strip().lower() == self._source_filter
+
+    def _candidate_has_visible_child(self, row):
+        if row.get("row_role") != "candidate":
+            return False
+        candidate_key = str(row.get("candidate_key") or "")
+        model = self.sourceModel()
+        for index in range(model.rowCount() if model is not None else 0):
+            child = self._raw_row(index)
+            if (
+                child.get("row_role") == "recheck"
+                and str(child.get("candidate_key") or "") == candidate_key
+                and self._matches_result_set(child)
+                and self._matches_source(child)
+                and (not self._valid_only or child.get("valid") is True)
+            ):
+                return True
+        return False
+
     def filterAcceptsRow(self, source_row, source_parent):
         row = self._raw_row(source_row)
         if not row:
             return False
-        if self._current_run_only and not row.get("is_focus_run"):
+        if not self._matches_result_set(row):
             return False
-        if self._valid_only and row.get("valid") is not True:
-            return False
-        if self._source_filter != "all":
-            source_key = row.get("source_filter_key") or row.get("phase")
-            if str(source_key or "").strip().lower() != self._source_filter:
-                return False
-        return True
+        matches = self._matches_source(row) and (
+            not self._valid_only or row.get("valid") is True
+        )
+        return bool(matches or self._candidate_has_visible_child(row))
 
     def lessThan(self, left, right):
-        left_value = left.data(SUMMARY_SORT_ROLE)
-        right_value = right.data(SUMMARY_SORT_ROLE)
-        return self._normalize_sort_value(left_value) < self._normalize_sort_value(right_value)
+        left_row = self._raw_row(left.row())
+        right_row = self._raw_row(right.row())
+        left_candidate = str(left_row.get("candidate_key") or left_row.get("row_identity_key") or left.row())
+        right_candidate = str(right_row.get("candidate_key") or right_row.get("row_identity_key") or right.row())
+        descending = self.sortOrder() == Qt.DescendingOrder
+
+        if left_candidate == right_candidate:
+            def child_rank(row):
+                if row.get("row_role") == "candidate":
+                    return 0
+                return int(row.get("recheck_no") or 1)
+
+            left_rank = child_rank(left_row)
+            right_rank = child_rank(right_row)
+            return left_rank > right_rank if descending else left_rank < right_rank
+
+        model = self.sourceModel()
+        key = ""
+        if model is not None and hasattr(model, "columns"):
+            columns = model.columns()
+            if 0 <= left.column() < len(columns):
+                key = str(columns[left.column()].get("key") or "")
+
+        def anchor_value(row, fallback):
+            anchor = row.get("candidate_sort_anchor")
+            if not isinstance(anchor, dict):
+                return fallback
+            if key == "status_label":
+                valid = anchor.get("valid")
+                return 0 if valid is True else (1 if valid is False else 2)
+            if key == "volume_difference":
+                return anchor.get("mean_nL")
+            return anchor.get(key, fallback)
+
+        left_value = anchor_value(left_row, left.data(SUMMARY_SORT_ROLE))
+        right_value = anchor_value(right_row, right.data(SUMMARY_SORT_ROLE))
+        left_normalized = self._normalize_sort_value(left_value)
+        right_normalized = self._normalize_sort_value(right_value)
+        if left_normalized == right_normalized:
+            return left_candidate < right_candidate
+        return left_normalized < right_normalized
+
+
+def _populate_result_set_selector(combo, rows, *, default_selection):
+    previous = str(combo.currentData() or default_selection)
+    options = characterization_result_set_options(rows)
+    latest = next((item for item in options if item.get("is_latest_result_set")), None)
+    latest_label = "Latest"
+    if latest and latest.get("result_set_no") is not None:
+        latest_label = f"Latest \u2014 Set {latest.get('result_set_no')}"
+
+    blocker = QtCore.QSignalBlocker(combo)
+    combo.clear()
+    combo.addItem(latest_label, "latest")
+    combo.addItem("All result sets", "all")
+    for option in options:
+        label = str(option.get("result_set_label") or "Unlinked rechecks")
+        recorded = str(option.get("timestamp_display") or "").strip()
+        phase = str(option.get("phase_label") or "").strip()
+        suffix = " \u2014 ".join(part for part in (recorded, phase) if part)
+        combo.addItem(f"{label} \u2014 {suffix}" if suffix else label, option["result_set_key"])
+    index = combo.findData(previous)
+    if index < 0:
+        index = combo.findData(default_selection)
+    combo.setCurrentIndex(max(index, 0))
+    del blocker
 
 
 class CharacterizationHistoryDialog(QtWidgets.QDialog):
@@ -1200,8 +1338,7 @@ class CharacterizationHistoryDialog(QtWidgets.QDialog):
 
         toolbar = QtWidgets.QHBoxLayout()
         toolbar.setSpacing(8)
-        self.history_current_run_only_checkbox = QtWidgets.QCheckBox("Current run only")
-        self.history_current_run_only_checkbox.setChecked(False)
+        self.history_result_set_combo = QtWidgets.QComboBox()
         self.history_valid_only_checkbox = QtWidgets.QCheckBox("Valid only")
         self.history_source_combo = QtWidgets.QComboBox()
         self.history_source_combo.addItem("All", "all")
@@ -1212,7 +1349,8 @@ class CharacterizationHistoryDialog(QtWidgets.QDialog):
         self.history_source_combo.addItem("Synthetic", "synthetic")
         self.history_showing_label = QtWidgets.QLabel("")
 
-        toolbar.addWidget(self.history_current_run_only_checkbox)
+        toolbar.addWidget(QtWidgets.QLabel("Result set:"))
+        toolbar.addWidget(self.history_result_set_combo)
         toolbar.addWidget(self.history_valid_only_checkbox)
         toolbar.addWidget(QtWidgets.QLabel("Source:"))
         toolbar.addWidget(self.history_source_combo)
@@ -1240,14 +1378,20 @@ class CharacterizationHistoryDialog(QtWidgets.QDialog):
             close_btn.clicked.connect(self.close)
         layout.addWidget(buttons)
 
-        self.history_current_run_only_checkbox.toggled.connect(self._refresh_filters)
+        self.history_result_set_combo.currentIndexChanged.connect(self._refresh_filters)
         self.history_valid_only_checkbox.toggled.connect(self._refresh_filters)
         self.history_source_combo.currentIndexChanged.connect(self._refresh_filters)
         self.history_table.horizontalHeader().sectionClicked.connect(self._handle_header_click)
 
         self._sort_column = self.history_table_model.column_index("timestamp_display")
         self._sort_order = Qt.DescendingOrder
-        self.history_table_model.set_rows(rows or [])
+        rows = enrich_characterization_result_sets(rows or [])
+        self.history_table_model.set_rows(rows)
+        _populate_result_set_selector(
+            self.history_result_set_combo,
+            rows,
+            default_selection="all",
+        )
         self._refresh_filters()
         self._apply_sort(self._sort_column, self._sort_order)
 
@@ -1258,7 +1402,9 @@ class CharacterizationHistoryDialog(QtWidgets.QDialog):
         self.history_showing_label.setText(f"Showing {visible} of {total} {noun}")
 
     def _refresh_filters(self):
-        self.history_table_proxy_model.setCurrentRunOnly(self.history_current_run_only_checkbox.isChecked())
+        self.history_table_proxy_model.setResultSetFilter(
+            self.history_result_set_combo.currentData()
+        )
         self.history_table_proxy_model.setValidOnly(self.history_valid_only_checkbox.isChecked())
         self.history_table_proxy_model.setSourceFilter(self.history_source_combo.currentData())
         self._update_count_label()
@@ -4033,8 +4179,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._summary_applied_brush = QBrush(applied_color)
         self.summary_toolbar = QtWidgets.QHBoxLayout()
         self.summary_toolbar.setSpacing(8)
-        self.summary_current_run_checkbox = QtWidgets.QCheckBox("Current run only")
-        self.summary_current_run_checkbox.setChecked(True)
+        self.summary_result_set_combo = QtWidgets.QComboBox()
+        _populate_result_set_selector(
+            self.summary_result_set_combo,
+            [],
+            default_selection="latest",
+        )
         self.summary_valid_only_checkbox = QtWidgets.QCheckBox("Valid only")
         self.summary_source_combo = QtWidgets.QComboBox()
         self.summary_source_combo.addItem("All", "all")
@@ -4048,7 +4198,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_count_label = QtWidgets.QLabel("Showing 0 of 0 results")
         self.summary_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-        self.summary_toolbar.addWidget(self.summary_current_run_checkbox)
+        self.summary_toolbar.addWidget(QtWidgets.QLabel("Result set:"))
+        self.summary_toolbar.addWidget(self.summary_result_set_combo)
         self.summary_toolbar.addWidget(self.summary_valid_only_checkbox)
         self.summary_toolbar.addWidget(QtWidgets.QLabel("Source:"))
         self.summary_toolbar.addWidget(self.summary_source_combo)
@@ -4068,7 +4219,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         self.summary_table_model = CharacterizationSummaryTableModel(
             self,
-            include_recorded=False,
+            include_recorded=True,
             muted_brush=self._summary_muted_brush,
             applied_brush=self._summary_applied_brush,
         )
@@ -4115,7 +4266,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         detail_v = QtWidgets.QVBoxLayout(self.summary_detail_widget)
         detail_v.setContentsMargins(0, 0, 0, 0)
         detail_v.setSpacing(2)
-        self.summary_detail_meta_label = QtWidgets.QLabel("Select a result to see run details.")
+        self.summary_detail_meta_label = QtWidgets.QLabel("Select a result to see set details.")
         self.summary_detail_meta_label.setWordWrap(True)
         self.summary_detail_status_label = QtWidgets.QLabel("No result selected.")
         self.summary_detail_status_label.setWordWrap(True)
@@ -4466,7 +4617,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.enable_refuel_process_monitoring_checkbox.toggled.connect(self._set_refuel_process_monitoring_enabled)
         self.printer_head_recovery_button.clicked.connect(self.open_printer_head_recovery_dialog)
         self.printer_head_cleaning_button.clicked.connect(self.open_printer_head_cleaning_dialog)
-        self.summary_current_run_checkbox.toggled.connect(self._refresh_summary_filters)
+        self.summary_result_set_combo.currentIndexChanged.connect(self._refresh_summary_filters)
         self.summary_valid_only_checkbox.toggled.connect(self._refresh_summary_filters)
         self.summary_source_combo.currentIndexChanged.connect(self._refresh_summary_filters)
         self.summary_history_button.clicked.connect(self.open_characterization_history_dialog)
@@ -4982,7 +5133,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.control_panel_scroll.hide()
         self.analysis_panel.hide()
         self.info_panel_scroll.setMinimumWidth(700)
-        self.summary_current_run_checkbox.setChecked(True)
+        self._select_summary_result_set("latest")
         self.summary_valid_only_checkbox.setChecked(True)
         synthetic_index = self.summary_source_combo.findData("synthetic")
         if synthetic_index >= 0:
@@ -5108,7 +5259,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             )
             self._refresh_synthetic_workflow_controls()
             return False
-        self.summary_current_run_checkbox.setChecked(True)
+        self._select_summary_result_set("latest")
         self.summary_valid_only_checkbox.setChecked(True)
         synthetic_index = self.summary_source_combo.findData("synthetic")
         if synthetic_index >= 0:
@@ -13941,7 +14092,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         pw = raw.get("pw_us")
         pres = raw.get("pressure_psi")
         valid = raw.get("valid")
-        run_no = raw.get("run_no")
+        result_set_no = raw.get("result_set_no")
 
         if pw is None or pres is None:
             QtWidgets.QMessageBox.information(self, "Nothing to load", "Selected row is missing PW or Pressure.")
@@ -13969,7 +14120,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # Prefer the same atomic path your calibration uses:
         # ask the CalibrationManager to apply *both* settings in one go and wait for ack.
         mgr = self.model.calibration_manager
-        self.stageLabel.setText(f"Status: Applying PW {pw} µs, Pressure {pres:.3f} psi (Run {run_no or '—'})…")
+        self.stageLabel.setText(f"Status: Applying PW {pw} µs, Pressure {pres:.3f} psi (Set {result_set_no or '—'})…")
 
         def _after_apply(*_):
             # Reflect values into UI spinboxes without re-triggering handlers
@@ -13983,7 +14134,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
             # We don't have a dedicated "live print pressure" spinbox in this panel;
             # if you add one later, mirror pres into it here.
-            self.update_stage_and_log(f"Loaded PW {pw} µs & {pres:.3f} psi from Run {run_no or '—'}", "blue")
+            self.update_stage_and_log(f"Loaded PW {pw} µs & {pres:.3f} psi from Set {result_set_no or '—'}", "blue")
 
         try:
             # Use the existing manager→controller pathway for consistency/ack
@@ -14047,12 +14198,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._update_recheck_button_state(raw=raw, mismatch_message=mismatch_message)
             return
 
-        run_no = raw.get("run_no")
+        result_set_no = raw.get("result_set_no")
         pw = raw.get("pw_us")
         pres = raw.get("pressure_psi")
         self.stageLabel.setText(
             f"Status: Starting recheck for PW {pw or '-'} us, Pressure {pres or '-'} psi "
-            f"(Run {run_no or '-'})..."
+            f"(Set {result_set_no or '-'})..."
         )
 
         starter = getattr(self.controller, "start_droplet_recheck_characterization", None)
@@ -14154,15 +14305,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _refresh_summary_detail_strip(self):
         _, raw = self._selected_summary_row()
         if not raw:
-            self.summary_detail_meta_label.setText("Select a result to see run details.")
+            self.summary_detail_meta_label.setText("Select a result to see set details.")
             self.summary_detail_status_label.setText("No result selected.")
             return
 
-        run_text = raw.get("run_no")
-        source_text = raw.get("phase_label") or "Unknown"
+        set_text = raw.get("result_set_no")
+        source_text = CharacterizationSummaryTableModel._display_source(raw) or "Unknown"
         recorded_text = raw.get("timestamp_display") or "Unknown"
         self.summary_detail_meta_label.setText(
-            f"Run {run_text if run_text is not None else '-'} | Source {source_text} | Recorded {recorded_text}"
+            f"Set {set_text if set_text is not None else '-'} | Source {source_text} | Recorded {recorded_text}"
         )
         status_lines = []
         if raw.get("valid") is False:
@@ -14241,10 +14392,57 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if mismatch_message:
             status_lines.append(mismatch_message)
 
+        rollup = characterization_candidate_rollup(
+            self.summary_table_model.rows_snapshot(),
+            raw.get("candidate_key"),
+        )
+        if rollup.get("recheck_count", 0):
+            recheck_values = []
+            for value in rollup.get("recheck_volumes_nL") or []:
+                try:
+                    recheck_values.append(f"{float(value):.3f}")
+                except (TypeError, ValueError):
+                    recheck_values.append("flagged")
+            status_lines.append(
+                "Confirmation rounds: original "
+                f"{_format_bridge_number(rollup.get('candidate_volume_nL'), 3)} nL; "
+                f"rechecks {', '.join(recheck_values)} nL"
+            )
+            if rollup.get("usable_round_count"):
+                summary = (
+                    f"Valid-round mean {_format_bridge_number(rollup.get('mean_volume_nL'), 3)} nL | "
+                    f"Range {_format_bridge_number(rollup.get('range_nL'), 3)} nL"
+                )
+                if rollup.get("maximum_absolute_delta_nL") is not None:
+                    summary += (
+                        " | Maximum deviation "
+                        f"{_format_bridge_number(rollup.get('maximum_absolute_delta_nL'), 3)} nL"
+                    )
+                    if rollup.get("maximum_absolute_delta_percent") is not None:
+                        summary += (
+                            " ("
+                            f"{_format_bridge_number(rollup.get('maximum_absolute_delta_percent'), 1)}%"
+                            ")"
+                        )
+                status_lines.append(summary)
+            if rollup.get("excluded_round_count"):
+                status_lines.append(
+                    f"Excluded flagged or nonnumeric rounds: {rollup.get('excluded_round_count')}"
+                )
+
         self.summary_detail_status_label.setText("\n".join(status_lines))
 
+    def _select_summary_result_set(self, selection):
+        if not hasattr(self, "summary_result_set_combo"):
+            return
+        index = self.summary_result_set_combo.findData(selection)
+        if index >= 0:
+            self.summary_result_set_combo.setCurrentIndex(index)
+
     def _refresh_summary_filters(self):
-        self.summary_table_proxy_model.setCurrentRunOnly(self.summary_current_run_checkbox.isChecked())
+        self.summary_table_proxy_model.setResultSetFilter(
+            self.summary_result_set_combo.currentData()
+        )
         self.summary_table_proxy_model.setValidOnly(self.summary_valid_only_checkbox.isChecked())
         self.summary_table_proxy_model.setSourceFilter(self.summary_source_combo.currentData())
         self._update_summary_count_label()
@@ -14431,7 +14629,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         pw = raw.get("pw_us")
         pres = raw.get("pressure_psi")
         valid = raw.get("valid")
-        run_no = raw.get("run_no")
+        result_set_no = raw.get("result_set_no")
 
         if pw is None or pres is None:
             QtWidgets.QMessageBox.information(self, "Nothing to load", "Selected row is missing PW or Pressure.")
@@ -14455,7 +14653,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.information(self, "Loading flagged condition", reason)
 
         mgr = self.model.calibration_manager
-        self.stageLabel.setText(f"Status: Applying PW {pw} us, Pressure {pres:.3f} psi (Run {run_no or '-'})...")
+        self.stageLabel.setText(f"Status: Applying PW {pw} us, Pressure {pres:.3f} psi (Set {result_set_no or '-'})...")
 
         def _after_apply(*_):
             DropletImagingDialog._sync_manual_spinbox_value(
@@ -14465,7 +14663,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 force=True,
             )
             self.refresh_calibration_memory_recommendation()
-            self.update_stage_and_log(f"Loaded PW {pw} us and {pres:.3f} psi from Run {run_no or '-'}", "blue")
+            self.update_stage_and_log(f"Loaded PW {pw} us and {pres:.3f} psi from Set {result_set_no or '-'}", "blue")
 
         try:
             mgr.changeSettingsRequested.emit({"print_pulse_width": pw, "print_pressure": pres}, _after_apply)
@@ -14496,17 +14694,46 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def populate_summary_table(self):
         diagnostics_enabled = self._droplet_capture_performance_diagnostics_enabled()
         refresh_started_ns = time.monotonic_ns() if diagnostics_enabled else None
+        _, selected_before = self._selected_summary_row()
+        selected_identity = str((selected_before or {}).get("row_identity_key") or "")
+        selected_fingerprint = (
+            self._summary_row_fingerprint(selected_before)
+            if selected_before
+            else None
+        )
         mgr = self.model.calibration_manager
         getter = getattr(mgr, "get_characterization_summary_rows", None)
         if callable(getter):
             rows = getter()
         else:
             rows = mgr.get_pressure_sweep_summary_rows()
+        rows = enrich_characterization_result_sets(rows)
         self.summary_table_model.set_rows(rows)
+        _populate_result_set_selector(
+            self.summary_result_set_combo,
+            rows,
+            default_selection="latest",
+        )
         self._sync_applied_summary_row_highlight()
         self._refresh_summary_filters()
         if self._summary_sort_column is not None:
             self._apply_summary_sort(self._summary_sort_column, self._summary_sort_order)
+        if selected_identity or selected_fingerprint is not None:
+            for proxy_row in range(self.summary_table_proxy_model.rowCount()):
+                proxy_index = self.summary_table_proxy_model.index(proxy_row, 0)
+                source_index = self.summary_table_proxy_model.mapToSource(proxy_index)
+                candidate = self.summary_table_model.raw_row_at(source_index.row()) or {}
+                same_identity = bool(
+                    selected_identity
+                    and str(candidate.get("row_identity_key") or "") == selected_identity
+                )
+                same_fingerprint = bool(
+                    selected_fingerprint is not None
+                    and self._summary_row_fingerprint(candidate) == selected_fingerprint
+                )
+                if same_identity or same_fingerprint:
+                    self.summary_table.selectRow(proxy_row)
+                    break
         self.refresh_calibration_memory_recommendation()
         if diagnostics_enabled:
             self._record_droplet_capture_performance_marker(

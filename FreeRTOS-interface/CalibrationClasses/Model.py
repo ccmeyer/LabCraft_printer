@@ -69,6 +69,11 @@ from CalibrationStorageContracts import (
     materialize_characterization_rows,
     process_storage_contract,
 )
+from CalibrationResultGrouping import (
+    build_characterization_source_reference,
+    enrich_characterization_result_sets,
+    normalize_characterization_source_reference,
+)
 from CalibrationPersistencePolicy import (
     CalibrationStoragePolicy,
     legacy_compatible_policy,
@@ -5674,6 +5679,7 @@ class CalibrationManager(QObject):
             missing.append("Source droplet trajectory")
 
         source_result = {
+            **build_characterization_source_reference(row),
             "run_id": row.get("source_run_id") or row.get("run_id"),
             "phase_key": self._summary_source_phase_key(row),
             "step_index": self._recheck_int_or_none(row.get("source_step_index")),
@@ -5686,6 +5692,29 @@ class CalibrationManager(QObject):
             "mean_volume_nL": self._recheck_float_or_none(row.get("mean_nL")),
             "cv_pct": self._recheck_float_or_none(row.get("cv_pct")),
         }
+        if phase == "recheck":
+            stored_root = row.get("recheck_root_source") or row.get("recheck_source")
+            root_source_result = (
+                normalize_characterization_source_reference(stored_root)
+                if isinstance(stored_root, dict)
+                else dict(source_result)
+            )
+        else:
+            root_source_result = dict(source_result)
+        reference_mean_volume_nl = self._recheck_float_or_none(
+            self._recheck_first_value(
+                root_source_result.get("mean_volume_nL"),
+                row.get("reference_mean_volume_nL"),
+                source_result.get("mean_volume_nL"),
+            )
+        )
+        reference_cv_volume_percent = self._recheck_float_or_none(
+            self._recheck_first_value(
+                root_source_result.get("cv_pct"),
+                row.get("reference_cv_volume_percent"),
+                source_result.get("cv_pct"),
+            )
+        )
         context = {
             "print_pulse_width_us": pw_us,
             "pressure_psi": pressure_psi,
@@ -5704,9 +5733,10 @@ class CalibrationManager(QObject):
                 if static_target_context
                 else self._recheck_first_value(row.get("targeting_mode"), pressure_entry.get("targeting_mode"))
             ),
-            "reference_mean_volume_nL": source_result["mean_volume_nL"],
-            "reference_cv_volume_percent": source_result["cv_pct"],
+            "reference_mean_volume_nL": reference_mean_volume_nl,
+            "reference_cv_volume_percent": reference_cv_volume_percent,
             "source_result": source_result,
+            "root_source_result": root_source_result,
         }
         if isinstance(trajectory_result, dict):
             context["trajectory_result"] = trajectory_result
@@ -10349,6 +10379,10 @@ class CalibrationManager(QObject):
                         "nozzle_center_machine": res.get("nozzle_center_machine"),
                         "emergence_time_us": res.get("emergence_time_us"),
                         "recheck_source": p.get("recheck_source") or res.get("recheck_source"),
+                        "recheck_root_source": (
+                            p.get("recheck_root_source")
+                            or res.get("recheck_root_source")
+                        ),
                         "reference_mean_volume_nL": p.get("reference_mean_volume_nL"),
                         "volume_delta_nL": p.get("volume_delta_nL"),
                         "volume_delta_percent": p.get("volume_delta_percent"),
@@ -10513,7 +10547,9 @@ class CalibrationManager(QObject):
 
     def get_characterization_history_snapshot(self):
         if self.get_calibration_reader_preference() == "legacy":
-            rows = self._get_legacy_characterization_summary_rows()
+            rows = enrich_characterization_result_sets(
+                self._get_legacy_characterization_summary_rows()
+            )
             diagnostics = {
                 "primary": "legacy",
                 "row_count": len(rows),
@@ -10525,7 +10561,9 @@ class CalibrationManager(QObject):
             return {"rows": rows, "issues": [], "diagnostics": diagnostics}
         reader = self._ensure_calibration_recording_reader()
         if reader is None:
-            rows = self._get_legacy_characterization_summary_rows()
+            rows = enrich_characterization_result_sets(
+                self._get_legacy_characterization_summary_rows()
+            )
             diagnostics = {"primary": "legacy_unconfigured", "row_count": len(rows), "issue_count": 0}
             self._calibration_reader_diagnostics = diagnostics
             return {"rows": rows, "issues": [], "diagnostics": diagnostics}
@@ -10570,6 +10608,7 @@ class CalibrationManager(QObject):
             filtered.extend(self._historical_characterization_rows())
         if callable(getattr(self, "_transient_characterization_rows", None)):
             filtered.extend(self._transient_characterization_rows())
+        filtered = enrich_characterization_result_sets(filtered)
         diagnostics = _thaw_candidate_value(snapshot.diagnostics)
         diagnostics["filtered_row_count"] = len(filtered)
         self._calibration_reader_diagnostics = diagnostics
@@ -10585,10 +10624,12 @@ class CalibrationManager(QObject):
             committed = list(history_getter()["rows"])
             if self.get_calibration_reader_preference() == "legacy":
                 return committed
-            return committed + self._get_in_progress_characterization_rows(committed)
+            return enrich_characterization_result_sets(
+                committed + self._get_in_progress_characterization_rows(committed)
+            )
         # Compatibility for the intentionally minimal, unbound normalization
         # hosts used by SIL and older integrations.
-        return list(
+        return enrich_characterization_result_sets(
             CalibrationManager._get_legacy_characterization_summary_rows(self)
         )
 
@@ -31945,6 +31986,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "initial_track_offset_steps": [int(v) for v in initial_track_offset_steps],
             "print_pulse_width_us": int(pw_us),
             "recheck_source": source,
+            "recheck_root_source": dict(context.get("root_source_result") or source),
             "reference_mean_volume_nL": context.get("reference_mean_volume_nL"),
             "reference_cv_volume_percent": context.get("reference_cv_volume_percent"),
         }
@@ -31981,6 +32023,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             "initial_track_offset_steps": [0, 0, 0],
             "print_pulse_width_us": int(pw_us),
             "recheck_source": source,
+            "recheck_root_source": dict(context.get("root_source_result") or source),
             "manual_current_source": source,
             "static_target_context": True,
             "reference_mean_volume_nL": context.get("reference_mean_volume_nL"),
@@ -33397,6 +33440,12 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         context = context if isinstance(context, dict) else {}
         source = plan_record.get("recheck_source") or context.get("source_result") or {}
         source = dict(source) if isinstance(source, dict) else {}
+        root_source = (
+            plan_record.get("recheck_root_source")
+            or context.get("root_source_result")
+            or source
+        )
+        root_source = dict(root_source) if isinstance(root_source, dict) else dict(source)
         pw_us = self._coerce_int_or_none(
             plan_record.get("print_pulse_width_us") or context.get("print_pulse_width_us")
         )
@@ -33404,6 +33453,7 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             rec["print_pulse_width_us"] = int(pw_us)
         rec["recheck"] = True
         rec["recheck_source"] = source
+        rec["recheck_root_source"] = root_source
 
         ref_mean = self._coerce_float_or_none(
             plan_record.get("reference_mean_volume_nL")
@@ -33932,13 +33982,16 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
         }
         if bool(getattr(self, "recheck_mode", False)):
             source = {}
+            root_source = {}
             context = getattr(self, "recheck_context", None)
             if isinstance(context, dict):
                 source = dict(context.get("source_result") or {})
+                root_source = dict(context.get("root_source_result") or source)
             result.update(
                 {
                     "recheck": True,
                     "recheck_source": source,
+                    "recheck_root_source": root_source,
                     "print_pulse_width_us": pressure_entry.get("print_pulse_width_us"),
                 }
             )
@@ -33977,7 +34030,12 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             if bool(getattr(self, "recheck_mode", False)):
                 context = getattr(self, "recheck_context", None)
                 source = dict(context.get("source_result") or {}) if isinstance(context, dict) else {}
-                result.update({"recheck": True, "recheck_source": source})
+                root_source = dict(context.get("root_source_result") or source) if isinstance(context, dict) else source
+                result.update({
+                    "recheck": True,
+                    "recheck_source": source,
+                    "recheck_root_source": root_source,
+                })
             if bool(getattr(self, "manual_current_mode", False)):
                 context = getattr(self, "manual_current_context", None)
                 source = dict(context.get("source_result") or {}) if isinstance(context, dict) else {}
@@ -34000,7 +34058,12 @@ class PressureSweepCharacterizationProcess(BaseCalibrationProcess):
             if bool(getattr(self, "recheck_mode", False)):
                 context = getattr(self, "recheck_context", None)
                 source = dict(context.get("source_result") or {}) if isinstance(context, dict) else {}
-                result.update({"recheck": True, "recheck_source": source})
+                root_source = dict(context.get("root_source_result") or source) if isinstance(context, dict) else source
+                result.update({
+                    "recheck": True,
+                    "recheck_source": source,
+                    "recheck_root_source": root_source,
+                })
             if bool(getattr(self, "manual_current_mode", False)):
                 context = getattr(self, "manual_current_context", None)
                 source = dict(context.get("source_result") or {}) if isinstance(context, dict) else {}
