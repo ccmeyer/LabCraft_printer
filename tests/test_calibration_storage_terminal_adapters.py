@@ -8,6 +8,7 @@ from CalibrationRecordingStore import CaptureRetentionPolicy
 from CalibrationStorageContracts import (
     PRODUCTION_PROCESS_NAMES,
     build_terminal_summary,
+    materialize_characterization_rows,
     process_storage_contract,
 )
 
@@ -80,6 +81,76 @@ def test_characterization_adapter_is_bounded_and_application_eligible_only_when_
     assert summary["rows"][0]["pressure_psi"] == 1.2
     assert "raw_measurements" not in summary["rows"][0]
     assert build_terminal_summary(object(), contract, run, "error")["application_eligible"] is False
+
+
+def test_pressure_sweep_completion_update_does_not_create_an_extra_result_row():
+    contract = process_storage_contract("PressureSweepCharacterizationProcess")
+    updates = []
+    for update_index, pressure in enumerate((0.650, 0.627, 0.603, 0.580), 1):
+        updates.append(
+            {
+                "update_id": f"update-{update_index}",
+                "update_index": update_index,
+                "legacy_source": {
+                    "source_run_id": "session-1",
+                    "source_phase_key": "pressure_sweep_characterization",
+                    "source_step_index": update_index - 1,
+                },
+                "payload": {
+                    "timestamp": f"2026-08-15T00:00:0{update_index}Z",
+                    "settings": {"print_pressure": pressure},
+                    "result": {
+                        "pressures": [
+                            {
+                                "pressure": pressure,
+                                "mean_volume": 9.0 + update_index,
+                                "valid": True,
+                            }
+                        ]
+                    },
+                },
+            }
+        )
+    updates.append(
+        {
+            "update_id": "update-complete",
+            "update_index": 5,
+            "legacy_source": {
+                "source_run_id": "session-1",
+                "source_phase_key": "pressure_sweep_characterization",
+                "source_step_index": 4,
+            },
+            "payload": {
+                "timestamp": "2026-08-15T00:00:05Z",
+                "settings": {"print_pressure": 0.580},
+                "result": {"pressures": [], "complete": True},
+            },
+        }
+    )
+    run = SimpleNamespace(
+        process_run_id="process-run-1",
+        identity={"identity_quality": "stable"},
+        updates=updates,
+    )
+
+    summary = build_terminal_summary(object(), contract, run, "completed")
+
+    assert [row["pressure_psi"] for row in summary["rows"]] == [
+        0.650,
+        0.627,
+        0.603,
+        0.580,
+    ]
+    assert [row["update_id"] for row in summary["rows"]] == [
+        "update-1",
+        "update-2",
+        "update-3",
+        "update-4",
+    ]
+    assert materialize_characterization_rows(
+        updates[-1]["payload"],
+        updates[-1]["legacy_source"],
+    ) == []
 
 
 def test_dataset_adapter_counts_frames_without_embedding_the_stream():

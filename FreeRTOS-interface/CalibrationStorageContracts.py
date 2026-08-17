@@ -251,7 +251,10 @@ def materialize_characterization_rows(
 
     if phase_key in {"pressure_sweep_characterization", "droplet_recheck", "droplet_search"}:
         pressures = list(result.get("pressures") or [])
-        if not pressures and phase_key in {"pressure_sweep_characterization", "droplet_search"}:
+        if (
+            "pressures" not in result
+            and phase_key in {"pressure_sweep_characterization", "droplet_search"}
+        ):
             pressures = [result]
         phase = {
             "pressure_sweep_characterization": "sweep",
