@@ -193,6 +193,7 @@ def test_printing_controls_show_feedback_commit_settings_and_filter_profiles(
     host.settings["current_print"] = 0.71
     host.settings["current_refuel"] = 0.41
     host.machine_model.pressure_updated.emit()
+    qapp.processEvents()
     assert dialog.current_print_pressure_value.text() == "0.71 psi"
     assert dialog.current_refuel_pressure_value.text() == "0.41 psi"
 
@@ -399,6 +400,7 @@ def test_live_pressure_plot_coalesces_targets_and_stops_while_collapsed(
 
     for _ in range(20):
         host.machine_model.pressure_updated.emit()
+    qapp.processEvents()
     assert dialog.live_pressure_render_timer.isSingleShot()
     assert dialog.live_pressure_render_timer.interval() == 100
     assert dialog.live_pressure_render_timer.isActive()

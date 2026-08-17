@@ -81,6 +81,31 @@ def _benign_startup_report():
     }
 
 
+def test_status_delivery_diagnostics_are_bounded(qapp, test_profile, tmp_path):
+    machine = _make_machine(qapp, test_profile, tmp_path)
+    for delay_ms in (1, 2, 3, 4, 5, 6, 7, 8):
+        machine.update_status(
+            {
+                "Current_command": 1,
+                "Last_completed": 1,
+                "__host_rx_monotonic_ns": time.monotonic_ns() - (delay_ms * 1_000_000),
+            }
+        )
+
+    diagnostics = machine.get_status_delivery_diagnostics()
+
+    assert diagnostics["received_count"] == 8
+    assert diagnostics["retained_count"] == 8
+    assert diagnostics["history_capacity"] == 512
+    assert diagnostics["rx_to_main_thread_ms"]["count"] == 8
+    assert diagnostics["first_quartile_rx_to_main_thread_ms"]["count"] == 2
+    assert diagnostics["last_quartile_rx_to_main_thread_ms"]["count"] == 2
+    assert (
+        diagnostics["last_quartile_rx_to_main_thread_ms"]["median_ms"]
+        > diagnostics["first_quartile_rx_to_main_thread_ms"]["median_ms"]
+    )
+
+
 def _with_actionable_host_context(report):
     enriched = dict(report)
     enriched["host_context"] = {

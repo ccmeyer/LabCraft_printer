@@ -30,7 +30,7 @@ def test_droplet_capture_perf_enabled_events_are_bounded_and_json_safe():
     snapshot = diagnostics.build_snapshot(reason="unit_test")
 
     assert snapshot["kind"] == "droplet_capture_performance_snapshot"
-    assert snapshot["schema_version"] == 10
+    assert snapshot["schema_version"] == 11
     assert snapshot["reason"] == "unit_test"
     assert snapshot["event_count"] == 2
     assert snapshot["event_counts"]["controller_completion_received"] == 1
@@ -244,7 +244,7 @@ def test_compact_camera_summary_matches_legacy_phase_projection():
     }
 
 
-def test_schema_10_snapshot_aggregates_ui_work_without_raw_samples():
+def test_schema_11_snapshot_aggregates_ui_work_without_raw_samples():
     diagnostics = DropletCapturePerformanceDiagnostics(max_events=20)
     diagnostics.set_enabled(True)
     for duration in (1.0, 2.0, 3.0, 4.0):
@@ -253,9 +253,17 @@ def test_schema_10_snapshot_aggregates_ui_work_without_raw_samples():
     diagnostics.record("image_rendered", {"duration_ms": 8.0})
     diagnostics.record("characterization_summary_refreshed", {"duration_ms": 10.0})
 
-    snapshot = diagnostics.build_snapshot()
+    snapshot = diagnostics.build_snapshot(
+        runtime_summaries={
+            "calibration_ui_refresh": {
+                "request_count": 100,
+                "batch_count": 1,
+                "max_pending_count": 1,
+            }
+        }
+    )
 
-    assert snapshot["schema_version"] == 10
+    assert snapshot["schema_version"] == 11
     assert snapshot["ui_work_summaries"]["model_ui_image_update"] == {
         "count": 4,
         "median_ms": 2.5,
@@ -265,6 +273,11 @@ def test_schema_10_snapshot_aggregates_ui_work_without_raw_samples():
     assert snapshot["ui_work_summaries"]["calibration_callback_handling"]["count"] == 1
     assert snapshot["ui_work_summaries"]["image_rendering"]["maximum_ms"] == 8.0
     assert snapshot["ui_work_summaries"]["characterization_summary_refresh"]["p95_ms"] == 10.0
+    assert snapshot["runtime_summaries"]["calibration_ui_refresh"] == {
+        "request_count": 100,
+        "batch_count": 1,
+        "max_pending_count": 1,
+    }
 
 
 def test_controller_exposes_droplet_capture_profile_state():

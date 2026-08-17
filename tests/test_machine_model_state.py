@@ -184,3 +184,44 @@ def test_reported_dispense_frequency_does_not_overwrite_session_value(qapp):
 
     assert machine_model.get_dispense_frequency_hz() == 10
     assert machine_model.get_reported_dispense_frequency_hz() == 20
+
+
+def test_reported_printing_parameters_emit_once_per_changed_status_batch(qapp):
+    machine_model = MachineModel()
+    emissions = []
+    machine_model.printing_parameters_updated.connect(lambda: emissions.append(1))
+    status = {
+        "Tar_print": machine_model.psi_offset + 1000,
+        "Tar_refuel": machine_model.psi_offset + 500,
+        "Print_width": 1400,
+        "Refuel_width": 3200,
+        "Grip_pulse": 1500,
+        "Grip_refresh": 30000,
+    }
+
+    assert machine_model.apply_reported_printing_parameters(status) is True
+    for _ in range(1000):
+        assert machine_model.apply_reported_printing_parameters(status) is False
+
+    assert emissions == [1]
+    assert machine_model.get_gripper_settings() == (30000, 1500)
+
+    changed = dict(status, Print_width=1450, Grip_period=31000)
+    changed.pop("Grip_refresh")
+    assert machine_model.apply_reported_printing_parameters(changed) is True
+    assert emissions == [1, 1]
+
+
+def test_individual_printing_parameter_setters_ignore_unchanged_values(qapp):
+    machine_model = MachineModel()
+    emissions = []
+    machine_model.printing_parameters_updated.connect(lambda: emissions.append(1))
+
+    assert machine_model.update_print_pulse_width(1400) is True
+    assert machine_model.update_print_pulse_width(1400) is False
+    assert machine_model.update_refuel_pulse_width(3200) is True
+    assert machine_model.update_refuel_pulse_width(3200) is False
+    assert machine_model.update_dispense_frequency_hz(12) is True
+    assert machine_model.update_dispense_frequency_hz(12) is False
+
+    assert emissions == [1, 1, 1]

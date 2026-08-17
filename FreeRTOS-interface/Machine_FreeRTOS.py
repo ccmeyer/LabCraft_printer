@@ -4429,6 +4429,7 @@ class Machine(QObject):
         self._last_reset_report = None
         self._flash_state = default_flash_safety_state()
         self.status_history = deque(maxlen=512)
+        self._status_sample_count = 0
         self.command_event_history = deque(maxlen=512)
         self._settings_trace_requests = {}
         self._latest_status_sample = None
@@ -6097,6 +6098,46 @@ class Machine(QObject):
             out["observed_ms"] = observed_ms
         return out
 
+    @staticmethod
+    def _status_latency_distribution(values):
+        ordered = sorted(float(value) for value in values if value is not None)
+        if not ordered:
+            return {"count": 0, "median_ms": None, "p95_ms": None, "maximum_ms": None}
+        count = len(ordered)
+        midpoint = count // 2
+        median = (
+            ordered[midpoint]
+            if count % 2
+            else (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+        )
+        p95_index = max(0, min(count - 1, int((0.95 * count) + 0.999999) - 1))
+        return {
+            "count": count,
+            "median_ms": median,
+            "p95_ms": ordered[p95_index],
+            "maximum_ms": ordered[-1],
+        }
+
+    def get_status_delivery_diagnostics(self):
+        """Return bounded main-thread delivery statistics for received status frames."""
+        samples = list(self.status_history)
+        latencies = [
+            sample.get("rx_to_main_thread_ms")
+            for sample in samples
+            if sample.get("rx_to_main_thread_ms") is not None
+        ]
+        quartile_size = max(1, len(latencies) // 4) if latencies else 0
+        first_quartile = latencies[:quartile_size] if quartile_size else []
+        last_quartile = latencies[-quartile_size:] if quartile_size else []
+        return {
+            "received_count": int(getattr(self, "_status_sample_count", 0)),
+            "retained_count": len(samples),
+            "history_capacity": int(self.status_history.maxlen or 0),
+            "rx_to_main_thread_ms": self._status_latency_distribution(latencies),
+            "first_quartile_rx_to_main_thread_ms": self._status_latency_distribution(first_quartile),
+            "last_quartile_rx_to_main_thread_ms": self._status_latency_distribution(last_quartile),
+        }
+
     def _find_command_by_number(self, command_number):
         command_number = self._coerce_optional_int(command_number)
         if command_number is None:
@@ -6357,6 +6398,7 @@ class Machine(QObject):
             self._mark_mcu_rx("status")
             observed_monotonic_ns = int(time.monotonic_ns())
             sample = self._status_sample_from_dict(data, observed_monotonic_ns)
+            self._status_sample_count = int(getattr(self, "_status_sample_count", 0)) + 1
             self.status_history.append(sample)
             self._latest_status_sample = dict(sample)
             self._update_pause_after_requests_from_status(sample)

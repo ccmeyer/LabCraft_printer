@@ -406,7 +406,12 @@ def test_droplet_capture_performance_debug_checkbox_and_export(monkeypatch, qapp
     dialog.export_droplet_capture_performance_button.click()
     qapp.processEvents()
 
-    controller.write_droplet_capture_performance_snapshot.assert_called_once_with(reason="manual_export")
+    controller.write_droplet_capture_performance_snapshot.assert_called_once_with(
+        reason="manual_export",
+        runtime_summaries={
+            "calibration_ui_refresh": dialog.get_status_ui_refresh_diagnostics(),
+        },
+    )
     assert "C:/tmp/droplet_capture_perf.json" in dialog.droplet_capture_performance_debug_status_label.text()
 
 

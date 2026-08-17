@@ -209,7 +209,7 @@ class DropletCapturePerformanceDiagnostics:
         self.events.append(record)
         return dict(record)
 
-    def build_snapshot(self, *, reason="manual_export"):
+    def build_snapshot(self, *, reason="manual_export", runtime_summaries=None):
         events = list(self.events)
         event_counts = Counter(str(row.get("event_kind") or "") for row in events)
         rejection_counts = Counter(
@@ -788,7 +788,7 @@ class DropletCapturePerformanceDiagnostics:
 
         snapshot = {
             "kind": "droplet_capture_performance_snapshot",
-            "schema_version": 10,
+            "schema_version": 11,
             "reason": str(reason or "manual_export"),
             "generated_at_utc": self._now_utc(),
             "generated_monotonic_ns": int(time.monotonic_ns()),
@@ -804,6 +804,7 @@ class DropletCapturePerformanceDiagnostics:
             "calibration_capture_summaries": calibration_capture_summaries,
             "settings_request_summaries": settings_request_summaries,
             "ui_work_summaries": ui_work_summaries,
+            "runtime_summaries": self._json_safe(dict(runtime_summaries or {})),
             "event_log_tail": events,
             "last_snapshot_path": self.last_snapshot_path,
         }
@@ -9343,9 +9344,30 @@ class Controller(QObject):
             return None
         return diagnostics.record(event_kind, payload if isinstance(payload, dict) else {})
 
-    def build_droplet_capture_performance_snapshot(self, reason="manual_export"):
+    def _droplet_capture_runtime_summaries(self, runtime_summaries=None):
+        summaries = dict(runtime_summaries or {})
+        getter = getattr(
+            getattr(self, "machine", None),
+            "get_status_delivery_diagnostics",
+            None,
+        )
+        if callable(getter):
+            try:
+                summaries.setdefault("machine_status_delivery", getter())
+            except Exception:
+                pass
+        return summaries
+
+    def build_droplet_capture_performance_snapshot(
+        self,
+        reason="manual_export",
+        runtime_summaries=None,
+    ):
         diagnostics = self._ensure_droplet_capture_performance_diagnostics()
-        return diagnostics.build_snapshot(reason=reason)
+        return diagnostics.build_snapshot(
+            reason=reason,
+            runtime_summaries=self._droplet_capture_runtime_summaries(runtime_summaries),
+        )
 
     def _default_droplet_capture_performance_snapshot_dir(self):
         experiment_model = getattr(getattr(self, "model", None), "experiment_model", None)
@@ -9353,7 +9375,12 @@ class Controller(QObject):
         base = Path(str(experiment_path)) if experiment_path else Path.cwd()
         return base / "calibration_recordings" / "droplet_capture_performance"
 
-    def write_droplet_capture_performance_snapshot(self, directory=None, reason="manual_export"):
+    def write_droplet_capture_performance_snapshot(
+        self,
+        directory=None,
+        reason="manual_export",
+        runtime_summaries=None,
+    ):
         diagnostics = self._ensure_droplet_capture_performance_diagnostics()
         out_dir = Path(directory) if directory is not None else self._default_droplet_capture_performance_snapshot_dir()
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -9361,7 +9388,10 @@ class Controller(QObject):
         path = out_dir / f"droplet_capture_performance_{stamp}_{uuid.uuid4().hex[:8]}.json"
         previous_path = diagnostics.last_snapshot_path
         diagnostics.last_snapshot_path = str(path)
-        snapshot = diagnostics.build_snapshot(reason=reason)
+        snapshot = diagnostics.build_snapshot(
+            reason=reason,
+            runtime_summaries=self._droplet_capture_runtime_summaries(runtime_summaries),
+        )
         try:
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(snapshot, handle, indent=2)

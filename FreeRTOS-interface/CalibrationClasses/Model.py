@@ -34739,43 +34739,90 @@ class DropletCameraModel(QObject):
         return self.num_flashes
     
     def update_num_flashes(self,num):
-        self.num_flashes = int(num)
+        value = int(num)
+        if self.num_flashes == value:
+            return False
+        self.num_flashes = value
         self.flash_signal.emit()
+        return True
 
     def get_flash_duration(self):
         return self.flash_duration
     
     def update_flash_duration(self,duration):
-        self.flash_duration = int(duration)
+        value = int(duration)
+        if self.flash_duration == value:
+            return False
+        self.flash_duration = value
         self.flash_signal.emit()
+        return True
 
     def get_flash_delay(self):
         return self.flash_delay
     
     def update_flash_delay(self,delay):
-        self.flash_delay = int(delay)
+        value = int(delay)
+        if self.flash_delay == value:
+            return False
+        self.flash_delay = value
         self.flash_signal.emit()
+        return True
 
     def get_num_droplets(self):
         return self.num_droplets
     
     def update_num_droplets(self,num):
-        self.num_droplets = int(num)
+        value = int(num)
+        if self.num_droplets == value:
+            return False
+        self.num_droplets = value
         self.flash_signal.emit()
+        return True
 
     def get_exposure_time(self):
         return self.exposure_time
     
     def update_exposure_time(self,exposure_time):
-        self.exposure_time = int(exposure_time)
+        value = int(exposure_time)
+        if self.exposure_time == value:
+            return False
+        self.exposure_time = value
         self.flash_signal.emit()
+        return True
 
     def get_trigger_counter(self):
         return self.ext_counter
     
     def update_trigger_counter(self,counter):
-        self.ext_counter = int(counter)
+        value = int(counter)
+        if self.ext_counter == value:
+            return False
+        self.ext_counter = value
         self.flash_signal.emit()
+        return True
+
+    def apply_reported_flash_parameters(self, status):
+        """Apply one status chunk and emit once when displayed flash state changes."""
+        status = dict(status or {})
+        field_map = (
+            ("Flashes", "num_flashes"),
+            ("Flash_width", "flash_duration"),
+            ("Flash_delay", "flash_delay"),
+            ("Flash_droplets", "num_droplets"),
+            ("Ext_counter", "ext_counter"),
+        )
+        changed = False
+        for key, attribute in field_map:
+            if key not in status:
+                continue
+            value = int(status[key])
+            if getattr(self, attribute) == value:
+                continue
+            setattr(self, attribute, value)
+            changed = True
+        if changed:
+            self.flash_signal.emit()
+        return changed
 
     def get_flash_session_armed(self):
         return bool(self.flash_session_armed)

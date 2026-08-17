@@ -17,6 +17,7 @@ import random
 import time
 import shutil
 import uuid
+from collections import Counter, deque
 from datetime import datetime
 from pathlib import Path
 import cv2
@@ -2888,6 +2889,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
     sessionDeactivated = QtCore.Signal(str)
     PRINT_PROFILE_PRESSURE_TOLERANCE = 0.005
     LIVE_PRESSURE_RENDER_INTERVAL_MS = 100
+    STATUS_UI_DIAGNOSTIC_SAMPLE_LIMIT = 256
     REFUEL_LEVEL_CHART_WINDOW_SAMPLES = 100
     REFUEL_LEVEL_CHART_FALLBACK_HEIGHT_PX = 100.0
     IMAGER_CLOSE_STOP_TIMEOUT_S = 10.0
@@ -3043,6 +3045,27 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.refuel_panel_refresh_timer = QTimer(self)
         self.refuel_panel_refresh_timer.setSingleShot(True)
         self.refuel_panel_refresh_timer.timeout.connect(self._run_refuel_level_panel_refresh)
+        self.status_ui_refresh_timer = QTimer(self)
+        self.status_ui_refresh_timer.setSingleShot(True)
+        self.status_ui_refresh_timer.setInterval(0)
+        self.status_ui_refresh_timer.timeout.connect(self._run_status_ui_refresh)
+        self.manual_focus_refresh_timer = QTimer(self)
+        self.manual_focus_refresh_timer.setSingleShot(True)
+        self.manual_focus_refresh_timer.setInterval(0)
+        self.manual_focus_refresh_timer.timeout.connect(self._run_manual_focus_refresh)
+        self._status_ui_dirty_categories = set()
+        self._status_ui_refresh_requests = Counter()
+        self._status_ui_refresh_batch_count = 0
+        self._status_ui_refresh_coalesced_count = 0
+        self._status_ui_refresh_max_pending = 0
+        self._status_ui_refresh_scheduled_ns = None
+        self._status_ui_refresh_queue_ms = deque(maxlen=self.STATUS_UI_DIAGNOSTIC_SAMPLE_LIMIT)
+        self._status_ui_refresh_work_ms = deque(maxlen=self.STATUS_UI_DIAGNOSTIC_SAMPLE_LIMIT)
+        self._manual_focus_refresh_request_count = 0
+        self._manual_focus_refresh_batch_count = 0
+        self._manual_focus_refresh_coalesced_count = 0
+        self._manual_focus_refresh_max_pending = 0
+        self._machine_state_ui_fingerprint = None
         self._refuel_monitor_camera_started = False
         self._refuel_first_sample_pending = False
         self._last_refuel_panel_auto_refresh_monotonic = None
@@ -4409,6 +4432,162 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def session_is_active(self):
         return self._session_state in {"opening", "active", "closing"}
 
+    @staticmethod
+    def _runtime_timing_distribution(values):
+        ordered = sorted(float(value) for value in values)
+        if not ordered:
+            return {"count": 0, "median_ms": None, "p95_ms": None, "maximum_ms": None}
+        count = len(ordered)
+        midpoint = count // 2
+        median = (
+            ordered[midpoint]
+            if count % 2
+            else (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+        )
+        p95_index = max(0, min(count - 1, int((0.95 * count) + 0.999999) - 1))
+        return {
+            "count": count,
+            "median_ms": median,
+            "p95_ms": ordered[p95_index],
+            "maximum_ms": ordered[-1],
+        }
+
+    def _reset_status_ui_runtime_diagnostics(self):
+        self.status_ui_refresh_timer.stop()
+        self.manual_focus_refresh_timer.stop()
+        self._status_ui_dirty_categories.clear()
+        self._status_ui_refresh_requests.clear()
+        self._status_ui_refresh_batch_count = 0
+        self._status_ui_refresh_coalesced_count = 0
+        self._status_ui_refresh_max_pending = 0
+        self._status_ui_refresh_scheduled_ns = None
+        self._status_ui_refresh_queue_ms.clear()
+        self._status_ui_refresh_work_ms.clear()
+        self._manual_focus_refresh_request_count = 0
+        self._manual_focus_refresh_batch_count = 0
+        self._manual_focus_refresh_coalesced_count = 0
+        self._manual_focus_refresh_max_pending = 0
+        self._machine_state_ui_fingerprint = None
+
+    def _schedule_status_ui_refresh(self, category):
+        if self._session_state not in {"opening", "active"}:
+            return False
+        category = str(category or "")
+        if category not in {"pressure", "printing", "flash", "control_lock"}:
+            raise ValueError(f"Unknown status UI refresh category: {category}")
+        self._status_ui_refresh_requests[category] += 1
+        self._status_ui_dirty_categories.add(category)
+        if self.status_ui_refresh_timer.isActive():
+            self._status_ui_refresh_coalesced_count += 1
+            return False
+        self._status_ui_refresh_scheduled_ns = time.monotonic_ns()
+        self._status_ui_refresh_max_pending = max(self._status_ui_refresh_max_pending, 1)
+        self.status_ui_refresh_timer.start()
+        return True
+
+    def _schedule_pressure_ui_refresh(self, *_args):
+        return self._schedule_status_ui_refresh("pressure")
+
+    def _schedule_printing_ui_refresh(self, *_args):
+        return self._schedule_status_ui_refresh("printing")
+
+    def _schedule_flash_ui_refresh(self, *_args):
+        return self._schedule_status_ui_refresh("flash")
+
+    def _machine_state_ui_fingerprint_value(self):
+        machine = getattr(self.model, "machine_model", None)
+        connected_getter = getattr(machine, "is_connected", None)
+        try:
+            connected = (
+                bool(connected_getter())
+                if callable(connected_getter)
+                else bool(getattr(machine, "machine_connected", False))
+            )
+        except Exception:
+            connected = False
+        return (
+            connected,
+            bool(DropletImagingDialog._is_calibration_busy(self)),
+            bool(self._is_flash_fault_latched()),
+            bool(self._capture_pending_for_ui()),
+            bool(self._imager_dirty_shutdown_active()),
+        )
+
+    def _schedule_machine_state_ui_refresh(self, *_args):
+        fingerprint = self._machine_state_ui_fingerprint_value()
+        if fingerprint == self._machine_state_ui_fingerprint:
+            return False
+        self._machine_state_ui_fingerprint = fingerprint
+        return self._schedule_status_ui_refresh("control_lock")
+
+    def _run_status_ui_refresh(self):
+        categories = set(self._status_ui_dirty_categories)
+        self._status_ui_dirty_categories.clear()
+        scheduled_ns = self._status_ui_refresh_scheduled_ns
+        self._status_ui_refresh_scheduled_ns = None
+        if not categories or self._session_state not in {"opening", "active"}:
+            return
+        started_ns = time.monotonic_ns()
+        if scheduled_ns is not None:
+            self._status_ui_refresh_queue_ms.append(
+                max(0.0, (started_ns - scheduled_ns) / 1_000_000.0)
+            )
+        self._status_ui_refresh_batch_count += 1
+        if "printing" in categories:
+            self._sync_printing_controls_from_model()
+        elif "pressure" in categories:
+            self._refresh_current_pressure_values()
+            self._request_live_pressure_render()
+        if "flash" in categories:
+            self.update_flash_info()
+        if "control_lock" in categories:
+            self._refresh_manual_control_lock_state()
+        self._status_ui_refresh_work_ms.append(
+            max(0.0, (time.monotonic_ns() - started_ns) / 1_000_000.0)
+        )
+
+    def _schedule_manual_focus_refresh(self):
+        self._manual_focus_refresh_request_count += 1
+        if self.manual_focus_refresh_timer.isActive():
+            self._manual_focus_refresh_coalesced_count += 1
+            return False
+        self._manual_focus_refresh_max_pending = max(
+            self._manual_focus_refresh_max_pending,
+            1,
+        )
+        self.manual_focus_refresh_timer.start()
+        return True
+
+    def _run_manual_focus_refresh(self):
+        if self._session_state not in {"opening", "active"}:
+            return
+        self._manual_focus_refresh_batch_count += 1
+        self._refresh_manual_spinbox_focus_frame()
+
+    def get_status_ui_refresh_diagnostics(self):
+        return {
+            "requests_by_category": dict(self._status_ui_refresh_requests),
+            "request_count": int(sum(self._status_ui_refresh_requests.values())),
+            "batch_count": int(self._status_ui_refresh_batch_count),
+            "coalesced_request_count": int(self._status_ui_refresh_coalesced_count),
+            "pending_count": int(self.status_ui_refresh_timer.isActive()),
+            "max_pending_count": int(self._status_ui_refresh_max_pending),
+            "dirty_categories": sorted(self._status_ui_dirty_categories),
+            "queue_delay_ms": self._runtime_timing_distribution(
+                self._status_ui_refresh_queue_ms
+            ),
+            "work_duration_ms": self._runtime_timing_distribution(
+                self._status_ui_refresh_work_ms
+            ),
+            "manual_focus": {
+                "request_count": int(self._manual_focus_refresh_request_count),
+                "batch_count": int(self._manual_focus_refresh_batch_count),
+                "coalesced_request_count": int(self._manual_focus_refresh_coalesced_count),
+                "pending_count": int(self.manual_focus_refresh_timer.isActive()),
+                "max_pending_count": int(self._manual_focus_refresh_max_pending),
+            },
+        }
+
     def _connect_session_signal(self, signal, slot, connection_type=None):
         if signal is None:
             return
@@ -4434,7 +4613,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._on_droplet_capture_finished,
             Qt.ConnectionType.QueuedConnection,
         )
-        self._connect_session_signal(camera.flash_signal, self.update_flash_info)
+        self._connect_session_signal(camera.flash_signal, self._schedule_flash_ui_refresh)
         self._connect_session_signal(manager.analyzedImageUpdated, self.display_analyzed_image)
         self._connect_session_signal(
             getattr(manager, "onlineStreamDebugUpdated", None),
@@ -4447,15 +4626,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
             )
 
         pressure_signal = getattr(machine, "pressure_updated", None)
-        self._connect_session_signal(pressure_signal, self._refresh_current_pressure_values)
-        self._connect_session_signal(pressure_signal, self._request_live_pressure_render)
+        self._connect_session_signal(pressure_signal, self._schedule_pressure_ui_refresh)
         self._connect_session_signal(
             getattr(machine, "printing_parameters_updated", None),
-            self._sync_printing_controls_from_model,
+            self._schedule_printing_ui_refresh,
         )
         self._connect_session_signal(
             getattr(machine, "machine_state_updated", None),
-            self._refresh_manual_control_lock_state,
+            self._schedule_machine_state_ui_refresh,
         )
         self._connect_session_signal(
             getattr(self.controller, "transport_fault_ui_signal", None),
@@ -4536,6 +4714,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return False
 
         self._session_state = "opening"
+        self._reset_status_ui_runtime_diagnostics()
         self._session_mode = normalized_mode
         self.service_mode = normalized_mode == "optics"
         self.initial_tab = "optics" if self.service_mode else ""
@@ -4566,7 +4745,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 self._install_droplet_capture_raw_attempt_filter()
                 self._refresh_manual_control_lock_state()
                 self._refresh_optics_controls()
-                self._apply_flash_safety_ui_state()
+                if callable(getattr(self.droplet_camera_model, "get_num_flashes", None)):
+                    self.update_flash_info()
+                else:
+                    self._apply_flash_safety_ui_state()
                 self._sync_stream_capture_panel_state()
                 self._schedule_refuel_level_panel_refresh(force=True)
                 if self._is_refuel_tracking_enabled():
@@ -4634,7 +4816,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._reset_online_stream_debug_view(hide=True)
         except Exception:
             pass
-        for timer_name in ("camera_timer", "refuel_monitor_timer", "refuel_panel_refresh_timer"):
+        for timer_name in (
+            "camera_timer",
+            "refuel_monitor_timer",
+            "refuel_panel_refresh_timer",
+            "status_ui_refresh_timer",
+            "manual_focus_refresh_timer",
+        ):
             timer = getattr(self, timer_name, None)
             if timer is not None:
                 try:
@@ -4679,6 +4867,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._stop_live_pressure_rendering()
         except Exception:
             pass
+        self._status_ui_dirty_categories.clear()
+        self._status_ui_refresh_scheduled_ns = None
+        self._machine_state_ui_fingerprint = None
+        self._manual_focus_frame_active_spinbox = None
+        if hasattr(self, "manual_edit_focus_frame"):
+            self.manual_edit_focus_frame.hide()
         self._disconnect_external_session_signals()
         self._capture_request_pending = False
         self.capturing = False
@@ -5214,7 +5408,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 )
             return None
         try:
-            path = writer(reason=reason)
+            path = writer(
+                reason=reason,
+                runtime_summaries={
+                    "calibration_ui_refresh": self.get_status_ui_refresh_diagnostics(),
+                },
+            )
         except Exception as exc:
             print(f"[DropletCapturePerf] snapshot export failed: {exc}")
             if show_status:
@@ -6820,7 +7019,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def _mark_manual_spinbox_typed_edit(self, spinbox):
         self._manual_spinbox_typed_drafts[spinbox] = True
-        self._refresh_manual_spinbox_focus_frame()
+        self._schedule_manual_focus_refresh()
 
     def _dispatch_manual_spinbox_value(self, spinbox):
         if DropletImagingDialog._is_calibration_busy(self):
@@ -6832,7 +7031,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _finish_manual_spinbox_edit(self, spinbox):
         self._manual_spinbox_typed_drafts[spinbox] = False
         spinbox.clearFocus()
-        QTimer.singleShot(0, self._refresh_manual_spinbox_focus_frame)
+        self._schedule_manual_focus_refresh()
 
     def _handle_manual_spinbox_value_changed(self, spinbox, _value):
         if spinbox in self._manual_spinbox_syncing:
@@ -6846,7 +7045,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if spinbox in self._manual_spinbox_syncing:
             return
         if not self._manual_spinbox_typed_drafts.get(spinbox, False):
-            QTimer.singleShot(0, self._refresh_manual_spinbox_focus_frame)
+            self._schedule_manual_focus_refresh()
             return
         spinbox.interpretText()
         self._manual_spinbox_typed_drafts[spinbox] = False
@@ -6872,12 +7071,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.manual_edit_focus_frame.raise_()
 
     def _sync_manual_spinbox_value(self, spinbox, value, force=False):
+        if isinstance(spinbox, QtWidgets.QDoubleSpinBox):
+            normalized_value = round(float(value), int(spinbox.decimals()))
+            current_value = round(float(spinbox.value()), int(spinbox.decimals()))
+        else:
+            normalized_value = int(value)
+            current_value = int(spinbox.value())
         typed_drafts = getattr(self, "_manual_spinbox_typed_drafts", None)
         syncing = getattr(self, "_manual_spinbox_syncing", None)
         if typed_drafts is None or syncing is None:
+            if current_value == normalized_value:
+                return
             spinbox.blockSignals(True)
             try:
-                spinbox.setValue(value)
+                spinbox.setValue(normalized_value)
             finally:
                 spinbox.blockSignals(False)
             return
@@ -6887,16 +7094,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
             or DropletImagingDialog._manual_spinbox_is_being_edited(self, spinbox)
         ):
             return
+        if current_value == normalized_value:
+            return
         typed_drafts[spinbox] = False
         syncing.add(spinbox)
         spinbox.blockSignals(True)
         try:
-            spinbox.setValue(value)
+            spinbox.setValue(normalized_value)
         finally:
             spinbox.blockSignals(False)
             syncing.discard(spinbox)
-        if hasattr(self, "manual_edit_focus_frame"):
-            QTimer.singleShot(0, lambda: DropletImagingDialog._refresh_manual_spinbox_focus_frame(self))
 
     def _register_calibration_action_button(self, action_key: str, button: QtWidgets.QPushButton, *, default_text: str | None = None):
         key = str(action_key)
@@ -8290,6 +8497,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         flash_fault_latched = self._is_flash_fault_latched()
         capture_pending = self._capture_pending_for_ui()
         dirty_shutdown = self._imager_dirty_shutdown_active()
+        self._machine_state_ui_fingerprint = self._machine_state_ui_fingerprint_value()
 
         if busy and not was_locked:
             DropletImagingDialog._clear_manual_control_edit_state(self)
@@ -8349,7 +8557,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         spinbox = self._manual_spinbox_focus_targets.get(watched)
         if spinbox is not None:
             if event.type() in (QtCore.QEvent.FocusIn, QtCore.QEvent.FocusOut):
-                QTimer.singleShot(0, self._refresh_manual_spinbox_focus_frame)
+                self._schedule_manual_focus_refresh()
             elif watched is spinbox and event.type() == QtCore.QEvent.MouseButtonPress:
                 if self._manual_spinbox_step_subcontrol_hit(spinbox, event):
                     self._manual_spinbox_typed_drafts[spinbox] = False

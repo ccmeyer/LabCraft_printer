@@ -15307,12 +15307,20 @@ class MachineModel(QObject):
         self.current_r = int(r)
     
     def update_target_print_pressure(self, pressure):
-        self.target_print_pressure = self.convert_to_psi(pressure)
+        value = self.convert_to_psi(pressure)
+        if self.target_print_pressure == value:
+            return False
+        self.target_print_pressure = value
         self.printing_parameters_updated.emit()
+        return True
     
     def update_target_refuel_pressure(self, pressure):
-        self.target_refuel_pressure = self.convert_to_psi(pressure)
+        value = self.convert_to_psi(pressure)
+        if self.target_refuel_pressure == value:
+            return False
+        self.target_refuel_pressure = value
         self.printing_parameters_updated.emit()
+        return True
 
     def update_print_pressure(self, new_pressure):
         """Update the print pressure readings with a new value."""
@@ -15345,12 +15353,20 @@ class MachineModel(QObject):
         self.accelerations_changed.emit(self.x_accel, self.y_accel, self.z_accel)
 
     def update_gripper_refresh_period(self, period):
-        self.gripper_refresh_period = int(period)
+        value = int(period)
+        if self.gripper_refresh_period == value:
+            return False
+        self.gripper_refresh_period = value
         self.printing_parameters_updated.emit()
+        return True
 
     def update_gripper_pulse_duration(self, duration):
-        self.gripper_pulse_duration = int(duration)
+        value = int(duration)
+        if self.gripper_pulse_duration == value:
+            return False
+        self.gripper_pulse_duration = value
         self.printing_parameters_updated.emit()
+        return True
 
     def get_print_pressure_bounds(self):
         return self.P_MIN, self.P_MAX
@@ -15404,16 +15420,57 @@ class MachineModel(QObject):
         return self.current_r
     
     def update_print_pulse_width(self,pulse_width):
-        self.print_pulse_width = int(pulse_width)
+        value = int(pulse_width)
+        if self.print_pulse_width == value:
+            return False
+        self.print_pulse_width = value
         self.printing_parameters_updated.emit()
+        return True
     
     def update_refuel_pulse_width(self,pulse_width):
-        self.refuel_pulse_width = int(pulse_width)
+        value = int(pulse_width)
+        if self.refuel_pulse_width == value:
+            return False
+        self.refuel_pulse_width = value
         self.printing_parameters_updated.emit()
+        return True
 
     def update_dispense_frequency_hz(self, hz):
-        self.dispense_frequency_hz = max(0, int(hz))
+        value = max(0, int(hz))
+        if self.dispense_frequency_hz == value:
+            return False
+        self.dispense_frequency_hz = value
         self.printing_parameters_updated.emit()
+        return True
+
+    def apply_reported_printing_parameters(self, status):
+        """Apply one status chunk and emit once if displayed printing state changed."""
+        status = dict(status or {})
+        updates = []
+        if "Tar_print" in status:
+            updates.append(("target_print_pressure", self.convert_to_psi(status["Tar_print"])))
+        if "Tar_refuel" in status:
+            updates.append(("target_refuel_pressure", self.convert_to_psi(status["Tar_refuel"])))
+        if "Print_width" in status:
+            updates.append(("print_pulse_width", int(status["Print_width"])))
+        if "Refuel_width" in status:
+            updates.append(("refuel_pulse_width", int(status["Refuel_width"])))
+        if "Grip_pulse" in status:
+            updates.append(("gripper_pulse_duration", int(status["Grip_pulse"])))
+        if "Grip_refresh" in status:
+            updates.append(("gripper_refresh_period", int(status["Grip_refresh"])))
+        elif "Grip_period" in status:
+            updates.append(("gripper_refresh_period", int(status["Grip_period"])))
+
+        changed = False
+        for attribute, value in updates:
+            if getattr(self, attribute) == value:
+                continue
+            setattr(self, attribute, value)
+            changed = True
+        if changed:
+            self.printing_parameters_updated.emit()
+        return changed
 
     def update_reported_dispense_frequency_hz(self, hz):
         # Board-reported dispense rate can legitimately lag behind the host-side
@@ -16204,10 +16261,28 @@ class Model(QObject):
             self.machine_model.update_print_pressure(status_dict['Pressure_P'])
         if 'Pressure_R' in status_keys:
             self.machine_model.update_refuel_pressure(status_dict['Pressure_R'])
-        if 'Tar_print' in status_keys:
-            self.machine_model.update_target_print_pressure(status_dict['Tar_print'])
-        if 'Tar_refuel' in status_keys:
-            self.machine_model.update_target_refuel_pressure(status_dict['Tar_refuel'])
+        apply_printing_parameters = getattr(
+            self.machine_model,
+            "apply_reported_printing_parameters",
+            None,
+        )
+        if callable(apply_printing_parameters):
+            apply_printing_parameters(status_dict)
+        else:
+            if 'Tar_print' in status_keys:
+                self.machine_model.update_target_print_pressure(status_dict['Tar_print'])
+            if 'Tar_refuel' in status_keys:
+                self.machine_model.update_target_refuel_pressure(status_dict['Tar_refuel'])
+            if 'Print_width' in status_keys:
+                self.machine_model.update_print_pulse_width(status_dict['Print_width'])
+            if 'Refuel_width' in status_keys:
+                self.machine_model.update_refuel_pulse_width(status_dict['Refuel_width'])
+            if 'Grip_pulse' in status_keys:
+                self.machine_model.update_gripper_pulse_duration(status_dict['Grip_pulse'])
+            if 'Grip_refresh' in status_keys:
+                self.machine_model.update_gripper_refresh_period(status_dict['Grip_refresh'])
+            elif 'Grip_period' in status_keys:
+                self.machine_model.update_gripper_refresh_period(status_dict['Grip_period'])
         if 'print_active' in status_keys or 'refuel_active' in status_keys:
             self.machine_model.update_regulation_state(
                 status_dict.get('print_active', self.machine_model.regulating_print_pressure),
@@ -16217,35 +16292,32 @@ class Model(QObject):
             self.machine_model.update_cycle_count(status_dict['Cycle_count'])
         if 'Max_cycle' in status_keys:
             self.machine_model.update_max_cycle(status_dict['Max_cycle'])
-        if 'Print_width' in status_keys:
-            self.machine_model.update_print_pulse_width(status_dict['Print_width'])
-        if 'Refuel_width' in status_keys:
-            self.machine_model.update_refuel_pulse_width(status_dict['Refuel_width'])
         if 'Disp_freq' in status_keys:
             self.machine_model.update_reported_dispense_frequency_hz(status_dict['Disp_freq'])
         if 'Micros' in status_keys:
             self.machine_model.update_current_micros(status_dict['Micros'])
-        if 'Flashes' in status_keys:
-            self.droplet_camera_model.update_num_flashes(status_dict['Flashes'])
-        if 'Flash_width' in status_keys:
-            self.droplet_camera_model.update_flash_duration(status_dict['Flash_width'])
-        if 'Flash_delay' in status_keys:
-            self.droplet_camera_model.update_flash_delay(status_dict['Flash_delay'])
-        if 'Flash_droplets' in status_keys:
-            self.droplet_camera_model.update_num_droplets(status_dict['Flash_droplets'])
-        if 'Ext_counter' in status_keys:
-            self.droplet_camera_model.update_trigger_counter(status_dict['Ext_counter'])
+        apply_flash_parameters = getattr(
+            self.droplet_camera_model,
+            "apply_reported_flash_parameters",
+            None,
+        )
+        if callable(apply_flash_parameters):
+            apply_flash_parameters(status_dict)
+        else:
+            if 'Flashes' in status_keys:
+                self.droplet_camera_model.update_num_flashes(status_dict['Flashes'])
+            if 'Flash_width' in status_keys:
+                self.droplet_camera_model.update_flash_duration(status_dict['Flash_width'])
+            if 'Flash_delay' in status_keys:
+                self.droplet_camera_model.update_flash_delay(status_dict['Flash_delay'])
+            if 'Flash_droplets' in status_keys:
+                self.droplet_camera_model.update_num_droplets(status_dict['Flash_droplets'])
+            if 'Ext_counter' in status_keys:
+                self.droplet_camera_model.update_trigger_counter(status_dict['Ext_counter'])
         if 'X_max_hz' in status_keys:
             self.machine_model.update_all_speeds(status_dict['X_max_hz'], status_dict['Y_max_hz'], status_dict['Z_max_hz'])
         if 'X_accel' in status_keys:
             self.machine_model.update_all_accelerations(status_dict['X_accel'], status_dict['Y_accel'], status_dict['Z_accel'])
-
-        if 'Grip_pulse' in status_keys:
-            self.machine_model.update_gripper_pulse_duration(status_dict['Grip_pulse'])
-        if 'Grip_refresh' in status_keys:
-            self.machine_model.update_gripper_refresh_period(status_dict['Grip_refresh'])
-        elif 'Grip_period' in status_keys:
-            self.machine_model.update_gripper_refresh_period(status_dict['Grip_period'])
 
         self.machine_model.update_command_numbers(
             status_dict.get('Current_command', self.machine_model.current_command_num),

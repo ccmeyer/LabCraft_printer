@@ -121,7 +121,7 @@ def test_calibration_capture_diagnostics_nonintrusive():
     }
     print("SIL_PROGRESS " + json.dumps(metrics, sort_keys=True), flush=True)
 
-    assert snapshot["schema_version"] == 10
+    assert snapshot["schema_version"] == 11
     assert metrics["capture_summary_count"] == 1000
     assert metrics["normal_phase_event_count"] == 0
     assert metrics["request_summary_count"] == 1000
