@@ -5794,6 +5794,8 @@ class CalibrationManager(QObject):
                 "session_id": f"droplet_calibration_sequence_{ts}_{uuid.uuid4().hex[:8]}",
                 "session_outcome": None,
                 "pressure_scan_mode": str(pressure_scan_mode),
+                "gripper_phase": "closing",
+                "gripper_settle_deadline_monotonic_s": None,
             }
         )
         self._emit_droplet_calibration_sequence_state_changed()
@@ -5837,6 +5839,8 @@ class CalibrationManager(QObject):
                 "error_message": "",
                 "session_id": f"stream_calibration_sequence_{ts}_{uuid.uuid4().hex[:8]}",
                 "session_outcome": None,
+                "gripper_phase": "closing",
+                "gripper_settle_deadline_monotonic_s": None,
             }
         )
         self._emit_stream_calibration_sequence_state_changed()
@@ -6220,6 +6224,8 @@ class CalibrationManager(QObject):
             "session_id": None,
             "pressure_scan_mode": "band",
             "session_outcome": None,
+            "gripper_phase": "idle",
+            "gripper_settle_deadline_monotonic_s": None,
         }
 
     def _copy_stream_calibration_sequence_state(self):
@@ -6270,6 +6276,8 @@ class CalibrationManager(QObject):
             "error_message": "",
             "session_id": None,
             "session_outcome": None,
+            "gripper_phase": "idle",
+            "gripper_settle_deadline_monotonic_s": None,
         }
 
     def _copy_droplet_calibration_sequence_state(self):
@@ -6875,6 +6883,8 @@ class CalibrationManager(QObject):
             "Refreshing gripper vacuum before droplet calibration sequence."
         )
         self._droplet_calibration_sequence_state["error_message"] = ""
+        self._droplet_calibration_sequence_state["gripper_phase"] = "closing"
+        self._droplet_calibration_sequence_state["gripper_settle_deadline_monotonic_s"] = None
         self._emit_droplet_calibration_sequence_state_changed()
         return True, ""
 
@@ -6887,6 +6897,10 @@ class CalibrationManager(QObject):
             return False, "Droplet calibration sequence is no longer waiting for this gripper pulse."
         self._droplet_calibration_sequence_state["status_message"] = (
             f"Waiting {float(settle_ms) / 1000.0:.1f} seconds for gripper pressure to settle."
+        )
+        self._droplet_calibration_sequence_state["gripper_phase"] = "settling"
+        self._droplet_calibration_sequence_state["gripper_settle_deadline_monotonic_s"] = (
+            time.monotonic() + max(0.0, float(settle_ms) / 1000.0)
         )
         self._emit_droplet_calibration_sequence_state_changed()
         return True, ""
@@ -6901,6 +6915,8 @@ class CalibrationManager(QObject):
         self._droplet_calibration_sequence_state["status_message"] = (
             "Running droplet calibration sequence."
         )
+        self._droplet_calibration_sequence_state["gripper_phase"] = "idle"
+        self._droplet_calibration_sequence_state["gripper_settle_deadline_monotonic_s"] = None
         self._emit_droplet_calibration_sequence_state_changed()
 
         self.clear_calibration_queue()
@@ -6956,6 +6972,8 @@ class CalibrationManager(QObject):
             "Refreshing gripper vacuum before stream calibration sequence."
         )
         self._stream_calibration_sequence_state["error_message"] = ""
+        self._stream_calibration_sequence_state["gripper_phase"] = "closing"
+        self._stream_calibration_sequence_state["gripper_settle_deadline_monotonic_s"] = None
         self._emit_stream_calibration_sequence_state_changed()
         return True, ""
 
@@ -6968,6 +6986,10 @@ class CalibrationManager(QObject):
             return False, "Stream calibration sequence is no longer waiting for this gripper pulse."
         self._stream_calibration_sequence_state["status_message"] = (
             f"Waiting {float(settle_ms) / 1000.0:.1f} seconds for gripper pressure to settle."
+        )
+        self._stream_calibration_sequence_state["gripper_phase"] = "settling"
+        self._stream_calibration_sequence_state["gripper_settle_deadline_monotonic_s"] = (
+            time.monotonic() + max(0.0, float(settle_ms) / 1000.0)
         )
         self._emit_stream_calibration_sequence_state_changed()
         return True, ""
@@ -6982,6 +7004,8 @@ class CalibrationManager(QObject):
         self._stream_calibration_sequence_state["status_message"] = (
             "Running nozzle, focus, emergence, and stream calibration sequence."
         )
+        self._stream_calibration_sequence_state["gripper_phase"] = "idle"
+        self._stream_calibration_sequence_state["gripper_settle_deadline_monotonic_s"] = None
         self._emit_stream_calibration_sequence_state_changed()
 
         self.clear_calibration_queue()

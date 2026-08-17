@@ -47,7 +47,7 @@ The droplet imager is split across three layers:
 
 - `FreeRTOS-interface/Controller.py`
   - `connect_droplet_camera_signals()` wires calibration-manager capture/move/settings requests to controller handlers and connects `machine.droplet_camera.image_captured_signal` to `_on_image_captured()`.
-  - Droplet and stream **Calibrate All** use one explicit gripper close followed by an ordered firmware `WAIT(3000)` settle barrier. The matching calibration queue starts only after that wait retires; session guards discard callbacks from stopped or replaced runs. Standalone stream gravimetric capture has no gripper preamble or parameter-restoration phase.
+  - Droplet and stream **Calibrate All** use one explicit gripper close followed by an ordered firmware `WAIT(3000)` settle barrier. The matching calibration queue starts only after that wait retires; session guards discard callbacks from stopped or replaced runs. A display-only banner over the top of the camera image reports the close phase and counts down from the manager's monotonic settle deadline. The banner never advances the queue. Standalone stream gravimetric capture has no gripper preamble or parameter-restoration phase.
   - `handle_capture_request()` stores a pending callback and starts an async capture through `machine.capture_droplet_image()`.
   - `_on_image_captured()` pulls the chosen frame from `machine.droplet_camera`, forwards it into `model.droplet_camera_model.update_image(...)`, and resolves the pending callback for the active calibration process.
   - `_on_capture_failed()` resolves the pending callback with `None` and emits `calibration_manager.captureFailed`.

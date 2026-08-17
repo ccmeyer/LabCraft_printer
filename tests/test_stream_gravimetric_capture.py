@@ -1,6 +1,7 @@
 import csv
 import json
 import re
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1058,23 +1059,39 @@ def test_controller_calibrate_all_preamble_uses_one_close_only(
         expected_queue = list(manager.DROPLET_CALIBRATION_SEQUENCE_QUEUE)
 
     assert result == (True, "")
-    assert state_getter()["status"] == "refreshing_gripper"
+    refreshing_state = state_getter()
+    assert refreshing_state["status"] == "refreshing_gripper"
+    assert refreshing_state["gripper_phase"] == "closing"
+    assert refreshing_state["gripper_settle_deadline_monotonic_s"] is None
     assert queued == []
     assert len(close_handlers) == 1
 
+    deadline_lower_bound = time.monotonic() + (
+        Controller.CALIBRATION_GRIPPER_SETTLE_MS / 1000.0
+    )
     close_handlers[0]()
+    deadline_upper_bound = time.monotonic() + (
+        Controller.CALIBRATION_GRIPPER_SETTLE_MS / 1000.0
+    )
 
     assert wait_calls == [Controller.CALIBRATION_GRIPPER_SETTLE_MS]
     assert len(wait_handlers) == 1
-    assert state_getter()["status"] == "refreshing_gripper"
-    assert state_getter()["status_message"] == (
+    settling_state = state_getter()
+    assert settling_state["status"] == "refreshing_gripper"
+    assert settling_state["status_message"] == (
         "Waiting 3.0 seconds for gripper pressure to settle."
     )
+    assert settling_state["gripper_phase"] == "settling"
+    assert deadline_lower_bound <= settling_state["gripper_settle_deadline_monotonic_s"]
+    assert settling_state["gripper_settle_deadline_monotonic_s"] <= deadline_upper_bound
     assert queued == []
 
     wait_handlers[0]()
 
-    assert state_getter()["status"] == "running"
+    running_state = state_getter()
+    assert running_state["status"] == "running"
+    assert running_state["gripper_phase"] == "idle"
+    assert running_state["gripper_settle_deadline_monotonic_s"] is None
     assert queued == [expected_queue]
 
 
@@ -1168,7 +1185,10 @@ def test_controller_calibrate_all_close_enqueue_failure_resets_sequence(tmp_path
     result = controller.begin_stream_calibration_sequence_gripper_preamble()
 
     assert result[0] is False
-    assert manager.get_stream_calibration_sequence_state()["status"] == "idle"
+    state = manager.get_stream_calibration_sequence_state()
+    assert state["status"] == "idle"
+    assert state["gripper_phase"] == "idle"
+    assert state["gripper_settle_deadline_monotonic_s"] is None
     assert errors[-1] == "Failed to enqueue the initial gripper close pulse."
 
 
@@ -1198,7 +1218,10 @@ def test_controller_calibrate_all_wait_enqueue_failure_resets_sequence(
     assert controller.begin_stream_calibration_sequence_gripper_preamble() == (True, "")
     close_handlers[0]()
 
-    assert manager.get_stream_calibration_sequence_state()["status"] == "idle"
+    state = manager.get_stream_calibration_sequence_state()
+    assert state["status"] == "idle"
+    assert state["gripper_phase"] == "idle"
+    assert state["gripper_settle_deadline_monotonic_s"] is None
     assert errors
     assert errors[-1].startswith("Failed to enqueue the gripper cooldown wait")
 

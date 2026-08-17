@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from PySide6 import QtCore
 
 from tests.calibration_test_utils import SignalStub, ensure_calibration_import_stubs
@@ -1319,6 +1320,169 @@ def test_droplet_calibration_sequence_keeps_stop_button_enabled_during_refresh(m
 
     assert dialog.calibrate_all_button.text() == "Calibrate All"
 
+    dialog.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("state_name", "signal_name", "button_name"),
+    [
+        (
+            "sequence_state",
+            "streamCalibrationSequenceStateChanged",
+            "calibrate_all_stream_button",
+        ),
+        (
+            "droplet_sequence_state",
+            "dropletCalibrationSequenceStateChanged",
+            "calibrate_all_button",
+        ),
+    ],
+)
+def test_calibrate_all_gripper_banner_shows_close_phase_for_both_modes(
+    monkeypatch,
+    qapp,
+    state_name,
+    signal_name,
+    button_name,
+):
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+    state = getattr(manager, state_name)
+    signal = getattr(manager, signal_name)
+    button = getattr(dialog, button_name)
+
+    state.update(
+        {
+            "status": "refreshing_gripper",
+            "gripper_phase": "closing",
+            "gripper_settle_deadline_monotonic_s": None,
+        }
+    )
+    signal.emit(dict(state))
+    qapp.processEvents()
+
+    assert dialog.calibration_gripper_status_banner.isHidden() is False
+    assert dialog.calibration_gripper_status_banner.text() == "Refreshing gripper pressure…"
+    assert dialog.gripper_settle_banner_timer.isActive() is False
+    assert button.isEnabled() is True
+    assert button.text() == "Stop Calibration"
+
+    state.update(
+        {
+            "status": "running",
+            "gripper_phase": "idle",
+            "gripper_settle_deadline_monotonic_s": None,
+        }
+    )
+    signal.emit(dict(state))
+    qapp.processEvents()
+
+    assert dialog.calibration_gripper_status_banner.isHidden() is True
+    assert dialog.gripper_settle_banner_timer.isActive() is False
+
+    dialog.deleteLater()
+
+
+def test_calibrate_all_gripper_banner_counts_down_without_starting_calibration(
+    monkeypatch,
+    qapp,
+):
+    now = [100.0]
+    monkeypatch.setattr("CalibrationClasses.View.time.monotonic", lambda: now[0])
+    dialog, manager, controller = _build_dialog(monkeypatch, qapp)
+    state = manager.droplet_sequence_state
+    state.update(
+        {
+            "status": "refreshing_gripper",
+            "gripper_phase": "settling",
+            "gripper_settle_deadline_monotonic_s": 103.0,
+        }
+    )
+    manager.dropletCalibrationSequenceStateChanged.emit(dict(state))
+    qapp.processEvents()
+
+    assert dialog.calibration_gripper_status_banner.isHidden() is False
+    assert dialog.calibration_gripper_status_banner.text().endswith("3.0 seconds")
+    assert dialog.gripper_settle_banner_timer.isActive() is True
+
+    now[0] = 101.01
+    dialog._sync_calibration_gripper_status_banner()
+    assert dialog.calibration_gripper_status_banner.text().endswith("2.0 seconds")
+
+    now[0] = 103.0
+    dialog._sync_calibration_gripper_status_banner()
+    assert dialog.calibration_gripper_status_banner.text() == (
+        "Gripper pressure settled — starting calibration…"
+    )
+    assert dialog.gripper_settle_banner_timer.isActive() is False
+    assert controller.start_droplet_calibration_sequence_calls == 0
+
+    state["gripper_settle_deadline_monotonic_s"] = None
+    manager.dropletCalibrationSequenceStateChanged.emit(dict(state))
+    qapp.processEvents()
+    assert dialog.calibration_gripper_status_banner.text() == (
+        "Waiting for gripper pressure to settle…"
+    )
+    assert dialog.gripper_settle_banner_timer.isActive() is False
+
+    state.update({"status": "idle", "gripper_phase": "idle"})
+    manager.dropletCalibrationSequenceStateChanged.emit(dict(state))
+    qapp.processEvents()
+    assert dialog.calibration_gripper_status_banner.isHidden() is True
+
+    dialog.deleteLater()
+
+
+def test_calibrate_all_gripper_banner_lifecycle_uses_remaining_deadline(
+    monkeypatch,
+    qapp,
+):
+    now = [200.0]
+    monkeypatch.setattr("CalibrationClasses.View.time.monotonic", lambda: now[0])
+    dialog, manager, _controller = _build_dialog(monkeypatch, qapp)
+    state = manager.sequence_state
+    state.update(
+        {
+            "status": "refreshing_gripper",
+            "gripper_phase": "settling",
+            "gripper_settle_deadline_monotonic_s": 203.0,
+        }
+    )
+    manager.streamCalibrationSequenceStateChanged.emit(dict(state))
+    qapp.processEvents()
+    assert dialog.calibration_gripper_status_banner.text().endswith("3.0 seconds")
+
+    dialog.deactivate_session(reason="test")
+    assert dialog.calibration_gripper_status_banner.isHidden() is True
+    assert dialog.gripper_settle_banner_timer.isActive() is False
+
+    now[0] = 201.0
+    dialog.activate_session(mode="calibration")
+    qapp.processEvents()
+    assert dialog.calibration_gripper_status_banner.isHidden() is False
+    assert dialog.calibration_gripper_status_banner.text().endswith("2.0 seconds")
+    assert dialog.gripper_settle_banner_timer.isActive() is True
+
+    state.update(
+        {
+            "status": "idle",
+            "gripper_phase": "idle",
+            "gripper_settle_deadline_monotonic_s": None,
+        }
+    )
+    manager.streamCalibrationSequenceStateChanged.emit(
+        {
+            "status": "refreshing_gripper",
+            "gripper_phase": "settling",
+            "gripper_settle_deadline_monotonic_s": 203.0,
+        }
+    )
+    qapp.processEvents()
+    assert dialog.calibration_gripper_status_banner.isHidden() is True
+    assert dialog.gripper_settle_banner_timer.isActive() is False
+
+    dialog.shutdown()
+    assert dialog.calibration_gripper_status_banner.isHidden() is True
+    assert dialog.gripper_settle_banner_timer.isActive() is False
     dialog.deleteLater()
 
 

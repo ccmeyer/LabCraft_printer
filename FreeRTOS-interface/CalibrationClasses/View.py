@@ -12,6 +12,7 @@ from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import numpy as np
 import json
+import math
 import os
 import random
 import time
@@ -3053,6 +3054,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.manual_focus_refresh_timer.setSingleShot(True)
         self.manual_focus_refresh_timer.setInterval(0)
         self.manual_focus_refresh_timer.timeout.connect(self._run_manual_focus_refresh)
+        self.gripper_settle_banner_timer = QTimer(self)
+        self.gripper_settle_banner_timer.setInterval(100)
+        self.gripper_settle_banner_timer.timeout.connect(
+            self._sync_calibration_gripper_status_banner
+        )
         self._status_ui_dirty_categories = set()
         self._status_ui_refresh_requests = Counter()
         self._status_ui_refresh_batch_count = 0
@@ -4300,8 +4306,54 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.image_label.setMinimumSize(480, 360)
         self.image_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.image_label.setStyleSheet("background-color: black; border: 1px solid #444; padding: 8px;")
+
+        self.image_viewport = QtWidgets.QWidget()
+        self.image_viewport.setObjectName("calibrationImageViewport")
+        self.image_viewport.setMinimumSize(480, 360)
+        self.image_viewport.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding,
+        )
+        image_stack = QtWidgets.QStackedLayout(self.image_viewport)
+        image_stack.setContentsMargins(0, 0, 0, 0)
+        image_stack.setStackingMode(QtWidgets.QStackedLayout.StackAll)
+        image_stack.addWidget(self.image_label)
+
+        self.calibration_gripper_banner_overlay = QtWidgets.QWidget()
+        self.calibration_gripper_banner_overlay.setObjectName(
+            "calibrationGripperStatusOverlay"
+        )
+        self.calibration_gripper_banner_overlay.setAttribute(
+            QtCore.Qt.WA_TransparentForMouseEvents,
+            True,
+        )
+        banner_overlay_layout = QtWidgets.QVBoxLayout(
+            self.calibration_gripper_banner_overlay
+        )
+        banner_overlay_layout.setContentsMargins(12, 12, 12, 0)
+        banner_overlay_layout.setSpacing(0)
+        self.calibration_gripper_status_banner = QtWidgets.QLabel()
+        self.calibration_gripper_status_banner.setObjectName(
+            "calibrationGripperStatusBanner"
+        )
+        self.calibration_gripper_status_banner.setAlignment(Qt.AlignCenter)
+        self.calibration_gripper_status_banner.setWordWrap(False)
+        self.calibration_gripper_status_banner.setAccessibleName(
+            "Calibration gripper status"
+        )
+        gripper_banner_color = self.color_dict.get("dark_blue", "#063f99")
+        self.calibration_gripper_status_banner.setStyleSheet(
+            f"background-color: {gripper_banner_color}; color: white; "
+            "font-weight: 600; padding: 8px; border-radius: 4px;"
+        )
+        self.calibration_gripper_status_banner.hide()
+        banner_overlay_layout.addWidget(self.calibration_gripper_status_banner)
+        banner_overlay_layout.addStretch(1)
+        image_stack.addWidget(self.calibration_gripper_banner_overlay)
+        image_stack.setCurrentWidget(self.calibration_gripper_banner_overlay)
+
         self._analysis_image_layout_index = self.analysis_layout.count()
-        self.analysis_layout.addWidget(self.image_label, 1)
+        self.analysis_layout.addWidget(self.image_viewport, 1)
 
         self.online_stream_plot_container = QtWidgets.QWidget()
         self.online_stream_plot_container.setObjectName("online_stream_plot_container")
@@ -4679,6 +4731,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         stream_sequence = getattr(manager, "streamCalibrationSequenceStateChanged", None)
         for slot in (
             self._refresh_manual_control_lock_state,
+            self._sync_calibration_gripper_status_banner,
             self._ensure_stream_calibration_sequence_followup_state,
             self._on_refuel_stream_sequence_state_changed,
         ):
@@ -4686,6 +4739,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         droplet_sequence = getattr(manager, "dropletCalibrationSequenceStateChanged", None)
         for slot in (
             self._refresh_manual_control_lock_state,
+            self._sync_calibration_gripper_status_banner,
             self._ensure_droplet_calibration_sequence_followup_state,
             self._on_refuel_droplet_sequence_state_changed,
         ):
@@ -4754,6 +4808,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 if self._is_refuel_tracking_enabled():
                     self._start_refuel_monitor()
             self._sync_printing_controls_from_model(force=True)
+            self._sync_calibration_gripper_status_banner()
             self.populate_summary_table()
             self.model.calibration_manager._emit_readiness()
             if not self.camera_free_mode:
@@ -4822,6 +4877,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "refuel_panel_refresh_timer",
             "status_ui_refresh_timer",
             "manual_focus_refresh_timer",
+            "gripper_settle_banner_timer",
         ):
             timer = getattr(self, timer_name, None)
             if timer is not None:
@@ -4829,6 +4885,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     timer.stop()
                 except Exception:
                     pass
+        self._hide_calibration_gripper_status_banner()
         if not self.camera_free_mode and not force_close:
             try:
                 self._auto_export_refuel_performance_snapshot_on_close()
@@ -8284,6 +8341,81 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "session_id": None,
             "session_outcome": None,
         }
+
+    def _active_calibration_gripper_banner_state(self):
+        for state in (
+            self._get_droplet_calibration_sequence_state(),
+            self._get_stream_calibration_sequence_state(),
+        ):
+            if str(state.get("status") or "idle") in {
+                "pending_gripper_refresh",
+                "refreshing_gripper",
+            }:
+                return state
+        return None
+
+    def _hide_calibration_gripper_status_banner(self):
+        timer = getattr(self, "gripper_settle_banner_timer", None)
+        if timer is not None:
+            timer.stop()
+        banner = getattr(self, "calibration_gripper_status_banner", None)
+        if banner is not None:
+            banner.clear()
+            banner.hide()
+
+    def _sync_calibration_gripper_status_banner(self, *_args):
+        if (
+            self._session_state not in {"opening", "active"}
+            or self.camera_free_mode
+            or self.service_mode
+        ):
+            self._hide_calibration_gripper_status_banner()
+            return
+
+        state = self._active_calibration_gripper_banner_state()
+        if state is None:
+            self._hide_calibration_gripper_status_banner()
+            return
+
+        status = str(state.get("status") or "idle")
+        phase = str(state.get("gripper_phase") or "").strip().lower()
+        banner = self.calibration_gripper_status_banner
+
+        if status == "pending_gripper_refresh" or phase in {"", "closing"}:
+            self.gripper_settle_banner_timer.stop()
+            banner.setText("Refreshing gripper pressure…")
+            banner.show()
+            return
+
+        if status != "refreshing_gripper" or phase != "settling":
+            self._hide_calibration_gripper_status_banner()
+            return
+
+        try:
+            deadline = float(state.get("gripper_settle_deadline_monotonic_s"))
+        except (TypeError, ValueError):
+            deadline = None
+        if deadline is None or not math.isfinite(deadline):
+            self.gripper_settle_banner_timer.stop()
+            banner.setText("Waiting for gripper pressure to settle…")
+            banner.show()
+            return
+
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0.0:
+            self.gripper_settle_banner_timer.stop()
+            banner.setText("Gripper pressure settled — starting calibration…")
+            banner.show()
+            return
+
+        remaining_tenths = max(1, int(math.ceil(remaining_s * 10.0)))
+        banner.setText(
+            "Gripper pressure settling — calibration starts in "
+            f"{remaining_tenths / 10.0:.1f} seconds"
+        )
+        banner.show()
+        if not self.gripper_settle_banner_timer.isActive():
+            self.gripper_settle_banner_timer.start()
 
     @staticmethod
     def _filter_stream_calibration_sequence_missing(missing):
