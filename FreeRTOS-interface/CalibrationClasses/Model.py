@@ -66,6 +66,7 @@ from CalibrationRecordingStore import (
 )
 from CalibrationStorageContracts import (
     build_terminal_summary,
+    materialize_characterization_rows,
     process_storage_contract,
 )
 from CalibrationPersistencePolicy import (
@@ -1759,6 +1760,7 @@ class CalibrationManager(QObject):
         self._active_calibration_session_state = None
         self._active_session_payloads = {}
         self._active_session_phase_update_counts = {}
+        self._in_progress_characterization_rows = {}
         self._calibration_history_revision = 0
         self._capture_performance_diagnostics_enabled = False
 
@@ -3215,6 +3217,8 @@ class CalibrationManager(QObject):
     def _begin_process_recording(self, process_obj):
         if process_obj is None:
             return False
+        if self._clear_in_progress_characterization_rows():
+            self.characterizationSummaryUpdated.emit()
         self._last_shadow_commit = None
         self._last_shadow_run = None
         contract = None
@@ -3529,10 +3533,18 @@ class CalibrationManager(QObject):
                     self._last_shadow_commit.result.document.get("outcome") or ""
                 )
                 if committed_outcome == "completed":
+                    live_rows_cleared = self._clear_in_progress_characterization_rows(
+                        process_run_id=str(shadow_run.process_run_id)
+                    )
                     self._register_completed_canonical_run(
                         shadow_run,
                         summary_projection=summary,
                     )
+                    if live_rows_cleared and not (
+                        summary.get("application_eligible")
+                        and list(summary.get("rows") or [])
+                    ):
+                        self.characterizationSummaryUpdated.emit()
                 if (
                     self.is_calibration_store_authoritative()
                     and effective_outcome == "completed"
@@ -3554,6 +3566,15 @@ class CalibrationManager(QObject):
                 self._last_shadow_run = shadow_run
                 self._active_shadow_run = None
                 self._active_shadow_process = None
+
+        if effective_outcome != "completed" and self._clear_in_progress_characterization_rows(
+            process_run_id=(
+                str(getattr(shadow_run, "process_run_id", "") or "")
+                if shadow_run is not None
+                else None
+            )
+        ):
+            self.characterizationSummaryUpdated.emit()
 
         if process_obj is not None:
             process_obj._process_recording_finalized = True
@@ -3588,7 +3609,142 @@ class CalibrationManager(QObject):
             self._calibration_history_revision = int(
                 getattr(self, "_calibration_history_revision", 0)
             ) + 1
+            self.characterizationSummaryUpdated.emit()
         return True
+
+    @staticmethod
+    def _in_progress_characterization_row_id(row):
+        row = dict(row or {})
+        return ":".join(
+            (
+                str(row.get("process_run_id") or ""),
+                str(row.get("update_id") or ""),
+                str(row.get("row_ordinal") if row.get("row_ordinal") is not None else 0),
+            )
+        )
+
+    def _clear_in_progress_characterization_rows(self, *, process_run_id=None):
+        rows = getattr(self, "_in_progress_characterization_rows", None)
+        if not isinstance(rows, dict) or not rows:
+            self._in_progress_characterization_rows = {}
+            return False
+        if process_run_id in (None, ""):
+            self._in_progress_characterization_rows = {}
+            return True
+        target = str(process_run_id)
+        retained = {
+            key: value
+            for key, value in rows.items()
+            if str((value or {}).get("process_run_id") or "") != target
+        }
+        if len(retained) == len(rows):
+            return False
+        self._in_progress_characterization_rows = retained
+        return True
+
+    def _remember_in_progress_characterization_rows(self, canonical_update, run):
+        if canonical_update is None or run is None:
+            return False
+        document = dict(canonical_update.document or {})
+        phase_key = self._resolve_phase_key(document.get("phase_name"))
+        if phase_key not in {
+            "pressure_sweep_characterization",
+            "droplet_recheck",
+            "droplet_search",
+            "online_stream_calibration",
+        }:
+            return False
+        identity = dict(getattr(run, "identity", {}) or {})
+        if str(identity.get("identity_quality") or "") != "stable":
+            return False
+        rows = materialize_characterization_rows(
+            dict(document.get("payload") or {}),
+            dict(document.get("legacy_source") or {}),
+            process_run_id=str(document.get("process_run_id") or ""),
+            update_id=str(document.get("update_id") or ""),
+            update_index=int(document.get("update_index") or 0),
+            update_payload_sha256=str(document.get("payload_sha256") or ""),
+        )
+        cache = getattr(self, "_in_progress_characterization_rows", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._in_progress_characterization_rows = cache
+        changed = False
+        for row in rows:
+            live = dict(row or {})
+            if live.get("phase") in {"sweep", "recheck", "search"} and live.get(
+                "pressure_psi"
+            ) is None:
+                continue
+            live.update(
+                {
+                    "calibration_session_id": str(
+                        document.get("calibration_session_id") or self._run_id or ""
+                    ),
+                    "canonical_identity": identity,
+                    "result_id": None,
+                    "result_sha256": None,
+                    "row_state": "in_progress",
+                    "application_eligible": False,
+                }
+            )
+            live["display_row_id"] = self._in_progress_characterization_row_id(live)
+            key = live["display_row_id"]
+            if cache.get(key) != live:
+                cache[key] = live
+                changed = True
+        return changed
+
+    def _get_in_progress_characterization_rows(self, committed_rows=None):
+        committed = [dict(row or {}) for row in list(committed_rows or [])]
+        cached = getattr(self, "_in_progress_characterization_rows", None)
+        if not isinstance(cached, dict) or not cached:
+            return []
+        current_identity = self._build_calibration_stock_identity_snapshot()
+        current_keys = set(self._calibration_stock_match_keys_from_fields(current_identity))
+        rows = []
+        for cached_row in cached.values():
+            row = dict(cached_row or {})
+            identity = dict(row.get("canonical_identity") or {})
+            row_keys = set(self._calibration_stock_match_keys_from_fields(identity))
+            if current_keys and row_keys and not current_keys.intersection(row_keys):
+                continue
+            rows.append(row)
+
+        run_numbers = {}
+        highest_run_number = 0
+        for row in committed:
+            session_id = str(
+                row.get("calibration_session_id") or row.get("source_run_id") or ""
+            )
+            try:
+                run_number = int(row.get("run_no"))
+            except (TypeError, ValueError):
+                continue
+            if session_id:
+                run_numbers[session_id] = run_number
+            highest_run_number = max(highest_run_number, run_number)
+        active_session_id = str(self._run_id or "")
+        if active_session_id and active_session_id not in run_numbers:
+            run_numbers[active_session_id] = highest_run_number + 1
+        for row in rows:
+            session_id = str(
+                row.get("calibration_session_id") or row.get("source_run_id") or ""
+            )
+            row.setdefault("run_id", row.get("source_run_id") or session_id)
+            row["run_no"] = run_numbers.get(session_id)
+            row["is_focus_run"] = bool(active_session_id and session_id == active_session_id)
+            row["phase_label"] = self._pressure_sweep_phase_label(row.get("phase"))
+            row["timestamp_display"] = self._format_pressure_sweep_summary_timestamp(
+                row.get("timestamp")
+            )
+        rows.sort(
+            key=lambda row: (
+                row.get("update_index") if row.get("update_index") is not None else 10**9,
+                row.get("row_ordinal") if row.get("row_ordinal") is not None else 10**9,
+            )
+        )
+        return rows
 
     def _register_terminal_canonical_run(self, run, commit):
         if run is None or commit is None:
@@ -4198,6 +4354,7 @@ class CalibrationManager(QObject):
         self._run_idx = 0
         self._active_session_payloads = {}
         self._active_session_phase_update_counts = {}
+        self._in_progress_characterization_rows = {}
         self._start_calibration_memory_run(notes=notes)
 
         self.calibrationStageChanged.emit(
@@ -4264,6 +4421,7 @@ class CalibrationManager(QObject):
         self._active_calibration_session_state = None
         self._active_session_payloads = {}
         self._active_session_phase_update_counts = {}
+        self._in_progress_characterization_rows = {}
         self._reset_calibration_memory_prior_runtime()
         self._reset_online_stream_prior_runtime()
         self._reset_calibration_memory_ui_recommendation_state()
@@ -4304,6 +4462,7 @@ class CalibrationManager(QObject):
             self._active_calibration_session_state = None
             self._active_session_payloads = {}
             self._active_session_phase_update_counts = {}
+            self._in_progress_characterization_rows = {}
             self._reset_calibration_memory_prior_runtime()
             self._reset_online_stream_prior_runtime()
             self._reset_calibration_memory_ui_recommendation_state()
@@ -8691,6 +8850,19 @@ class CalibrationManager(QObject):
         session_payloads.setdefault(phase_key, []).append(dict(payload))
         phase_counts[phase_key] = source_step_index + 1
 
+        live_rows_changed = False
+        if canonical_update is not None and shadow_run is not None:
+            try:
+                live_rows_changed = self._remember_in_progress_characterization_rows(
+                    canonical_update,
+                    shadow_run,
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "Could not materialize in-progress calibration result: %s",
+                    exc,
+                )
+
         self.record_analysis(
             {
                 "kind": "calibration_data_updated",
@@ -8699,17 +8871,13 @@ class CalibrationManager(QObject):
             }
         )
 
-        # Notify listeners to refresh the summary table when relevant
-        if phase_key in (
+        if live_rows_changed or phase_key in {
             "pressure_sweep_characterization",
             "droplet_recheck",
             "droplet_search",
             "online_stream_calibration",
-        ):
-            try:
-                self.characterizationSummaryUpdated.emit()
-            except Exception:
-                pass
+        }:
+            self.characterizationSummaryUpdated.emit()
 
     def _try_append_flat_rows_from_payload(self, run_obj, phase_key, payload):
         """
@@ -10314,7 +10482,10 @@ class CalibrationManager(QObject):
     def get_characterization_summary_rows(self):
         history_getter = getattr(self, "get_characterization_history_snapshot", None)
         if callable(history_getter):
-            return list(history_getter()["rows"])
+            committed = list(history_getter()["rows"])
+            if self.get_calibration_reader_preference() == "legacy":
+                return committed
+            return committed + self._get_in_progress_characterization_rows(committed)
         # Compatibility for the intentionally minimal, unbound normalization
         # hosts used by SIL and older integrations.
         return list(
@@ -10323,6 +10494,17 @@ class CalibrationManager(QObject):
 
     def resolve_characterization_selection(self, selected_summary_row):
         row = dict(selected_summary_row or {})
+        if str(row.get("row_state") or "") == "in_progress":
+            return {
+                "ok": False,
+                "code": "calibration_result_in_progress",
+                "message": (
+                    "This result is still in progress. Wait for the calibration process "
+                    "to complete before previewing, loading, rechecking, or applying it."
+                ),
+                "row": row,
+                "bundle": None,
+            }
         if row.get("_transient_candidate_id") or row.get("_historical_candidate_id"):
             result = self.validate_characterization_candidate_for_application(row)
             if result.get("ok"):

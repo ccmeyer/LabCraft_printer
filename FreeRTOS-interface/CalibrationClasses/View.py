@@ -910,6 +910,12 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
     @staticmethod
     def _display_status(row):
         valid = row.get("valid")
+        if str(row.get("row_state") or "") == "in_progress":
+            if valid is True:
+                return "In progress — Valid"
+            if valid is False:
+                return "In progress — Flagged"
+            return "In progress"
         if valid is True:
             return "Valid"
         if valid is False:
@@ -1078,6 +1084,11 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
         if role == Qt.ToolTipRole:
             if key == "applied_marker" and self._is_applied_row(row):
                 return "Applied to design"
+            if str(row.get("row_state") or "") == "in_progress":
+                return (
+                    "This result is saved as a canonical update but remains in progress. "
+                    "Wait for the calibration process to complete before using it."
+                )
             if row.get("synthetic") is True:
                 fingerprint = str(row.get("synthetic_result_fingerprint") or "")
                 limitations = ", ".join(row.get("synthetic_limitations") or [])
@@ -13326,6 +13337,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _summary_row_recheck_missing(self, raw):
         if not raw:
             return ["Selected characterization result"]
+        if str(raw.get("row_state") or "") == "in_progress":
+            return ["Calibration process completion"]
         mgr = getattr(getattr(self, "model", None), "calibration_manager", None)
         getter = getattr(mgr, "get_droplet_recheck_missing_requirements", None)
         if callable(getter):
@@ -13659,6 +13672,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             status_lines.append(f"Invalid: {reason}")
         else:
             status_lines.append("Valid result")
+        if str(raw.get("row_state") or "") == "in_progress":
+            status_lines.insert(
+                0,
+                "In-progress result — saved, but unavailable until calibration completes",
+            )
 
         if raw.get("synthetic") is True:
             record_state_label = _synthetic_record_state_label(raw)
@@ -13753,11 +13771,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def open_characterization_history_dialog(self):
         mgr = self.model.calibration_manager
-        getter = getattr(mgr, "get_characterization_summary_rows", None)
-        if callable(getter):
-            rows = getter()
+        history_getter = getattr(mgr, "get_characterization_history_snapshot", None)
+        if callable(history_getter):
+            rows = list((history_getter() or {}).get("rows") or [])
         else:
-            rows = mgr.get_pressure_sweep_summary_rows()
+            getter = getattr(mgr, "get_characterization_summary_rows", None)
+            rows = getter() if callable(getter) else mgr.get_pressure_sweep_summary_rows()
         dialog = CharacterizationHistoryDialog(
             self,
             rows=rows,

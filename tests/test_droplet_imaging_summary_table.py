@@ -461,6 +461,66 @@ def _select_visible_row(dialog, row):
     dialog.summary_table.selectRow(row)
 
 
+def test_in_progress_result_is_visible_but_all_actions_remain_blocked(
+    monkeypatch, qapp, tmp_path
+):
+    dialog, manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        [],
+        active_run_id="run_live",
+    )
+    live_row = {
+        "calibration_session_id": "run_live",
+        "source_run_id": "run_live",
+        "run_id": "run_live",
+        "run_no": 1,
+        "is_focus_run": True,
+        "phase": "sweep",
+        "phase_label": "Sweep",
+        "timestamp": "2026-08-16T10:00:00Z",
+        "timestamp_display": "2026-08-16 10:00:00",
+        "pw_us": 1400,
+        "pressure_psi": 1.25,
+        "mean_nL": 9.75,
+        "cv_pct": 3.5,
+        "valid": True,
+        "row_state": "in_progress",
+        "application_eligible": False,
+        "process_run_id": "process-live",
+        "update_id": "update-live",
+        "update_index": 1,
+        "display_row_id": "process-live:update-live:0",
+    }
+    manager.get_characterization_summary_rows = lambda: [dict(live_row)]
+    manager.get_characterization_history_snapshot = lambda: {
+        "rows": [],
+        "issues": [],
+        "diagnostics": {},
+    }
+
+    dialog.populate_summary_table()
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+
+    status_column = dialog.summary_table_model.column_index("status_label")
+    status_index = dialog.summary_table_proxy_model.index(0, status_column)
+    assert status_index.data(Qt.DisplayRole) == "In progress — Valid"
+    assert "canonical update" in status_index.data(Qt.ToolTipRole)
+    assert dialog.load_selected_button.isEnabled() is False
+    assert "still in progress" in dialog.load_selected_button.toolTip()
+    assert dialog.recheck_selected_button.isEnabled() is False
+    assert dialog.bridge_table.rowCount() == 0
+    assert "still in progress" in dialog.bridge_status_label.text()
+    assert "In-progress result" in dialog.summary_detail_status_label.text()
+
+    history = dialog.open_characterization_history_dialog()
+    assert history.history_table_model.rowCount() == 0
+    history.close()
+    dialog.deleteLater()
+
+
 class _FakeCloseEvent:
     def __init__(self):
         self.accepted = False

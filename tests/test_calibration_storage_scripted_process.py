@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,142 @@ def test_scripted_process_uses_real_manager_writers_and_capture_drain(qapp, tmp_
         assert evidence[2].recorder_update_hashes == selected[2].expected_update_hashes
         assert runner.metrics.snapshot()["calibration_rewrite_count"] == 0
         assert not calibration_path.exists()
+        runner.restore()
+    finally:
+        assert session.close()
+
+
+def test_characterization_rows_are_live_then_promoted_after_terminal_commit(
+    qapp, tmp_path
+):
+    session = _session(qapp, tmp_path / "live-results-session")
+    try:
+        _catalog, cases = load_catalog()
+        selected = next(
+            case for case in cases if case.process_id == "legacy-parity-two-update"
+        )
+        experiment_dir = tmp_path / "live-results-experiment"
+        experiment_dir.mkdir()
+        calibration_path = experiment_dir / "calibration.json"
+        em = session.components.model.experiment_model
+        em.experiment_dir_path = str(experiment_dir)
+        em.calibration_file_path = str(calibration_path)
+        runner = StorageContractRunner(
+            model=session.components.model,
+            controller=session.components.controller,
+            machine=session.components.machine,
+            app=qapp,
+            calibration_file_path=calibration_path,
+        )
+        manager = runner.manager
+        notifications = []
+
+        def observe_summary():
+            notifications.append(
+                {
+                    "summary": manager.get_characterization_summary_rows(),
+                    "history": manager.get_characterization_history_snapshot()["rows"],
+                    "index_exists": (experiment_dir / "calibration_index.jsonl").exists(),
+                }
+            )
+
+        manager.characterizationSummaryUpdated.connect(observe_summary)
+        runner.run_case(selected)
+
+        live = [
+            snapshot
+            for snapshot in notifications
+            if snapshot["summary"]
+            and all(
+                row.get("row_state") == "in_progress"
+                for row in snapshot["summary"]
+            )
+        ]
+        assert [len(snapshot["summary"]) for snapshot in live] == [1, 3]
+        assert all(snapshot["history"] == [] for snapshot in live)
+        assert all(snapshot["index_exists"] is False for snapshot in live)
+        assert all(
+            row["application_eligible"] is False
+            and row["result_id"] is None
+            and row["update_id"]
+            and row["update_payload_sha256"]
+            for snapshot in live
+            for row in snapshot["summary"]
+        )
+        assert len(
+            {
+                row["display_row_id"]
+                for row in live[-1]["summary"]
+            }
+        ) == 3
+        blocked = manager.resolve_characterization_selection(live[-1]["summary"][0])
+        assert blocked["ok"] is False
+        assert blocked["code"] == "calibration_result_in_progress"
+
+        terminal = notifications[-1]
+        assert terminal["index_exists"] is True
+        assert len(terminal["summary"]) == 3
+        assert len(terminal["history"]) == 3
+        assert all(row.get("row_state") != "in_progress" for row in terminal["summary"])
+        assert all(row.get("result_id") for row in terminal["summary"])
+        assert manager._in_progress_characterization_rows == {}
+        runner.restore()
+    finally:
+        assert session.close()
+
+
+@pytest.mark.parametrize(
+    ("terminal_outcome", "error_message"),
+    (
+        ("error", "injected terminal failure"),
+        ("stopped", "Calibration terminated by user"),
+    ),
+)
+def test_noncompleted_characterization_removes_live_rows_without_promoting_them(
+    qapp, tmp_path, terminal_outcome, error_message
+):
+    session = _session(qapp, tmp_path / "live-results-error-session")
+    try:
+        _catalog, cases = load_catalog()
+        completed = next(
+            case for case in cases if case.process_id == "legacy-parity-two-update"
+        )
+        selected = replace(
+            completed,
+            process_id=f"live-results-{terminal_outcome}-after-updates",
+            terminal_outcome=terminal_outcome,
+            error_message=error_message,
+            expected_summary_rows=(),
+        )
+        experiment_dir = tmp_path / "live-results-error-experiment"
+        experiment_dir.mkdir()
+        calibration_path = experiment_dir / "calibration.json"
+        em = session.components.model.experiment_model
+        em.experiment_dir_path = str(experiment_dir)
+        em.calibration_file_path = str(calibration_path)
+        runner = StorageContractRunner(
+            model=session.components.model,
+            controller=session.components.controller,
+            machine=session.components.machine,
+            app=qapp,
+            calibration_file_path=calibration_path,
+        )
+        manager = runner.manager
+        snapshots = []
+        manager.characterizationSummaryUpdated.connect(
+            lambda: snapshots.append(manager.get_characterization_summary_rows())
+        )
+
+        evidence = runner.run_case(selected)
+
+        assert any(
+            rows and all(row.get("row_state") == "in_progress" for row in rows)
+            for rows in snapshots
+        )
+        assert snapshots[-1] == []
+        assert manager.get_characterization_history_snapshot()["rows"] == []
+        assert manager._in_progress_characterization_rows == {}
+        assert evidence.canonical_result_outcome == terminal_outcome
         runner.restore()
     finally:
         assert session.close()
