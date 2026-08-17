@@ -61,8 +61,10 @@ Production result IDs are:
 - `2096` selector -> `2091` through `2095` direct X/Y/Z LUT regression;
 - `2078` selector -> `2071` production camera-ratio/home transition.
 
-Active manifests are `coordinated_xy_production_mres3_v3`,
-`direct_xyz_lut_v1`, and `coordinated_xy_camera_transition_v2`.
+Current active manifests are `coordinated_xy_production_mres3_v4`,
+`coordinated_xy_shallow_edge_v3`, `direct_xyz_lut_v1`, and
+`coordinated_xy_camera_transition_v3`. The watched sequence recorded below
+retains the manifest versions used for that historical closeout.
 
 ## Continuous motion-limit confirmation revision
 

@@ -147,6 +147,8 @@ static constexpr DiagnosticTestDescriptor kDiagnosticTests[] = {
     {2089u, "coord_xy_prod_conditional_rearm", "performance", "FULL", "explicit_selection"},
     {2090u, "tmc2208_production_mres3_config", "configuration", "FULL", "explicit_selection"},
     {2098u, "coord_xy_limit_debounce", "safety", "FULL", "explicit_selection"},
+    {2099u, "coord_xy_shallow_edge_distribution", "performance", "FULL", "explicit_selection"},
+    {2100u, "coord_xy_terminal_timing", "performance", "FULL", "explicit_selection"},
     {2091u, "direct_lut_x_cruise", "performance", "FULL", "explicit_selection"},
     {2092u, "direct_lut_y_cruise", "performance", "FULL", "explicit_selection"},
     {2093u, "direct_lut_z_cruise", "performance", "FULL", "explicit_selection"},
@@ -271,10 +273,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
     const bool runProfileLutBenchmark = (selectedDiagnosticId == 2039u);
     const bool runCoordinatedXyProductionMres3Suite =
         (selectedDiagnosticId == 2097u);
+    const bool runCoordinatedXyShallowEdgeSuite =
+        (selectedDiagnosticId == 2099u);
     const bool runDirectXyzLutSuite = (selectedDiagnosticId == 2096u);
     const bool runCoordinatedXyTransitionSuite = (selectedDiagnosticId == 2078u);
     const bool runCoordinatedXyPerformanceSuite =
-        runCoordinatedXyProductionMres3Suite || runCoordinatedXyTransitionSuite;
+        runCoordinatedXyProductionMres3Suite ||
+        runCoordinatedXyTransitionSuite ||
+        runCoordinatedXyShallowEdgeSuite;
     const bool runPressureRegulatorSuite = (selectedDiagnosticId == 2299u);
     const bool runRefuelVacuumSuite = (selectedDiagnosticId == 2298u);
     const bool runValveCharacterizationSuite = (selectedDiagnosticId == 2499u);
@@ -2796,6 +2802,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         using CoordinatedXyPerformanceReport::Aggregate;
                         using CoordinatedXyPerformanceReport::Limits;
                         using CoordinatedXyPerformanceReport::MoveObservation;
+                        using CoordinatedXyPerformanceReport::
+                            ShallowMoveTimingExpectation;
 
                         struct Point { int32_t x; int32_t y; };
                         struct Pair { Point start; Point finish; };
@@ -2805,6 +2813,14 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             {{5000, 5000}, {25000, 25000}},
                             {{5000, 5000}, {10000, 25000}},
                             {{8916, 30500}, {500, 500}},
+                        };
+                        static constexpr Pair kShallowEdgePairs[] = {
+                            {{5000, 5000}, {22100, 9470}},
+                            {{5000, 5000}, {22100, 7054}},
+                            {{5000, 5000}, {5100, 24574}},
+                            {{5000, 5000}, {9470, 22100}},
+                            {{5000, 5000}, {7054, 22100}},
+                            {{5000, 5000}, {24574, 5100}},
                         };
                         static constexpr uint32_t kLogicalRateHz = 40000u;
                         static constexpr uint32_t kLogicalAcceleration = 140000u;
@@ -2869,6 +2885,26 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                          sizeof(metrics),
                                          "gate=%s;n=0;i2=0;i7=0;pu=0;sf=0;to=1",
                                          gate);
+                          if (runCoordinatedXyShallowEdgeSuite) {
+                            (void)runOne(
+                                2099u,
+                                "coord_xy_shallow_edge_distribution",
+                                false,
+                                metrics);
+                            char timingMetrics[128] = {};
+                            (void)snprintf(
+                                timingMetrics,
+                                sizeof(timingMetrics),
+                                "gate=%s;bl=%lu;n1=0;n2=0;av=0;sf=0",
+                                gate,
+                                (unsigned long)CoordinatedXyPerformanceReport::
+                                    kCoordinatedTerminalHandlerBudgetCycles);
+                            (void)runOne(2100u,
+                                         "coord_xy_terminal_timing",
+                                         false,
+                                         timingMetrics);
+                            return;
+                          }
                           if (runCoordinatedXyTransitionSuite) {
                             (void)runOne(2071u,
                                          "coord_xy_camera_home_transition",
@@ -2914,15 +2950,19 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             driver.doubleEdge && !driver.multistepFilter &&
                             driver.successfulWrites == 4u &&
                             driver.failedWrites == 0u &&
-                            MotionUnitScale::logicalUnitsPerNativeStep() == 2u;
+                            MotionUnitScale::logicalUnitsPerNativeStep() == 2u &&
+                            MotionUnitScale::logicalUnitsPerCoordinatedActiveEdge() == 1u;
                         if (!configurationValid) {
                           emitSkipped("configuration");
                           return finish();
                         }
 
-                        const char* fixtureStage = runCoordinatedXyTransitionSuite
-                            ? "coordinated_xy_camera_transition_envelope_clear"
-                            : "coordinated_xy_production_mres3_envelope_clear";
+                        const char* fixtureStage =
+                            runCoordinatedXyShallowEdgeSuite
+                                ? "coordinated_xy_shallow_edge_envelope_clear"
+                                : runCoordinatedXyTransitionSuite
+                                    ? "coordinated_xy_camera_transition_envelope_clear"
+                                    : "coordinated_xy_production_mres3_envelope_clear";
                         if (!waitForOperatorResume(fixtureStage)) {
                           emitSkipped("fixture");
                           return finish();
@@ -3028,21 +3068,26 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         auto targetArrForRate = [](uint32_t rateHz) {
                           return rateHz == 0u
                               ? std::numeric_limits<uint32_t>::max()
-                              : (kTimerClockHz / (2u * rateHz)) - 1u;
+                              : (kTimerClockHz / rateHz) - 1u;
                         };
                         Limits limits{};
                         CoordinatedXyExecutor::TerminalReason firstAbnormalTerminal =
                             CoordinatedXyExecutor::TerminalReason::Completed;
                         struct MoveResult {
                           bool passed = false;
+                          uint32_t failureMask = 0u;
                           MoveObservation observation{};
                           CoordinatedXySnapshot snapshot{};
                         };
-                        auto observeMove = [&](Point start, Point target) {
+                        auto observeMove = [&](Point start,
+                                               Point target,
+                                               uint32_t activeEdgeRateHz,
+                                               const ShallowMoveTimingExpectation*
+                                                   shallowExpectation) {
                           MoveResult result{};
-                          const uint32_t expectedX = MotionUnitScale::toNativeStepCycles(
+                          const uint32_t expectedX = MotionUnitScale::toCoordinatedActiveEdges(
                               absoluteDelta(start.x, target.x));
-                          const uint32_t expectedY = MotionUnitScale::toNativeStepCycles(
+                          const uint32_t expectedY = MotionUnitScale::toCoordinatedActiveEdges(
                               absoluteDelta(start.y, target.y));
                           const uint32_t expectedMaster =
                               expectedX > expectedY ? expectedX : expectedY;
@@ -3066,16 +3111,21 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           const Comm::StatusMetricsSnapshot status =
                               Comm::getStatusMetricsSnapshot();
                           const bool statusValid = statusReset && status.valid;
-                          const uint32_t nativeRate =
-                              MotionUnitScale::toNativeRate(kLogicalRateHz);
                           MoveObservation& observation = result.observation;
-                          observation.expectedXSteps = expectedX;
-                          observation.expectedYSteps = expectedY;
-                          observation.expectedMasterSteps = expectedMaster;
-                          observation.expectedRateHz = nativeRate;
-                          observation.expectedTargetArr = targetArrForRate(nativeRate);
+                          observation.expectedXEdges = expectedX;
+                          observation.expectedYEdges = expectedY;
+                          observation.expectedMasterEdges = expectedMaster;
+                          observation.expectedRateHz = shallowExpectation != nullptr
+                              ? shallowExpectation->selectedRateHz
+                              : activeEdgeRateHz;
+                          observation.expectedTargetArr =
+                              shallowExpectation != nullptr
+                                  ? shallowExpectation->targetArr
+                                  : targetArrForRate(activeEdgeRateHz);
                           observation.expectedStartArr =
-                              observation.expectedTargetArr * 5u;
+                              shallowExpectation != nullptr
+                                  ? shallowExpectation->startArr
+                                  : observation.expectedTargetArr * 5u;
                           observation.timerRearmCount =
                               result.snapshot.timerRearmCount;
                           observation.timerRearmPendingCount =
@@ -3092,13 +3142,18 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               result.snapshot.timerScheduleSaturationFlags;
                           observation.terminalReason =
                               result.snapshot.terminalReason;
-                          observation.requestedXSteps =
-                              result.snapshot.requestedXSteps;
-                          observation.requestedYSteps =
-                              result.snapshot.requestedYSteps;
-                          observation.emittedXSteps = result.snapshot.emittedXSteps;
-                          observation.emittedYSteps = result.snapshot.emittedYSteps;
-                          observation.masterSteps = result.snapshot.masterSteps;
+                          observation.requestedXEdges =
+                              result.snapshot.requestedXEdges;
+                          observation.requestedYEdges =
+                              result.snapshot.requestedYEdges;
+                          observation.emittedXEdges = result.snapshot.emittedXEdges;
+                          observation.emittedYEdges = result.snapshot.emittedYEdges;
+                          observation.masterEdges = result.snapshot.masterEdges;
+                          observation.cleanupEdgeEvents =
+                              result.snapshot.cleanupEdgeEvents;
+                          observation.edgeSpacingViolations =
+                              result.snapshot.xSpacingViolations +
+                              result.snapshot.ySpacingViolations;
                           observation.selectedRateHz =
                               result.snapshot.selectedMasterRateHz;
                           observation.timer2Callbacks =
@@ -3128,9 +3183,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           observation.targetsMatch = execution.targetsMatch &&
                               result.snapshot.xTarget == target.x &&
                               result.snapshot.yTarget == target.y;
+                          const bool driversEnabled =
+                              stepperX->enableOutputsAssertedForDiagnostics() &&
+                              stepperY->enableOutputsAssertedForDiagnostics();
                           observation.completionTogether = execution.waitCompleted &&
                               execution.disposition ==
-                                  OrchestratorCompletionPolicy::AbsXyDisposition::Completed;
+                                  OrchestratorCompletionPolicy::AbsXyDisposition::Completed &&
+                              driversEnabled;
                           observation.pinsLow = result.snapshot.xStepLow &&
                               result.snapshot.yStepLow;
                           observation.ownershipReleased =
@@ -3138,8 +3197,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           observation.checksumMatch = true;
                           observation.timedOut = !execution.waitCompleted;
                           observation.timing = result.snapshot.timing;
-                          result.passed = CoordinatedXyPerformanceReport::movePasses(
-                              observation, limits);
+                          result.failureMask =
+                              CoordinatedXyPerformanceReport::moveFailureMask(
+                                  observation, limits);
+                          result.passed = result.failureMask == 0u;
                           return result;
                         };
                         auto positionTo = [&](Point target) {
@@ -3167,26 +3228,79 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               snapshot.xStepLow && snapshot.yStepLow &&
                               !snapshot.timerOwned;
                         };
-                        auto addPair = [&](Aggregate& aggregate, const Pair& pair) {
-                          if (!positionTo(pair.start)) return false;
-                          MoveResult forward = observeMove(pair.start, pair.finish);
-                          if (!forward.passed) {
+                        struct PairResult {
+                          bool accepted = false;
+                          bool safeToContinue = false;
+                        };
+                        auto observePair = [&](Aggregate& aggregate,
+                                               const Pair& pair,
+                                               uint32_t activeEdgeRateHz,
+                                               bool requireShallowExpectation) {
+                          PairResult pairResult{};
+                          ShallowMoveTimingExpectation shallowExpectation{};
+                          const uint32_t expectedX =
+                              MotionUnitScale::toCoordinatedActiveEdges(
+                                  absoluteDelta(pair.start.x, pair.finish.x));
+                          const uint32_t expectedY =
+                              MotionUnitScale::toCoordinatedActiveEdges(
+                                  absoluteDelta(pair.start.y, pair.finish.y));
+                          const uint32_t expectedMaster =
+                              expectedX > expectedY ? expectedX : expectedY;
+                          if (requireShallowExpectation &&
+                              !CoordinatedXyPerformanceReport::
+                                  shallowMoveTimingExpectation(
+                                      activeEdgeRateHz,
+                                      expectedMaster,
+                                      shallowExpectation)) {
+                            aggregate.exactAndSafe = false;
+                            aggregate.moveFailureMask |=
+                                CoordinatedXyPerformanceReport::
+                                    kMoveFailureSelectedRate |
+                                CoordinatedXyPerformanceReport::
+                                    kMoveFailureArrRange;
+                            return pairResult;
+                          }
+                          const ShallowMoveTimingExpectation* expectation =
+                              requireShallowExpectation
+                                  ? &shallowExpectation
+                                  : nullptr;
+                          if (!positionTo(pair.start)) return pairResult;
+                          MoveResult forward = observeMove(
+                              pair.start,
+                              pair.finish,
+                              activeEdgeRateHz,
+                              expectation);
+                          if (!CoordinatedXyPerformanceReport::
+                                  canContinueAfterTerminalBudgetOnlyFailure(
+                                      forward.failureMask)) {
                             CoordinatedXyPerformanceReport::addMove(
                                 aggregate, forward.observation, limits);
-                            return false;
+                            return pairResult;
                           }
-                          MoveResult reverse = observeMove(pair.finish, pair.start);
-                          const bool checksumsMatch = reverse.passed &&
+                          MoveResult reverse = observeMove(
+                              pair.finish,
+                              pair.start,
+                              activeEdgeRateHz,
+                              expectation);
+                          const bool reverseCanContinue =
+                              CoordinatedXyPerformanceReport::
+                                  canContinueAfterTerminalBudgetOnlyFailure(
+                                      reverse.failureMask);
+                          const bool checksumsMatch = reverseCanContinue &&
                               forward.snapshot.maskChecksum ==
                                   reverse.snapshot.maskChecksum &&
                               forward.snapshot.arrChecksum ==
                                   reverse.snapshot.arrChecksum;
                           forward.observation.checksumMatch = checksumsMatch;
                           reverse.observation.checksumMatch = checksumsMatch;
-                          forward.passed = CoordinatedXyPerformanceReport::movePasses(
-                              forward.observation, limits);
-                          reverse.passed = CoordinatedXyPerformanceReport::movePasses(
-                              reverse.observation, limits);
+                          forward.failureMask =
+                              CoordinatedXyPerformanceReport::moveFailureMask(
+                                  forward.observation, limits);
+                          reverse.failureMask =
+                              CoordinatedXyPerformanceReport::moveFailureMask(
+                                  reverse.observation, limits);
+                          forward.passed = forward.failureMask == 0u;
+                          reverse.passed = reverse.failureMask == 0u;
                           CoordinatedXyPerformanceReport::addMove(
                               aggregate, forward.observation, limits);
                           CoordinatedXyPerformanceReport::addMove(
@@ -3195,9 +3309,27 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           const uint32_t returnError =
                               absoluteDelta(returned.x, pair.start.x) +
                               absoluteDelta(returned.y, pair.start.y);
-                          return forward.passed && reverse.passed &&
-                              checksumsMatch &&
-                              returnError <= kReturnErrorLimitSteps;
+                          pairResult.accepted = forward.passed && reverse.passed &&
+                              checksumsMatch && returnError <= kReturnErrorLimitSteps;
+                          pairResult.safeToContinue = checksumsMatch &&
+                              returnError <= kReturnErrorLimitSteps &&
+                              CoordinatedXyPerformanceReport::
+                                  canContinueAfterTerminalBudgetOnlyFailure(
+                                      forward.failureMask) &&
+                              CoordinatedXyPerformanceReport::
+                                  canContinueAfterTerminalBudgetOnlyFailure(
+                                      reverse.failureMask);
+                          return pairResult;
+                        };
+                        auto addPair = [&](Aggregate& aggregate,
+                                           const Pair& pair,
+                                           uint32_t activeEdgeRateHz) {
+                          return observePair(
+                                     aggregate,
+                                     pair,
+                                     activeEdgeRateHz,
+                                     false)
+                              .accepted;
                         };
 
                         stepperX->setMaxSpeedHz(kLogicalRateHz);
@@ -3206,6 +3338,278 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             static_cast<float>(kLogicalAcceleration));
                         stepperY->setAccelStepsPerSec2(
                             static_cast<float>(kLogicalAcceleration));
+
+                        if (runCoordinatedXyShallowEdgeSuite) {
+                          static constexpr uint32_t kTierRates[] = {
+                              10000u, 40000u};
+                          Aggregate tiers[2]{};
+                          bool suitePassed = true;
+                          bool suiteSafeToContinue = true;
+                          uint32_t xDriftMax = 0u;
+                          uint32_t yDriftMax = 0u;
+                          for (uint32_t tierIndex = 0u;
+                               tierIndex < 2u;
+                               ++tierIndex) {
+                            const uint32_t tierRate = kTierRates[tierIndex];
+                            stepperX->setMaxSpeedHz(tierRate);
+                            stepperY->setMaxSpeedHz(tierRate);
+                            bool motionAccepted = true;
+                            bool motionSafeToContinue = true;
+                            for (const Pair& pair : kShallowEdgePairs) {
+                              const PairResult pairResult = observePair(
+                                  tiers[tierIndex], pair, tierRate, true);
+                              motionAccepted =
+                                  motionAccepted && pairResult.accepted;
+                              if (!pairResult.safeToContinue) {
+                                motionSafeToContinue = false;
+                                break;
+                              }
+                            }
+                            MotionQualificationMath::AxisHomeSample xAfter{};
+                            MotionQualificationMath::AxisHomeSample yAfter{};
+                            const bool homePassed = motionSafeToContinue &&
+                                runSequentialHome(xAfter, yAfter, true);
+                            const uint32_t xDrift = homePassed
+                                ? MotionQualificationMath::absDiffSteps(
+                                      xAfter.limitTriggerSteps, 0)
+                                : std::numeric_limits<uint32_t>::max();
+                            const uint32_t yDrift = homePassed
+                                ? MotionQualificationMath::absDiffSteps(
+                                      yAfter.limitTriggerSteps, 0)
+                                : std::numeric_limits<uint32_t>::max();
+                            if (xDrift > xDriftMax) xDriftMax = xDrift;
+                            if (yDrift > yDriftMax) yDriftMax = yDrift;
+                            const bool driversEnabled =
+                                stepperX->enableOutputsAssertedForDiagnostics() &&
+                                stepperY->enableOutputsAssertedForDiagnostics();
+                            const bool tierSafeToContinue =
+                                motionSafeToContinue && homePassed &&
+                                xDrift <= kHomeDriftLimitSteps &&
+                                yDrift <= kHomeDriftLimitSteps && driversEnabled;
+                            const bool tierPassed = motionAccepted &&
+                                tierSafeToContinue &&
+                                xDrift <= kHomeDriftLimitSteps &&
+                                yDrift <= kHomeDriftLimitSteps &&
+                                CoordinatedXyPerformanceReport::aggregatePasses(
+                                    tiers[tierIndex],
+                                    12u,
+                                    120796u,
+                                    120796u,
+                                    215096u,
+                                    limits);
+                            suitePassed = suitePassed && tierPassed;
+                            suiteSafeToContinue =
+                                suiteSafeToContinue && tierSafeToContinue;
+                            if (!tierSafeToContinue) break;
+                          }
+
+                          const uint32_t moves =
+                              tiers[0].moveCount + tiers[1].moveCount;
+                          const uint32_t xEdges =
+                              tiers[0].emittedXEdges + tiers[1].emittedXEdges;
+                          const uint32_t yEdges =
+                              tiers[0].emittedYEdges + tiers[1].emittedYEdges;
+                          const uint32_t masterEdges =
+                              tiers[0].masterEdges + tiers[1].masterEdges;
+                          const uint32_t callbacks =
+                              tiers[0].timer2Callbacks + tiers[1].timer2Callbacks;
+                          const uint32_t tim7Callbacks =
+                              tiers[0].timer7Callbacks + tiers[1].timer7Callbacks;
+                          const uint32_t cleanupEdges =
+                              tiers[0].cleanupEdgeEvents +
+                              tiers[1].cleanupEdgeEvents;
+                          const uint32_t spacingViolations =
+                              tiers[0].edgeSpacingViolations +
+                              tiers[1].edgeSpacingViolations;
+                          const uint32_t moveFailures =
+                              tiers[0].moveFailureMask |
+                              tiers[1].moveFailureMask;
+                          auto activeCycleMax = [](const Aggregate& tier) {
+                            uint32_t maximum = 0u;
+                            for (uint8_t phase = 0u;
+                                 phase < static_cast<uint8_t>(
+                                     CoordinatedXyIsrInstrumentation::Phase::Count);
+                                 ++phase) {
+                              if (tier.phaseMaxCycles[phase] > maximum) {
+                                maximum = tier.phaseMaxCycles[phase];
+                              }
+                            }
+                            return maximum;
+                          };
+                          const uint32_t activeMax = std::max(
+                              activeCycleMax(tiers[0]),
+                              activeCycleMax(tiers[1]));
+                          const uint32_t terminalMax = std::max(
+                              tiers[0].terminalMaxCycles,
+                              tiers[1].terminalMaxCycles);
+                          const uint32_t durationErrorMax = std::max(
+                              tiers[0].durationErrorMaxBasisPoints,
+                              tiers[1].durationErrorMaxBasisPoints);
+                          const uint32_t statusPeriodMax = std::max(
+                              tiers[0].statusPeriodMaxMs,
+                              tiers[1].statusPeriodMaxMs);
+                          const uint32_t statusWatchdogMax = std::max(
+                              tiers[0].statusWatchdogAgeMaxMs,
+                              tiers[1].statusWatchdogAgeMaxMs);
+                          const uint32_t saturation =
+                              tiers[0].saturationFlags |
+                              tiers[1].saturationFlags |
+                              tiers[0].timerScheduleSaturationFlags |
+                              tiers[1].timerScheduleSaturationFlags;
+                          const uint32_t timeouts =
+                              tiers[0].timeoutCount + tiers[1].timeoutCount;
+                          suitePassed = suitePassed && moves == 24u &&
+                              xEdges == 241592u && yEdges == 241592u &&
+                              masterEdges == 430192u && callbacks == 430192u &&
+                              tim7Callbacks == 0u && cleanupEdges == 0u &&
+                              spacingViolations == 0u && moveFailures == 0u &&
+                              saturation == 0u && timeouts == 0u;
+
+                          char metrics[224] = {};
+                          const int written = snprintf(
+                              metrics,
+                              sizeof(metrics),
+                              "h1=10000;h2=40000;n=%lu;xe=%lu;ye=%lu;"
+                              "me=%lu;i2=%lu;i7=%lu;ce=%lu;sv=%lu;"
+                              "en=%u;xd=%lu;yd=%lu;ok=%u;mf=%lu;am=%lu;"
+                              "tm=%lu;de=%lu;sg=%lu;wd=%lu;sf=%lu;to=%lu",
+                              (unsigned long)moves,
+                              (unsigned long)xEdges,
+                              (unsigned long)yEdges,
+                              (unsigned long)masterEdges,
+                              (unsigned long)callbacks,
+                              (unsigned long)tim7Callbacks,
+                              (unsigned long)cleanupEdges,
+                              (unsigned long)spacingViolations,
+                              (stepperX->enableOutputsAssertedForDiagnostics() &&
+                               stepperY->enableOutputsAssertedForDiagnostics())
+                                  ? 1u
+                                  : 0u,
+                              (unsigned long)xDriftMax,
+                              (unsigned long)yDriftMax,
+                              suitePassed ? 1u : 0u,
+                              (unsigned long)moveFailures,
+                              (unsigned long)activeMax,
+                              (unsigned long)terminalMax,
+                              (unsigned long)durationErrorMax,
+                              (unsigned long)statusPeriodMax,
+                              (unsigned long)statusWatchdogMax,
+                              (unsigned long)saturation,
+                              (unsigned long)timeouts);
+                          const size_t budget =
+                              DiagnosticResultEmitter::kResultMetricsFrameBudget -
+                              std::min(std::strlen(
+                                           "coord_xy_shallow_edge_distribution"),
+                                       DiagnosticResultEmitter::kMaxResultNameBytes);
+                          const bool metricsFit = written > 0 &&
+                              static_cast<size_t>(written) < sizeof(metrics) &&
+                              static_cast<size_t>(written) <= budget;
+                          char fallbackMetrics[160] = {};
+                          const int fallbackWritten = snprintf(
+                              fallbackMetrics,
+                              sizeof(fallbackMetrics),
+                              "gate=metrics_overflow;mf=%lu;am=%lu;tm=%lu;"
+                              "de=%lu;sg=%lu;wd=%lu;sf=%lu;to=%lu",
+                              (unsigned long)moveFailures,
+                              (unsigned long)activeMax,
+                              (unsigned long)terminalMax,
+                              (unsigned long)durationErrorMax,
+                              (unsigned long)statusPeriodMax,
+                              (unsigned long)statusWatchdogMax,
+                              (unsigned long)(saturation | 1u),
+                              (unsigned long)timeouts);
+                          const bool fallbackFits = fallbackWritten > 0 &&
+                              static_cast<size_t>(fallbackWritten) <
+                                  sizeof(fallbackMetrics) &&
+                              static_cast<size_t>(fallbackWritten) <= budget;
+                          comm->setStatusPaused(true);
+                          (void)runOne(
+                              2099u,
+                              "coord_xy_shallow_edge_distribution",
+                              suitePassed && metricsFit,
+                              metricsFit
+                                  ? metrics
+                                  : (fallbackFits
+                                         ? fallbackMetrics
+                                         : "gate=metrics_overflow;sf=1;to=1"));
+
+                          const Aggregate& worstTerminalTier =
+                              tiers[1].terminalMaxCycles >
+                                      tiers[0].terminalMaxCycles
+                                  ? tiers[1]
+                                  : tiers[0];
+                          const uint32_t terminalAccountingViolations =
+                              tiers[0].terminalStageAccountingViolations +
+                              tiers[1].terminalStageAccountingViolations;
+                          const uint32_t terminalSaturation =
+                              tiers[0].saturationFlags |
+                              tiers[1].saturationFlags;
+                          const bool terminalTimingPassed =
+                              suiteSafeToContinue &&
+                              tiers[0].terminalSampleCount == 12u &&
+                              tiers[1].terminalSampleCount == 12u &&
+                              tiers[0].terminalOverBudgetCount == 0u &&
+                              tiers[1].terminalOverBudgetCount == 0u &&
+                              terminalAccountingViolations == 0u &&
+                              terminalSaturation == 0u;
+                          char terminalMetrics[224] = {};
+                          const int terminalWritten = snprintf(
+                              terminalMetrics,
+                              sizeof(terminalMetrics),
+                              "bl=%lu;h1=10000;n1=%lu;tl1=%lu;ta1=%lu;"
+                              "tm1=%lu;ob1=%lu;h2=40000;n2=%lu;tl2=%lu;"
+                              "ta2=%lu;tm2=%lu;ob2=%lu;cm=%lu;sm=%lu;"
+                              "im=%lu;pm=%lu;fm=%lu;av=%lu;sf=%lu",
+                              (unsigned long)limits.terminalMaxCycles,
+                              (unsigned long)tiers[0].terminalSampleCount,
+                              (unsigned long)tiers[0].terminalMinCycles,
+                              (unsigned long)CoordinatedXyPerformanceReport::
+                                  terminalAverageCycles(tiers[0]),
+                              (unsigned long)tiers[0].terminalMaxCycles,
+                              (unsigned long)tiers[0].terminalOverBudgetCount,
+                              (unsigned long)tiers[1].terminalSampleCount,
+                              (unsigned long)tiers[1].terminalMinCycles,
+                              (unsigned long)CoordinatedXyPerformanceReport::
+                                  terminalAverageCycles(tiers[1]),
+                              (unsigned long)tiers[1].terminalMaxCycles,
+                              (unsigned long)tiers[1].terminalOverBudgetCount,
+                              (unsigned long)worstTerminalTier.
+                                  worstTerminalCommonCycles,
+                              (unsigned long)worstTerminalTier.
+                                  worstTerminalShutdownCycles,
+                              (unsigned long)worstTerminalTier.
+                                  worstTerminalInstrumentationCycles,
+                              (unsigned long)worstTerminalTier.
+                                  worstTerminalPreHandlerCycles,
+                              (unsigned long)worstTerminalTier.
+                                  worstTerminalFullIrqCycles,
+                              (unsigned long)terminalAccountingViolations,
+                              (unsigned long)terminalSaturation);
+                          const size_t terminalBudget =
+                              DiagnosticResultEmitter::kResultMetricsFrameBudget -
+                              std::min(std::strlen("coord_xy_terminal_timing"),
+                                       DiagnosticResultEmitter::kMaxResultNameBytes);
+                          const bool terminalMetricsFit = terminalWritten > 0 &&
+                              static_cast<size_t>(terminalWritten) <
+                                  sizeof(terminalMetrics) &&
+                              static_cast<size_t>(terminalWritten) <=
+                                  terminalBudget;
+                          char terminalFallbackMetrics[96] = {};
+                          (void)snprintf(
+                              terminalFallbackMetrics,
+                              sizeof(terminalFallbackMetrics),
+                              "gate=metrics_overflow;bl=%lu;n1=0;n2=0;av=0;sf=1",
+                              (unsigned long)CoordinatedXyPerformanceReport::
+                                  kCoordinatedTerminalHandlerBudgetCycles);
+                          (void)runOne(
+                              2100u,
+                              "coord_xy_terminal_timing",
+                              terminalTimingPassed && terminalMetricsFit,
+                              terminalMetricsFit
+                                  ? terminalMetrics
+                                  : terminalFallbackMetrics);
+                          return finish();
+                        }
 
                         if (runCoordinatedXyTransitionSuite) {
                           const Pair cameraPair = kGeometryPairs[4];
@@ -3217,7 +3621,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           if (!passed) failureStage = 1u;
                           stepperX->setMaxSpeedHz(kLogicalRateHz);
                           stepperY->setMaxSpeedHz(kLogicalRateHz);
-                          if (passed && !addPair(aggregate, cameraPair)) {
+                          if (passed && !addPair(
+                                  aggregate, cameraPair, kLogicalRateHz)) {
                             passed = false;
                             failureStage = 2u;
                           }
@@ -3259,7 +3664,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               : std::numeric_limits<uint32_t>::max();
                           const bool aggregatePass =
                               CoordinatedXyPerformanceReport::aggregatePasses(
-                                  aggregate, 2u, 8416u, 30000u, 30000u, limits);
+                                  aggregate, 2u, 16832u, 60000u, 60000u, limits);
                           const bool homeEvidence = passed && aggregatePass &&
                               !limitBefore && !limitAfter &&
                               stepperX->enableOutputsAssertedForDiagnostics() &&
@@ -3276,41 +3681,40 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               homeIsr.completedPulses == 50u &&
                               homeIsr.pendingObservations == 0u;
                           if (!homeEvidence && failureStage == 0u) failureStage = 5u;
+                          CoordinatedXyPerformanceReport::CameraTransitionEvidence
+                              cameraEvidence{};
+                          cameraEvidence.failureStage = failureStage;
+                          cameraEvidence.transitionSafe = transitionSafe;
+                          cameraEvidence.stepsLow =
+                              transition.xStepLow && transition.yStepLow;
+                          cameraEvidence.timerOwned = transition.timerOwned;
+                          cameraEvidence.limitBefore = limitBefore;
+                          cameraEvidence.homeStartPositionSteps =
+                              lastXHome.snapshot.startPositionSteps;
+                          cameraEvidence.homeEndPositionSteps =
+                              lastXHome.snapshot.endPositionSteps;
+                          cameraEvidence.homeGuardSteps = lastXHome.guardSteps;
+                          cameraEvidence.homeIsrEntries = homeIsr.totalEntries;
+                          cameraEvidence.homeCompletedPulses =
+                              homeIsr.completedPulses;
+                          cameraEvidence.homePendingObservations =
+                              homeIsr.pendingObservations;
+                          cameraEvidence.homeDriftSteps = homeDrift;
+                          cameraEvidence.homeEvidence = homeEvidence;
                           char metrics[224] = {};
-                          const int written = snprintf(
-                              metrics,
-                              sizeof(metrics),
-                              "fs=%lu;n=%lu;xe=%lu;ye=%lu;i2=%lu;i7=%lu;pu=%lu;"
-                              "en=%u;sl=%u;ow=%u;lb=%u;hs=%ld;he=%ld;hg=%lu;"
-                              "hi=%lu;hpc=%lu;hpu=%lu;hd=%lu;sf=%lu;to=%u",
-                              (unsigned long)failureStage,
-                              (unsigned long)aggregate.moveCount,
-                              (unsigned long)aggregate.emittedXSteps,
-                              (unsigned long)aggregate.emittedYSteps,
-                              (unsigned long)aggregate.timer2Callbacks,
-                              (unsigned long)aggregate.timer7Callbacks,
-                              (unsigned long)aggregate.pendingObservations,
-                              transitionSafe ? 1u : 0u,
-                              (transition.xStepLow && transition.yStepLow) ? 1u : 0u,
-                              transition.timerOwned ? 1u : 0u,
-                              limitBefore ? 1u : 0u,
-                              (long)lastXHome.snapshot.startPositionSteps,
-                              (long)lastXHome.snapshot.endPositionSteps,
-                              (unsigned long)lastXHome.guardSteps,
-                              (unsigned long)homeIsr.totalEntries,
-                              (unsigned long)homeIsr.completedPulses,
-                              (unsigned long)homeIsr.pendingObservations,
-                              (unsigned long)homeDrift,
-                              (unsigned long)aggregate.saturationFlags,
-                              homeEvidence ? 0u : 1u);
+                          const size_t written = CoordinatedXyPerformanceReport::
+                              buildCameraTransitionMetrics(
+                                  metrics,
+                                  sizeof(metrics),
+                                  aggregate,
+                                  cameraEvidence);
                           const size_t budget =
                               DiagnosticResultEmitter::kResultMetricsFrameBudget -
                               std::min(std::strlen(
                                            "coord_xy_camera_home_transition"),
                                        DiagnosticResultEmitter::kMaxResultNameBytes);
-                          const bool metricsFit = written > 0 &&
-                              static_cast<size_t>(written) < sizeof(metrics) &&
-                              static_cast<size_t>(written) <= budget;
+                          const bool metricsFit = written != 0u &&
+                              written <= budget;
                           comm->setStatusPaused(true);
                           (void)runOne(2071u,
                                        "coord_xy_camera_home_transition",
@@ -3328,7 +3732,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         Aggregate aggregate{};
                         bool rowPassed = true;
                         for (const Pair& pair : kGeometryPairs) {
-                          if (!addPair(aggregate, pair)) {
+                          if (!addPair(aggregate, pair, kLogicalRateHz)) {
                             rowPassed = false;
                             break;
                           }
@@ -3372,7 +3776,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             CoordinatedXyPerformanceReport::buildMetrics(
                                 motionMetrics,
                                 sizeof(motionMetrics),
-                                MotionUnitScale::toNativeRate(kLogicalRateHz),
+                                kLogicalRateHz,
                                 aggregate,
                                 xDrift,
                                 yDrift);
@@ -3384,9 +3788,9 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             CoordinatedXyPerformanceReport::aggregatePasses(
                                 aggregate,
                                 10u,
-                                53416u,
-                                90000u,
-                                110000u,
+                                106832u,
+                                180000u,
+                                220000u,
                                 limits);
                         const bool motionMetricsFit = motionLength != 0u &&
                             motionLength <= motionBudget;

@@ -54,6 +54,7 @@ CAMERA_BENCHMARK_MAX_NEW_FRAMES=""
 CAMERA_BENCHMARK_ORDER=""
 CAMERA_BENCHMARK_MODE=""
 CAMERA_BENCHMARK_PREFLIGHT_PRESSURE_TIMEOUT_MS=""
+COORDINATED_XY_SHALLOW_EDGE_SUITE=0
 
 # -------------------------
 # Helpers
@@ -219,6 +220,9 @@ run_selftest() {
     if [[ "$SKIP_SELFTEST_AFTER_MISSING_HELLO" -ne 0 ]]; then
       cmd+=(--fast-fail-on-missing-hello)
     fi
+    if [[ "$COORDINATED_XY_SHALLOW_EDGE_SUITE" -ne 0 ]]; then
+      cmd+=(--coordinated-xy-shallow-edge-suite)
+    fi
     if [[ "$CAMERA_BENCHMARK" -ne 0 ]]; then
       cmd+=(--camera-benchmark)
     fi
@@ -282,6 +286,7 @@ Options:
   --status-only-timeout-ms N  Fail fast if only CMD_STATUS traffic remains after selftest frames
   --hello-retry-ms N    HELLO retry interval for tools/run_selftest.py
   --skip-selftest-after-missing-hello  Fail immediately when HELLO_ACK never arrives
+  --coordinated-xy-shallow-edge-suite  Run the focused 10/40 kHz shallow-angle edge suite
   --camera-benchmark     Run camera/flash timing benchmark and attach artifact
   --camera-benchmark-cycles N
   --camera-benchmark-exposure-us N
@@ -322,6 +327,7 @@ while [[ $# -gt 0 ]]; do
     --status-only-timeout-ms) STATUS_ONLY_TIMEOUT_MS="$2"; shift 2 ;;
     --hello-retry-ms) HELLO_RETRY_MS="$2"; shift 2 ;;
     --skip-selftest-after-missing-hello) SKIP_SELFTEST_AFTER_MISSING_HELLO=1; shift 1 ;;
+    --coordinated-xy-shallow-edge-suite) COORDINATED_XY_SHALLOW_EDGE_SUITE=1; shift 1 ;;
     --camera-benchmark) CAMERA_BENCHMARK=1; shift 1 ;;
     --camera-benchmark-cycles) CAMERA_BENCHMARK_CYCLES="$2"; shift 2 ;;
     --camera-benchmark-exposure-us) CAMERA_BENCHMARK_EXPOSURE_US="$2"; shift 2 ;;

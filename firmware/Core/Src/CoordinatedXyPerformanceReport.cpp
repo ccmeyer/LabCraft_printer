@@ -69,6 +69,33 @@ uint32_t boundedHomeGuardSteps(int32_t currentPositionSteps,
       : static_cast<uint32_t>(guard);
 }
 
+bool shallowMoveTimingExpectation(
+    uint32_t requestedRateHz,
+    uint32_t masterEdges,
+    ShallowMoveTimingExpectation& expectation) {
+  expectation = {};
+  if (requestedRateHz == 10000u &&
+      (masterEdges == 17100u || masterEdges == 19574u)) {
+    expectation.selectedRateHz = 10000u;
+    expectation.targetArr = 8999u;
+    expectation.startArr = 44995u;
+    return true;
+  }
+  if (requestedRateHz == 40000u && masterEdges == 17100u) {
+    expectation.selectedRateHz = 36986u;
+    expectation.targetArr = 2432u;
+    expectation.startArr = 12160u;
+    return true;
+  }
+  if (requestedRateHz == 40000u && masterEdges == 19574u) {
+    expectation.selectedRateHz = 39571u;
+    expectation.targetArr = 2273u;
+    expectation.startArr = 11365u;
+    return true;
+  }
+  return false;
+}
+
 uint32_t moveFailureMask(const MoveObservation& observation,
                          const Limits& limits) {
   const auto& timing = observation.timing;
@@ -80,21 +107,21 @@ uint32_t moveFailureMask(const MoveObservation& observation,
   if (!observation.pinsLow) failures |= kMoveFailurePins;
   if (!observation.ownershipReleased) failures |= kMoveFailureOwnership;
   if (!observation.checksumMatch) failures |= kMoveFailureChecksum;
-  if (observation.requestedXSteps != observation.expectedXSteps ||
-      observation.requestedYSteps != observation.expectedYSteps) {
+  if (observation.requestedXEdges != observation.expectedXEdges ||
+      observation.requestedYEdges != observation.expectedYEdges) {
     failures |= kMoveFailureRequestedCounts;
   }
-  if (observation.emittedXSteps != observation.expectedXSteps ||
-      observation.emittedYSteps != observation.expectedYSteps) {
+  if (observation.emittedXEdges != observation.expectedXEdges ||
+      observation.emittedYEdges != observation.expectedYEdges) {
     failures |= kMoveFailureEmittedCounts;
   }
-  if (observation.masterSteps != observation.expectedMasterSteps) {
+  if (observation.masterEdges != observation.expectedMasterEdges) {
     failures |= kMoveFailureMasterCount;
   }
   if (observation.selectedRateHz != observation.expectedRateHz) {
     failures |= kMoveFailureSelectedRate;
   }
-  if (observation.timer2Callbacks != observation.expectedMasterSteps * 2u ||
+  if (observation.timer2Callbacks != observation.expectedMasterEdges ||
       observation.timer7Callbacks != 0u) {
     failures |= kMoveFailureTimerCounts;
   }
@@ -124,8 +151,10 @@ uint32_t moveFailureMask(const MoveObservation& observation,
     failures |= kMoveFailureTimingState;
   }
   if (timing.totalCallbacks != observation.timer2Callbacks ||
-      timing.completedPulses != observation.expectedMasterSteps ||
+      timing.activeEdgeEvents != observation.expectedMasterEdges ||
       timing.terminalCallbacks != 1u ||
+      timing.terminalStageSamples != 1u ||
+      timing.terminalStageAccountingViolations != 0u ||
       timing.irqPathSamples != observation.timer2Callbacks ||
       timing.irqPathMissing != 0u ||
       timing.entryTimerSamples != observation.timer2Callbacks ||
@@ -141,6 +170,12 @@ uint32_t moveFailureMask(const MoveObservation& observation,
   }
   if (observation.requireNoLateEntries && timing.lateEntryCount != 0u) {
     failures |= kMoveFailureEntryLateness;
+  }
+  if (observation.cleanupEdgeEvents != 0u) {
+    failures |= kMoveFailureCleanupEdges;
+  }
+  if (observation.edgeSpacingViolations != 0u) {
+    failures |= kMoveFailureEdgeSpacing;
   }
   if (timing.pendingObservations != 0u || timing.maxPendingStreak != 0u) {
     failures |= kMoveFailurePendingUpdate;
@@ -178,22 +213,38 @@ bool movePasses(const MoveObservation& observation, const Limits& limits) {
   return moveFailureMask(observation, limits) == 0u;
 }
 
+bool canContinueAfterTerminalBudgetOnlyFailure(uint32_t failureMask) {
+  return (failureMask & ~kMoveFailureTerminalCycles) == 0u;
+}
+
+uint32_t terminalAverageCycles(const Aggregate& aggregate) {
+  return aggregate.terminalSampleCount == 0u
+      ? 0u
+      : aggregate.terminalTotalCycles / aggregate.terminalSampleCount;
+}
+
 void addMove(Aggregate& aggregate,
              const MoveObservation& observation,
              const Limits& limits) {
   const uint32_t failureMask = moveFailureMask(observation, limits);
+  aggregate.moveFailureMask |= failureMask;
   addSaturating(aggregate.moveCount, 1u, aggregate.saturationFlags);
-  addSaturating(aggregate.expectedXSteps, observation.expectedXSteps,
+  addSaturating(aggregate.expectedXEdges, observation.expectedXEdges,
                 aggregate.saturationFlags);
-  addSaturating(aggregate.expectedYSteps, observation.expectedYSteps,
+  addSaturating(aggregate.expectedYEdges, observation.expectedYEdges,
                 aggregate.saturationFlags);
-  addSaturating(aggregate.expectedMasterSteps, observation.expectedMasterSteps,
+  addSaturating(aggregate.expectedMasterEdges, observation.expectedMasterEdges,
                 aggregate.saturationFlags);
-  addSaturating(aggregate.emittedXSteps, observation.emittedXSteps,
+  addSaturating(aggregate.emittedXEdges, observation.emittedXEdges,
                 aggregate.saturationFlags);
-  addSaturating(aggregate.emittedYSteps, observation.emittedYSteps,
+  addSaturating(aggregate.emittedYEdges, observation.emittedYEdges,
                 aggregate.saturationFlags);
-  addSaturating(aggregate.masterSteps, observation.masterSteps,
+  addSaturating(aggregate.masterEdges, observation.masterEdges,
+                aggregate.saturationFlags);
+  addSaturating(aggregate.cleanupEdgeEvents, observation.cleanupEdgeEvents,
+                aggregate.saturationFlags);
+  addSaturating(aggregate.edgeSpacingViolations,
+                observation.edgeSpacingViolations,
                 aggregate.saturationFlags);
   addSaturating(aggregate.timer2Callbacks, observation.timer2Callbacks,
                 aggregate.saturationFlags);
@@ -232,8 +283,41 @@ void addMove(Aggregate& aggregate,
       aggregate.phaseMaxCycles[i] = observation.timing.phaseMaxCycles[i];
     }
   }
-  if (observation.timing.terminalMaxCycles > aggregate.terminalMaxCycles) {
+  const bool firstTerminalSample = aggregate.terminalSampleCount == 0u;
+  addSaturating(aggregate.terminalSampleCount,
+                observation.timing.terminalStageSamples,
+                aggregate.saturationFlags);
+  addSaturating(aggregate.terminalTotalCycles,
+                observation.timing.terminalTotalCycles,
+                aggregate.saturationFlags);
+  addSaturating(aggregate.terminalStageAccountingViolations,
+                observation.timing.terminalStageAccountingViolations,
+                aggregate.saturationFlags);
+  if (observation.timing.terminalStageSamples != 0u &&
+      (firstTerminalSample || observation.timing.terminalMinCycles <
+          aggregate.terminalMinCycles)) {
+    aggregate.terminalMinCycles = observation.timing.terminalMinCycles;
+  }
+  if (observation.timing.terminalStageSamples != 0u &&
+      observation.timing.terminalMaxCycles > limits.terminalMaxCycles) {
+    addSaturating(aggregate.terminalOverBudgetCount,
+                  1u,
+                  aggregate.saturationFlags);
+  }
+  if (observation.timing.terminalStageSamples != 0u &&
+      (firstTerminalSample ||
+       observation.timing.terminalMaxCycles > aggregate.terminalMaxCycles)) {
     aggregate.terminalMaxCycles = observation.timing.terminalMaxCycles;
+    aggregate.worstTerminalCommonCycles =
+        observation.timing.worstTerminalCommonCycles;
+    aggregate.worstTerminalShutdownCycles =
+        observation.timing.worstTerminalShutdownCycles;
+    aggregate.worstTerminalInstrumentationCycles =
+        observation.timing.worstTerminalInstrumentationCycles;
+    aggregate.worstTerminalPreHandlerCycles =
+        observation.timing.worstTerminalPreHandlerCycles;
+    aggregate.worstTerminalFullIrqCycles =
+        observation.timing.worstTerminalFullIrqCycles;
   }
   addSaturating(aggregate.irqPathSamples, observation.timing.irqPathSamples,
                 aggregate.saturationFlags);
@@ -325,18 +409,20 @@ void addMove(Aggregate& aggregate,
 
 bool aggregatePasses(const Aggregate& aggregate,
                      uint32_t expectedMoves,
-                     uint32_t expectedXSteps,
-                     uint32_t expectedYSteps,
-                     uint32_t expectedMasterSteps,
+                     uint32_t expectedXEdges,
+                     uint32_t expectedYEdges,
+                     uint32_t expectedMasterEdges,
                      const Limits& limits) {
   return aggregate.exactAndSafe && aggregate.moveCount == expectedMoves &&
-      aggregate.expectedXSteps == expectedXSteps &&
-      aggregate.expectedYSteps == expectedYSteps &&
-      aggregate.expectedMasterSteps == expectedMasterSteps &&
-      aggregate.emittedXSteps == expectedXSteps &&
-      aggregate.emittedYSteps == expectedYSteps &&
-      aggregate.masterSteps == expectedMasterSteps &&
-      aggregate.timer2Callbacks == expectedMasterSteps * 2u &&
+      aggregate.expectedXEdges == expectedXEdges &&
+      aggregate.expectedYEdges == expectedYEdges &&
+      aggregate.expectedMasterEdges == expectedMasterEdges &&
+      aggregate.emittedXEdges == expectedXEdges &&
+      aggregate.emittedYEdges == expectedYEdges &&
+      aggregate.masterEdges == expectedMasterEdges &&
+      aggregate.cleanupEdgeEvents == 0u &&
+      aggregate.edgeSpacingViolations == 0u &&
+      aggregate.timer2Callbacks == expectedMasterEdges &&
       aggregate.timer7Callbacks == 0u &&
       aggregate.timer2Callbacks >= aggregate.moveCount &&
       aggregate.conditionalDecisionCount ==
@@ -355,6 +441,8 @@ bool aggregatePasses(const Aggregate& aggregate,
       aggregate.watchdogLateCount == 0u &&
       aggregate.cycleWraps <= aggregate.moveCount &&
       aggregate.statusFrameCount > 0u &&
+      aggregate.terminalSampleCount == aggregate.moveCount &&
+      aggregate.terminalStageAccountingViolations == 0u &&
       aggregateActiveMax(aggregate) <= limits.activeMaxCycles &&
       (!aggregate.requireTerminalCycleBudget ||
        aggregate.terminalMaxCycles <= limits.terminalMaxCycles) &&
@@ -373,17 +461,19 @@ size_t buildMetrics(char* out,
   const int written = std::snprintf(
       out,
       capacity,
-      "hz=%lu;n=%lu;xe=%lu;ye=%lu;ms=%lu;i2=%lu;i7=%lu;ok=%u;"
-      "pu=%lu;ps=%lu;am=%lu;tm=%lu;de=%lu;sg=%lu;wd=%lu;sa=%lu;"
+      "hz=%lu;n=%lu;xe=%lu;ye=%lu;me=%lu;i2=%lu;i7=%lu;ok=%u;"
+      "ce=%lu;sv=%lu;pu=%lu;ps=%lu;am=%lu;tm=%lu;de=%lu;sg=%lu;wd=%lu;sa=%lu;"
       "wl=%lu;cw=%lu;sf=%lu;xd=%lu;yd=%lu;to=%lu",
       static_cast<unsigned long>(rateHz),
       static_cast<unsigned long>(aggregate.moveCount),
-      static_cast<unsigned long>(aggregate.emittedXSteps),
-      static_cast<unsigned long>(aggregate.emittedYSteps),
-      static_cast<unsigned long>(aggregate.masterSteps),
+      static_cast<unsigned long>(aggregate.emittedXEdges),
+      static_cast<unsigned long>(aggregate.emittedYEdges),
+      static_cast<unsigned long>(aggregate.masterEdges),
       static_cast<unsigned long>(aggregate.timer2Callbacks),
       static_cast<unsigned long>(aggregate.timer7Callbacks),
       static_cast<unsigned>(aggregate.exactAndSafe ? 1u : 0u),
+      static_cast<unsigned long>(aggregate.cleanupEdgeEvents),
+      static_cast<unsigned long>(aggregate.edgeSpacingViolations),
       static_cast<unsigned long>(aggregate.pendingObservations),
       static_cast<unsigned long>(aggregate.maxPendingStreak),
       static_cast<unsigned long>(aggregateActiveMax(aggregate)),
@@ -398,6 +488,51 @@ size_t buildMetrics(char* out,
       static_cast<unsigned long>(xDriftSteps),
       static_cast<unsigned long>(yDriftSteps),
       static_cast<unsigned long>(aggregate.timeoutCount));
+  if (written < 0 || static_cast<size_t>(written) >= capacity) {
+    out[0] = '\0';
+    return 0u;
+  }
+  return static_cast<size_t>(written);
+}
+
+size_t buildCameraTransitionMetrics(
+    char* out,
+    size_t capacity,
+    const Aggregate& aggregate,
+    const CameraTransitionEvidence& evidence) {
+  if (out == nullptr || capacity == 0u) return 0u;
+  const int written = std::snprintf(
+      out,
+      capacity,
+      "fs=%lu;n=%lu;xe=%lu;ye=%lu;i2=%lu;i7=%lu;pu=%lu;"
+      "en=%u;sl=%u;ow=%u;lb=%u;hs=%ld;he=%ld;hg=%lu;"
+      "hi=%lu;hpc=%lu;hpu=%lu;hd=%lu;mf=%lu;ab=%lu;am=%lu;tm=%lu;"
+      "sf=%lu;to=%u",
+      static_cast<unsigned long>(evidence.failureStage),
+      static_cast<unsigned long>(aggregate.moveCount),
+      static_cast<unsigned long>(aggregate.emittedXEdges),
+      static_cast<unsigned long>(aggregate.emittedYEdges),
+      static_cast<unsigned long>(aggregate.timer2Callbacks),
+      static_cast<unsigned long>(aggregate.timer7Callbacks),
+      static_cast<unsigned long>(aggregate.pendingObservations),
+      evidence.transitionSafe ? 1u : 0u,
+      evidence.stepsLow ? 1u : 0u,
+      evidence.timerOwned ? 1u : 0u,
+      evidence.limitBefore ? 1u : 0u,
+      static_cast<long>(evidence.homeStartPositionSteps),
+      static_cast<long>(evidence.homeEndPositionSteps),
+      static_cast<unsigned long>(evidence.homeGuardSteps),
+      static_cast<unsigned long>(evidence.homeIsrEntries),
+      static_cast<unsigned long>(evidence.homeCompletedPulses),
+      static_cast<unsigned long>(evidence.homePendingObservations),
+      static_cast<unsigned long>(evidence.homeDriftSteps),
+      static_cast<unsigned long>(aggregate.moveFailureMask),
+      static_cast<unsigned long>(
+          kCoordinatedActiveHandlerRegressionBudgetCycles),
+      static_cast<unsigned long>(aggregateActiveMax(aggregate)),
+      static_cast<unsigned long>(aggregate.terminalMaxCycles),
+      static_cast<unsigned long>(aggregate.saturationFlags),
+      evidence.homeEvidence ? 0u : 1u);
   if (written < 0 || static_cast<size_t>(written) >= capacity) {
     out[0] = '\0';
     return 0u;

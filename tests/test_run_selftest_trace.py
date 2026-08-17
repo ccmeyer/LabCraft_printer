@@ -1044,6 +1044,7 @@ def test_run_sends_selftest_scheduler_selector(monkeypatch, tmp_path, flag_name,
     ("flag_name", "expected_selector"),
     (
         ("coordinated_xy_production_mres3_suite", 2097),
+        ("coordinated_xy_shallow_edge_suite", 2099),
         ("direct_xyz_lut_suite", 2096),
         ("coordinated_xy_camera_transition_suite", 2078),
     ),
@@ -2142,7 +2143,17 @@ def test_production_mres3_fixture_stage_is_an_operator_prompt():
     assert mod._is_operator_prompt_stage(stage)
     message = mod._operator_prompt_message(stage)
     assert "MRES=3" in message
-    assert "20 kHz" in message
+    assert "40 kHz active edges" in message
+
+
+def test_shallow_edge_fixture_stage_is_an_operator_prompt():
+    mod = _load_run_selftest()
+    stage = "coordinated_xy_shallow_edge_envelope_clear"
+
+    assert mod._is_operator_prompt_stage(stage)
+    message = mod._operator_prompt_message(stage)
+    assert "non-dispensing test heads" in message
+    assert "10/40 kHz shallow-angle" in message
 
 
 def test_direct_xyz_lut_fixture_stage_is_an_operator_prompt():

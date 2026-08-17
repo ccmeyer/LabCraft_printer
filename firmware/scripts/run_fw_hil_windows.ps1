@@ -14,6 +14,7 @@ param(
   [int]$ProgressTimeoutMs = 30000,
   [int]$ActivityTimeoutMs = 120000,
   [int]$StatusOnlyTimeoutMs = 10000,
+  [switch]$CoordinatedXyShallowEdgeSuite,
   [switch]$CameraBenchmark,
   [int]$CameraBenchmarkCycles = 100,
   [int]$CameraBenchmarkExposureUs = 20000,
@@ -118,6 +119,17 @@ try {
     $remoteProfile = "SAFE"
   }
 
+  $effectiveSelfTestTimeoutMs = $SelfTestTimeoutMs
+  $effectiveStatusOnlyTimeoutMs = $StatusOnlyTimeoutMs
+  if ($CoordinatedXyShallowEdgeSuite.IsPresent) {
+    if (-not $PSBoundParameters.ContainsKey("SelfTestTimeoutMs")) {
+      $effectiveSelfTestTimeoutMs = 240000
+    }
+    if (-not $PSBoundParameters.ContainsKey("StatusOnlyTimeoutMs")) {
+      $effectiveStatusOnlyTimeoutMs = 120000
+    }
+  }
+
   $flashArgs = @(
     "./firmware/hil/flash_and_test.sh"
     "--bin", "firmware/artifacts/LabCraft_firmware.bin"
@@ -125,10 +137,10 @@ try {
     "--profile", $remoteProfile
     "--mode", $remoteMode
     "--report", $remoteReport
-    "--selftest-timeout-ms", $SelfTestTimeoutMs
+    "--selftest-timeout-ms", $effectiveSelfTestTimeoutMs
     "--progress-timeout-ms", $ProgressTimeoutMs
     "--activity-timeout-ms", $ActivityTimeoutMs
-    "--status-only-timeout-ms", $StatusOnlyTimeoutMs
+    "--status-only-timeout-ms", $effectiveStatusOnlyTimeoutMs
   )
   if ($CameraBenchmark.IsPresent) {
     $flashArgs += @(
@@ -144,6 +156,9 @@ try {
       "--camera-benchmark-mode", $CameraBenchmarkMode
       "--camera-benchmark-preflight-pressure-timeout-ms", $CameraBenchmarkPreflightPressureTimeoutMs
     )
+  }
+  if ($CoordinatedXyShallowEdgeSuite.IsPresent) {
+    $flashArgs += "--coordinated-xy-shallow-edge-suite"
   }
 
   $cmd = @"
@@ -164,7 +179,10 @@ $cmd = $cmd -replace "`r", ""
 
   Write-Host "=== Flash + selftest on Pi ==="
   & ssh @sshOptions "$sshTarget" bash -lc $cmd
-  if ($LASTEXITCODE -ne 0) { Fail "Pi flash/selftest failed." }
+  $remoteHilExitCode = $LASTEXITCODE
+  if ($remoteHilExitCode -ne 0) {
+    Write-Warning "Pi flash/selftest exited with rc=$remoteHilExitCode; attempting to download its failure report."
+  }
 
   # 4) Pull report back
   $localReportDir = Join-Path $RepoRoot "hil_reports"
@@ -173,6 +191,13 @@ $cmd = $cmd -replace "`r", ""
 
   Write-Host "=== Download report ==="
   & scp @scpOptions $scpReportSource "$localReport"
+  $reportDownloaded = $LASTEXITCODE -eq 0 -and (Test-Path $localReport)
+  if (-not $reportDownloaded) {
+    if ($remoteHilExitCode -ne 0) {
+      Fail "Pi flash/selftest failed with rc=$remoteHilExitCode and its report could not be downloaded from $scpReportSource."
+    }
+    Fail "Self-test report could not be downloaded from $scpReportSource."
+  }
   if ($CameraBenchmark.IsPresent) {
     $localBenchmark = Join-Path $localReportDir ("selftest_${ts}_camera_benchmark.json")
     & scp @scpOptions $scpBenchmarkReportSource "$localBenchmark"
@@ -198,6 +223,8 @@ $cmd = $cmd -replace "`r", ""
   if ($failed -gt 0 -or $reportObj.aborted -eq $true) {
     Write-Host "SELFTEST: FAIL"
     exit 2
+  } elseif ($remoteHilExitCode -ne 0) {
+    Fail "Pi flash/selftest exited with rc=$remoteHilExitCode despite a passing report."
   } else {
     Write-Host "SELFTEST: PASS"
     exit 0

@@ -27,7 +27,7 @@ TEST(CoordinatedXyIsrInstrumentation, TracksPhaseAndTerminalMaxima) {
   recordSample(state, Phase::Deceleration, 260u, 340u, 9u, false, false, true);
   const Snapshot snapshot = makeSnapshot(state);
   UNSIGNED_LONGS_EQUAL(4u, snapshot.totalCallbacks);
-  UNSIGNED_LONGS_EQUAL(2u, snapshot.completedPulses);
+  UNSIGNED_LONGS_EQUAL(2u, snapshot.activeEdgeEvents);
   UNSIGNED_LONGS_EQUAL(130u, snapshot.phaseMaxCycles[0]);
   UNSIGNED_LONGS_EQUAL(30u, snapshot.phaseMaxCycles[1]);
   UNSIGNED_LONGS_EQUAL(50u, snapshot.phaseMaxCycles[2]);
@@ -69,6 +69,59 @@ TEST(CoordinatedXyIsrInstrumentation, TracksEntryAndFullIrqMaxima) {
   UNSIGNED_LONGS_EQUAL(2u, snapshot.entryTimerSamples);
   UNSIGNED_LONGS_EQUAL(100u, snapshot.entryTimerCountMax);
   UNSIGNED_LONGS_EQUAL(100u, snapshot.pendingEntryTimerCountMax);
+}
+
+TEST(CoordinatedXyIsrInstrumentation, CorrelatesWorstTerminalStageBreakdown) {
+  State state{};
+  reset(state, 0u);
+  recordTerminalStages(state, 100u, 140u, 170u, 200u);
+  beginIrqPathSample(
+      state, true, 90u, true, 0u, 8999u, 100u, false, true);
+  completeIrqPath(state, 240u);
+  recordTerminalStages(state, 300u, 360u, 410u, 450u);
+  beginIrqPathSample(
+      state, true, 280u, true, 0u, 8999u, 300u, false, true);
+  completeIrqPath(state, 500u);
+
+  const Snapshot snapshot = makeSnapshot(state);
+  UNSIGNED_LONGS_EQUAL(2u, snapshot.terminalStageSamples);
+  UNSIGNED_LONGS_EQUAL(100u, snapshot.terminalMinCycles);
+  UNSIGNED_LONGS_EQUAL(250u, snapshot.terminalTotalCycles);
+  UNSIGNED_LONGS_EQUAL(60u, snapshot.worstTerminalCommonCycles);
+  UNSIGNED_LONGS_EQUAL(50u, snapshot.worstTerminalShutdownCycles);
+  UNSIGNED_LONGS_EQUAL(40u, snapshot.worstTerminalInstrumentationCycles);
+  UNSIGNED_LONGS_EQUAL(20u, snapshot.worstTerminalPreHandlerCycles);
+  UNSIGNED_LONGS_EQUAL(220u, snapshot.worstTerminalFullIrqCycles);
+  UNSIGNED_LONGS_EQUAL(0u, snapshot.terminalStageAccountingViolations);
+}
+
+TEST(CoordinatedXyIsrInstrumentation, TerminalStagesUseWrapSafeDwtDeltas) {
+  State state{};
+  reset(state, 0xFFFFFF00u);
+  recordTerminalStages(
+      state, 0xFFFFFFF0u, 0x00000010u, 0x00000030u, 0x00000050u);
+  const Snapshot snapshot = makeSnapshot(state);
+  UNSIGNED_LONGS_EQUAL(1u, snapshot.terminalStageSamples);
+  UNSIGNED_LONGS_EQUAL(96u, snapshot.terminalTotalCycles);
+  UNSIGNED_LONGS_EQUAL(32u, snapshot.worstTerminalCommonCycles);
+  UNSIGNED_LONGS_EQUAL(32u, snapshot.worstTerminalShutdownCycles);
+  UNSIGNED_LONGS_EQUAL(32u, snapshot.worstTerminalInstrumentationCycles);
+  UNSIGNED_LONGS_EQUAL(0u, snapshot.terminalStageAccountingViolations);
+}
+
+TEST(CoordinatedXyIsrInstrumentation, TerminalStageAccountingFailsClosed) {
+  State state{};
+  reset(state, 0u);
+  state.terminalTotalCycles = std::numeric_limits<uint32_t>::max();
+  recordTerminalStages(
+      state, 0u, 0xFFFFFFF0u, 0xFFFFFFF1u, 0x00000001u);
+  const Snapshot snapshot = makeSnapshot(state);
+  UNSIGNED_LONGS_EQUAL(1u, snapshot.terminalStageAccountingViolations);
+  UNSIGNED_LONGS_EQUAL(std::numeric_limits<uint32_t>::max(),
+                       snapshot.terminalTotalCycles);
+  CHECK_TRUE((snapshot.saturationFlags & SaturatedTerminalStageTotal) != 0u);
+  CHECK_TRUE((snapshot.saturationFlags &
+              SaturatedTerminalStageAccounting) == 0u);
 }
 
 TEST(CoordinatedXyIsrInstrumentation, MissingEntrySamplesFailClosed) {

@@ -1064,7 +1064,6 @@ void Stepper::_prepareCoordinatedAxis(bool participating,
   _prepareForNewMove();
   _resetMoveLimitState();
   DirectStepperProfile::reset(_directProfileState);
-  _writeCoordinatedStep(false);
   _targetPos = targetPosition;
   _direction = direction;
   _lastDirection = direction;
@@ -1116,11 +1115,11 @@ void Stepper::_writeCoordinatedStep(bool high)
 }
 
 LC_COORDINATED_GPIO_OPTIMIZED
-void Stepper::_accountCoordinatedPulse()
+void Stepper::_accountCoordinatedEdge()
 {
   if (!_coordinatedReserved) return;
   const int32_t logicalStep = static_cast<int32_t>(
-      MotionUnitScale::logicalUnitsPerNativeStep());
+      MotionUnitScale::logicalUnitsPerCoordinatedActiveEdge());
   _pos += _direction ? logicalStep : -logicalStep;
 }
 
@@ -1158,9 +1157,21 @@ void Stepper::_finishCompletedCoordinatedAxisFromLow()
 
 bool Stepper::_coordinatedStepIsLow() const
 {
-  if (_stepPort == nullptr || (_stepPort->ODR & _stepPin) != 0u) return false;
-  return !_dualDriver ||
-         (_stepPort2 != nullptr && (_stepPort2->ODR & _stepPin2) == 0u);
+  bool high = false;
+  return _readCoordinatedStepHigh(high) && !high;
+}
+
+bool Stepper::_readCoordinatedStepHigh(bool& high) const
+{
+  if (_stepPort == nullptr) return false;
+  const bool primaryHigh = (_stepPort->ODR & _stepPin) != 0u;
+  if (_dualDriver) {
+    if (_stepPort2 == nullptr) return false;
+    const bool secondaryHigh = (_stepPort2->ODR & _stepPin2) != 0u;
+    if (secondaryHigh != primaryHigh) return false;
+  }
+  high = primaryHigh;
+  return true;
 }
 
 #undef LC_COORDINATED_GPIO_OPTIMIZED

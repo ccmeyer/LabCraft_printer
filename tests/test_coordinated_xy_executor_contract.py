@@ -31,7 +31,7 @@ def test_pure_executor_has_no_hal_rtos_float_or_dynamic_runtime_dependency():
     assert '#include "CoordinatedXyPlanner.h"' in header
 
 
-def test_executor_is_fixed_at_two_edges_per_master_step():
+def test_executor_emits_one_active_edge_mask_per_master_event():
     header = _read("firmware/Core/Inc/CoordinatedXyExecutor.h")
     source = _read("firmware/Core/Src/CoordinatedXyExecutor.cpp")
 
@@ -39,10 +39,14 @@ def test_executor_is_fixed_at_two_edges_per_master_step():
     assert "prepareCompleteStep" not in header + source
     assert "commitCompleteStep" not in header + source
     assert "ExecutionMode" not in header + source
-    assert "cursor.risingEdges" in source
-    assert "cursor.fallingEdges" in source
+    assert "cursor.plannedEdgeEvents" in source
+    assert "cursor.xActiveEdges" in source
+    assert "cursor.yActiveEdges" in source
     assert "cursor.timerInterrupts" in source
-    assert "result.accountCompletePulse = true" in source
+    assert "result.accountEdgeMask = mask" in source
+    assert "cursor.risingEdges" not in source
+    assert "cursor.fallingEdges" not in source
+    assert "accountCompletePulse" not in header + source
 
 
 def test_target_build_optimizes_only_the_bounded_executor_and_isr_paths():
@@ -89,24 +93,49 @@ def test_xy_only_move_by_and_absolute_move_use_shared_executor():
     assert "stepperY()->move" not in move_to
 
 
-def test_isr_uses_fixed_conditional_rearm_order_after_physical_edge():
+def test_isr_accounts_each_physical_edge_before_conditional_rearm():
     gantry = _read("firmware/Core/Src/Gantry.cpp")
     start = gantry.index("bool Gantry::_handleCoordinatedTim2BodyFromIsr")
     end = gantry.index("bool Gantry::dispatchCoordinatedTimerFromIsr", start)
     handler = gantry[start:end]
 
     edge = handler.index("_writeCoordinatedStep")
-    arr = handler.index("__HAL_TIM_SET_AUTORELOAD", edge)
+    account = handler.index("_accountCoordinatedEdge", edge)
+    arr = handler.index("__HAL_TIM_SET_AUTORELOAD", account)
     sample = handler.index("const uint32_t timerCount", arr)
     decision = handler.index("CoordinatedXyTimerSchedulePolicy::decide", sample)
     stop = handler.index("TIM_CR1_CEN", decision)
     reset = handler.index("__HAL_TIM_SET_COUNTER", stop)
     clear = handler.index("__HAL_TIM_CLEAR_FLAG", reset)
     restart = handler.index("SET_BIT(_coordinatedMasterTimer->Instance->CR1", clear)
-    account = handler.index("_accountCoordinatedPulse", restart)
-    assert edge < arr < sample < decision < stop < reset < clear < restart < account
+    assert edge < account < arr < sample < decision < stop < reset < clear < restart
+    assert "_accountCoordinatedPulse" not in handler
     assert "lateInjection" not in handler
     assert "intentionalWait" not in handler
+
+
+def test_task_control_clears_stale_tim2_irq_before_a_fresh_edge_interval():
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
+
+    start = gantry[gantry.index("CoordinatedStartStatus Gantry::startCoordinatedXY"):]
+    start = start[: start.index("void Gantry::_resetCoordinatedInstrumentation")]
+    finish = gantry[gantry.index("void Gantry::_finishCoordinatedHardware"):]
+    finish = finish[: finish.index("void Gantry::_finishCoordinatedFromIsr")]
+    pause = gantry[gantry.index("void Gantry::_pauseCoordinatedTask"):]
+    pause = pause[: pause.index("void Gantry::_resumeCoordinatedTask")]
+    resume = gantry[gantry.index("void Gantry::_resumeCoordinatedTask"):]
+    resume = resume[: resume.index("bool Gantry::_cancelCoordinatedTask")]
+    cancel = gantry[gantry.index("bool Gantry::_cancelCoordinatedTask"):]
+    cancel = cancel[: cancel.index("void Gantry::pauseXYZMotors")]
+
+    assert "NVIC_ClearPendingIRQ(TIM2_IRQn);" in start
+    assert "NVIC_ClearPendingIRQ(TIM2_IRQn);" in finish
+    assert "NVIC_ClearPendingIRQ(TIM2_IRQn);" in pause
+    for restarted in (resume, cancel):
+        clear_flag = restarted.index("__HAL_TIM_CLEAR_FLAG")
+        clear_irq = restarted.index("NVIC_ClearPendingIRQ(TIM2_IRQn)", clear_flag)
+        restart = restarted.index("HAL_TIM_Base_Start_IT", clear_irq)
+        assert clear_flag < clear_irq < restart
 
 
 def test_generated_tim2_hooks_preserve_earliest_entry_and_post_hal_deadline_capture():
@@ -125,12 +154,15 @@ def test_generated_tim2_hooks_preserve_earliest_entry_and_post_hal_deadline_capt
 def test_host_executor_tests_cover_counts_pause_cancel_limits_and_faults():
     tests = _read("firmware/tests_host/tests/test_coordinated_xy_executor.cpp")
     for name in (
-        "EveryMagnitudePairUsesTwoEdgesPerMasterStep",
-        "PauseWhileLowStopsImmediatelyAndResumesCachedEvent",
-        "PauseWhileHighFinishesPulseThenResumesNextEvent",
-        "CancelHighAccountsOnlyTheInFlightPulse",
-        "LimitOverridesCancelAndPause",
-        "PlannerMismatchFaultsAfterAccountingTheHighPulse",
+        "EachMasterEventEmitsOneActiveEdgeMask",
+        "IndependentPhasesReturnToEveryInitialState",
+        "PauseStopsAtBoundaryAndPreservesCachedTrace",
+        "CancelHighEmitsOneAccountedCleanupFall",
+        "CleanupFallsOnlyAxesThatAreHigh",
+        "LimitOverridesCancelBeforeCleanup",
+        "PlannerFaultUsesSameBoundedCleanup",
+        "PostEdgePlannerMismatchAccountsThenCleansUp",
+        "ShallowVectorsHaveNoRuntimeSpacingViolations",
     ):
         assert name in tests
     assert "CompleteStep" not in tests

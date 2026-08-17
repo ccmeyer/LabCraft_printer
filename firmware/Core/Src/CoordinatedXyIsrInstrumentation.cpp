@@ -88,7 +88,7 @@ void recordSample(State& state,
                   uint32_t exitCycle,
                   uint32_t arr,
                   bool updatePending,
-                  bool completedPulse,
+                  bool activeEdgeEvent,
                   bool terminal) {
   if (!state.valid || !state.active) return;
 
@@ -98,10 +98,10 @@ void recordSample(State& state,
 
   saturatingIncrement(
       state.totalCallbacks, state.saturationFlags, SaturatedCallbacks);
-  if (completedPulse) {
-    saturatingIncrement(state.completedPulses,
+  if (activeEdgeEvent) {
+    saturatingIncrement(state.activeEdgeEvents,
                         state.saturationFlags,
-                        SaturatedCompletedPulses);
+                        SaturatedActiveEdgeEvents);
   }
 
   const uint32_t elapsed = exitCycle - entryCycle;
@@ -172,6 +172,50 @@ void completeSampleTiming(State& state,
   if (index >= phaseIndex(Phase::Count)) return;
   if (completed > state.phaseMaxCycles[index]) {
     state.phaseMaxCycles[index] = completed;
+  }
+}
+
+void recordTerminalStages(State& state,
+                          uint32_t entryCycle,
+                          uint32_t shutdownStartCycle,
+                          uint32_t shutdownEndCycle,
+                          uint32_t instrumentationEndCycle) {
+  if (!state.valid) return;
+
+  const uint32_t commonCycles = shutdownStartCycle - entryCycle;
+  const uint32_t shutdownCycles = shutdownEndCycle - shutdownStartCycle;
+  const uint32_t instrumentationCycles =
+      instrumentationEndCycle - shutdownEndCycle;
+  const uint32_t totalCycles = instrumentationEndCycle - entryCycle;
+  const uint64_t stageTotal = static_cast<uint64_t>(commonCycles) +
+      static_cast<uint64_t>(shutdownCycles) + instrumentationCycles;
+  const bool firstSample = state.terminalStageSamples == 0u;
+
+  saturatingIncrement(state.terminalStageSamples,
+                      state.saturationFlags,
+                      SaturatedTerminalStageSamples);
+  saturatingAdd(state.terminalTotalCycles,
+                totalCycles,
+                state.saturationFlags,
+                SaturatedTerminalStageTotal);
+  if (firstSample || totalCycles < state.terminalMinCycles) {
+    state.terminalMinCycles = totalCycles;
+  }
+  if (stageTotal != static_cast<uint64_t>(totalCycles)) {
+    saturatingIncrement(state.terminalStageAccountingViolations,
+                        state.saturationFlags,
+                        SaturatedTerminalStageAccounting);
+  }
+
+  state.currentTerminalIsWorst =
+      firstSample || totalCycles > state.worstTerminalTotalCycles;
+  if (state.currentTerminalIsWorst) {
+    state.worstTerminalTotalCycles = totalCycles;
+    state.worstTerminalCommonCycles = commonCycles;
+    state.worstTerminalShutdownCycles = shutdownCycles;
+    state.worstTerminalInstrumentationCycles = instrumentationCycles;
+    state.worstTerminalPreHandlerCycles = 0u;
+    state.worstTerminalFullIrqCycles = 0u;
   }
 }
 
@@ -248,6 +292,9 @@ void beginIrqPathSample(State& state,
   if (preHandlerCycles > state.preHandlerMaxCycles) {
     state.preHandlerMaxCycles = preHandlerCycles;
   }
+  if (terminal && state.currentTerminalIsWorst) {
+    state.worstTerminalPreHandlerCycles = preHandlerCycles;
+  }
   if (updatePending &&
       preHandlerCycles > state.pendingPreHandlerMaxCycles) {
     state.pendingPreHandlerMaxCycles = preHandlerCycles;
@@ -272,6 +319,9 @@ void completeIrqPath(State& state, uint32_t irqExitCycle) {
       fullIrqCycles > state.terminalFullIrqMaxCycles) {
     state.terminalFullIrqMaxCycles = fullIrqCycles;
   }
+  if (state.irqPathSampleTerminal && state.currentTerminalIsWorst) {
+    state.worstTerminalFullIrqCycles = fullIrqCycles;
+  }
   if (state.irqPathSamplePending &&
       fullIrqCycles > state.pendingFullIrqMaxCycles) {
     state.pendingFullIrqMaxCycles = fullIrqCycles;
@@ -279,6 +329,7 @@ void completeIrqPath(State& state, uint32_t irqExitCycle) {
   state.irqPathSampleOpen = false;
   state.irqPathSamplePending = false;
   state.irqPathSampleTerminal = false;
+  state.currentTerminalIsWorst = false;
 }
 
 void recordTim2Deadline(State& state,
@@ -324,13 +375,25 @@ Snapshot makeSnapshot(const State& state) {
   snapshot.cycleWraps = state.cycleWraps;
   snapshot.durationCycles = durationCycles(state);
   snapshot.totalCallbacks = state.totalCallbacks;
-  snapshot.completedPulses = state.completedPulses;
+  snapshot.activeEdgeEvents = state.activeEdgeEvents;
   for (uint8_t i = 0u; i < phaseIndex(Phase::Count); ++i) {
     snapshot.phaseCallbacks[i] = state.phaseCallbacks[i];
     snapshot.phaseMaxCycles[i] = state.phaseMaxCycles[i];
   }
   snapshot.terminalCallbacks = state.terminalCallbacks;
   snapshot.terminalMaxCycles = state.terminalMaxCycles;
+  snapshot.terminalStageSamples = state.terminalStageSamples;
+  snapshot.terminalMinCycles = state.terminalMinCycles;
+  snapshot.terminalTotalCycles = state.terminalTotalCycles;
+  snapshot.terminalStageAccountingViolations =
+      state.terminalStageAccountingViolations;
+  snapshot.worstTerminalCommonCycles = state.worstTerminalCommonCycles;
+  snapshot.worstTerminalShutdownCycles = state.worstTerminalShutdownCycles;
+  snapshot.worstTerminalInstrumentationCycles =
+      state.worstTerminalInstrumentationCycles;
+  snapshot.worstTerminalPreHandlerCycles =
+      state.worstTerminalPreHandlerCycles;
+  snapshot.worstTerminalFullIrqCycles = state.worstTerminalFullIrqCycles;
   snapshot.pendingObservations = state.pendingObservations;
   snapshot.maxPendingStreak = state.maxPendingStreak;
   snapshot.scheduledTimerTicks = state.scheduledTimerTicks;

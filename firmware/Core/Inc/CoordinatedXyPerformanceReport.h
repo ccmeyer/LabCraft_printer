@@ -9,6 +9,10 @@
 
 namespace CoordinatedXyPerformanceReport {
 
+static constexpr uint32_t kCoordinatedActiveHandlerRegressionBudgetCycles =
+    2600u;
+static constexpr uint32_t kCoordinatedTerminalHandlerBudgetCycles = 3500u;
+
 static constexpr uint32_t kMoveFailureTimedOut = 1u << 0;
 static constexpr uint32_t kMoveFailureEndpoint = 1u << 1;
 static constexpr uint32_t kMoveFailureTargets = 1u << 2;
@@ -39,23 +43,33 @@ static constexpr uint32_t kMoveFailureTimerRearm = 1u << 26;
 static constexpr uint32_t kMoveFailureScheduleSaturation = 1u << 27;
 static constexpr uint32_t kMoveFailureTerminalReason = 1u << 28;
 static constexpr uint32_t kMoveFailureEntryLateness = 1u << 29;
+static constexpr uint32_t kMoveFailureCleanupEdges = 1u << 30;
+static constexpr uint32_t kMoveFailureEdgeSpacing = 1u << 31;
 
 struct Limits {
-  uint32_t activeMaxCycles = 2025u;
+  uint32_t activeMaxCycles =
+      kCoordinatedActiveHandlerRegressionBudgetCycles;
   // Terminal cleanup runs after the final STEP edge while TIM2 is stopping,
-  // so it is not constrained by the 2,250-cycle active edge interval. Keep a
-  // separate bounded regression gate above the accepted 2,508-cycle HIL max.
-  uint32_t terminalMaxCycles = 2700u;
+  // so it is not constrained by the 4,500-core-cycle active edge interval.
+  // Keep a separate bounded regression gate with 20% margin above the
+  // accepted 2,910-cycle HIL maximum.
+  uint32_t terminalMaxCycles = kCoordinatedTerminalHandlerBudgetCycles;
   uint32_t durationErrorMaxBasisPoints = 100u;
   uint32_t statusPeriodMaxMs = 100u;
   uint32_t statusWatchdogAgeMaxMs = 100u;
   uint32_t maxCycleWrapsPerMove = 1u;
 };
 
+struct ShallowMoveTimingExpectation {
+  uint32_t selectedRateHz = 0u;
+  uint32_t targetArr = 0u;
+  uint32_t startArr = 0u;
+};
+
 struct MoveObservation {
-  uint32_t expectedXSteps = 0u;
-  uint32_t expectedYSteps = 0u;
-  uint32_t expectedMasterSteps = 0u;
+  uint32_t expectedXEdges = 0u;
+  uint32_t expectedYEdges = 0u;
+  uint32_t expectedMasterEdges = 0u;
   uint32_t expectedRateHz = 0u;
   uint32_t expectedTargetArr = 0u;
   uint32_t expectedStartArr = 0u;
@@ -68,11 +82,13 @@ struct MoveObservation {
   uint32_t timerScheduleSaturationFlags = 0u;
   CoordinatedXyExecutor::TerminalReason terminalReason =
       CoordinatedXyExecutor::TerminalReason::None;
-  uint32_t requestedXSteps = 0u;
-  uint32_t requestedYSteps = 0u;
-  uint32_t emittedXSteps = 0u;
-  uint32_t emittedYSteps = 0u;
-  uint32_t masterSteps = 0u;
+  uint32_t requestedXEdges = 0u;
+  uint32_t requestedYEdges = 0u;
+  uint32_t emittedXEdges = 0u;
+  uint32_t emittedYEdges = 0u;
+  uint32_t masterEdges = 0u;
+  uint32_t cleanupEdgeEvents = 0u;
+  uint32_t edgeSpacingViolations = 0u;
   uint32_t selectedRateHz = 0u;
   uint32_t timer2Callbacks = 0u;
   uint32_t timer7Callbacks = 0u;
@@ -99,12 +115,15 @@ struct MoveObservation {
 
 struct Aggregate {
   uint32_t moveCount = 0u;
-  uint32_t expectedXSteps = 0u;
-  uint32_t expectedYSteps = 0u;
-  uint32_t expectedMasterSteps = 0u;
-  uint32_t emittedXSteps = 0u;
-  uint32_t emittedYSteps = 0u;
-  uint32_t masterSteps = 0u;
+  uint32_t moveFailureMask = 0u;
+  uint32_t expectedXEdges = 0u;
+  uint32_t expectedYEdges = 0u;
+  uint32_t expectedMasterEdges = 0u;
+  uint32_t emittedXEdges = 0u;
+  uint32_t emittedYEdges = 0u;
+  uint32_t masterEdges = 0u;
+  uint32_t cleanupEdgeEvents = 0u;
+  uint32_t edgeSpacingViolations = 0u;
   uint32_t timer2Callbacks = 0u;
   uint32_t timer7Callbacks = 0u;
   uint32_t timerRearmCount = 0u;
@@ -117,6 +136,16 @@ struct Aggregate {
   uint32_t phaseCallbacks[static_cast<uint8_t>(CoordinatedXyIsrInstrumentation::Phase::Count)] = {};
   uint32_t phaseMaxCycles[static_cast<uint8_t>(CoordinatedXyIsrInstrumentation::Phase::Count)] = {};
   uint32_t terminalMaxCycles = 0u;
+  uint32_t terminalSampleCount = 0u;
+  uint32_t terminalMinCycles = 0u;
+  uint32_t terminalTotalCycles = 0u;
+  uint32_t terminalOverBudgetCount = 0u;
+  uint32_t terminalStageAccountingViolations = 0u;
+  uint32_t worstTerminalCommonCycles = 0u;
+  uint32_t worstTerminalShutdownCycles = 0u;
+  uint32_t worstTerminalInstrumentationCycles = 0u;
+  uint32_t worstTerminalPreHandlerCycles = 0u;
+  uint32_t worstTerminalFullIrqCycles = 0u;
   uint32_t irqPathSamples = 0u;
   uint32_t irqPathMissing = 0u;
   uint32_t preHandlerMaxCycles = 0u;
@@ -150,22 +179,44 @@ struct Aggregate {
   bool exactAndSafe = true;
 };
 
+struct CameraTransitionEvidence {
+  uint32_t failureStage = 0u;
+  bool transitionSafe = false;
+  bool stepsLow = false;
+  bool timerOwned = false;
+  bool limitBefore = false;
+  int32_t homeStartPositionSteps = 0;
+  int32_t homeEndPositionSteps = 0;
+  uint32_t homeGuardSteps = 0u;
+  uint32_t homeIsrEntries = 0u;
+  uint32_t homeCompletedPulses = 0u;
+  uint32_t homePendingObservations = 0u;
+  uint32_t homeDriftSteps = 0u;
+  bool homeEvidence = false;
+};
+
 uint32_t boundedHomeGuardSteps(int32_t currentPositionSteps,
                                uint32_t axisEnvelopeMaximumSteps,
                                uint32_t marginSteps,
                                uint32_t minimumGuardSteps,
                                bool positionKnown);
+bool shallowMoveTimingExpectation(
+    uint32_t requestedRateHz,
+    uint32_t masterEdges,
+    ShallowMoveTimingExpectation& expectation);
 uint32_t moveFailureMask(const MoveObservation& observation,
                          const Limits& limits);
 bool movePasses(const MoveObservation& observation, const Limits& limits);
+bool canContinueAfterTerminalBudgetOnlyFailure(uint32_t failureMask);
+uint32_t terminalAverageCycles(const Aggregate& aggregate);
 void addMove(Aggregate& aggregate,
              const MoveObservation& observation,
              const Limits& limits);
 bool aggregatePasses(const Aggregate& aggregate,
                      uint32_t expectedMoves,
-                     uint32_t expectedXSteps,
-                     uint32_t expectedYSteps,
-                     uint32_t expectedMasterSteps,
+                     uint32_t expectedXEdges,
+                     uint32_t expectedYEdges,
+                     uint32_t expectedMasterEdges,
                      const Limits& limits);
 size_t buildMetrics(char* out,
                     size_t capacity,
@@ -173,6 +224,11 @@ size_t buildMetrics(char* out,
                     const Aggregate& aggregate,
                     uint32_t xDriftSteps,
                     uint32_t yDriftSteps);
+size_t buildCameraTransitionMetrics(
+    char* out,
+    size_t capacity,
+    const Aggregate& aggregate,
+    const CameraTransitionEvidence& evidence);
 
 }  // namespace CoordinatedXyPerformanceReport
 

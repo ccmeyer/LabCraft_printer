@@ -1,0 +1,60 @@
+{
+  "schema_version": "qualification_manifest_v0",
+  "manifest_id": "coordinated_xy_shallow_edge_v2",
+  "name": "Coordinated XY Shallow Active-Edge Distribution v2",
+  "profile": "FULL",
+  "lifecycle": "archived",
+  "description": "Focused qualification of the incident shallow-angle vectors with complete terminal timing distributions at 10 and 40 kHz.",
+  "expected_test_ids": [2099, 2100],
+  "enforce_expected_test_ids": true,
+  "requires_operator_prompts": true,
+  "selftest_args": ["--coordinated-xy-shallow-edge-suite"],
+  "required_host_checks": ["selftest_progress_watchdog", "coordinated_xy_status_cadence"],
+  "fixtures": [
+    {
+      "fixture_id": "coordinated_xy_shallow_edge_envelope_clear",
+      "required_for": [2099, 2100],
+      "operator_note": "Confirm both limits are released, the gantry is square, non-dispensing test heads are fitted, and the complete XY/Z envelope is clear. Stop for contact, abnormal sound, loss of holding torque, lost squareness, reset, watchdog evidence, or communication loss."
+    }
+  ],
+  "analysis_rules": {
+    "2099": {
+      "category": "performance",
+      "failure_domain": "firmware_motion",
+      "metrics": {
+        "h1": {"maturity": "acceptance", "equals": 10000},
+        "h2": {"maturity": "acceptance", "equals": 40000},
+        "n": {"maturity": "acceptance", "equals": 24},
+        "xe": {"maturity": "acceptance", "equals": 241592},
+        "ye": {"maturity": "acceptance", "equals": 241592},
+        "me": {"maturity": "acceptance", "equals": 430192},
+        "i2": {"maturity": "acceptance", "equals": 430192},
+        "i7": {"maturity": "acceptance", "equals": 0},
+        "ce": {"maturity": "acceptance", "equals": 0},
+        "sv": {"maturity": "acceptance", "equals": 0},
+        "mf": {"maturity": "acceptance", "equals": 0},
+        "en": {"maturity": "acceptance", "equals": 1},
+        "xd": {"maturity": "acceptance", "max": 25},
+        "yd": {"maturity": "acceptance", "max": 25},
+        "ok": {"maturity": "acceptance", "equals": 1},
+        "sf": {"maturity": "acceptance", "equals": 0},
+        "to": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "2100": {
+      "category": "performance",
+      "failure_domain": "firmware_motion",
+      "metrics": {
+        "bl": {"maturity": "acceptance", "equals": 2700},
+        "h1": {"maturity": "acceptance", "equals": 10000},
+        "n1": {"maturity": "acceptance", "equals": 12},
+        "ob1": {"maturity": "acceptance", "equals": 0},
+        "h2": {"maturity": "acceptance", "equals": 40000},
+        "n2": {"maturity": "acceptance", "equals": 12},
+        "ob2": {"maturity": "acceptance", "equals": 0},
+        "av": {"maturity": "acceptance", "equals": 0},
+        "sf": {"maturity": "acceptance", "equals": 0}
+      }
+    }
+  }
+}

@@ -8,9 +8,9 @@ namespace CoordinatedXyPlanner {
 namespace {
 
 #if defined(__GNUC__) && !defined(UNIT_TEST)
-#define LC_COORDINATED_STEP_OPTIMIZED __attribute__((optimize("O2"), hot))
+#define LC_COORDINATED_EDGE_OPTIMIZED __attribute__((optimize("O2"), hot))
 #else
-#define LC_COORDINATED_STEP_OPTIMIZED
+#define LC_COORDINATED_EDGE_OPTIMIZED
 #endif
 
 constexpr uint64_t kNanosecondsPerSecond = 1000000000ULL;
@@ -65,27 +65,27 @@ uint32_t integerSquareRoot(uint64_t value) {
   return static_cast<uint32_t>(root);
 }
 
-uint64_t requiredProfileRampSteps(uint32_t rateHz,
-                                  uint32_t accelerationStepsPerSec2) {
+uint64_t requiredProfileRampEdges(uint32_t rateHz,
+                                  uint32_t accelerationEdgesPerSec2) {
   const uint64_t rateSquared = static_cast<uint64_t>(rateHz) * rateHz;
   const uint64_t numerator =
       rateSquared * kProfileAccelerationNumerator;
   const uint64_t denominator =
-      static_cast<uint64_t>(accelerationStepsPerSec2) *
+      static_cast<uint64_t>(accelerationEdgesPerSec2) *
       kProfileAccelerationDenominator;
   return ceilDivide(numerator, denominator);
 }
 
 uint32_t maximumTriangularRate(uint32_t requestedRateHz,
-                               uint32_t accelerationStepsPerSec2,
-                               uint32_t rampSteps) {
+                               uint32_t accelerationEdgesPerSec2,
+                               uint32_t rampEdges) {
   uint32_t accepted = 0u;
   uint32_t low = 1u;
   uint32_t high = requestedRateHz;
   while (low <= high) {
     const uint32_t middle = low + ((high - low) / 2u);
-    if (requiredProfileRampSteps(middle, accelerationStepsPerSec2) <=
-        rampSteps) {
+    if (requiredProfileRampEdges(middle, accelerationEdgesPerSec2) <=
+        rampEdges) {
       accepted = middle;
       if (middle == std::numeric_limits<uint32_t>::max()) break;
       low = middle + 1u;
@@ -98,58 +98,58 @@ uint32_t maximumTriangularRate(uint32_t requestedRateHz,
 }
 
 uint64_t scaledMasterLimit(uint32_t axisLimit,
-                           uint32_t masterSteps,
-                           uint32_t axisSteps) {
-  return (static_cast<uint64_t>(axisLimit) * masterSteps) / axisSteps;
+                           uint32_t masterEdges,
+                           uint32_t axisEdges) {
+  return (static_cast<uint64_t>(axisLimit) * masterEdges) / axisEdges;
 }
 
 uint32_t scaledComponent(uint32_t masterValue,
-                         uint32_t axisSteps,
-                         uint32_t masterSteps) {
-  if (axisSteps == 0u) return 0u;
+                         uint32_t axisEdges,
+                         uint32_t masterEdges) {
+  if (axisEdges == 0u) return 0u;
   return static_cast<uint32_t>(
-      (static_cast<uint64_t>(masterValue) * axisSteps) / masterSteps);
+      (static_cast<uint64_t>(masterValue) * axisEdges) / masterEdges);
 }
 
-LC_COORDINATED_STEP_OPTIMIZED
+LC_COORDINATED_EDGE_OPTIMIZED
 bool planMatchesCursor(const CoordinatedXyPlan& plan, const Cursor& cursor) {
   return plan.status == PlanStatus::Ready &&
-         cursor.expectedMasterSteps == plan.masterSteps &&
-         cursor.expectedXSteps == plan.xSteps &&
-         cursor.expectedYSteps == plan.ySteps;
+         cursor.expectedMasterEdges == plan.masterEdges &&
+         cursor.expectedXEdges == plan.xEdges &&
+         cursor.expectedYEdges == plan.yEdges;
 }
 
-LC_COORDINATED_STEP_OPTIMIZED
-StepMask nextMask(const CoordinatedXyPlan& plan, Cursor& cursor) {
-  StepMask mask = StepMask::None;
-  if (plan.xSteps != 0u) {
+LC_COORDINATED_EDGE_OPTIMIZED
+EdgeMask nextMask(const CoordinatedXyPlan& plan, Cursor& cursor) {
+  EdgeMask mask = EdgeMask::None;
+  if (plan.xEdges != 0u) {
     cursor.xAccumulator += plan.ddaIncrementX;
     if (cursor.xAccumulator >= plan.ddaThreshold) {
       cursor.xAccumulator -= plan.ddaThreshold;
-      mask = mask | StepMask::X;
+      mask = mask | EdgeMask::X;
     }
   }
-  if (plan.ySteps != 0u) {
+  if (plan.yEdges != 0u) {
     cursor.yAccumulator += plan.ddaIncrementY;
     if (cursor.yAccumulator >= plan.ddaThreshold) {
       cursor.yAccumulator -= plan.ddaThreshold;
-      mask = mask | StepMask::Y;
+      mask = mask | EdgeMask::Y;
     }
   }
   return mask;
 }
 
-LC_COORDINATED_STEP_OPTIMIZED
+LC_COORDINATED_EDGE_OPTIMIZED
 void primeEvent(const CoordinatedXyPlan& plan, Cursor& cursor) {
-  StepEvent event{};
-  event.masterStepIndex = cursor.completedMasterSteps;
+  EdgeEvent event{};
+  event.masterEdgeIndex = cursor.completedMasterEdges;
   event.mask = nextMask(plan, cursor);
 
-  if (event.masterStepIndex < plan.accelerationSteps) {
+  if (event.masterEdgeIndex < plan.accelerationEdges) {
     event.phase = ProfilePhase::Acceleration;
     event.arr = NormalizedCosineProfile::currentArr(cursor.accelerationCursor);
-  } else if (event.masterStepIndex <
-             (plan.accelerationSteps + plan.cruiseSteps)) {
+  } else if (event.masterEdgeIndex <
+             (plan.accelerationEdges + plan.cruiseEdges)) {
     event.phase = ProfilePhase::Cruise;
     event.arr = plan.targetArr;
   } else {
@@ -171,54 +171,54 @@ PlanStatus prepare(const PlanRequest& request, CoordinatedXyPlan& plan) {
     plan.status = PlanStatus::ArithmeticOverflow;
     return plan.status;
   }
-  if (!magnitudeOf(request.deltaX, plan.xSteps) ||
-      !magnitudeOf(request.deltaY, plan.ySteps)) {
+  if (!magnitudeOf(request.deltaX, plan.xEdges) ||
+      !magnitudeOf(request.deltaY, plan.yEdges)) {
     plan.status = PlanStatus::OutOfRange;
     return plan.status;
   }
 
-  plan.masterSteps = std::max(plan.xSteps, plan.ySteps);
-  plan.ddaIncrementX = plan.xSteps;
-  plan.ddaIncrementY = plan.ySteps;
-  plan.ddaThreshold = plan.masterSteps;
-  if (plan.masterSteps == 0u) {
+  plan.masterEdges = std::max(plan.xEdges, plan.yEdges);
+  plan.ddaIncrementX = plan.xEdges;
+  plan.ddaIncrementY = plan.yEdges;
+  plan.ddaThreshold = plan.masterEdges;
+  if (plan.masterEdges == 0u) {
     plan.status = PlanStatus::Immediate;
     return plan.status;
   }
 
-  if ((plan.xSteps != 0u &&
+  if ((plan.xEdges != 0u &&
        (request.xLimits.maxRateHz == 0u ||
-        request.xLimits.accelerationStepsPerSec2 == 0u)) ||
-      (plan.ySteps != 0u &&
+        request.xLimits.accelerationEdgesPerSec2 == 0u)) ||
+      (plan.yEdges != 0u &&
        (request.yLimits.maxRateHz == 0u ||
-        request.yLimits.accelerationStepsPerSec2 == 0u)) ||
+        request.yLimits.accelerationEdgesPerSec2 == 0u)) ||
       request.timer.inputClockHz == 0u ||
-      request.timer.minPulseNs == 0u) {
+      request.timer.minEdgeIntervalNs == 0u) {
     plan.status = PlanStatus::InvalidLimits;
     return plan.status;
   }
 
   uint64_t rateCap = std::numeric_limits<uint64_t>::max();
   uint64_t accelerationCap = std::numeric_limits<uint64_t>::max();
-  if (plan.xSteps != 0u) {
+  if (plan.xEdges != 0u) {
     rateCap = std::min(rateCap, scaledMasterLimit(
-        request.xLimits.maxRateHz, plan.masterSteps, plan.xSteps));
+        request.xLimits.maxRateHz, plan.masterEdges, plan.xEdges));
     accelerationCap = std::min(accelerationCap, scaledMasterLimit(
-        request.xLimits.accelerationStepsPerSec2,
-        plan.masterSteps,
-        plan.xSteps));
+        request.xLimits.accelerationEdgesPerSec2,
+        plan.masterEdges,
+        plan.xEdges));
   }
-  if (plan.ySteps != 0u) {
+  if (plan.yEdges != 0u) {
     rateCap = std::min(rateCap, scaledMasterLimit(
-        request.yLimits.maxRateHz, plan.masterSteps, plan.ySteps));
+        request.yLimits.maxRateHz, plan.masterEdges, plan.yEdges));
     accelerationCap = std::min(accelerationCap, scaledMasterLimit(
-        request.yLimits.accelerationStepsPerSec2,
-        plan.masterSteps,
-        plan.ySteps));
+        request.yLimits.accelerationEdgesPerSec2,
+        plan.masterEdges,
+        plan.yEdges));
   }
 
   uint64_t minimumTicks = ceilDivide(
-      static_cast<uint64_t>(request.timer.minPulseNs) *
+      static_cast<uint64_t>(request.timer.minEdgeIntervalNs) *
           request.timer.inputClockHz,
       kNanosecondsPerSecond);
   if (minimumTicks < 2u) minimumTicks = 2u;
@@ -228,8 +228,7 @@ PlanStatus prepare(const PlanRequest& request, CoordinatedXyPlan& plan) {
   }
   plan.minArr = static_cast<uint32_t>(minimumTicks - 1u);
 
-  const uint64_t timerDenominator = 2u * minimumTicks;
-  const uint64_t timerRateCap = request.timer.inputClockHz / timerDenominator;
+  const uint64_t timerRateCap = request.timer.inputClockHz / minimumTicks;
   rateCap = std::min(rateCap, timerRateCap);
   if (rateCap == 0u || accelerationCap == 0u ||
       rateCap > std::numeric_limits<uint32_t>::max() ||
@@ -239,10 +238,10 @@ PlanStatus prepare(const PlanRequest& request, CoordinatedXyPlan& plan) {
   }
 
   plan.masterRateCapHz = static_cast<uint32_t>(rateCap);
-  plan.masterAccelerationCapStepsPerSec2 =
+  plan.masterAccelerationCapEdgesPerSec2 =
       static_cast<uint32_t>(accelerationCap);
-  plan.masterAccelerationStepsPerSec2 =
-      plan.masterAccelerationCapStepsPerSec2;
+  plan.masterAccelerationEdgesPerSec2 =
+      plan.masterAccelerationCapEdgesPerSec2;
   plan.masterRateHz = request.requestedMasterRateHz == 0u
       ? plan.masterRateCapHz
       : std::min(request.requestedMasterRateHz, plan.masterRateCapHz);
@@ -251,32 +250,31 @@ PlanStatus prepare(const PlanRequest& request, CoordinatedXyPlan& plan) {
     return plan.status;
   }
 
-  const uint64_t requestedAccelerationSteps =
-      requiredProfileRampSteps(plan.masterRateHz,
-                               plan.masterAccelerationStepsPerSec2);
+  const uint64_t requestedAccelerationEdges =
+      requiredProfileRampEdges(plan.masterRateHz,
+                               plan.masterAccelerationEdgesPerSec2);
 
-  if ((requestedAccelerationSteps * 2u) <= plan.masterSteps) {
-    plan.accelerationSteps = static_cast<uint32_t>(requestedAccelerationSteps);
-    plan.decelerationSteps = plan.accelerationSteps;
-    plan.cruiseSteps = plan.masterSteps - plan.accelerationSteps -
-                       plan.decelerationSteps;
+  if ((requestedAccelerationEdges * 2u) <= plan.masterEdges) {
+    plan.accelerationEdges = static_cast<uint32_t>(requestedAccelerationEdges);
+    plan.decelerationEdges = plan.accelerationEdges;
+    plan.cruiseEdges = plan.masterEdges - plan.accelerationEdges -
+                       plan.decelerationEdges;
   } else {
-    plan.accelerationSteps = plan.masterSteps / 2u;
-    plan.decelerationSteps = plan.accelerationSteps;
-    plan.cruiseSteps = plan.masterSteps - plan.accelerationSteps -
-                       plan.decelerationSteps;
-    uint32_t peakRate = plan.accelerationSteps == 0u
-        ? integerSquareRoot(plan.masterAccelerationStepsPerSec2)
+    plan.accelerationEdges = plan.masterEdges / 2u;
+    plan.decelerationEdges = plan.accelerationEdges;
+    plan.cruiseEdges = plan.masterEdges - plan.accelerationEdges -
+                       plan.decelerationEdges;
+    uint32_t peakRate = plan.accelerationEdges == 0u
+        ? integerSquareRoot(plan.masterAccelerationEdgesPerSec2)
         : maximumTriangularRate(plan.masterRateHz,
-                                plan.masterAccelerationStepsPerSec2,
-                                plan.accelerationSteps);
+                                plan.masterAccelerationEdgesPerSec2,
+                                plan.accelerationEdges);
     if (peakRate == 0u) peakRate = 1u;
     plan.masterRateHz = std::min(peakRate, plan.masterRateCapHz);
     plan.triangular = true;
   }
 
-  const uint64_t arrDenominator =
-      static_cast<uint64_t>(plan.masterRateHz) * 2u;
+  const uint64_t arrDenominator = static_cast<uint64_t>(plan.masterRateHz);
   const uint64_t arrPlusOne = request.timer.inputClockHz / arrDenominator;
   if (arrPlusOne < 2u) {
     plan.status = PlanStatus::InvalidLimits;
@@ -300,27 +298,27 @@ PlanStatus prepare(const PlanRequest& request, CoordinatedXyPlan& plan) {
   if (plan.startArr < plan.minArr) plan.startArr = plan.minArr;
 
   plan.xRateHz = scaledComponent(
-      plan.masterRateHz, plan.xSteps, plan.masterSteps);
+      plan.masterRateHz, plan.xEdges, plan.masterEdges);
   plan.yRateHz = scaledComponent(
-      plan.masterRateHz, plan.ySteps, plan.masterSteps);
-  plan.xAccelerationStepsPerSec2 = scaledComponent(
-      plan.masterAccelerationStepsPerSec2, plan.xSteps, plan.masterSteps);
-  plan.yAccelerationStepsPerSec2 = scaledComponent(
-      plan.masterAccelerationStepsPerSec2, plan.ySteps, plan.masterSteps);
+      plan.masterRateHz, plan.yEdges, plan.masterEdges);
+  plan.xAccelerationEdgesPerSec2 = scaledComponent(
+      plan.masterAccelerationEdgesPerSec2, plan.xEdges, plan.masterEdges);
+  plan.yAccelerationEdgesPerSec2 = scaledComponent(
+      plan.masterAccelerationEdgesPerSec2, plan.yEdges, plan.masterEdges);
 
   plan.accelerationRamp = {
       plan.startArr,
       plan.targetArr,
       plan.minArr,
       request.timer.maxArr,
-      plan.accelerationSteps,
+      plan.accelerationEdges,
   };
   plan.decelerationRamp = {
       plan.targetArr,
       plan.startArr,
       plan.minArr,
       request.timer.maxArr,
-      plan.decelerationSteps,
+      plan.decelerationEdges,
   };
   plan.status = PlanStatus::Ready;
   return plan.status;
@@ -333,7 +331,7 @@ TraceStatus begin(const CoordinatedXyPlan& plan, Cursor& cursor) {
     cursor.complete = true;
     return TraceStatus::Complete;
   }
-  if (plan.status != PlanStatus::Ready || plan.masterSteps == 0u) {
+  if (plan.status != PlanStatus::Ready || plan.masterEdges == 0u) {
     return TraceStatus::InvalidPlan;
   }
 
@@ -349,37 +347,37 @@ TraceStatus begin(const CoordinatedXyPlan& plan, Cursor& cursor) {
     return TraceStatus::InvalidPlan;
   }
 
-  cursor.expectedMasterSteps = plan.masterSteps;
-  cursor.expectedXSteps = plan.xSteps;
-  cursor.expectedYSteps = plan.ySteps;
-  cursor.xAccumulator = plan.masterSteps / 2u;
-  cursor.yAccumulator = plan.masterSteps / 2u;
+  cursor.expectedMasterEdges = plan.masterEdges;
+  cursor.expectedXEdges = plan.xEdges;
+  cursor.expectedYEdges = plan.yEdges;
+  cursor.xAccumulator = plan.masterEdges / 2u;
+  cursor.yAccumulator = plan.masterEdges / 2u;
   cursor.active = true;
   primeEvent(plan, cursor);
   return TraceStatus::Ready;
 }
 
-LC_COORDINATED_STEP_OPTIMIZED
-TraceStatus currentEvent(const Cursor& cursor, StepEvent& event) {
+LC_COORDINATED_EDGE_OPTIMIZED
+TraceStatus currentEvent(const Cursor& cursor, EdgeEvent& event) {
   if (cursor.complete) return TraceStatus::Complete;
   if (!cursor.active) return TraceStatus::InvalidState;
   event = cursor.cachedEvent;
   return TraceStatus::Ready;
 }
 
-LC_COORDINATED_STEP_OPTIMIZED
-TraceStatus completeCurrentStep(const CoordinatedXyPlan& plan, Cursor& cursor) {
+LC_COORDINATED_EDGE_OPTIMIZED
+TraceStatus completeCurrentEdge(const CoordinatedXyPlan& plan, Cursor& cursor) {
   if (!cursor.active || cursor.complete || !planMatchesCursor(plan, cursor) ||
-      cursor.cachedEvent.masterStepIndex != cursor.completedMasterSteps) {
+      cursor.cachedEvent.masterEdgeIndex != cursor.completedMasterEdges) {
     return TraceStatus::InvalidState;
   }
 
   const uint8_t eventMask = static_cast<uint8_t>(cursor.cachedEvent.mask);
-  if ((eventMask & static_cast<uint8_t>(StepMask::X)) != 0u) {
-    ++cursor.xEmittedSteps;
+  if ((eventMask & static_cast<uint8_t>(EdgeMask::X)) != 0u) {
+    ++cursor.xEmittedEdges;
   }
-  if ((eventMask & static_cast<uint8_t>(StepMask::Y)) != 0u) {
-    ++cursor.yEmittedSteps;
+  if ((eventMask & static_cast<uint8_t>(EdgeMask::Y)) != 0u) {
+    ++cursor.yEmittedEdges;
   }
 
   if (cursor.cachedEvent.phase == ProfilePhase::Acceleration) {
@@ -392,17 +390,17 @@ TraceStatus completeCurrentStep(const CoordinatedXyPlan& plan, Cursor& cursor) {
     }
   }
 
-  ++cursor.completedMasterSteps;
-  if (cursor.completedMasterSteps >= plan.masterSteps) {
-    if (cursor.xEmittedSteps != plan.xSteps ||
-        cursor.yEmittedSteps != plan.ySteps ||
-        (plan.accelerationSteps != 0u &&
+  ++cursor.completedMasterEdges;
+  if (cursor.completedMasterEdges >= plan.masterEdges) {
+    if (cursor.xEmittedEdges != plan.xEdges ||
+        cursor.yEmittedEdges != plan.yEdges ||
+        (plan.accelerationEdges != 0u &&
          !NormalizedCosineProfile::atEndpoint(cursor.accelerationCursor)) ||
-        (plan.decelerationSteps != 0u &&
+        (plan.decelerationEdges != 0u &&
          !NormalizedCosineProfile::atEndpoint(cursor.decelerationCursor))) {
       return TraceStatus::InvalidState;
     }
-    cursor.cachedEvent = StepEvent{};
+    cursor.cachedEvent = EdgeEvent{};
     cursor.active = false;
     cursor.complete = true;
     return TraceStatus::Complete;
@@ -416,6 +414,6 @@ bool isComplete(const Cursor& cursor) {
   return cursor.complete;
 }
 
-#undef LC_COORDINATED_STEP_OPTIMIZED
+#undef LC_COORDINATED_EDGE_OPTIMIZED
 
 }  // namespace CoordinatedXyPlanner

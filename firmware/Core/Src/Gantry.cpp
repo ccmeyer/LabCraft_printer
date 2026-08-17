@@ -140,7 +140,7 @@ void gantryStopAndClearUpdateTimer(TIM_HandleTypeDef* timer) {
 
   // Coordinated execution owns these base timers exclusively. Avoid the
   // comparatively expensive HAL stop path on the terminal edge so the final
-  // pulse has the same bounded ISR budget as every other edge.
+  // active edge has the same bounded ISR budget as every other edge.
   timer->Instance->DIER &= ~TIM_IT_UPDATE;
   timer->Instance->CR1 &= ~TIM_CR1_CEN;
   timer->Instance->SR = ~TIM_FLAG_UPDATE;
@@ -270,12 +270,16 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
     return _coordinatedStartStatus;
   }
 
-  const int64_t nativeDx = xMove.positive
-      ? static_cast<int64_t>(xMove.nativeStepCycles)
-      : -static_cast<int64_t>(xMove.nativeStepCycles);
-  const int64_t nativeDy = yMove.positive
-      ? static_cast<int64_t>(yMove.nativeStepCycles)
-      : -static_cast<int64_t>(yMove.nativeStepCycles);
+  const uint32_t xActiveEdges = MotionUnitScale::toCoordinatedActiveEdges(
+      xMove.logicalMagnitude);
+  const uint32_t yActiveEdges = MotionUnitScale::toCoordinatedActiveEdges(
+      yMove.logicalMagnitude);
+  const int64_t edgeDx = xMove.positive
+      ? static_cast<int64_t>(xActiveEdges)
+      : -static_cast<int64_t>(xActiveEdges);
+  const int64_t edgeDy = yMove.positive
+      ? static_cast<int64_t>(yActiveEdges)
+      : -static_cast<int64_t>(yActiveEdges);
 
   auto accelerationLimit = [](Stepper* stepper) -> uint32_t {
     const float acceleration = stepper->accelStepsPerSec2();
@@ -283,19 +287,17 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
         acceleration > static_cast<float>(std::numeric_limits<uint32_t>::max())) {
       return 0u;
     }
-    return MotionUnitScale::toNativeAcceleration(
-        static_cast<uint32_t>(acceleration));
+    return static_cast<uint32_t>(acceleration);
   };
 
   CoordinatedXyPlanner::PlanRequest request{};
-  request.deltaX = nativeDx;
-  request.deltaY = nativeDy;
-  request.requestedMasterRateHz =
-      MotionUnitScale::toNativeRate(requestedRateHz);
+  request.deltaX = edgeDx;
+  request.deltaY = edgeDy;
+  request.requestedMasterRateHz = requestedRateHz;
   request.xLimits = {
-      MotionUnitScale::toNativeRate(sx->maxSpeedHz()), accelerationLimit(sx)};
+      sx->maxSpeedHz(), accelerationLimit(sx)};
   request.yLimits = {
-      MotionUnitScale::toNativeRate(sy->maxSpeedHz()), accelerationLimit(sy)};
+      sy->maxSpeedHz(), accelerationLimit(sy)};
   request.timer = {
       gantryTimerInputHz(sx->_htim, sx->_prescaler),
       gantryTimerMaxArr(sx->_htim),
@@ -331,8 +333,8 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
     _coordinatedStartStatus = CoordinatedStartStatus::InvalidPlan;
     return _coordinatedStartStatus;
   }
-  const bool xParticipates = plan.xSteps != 0u;
-  const bool yParticipates = plan.ySteps != 0u;
+  const bool xParticipates = plan.xEdges != 0u;
+  const bool yParticipates = plan.yEdges != 0u;
   const bool xDirection =
       plan.xDirection == CoordinatedXyPlanner::Direction::Positive;
   const bool yDirection =
@@ -363,14 +365,6 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
     _coordinatedStartStatus = CoordinatedStartStatus::HardwareMismatch;
     return _coordinatedStartStatus;
   }
-
-  CoordinatedXyExecutor::Cursor executorCursor{};
-  if (CoordinatedXyExecutor::arm(plan, executorCursor) !=
-      CoordinatedXyExecutor::ArmStatus::Ready) {
-    _coordinatedStartStatus = CoordinatedStartStatus::InvalidPlan;
-    return _coordinatedStartStatus;
-  }
-  uint32_t firstProgrammedArr = executorCursor.cachedEvent.arr;
 
   const CoordinatedXyExecutor::AxisReservationState xReservation{
       sx->_togglesRemaining != 0u || sx->_legacyMoveStartPending,
@@ -420,6 +414,30 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
   HAL_TIM_Base_Stop_IT(sy->_htim);
   __HAL_TIM_CLEAR_FLAG(sx->_htim, TIM_FLAG_UPDATE);
   __HAL_TIM_CLEAR_FLAG(sy->_htim, TIM_FLAG_UPDATE);
+  NVIC_ClearPendingIRQ(TIM2_IRQn);
+  NVIC_ClearPendingIRQ(TIM7_IRQn);
+
+  bool initialXStepHigh = false;
+  bool initialYStepHigh = false;
+  if (!sx->_readCoordinatedStepHigh(initialXStepHigh) ||
+      !sy->_readCoordinatedStepHigh(initialYStepHigh) ||
+      initialXStepHigh || initialYStepHigh) {
+    sy->_releaseCoordinatedReservation();
+    sx->_releaseCoordinatedReservation();
+    _coordinatedStartStatus = CoordinatedStartStatus::HardwareMismatch;
+    return _coordinatedStartStatus;
+  }
+
+  CoordinatedXyExecutor::Cursor executorCursor{};
+  if (CoordinatedXyExecutor::arm(
+          plan, executorCursor, initialXStepHigh, initialYStepHigh) !=
+      CoordinatedXyExecutor::ArmStatus::Ready) {
+    sy->_releaseCoordinatedReservation();
+    sx->_releaseCoordinatedReservation();
+    _coordinatedStartStatus = CoordinatedStartStatus::InvalidPlan;
+    return _coordinatedStartStatus;
+  }
+  const uint32_t firstProgrammedArr = executorCursor.cachedEvent.arr;
 
   sx->_prepareCoordinatedAxis(
       xParticipates,
@@ -513,6 +531,8 @@ void Gantry::_finishCoordinatedHardware(bool aborted,
   if (_coordinatedY != nullptr) {
     gantryStopAndClearUpdateTimer(_coordinatedY->_htim);
   }
+  NVIC_ClearPendingIRQ(TIM2_IRQn);
+  NVIC_ClearPendingIRQ(TIM7_IRQn);
   if (_coordinatedX != nullptr) {
     if (aborted) {
       if (stepStateKnownLow) {
@@ -551,8 +571,8 @@ void Gantry::_finishCoordinatedFromIsr(bool aborted,
     CoordinatedXyIsrInstrumentation::markAborted(_coordinatedTiming);
   }
 #endif
-  // Executor terminal transitions are accepted only while STEP is already
-  // low: either before a new rise or immediately after the accounted fall.
+  // Executor terminal transitions are accepted only after every active edge
+  // has been accounted and both STEP outputs are known low.
   _finishCoordinatedHardware(aborted, true);
   xEventGroupSetBitsFromISR(Orchestrator::getDoneEvents(),
                             BIT_STEPPER1_DONE | BIT_STEPPER2_DONE,
@@ -679,28 +699,27 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
       CoordinatedXyExecutor::onTimerUpdate(
           _coordinatedPlan, _coordinatedCursor, tick);
   _observeCoordinatedArr(tick.arr);
-  const uint8_t tickMask = static_cast<uint8_t>(tick.mask);
-  const bool stepX =
-      (tickMask & static_cast<uint8_t>(CoordinatedXyPlanner::StepMask::X)) != 0u;
-  const bool stepY =
-      (tickMask & static_cast<uint8_t>(CoordinatedXyPlanner::StepMask::Y)) != 0u;
+  const uint8_t edgeMask = static_cast<uint8_t>(tick.edgeMask);
+  const uint8_t highMask = static_cast<uint8_t>(tick.highMask);
+  const uint8_t lowMask = static_cast<uint8_t>(tick.lowMask);
+  const uint8_t accountMask = static_cast<uint8_t>(tick.accountEdgeMask);
+  const uint8_t xMask =
+      static_cast<uint8_t>(CoordinatedXyPlanner::EdgeMask::X);
+  const uint8_t yMask =
+      static_cast<uint8_t>(CoordinatedXyPlanner::EdgeMask::Y);
 
-  bool physicalEdgeEmitted = false;
-  if (status == CoordinatedXyExecutor::TickStatus::Raised) {
-    if (stepX) {
-      _coordinatedX->_writeCoordinatedStep(true);
-    }
-    if (stepY) {
-      _coordinatedY->_writeCoordinatedStep(true);
-    }
-    physicalEdgeEmitted = stepX || stepY;
-  } else if (tick.accountCompletePulse) {
-    if (stepX) _coordinatedX->_writeCoordinatedStep(false);
-    if (stepY) _coordinatedY->_writeCoordinatedStep(false);
-    physicalEdgeEmitted = stepX || stepY;
-  }
+  if ((highMask & xMask) != 0u) _coordinatedX->_writeCoordinatedStep(true);
+  if ((highMask & yMask) != 0u) _coordinatedY->_writeCoordinatedStep(true);
+  if ((lowMask & xMask) != 0u) _coordinatedX->_writeCoordinatedStep(false);
+  if ((lowMask & yMask) != 0u) _coordinatedY->_writeCoordinatedStep(false);
+  const bool physicalEdgeEmitted = edgeMask != 0u;
   const uint32_t emittedEdgeCycle =
       physicalEdgeEmitted ? gantryCycleNow() : 0u;
+
+  // DEDGE makes every physical transition an active motor step. Account it
+  // immediately so a later scheduling fault can never discard real travel.
+  if ((accountMask & xMask) != 0u) _coordinatedX->_accountCoordinatedEdge();
+  if ((accountMask & yMask) != 0u) _coordinatedY->_accountCoordinatedEdge();
 
   if (tick.updateArr) {
     _observeCoordinatedArr(tick.nextArr);
@@ -734,10 +753,9 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
       gantrySaturatingIncrement(
           _coordinatedConditionalDecisionMissingCount,
           _coordinatedTimerScheduleSaturationFlags);
-      if (status == CoordinatedXyExecutor::TickStatus::Raised) {
-        if (stepX) _coordinatedX->_writeCoordinatedStep(false);
-        if (stepY) _coordinatedY->_writeCoordinatedStep(false);
-      }
+      // Do not force STEP low in this ISR. If the emitted active edge left an
+      // axis high, the executor schedules one accounted cleanup falling edge
+      // on the next timer interval.
       status = CoordinatedXyExecutor::forcePlannerFault(
           _coordinatedCursor, tick);
     } else {
@@ -777,22 +795,27 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
     }
   }
 
-  // Position accounting follows the actual falling edge and any timer restart
-  // so it cannot shorten the next physical edge interval.
-  if (tick.accountCompletePulse) {
-    if (stepX) _coordinatedX->_accountCoordinatedPulse();
-    if (stepY) _coordinatedY->_accountCoordinatedPulse();
-  }
-
   const bool terminal = tick.stopTimer &&
       status != CoordinatedXyExecutor::TickStatus::Paused;
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  const bool completedTerminal = terminal &&
+      status == CoordinatedXyExecutor::TickStatus::Completed;
+  uint32_t terminalShutdownStartCycle = 0u;
+  uint32_t terminalShutdownEndCycle = 0u;
+#endif
   if (tick.stopTimer) {
     if (status == CoordinatedXyExecutor::TickStatus::Paused) {
       HAL_TIM_Base_Stop_IT(_coordinatedMasterTimer);
       __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
     } else {
       const bool aborted = status != CoordinatedXyExecutor::TickStatus::Completed;
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+      if (completedTerminal) terminalShutdownStartCycle = gantryCycleNow();
+#endif
       _finishCoordinatedFromIsr(aborted, &woken, true);
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+      if (completedTerminal) terminalShutdownEndCycle = gantryCycleNow();
+#endif
     }
   } else if (!shouldRearm &&
              __HAL_TIM_GET_FLAG(
@@ -819,7 +842,7 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
       recordedExitCycle,
       timingArr,
       updatePending,
-      tick.accountCompletePulse,
+      physicalEdgeEmitted,
       terminal);
   const uint32_t finalExitCycle = gantryCycleNow();
   CoordinatedXyIsrInstrumentation::completeSampleTiming(
@@ -829,6 +852,14 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
       recordedExitCycle,
       finalExitCycle,
       terminal);
+  if (completedTerminal) {
+    CoordinatedXyIsrInstrumentation::recordTerminalStages(
+        _coordinatedTiming,
+        entryCycle,
+        terminalShutdownStartCycle,
+        terminalShutdownEndCycle,
+        finalExitCycle);
+  }
   CoordinatedXyIsrInstrumentation::beginIrqPathSample(
       _coordinatedTiming,
       irqEntryValid,
@@ -1009,6 +1040,7 @@ void Gantry::_pauseCoordinatedTask() {
       _coordinatedMasterTimer != nullptr) {
     HAL_TIM_Base_Stop_IT(_coordinatedMasterTimer);
     __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
+    NVIC_ClearPendingIRQ(TIM2_IRQn);
   }
   taskEXIT_CRITICAL();
 }
@@ -1025,6 +1057,7 @@ void Gantry::_resumeCoordinatedTask() {
     __HAL_TIM_SET_AUTORELOAD(_coordinatedMasterTimer, programmedArr);
     __HAL_TIM_SET_COUNTER(_coordinatedMasterTimer, 0u);
     __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
+    NVIC_ClearPendingIRQ(TIM2_IRQn);
     (void)HAL_TIM_Base_Start_IT(_coordinatedMasterTimer);
   }
   taskEXIT_CRITICAL();
@@ -1037,6 +1070,8 @@ void Gantry::_resumeCoordinatedTask() {
 bool Gantry::_cancelCoordinatedTask() {
   bool signalDone = false;
   taskENTER_CRITICAL();
+  const bool wasPaused =
+      _coordinatedCursor.state == CoordinatedXyExecutor::State::Paused;
   const CoordinatedXyExecutor::ControlDisposition disposition =
       CoordinatedXyExecutor::requestCancel(_coordinatedCursor);
   if (disposition == CoordinatedXyExecutor::ControlDisposition::StopNow) {
@@ -1046,6 +1081,16 @@ bool Gantry::_cancelCoordinatedTask() {
         _coordinatedTiming, gantryCycleNow(), true);
 #endif
     signalDone = true;
+  } else if (disposition ==
+                 CoordinatedXyExecutor::ControlDisposition::Deferred &&
+             wasPaused && _coordinatedMasterTimer != nullptr) {
+    const uint32_t cleanupArr = _coordinatedCursor.cachedEvent.arr;
+    _coordinatedProgrammedArr = cleanupArr;
+    __HAL_TIM_SET_AUTORELOAD(_coordinatedMasterTimer, cleanupArr);
+    __HAL_TIM_SET_COUNTER(_coordinatedMasterTimer, 0u);
+    __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
+    NVIC_ClearPendingIRQ(TIM2_IRQn);
+    (void)HAL_TIM_Base_Start_IT(_coordinatedMasterTimer);
   }
   taskEXIT_CRITICAL();
   if (signalDone) {
@@ -1096,15 +1141,19 @@ CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
   snapshot.startStatus = _coordinatedStartStatus;
   snapshot.state = _coordinatedCursor.state;
   snapshot.terminalReason = _coordinatedCursor.terminalReason;
-  snapshot.requestedXSteps = _coordinatedPlan.xSteps;
-  snapshot.requestedYSteps = _coordinatedPlan.ySteps;
-  snapshot.emittedXSteps = _coordinatedCursor.xEmittedSteps;
-  snapshot.emittedYSteps = _coordinatedCursor.yEmittedSteps;
-  snapshot.masterSteps = _coordinatedPlan.masterSteps;
+  snapshot.requestedXEdges = _coordinatedPlan.xEdges;
+  snapshot.requestedYEdges = _coordinatedPlan.yEdges;
+  snapshot.emittedXEdges = _coordinatedCursor.xActiveEdges;
+  snapshot.emittedYEdges = _coordinatedCursor.yActiveEdges;
+  snapshot.masterEdges = _coordinatedPlan.masterEdges;
   snapshot.timer2Interrupts = _coordinatedCursor.timerInterrupts;
   snapshot.timer7Interrupts = _coordinatedTim7Interrupts;
-  snapshot.risingEdges = _coordinatedCursor.risingEdges;
-  snapshot.fallingEdges = _coordinatedCursor.fallingEdges;
+  snapshot.plannedEdgeEvents = _coordinatedCursor.plannedEdgeEvents;
+  snapshot.cleanupEdgeEvents = _coordinatedCursor.cleanupEdgeEvents;
+  snapshot.xCleanupEdges = _coordinatedCursor.xCleanupEdges;
+  snapshot.yCleanupEdges = _coordinatedCursor.yCleanupEdges;
+  snapshot.xSpacingViolations = _coordinatedCursor.xSpacingViolations;
+  snapshot.ySpacingViolations = _coordinatedCursor.ySpacingViolations;
   snapshot.arrMin = _coordinatedArrMin;
   snapshot.arrMax = _coordinatedArrMax;
   snapshot.pendingUpdateCount = _coordinatedPendingUpdateCount;
@@ -1119,11 +1168,11 @@ CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
   snapshot.timerScheduleSaturationFlags =
       _coordinatedTimerScheduleSaturationFlags;
   snapshot.selectedMasterRateHz = _coordinatedPlan.masterRateHz;
-  snapshot.selectedMasterAccelerationStepsPerSec2 =
-      _coordinatedPlan.masterAccelerationStepsPerSec2;
-  snapshot.accelerationSteps = _coordinatedPlan.accelerationSteps;
-  snapshot.cruiseSteps = _coordinatedPlan.cruiseSteps;
-  snapshot.decelerationSteps = _coordinatedPlan.decelerationSteps;
+  snapshot.selectedMasterAccelerationEdgesPerSec2 =
+      _coordinatedPlan.masterAccelerationEdgesPerSec2;
+  snapshot.accelerationEdges = _coordinatedPlan.accelerationEdges;
+  snapshot.cruiseEdges = _coordinatedPlan.cruiseEdges;
+  snapshot.decelerationEdges = _coordinatedPlan.decelerationEdges;
   snapshot.triangular = _coordinatedPlan.triangular;
   snapshot.timing = CoordinatedXyIsrInstrumentation::makeSnapshot(
       _coordinatedTiming);

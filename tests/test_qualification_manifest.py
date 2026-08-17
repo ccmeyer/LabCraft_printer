@@ -319,6 +319,51 @@ def test_load_coordinated_xy_camera_transition_manifest_is_bounded_and_focused()
     assert rules["hd"]["max"] == 25
 
 
+def test_load_coordinated_xy_shallow_edge_manifest_is_exact_and_fail_closed():
+    archived_v1 = load_manifest("coordinated_xy_shallow_edge_v1")
+    archived_v2 = load_manifest("coordinated_xy_shallow_edge_v2")
+    archived_v3 = load_manifest("coordinated_xy_shallow_edge_v3")
+    manifest = load_manifest("coordinated_xy_shallow_edge_v4")
+
+    assert archived_v1.lifecycle == "archived"
+    assert archived_v2.lifecycle == "archived"
+    assert archived_v3.lifecycle == "archived"
+    assert manifest.lifecycle == "active"
+    assert manifest.profile == "FULL"
+    assert manifest.expected_test_ids == (2099, 2100)
+    assert manifest.enforce_expected_test_ids is True
+    assert manifest.requires_operator_prompts is True
+    assert manifest.selftest_args == ("--coordinated-xy-shallow-edge-suite",)
+    assert manifest.required_host_checks == (
+        "selftest_progress_watchdog",
+        "coordinated_xy_status_cadence",
+    )
+    assert {item["fixture_id"] for item in manifest.fixtures} == {
+        "coordinated_xy_shallow_edge_envelope_clear"
+    }
+    rules = manifest.analysis_rules["2099"]["metrics"]
+    assert rules["n"]["equals"] == 24
+    assert rules["xe"]["equals"] == 241592
+    assert rules["ye"]["equals"] == 241592
+    assert rules["me"]["equals"] == 430192
+    assert rules["am"]["max"] == 2600
+    assert rules["tm"]["max"] == 3500
+    assert rules["i2"]["equals"] == 430192
+    assert rules["ce"]["equals"] == 0
+    assert rules["sv"]["equals"] == 0
+    assert rules["mf"]["equals"] == 0
+    assert rules["xd"]["max"] == 25
+    assert rules["yd"]["max"] == 25
+    timing = manifest.analysis_rules["2100"]["metrics"]
+    assert timing["bl"]["equals"] == 3500
+    assert timing["n1"]["equals"] == 12
+    assert timing["ob1"]["equals"] == 0
+    assert timing["n2"]["equals"] == 12
+    assert timing["ob2"]["equals"] == 0
+    assert timing["av"]["equals"] == 0
+    assert timing["sf"]["equals"] == 0
+
+
 def test_load_coordinated_xy_40khz_manifest_reuses_only_the_existing_row():
     manifest = load_manifest("coordinated_xy_40khz_v1")
 

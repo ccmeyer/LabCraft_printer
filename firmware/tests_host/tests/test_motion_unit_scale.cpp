@@ -73,3 +73,17 @@ TEST(MotionUnitScale, ActiveProductionScalePreservesLegacyExternalUnits) {
   UNSIGNED_LONGS_EQUAL(70000u,
       MotionUnitScale::toNativeAcceleration(140000u));
 }
+
+TEST(MotionUnitScale, DedgeActiveEdgesMapOneToOneToLogicalCoordinates) {
+  UNSIGNED_LONGS_EQUAL(
+      2u, MotionUnitScale::coordinatedActiveEdgesPerNativeStep());
+  UNSIGNED_LONGS_EQUAL(
+      1u, MotionUnitScale::logicalUnitsPerCoordinatedActiveEdge());
+  UNSIGNED_LONGS_EQUAL(
+      19574u, MotionUnitScale::toCoordinatedActiveEdges(19574u));
+  UNSIGNED_LONGS_EQUAL(
+      19574u,
+      MotionUnitScale::coordinatedActiveEdgesToLogicalMagnitude(19574u));
+  UNSIGNED_LONGS_EQUAL(
+      9787u, MotionUnitScale::toNativeStepCycles(19574u));
+}

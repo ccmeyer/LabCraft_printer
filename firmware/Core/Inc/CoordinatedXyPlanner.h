@@ -13,7 +13,7 @@ enum class Direction : int8_t {
   Positive = 1,
 };
 
-enum class StepMask : uint8_t {
+enum class EdgeMask : uint8_t {
   None = 0u,
   X = 1u << 0u,
   Y = 1u << 1u,
@@ -43,13 +43,13 @@ enum class TraceStatus : uint8_t {
 
 struct AxisLimits {
   uint32_t maxRateHz = 0u;
-  uint32_t accelerationStepsPerSec2 = 0u;
+  uint32_t accelerationEdgesPerSec2 = 0u;
 };
 
 struct TimerLimits {
   uint32_t inputClockHz = 0u;
   uint32_t maxArr = 0u;
-  uint32_t minPulseNs = 2000u;
+  uint32_t minEdgeIntervalNs = 2000u;
 };
 
 struct PlanRequest {
@@ -65,9 +65,9 @@ struct CoordinatedXyPlan {
   PlanStatus status = PlanStatus::InvalidLimits;
   Direction xDirection = Direction::Stationary;
   Direction yDirection = Direction::Stationary;
-  uint32_t xSteps = 0u;
-  uint32_t ySteps = 0u;
-  uint32_t masterSteps = 0u;
+  uint32_t xEdges = 0u;
+  uint32_t yEdges = 0u;
+  uint32_t masterEdges = 0u;
   uint32_t ddaIncrementX = 0u;
   uint32_t ddaIncrementY = 0u;
   uint32_t ddaThreshold = 0u;
@@ -76,14 +76,14 @@ struct CoordinatedXyPlan {
   uint32_t masterRateHz = 0u;
   uint32_t xRateHz = 0u;
   uint32_t yRateHz = 0u;
-  uint32_t masterAccelerationCapStepsPerSec2 = 0u;
-  uint32_t masterAccelerationStepsPerSec2 = 0u;
-  uint32_t xAccelerationStepsPerSec2 = 0u;
-  uint32_t yAccelerationStepsPerSec2 = 0u;
+  uint32_t masterAccelerationCapEdgesPerSec2 = 0u;
+  uint32_t masterAccelerationEdgesPerSec2 = 0u;
+  uint32_t xAccelerationEdgesPerSec2 = 0u;
+  uint32_t yAccelerationEdgesPerSec2 = 0u;
 
-  uint32_t accelerationSteps = 0u;
-  uint32_t cruiseSteps = 0u;
-  uint32_t decelerationSteps = 0u;
+  uint32_t accelerationEdges = 0u;
+  uint32_t cruiseEdges = 0u;
+  uint32_t decelerationEdges = 0u;
   bool triangular = false;
 
   TimerLimits timer{};
@@ -94,9 +94,9 @@ struct CoordinatedXyPlan {
   NormalizedCosineProfile::RampSpec decelerationRamp{};
 };
 
-struct StepEvent {
-  uint32_t masterStepIndex = 0u;
-  StepMask mask = StepMask::None;
+struct EdgeEvent {
+  uint32_t masterEdgeIndex = 0u;
+  EdgeMask mask = EdgeMask::None;
   uint32_t arr = 0u;
   ProfilePhase phase = ProfilePhase::Cruise;
 };
@@ -104,32 +104,32 @@ struct StepEvent {
 struct Cursor {
   uint64_t xAccumulator = 0u;
   uint64_t yAccumulator = 0u;
-  uint32_t xEmittedSteps = 0u;
-  uint32_t yEmittedSteps = 0u;
-  uint32_t completedMasterSteps = 0u;
-  uint32_t expectedMasterSteps = 0u;
-  uint32_t expectedXSteps = 0u;
-  uint32_t expectedYSteps = 0u;
-  StepEvent cachedEvent{};
+  uint32_t xEmittedEdges = 0u;
+  uint32_t yEmittedEdges = 0u;
+  uint32_t completedMasterEdges = 0u;
+  uint32_t expectedMasterEdges = 0u;
+  uint32_t expectedXEdges = 0u;
+  uint32_t expectedYEdges = 0u;
+  EdgeEvent cachedEvent{};
   NormalizedCosineProfile::RampCursor accelerationCursor{};
   NormalizedCosineProfile::RampCursor decelerationCursor{};
   bool active = false;
   bool complete = false;
 };
 
-constexpr StepMask operator|(StepMask lhs, StepMask rhs) {
-  return static_cast<StepMask>(static_cast<uint8_t>(lhs) |
+constexpr EdgeMask operator|(EdgeMask lhs, EdgeMask rhs) {
+  return static_cast<EdgeMask>(static_cast<uint8_t>(lhs) |
                                static_cast<uint8_t>(rhs));
 }
 
-constexpr bool contains(StepMask mask, StepMask axis) {
+constexpr bool contains(EdgeMask mask, EdgeMask axis) {
   return (static_cast<uint8_t>(mask) & static_cast<uint8_t>(axis)) != 0u;
 }
 
 PlanStatus prepare(const PlanRequest& request, CoordinatedXyPlan& plan);
 TraceStatus begin(const CoordinatedXyPlan& plan, Cursor& cursor);
-TraceStatus currentEvent(const Cursor& cursor, StepEvent& event);
-TraceStatus completeCurrentStep(const CoordinatedXyPlan& plan, Cursor& cursor);
+TraceStatus currentEvent(const Cursor& cursor, EdgeEvent& event);
+TraceStatus completeCurrentEdge(const CoordinatedXyPlan& plan, Cursor& cursor);
 bool isComplete(const Cursor& cursor);
 
 }  // namespace CoordinatedXyPlanner

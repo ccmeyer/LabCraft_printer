@@ -15,7 +15,13 @@ namespace {
 #define LC_COORDINATED_EDGE_ALWAYS_INLINE inline
 #endif
 
+using CoordinatedXyPlanner::EdgeMask;
 using CoordinatedXyPlanner::TraceStatus;
+
+LC_COORDINATED_EDGE_ALWAYS_INLINE
+bool anyStepHigh(const Cursor& cursor) {
+  return cursor.xStepHigh || cursor.yStepHigh;
+}
 
 LC_COORDINATED_EDGE_OPTIMIZED
 uint32_t hashWord(uint32_t checksum, uint32_t value) {
@@ -27,8 +33,15 @@ uint32_t hashWord(uint32_t checksum, uint32_t value) {
 }
 
 LC_COORDINATED_EDGE_ALWAYS_INLINE
+void saturatingIncrement(uint32_t& value) {
+  if (value != std::numeric_limits<uint32_t>::max()) ++value;
+}
+
+LC_COORDINATED_EDGE_ALWAYS_INLINE
 uint8_t controlPriority(PendingControl control) {
   switch (control) {
+    case PendingControl::PlannerFault:
+      return 4u;
     case PendingControl::XLimit:
     case PendingControl::YLimit:
       return 3u;
@@ -43,9 +56,22 @@ uint8_t controlPriority(PendingControl control) {
 }
 
 LC_COORDINATED_EDGE_ALWAYS_INLINE
+TickStatus terminalStatus(PendingControl control) {
+  switch (control) {
+    case PendingControl::Cancel:
+      return TickStatus::Canceled;
+    case PendingControl::XLimit:
+    case PendingControl::YLimit:
+      return TickStatus::LimitAborted;
+    case PendingControl::PlannerFault:
+    default:
+      return TickStatus::Faulted;
+  }
+}
+
+LC_COORDINATED_EDGE_ALWAYS_INLINE
 void setTerminal(Cursor& cursor, PendingControl control) {
   cursor.pendingControl = PendingControl::None;
-  cursor.stepHigh = false;
   switch (control) {
     case PendingControl::Cancel:
       cursor.state = State::Canceled;
@@ -59,6 +85,7 @@ void setTerminal(Cursor& cursor, PendingControl control) {
       cursor.state = State::LimitAborted;
       cursor.terminalReason = TerminalReason::YLimit;
       break;
+    case PendingControl::PlannerFault:
     default:
       cursor.state = State::Faulted;
       cursor.terminalReason = TerminalReason::PlannerFault;
@@ -66,101 +93,104 @@ void setTerminal(Cursor& cursor, PendingControl control) {
   }
 }
 
-LC_COORDINATED_EDGE_OPTIMIZED
-void setPlannerFault(Cursor& cursor, TickResult& result) {
-  cursor.pendingControl = PendingControl::None;
-  cursor.stepHigh = false;
-  cursor.state = State::Faulted;
-  cursor.terminalReason = TerminalReason::PlannerFault;
-  result.status = TickStatus::Faulted;
+LC_COORDINATED_EDGE_ALWAYS_INLINE
+void finishTerminal(Cursor& cursor,
+                    PendingControl control,
+                    TickResult& result) {
+  setTerminal(cursor, control);
+  result.status = terminalStatus(control);
   result.stopTimer = true;
   result.signalDone = true;
 }
 
-LC_COORDINATED_EDGE_OPTIMIZED
-TickStatus applyDeferredControl(Cursor& cursor, TickResult& result);
-
-LC_COORDINATED_EDGE_OPTIMIZED
-TickStatus raiseCurrentStep(Cursor& cursor, TickResult& result) {
-  if (cursor.pendingControl != PendingControl::None) {
-    return applyDeferredControl(cursor, result);
+LC_COORDINATED_EDGE_ALWAYS_INLINE
+void recordSpacing(uint32_t masterEdgeIndex,
+                   uint32_t axisEdges,
+                   uint32_t masterEdges,
+                   bool& hasPrevious,
+                   uint32_t& previousIndex,
+                   uint32_t& violations) {
+  if (axisEdges == 0u) return;
+  if (hasPrevious) {
+    const uint32_t gap = masterEdgeIndex - previousIndex;
+    const uint32_t minimumGap = masterEdges / axisEdges;
+    const uint32_t maximumGap = minimumGap +
+        ((masterEdges % axisEdges) != 0u ? 1u : 0u);
+    if (gap < minimumGap || gap > maximumGap) {
+      saturatingIncrement(violations);
+    }
   }
-  result.status = TickStatus::Raised;
-  result.mask = cursor.cachedEvent.mask;
-  result.arr = cursor.cachedEvent.arr;
-  cursor.stepHigh = true;
-  ++cursor.risingEdges;
-  return result.status;
+  previousIndex = masterEdgeIndex;
+  hasPrevious = true;
+}
+
+LC_COORDINATED_EDGE_ALWAYS_INLINE
+void applyEdgePhases(Cursor& cursor,
+                     EdgeMask mask,
+                     TickResult& result) {
+  result.edgeMask = mask;
+  result.accountEdgeMask = mask;
+  if (CoordinatedXyPlanner::contains(mask, EdgeMask::X)) {
+    cursor.xStepHigh = !cursor.xStepHigh;
+    if (cursor.xStepHigh) {
+      result.highMask = result.highMask | EdgeMask::X;
+    } else {
+      result.lowMask = result.lowMask | EdgeMask::X;
+    }
+    saturatingIncrement(cursor.xActiveEdges);
+  }
+  if (CoordinatedXyPlanner::contains(mask, EdgeMask::Y)) {
+    cursor.yStepHigh = !cursor.yStepHigh;
+    if (cursor.yStepHigh) {
+      result.highMask = result.highMask | EdgeMask::Y;
+    } else {
+      result.lowMask = result.lowMask | EdgeMask::Y;
+    }
+    saturatingIncrement(cursor.yActiveEdges);
+  }
 }
 
 LC_COORDINATED_EDGE_OPTIMIZED
-TickStatus completeCurrentStep(
-    const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
-    Cursor& cursor,
-    TickResult& result) {
-  result.status = TickStatus::Lowered;
-  result.mask = cursor.cachedEvent.mask;
+TickStatus emitCleanupEdge(Cursor& cursor, TickResult& result) {
+  const PendingControl terminalControl = cursor.pendingControl;
+  EdgeMask cleanupMask = EdgeMask::None;
+  if (cursor.xStepHigh) cleanupMask = cleanupMask | EdgeMask::X;
+  if (cursor.yStepHigh) cleanupMask = cleanupMask | EdgeMask::Y;
+  if (cleanupMask == EdgeMask::None) {
+    finishTerminal(cursor, terminalControl, result);
+    return result.status;
+  }
+
   result.arr = cursor.cachedEvent.arr;
-  result.accountCompletePulse = true;
-  cursor.stepHigh = false;
-  ++cursor.fallingEdges;
-  cursor.maskChecksum = hashWord(
-      cursor.maskChecksum, static_cast<uint32_t>(cursor.cachedEvent.mask));
-  cursor.arrChecksum = hashWord(cursor.arrChecksum, cursor.cachedEvent.arr);
-
-  const TraceStatus advanceStatus =
-      CoordinatedXyPlanner::completeCurrentStep(plan, cursor.planner);
-  cursor.xEmittedSteps = cursor.planner.xEmittedSteps;
-  cursor.yEmittedSteps = cursor.planner.yEmittedSteps;
-  if (advanceStatus != TraceStatus::Ready &&
-      advanceStatus != TraceStatus::Complete) {
-    setPlannerFault(cursor, result);
-    return result.status;
+  result.cleanupEdgeMask = cleanupMask;
+  applyEdgePhases(cursor, cleanupMask, result);
+  saturatingIncrement(cursor.cleanupEdgeEvents);
+  if (CoordinatedXyPlanner::contains(cleanupMask, EdgeMask::X)) {
+    saturatingIncrement(cursor.xCleanupEdges);
   }
-
-  if (advanceStatus == TraceStatus::Complete) {
-    // Cancel and limit requests retain their terminal reason even when they
-    // arrive during the final high phase. A pause at the same point has no
-    // remaining event to preserve, so completing is the only resumable-safe
-    // outcome and guarantees that no extra rising edge can be emitted.
-    if (cursor.pendingControl != PendingControl::None &&
-        cursor.pendingControl != PendingControl::Pause) {
-      return applyDeferredControl(cursor, result);
-    }
-    cursor.pendingControl = PendingControl::None;
-    cursor.state = State::Completed;
-    cursor.terminalReason = TerminalReason::Completed;
-    result.status = TickStatus::Completed;
-    result.stopTimer = true;
-    result.signalDone = true;
-    return result.status;
+  if (CoordinatedXyPlanner::contains(cleanupMask, EdgeMask::Y)) {
+    saturatingIncrement(cursor.yCleanupEdges);
   }
-
-  if (cursor.pendingControl != PendingControl::None &&
-      cursor.pendingControl != PendingControl::Pause) {
-    return applyDeferredControl(cursor, result);
-  }
-
-  if (CoordinatedXyPlanner::currentEvent(cursor.planner,
-                                         cursor.cachedEvent) !=
-      TraceStatus::Ready) {
-    setPlannerFault(cursor, result);
-    return result.status;
-  }
-  result.nextArr = cursor.cachedEvent.arr;
-  result.updateArr = true;
-  if (cursor.pendingControl == PendingControl::Pause) {
-    return applyDeferredControl(cursor, result);
-  }
+  finishTerminal(cursor, terminalControl, result);
   return result.status;
 }
 
 LC_COORDINATED_EDGE_ALWAYS_INLINE
-ControlDisposition requestControl(Cursor& cursor, PendingControl requested) {
-  if (cursor.state == State::Completed || cursor.state == State::Canceled ||
-      cursor.state == State::LimitAborted || cursor.state == State::Faulted) {
-    return ControlDisposition::AlreadySatisfied;
+void deferOrFinishPlannerFault(Cursor& cursor, TickResult& result) {
+  cursor.pendingControl = PendingControl::PlannerFault;
+  if (anyStepHigh(cursor)) {
+    cursor.state = State::Running;
+    result.status = TickStatus::CleanupPending;
+    result.stopTimer = false;
+    result.signalDone = false;
+    return;
   }
+  finishTerminal(cursor, PendingControl::PlannerFault, result);
+}
+
+LC_COORDINATED_EDGE_ALWAYS_INLINE
+ControlDisposition requestControl(Cursor& cursor, PendingControl requested) {
+  if (isTerminal(cursor)) return ControlDisposition::AlreadySatisfied;
   if (cursor.state != State::Running && cursor.state != State::Armed &&
       cursor.state != State::Paused) {
     return ControlDisposition::InvalidState;
@@ -176,48 +206,41 @@ ControlDisposition requestControl(Cursor& cursor, PendingControl requested) {
     }
   }
 
-  if (requested == PendingControl::Pause && cursor.state == State::Paused) {
-    return ControlDisposition::AlreadySatisfied;
+  if (requested == PendingControl::Pause) {
+    if (cursor.state == State::Paused) {
+      return ControlDisposition::AlreadySatisfied;
+    }
+    cursor.pendingControl = PendingControl::None;
+    cursor.state = State::Paused;
+    return ControlDisposition::StopNow;
   }
 
   cursor.pendingControl = requested;
-  if (cursor.stepHigh) return ControlDisposition::Deferred;
-
-  if (requested == PendingControl::Pause) {
-    cursor.pendingControl = PendingControl::None;
-    cursor.state = State::Paused;
-  } else {
-    setTerminal(cursor, requested);
+  if (anyStepHigh(cursor)) {
+    // A paused move has no running timer. Re-enter Running so the caller can
+    // start exactly one interval that emits the accounted cleanup fall.
+    if (cursor.state == State::Paused || cursor.state == State::Armed) {
+      cursor.state = State::Running;
+    }
+    return ControlDisposition::Deferred;
   }
+
+  TickResult unused{};
+  finishTerminal(cursor, requested, unused);
   return ControlDisposition::StopNow;
-}
-
-LC_COORDINATED_EDGE_OPTIMIZED
-TickStatus applyDeferredControl(Cursor& cursor, TickResult& result) {
-  const PendingControl pending = cursor.pendingControl;
-  cursor.pendingControl = PendingControl::None;
-  result.stopTimer = true;
-  if (pending == PendingControl::Pause) {
-    cursor.state = State::Paused;
-    result.status = TickStatus::Paused;
-    return result.status;
-  }
-
-  setTerminal(cursor, pending);
-  result.signalDone = true;
-  result.status = cursor.state == State::Canceled
-      ? TickStatus::Canceled
-      : TickStatus::LimitAborted;
-  return result.status;
 }
 
 }  // namespace
 
 ArmStatus arm(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
-              Cursor& cursor) {
+              Cursor& cursor,
+              bool initialXStepHigh,
+              bool initialYStepHigh) {
   if (isActive(cursor)) return ArmStatus::Busy;
 
   cursor = Cursor{};
+  cursor.xStepHigh = initialXStepHigh;
+  cursor.yStepHigh = initialYStepHigh;
   const TraceStatus status = CoordinatedXyPlanner::begin(plan, cursor.planner);
   if (status == TraceStatus::Complete &&
       plan.status == CoordinatedXyPlanner::PlanStatus::Immediate) {
@@ -253,7 +276,7 @@ ControlDisposition resume(Cursor& cursor) {
   if (cursor.state == State::Running) {
     return ControlDisposition::AlreadySatisfied;
   }
-  if (cursor.state != State::Paused || cursor.stepHigh) {
+  if (cursor.state != State::Paused) {
     return ControlDisposition::InvalidState;
   }
   cursor.state = State::Running;
@@ -276,21 +299,73 @@ TickStatus onTimerUpdate(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
                          Cursor& cursor,
                          TickResult& result) {
   result = TickResult{};
-  if (cursor.state != State::Running) {
+  if (cursor.state != State::Running) return result.status;
+
+  saturatingIncrement(cursor.timerInterrupts);
+  if (cursor.pendingControl != PendingControl::None) {
+    return emitCleanupEdge(cursor, result);
+  }
+
+  result.status = TickStatus::EdgeEmitted;
+  result.arr = cursor.cachedEvent.arr;
+  const EdgeMask mask = cursor.cachedEvent.mask;
+  const uint32_t masterEdgeIndex = cursor.cachedEvent.masterEdgeIndex;
+  applyEdgePhases(cursor, mask, result);
+  saturatingIncrement(cursor.plannedEdgeEvents);
+  if (CoordinatedXyPlanner::contains(mask, EdgeMask::X)) {
+    recordSpacing(masterEdgeIndex,
+                  plan.xEdges,
+                  plan.masterEdges,
+                  cursor.xHasPreviousEdge,
+                  cursor.xLastMasterEdgeIndex,
+                  cursor.xSpacingViolations);
+  }
+  if (CoordinatedXyPlanner::contains(mask, EdgeMask::Y)) {
+    recordSpacing(masterEdgeIndex,
+                  plan.yEdges,
+                  plan.masterEdges,
+                  cursor.yHasPreviousEdge,
+                  cursor.yLastMasterEdgeIndex,
+                  cursor.ySpacingViolations);
+  }
+  cursor.maskChecksum = hashWord(
+      cursor.maskChecksum, static_cast<uint32_t>(mask));
+  cursor.arrChecksum = hashWord(cursor.arrChecksum, cursor.cachedEvent.arr);
+
+  const TraceStatus advanceStatus =
+      CoordinatedXyPlanner::completeCurrentEdge(plan, cursor.planner);
+  if (advanceStatus != TraceStatus::Ready &&
+      advanceStatus != TraceStatus::Complete) {
+    deferOrFinishPlannerFault(cursor, result);
     return result.status;
   }
 
-  ++cursor.timerInterrupts;
-  if (!cursor.stepHigh) {
-    return raiseCurrentStep(cursor, result);
+  if (advanceStatus == TraceStatus::Complete) {
+    cursor.pendingControl = PendingControl::None;
+    cursor.state = State::Completed;
+    cursor.terminalReason = TerminalReason::Completed;
+    result.status = TickStatus::Completed;
+    result.stopTimer = true;
+    result.signalDone = true;
+    return result.status;
   }
-  return completeCurrentStep(plan, cursor, result);
+
+  if (CoordinatedXyPlanner::currentEvent(cursor.planner,
+                                         cursor.cachedEvent) !=
+      TraceStatus::Ready) {
+    deferOrFinishPlannerFault(cursor, result);
+    return result.status;
+  }
+  result.nextArr = cursor.cachedEvent.arr;
+  result.updateArr = true;
+  return result.status;
 }
 
 LC_COORDINATED_EDGE_OPTIMIZED
 TickStatus forcePlannerFault(Cursor& cursor, TickResult& result) {
   result = TickResult{};
-  setPlannerFault(cursor, result);
+  if (!isActive(cursor)) return result.status;
+  deferOrFinishPlannerFault(cursor, result);
   return result.status;
 }
 

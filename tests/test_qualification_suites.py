@@ -22,8 +22,9 @@ def test_discover_suite_entries_lists_current_manifests():
         "xy_motion_v1",
         "motion_timing_v1",
         "profile_lut_benchmark_v1",
-        "coordinated_xy_camera_transition_v2",
-        "coordinated_xy_production_mres3_v3",
+        "coordinated_xy_camera_transition_v4",
+        "coordinated_xy_production_mres3_v5",
+        "coordinated_xy_shallow_edge_v4",
         "direct_xyz_lut_v1",
         "motion_envelope_v1",
         "pressure_regulator_v1",
@@ -150,7 +151,7 @@ def test_production_mres3_suite_requires_fixed_conditional_contract():
         entry.manifest_id: entry
         for entry in discover_suite_entries(MANIFEST_ROOT)
     }
-    manifest = entries["coordinated_xy_production_mres3_v3"].manifest
+    manifest = entries["coordinated_xy_production_mres3_v5"].manifest
 
     assert manifest.lifecycle == "active"
     assert manifest.profile == "FULL"
@@ -163,8 +164,14 @@ def test_production_mres3_suite_requires_fixed_conditional_contract():
     ]
     motion = manifest.analysis_rules["2087"]["metrics"]
     assert motion["n"]["equals"] == 10
+    assert motion["xe"]["equals"] == 106832
+    assert motion["ye"]["equals"] == 180000
+    assert motion["me"]["equals"] == 220000
     assert motion["i2"]["equals"] == 220000
-    assert motion["tm"]["max"] == 2700
+    assert motion["ce"]["equals"] == 0
+    assert motion["sv"]["equals"] == 0
+    assert motion["am"]["max"] == 2600
+    assert motion["tm"]["max"] == 3500
     schedule = manifest.analysis_rules["2089"]["metrics"]
     assert schedule["dc"]["equals"] == 219990
     assert schedule["ci"]["equals"] == 0
@@ -176,6 +183,43 @@ def test_production_mres3_suite_requires_fixed_conditional_contract():
     assert debounce["tv"]["equals"] == 1
     assert debounce["xf"]["equals"] == 0
     assert debounce["yf"]["equals"] == 0
+
+
+def test_shallow_edge_suite_freezes_incident_vector_evidence():
+    entries = {
+        entry.manifest_id: entry
+        for entry in discover_suite_entries(MANIFEST_ROOT)
+    }
+    manifest = entries["coordinated_xy_shallow_edge_v4"].manifest
+
+    assert manifest.lifecycle == "active"
+    assert manifest.profile == "FULL"
+    assert manifest.selftest_args == ("--coordinated-xy-shallow-edge-suite",)
+    assert required_fixture_ids(manifest) == (
+        "coordinated_xy_shallow_edge_envelope_clear",
+    )
+    rows = build_test_plan_rows(manifest)
+    assert [row.test_id for row in rows] == [2099, 2100]
+    assert rows[0].name == "Coordinated XY shallow-edge distribution"
+    assert rows[1].name == "Coordinated XY terminal timing"
+    rules = manifest.analysis_rules["2099"]["metrics"]
+    for metric, value in (
+        ("h1", 10000), ("h2", 40000), ("n", 24),
+        ("xe", 241592), ("ye", 241592), ("me", 430192),
+        ("i2", 430192), ("i7", 0), ("ce", 0), ("sv", 0),
+        ("mf", 0), ("en", 1), ("ok", 1), ("sf", 0), ("to", 0),
+    ):
+        assert rules[metric]["equals"] == value
+    assert rules["xd"]["max"] == 25
+    assert rules["yd"]["max"] == 25
+    assert rules["am"]["max"] == 2600
+    assert rules["tm"]["max"] == 3500
+    timing = manifest.analysis_rules["2100"]["metrics"]
+    for metric, value in (
+        ("bl", 3500), ("h1", 10000), ("n1", 12), ("ob1", 0),
+        ("h2", 40000), ("n2", 12), ("ob2", 0), ("av", 0), ("sf", 0),
+    ):
+        assert timing[metric]["equals"] == value
 
 
 def test_archived_coordinated_suites_are_not_discoverable():
@@ -190,9 +234,16 @@ def test_archived_coordinated_suites_are_not_discoverable():
         "coordinated_xy_mres3_20khz_v2",
         "coordinated_xy_mres3_rearm_v1",
         "coordinated_xy_mres3_conditional_rearm_v3",
+        "coordinated_xy_shallow_edge_v1",
+        "coordinated_xy_shallow_edge_v2",
+        "coordinated_xy_shallow_edge_v3",
         "coordinated_xy_production_mres3_v1",
         "coordinated_xy_production_mres3_v2",
+        "coordinated_xy_production_mres3_v3",
+        "coordinated_xy_production_mres3_v4",
         "coordinated_xy_camera_transition_v1",
+        "coordinated_xy_camera_transition_v2",
+        "coordinated_xy_camera_transition_v3",
     ):
         assert manifest_id not in entries
 
@@ -230,12 +281,12 @@ def test_z_speed_ladder_suite_is_archived_and_not_launchable():
     assert manifest.expected_test_ids == (2195, 2196, 2197, 2194)
 
 
-def test_camera_transition_v2_is_single_production_scaled_gate():
+def test_camera_transition_v4_is_single_production_scaled_gate():
     entries = {
         entry.manifest_id: entry
         for entry in discover_suite_entries(MANIFEST_ROOT)
     }
-    focused = entries["coordinated_xy_camera_transition_v2"].manifest
+    focused = entries["coordinated_xy_camera_transition_v4"].manifest
 
     assert focused.lifecycle == "active"
     assert focused.profile == "FULL"
@@ -246,11 +297,15 @@ def test_camera_transition_v2_is_single_production_scaled_gate():
     assert [row.test_id for row in rows] == [2071]
     assert rows[0].name == "Coordinated XY camera/home transition"
     rules = focused.analysis_rules["2071"]["metrics"]
-    assert rules["xe"]["equals"] == 8416
-    assert rules["ye"]["equals"] == 30000
+    assert rules["xe"]["equals"] == 16832
+    assert rules["ye"]["equals"] == 60000
     assert rules["i2"]["equals"] == 60000
     assert rules["hi"]["equals"] == 101
     assert rules["hpc"]["equals"] == 50
+    assert rules["mf"]["equals"] == 0
+    assert rules["ab"]["equals"] == 2600
+    assert rules["am"]["max"] == 2600
+    assert rules["tm"]["max"] == 3500
 
 
 def test_motion_envelope_suite_exposes_operator_fixture_and_catalog_rows():

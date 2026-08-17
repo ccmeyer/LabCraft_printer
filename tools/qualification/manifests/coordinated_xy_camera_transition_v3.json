@@ -1,10 +1,10 @@
 {
   "schema_version": "qualification_manifest_v0",
-  "manifest_id": "coordinated_xy_camera_transition_v2",
-  "name": "Production Camera/Home Transition v2",
+  "manifest_id": "coordinated_xy_camera_transition_v3",
+  "name": "Production Camera/Home Transition v3",
   "profile": "FULL",
   "lifecycle": "archived",
-  "description": "Production active-edge camera-ratio round trip followed immediately by a bounded X home.",
+  "description": "Production active-edge camera-ratio round trip followed immediately by a bounded X home, using the shared 3,500-cycle post-motion terminal-handler regression gate.",
   "expected_test_ids": [2071],
   "enforce_expected_test_ids": true,
   "requires_operator_prompts": true,

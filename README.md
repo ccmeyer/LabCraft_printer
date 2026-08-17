@@ -3285,12 +3285,34 @@ interrupt-restoration gates.
 
 Milestone 7 makes one coordinated-XY implementation permanent. Normal
 `ABSOLUTE_XY` commands use the fixed-point TIM2 executor with MRES=3,
-DEDGE enabled, multistep filtering disabled, two interrupts per complete STEP
-cycle, and the 1,125-tick conditional late-rearm guard. `MotionUnitScale`
+DEDGE enabled, multistep filtering disabled, one interrupt per active STEP
+transition, and the 1,125-tick conditional late-rearm guard. Because DEDGE
+makes both rising and falling transitions advance the driver, each transition
+is one historical logical coordinate unit. `MotionUnitScale`
 keeps application commands, stored positions, status, home distances, rates,
-and acceleration in the historical MRES=2 logical units. Ordinary cosine
+and acceleration in the historical MRES=2 logical units. The coordinated
+planner therefore consumes logical active-edge counts and the unchanged
+40 kHz / 140 kHz/s limits directly; no native complete-cycle conversion is
+applied to this path. Ordinary cosine
 profile X/Y/Z moves use the normalized LUT; homes, limit soft stops, P/R, and
 alternate direct profiles retain their specialized paths.
+
+The former complete-pulse scheduler placed a minor-axis rise/fall pair close
+together and then left a long inactive gap. That shape was most visible on
+the incident shallow vectors `(17100,4470)`, `(17100,2054)`, and
+`(100,19574)`. The active-edge DDA now distributes every selected transition
+over the master timeline: minor-axis gaps are respectively 3-4, 8-9, and
+195-196 callbacks, including signed and axis-swapped forms, with no more than
+one edge of cross-track error. At 40 kHz with the 90 MHz timer clock, ARR
+remains 2249; callback load and nominal move duration do not increase.
+
+X and Y retain independent STEP phases initialized from the output GPIOs.
+Pause stops between active edges and preserves the cached trace. Cancel,
+confirmed limits, and post-edge scheduling faults stop immediately when both
+pins are low. If a pin is high, the next valid timer interval emits and
+accounts exactly one cleanup falling edge on only that axis, rebases the
+target to the actual position, and terminates with both pins low. Successful
+moves require zero cleanup edges and zero spacing violations.
 
 All X/Y/Z/P/R motion limit inputs use the same continuous 15 ms confirmation
 policy. A raw EXTI edge starts and temporarily masks a candidate; it cannot
@@ -3302,23 +3324,32 @@ asserted input confirms immediately as the fail-safe behavior. Z retains its
 active-high/no-pull electrical configuration. The pressure-regulator PG13/PG14
 inner switches keep their existing independent 15 ms deferred notification.
 
-The strict production timing contract keeps active callbacks at or below
-2,025 core cycles and terminal cleanup at or below 2,700 cycles. Terminal
-cleanup occurs after the final STEP edge while TIM2 is stopping; the separate
-bound is based on the accepted 2,508-cycle HIL maximum and does not relax the
-active edge deadline or the 1,125-tick rearm guard.
+The production timing contract uses a 2,600-core-cycle active-handler
+regression budget and a 3,500-cycle post-motion terminal-handler budget. The
+active budget is the 2,134-cycle worst case measured after the active-edge
+migration plus approximately 20% margin, rounded up. It is not the physical
+40 kHz deadline: a 25 us active-edge interval is 4,500 core cycles at 180 MHz,
+so the regression budget retains 1,900 core cycles of raw interval margin.
+Zero deadline misses, at least 450 timer ticks of measured slack, the
+1,125-tick conditional-rearm guard, and zero pending-at-rearm observations
+remain the scheduling-safety gates. Terminal work occurs once after the final
+STEP edge while TIM2 is stopping. Pre-handler and full-IRQ timing remain
+diagnostic evidence rather than independent acceptance limits.
 
 The supported coordinated-motion selectors are now:
 
 ```bash
-python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-production-mres3-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_production_mres3_v3.json
-python3 tools/run_qualification.py --manifest coordinated_xy_production_mres3_v3 --operator-prompts --fixture coordinated_xy_production_mres3_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_production_mres3_v3.json
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-production-mres3-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_production_mres3_v5.json
+python3 tools/run_qualification.py --manifest coordinated_xy_production_mres3_v5 --operator-prompts --fixture coordinated_xy_production_mres3_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_production_mres3_v5.json
+
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-shallow-edge-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_shallow_edge_v4.json
+python3 tools/run_qualification.py --manifest coordinated_xy_shallow_edge_v4 --operator-prompts --fixture coordinated_xy_shallow_edge_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_shallow_edge_v4.json
 
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --direct-xyz-lut-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/direct_xyz_lut.json
 python3 tools/run_qualification.py --manifest direct_xyz_lut_v1 --operator-prompts --fixture direct_xyz_lut_envelope_clear --machine-id LC-001 --raw-report hil_reports/direct_xyz_lut.json
 
-python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-camera-transition-suite --timeout-ms 180000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_camera_transition_v2.json
-python3 tools/run_qualification.py --manifest coordinated_xy_camera_transition_v2 --operator-prompts --fixture coordinated_xy_camera_transition_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_camera_transition_v2.json
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-camera-transition-suite --timeout-ms 180000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_camera_transition_v4.json
+python3 tools/run_qualification.py --manifest coordinated_xy_camera_transition_v4 --operator-prompts --fixture coordinated_xy_camera_transition_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_camera_transition_v4.json
 ```
 
 The completed Z speed-ladder experiment selected the existing 30 kHz logical
@@ -3333,6 +3364,76 @@ Only the normal `Debug` firmware image is built and versioned. The former
 headless build script exits before copying an artifact when compilation fails,
 so `firmware/artifacts/LabCraft_firmware.bin` cannot be silently replaced by a
 stale failed-build output.
+
+Before loaded-rack use, run the shallow-edge suite with non-dispensing test
+heads and a clear envelope. Then perform 20 attended rack operations: five
+pause-to-Slot-1 unloads, five pause-to-Slot-2 unloads, five Slot-1-retreat to
+Slot-4-approach transfers, and five reverse Slot-4-to-Slot-1 transfers. Home
+XY after each five-operation block and require no more than 25 logical units
+of drift on either axis. Finally run one attended four-head experiment and
+apply the same drift gate. Stop immediately for collision, loss of holding
+torque, abnormal sound, or visible gantry skew; do not return the printer to
+unattended operation until all automated and physical gates pass.
+
+Result `2099` includes `mf`, the bitwise OR of the exact per-move failure
+masks, plus `am`, `tm`, `de`, `sg`, and `wd` timing/status maxima. A passing
+run requires `mf=0`. The Windows HIL wrapper downloads and summarizes the JSON
+report even when the remote self-test exits nonzero, so first-failure evidence
+is retained locally instead of remaining only on the Pi.
+
+Camera-transition result `2071` retains `fs` as its overall stage code and now
+adds `mf`, the exact OR of measured coordinated-move failure bits, `ab=2600`,
+and the observed active/terminal handler maxima `am`/`tm`. Thus a positioning
+or home failure can report a nonzero `fs` with `mf=0`, while an active-handler
+overrun reports bit 18 (`mf=262144`) without hiding the safe STEP/ownership or
+home evidence. These fields are emitted by a bounded, host-tested formatter
+and fit the existing result frame; result ID, name, and protocol layout do not
+change.
+
+Shallow-edge manifest v4 also expects result `2100`,
+`coord_xy_terminal_timing`. Terminal-budget-only failures remain acceptance
+failures but may continue because they occur after the final accounted edge
+while TIM2 is stopping; every other failure remains fail-fast. The suite thus
+collects 12 terminal samples at 10 kHz and 12 at 40 kHz whenever bit 19 is the
+only anomaly. Metrics `tl*`, `ta*`, `tm*`, and `ob*` are the per-tier minimum,
+integer mean, maximum, and over-budget count. For the same worst handler
+sample, `cm`, `sm`, and `im` split common edge/schedule work,
+timer/axis/event shutdown, and instrumentation; `pm` and `fm` report
+pre-handler and full-IRQ time. `av` must remain zero so the three handler
+stages exactly account for the terminal total. High `cm`, `sm`, or `im`
+localizes handler work, while normal handler stages with high `pm`/`fm`
+indicates IRQ/HAL or preemption latency. Manifest v1 remains archived.
+
+The 40 kHz shallow tier is a requested active-edge cap, not a promise that a
+finite move reaches that rate. With the production acceleration, the 17,100
+master-edge vectors use a 36,986 Hz triangular peak (`ARR=2432`, start
+`ARR=12160`) and the 19,574-edge vectors use 39,571 Hz (`ARR=2273`, start
+`ARR=11365`). At 10 kHz both lengths reach the cap (`ARR=8999`, start
+`ARR=44995`). These fixed expectations are independent of sign and axis swap;
+an unknown tier/vector combination fails closed before its measured move.
+Manifests v1 through v3 remain archived for historical normalization.
+
+With `-CoordinatedXyShallowEdgeSuite`, the Windows wrapper defaults to a
+240,000 ms self-test timeout and a 120,000 ms status-only timeout. Explicit
+timeout parameters still override those suite defaults.
+
+The recorded rollback baseline is source commit
+`00be6ddf633e01f4d757725844af57ee8aa1eb3e` with firmware SHA-256
+`02D74A4B24FFC40DEC07A4932B9A2B34D037B518DABFE2DBDB9FC4ABE68613D9`.
+If any gate fails, stop rack testing and restore that source and its matching
+binary together. Never combine firmware built from one revision with source
+from another.
+
+The active-handler rebaseline used shallow-edge maximum 1,964 cycles and two
+production observations of 2,134 and 2,122 cycles. The retained production
+rerun recorded zero deadline misses and 692 timer ticks of minimum slack in
+`coordinated_xy_production_mres3_v4_20260817_145357.json`, SHA-256
+`8DE50A087AC493E784607D835D8586FDD919B001BBD95068065B6615A4BD17A3`.
+Its immediate rollback artifact is 332,760 bytes with SHA-256
+`9A6A8A712AE6732D02D8F29BB172C10327474E4BC053C9F874F5C2F998A06127`;
+the matching pre-rebaseline dirty source state is identified by binary-diff
+fingerprint `824956a4cbfa79af0e80a5553d1303f9eb9108c8` over commit
+`00be6ddf633e01f4d757725844af57ee8aa1eb3e`.
 
 Superseded coordinated-XY manifests are marked `archived`. They remain usable
 with `--raw-report` to normalize retained evidence, but are hidden from the
@@ -3846,6 +3947,17 @@ Run host firmware tests plus a headless CubeIDE build:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug
+```
+
+Run the focused shallow-angle flash/HIL workflow only on the designated,
+operator-attended LC-001 machine after confirming non-dispensing heads and a
+clear motion envelope:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 `
+  -PiHost 192.168.0.33 `
+  -Profile FULL `
+  -CoordinatedXyShallowEdgeSuite
 ```
 
 The firmware scripts resolve the project from the repo checkout, so moved workspaces do not need script edits. If the headless build reports that the project cannot be found, verify the checkout path and rerun the build script with an explicit project path:

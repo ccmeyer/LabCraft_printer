@@ -23,7 +23,7 @@ enum SaturationFlag : uint32_t {
   SaturatedNone = 0u,
   SaturatedCallbacks = 1u << 0u,
   SaturatedPhaseCallbacks = 1u << 1u,
-  SaturatedCompletedPulses = 1u << 2u,
+  SaturatedActiveEdgeEvents = 1u << 2u,
   SaturatedPendingObservations = 1u << 3u,
   SaturatedPendingStreak = 1u << 4u,
   SaturatedCycleWraps = 1u << 5u,
@@ -37,6 +37,9 @@ enum SaturationFlag : uint32_t {
   SaturatedDeadlineSamples = 1u << 16u,
   SaturatedDeadlineMissing = 1u << 17u,
   SaturatedDeadlineMisses = 1u << 18u,
+  SaturatedTerminalStageSamples = 1u << 19u,
+  SaturatedTerminalStageTotal = 1u << 20u,
+  SaturatedTerminalStageAccounting = 1u << 21u,
 };
 
 struct State {
@@ -48,11 +51,22 @@ struct State {
   uint32_t lastObservedCycle = 0u;
   uint32_t cycleWraps = 0u;
   uint32_t totalCallbacks = 0u;
-  uint32_t completedPulses = 0u;
+  uint32_t activeEdgeEvents = 0u;
   uint32_t phaseCallbacks[static_cast<uint8_t>(Phase::Count)] = {};
   uint32_t phaseMaxCycles[static_cast<uint8_t>(Phase::Count)] = {};
   uint32_t terminalCallbacks = 0u;
   uint32_t terminalMaxCycles = 0u;
+  uint32_t terminalStageSamples = 0u;
+  uint32_t terminalMinCycles = 0u;
+  uint32_t terminalTotalCycles = 0u;
+  uint32_t terminalStageAccountingViolations = 0u;
+  uint32_t worstTerminalTotalCycles = 0u;
+  uint32_t worstTerminalCommonCycles = 0u;
+  uint32_t worstTerminalShutdownCycles = 0u;
+  uint32_t worstTerminalInstrumentationCycles = 0u;
+  uint32_t worstTerminalPreHandlerCycles = 0u;
+  uint32_t worstTerminalFullIrqCycles = 0u;
+  bool currentTerminalIsWorst = false;
   uint32_t pendingObservations = 0u;
   uint32_t currentPendingStreak = 0u;
   uint32_t maxPendingStreak = 0u;
@@ -93,11 +107,20 @@ struct Snapshot {
   uint32_t cycleWraps = 0u;
   uint32_t durationCycles = 0u;
   uint32_t totalCallbacks = 0u;
-  uint32_t completedPulses = 0u;
+  uint32_t activeEdgeEvents = 0u;
   uint32_t phaseCallbacks[static_cast<uint8_t>(Phase::Count)] = {};
   uint32_t phaseMaxCycles[static_cast<uint8_t>(Phase::Count)] = {};
   uint32_t terminalCallbacks = 0u;
   uint32_t terminalMaxCycles = 0u;
+  uint32_t terminalStageSamples = 0u;
+  uint32_t terminalMinCycles = 0u;
+  uint32_t terminalTotalCycles = 0u;
+  uint32_t terminalStageAccountingViolations = 0u;
+  uint32_t worstTerminalCommonCycles = 0u;
+  uint32_t worstTerminalShutdownCycles = 0u;
+  uint32_t worstTerminalInstrumentationCycles = 0u;
+  uint32_t worstTerminalPreHandlerCycles = 0u;
+  uint32_t worstTerminalFullIrqCycles = 0u;
   uint32_t pendingObservations = 0u;
   uint32_t maxPendingStreak = 0u;
   uint32_t scheduledTimerTicks = 0u;
@@ -131,7 +154,7 @@ void recordSample(State& state,
                   uint32_t exitCycle,
                   uint32_t arr,
                   bool updatePending,
-                  bool completedPulse,
+                  bool activeEdgeEvent,
                   bool terminal);
 void completeSampleTiming(State& state,
                           Phase phase,
@@ -139,6 +162,11 @@ void completeSampleTiming(State& state,
                           uint32_t recordedExitCycle,
                           uint32_t finalExitCycle,
                           bool terminal);
+void recordTerminalStages(State& state,
+                          uint32_t entryCycle,
+                          uint32_t shutdownStartCycle,
+                          uint32_t shutdownEndCycle,
+                          uint32_t instrumentationEndCycle);
 void beginIrqPathSample(State& state,
                         bool irqEntryValid,
                         uint32_t irqEntryCycle,

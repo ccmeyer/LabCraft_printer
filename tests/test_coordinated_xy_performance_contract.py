@@ -40,9 +40,13 @@ def test_production_mres3_and_motion_unit_scaling_are_fixed():
     assert "logicalUnitsPerNativeStepForMres" in scale
     assert "mres == 3u ? 2u : 1u" in scale
     assert "TMC2208Configuration::kMres" in scale
+    assert "coordinatedActiveEdgesPerNativeStep" in scale
+    assert "logicalUnitsPerCoordinatedActiveEdge" in scale
+    assert "toCoordinatedActiveEdges" in gantry
     assert "MotionUnitScale::quantizeDisplacement(initialX, dx)" in gantry
-    assert "MotionUnitScale::toNativeRate" in gantry
-    assert "MotionUnitScale::toNativeAcceleration" in gantry
+    coordinated_start = gantry[gantry.index("CoordinatedStartStatus Gantry::startCoordinatedXY"):]
+    assert "MotionUnitScale::toNativeRate" not in coordinated_start
+    assert "MotionUnitScale::toNativeAcceleration" not in coordinated_start
     assert "MotionUnitScale::quantizeDisplacement(_pos, requestedDelta)" in stepper
     assert "MotionUnitScale::toNativeRate(freqHz)" in stepper
     assert "MotionUnitScale::toNativeAcceleration(_accel_sps2)" in stepper
@@ -92,6 +96,11 @@ def test_isr_telemetry_keeps_bounded_maxima_and_drops_experiment_sums():
         "maxPendingStreak",
         "phaseMaxCycles",
         "terminalMaxCycles",
+        "terminalStageSamples",
+        "terminalTotalCycles",
+        "worstTerminalCommonCycles",
+        "worstTerminalShutdownCycles",
+        "worstTerminalInstrumentationCycles",
         "fullIrqMaxCycles",
         "entryTimerSamples",
         "entryTimerMissing",
@@ -114,24 +123,45 @@ def test_isr_telemetry_keeps_bounded_maxima_and_drops_experiment_sums():
         assert removed not in header
 
 
-def test_performance_report_is_strict_fixed_two_edge_conditional():
+def test_performance_report_is_strict_active_edge_conditional():
     header = _read("firmware/Core/Inc/CoordinatedXyPerformanceReport.h")
     source = _read("firmware/Core/Src/CoordinatedXyPerformanceReport.cpp")
-    assert "observation.expectedMasterSteps * 2u" in source
-    assert "observation.timer2Callbacks - 1u" in source
+    assert "observation.timer2Callbacks != observation.expectedMasterEdges" in source
+    assert "timing.activeEdgeEvents != observation.expectedMasterEdges" in source
+    assert "observation.cleanupEdgeEvents != 0u" in source
+    assert "observation.edgeSpacingViolations != 0u" in source
     assert "kConditionalGuardTicks" in source
     assert "moveCanContinueAfterCompletion" not in header + source
     assert "qualificationFailure" not in header + source
     assert "aggregate.exactAndSafe" in source
     assert "kMoveFailureScheduleSaturation" in header
     assert "kMoveFailureTerminalReason" in header
+    assert "canContinueAfterTerminalBudgetOnlyFailure" in header + source
+    assert "timing.terminalStageSamples != 1u" in source
+    assert "kCoordinatedTerminalHandlerBudgetCycles = 3500u" in header
+    assert "terminalMaxCycles = kCoordinatedTerminalHandlerBudgetCycles" in header
 
 
-def test_diagnostics_exposes_only_production_xy_direct_lut_and_camera_selectors():
+def test_shallow_suite_uses_fixed_finite_profile_expectations():
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+    report = _read("firmware/Core/Src/CoordinatedXyPerformanceReport.cpp")
+    assert "shallowMoveTimingExpectation" in diagnostics + report
+    assert "requireShallowExpectation" in diagnostics
+    assert "kMoveFailureSelectedRate" in diagnostics
+    for value in (
+        "10000u", "17100u", "19574u", "36986u", "2432u", "12160u",
+        "39571u", "2273u", "11365u", "8999u", "44995u",
+    ):
+        assert value in report
+
+
+def test_diagnostics_exposes_production_shallow_direct_lut_and_camera_selectors():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
     assert "selectedDiagnosticId == 2097u" in diagnostics
     assert "selectedDiagnosticId == 2096u" in diagnostics
     assert "selectedDiagnosticId == 2078u" in diagnostics
+    assert "selectedDiagnosticId == 2099u" in diagnostics
+    assert '2100u, "coord_xy_terminal_timing"' in diagnostics
     for selector in (2049, 2059, 2069, 2075, 2076, 2077, 2079, 2084, 2085, 2086):
         assert f"selectedDiagnosticId == {selector}u" not in diagnostics
     assert "runProductionCoordinatedDiagnostic" in diagnostics
@@ -151,9 +181,9 @@ def test_production_suite_freezes_geometry_counts_and_strict_evidence():
         "{{8916, 30500}, {500, 500}}",
     ):
         assert point in suite
-    assert "10u,\n                                53416u" in suite
-    assert "90000u" in suite
-    assert "110000u" in suite
+    assert "10u,\n                                106832u" in suite
+    assert "180000u" in suite
+    assert "220000u" in suite
     assert "aggregate.timer2Callbacks == 220000u" in suite
     assert "aggregate.conditionalDecisionCount == 219990u" in suite
     assert "aggregate.timerRearmPendingCount == 0u" in suite
@@ -169,6 +199,9 @@ def test_production_results_use_reduced_metric_contract():
         diagnostics.index("if (runCoordinatedXyPerformanceSuite)") :
         diagnostics.index("if (runDirectXyzLutSuite)")
     ]
+    shallow_start = production_suite.rindex("if (runCoordinatedXyShallowEdgeSuite)")
+    shallow_end = production_suite.index("if (runCoordinatedXyTransitionSuite)", shallow_start)
+    production_suite = production_suite[:shallow_start] + production_suite[shallow_end:]
     for removed_metric in ("qf=", "qm=", "hm=", "sm=", "lf=", "ic=", "ix="):
         assert removed_metric not in production_suite
 
@@ -209,26 +242,132 @@ def test_motion_limits_share_fixed_fifteen_ms_confirmation_without_raw_stop():
 
 def test_camera_transition_uses_production_scaling_and_direct_home_counts():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    assert "aggregate, 2u, 8416u, 30000u, 30000u, limits" in diagnostics
+    assert "aggregate, 2u, 16832u, 60000u, 60000u, limits" in diagnostics
     assert "homeIsr.totalEntries == 101u" in diagnostics
     assert "homeIsr.completedPulses == 50u" in diagnostics
     assert 'runOne(2071u' in diagnostics
 
 
-def test_active_v3_manifest_adds_limit_debounce_and_archives_v2():
-    production = json.loads(
-        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v3.json")
+def test_shallow_suite_reports_the_exact_move_failure_mask_and_timing_maxima():
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+    suite = diagnostics[diagnostics.rindex("if (runCoordinatedXyShallowEdgeSuite)") :]
+    suite = suite[: suite.index("if (runCoordinatedXyTransitionSuite)")]
+    assert "tiers[0].moveFailureMask |" in suite
+    assert "tiers[1].moveFailureMask" in suite
+    assert "moveFailures == 0u" in suite
+    assert '"tm=%lu;de=%lu;sg=%lu;wd=%lu;sf=%lu;to=%lu"' in suite
+    assert "canContinueAfterTerminalBudgetOnlyFailure" in diagnostics
+    assert "observePair(" in suite
+    assert "if (!pairResult.safeToContinue)" in suite
+    assert "completionTogether = execution.waitCompleted &&" in diagnostics
+    assert "driversEnabled;" in diagnostics
+    assert "const bool homePassed = motionSafeToContinue &&" in suite
+    assert "tiers[0].terminalSampleCount == 12u" in suite
+    assert "tiers[1].terminalSampleCount == 12u" in suite
+    for metric in (
+        "bl=%lu", "n1=%lu", "tl1=%lu", "ta1=%lu", "tm1=%lu", "ob1=%lu",
+        "n2=%lu", "tl2=%lu", "ta2=%lu", "tm2=%lu", "ob2=%lu",
+        "cm=%lu", "sm=%lu", "im=%lu", "pm=%lu", "fm=%lu", "av=%lu",
+    ):
+        assert metric in suite
+
+
+def test_terminal_stage_timestamps_are_confined_to_completed_terminal_path():
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
+    instrumentation = _read(
+        "firmware/Core/Src/CoordinatedXyIsrInstrumentation.cpp"
     )
-    production_v2 = json.loads(
-        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v2.json")
+    assert "if (completedTerminal) terminalShutdownStartCycle = gantryCycleNow();" in gantry
+    assert "if (completedTerminal) terminalShutdownEndCycle = gantryCycleNow();" in gantry
+    assert "recordTerminalStages(" in gantry + instrumentation
+    assert "stageTotal != static_cast<uint64_t>(totalCycles)" in instrumentation
+
+
+def test_active_handler_budget_and_camera_failure_telemetry_are_shared():
+    header = _read("firmware/Core/Inc/CoordinatedXyPerformanceReport.h")
+    report = _read("firmware/Core/Src/CoordinatedXyPerformanceReport.cpp")
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+    assert "kCoordinatedActiveHandlerRegressionBudgetCycles =\n    2600u" in header
+    assert "activeMaxCycles =\n      kCoordinatedActiveHandlerRegressionBudgetCycles" in header
+    assert "buildCameraTransitionMetrics(" in report + diagnostics
+    assert '"hi=%lu;hpc=%lu;hpu=%lu;hd=%lu;mf=%lu;ab=%lu;am=%lu;tm=%lu;"' in report
+
+
+def test_shallow_result_metrics_fit_frame_at_acceptance_domain_maxima():
+    motion = (
+        "h1=10000;h2=40000;n=24;xe=241592;ye=241592;me=430192;"
+        "i2=430192;i7=0;ce=0;sv=0;en=1;xd=25;yd=25;ok=1;mf=0;"
+        "am=2600;tm=3500;de=100;sg=100;wd=100;sf=0;to=0"
+    )
+    terminal = (
+        "bl=3500;h1=10000;n1=12;tl1=3500;ta1=3500;tm1=3500;ob1=0;"
+        "h2=40000;n2=12;tl2=3500;ta2=3500;tm2=3500;ob2=0;"
+        "cm=3500;sm=3500;im=3500;pm=4294967295;fm=4294967295;av=0;sf=0"
+    )
+    assert len(motion) <= 230 - min(len("coord_xy_shallow_edge_distribution"), 32)
+    assert len(terminal) <= 230 - min(len("coord_xy_terminal_timing"), 32)
+
+
+def test_camera_transition_failure_metrics_fit_frame_with_exact_timing():
+    metrics = (
+        "fs=2;n=1;xe=8416;ye=30000;i2=30000;i7=0;pu=0;en=0;sl=1;ow=0;"
+        "lb=0;hs=25000;he=100;hg=48000;hi=101;hpc=50;hpu=0;"
+        "hd=4294967295;mf=4294967295;ab=2600;"
+        "am=4294967295;tm=4294967295;sf=0;to=1"
+    )
+    assert len(metrics) <= 230 - min(len("coord_xy_camera_home_transition"), 32)
+
+
+def test_windows_hil_wrapper_downloads_failure_report_before_exiting():
+    script = _read("firmware/scripts/run_fw_hil_windows.ps1")
+    remote = script.index("$remoteHilExitCode = $LASTEXITCODE")
+    download = script.index('Write-Host "=== Download report ==="', remote)
+    parse = script.index("$reportObj = Get-Content $localReport", download)
+    summarize_failure = script.index("if ($failed -gt 0", parse)
+    assert remote < download < parse < summarize_failure
+    assert "attempting to download its failure report" in script
+    assert "Pi flash/selftest failed with rc=$remoteHilExitCode and its report could not be downloaded" in script
+
+
+def test_windows_hil_wrapper_uses_long_shallow_defaults_but_preserves_overrides():
+    script = _read("firmware/scripts/run_fw_hil_windows.ps1")
+    assert '$PSBoundParameters.ContainsKey("SelfTestTimeoutMs")' in script
+    assert '$effectiveSelfTestTimeoutMs = 240000' in script
+    assert '$PSBoundParameters.ContainsKey("StatusOnlyTimeoutMs")' in script
+    assert '$effectiveStatusOnlyTimeoutMs = 120000' in script
+    assert '"--selftest-timeout-ms", $effectiveSelfTestTimeoutMs' in script
+    assert '"--status-only-timeout-ms", $effectiveStatusOnlyTimeoutMs' in script
+
+
+def test_active_coordinated_manifests_share_timing_budgets_and_archive_predecessors():
+    production = json.loads(
+        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v5.json")
+    )
+    production_v4 = json.loads(
+        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v4.json")
     )
     camera = json.loads(
-        _read("tools/qualification/manifests/coordinated_xy_camera_transition_v2.json")
+        _read("tools/qualification/manifests/coordinated_xy_camera_transition_v4.json")
+    )
+    camera_v3 = json.loads(
+        _read("tools/qualification/manifests/coordinated_xy_camera_transition_v3.json")
+    )
+    shallow = json.loads(
+        _read("tools/qualification/manifests/coordinated_xy_shallow_edge_v4.json")
+    )
+    shallow_v3 = json.loads(
+        _read("tools/qualification/manifests/coordinated_xy_shallow_edge_v3.json")
     )
     assert production["lifecycle"] == "active"
-    assert production_v2["lifecycle"] == "archived"
+    assert production_v4["lifecycle"] == "archived"
     assert production["expected_test_ids"] == [2087, 2088, 2089, 2090, 2098]
-    assert production["analysis_rules"]["2089"]["metrics"]["dc"]["equals"] == 219990
+    assert production["analysis_rules"]["2087"]["metrics"]["xe"]["equals"] == 106832
+    assert production["analysis_rules"]["2087"]["metrics"]["ye"]["equals"] == 180000
+    assert production["analysis_rules"]["2087"]["metrics"]["me"]["equals"] == 220000
+    assert production["analysis_rules"]["2087"]["metrics"]["ce"]["equals"] == 0
+    assert production["analysis_rules"]["2087"]["metrics"]["sv"]["equals"] == 0
+    assert production["analysis_rules"]["2087"]["metrics"]["am"]["max"] == 2600
+    assert production["analysis_rules"]["2087"]["metrics"]["tm"]["max"] == 3500
     assert production["analysis_rules"]["2089"]["metrics"]["rp"]["equals"] == 0
     debounce = production["analysis_rules"]["2098"]["metrics"]
     assert debounce["db"]["equals"] == 15
@@ -236,8 +375,19 @@ def test_active_v3_manifest_adds_limit_debounce_and_archives_v2():
     assert debounce["yf"]["equals"] == 0
     assert debounce["tv"]["equals"] == 1
     assert camera["lifecycle"] == "active"
-    assert camera["analysis_rules"]["2071"]["metrics"]["xe"]["equals"] == 8416
+    assert camera_v3["lifecycle"] == "archived"
+    assert camera["analysis_rules"]["2071"]["metrics"]["xe"]["equals"] == 16832
     assert camera["analysis_rules"]["2071"]["metrics"]["hi"]["equals"] == 101
+    assert camera["analysis_rules"]["2071"]["metrics"]["mf"]["equals"] == 0
+    assert camera["analysis_rules"]["2071"]["metrics"]["ab"]["equals"] == 2600
+    assert camera["analysis_rules"]["2071"]["metrics"]["am"]["max"] == 2600
+    assert camera["analysis_rules"]["2071"]["metrics"]["tm"]["max"] == 3500
+    assert "3,500-cycle" in camera["description"]
+    assert shallow["lifecycle"] == "active"
+    assert shallow_v3["lifecycle"] == "archived"
+    assert shallow["analysis_rules"]["2099"]["metrics"]["am"]["max"] == 2600
+    assert shallow["analysis_rules"]["2099"]["metrics"]["tm"]["max"] == 3500
+    assert shallow["analysis_rules"]["2100"]["metrics"]["bl"]["equals"] == 3500
 
 
 def test_historical_manifests_are_archived_without_deleting_catalog_data():
@@ -253,7 +403,14 @@ def test_historical_manifests_are_archived_without_deleting_catalog_data():
         "coordinated_xy_mres3_conditional_rearm_v3",
         "coordinated_xy_production_mres3_v1",
         "coordinated_xy_production_mres3_v2",
+        "coordinated_xy_production_mres3_v3",
+        "coordinated_xy_production_mres3_v4",
         "coordinated_xy_camera_transition_v1",
+        "coordinated_xy_camera_transition_v2",
+        "coordinated_xy_camera_transition_v3",
+        "coordinated_xy_shallow_edge_v1",
+        "coordinated_xy_shallow_edge_v2",
+        "coordinated_xy_shallow_edge_v3",
     )
     catalog = _read("tools/qualification/test_catalog.py")
     for manifest_id in archived:

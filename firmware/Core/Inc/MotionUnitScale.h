@@ -27,6 +27,47 @@ inline constexpr uint32_t logicalUnitsPerNativeStep() {
       TMC2208Configuration::kMres);
 }
 
+// The configured TMC2208 DEDGE mode consumes both STEP transitions.  At
+// MRES=3 each active edge therefore advances one historical MRES=2 logical
+// coordinate unit, while a complete high/low cycle still advances two.
+inline constexpr uint32_t coordinatedActiveEdgesPerNativeStep() {
+  return TMC2208Configuration::buildValues().doubleEdge ? 2u : 1u;
+}
+
+inline constexpr uint32_t logicalUnitsPerCoordinatedActiveEdge() {
+  const uint32_t edgesPerNativeStep = coordinatedActiveEdgesPerNativeStep();
+  return edgesPerNativeStep == 0u
+      ? 0u
+      : logicalUnitsPerNativeStep() / edgesPerNativeStep;
+}
+
+static_assert(coordinatedActiveEdgesPerNativeStep() != 0u &&
+                  (logicalUnitsPerNativeStep() %
+                   coordinatedActiveEdgesPerNativeStep()) == 0u,
+              "Coordinated DEDGE transitions must map to whole logical units");
+static_assert(logicalUnitsPerCoordinatedActiveEdge() == 1u,
+              "Production coordinated motion requires one logical unit per active edge");
+
+inline constexpr uint32_t toCoordinatedActiveEdges(
+    uint32_t logicalMagnitude) {
+  const uint32_t logicalUnitsPerEdge =
+      logicalUnitsPerCoordinatedActiveEdge();
+  return logicalUnitsPerEdge == 0u
+      ? 0u
+      : logicalMagnitude / logicalUnitsPerEdge;
+}
+
+inline constexpr uint32_t coordinatedActiveEdgesToLogicalMagnitude(
+    uint32_t activeEdges) {
+  const uint32_t logicalUnitsPerEdge =
+      logicalUnitsPerCoordinatedActiveEdge();
+  return logicalUnitsPerEdge == 0u ||
+          activeEdges > std::numeric_limits<uint32_t>::max() /
+              logicalUnitsPerEdge
+      ? 0u
+      : activeEdges * logicalUnitsPerEdge;
+}
+
 inline constexpr uint32_t toNativeStepCycles(uint32_t logicalMagnitude,
                                               uint32_t scale) {
   return scale == 0u ? 0u : logicalMagnitude / scale;

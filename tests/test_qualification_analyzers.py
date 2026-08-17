@@ -600,8 +600,8 @@ def test_production_mres3_v2_rejects_reduced_evidence_regressions():
         assert _analyze(host_failure, manifest)["verdict"]["status"] == "fail"
 
 
-def test_production_mres3_v3_rejects_limit_debounce_regressions():
-    manifest = load_manifest("coordinated_xy_production_mres3_v3")
+def test_production_mres3_v5_rejects_timing_and_limit_debounce_regressions():
+    manifest = load_manifest("coordinated_xy_production_mres3_v5")
     results = []
     for test_id in manifest.expected_test_ids:
         metrics = {}
@@ -614,7 +614,7 @@ def test_production_mres3_v3_rejects_limit_debounce_regressions():
                 metrics[metric] = 0
         results.append({
             "test_id": test_id,
-            "name": f"production_v3_{test_id}",
+            "name": f"production_v5_{test_id}",
             "pass": True,
             "metrics": metrics,
         })
@@ -643,6 +643,12 @@ def test_production_mres3_v3_rejects_limit_debounce_regressions():
     informational["results"][debounce_index]["metrics"]["xr"] = 2
     assert _analyze(informational, manifest)["verdict"]["status"] == "pass"
 
+    for metric, value in (("am", 2601), ("tm", 3501)):
+        rejected = deepcopy(valid)
+        motion_index = manifest.expected_test_ids.index(2087)
+        rejected["results"][motion_index]["metrics"][metric] = value
+        assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
+
     for metric, value in (
         ("n", 9),
         ("xf", 1),
@@ -670,8 +676,85 @@ def test_production_mres3_v3_rejects_limit_debounce_regressions():
         assert _analyze(host_failure, manifest)["verdict"]["status"] == "fail"
 
 
-def test_camera_transition_v2_rejects_scaled_count_and_home_regressions():
-    manifest = load_manifest("coordinated_xy_camera_transition_v2")
+def test_shallow_edge_manifest_rejects_count_timing_and_safety_regressions():
+    manifest = load_manifest("coordinated_xy_shallow_edge_v4")
+    motion_rules = manifest.analysis_rules["2099"]["metrics"]
+    timing_rules = manifest.analysis_rules["2100"]["metrics"]
+    motion_metrics = {
+        name: rule.get("equals", rule.get("min", 0))
+        for name, rule in motion_rules.items()
+    }
+    timing_metrics = {
+        name: rule.get("equals", rule.get("min", 0))
+        for name, rule in timing_rules.items()
+    }
+    timing_metrics.update({
+        "tl1": 2400, "ta1": 2500, "tm1": 2600,
+        "tl2": 2450, "ta2": 2550, "tm2": 2650,
+        "cm": 1200, "sm": 800, "im": 650, "pm": 20, "fm": 2800,
+    })
+    valid = {
+        "run_id": 2099,
+        "profile": "FULL",
+        "started_at": "2026-08-17T00:00:00Z",
+        "finished_at": "2026-08-17T00:00:10Z",
+        "aborted": False,
+        "summary": {"total": 2, "passed": 2, "failed": 0},
+        "results": [
+            {
+                "test_id": 2099,
+                "name": "coord_xy_shallow_edge_distribution",
+                "pass": True,
+                "metrics": motion_metrics,
+            },
+            {
+                "test_id": 2100,
+                "name": "coord_xy_terminal_timing",
+                "pass": True,
+                "metrics": timing_metrics,
+            },
+        ],
+        "host_checks": [
+            {"name": "selftest_progress_watchdog", "pass": True,
+             "details": {"timeout_reason": None}},
+            {"name": "coordinated_xy_status_cadence", "pass": True,
+             "details": {"status_gap_max_ms": 100}},
+        ],
+    }
+    assert _analyze(valid, manifest)["verdict"]["status"] == "pass"
+
+    for metric, value in (
+        ("h1", 9999), ("h2", 39999), ("n", 23),
+        ("xe", 241591), ("ye", 241591), ("me", 430191),
+        ("i2", 430191), ("i7", 1), ("ce", 1), ("sv", 1),
+        ("mf", 2), ("en", 0), ("xd", 26), ("yd", 26), ("ok", 0),
+        ("am", 2601), ("tm", 3501), ("sf", 1), ("to", 1),
+    ):
+        rejected = deepcopy(valid)
+        rejected["results"][0]["metrics"][metric] = value
+        assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
+
+    for metric, value in (
+        ("bl", 3499), ("h1", 9999), ("n1", 11), ("ob1", 1),
+        ("h2", 39999), ("n2", 11), ("ob2", 1), ("av", 1), ("sf", 1),
+    ):
+        rejected = deepcopy(valid)
+        rejected["results"][1]["metrics"][metric] = value
+        assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
+
+    incomplete = deepcopy(valid)
+    incomplete["results"].pop()
+    incomplete["summary"] = {"total": 1, "passed": 1, "failed": 0}
+    assert _analyze(incomplete, manifest)["verdict"]["status"] == "fail"
+
+    for host_index in range(2):
+        host_failure = deepcopy(valid)
+        host_failure["host_checks"][host_index]["pass"] = False
+        assert _analyze(host_failure, manifest)["verdict"]["status"] == "fail"
+
+
+def test_camera_transition_v4_rejects_motion_timing_and_home_regressions():
+    manifest = load_manifest("coordinated_xy_camera_transition_v4")
     rules = manifest.analysis_rules["2071"]["metrics"]
     metrics = {
         name: rule.get("equals", rule.get("min", 0))
@@ -700,14 +783,20 @@ def test_camera_transition_v2_rejects_scaled_count_and_home_regressions():
     assert _analyze(valid, manifest)["verdict"]["status"] == "pass"
 
     for metric, value in (
-        ("xe", 8415), ("ye", 29999), ("i2", 59999), ("pu", 1),
+        ("xe", 16831), ("ye", 59999), ("i2", 59999), ("pu", 1),
         ("en", 0), ("sl", 0), ("ow", 1), ("lb", 1),
         ("hi", 100), ("hpc", 49), ("hpu", 1), ("hd", 26),
+        ("mf", 262144), ("ab", 2025), ("am", 2601), ("tm", 3501),
         ("sf", 1), ("to", 1),
     ):
         rejected = deepcopy(valid)
         rejected["results"][0]["metrics"][metric] = value
         assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
+
+    for metric in ("mf", "ab", "am", "tm"):
+        missing = deepcopy(valid)
+        del missing["results"][0]["metrics"][metric]
+        assert _analyze(missing, manifest)["verdict"]["status"] == "fail"
 
 
 def test_direct_xyz_lut_manifest_rejects_profile_timing_or_isolation_regressions():

@@ -285,11 +285,12 @@ private:
                                         bool direction,
                                         int32_t targetPosition);
   void          _writeCoordinatedStep(bool high);
-  void          _accountCoordinatedPulse();
+  void          _accountCoordinatedEdge();
   void          _finishCoordinatedAxis(bool aborted);
   void          _finishAbortedCoordinatedAxisFromLow();
   void          _finishCompletedCoordinatedAxisFromLow();
   bool          _coordinatedStepIsLow() const;
+  bool          _readCoordinatedStepHigh(bool& high) const;
 #if defined(__GNUC__) && !defined(UNIT_TEST)
   __attribute__((always_inline)) inline bool
 #else
