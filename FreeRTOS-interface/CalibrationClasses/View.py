@@ -11281,6 +11281,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
         ):
             display_message = f"{display_message}\n\n{self._flash_session_not_armed_warning()}"
             self._show_flash_session_not_armed_warning(popup=False)
+        elif self._is_flash_fault_latched() and "capture" in display_message.lower():
+            display_message = (
+                f"{display_message}\n\nFirmware flash safety fault: "
+                f"{self._flash_fault_reason_text()}. Close and reopen the imager "
+                "to clear the fault safely."
+            )
         self.update_stage_and_log("Calibration Error", "red")
         self.reset_calibration_buttons()
         self._refresh_manual_control_lock_state()

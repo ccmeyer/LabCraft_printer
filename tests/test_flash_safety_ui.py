@@ -199,6 +199,31 @@ def test_droplet_imager_disables_manual_flash_and_stops_timer_on_fault(monkeypat
     dialog.deleteLater()
 
 
+def test_calibration_capture_error_explains_latched_flash_fault(monkeypatch, qapp):
+    dialog, cam = _build_droplet_dialog(monkeypatch, qapp)
+    warnings = []
+    monkeypatch.setattr(
+        "CalibrationClasses.View.QtWidgets.QMessageBox.warning",
+        lambda _parent, title, message: warnings.append((title, message)),
+    )
+    dialog.model.calibration_manager.should_suppress_process_verdict = lambda: True
+    dialog.model.calibration_manager.clear_pending_process_verdict = lambda **_kwargs: None
+
+    cam.flash_session_armed = False
+    cam.flash_fault_latched = True
+    cam.flash_fault_reason = "print_completion_timeout"
+    dialog.update_flash_info()
+    dialog.on_calibration_error("Failed to capture droplet image.")
+
+    assert dialog.flash_button.isEnabled() is False
+    assert warnings
+    assert warnings[-1][0] == "Calibration Error"
+    assert "Droplet burst did not complete within the flash safety timeout" in warnings[-1][1]
+    assert "Close and reopen the imager" in warnings[-1][1]
+
+    dialog.deleteLater()
+
+
 def test_flash_fault_disables_shared_nozzle_buttons_in_both_tabs(monkeypatch, qapp):
     dialog, cam = _build_droplet_dialog(monkeypatch, qapp)
 

@@ -504,7 +504,6 @@ private:
   void _latchFlashFault(FlashSafety::FaultReason reason, bool deferLog);
   void _emitPendingFlashFaultLogs();
   uint32_t _flashAckTimeoutMs() const;
-  uint32_t _flashPrintCompletionTimeoutMs(uint16_t droplets, uint16_t rateHz) const;
   bool _waitForFlashTriggerRelease(uint32_t timeoutMs);
   bool _waitForFlashAckAfter(uint32_t baselineAckCount, uint32_t timeoutMs);
   bool _waitForFlashPrintDone(uint32_t timeoutMs);

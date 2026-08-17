@@ -152,6 +152,9 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 
 ### Command/comms and orchestration
 
+- `firmware/Core/Inc/FlashPrintCompletionPolicy.h`, `firmware/Core/Src/FlashPrintCompletionPolicy.cpp`
+  - Pure, host-tested imaging print deadline calculation. It retains the existing pulse-duration grace and `1000..30000 ms` base bounds, then adds a saturating startup-delay budget. The production flash task supplies `Gripper::DISPENSE_COOLDOWN_MS`, so a one-droplet 20 Hz imaging print receives `4050 ms` and a valid cooldown wait cannot latch `print_completion_timeout`.
+
 - Serial framing + packet handling:
   - `firmware/Core/Inc/Comm.h`, `firmware/Core/Src/Comm.cpp`
   - Functions: `Comm::begin`, `Comm::onRxByte`, `Comm::onRxBytes`, `Comm::handlePacket`, `Comm::statusTask`
@@ -191,7 +194,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
   - `HomeInterruptionPolicy` owns the host-tested, generation-tagged cancel/restart lifecycle. Orchestrator home workers are persistent static tasks: Pause hard-stops active home axes and closes regulator valves, Resume re-runs interrupted autonomous recovery homes before restarting the interrupted opcode, and a genuine failure remains paused and unretired until Clear.
   - Each persistent X/Y/Z/P/R home worker registers its static stack bounds with `CrashLog`. `Stepper::home` records phase transitions plus task-level checkpoints (`phase_entry`, `before_event_clear`, `before_move`, `waiting_for_move`, `after_move`, `before_limit_sample`, `after_limit_sample`, or `finishing`). There is no per-step or timer-ISR instrumentation, and parallel X/Y or P/R scheduling is unchanged.
   - Homing interruption does not add or change any serial opcode, TLV, ACK, or status field; the existing paused flag and non-advancing completion watermark represent a latched failure to the host.
-  - Flash session safety lives here: `CMD_INIT_FLASH` / `CMD_STOP_FLASH`, PE8 arm/disarm policy, PE9 output ownership, and fault latch logging (`FLASH_ARMED`, `FLASH_DISARMED`, `FLASH_FAULT`). Active imaging sessions now only hard-fault on `line_high_on_arm`; once armed, duplicate triggers while a flash is already pending are ignored and the task simply waits for PE8 to return low without latching on slow release.
+  - Flash session safety lives here: `CMD_INIT_FLASH` / `CMD_STOP_FLASH`, PE8 arm/disarm policy, PE9 output ownership, and fault latch logging (`FLASH_ARMED`, `FLASH_DISARMED`, `FLASH_FAULT`). Active imaging sessions now only hard-fault on `line_high_on_arm`; once armed, duplicate triggers while a flash is already pending are ignored and the task simply waits for PE8 to return low without latching on slow release. Imaging print completion uses `FlashPrintCompletionPolicy` with the full fixed gripper cooldown as startup budget; cancellation and fault-latch behavior remain unchanged after that bounded deadline.
 
   - `Orchestrator::drainAckQueue()` now flushes deferred `CMD_QUEUE_ACK` traffic from both the main loop and interruptible wait loops so `CMD_PAUSE_AFTER_SEQ32` requests can be acknowledged promptly during long move/dispense commands.
   - Runtime regulator profile calibration entrypoints `CMD_SET_REG_RECOVERY_PROFILE`, `CMD_SET_REG_SLEW_PROFILE`, `CMD_SET_REG_READY_PROFILE`, and `CMD_RESTORE_REG_PROFILE` validate existing `p1/p2/p3` TLVs through `RegulatorProfileCommandPolicy`, apply candidate settings in RAM only, capture a session baseline before the first candidate apply, and restore either that baseline or firmware defaults on request. `CMD_QUERY_REG_PROFILE` is reserved/no-op until a response format is documented.

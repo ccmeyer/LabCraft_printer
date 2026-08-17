@@ -52,6 +52,7 @@ add_executable(fw_tests
     tests/test_watchdog_participation_policy.cpp
     tests/test_flash_safety.cpp
     tests/test_flash_cycle_policy.cpp
+    tests/test_flash_print_completion_policy.cpp
     tests/test_flash_output_state.cpp
     tests/test_printer_completion_bits.cpp
     tests/test_printer_control_policy.cpp
@@ -97,6 +98,7 @@ add_executable(fw_tests
     ../Core/Src/CrashWatchdogSelfTestPolicy.cpp
     ../Core/Src/FlashSafety.cpp
     ../Core/Src/FlashCyclePolicy.cpp
+    ../Core/Src/FlashPrintCompletionPolicy.cpp
     ../Core/Src/PrinterControlPolicy.cpp
     ../Core/Src/GripperRefreshPolicy.cpp
 )

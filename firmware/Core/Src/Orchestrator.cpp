@@ -37,6 +37,7 @@
 #if LC_HAS_IMAGING > 0
   #include "Flash.h"
   #include "Flash.hpp"
+  #include "FlashPrintCompletionPolicy.h"
 #endif
 
 #if LC_HAS_LED_STRIP > 0
@@ -2265,21 +2266,8 @@ namespace {
 constexpr uint32_t kFlashTriggerReleaseTimeoutMs = 500u;
 constexpr uint32_t kFlashAckMinTimeoutMs = 250u;
 constexpr uint32_t kFlashAckGraceMs = 250u;
-constexpr uint32_t kFlashPrintCompletionGraceMs = 1000u;
-constexpr uint32_t kFlashPrintCompletionMinMs = 1000u;
-constexpr uint32_t kFlashPrintCompletionMaxMs = 30000u;
 constexpr uint32_t kFlashPrinterQueueTimeoutMs = 5u;
 constexpr uint32_t kFlashPrinterGateWaitTimeoutMs = 900u;
-
-uint32_t clampU32(uint32_t value, uint32_t minValue, uint32_t maxValue) {
-  if (value < minValue) {
-    return minValue;
-  }
-  if (value > maxValue) {
-    return maxValue;
-  }
-  return value;
-}
 }  // namespace
 
 
@@ -2348,18 +2336,6 @@ uint32_t Orchestrator::_flashAckTimeoutMs() const {
   const uint32_t delayMs = (_flashDelay + 999u) / 1000u;
   const uint32_t withGrace = delayMs + kFlashAckGraceMs;
   return (withGrace < kFlashAckMinTimeoutMs) ? kFlashAckMinTimeoutMs : withGrace;
-}
-
-uint32_t Orchestrator::_flashPrintCompletionTimeoutMs(uint16_t droplets, uint16_t rateHz) const {
-  const uint32_t safeRateHz = (rateHz == 0u) ? 1u : static_cast<uint32_t>(rateHz);
-  const uint64_t pulseMs =
-      ((static_cast<uint64_t>(droplets) * 1000ULL) + static_cast<uint64_t>(safeRateHz) - 1ULL) /
-      static_cast<uint64_t>(safeRateHz);
-  const uint64_t withGrace = pulseMs + static_cast<uint64_t>(kFlashPrintCompletionGraceMs);
-  const uint32_t bounded = (withGrace > 0xFFFFFFFFULL)
-      ? kFlashPrintCompletionMaxMs
-      : static_cast<uint32_t>(withGrace);
-  return clampU32(bounded, kFlashPrintCompletionMinMs, kFlashPrintCompletionMaxMs);
 }
 
 bool Orchestrator::_waitForFlashTriggerRelease(uint32_t timeoutMs) {
@@ -2614,7 +2590,10 @@ void Orchestrator::_flashTaskLoop() {
 //    Logger::instance()->log("-FLASH COMP-\r\n");
 
     if (waitForPrintCompletion) {
-      const uint32_t printTimeoutMs = _flashPrintCompletionTimeoutMs(_imagingDroplets, _imagingFreq);
+      const uint32_t printTimeoutMs = FlashPrintCompletionPolicy::timeoutMs(
+          _imagingDroplets,
+          _imagingFreq,
+          Gripper::DISPENSE_COOLDOWN_MS);
       if (!_waitForFlashPrintDone(printTimeoutMs)) {
         _faultFlashMonitorCycle(FlashSafety::FaultReason::PrintCompletionTimeout, true);
         continue;

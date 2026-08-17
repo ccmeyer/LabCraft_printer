@@ -47,7 +47,7 @@ The droplet imager is split across three layers:
 
 - `FreeRTOS-interface/Controller.py`
   - `connect_droplet_camera_signals()` wires calibration-manager capture/move/settings requests to controller handlers and connects `machine.droplet_camera.image_captured_signal` to `_on_image_captured()`.
-  - Droplet and stream **Calibrate All** use a close-only gripper preamble. Standalone stream gravimetric capture has no gripper preamble or parameter-restoration phase.
+  - Droplet and stream **Calibrate All** use one explicit gripper close followed by an ordered firmware `WAIT(3000)` settle barrier. The matching calibration queue starts only after that wait retires; session guards discard callbacks from stopped or replaced runs. Standalone stream gravimetric capture has no gripper preamble or parameter-restoration phase.
   - `handle_capture_request()` stores a pending callback and starts an async capture through `machine.capture_droplet_image()`.
   - `_on_image_captured()` pulls the chosen frame from `machine.droplet_camera`, forwards it into `model.droplet_camera_model.update_image(...)`, and resolves the pending callback for the active calibration process.
   - `_on_capture_failed()` resolves the pending callback with `None` and emits `calibration_manager.captureFailed`.
@@ -63,6 +63,8 @@ The droplet imager is split across three layers:
     - Runs a dedicated grabber thread which is the only place that evaluates candidate flashed frames.
 
 ### Firmware
+
+The firmware imaging watchdog includes the full fixed gripper cooldown in its print-completion budget. This is a safety backstop for a trigger that reaches the flash task during cooldown; the host settle barrier remains the physical-quality control that prevents Calibrate All from triggering a capture during that interval.
 
 - `firmware/Core/Src/main.c`
   - `HAL_GPIO_EXTI_Callback()` routes the trigger input interrupt into `MX_FLASH_TriggerCallback(GPIO_Pin)`.

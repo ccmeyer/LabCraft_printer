@@ -790,6 +790,8 @@ class AppRollbackCheckWorker(QtCore.QObject):
 
 class Controller(QObject):
     """Controller class for the application."""
+    CALIBRATION_GRIPPER_SETTLE_MS = 3000
+
     array_complete = Signal()
     array_state_changed = Signal(str)
     update_slots_signal = Signal()
@@ -9908,6 +9910,7 @@ class Controller(QObject):
         *,
         state_getter,
         begin_refresh,
+        mark_settling,
         mark_refreshed,
         report_failure,
     ):
@@ -9918,18 +9921,56 @@ class Controller(QObject):
         state = state_getter()
         expected_session_id = str(state.get("session_id") or "")
 
+        def _is_matching_refresh_session():
+            current = state_getter()
+            return (
+                str(current.get("status") or "") == "refreshing_gripper"
+                and str(current.get("session_id") or "") == expected_session_id
+            )
+
+        def _report_failure_if_current(message):
+            if _is_matching_refresh_session():
+                report_failure(message)
+
+        def _after_gripper_settle():
+            if _is_matching_refresh_session():
+                mark_refreshed(expected_session_id)
+
         def _after_gripper_refresh():
-            mark_refreshed(expected_session_id)
+            if not _is_matching_refresh_session():
+                return
+            settling_result = mark_settling(
+                expected_session_id,
+                self.CALIBRATION_GRIPPER_SETTLE_MS,
+            )
+            if (
+                isinstance(settling_result, tuple)
+                and settling_result
+                and settling_result[0] is False
+            ):
+                return
+            try:
+                wait_ok = self.machine.wait_ms(
+                    self.CALIBRATION_GRIPPER_SETTLE_MS,
+                    handler=_after_gripper_settle,
+                )
+            except Exception as exc:
+                message = f"Failed to enqueue the gripper cooldown wait: {exc}"
+                _report_failure_if_current(message)
+                return
+            if wait_ok is False:
+                message = "Failed to enqueue the gripper cooldown wait."
+                _report_failure_if_current(message)
 
         try:
             refresh_ok = self.close_gripper(handler=_after_gripper_refresh)
         except Exception as exc:
             message = f"Failed to enqueue the initial gripper close pulse: {exc}"
-            report_failure(message)
+            _report_failure_if_current(message)
             return False, message
         if refresh_ok is False:
             message = "Failed to enqueue the initial gripper close pulse."
-            report_failure(message)
+            _report_failure_if_current(message)
             return False, message
         return True, ""
 
@@ -9938,6 +9979,7 @@ class Controller(QObject):
         return self._begin_calibration_gripper_close_sequence(
             state_getter=manager.get_stream_calibration_sequence_state,
             begin_refresh=manager.begin_stream_calibration_sequence_gripper_refresh,
+            mark_settling=manager.mark_stream_calibration_sequence_gripper_settling,
             mark_refreshed=manager.mark_stream_calibration_sequence_gripper_refreshed,
             report_failure=manager.report_stream_calibration_sequence_gripper_preamble_failure,
         )
@@ -9947,6 +9989,7 @@ class Controller(QObject):
         return self._begin_calibration_gripper_close_sequence(
             state_getter=manager.get_droplet_calibration_sequence_state,
             begin_refresh=manager.begin_droplet_calibration_sequence_gripper_refresh,
+            mark_settling=manager.mark_droplet_calibration_sequence_gripper_settling,
             mark_refreshed=manager.mark_droplet_calibration_sequence_gripper_refreshed,
             report_failure=manager.report_droplet_calibration_sequence_gripper_preamble_failure,
         )

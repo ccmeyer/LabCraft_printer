@@ -1,5 +1,6 @@
 import csv
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1029,7 +1030,16 @@ def test_controller_calibrate_all_preamble_uses_one_close_only(
     controller = Controller.__new__(Controller)
     controller.model = SimpleNamespace(calibration_manager=manager)
     close_handlers = []
+    wait_calls = []
+    wait_handlers = []
     controller.close_gripper = lambda handler=None: close_handlers.append(handler) or True
+    controller.machine = SimpleNamespace(
+        wait_ms=lambda ms, handler=None: (
+            wait_calls.append(int(ms)),
+            wait_handlers.append(handler),
+            True,
+        )[-1]
+    )
     controller.open_gripper = lambda *args, **kwargs: pytest.fail("Calibrate All must not open the gripper")
     controller.set_gripper_params = lambda *args, **kwargs: pytest.fail(
         "Calibrate All must not park gripper parameters"
@@ -1053,6 +1063,16 @@ def test_controller_calibrate_all_preamble_uses_one_close_only(
 
     close_handlers[0]()
 
+    assert wait_calls == [Controller.CALIBRATION_GRIPPER_SETTLE_MS]
+    assert len(wait_handlers) == 1
+    assert state_getter()["status"] == "refreshing_gripper"
+    assert state_getter()["status_message"] == (
+        "Waiting 3.0 seconds for gripper pressure to settle."
+    )
+    assert queued == []
+
+    wait_handlers[0]()
+
     assert state_getter()["status"] == "running"
     assert queued == [expected_queue]
 
@@ -1065,7 +1085,11 @@ def test_controller_calibrate_all_ignores_stale_close_completion(tmp_path, monke
     controller = Controller.__new__(Controller)
     controller.model = SimpleNamespace(calibration_manager=manager)
     close_handlers = []
+    wait_handlers = []
     controller.close_gripper = lambda handler=None: close_handlers.append(handler) or True
+    controller.machine = SimpleNamespace(
+        wait_ms=lambda ms, handler=None: wait_handlers.append(handler) or True
+    )
 
     assert manager.start_stream_calibration_sequence() is True
     assert controller.begin_stream_calibration_sequence_gripper_preamble() == (True, "")
@@ -1078,11 +1102,55 @@ def test_controller_calibrate_all_ignores_stale_close_completion(tmp_path, monke
     assert second_session != first_session
 
     close_handlers[0]()
+    assert wait_handlers == []
     assert manager.get_stream_calibration_sequence_state()["status"] == "refreshing_gripper"
     assert manager.get_stream_calibration_sequence_state()["session_id"] == second_session
 
     close_handlers[1]()
+    assert manager.get_stream_calibration_sequence_state()["status"] == "refreshing_gripper"
+    wait_handlers[0]()
     assert manager.get_stream_calibration_sequence_state()["status"] == "running"
+
+
+def test_controller_calibrate_all_ignores_stale_wait_completion(tmp_path, monkeypatch):
+    _model, manager = _make_manager(tmp_path)
+    manager._stream_calibration_sequence_missing_requirements = lambda: []
+    queued = []
+    monkeypatch.setattr(
+        manager,
+        "start_calibration_queue",
+        lambda: queued.append(list(manager.calibration_queue)),
+    )
+
+    controller = Controller.__new__(Controller)
+    controller.model = SimpleNamespace(calibration_manager=manager)
+    close_handlers = []
+    wait_handlers = []
+    controller.close_gripper = lambda handler=None: close_handlers.append(handler) or True
+    controller.machine = SimpleNamespace(
+        wait_ms=lambda ms, handler=None: wait_handlers.append(handler) or True
+    )
+
+    assert manager.start_stream_calibration_sequence() is True
+    assert controller.begin_stream_calibration_sequence_gripper_preamble() == (True, "")
+    close_handlers[0]()
+    assert len(wait_handlers) == 1
+
+    manager.stop()
+    assert manager.start_stream_calibration_sequence() is True
+    assert controller.begin_stream_calibration_sequence_gripper_preamble() == (True, "")
+    replacement_session = manager.get_stream_calibration_sequence_state()["session_id"]
+
+    wait_handlers[0]()
+    state = manager.get_stream_calibration_sequence_state()
+    assert state["status"] == "refreshing_gripper"
+    assert state["session_id"] == replacement_session
+    assert queued == []
+
+    close_handlers[1]()
+    wait_handlers[1]()
+    assert manager.get_stream_calibration_sequence_state()["status"] == "running"
+    assert queued == [list(manager.STREAM_CALIBRATION_SEQUENCE_QUEUE)]
 
 
 def test_controller_calibrate_all_close_enqueue_failure_resets_sequence(tmp_path):
@@ -1101,6 +1169,47 @@ def test_controller_calibrate_all_close_enqueue_failure_resets_sequence(tmp_path
     assert result[0] is False
     assert manager.get_stream_calibration_sequence_state()["status"] == "idle"
     assert errors[-1] == "Failed to enqueue the initial gripper close pulse."
+
+
+@pytest.mark.parametrize("wait_failure", ["rejected", "raised"])
+def test_controller_calibrate_all_wait_enqueue_failure_resets_sequence(
+    tmp_path,
+    wait_failure,
+):
+    _model, manager = _make_manager(tmp_path)
+    manager._stream_calibration_sequence_missing_requirements = lambda: []
+    errors = []
+    manager.calibrationError.connect(errors.append)
+
+    controller = Controller.__new__(Controller)
+    controller.model = SimpleNamespace(calibration_manager=manager)
+    close_handlers = []
+    controller.close_gripper = lambda handler=None: close_handlers.append(handler) or True
+
+    def _wait_ms(_ms, handler=None):
+        if wait_failure == "raised":
+            raise RuntimeError("queue unavailable")
+        return False
+
+    controller.machine = SimpleNamespace(wait_ms=_wait_ms)
+
+    assert manager.start_stream_calibration_sequence() is True
+    assert controller.begin_stream_calibration_sequence_gripper_preamble() == (True, "")
+    close_handlers[0]()
+
+    assert manager.get_stream_calibration_sequence_state()["status"] == "idle"
+    assert errors
+    assert errors[-1].startswith("Failed to enqueue the gripper cooldown wait")
+
+
+def test_calibration_gripper_settle_contract_matches_firmware_constant():
+    header = (
+        REPO_ROOT / "firmware" / "Core" / "Inc" / "Gripper.h"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"DISPENSE_COOLDOWN_MS\s*=\s*(\d+)u", header)
+
+    assert match is not None
+    assert int(match.group(1)) == Controller.CALIBRATION_GRIPPER_SETTLE_MS
 
 
 def test_stream_capture_start_can_launch_first_internal_queue_step_without_gripper_preamble(tmp_path, monkeypatch):

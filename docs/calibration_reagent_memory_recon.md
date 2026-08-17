@@ -241,7 +241,7 @@ Important detail:
 
 - Actual image acquisition in the modern path is local async camera capture in `DropletCamera.capture_with_retry_async()`.
 - The controller then receives the frame in `_on_image_captured()` and forwards it into `DropletCameraModel.update_image()`.
-- Droplet and stream **Calibrate All** each queue one explicit `CLOSE_GRIPPER` before their calibration queue. They do not rewrite or restore gripper refresh parameters; the firmware-enforced post-pulse cooldown protects the first dispense.
+- Droplet and stream **Calibrate All** each queue one explicit `CLOSE_GRIPPER`, wait for its pump-off retirement, and then queue `WAIT(3000)` before starting the matching calibration queue. Session guards prevent a stopped or replacement sequence from being launched by either late callback. They do not rewrite or restore gripper refresh parameters. The firmware still enforces the dispense cooldown and budgets that cooldown in the imaging watchdog as defense in depth.
 - Standalone stream gravimetric capture starts its calibration queue directly and performs no gripper pulse. Its `gripper_refresh_suspended` log field records that the enclosing `p1=0` calibration profile disabled periodic refresh.
 
 ### F. Image capture and droplet analysis

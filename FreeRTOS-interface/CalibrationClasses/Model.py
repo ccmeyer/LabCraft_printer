@@ -6643,6 +6643,19 @@ class CalibrationManager(QObject):
         self._emit_droplet_calibration_sequence_state_changed()
         return True, ""
 
+    def mark_droplet_calibration_sequence_gripper_settling(self, expected_session_id, settle_ms):
+        state = self._droplet_calibration_sequence_state or {}
+        if (
+            str(state.get("status") or "idle") != "refreshing_gripper"
+            or str(state.get("session_id") or "") != str(expected_session_id or "")
+        ):
+            return False, "Droplet calibration sequence is no longer waiting for this gripper pulse."
+        self._droplet_calibration_sequence_state["status_message"] = (
+            f"Waiting {float(settle_ms) / 1000.0:.1f} seconds for gripper pressure to settle."
+        )
+        self._emit_droplet_calibration_sequence_state_changed()
+        return True, ""
+
     def mark_droplet_calibration_sequence_gripper_refreshed(self, expected_session_id):
         state = self._droplet_calibration_sequence_state or {}
         status = str((self._droplet_calibration_sequence_state or {}).get("status") or "idle")
@@ -6708,6 +6721,19 @@ class CalibrationManager(QObject):
             "Refreshing gripper vacuum before stream calibration sequence."
         )
         self._stream_calibration_sequence_state["error_message"] = ""
+        self._emit_stream_calibration_sequence_state_changed()
+        return True, ""
+
+    def mark_stream_calibration_sequence_gripper_settling(self, expected_session_id, settle_ms):
+        state = self._stream_calibration_sequence_state or {}
+        if (
+            str(state.get("status") or "idle") != "refreshing_gripper"
+            or str(state.get("session_id") or "") != str(expected_session_id or "")
+        ):
+            return False, "Stream calibration sequence is no longer waiting for this gripper pulse."
+        self._stream_calibration_sequence_state["status_message"] = (
+            f"Waiting {float(settle_ms) / 1000.0:.1f} seconds for gripper pressure to settle."
+        )
         self._emit_stream_calibration_sequence_state_changed()
         return True, ""
 
