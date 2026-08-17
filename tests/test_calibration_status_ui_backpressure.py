@@ -140,3 +140,194 @@ def test_dialog_coalesces_status_bursts_without_model_driven_focus_work(
     assert not dialog.manual_focus_refresh_timer.isActive()
     dialog.deleteLater()
     qapp.processEvents()
+
+
+def _canonical_summary_candidate():
+    return {
+        "row_identity_key": "result-1:update-1:0",
+        "display_row_id": "result-1:update-1:0",
+        "result_id": "result-1",
+        "result_sha256": "sha-result-1",
+        "process_run_id": "process-1",
+        "update_id": "update-1",
+        "update_payload_sha256": "sha-update-1",
+        "reader_state": "matching_dual",
+        "row_state": "committed",
+        "phase": "sweep",
+        "timestamp": "2026-08-17T12:00:00Z",
+        "pw_us": 1400,
+        "pressure_psi": 0.62,
+        "mean_nL": 10.0,
+        "valid": True,
+        "application_eligible": True,
+    }
+
+
+def test_selected_result_validation_is_skipped_while_busy_and_cached_when_idle(
+    monkeypatch,
+    qapp,
+):
+    dialog = _build_real_dialog_for_layout(
+        monkeypatch,
+        qapp,
+        main_window=SimpleNamespace(color_dict={}),
+    )
+    manager = dialog.model.calibration_manager
+    candidate = _canonical_summary_candidate()
+    calls = {"resolve": 0, "recheck_context": 0}
+
+    def _resolve(row):
+        calls["resolve"] += 1
+        return {
+            "ok": True,
+            "code": "ok",
+            "message": "",
+            "row": dict(row),
+            "bundle": {"updates": [{"large_measurement_stream": list(range(100))}]},
+        }
+
+    def _missing(_row):
+        calls["recheck_context"] += 1
+        return []
+
+    manager.resolve_characterization_selection = _resolve
+    manager.get_droplet_recheck_missing_requirements = _missing
+    dialog._selected_summary_row = lambda: (0, dict(candidate))
+    manager.activeCalibration = object()
+    dialog._manual_controls_locked = True
+
+    for _ in range(1000):
+        dialog._refresh_manual_control_lock_state("busy stage")
+
+    assert calls == {"resolve": 0, "recheck_context": 0}
+    assert dialog.load_selected_button.isEnabled() is False
+    assert "current calibration" in dialog.load_selected_button.toolTip()
+    assert dialog.recheck_selected_button.isEnabled() is False
+    assert "current calibration" in dialog.recheck_selected_button.toolTip()
+
+    manager.activeCalibration = None
+    dialog._refresh_manual_control_lock_state("idle")
+    assert calls == {"resolve": 1, "recheck_context": 1}
+    assert dialog.load_selected_button.isEnabled() is True
+    assert dialog.recheck_selected_button.isEnabled() is True
+
+    for _ in range(1000):
+        dialog._refresh_manual_control_lock_state("unchanged idle")
+    assert calls == {"resolve": 1, "recheck_context": 1}
+
+    cache = dialog._selected_characterization_readiness_cache
+    assert set(cache) == {
+        "cache_key",
+        "candidate_ok",
+        "candidate_code",
+        "candidate_message",
+        "mode_mismatch",
+        "recheck_missing",
+    }
+    assert "bundle" not in cache
+    assert "updates" not in cache
+    assert "image" not in cache
+    assert "measurement" not in cache
+
+    dialog._refresh_bridge_preview_for_current_state = lambda: None
+    dialog._on_summary_selection_changed()
+    assert calls == {"resolve": 2, "recheck_context": 2}
+
+    dialog.deactivate_session(reason="test_complete")
+    dialog.deleteLater()
+    qapp.processEvents()
+
+
+def test_capture_pending_refreshes_only_on_real_state_transitions(
+    monkeypatch,
+    qapp,
+):
+    dialog = _build_real_dialog_for_layout(
+        monkeypatch,
+        qapp,
+        main_window=SimpleNamespace(color_dict={}),
+    )
+    refreshes = {"locks": 0, "optics": 0}
+    dialog._refresh_manual_control_lock_state = lambda *_args: refreshes.__setitem__(
+        "locks", refreshes["locks"] + 1
+    )
+    dialog._refresh_optics_controls = lambda *_args: refreshes.__setitem__(
+        "optics", refreshes["optics"] + 1
+    )
+    dialog._capture_request_pending = False
+
+    assert dialog._set_capture_request_pending(False) is False
+    assert dialog._set_capture_request_pending(True) is True
+    assert dialog._set_capture_request_pending(True) is False
+    assert dialog._set_capture_request_pending(False) is True
+    assert dialog._set_capture_request_pending(False) is False
+    assert refreshes == {"locks": 2, "optics": 2}
+
+    dialog.deactivate_session(reason="test_complete")
+    dialog.deleteLater()
+    qapp.processEvents()
+
+
+def test_result_actions_ignore_cached_readiness_after_external_mutation(
+    monkeypatch,
+    qapp,
+):
+    dialog = _build_real_dialog_for_layout(
+        monkeypatch,
+        qapp,
+        main_window=SimpleNamespace(color_dict={}),
+    )
+    candidate = _canonical_summary_candidate()
+    manager = dialog.model.calibration_manager
+    state = {"valid": True, "resolve_calls": 0}
+
+    def _resolve(row):
+        state["resolve_calls"] += 1
+        if not state["valid"]:
+            return {
+                "ok": False,
+                "code": "result_changed",
+                "message": "The selected canonical result changed after selection.",
+            }
+        return {
+            "ok": True,
+            "code": "ok",
+            "message": "",
+            "row": dict(row),
+            "bundle": {"validated": True},
+        }
+
+    manager.resolve_characterization_selection = _resolve
+    manager.get_droplet_recheck_missing_requirements = lambda _row: []
+    dialog._selected_summary_row = lambda: (0, dict(candidate))
+    dialog.model.experiment_model = SimpleNamespace()
+    for method_name in ("information", "warning", "critical"):
+        monkeypatch.setattr(
+            "CalibrationClasses.View.QtWidgets.QMessageBox." + method_name,
+            lambda *_args, **_kwargs: None,
+        )
+
+    dialog._invalidate_selected_characterization_readiness_cache()
+    dialog._update_load_button_state()
+    assert state["resolve_calls"] == 1
+    assert dialog._selected_characterization_readiness_cache["candidate_ok"] is True
+
+    state["valid"] = False
+    dialog._refresh_bridge_preview_from_selection()
+    dialog.load_selected_summary_row()
+    dialog.recheck_selected_summary_row()
+    dialog._bridge_preview_payload = {
+        "factor_name": "reagent",
+        "option_name": None,
+        "new_droplet_nL": 10.0,
+        "n_stocks": 1,
+    }
+    dialog._apply_previewed_droplet_volume()
+
+    assert state["resolve_calls"] == 5
+    assert dialog._bridge_preview_payload is not None
+    assert dialog._selected_characterization_readiness_cache["candidate_ok"] is True
+
+    dialog.deactivate_session(reason="test_complete")
+    dialog.deleteLater()
+    qapp.processEvents()

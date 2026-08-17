@@ -3227,6 +3227,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._last_refuel_named_calibration_payload = {}
 
         self._bridge_preview_payload = None
+        self._selected_characterization_readiness_cache = None
         self._memory_recommendation_preview = None
         self._memory_recommendation_logged_fingerprint = None
         self._memory_recommendation_refresh_active = False
@@ -4892,6 +4893,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return False
 
         self._session_state = "opening"
+        self._invalidate_selected_characterization_readiness_cache()
         self._reset_status_ui_runtime_diagnostics()
         self._session_mode = normalized_mode
         self.service_mode = normalized_mode == "optics"
@@ -5055,6 +5057,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if hasattr(self, "manual_edit_focus_frame"):
             self.manual_edit_focus_frame.hide()
         self._disconnect_external_session_signals()
+        self._invalidate_selected_characterization_readiness_cache()
         self._capture_request_pending = False
         self.capturing = False
         repeat_button = getattr(self, "repeat_capture_button", None)
@@ -5072,6 +5075,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if self._session_state != "inactive":
             self.deactivate_session(reason="shutdown")
         self._disconnect_external_session_signals()
+        self._invalidate_selected_characterization_readiness_cache()
         self._session_state = "shutdown"
         self.hide()
         return True
@@ -7485,9 +7489,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.optics_status_label.setStyleSheet("" if not color else f"color:{color};")
 
     def _set_capture_request_pending(self, pending):
-        self._capture_request_pending = bool(pending)
+        pending = bool(pending)
+        if pending == bool(getattr(self, "_capture_request_pending", False)):
+            return False
+        self._capture_request_pending = pending
         self._refresh_manual_control_lock_state()
         self._refresh_optics_controls()
+        return True
 
     def _record_droplet_capture_performance_marker(self, event_kind, payload=None):
         recorder = getattr(self.controller, "record_droplet_capture_performance_marker", None)
@@ -8794,7 +8802,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 self._render_calibration_memory_recommendation(self._memory_recommendation_preview)
 
         if hasattr(self, "load_selected_button"):
-            self._update_load_button_state()
+            blocked_state = self._selected_result_action_block_state(
+                busy=busy,
+                capture_pending=capture_pending,
+                flash_fault_latched=flash_fault_latched,
+                dirty_shutdown=dirty_shutdown,
+            )
+            if blocked_state is not None:
+                self._render_selected_result_actions_blocked(blocked_state)
+            else:
+                self._update_load_button_state()
 
         if hasattr(self, "stream_capture_group"):
             self._sync_stream_capture_panel_state()
@@ -13970,21 +13987,41 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 return [f"Recheck context unavailable ({exc})"]
         return ["Recheck support is unavailable"]
 
-    def _update_recheck_button_state(self, *, raw=None, mismatch_message=None):
+    def _update_recheck_button_state(
+        self,
+        *,
+        raw=None,
+        mismatch_message=None,
+        readiness=None,
+        blocked_state=None,
+    ):
         if not hasattr(self, "recheck_selected_button"):
+            return
+        if blocked_state is None:
+            blocked_state = self._selected_result_action_block_state()
+        if blocked_state is not None:
+            self.recheck_selected_button.setEnabled(False)
+            self.recheck_selected_button.setToolTip(blocked_state["recheck_message"])
             return
         if raw is None:
             _, raw = self._selected_summary_row()
         if mismatch_message is None:
             mismatch_message = self._summary_row_mode_mismatch_message(raw)
-        missing = self._summary_row_recheck_missing(raw)
-        busy = DropletImagingDialog._is_calibration_busy(self)
-        ok = bool(raw and mismatch_message is None and not missing and not busy)
+        if readiness is None:
+            readiness = self._selected_characterization_readiness(
+                raw,
+                mismatch_message=mismatch_message,
+            )
+        missing = tuple(readiness.get("recheck_missing") or ())
+        candidate_ok = bool(readiness.get("candidate_ok"))
+        ok = bool(raw and candidate_ok and mismatch_message is None and not missing)
         self.recheck_selected_button.setEnabled(ok)
-        if mismatch_message:
+        if not candidate_ok:
+            self.recheck_selected_button.setToolTip(
+                readiness.get("candidate_message") or "Candidate unavailable."
+            )
+        elif mismatch_message:
             self.recheck_selected_button.setToolTip(mismatch_message)
-        elif busy:
-            self.recheck_selected_button.setToolTip("Wait for the current calibration to finish before rechecking.")
         elif missing:
             self.recheck_selected_button.setToolTip("Recheck unavailable: " + ", ".join(str(item) for item in missing))
         else:
@@ -14421,7 +14458,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._update_summary_count_label()
         self._update_load_button_state()
         self._refresh_summary_detail_strip()
-        self._refresh_bridge_preview_from_selection()
+        self._refresh_bridge_preview_for_current_state()
 
     def _apply_summary_sort(self, column, order):
         self._summary_sort_column = column
@@ -14520,29 +14557,171 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 }
         return {"ok": True, "code": "ok", "message": "", "row": raw}
 
+    def _invalidate_selected_characterization_readiness_cache(self):
+        """Discard presentation-only readiness state for the selected result."""
+        self._selected_characterization_readiness_cache = None
+
+    def _selected_characterization_readiness_cache_key(self, raw):
+        raw = dict(raw or {})
+        row_identity = str(
+            raw.get("row_identity_key")
+            or raw.get("display_row_id")
+            or raw.get("candidate_key")
+            or ""
+        )
+        canonical_identity = tuple(
+            str(raw.get(field) or "")
+            for field in (
+                "result_id",
+                "result_sha256",
+                "process_run_id",
+                "update_id",
+                "update_payload_sha256",
+                "reader_state",
+                "row_state",
+            )
+        )
+        return (
+            row_identity,
+            canonical_identity,
+            self._summary_row_fingerprint(raw),
+        )
+
+    def _selected_result_action_block_state(
+        self,
+        *,
+        busy=None,
+        capture_pending=None,
+        flash_fault_latched=None,
+        dirty_shutdown=None,
+    ):
+        """Return cheap UI-only blocking state without consulting storage readers."""
+        if busy is None:
+            busy = DropletImagingDialog._is_calibration_busy(self)
+        if capture_pending is None:
+            capture_pending = self._capture_pending_for_ui()
+        if flash_fault_latched is None:
+            flash_fault_latched = self._is_flash_fault_latched()
+        if dirty_shutdown is None:
+            dirty_shutdown = self._imager_dirty_shutdown_active()
+
+        if busy:
+            return {
+                "code": "calibration_busy",
+                "load_message": "Wait for the current calibration to finish.",
+                "recheck_message": "Wait for the current calibration to finish before rechecking.",
+                "preview_message": "Calibration results are unavailable while calibration is running.",
+            }
+        if capture_pending:
+            return {
+                "code": "capture_pending",
+                "load_message": "Wait for the current camera capture to finish.",
+                "recheck_message": "Wait for the current camera capture to finish before rechecking.",
+                "preview_message": "Calibration results are unavailable while a camera capture is pending.",
+            }
+        if flash_fault_latched:
+            message = "Unavailable while flash safety fault is latched."
+            return {
+                "code": "flash_fault_latched",
+                "load_message": message,
+                "recheck_message": message,
+                "preview_message": message,
+            }
+        if dirty_shutdown:
+            message = "Unavailable while camera recovery is required."
+            return {
+                "code": "dirty_shutdown",
+                "load_message": message,
+                "recheck_message": message,
+                "preview_message": message,
+            }
+        return None
+
+    def _render_selected_result_actions_blocked(self, blocked_state):
+        """Render blocked action controls without resolving the selected bundle."""
+        blocked_state = dict(blocked_state or {})
+        if hasattr(self, "load_selected_button"):
+            self.load_selected_button.setEnabled(False)
+            self.load_selected_button.setToolTip(
+                blocked_state.get("load_message") or "Candidate unavailable."
+            )
+        if hasattr(self, "recheck_selected_button"):
+            self.recheck_selected_button.setEnabled(False)
+            self.recheck_selected_button.setToolTip(
+                blocked_state.get("recheck_message") or "Recheck unavailable."
+            )
+
+    def _selected_characterization_readiness(self, raw, *, mismatch_message=None):
+        """Evaluate and cache bounded presentation state for one idle selection."""
+        raw = dict(raw or {})
+        cache_key = self._selected_characterization_readiness_cache_key(raw)
+        cached = getattr(self, "_selected_characterization_readiness_cache", None)
+        if isinstance(cached, dict) and cached.get("cache_key") == cache_key:
+            return dict(cached)
+
+        if mismatch_message is None:
+            mismatch_message = self._summary_row_mode_mismatch_message(raw)
+        if raw:
+            validation = self._validate_selected_characterization_candidate(raw)
+        else:
+            validation = {
+                "ok": False,
+                "code": "no_selection",
+                "message": "Select a calibration result.",
+            }
+        candidate_ok = bool(validation.get("ok"))
+        if candidate_ok and mismatch_message is None:
+            recheck_missing = tuple(
+                str(item) for item in self._summary_row_recheck_missing(raw)
+            )
+        else:
+            recheck_missing = ()
+        readiness = {
+            "cache_key": cache_key,
+            "candidate_ok": candidate_ok,
+            "candidate_code": str(validation.get("code") or ""),
+            "candidate_message": str(validation.get("message") or ""),
+            "mode_mismatch": None if mismatch_message is None else str(mismatch_message),
+            "recheck_missing": recheck_missing,
+        }
+        self._selected_characterization_readiness_cache = dict(readiness)
+        return readiness
+
     def _update_load_button_state(self):
         """Enable the Load button only when we have a usable selection."""
+        blocked_state = self._selected_result_action_block_state()
+        if blocked_state is not None:
+            self._render_selected_result_actions_blocked(blocked_state)
+            return
         _, raw = self._selected_summary_row()
         mismatch_message = self._summary_row_mode_mismatch_message(raw)
-        candidate_validation = self._validate_selected_characterization_candidate(raw)
+        readiness = self._selected_characterization_readiness(
+            raw,
+            mismatch_message=mismatch_message,
+        )
         ok = bool(
             raw
-            and candidate_validation.get("ok")
+            and readiness.get("candidate_ok")
             and mismatch_message is None
             and raw.get("pw_us") is not None
             and raw.get("pressure_psi") is not None
-            and not DropletImagingDialog._is_calibration_busy(self)
         )
         self.load_selected_button.setEnabled(ok)
-        if not candidate_validation.get("ok"):
-            self.load_selected_button.setToolTip(candidate_validation.get("message") or "Candidate unavailable.")
+        if not readiness.get("candidate_ok"):
+            self.load_selected_button.setToolTip(
+                readiness.get("candidate_message") or "Candidate unavailable."
+            )
         elif mismatch_message:
             self.load_selected_button.setToolTip(mismatch_message)
         else:
             self.load_selected_button.setToolTip(
                 "Select a row above, then click to apply its PW and pressure."
             )
-        self._update_recheck_button_state(raw=raw, mismatch_message=mismatch_message)
+        self._update_recheck_button_state(
+            raw=raw,
+            mismatch_message=mismatch_message,
+            readiness=readiness,
+        )
 
     def _handle_summary_double_click(self, _index):
         """Double-click loads immediately (same as pressing the button)."""
@@ -14572,9 +14751,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         return None
 
     def _on_summary_selection_changed(self, *_args):
+        self._invalidate_selected_characterization_readiness_cache()
         self._update_load_button_state()
         self._refresh_summary_detail_strip()
-        self._refresh_bridge_preview_from_selection()
+        self._refresh_bridge_preview_for_current_state()
 
     def load_selected_summary_row(self):
         """Apply the selected row's PW & pressure to the machine (atomically if possible)."""
@@ -14667,6 +14847,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def populate_summary_table(self):
         diagnostics_enabled = self._droplet_capture_performance_diagnostics_enabled()
         refresh_started_ns = time.monotonic_ns() if diagnostics_enabled else None
+        self._invalidate_selected_characterization_readiness_cache()
         _, selected_before = self._selected_summary_row()
         selected_identity = str((selected_before or {}).get("row_identity_key") or "")
         selected_fingerprint = (
@@ -14800,6 +14981,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 self.reagent_stock_label.setText("Stock concentration(s): —")
 
         self._sync_applied_summary_row_highlight()
+        self._refresh_bridge_preview_from_selection()
+
+    def _refresh_bridge_preview_for_current_state(self):
+        """Refresh automatic preview only when result actions are not runtime-blocked."""
+        blocked_state = self._selected_result_action_block_state()
+        if blocked_state is not None:
+            self._bridge_clear_preview_with_status(blocked_state["preview_message"])
+            return
         self._refresh_bridge_preview_from_selection()
 
     def _refresh_bridge_preview_from_selection(self):
