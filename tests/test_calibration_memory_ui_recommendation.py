@@ -604,7 +604,8 @@ def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_rig
     assert dialog.info_panel.maximumWidth() >= dialog.control_panel_scroll.maximumWidth()
     assert dialog.summary_table.minimumHeight() >= 280
     assert dialog.bridge_table.minimumHeight() >= 220
-    assert dialog.stage_table.minimumHeight() >= 140
+    assert not hasattr(dialog, "stage_table")
+    assert dialog.status_group.findChildren(calibration_view.QtWidgets.QTableWidget) == []
     assert dialog.flash_button.minimumHeight() >= 32
     assert dialog.calibrate_all_button.minimumHeight() >= 32
     assert dialog.memory_recommendation_apply_btn.minimumHeight() >= 32

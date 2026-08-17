@@ -658,7 +658,7 @@ def test_capture_phase_signal_info_is_disabled_by_default():
     assert payloads[0]["level"] == "warning"
 
 
-def test_capture_phase_signal_emits_when_diagnostics_enabled():
+def test_capture_phase_info_is_accumulated_without_qt_emission():
     camera = DropletCamera.__new__(DropletCamera)
     camera._cap_id = 0
     camera.capture_phase_signal = _Signal()
@@ -668,9 +668,10 @@ def test_capture_phase_signal_emits_when_diagnostics_enabled():
 
     DropletCamera._log_capture_phase(camera, "trigger_high", request_id="req-diag")
 
-    assert payloads
-    assert payloads[0]["phase"] == "trigger_high"
-    assert payloads[0]["request_id"] == "req-diag"
+    assert payloads == []
+    trace = DropletCamera._pop_capture_performance_trace(camera, "req-diag", 0)
+    assert [row["phase"] for row in trace["phases"]] == ["trigger_high"]
+    assert trace["phases"][0]["request_id"] == "req-diag"
 
 
 def test_capture_debug_logging_suppresses_info_prints_by_default(capsys):
@@ -1275,6 +1276,78 @@ def test_capture_worker_success_payload_includes_identity_context_and_timestamps
     assert payload["worker_started_monotonic_ns"] <= payload["worker_completed_monotonic_ns"]
 
 
+def test_capture_worker_batches_bounded_info_trace_into_one_completion_summary():
+    camera = _make_async_camera()
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
+    completion_seen = threading.Event()
+    payloads = []
+    phase_payloads = []
+
+    def _fake_sync(**kwargs):
+        for index in range(40):
+            DropletCamera._log_capture_phase(
+                camera,
+                f"phase_{index}",
+                request_id=kwargs.get("request_id"),
+                generation=kwargs.get("generation"),
+            )
+        DropletCamera._log_capture_phase(
+            camera,
+            "retry_attempt_result",
+            request_id=kwargs.get("request_id"),
+            generation=kwargs.get("generation"),
+            reason="threshold",
+            mean=125.0,
+            threshold=25.0,
+            make_array_ms=3.0,
+        )
+        return {
+            "status": "success",
+            "request_id": kwargs.get("request_id"),
+            "generation": kwargs.get("generation"),
+            "cap_id": 19,
+            "frame": camera.latest_frame,
+            "capture_info": {"cap_id": 19, "reason": "threshold"},
+            "reason": "threshold",
+        }
+
+    camera.capture_with_retry_sync = _fake_sync
+    camera.capture_phase_signal.connect(lambda payload: phase_payloads.append(dict(payload)))
+    camera.capture_completed_signal.connect(
+        lambda payload: payloads.append(dict(payload)) or completion_seen.set()
+    )
+
+    assert DropletCamera.capture_with_retry_async(camera, request_id="req-summary") is True
+    assert completion_seen.wait(1.0)
+
+    assert phase_payloads == []
+    assert len(payloads) == 1
+    summary = payloads[0]["capture_performance_summary"]
+    assert summary["request_id"] == "req-summary"
+    assert summary["phase_count"] == 41
+    assert summary["retained_phase_count"] == 32
+    assert summary["dropped_phase_count"] == 9
+    assert len(summary["phase_sequence"]) == 32
+    assert summary["phase_sequence"][-1] == "retry_attempt_result"
+    assert summary["make_array_ms"] == 3.0
+    assert summary["selected_frame_mean"] == 125.0
+    assert camera._capture_performance_traces == {}
+
+
+def test_capture_diagnostics_disable_releases_trace_and_skips_info_collection():
+    camera = DropletCamera.__new__(DropletCamera)
+    camera._cap_id = 0
+    camera.capture_phase_signal = _Signal()
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
+    DropletCamera._log_capture_phase(camera, "trigger_high", request_id="req-disable", generation=1)
+    assert camera._capture_performance_traces
+
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, False)
+    DropletCamera._log_capture_phase(camera, "trigger_low", request_id="req-disable", generation=1)
+
+    assert camera._capture_performance_traces == {}
+
+
 def test_machine_capture_droplet_image_passes_capture_context_to_camera_worker():
     class _Camera:
         def __init__(self):
@@ -1359,6 +1432,7 @@ def test_capture_worker_emits_exactly_one_failure_result_after_retry_failure():
 
 def test_capture_worker_finishes_on_missing_flash_edge_without_stuck_active():
     camera = _make_async_camera()
+    DropletCamera.set_capture_performance_diagnostics_enabled(camera, True)
     backend = _install_backend(camera, _FakeBackend("2", edge=_EdgeNeverReady()))
     completion_seen = threading.Event()
     payloads = []
@@ -1378,6 +1452,11 @@ def test_capture_worker_finishes_on_missing_flash_edge_without_stuck_active():
     assert backend.edge_line.wait_calls == [0, 0.001]
     assert backend.trigger_line.values == [1, 0]
     assert payloads[0]["status"] == "failed"
+    summary = payloads[0]["capture_performance_summary"]
+    assert summary["request_id"] == "req-no-edge"
+    assert summary["edge_timeout_count"] == 1
+    assert summary["trigger_count"] == 1
+    assert camera._capture_performance_traces == {}
     assert payloads[0]["reason"] == "edge_timeout"
     assert camera._capture_worker_active.is_set() is False
     assert failures
@@ -1410,12 +1489,14 @@ def test_capture_retry_timeout_drops_trigger_low_after_each_attempt(monkeypatch)
 
     assert backend.trigger_line.values == [1, 0, 1, 0, 1, 0]
     assert sleep_calls.count(0.005) == 3
-    phase_names = [phase for phase, _payload in phases]
+    trace = DropletCamera._pop_capture_performance_trace(camera, "req-retry-timeout", 0)
+    trace_phases = [(payload.get("phase"), payload) for payload in trace["phases"]]
+    phase_names = [phase for phase, _payload in trace_phases]
     assert phase_names.count("retry_attempt_start") == 3
     assert phase_names.count("retry_attempt_result") == 3
     assert phase_names.count("retrying") == 2
-    assert phase_names[-1] == "retry_exhausted"
-    retry_results = [payload for phase, payload in phases if phase == "retry_attempt_result"]
+    assert [phase for phase, _payload in phases] == ["retry_exhausted"]
+    retry_results = [payload for phase, payload in trace_phases if phase == "retry_attempt_result"]
     assert [payload["reason"] for payload in retry_results] == ["edge_timeout"] * 3
     assert [payload["will_retry"] for payload in retry_results] == [True, True, False]
     assert all(payload["waited"] is True for payload in retry_results)
@@ -1481,12 +1562,15 @@ def test_capture_retry_frame_selection_emits_retrying_and_success_markers(monkey
     assert result["cap_id"] == 22
     assert len(capture_calls) == 2
     assert sleep_calls == [0.02]
-    phase_names = [phase for phase, _payload in phases]
+    trace = DropletCamera._pop_capture_performance_trace(camera, "req-frame-retry", 0)
+    trace_phases = [(payload.get("phase"), payload) for payload in trace["phases"]]
+    phase_names = [phase for phase, _payload in trace_phases]
     assert phase_names.count("retry_attempt_start") == 2
     assert phase_names.count("retry_attempt_result") == 2
     assert phase_names.count("retrying") == 1
     assert phase_names[-1] == "retry_success"
-    retry_results = [payload for phase, payload in phases if phase == "retry_attempt_result"]
+    assert phases == []
+    retry_results = [payload for phase, payload in trace_phases if phase == "retry_attempt_result"]
     assert retry_results[0]["reason"] == "below_threshold"
     assert retry_results[0]["success"] is False
     assert retry_results[0]["will_retry"] is True
@@ -1495,7 +1579,7 @@ def test_capture_retry_frame_selection_emits_retrying_and_success_markers(monkey
     assert retry_results[1]["success"] is True
     assert retry_results[1]["will_retry"] is False
     assert "retry_total_elapsed_ms" in retry_results[1]
-    retry_success = next(payload for phase, payload in phases if phase == "retry_success")
+    retry_success = next(payload for phase, payload in trace_phases if phase == "retry_success")
     assert retry_success["retry_total_elapsed_ms"] >= retry_results[0]["retry_total_elapsed_ms"]
 
 

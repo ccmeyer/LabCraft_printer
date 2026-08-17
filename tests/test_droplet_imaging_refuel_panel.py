@@ -410,6 +410,18 @@ def test_droplet_capture_performance_debug_checkbox_and_export(monkeypatch, qapp
     assert "C:/tmp/droplet_capture_perf.json" in dialog.droplet_capture_performance_debug_status_label.text()
 
 
+def test_stage_updates_retain_only_current_status_without_history_widget(monkeypatch, qapp):
+    update_stage = DropletImagingDialog.update_stage_and_log
+    dialog, _refuel_model, _controller = _build_droplet_dialog(monkeypatch, qapp)
+
+    for index in range(1000):
+        update_stage(dialog, f"stage-{index}", "blue")
+
+    assert dialog.stageLabel.text() == "Status: stage-999"
+    assert not hasattr(dialog, "stage_table")
+    assert dialog.status_group.findChildren(QtWidgets.QTableWidget) == []
+
+
 def test_repeat_and_benchmark_capture_profiles_use_optimized_exposure_default(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
 

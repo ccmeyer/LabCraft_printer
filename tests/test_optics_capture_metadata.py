@@ -355,7 +355,7 @@ def test_controller_droplet_capture_perf_records_camera_phase():
 
 
 def test_controller_droplet_capture_perf_completion_payload_timings():
-    controller, _machine, _camera_model = _make_controller()
+    controller, _machine, camera_model = _make_controller()
     controller.set_droplet_capture_performance_diagnostics_enabled(True)
 
     assert controller.capture_droplet_image(capture_context="perf") is True
@@ -374,6 +374,13 @@ def test_controller_droplet_capture_perf_completion_payload_timings():
             "queued_monotonic_ns": 1_000,
             "worker_started_monotonic_ns": 2_001_000,
             "worker_completed_monotonic_ns": 7_001_000,
+            "capture_performance_summary": {
+                "schema_version": 1,
+                "request_id": request_id,
+                "phase_count": 12,
+                "trigger_count": 1,
+                "edge_wait_duration_ms": 4.5,
+            },
         }
     )
 
@@ -386,6 +393,11 @@ def test_controller_droplet_capture_perf_completion_payload_timings():
     assert completion["worker_complete_to_controller_ms"] is not None
     assert any(row["event_kind"] == "model_image_updated" for row in snapshot["event_log_tail"])
     assert any(row["event_kind"] == "controller_pending_cleared" for row in snapshot["event_log_tail"])
+    summaries = [row for row in snapshot["event_log_tail"] if row["event_kind"] == "camera_capture_summary"]
+    assert len(summaries) == 1
+    assert summaries[0]["phase_count"] == 12
+    assert snapshot["event_counts"].get("camera_phase", 0) == 0
+    assert "capture_performance_summary" not in camera_model.update_calls[0]["capture_info"]
 
 
 def test_controller_mark_droplet_imager_force_close_marks_dirty_without_machine_cleanup():

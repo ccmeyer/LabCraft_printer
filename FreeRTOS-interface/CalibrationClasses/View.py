@@ -4214,19 +4214,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.stageLabel = QtWidgets.QLabel("Status: Idle")
         status_v.addWidget(self.stageLabel)
 
-        self.stage_table = QtWidgets.QTableWidget()
-        self.stage_table.setColumnCount(2)
-        self.stage_table.setHorizontalHeaderLabels(["Time", "Stage"])
-        self.stage_table.verticalHeader().setVisible(False)
-        self.stage_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.stage_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        self.stage_table.setWordWrap(True)
-        self.stage_table.setAlternatingRowColors(True)
-        self.stage_table.horizontalHeader().setStretchLastSection(True)
-        self.stage_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
-        self.stage_table.setMinimumHeight(140)
-        status_v.addWidget(self.stage_table, 1)
-
         (
             self.summary_section,
             self.summary_section_toggle,
@@ -5024,7 +5011,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "Enable Droplet/Calibration Capture Performance Diagnostics"
         )
         self.enable_droplet_capture_performance_diagnostics_checkbox.setToolTip(
-            "Record lightweight timing markers for manual and calibration droplet captures."
+            "Record batched, non-intrusive timing summaries for manual and calibration captures. "
+            "Warnings and errors remain immediate and durable."
         )
         diagnostics_enabled = self._is_droplet_capture_performance_diagnostics_enabled()
         self.enable_droplet_capture_performance_diagnostics_checkbox.setChecked(diagnostics_enabled)
@@ -12309,30 +12297,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
             eff.setOpacity(0.35)  # tweak to taste
 
     def update_stage_and_log(self, stage: str, color_name: str):
-        # Update the small status label
+        """Compatibility slot: retain only the current live status."""
         self.stageLabel.setText(f"Status: {stage}")
-
-        # Append to the log table (time + stage text)
-        row = self.stage_table.rowCount()
-        self.stage_table.insertRow(row)
-
-        time_str = datetime.now().strftime("%H:%M:%S")
-        time_item = QtWidgets.QTableWidgetItem(time_str)
-        stage_item = QtWidgets.QTableWidgetItem(stage)
-
-        # Resolve background color from main_window.color_dict
-        # Fallbacks: "dark_gray" → hex → default gray if missing
-        hex_color = self.color_dict.get(color_name) or self.color_dict.get("dark_gray") or "#444444"
-        brush = QBrush(QColor(hex_color))
-
-        time_item.setBackground(brush)
-        stage_item.setBackground(brush)
-
-        self.stage_table.setItem(row, 0, time_item)
-        self.stage_table.setItem(row, 1, stage_item)
-
-        # Auto-scroll to the newest row
-        self.stage_table.scrollToBottom()
 
     def _bridge_get_calibration_manager(self):
         # Prefer the ExperimentModel-attached manager if present.
@@ -14188,6 +14154,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 )
 
     def populate_summary_table(self):
+        diagnostics_enabled = self._droplet_capture_performance_diagnostics_enabled()
+        refresh_started_ns = time.monotonic_ns() if diagnostics_enabled else None
         mgr = self.model.calibration_manager
         getter = getattr(mgr, "get_characterization_summary_rows", None)
         if callable(getter):
@@ -14200,6 +14168,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if self._summary_sort_column is not None:
             self._apply_summary_sort(self._summary_sort_column, self._summary_sort_order)
         self.refresh_calibration_memory_recommendation()
+        if diagnostics_enabled:
+            self._record_droplet_capture_performance_marker(
+                "characterization_summary_refreshed",
+                {
+                    "duration_ms": (time.monotonic_ns() - refresh_started_ns) / 1_000_000.0,
+                    "row_count": len(rows),
+                },
+            )
 
     def _bridge_clear_preview_with_status(self, status_text=None):
         self._bridge_preview_payload = None
@@ -14463,12 +14439,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
 
     def update_image(self):
+        diagnostics_enabled = self._droplet_capture_performance_diagnostics_enabled()
+        render_started_ns = time.monotonic_ns() if diagnostics_enabled else None
         # 1) Get the full-resolution image from the model
         image = self.model.droplet_camera_model.get_original_image()
         if image is None:
             # Optionally clear the label or show a placeholder
             self.image_label.clear()
             self.image_label.setText("No image captured yet.")
+            if diagnostics_enabled:
+                self._record_droplet_capture_performance_marker(
+                    "image_rendered",
+                    {
+                        "duration_ms": (time.monotonic_ns() - render_started_ns) / 1_000_000.0,
+                        "frame_present": False,
+                    },
+                )
             return
 
         self._maybe_hide_online_stream_debug_for_nonstream_preview()
@@ -14489,6 +14475,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
         # 5) Set the scaled pixmap
         self.image_label.setPixmap(scaled_pixmap)
+        if diagnostics_enabled:
+            self._record_droplet_capture_performance_marker(
+                "image_rendered",
+                {
+                    "duration_ms": (time.monotonic_ns() - render_started_ns) / 1_000_000.0,
+                    "frame_present": True,
+                    "image_width": int(image.shape[1]) if getattr(image, "ndim", 0) >= 2 else None,
+                    "image_height": int(image.shape[0]) if getattr(image, "ndim", 0) >= 2 else None,
+                },
+            )
 
     def display_analyzed_image(self, image):
         """

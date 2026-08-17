@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from Controller import Controller
+from Controller import Controller, DropletCapturePerformanceDiagnostics
 
 
 class FakeSignal:
@@ -103,8 +103,10 @@ def test_camera_capture_phase_signal_records_active_calibration_event():
     ]
 
 
-def test_info_camera_capture_phase_does_not_record_active_calibration_event_when_diagnostics_disabled():
+def test_info_camera_capture_phase_never_records_active_calibration_event():
     c = Controller.__new__(Controller)
+    c._droplet_capture_performance_diagnostics = DropletCapturePerformanceDiagnostics()
+    c._droplet_capture_performance_diagnostics.set_enabled(True)
 
     capture = FakeSignal()
     move = FakeSignal()
@@ -138,6 +140,7 @@ def test_info_camera_capture_phase_does_not_record_active_calibration_event_when
     phase.emit({"phase": "trigger_high", "request_id": "r1", "level": "info"})
 
     assert recorded == []
+    assert c._droplet_capture_performance_diagnostics.events[-1]["event_kind"] == "camera_phase"
 
 
 def test_handle_settings_change_request_binds_traced_commands_to_machine_snapshot():

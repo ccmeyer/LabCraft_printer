@@ -30,7 +30,7 @@ def test_droplet_capture_perf_enabled_events_are_bounded_and_json_safe():
     snapshot = diagnostics.build_snapshot(reason="unit_test")
 
     assert snapshot["kind"] == "droplet_capture_performance_snapshot"
-    assert snapshot["schema_version"] == 9
+    assert snapshot["schema_version"] == 10
     assert snapshot["reason"] == "unit_test"
     assert snapshot["event_count"] == 2
     assert snapshot["event_counts"]["controller_completion_received"] == 1
@@ -170,6 +170,101 @@ def test_droplet_capture_perf_snapshot_summarizes_timings():
     assert request_summary["selected_metadata_sensor_timestamp_ns"] == 123456789
     assert request_summary["controller_completion_to_pending_clear_ms"] is not None
     assert snapshot["ui_sequence_summaries"][0]["accepted"] is True
+
+
+def test_compact_camera_summary_matches_legacy_phase_projection():
+    completion = {
+        "request_id": "r-parity",
+        "status": "success",
+        "queue_to_worker_start_ms": 1.0,
+        "worker_duration_ms": 10.0,
+        "worker_complete_to_controller_ms": 0.5,
+    }
+    legacy = DropletCapturePerformanceDiagnostics(max_events=20)
+    legacy.set_enabled(True)
+    legacy.record("controller_completion_received", completion)
+    legacy.record("camera_phase", {"request_id": "r-parity", "phase": "edge_wait_start", "elapsed_ms": 2.0})
+    legacy.record("camera_phase", {"request_id": "r-parity", "phase": "edge_wait_done", "elapsed_ms": 8.0})
+    legacy.record("camera_phase", {"request_id": "r-parity", "phase": "arm_start", "elapsed_ms": 9.0})
+    legacy.record(
+        "camera_phase",
+        {
+            "request_id": "r-parity",
+            "phase": "retry_attempt_result",
+            "elapsed_ms": 20.0,
+            "mean": 100.0,
+            "threshold": 25.0,
+            "make_array_ms": 3.0,
+            "signal_mean_ms": 0.5,
+            "rotate_ms": 1.0,
+            "frame_select_reason": "threshold",
+            "cap_seen": 2,
+            "cap_max_new": 10,
+        },
+    )
+
+    compact = DropletCapturePerformanceDiagnostics(max_events=20)
+    compact.set_enabled(True)
+    compact.record("controller_completion_received", completion)
+    compact.record(
+        "camera_capture_summary",
+        {
+            "request_id": "r-parity",
+            "edge_wait_duration_ms": 6.0,
+            "post_ack_to_result_ms": 12.0,
+            "arm_to_result_ms": 11.0,
+            "selected_frame_mean": 100.0,
+            "selected_frame_threshold": 25.0,
+            "make_array_ms": 3.0,
+            "signal_mean_ms": 0.5,
+            "rotate_ms": 1.0,
+            "frame_select_reason": "threshold",
+            "cap_seen": 2,
+            "cap_max_new": 10,
+        },
+    )
+
+    legacy_summary = legacy.build_snapshot()["request_summaries"][0]
+    compact_summary = compact.build_snapshot()["request_summaries"][0]
+    fields = (
+        "edge_wait_duration_ms",
+        "post_ack_to_result_ms",
+        "arm_to_result_ms",
+        "selected_frame_mean",
+        "selected_frame_threshold",
+        "make_array_ms",
+        "signal_mean_ms",
+        "rotate_ms",
+        "frame_select_reason",
+        "cap_seen",
+        "cap_max_new",
+    )
+    assert {field: compact_summary[field] for field in fields} == {
+        field: legacy_summary[field] for field in fields
+    }
+
+
+def test_schema_10_snapshot_aggregates_ui_work_without_raw_samples():
+    diagnostics = DropletCapturePerformanceDiagnostics(max_events=20)
+    diagnostics.set_enabled(True)
+    for duration in (1.0, 2.0, 3.0, 4.0):
+        diagnostics.record("model_image_updated", {"duration_ms": duration})
+    diagnostics.record("calibration_callback_handled", {"duration_ms": 6.0})
+    diagnostics.record("image_rendered", {"duration_ms": 8.0})
+    diagnostics.record("characterization_summary_refreshed", {"duration_ms": 10.0})
+
+    snapshot = diagnostics.build_snapshot()
+
+    assert snapshot["schema_version"] == 10
+    assert snapshot["ui_work_summaries"]["model_ui_image_update"] == {
+        "count": 4,
+        "median_ms": 2.5,
+        "p95_ms": 4.0,
+        "maximum_ms": 4.0,
+    }
+    assert snapshot["ui_work_summaries"]["calibration_callback_handling"]["count"] == 1
+    assert snapshot["ui_work_summaries"]["image_rendering"]["maximum_ms"] == 8.0
+    assert snapshot["ui_work_summaries"]["characterization_summary_refresh"]["p95_ms"] == 10.0
 
 
 def test_controller_exposes_droplet_capture_profile_state():

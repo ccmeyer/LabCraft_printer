@@ -527,6 +527,8 @@ class DropletCamera(QObject):
         self._capture_generation = 0
         self._cap_request_id = None
         self._capture_performance_diagnostics_enabled = False
+        self._capture_performance_trace_lock = threading.Lock()
+        self._capture_performance_traces = {}
         self._capture_debug_logging_enabled = False
         
         # threshold tuning
@@ -782,6 +784,8 @@ class DropletCamera(QObject):
 
     def set_capture_performance_diagnostics_enabled(self, enabled):
         self._capture_performance_diagnostics_enabled = bool(enabled)
+        if not self._capture_performance_diagnostics_enabled:
+            self._clear_capture_performance_traces()
         return self._capture_performance_diagnostics_enabled
 
     def is_capture_performance_diagnostics_enabled(self):
@@ -800,7 +804,194 @@ class DropletCamera(QObject):
         return text in {"warning", "warn", "error", "critical", "exception"}
 
     def _should_emit_capture_phase(self, level="info"):
-        return self.is_capture_performance_diagnostics_enabled() or self._capture_phase_is_warning_or_error(level)
+        return self._capture_phase_is_warning_or_error(level)
+
+    def _capture_performance_trace_state(self):
+        lock = getattr(self, "_capture_performance_trace_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._capture_performance_trace_lock = lock
+        traces = getattr(self, "_capture_performance_traces", None)
+        if not isinstance(traces, dict):
+            traces = {}
+            self._capture_performance_traces = traces
+        return lock, traces
+
+    @staticmethod
+    def _capture_performance_trace_key(request_id, generation):
+        return (str(request_id or ""), int(generation or 0))
+
+    def _start_capture_performance_trace(self, request_id, generation):
+        if not self.is_capture_performance_diagnostics_enabled():
+            return
+        lock, traces = self._capture_performance_trace_state()
+        key = self._capture_performance_trace_key(request_id, generation)
+        with lock:
+            traces[key] = {
+                "phases": [],
+                "dropped_phase_count": 0,
+                "phase_counts": {},
+                "retry_reasons": [],
+                "edge_timeout_count": 0,
+                "max_edge_wait_elapsed_ms": None,
+            }
+
+    def _append_capture_performance_phase(self, payload):
+        if not self.is_capture_performance_diagnostics_enabled():
+            return
+        request_id = payload.get("request_id")
+        generation = payload.get("generation")
+        if request_id in (None, ""):
+            return
+        lock, traces = self._capture_performance_trace_state()
+        key = self._capture_performance_trace_key(request_id, generation)
+        with lock:
+            trace = traces.setdefault(
+                key,
+                {
+                    "phases": [],
+                    "dropped_phase_count": 0,
+                    "phase_counts": {},
+                    "retry_reasons": [],
+                    "edge_timeout_count": 0,
+                    "max_edge_wait_elapsed_ms": None,
+                },
+            )
+            phase_name = str(payload.get("phase") or "")
+            phase_counts = trace.setdefault("phase_counts", {})
+            phase_counts[phase_name] = int(phase_counts.get(phase_name, 0)) + 1
+            if phase_name == "retry_attempt_result" and payload.get("reason") not in (None, ""):
+                trace.setdefault("retry_reasons", []).append(str(payload.get("reason")))
+                if str(payload.get("reason")) == "attempt_timeout":
+                    trace["edge_timeout_count"] = int(trace.get("edge_timeout_count", 0)) + 1
+            if phase_name == "edge_wait_done":
+                if payload.get("fired") is False:
+                    trace["edge_timeout_count"] = int(trace.get("edge_timeout_count", 0)) + 1
+                try:
+                    edge_elapsed = float(payload.get("elapsed_ms"))
+                except (TypeError, ValueError):
+                    edge_elapsed = None
+                if edge_elapsed is not None:
+                    current_max = trace.get("max_edge_wait_elapsed_ms")
+                    trace["max_edge_wait_elapsed_ms"] = (
+                        edge_elapsed if current_max is None else max(float(current_max), edge_elapsed)
+                    )
+            phases = trace["phases"]
+            if len(phases) < 32:
+                phases.append(dict(payload))
+            else:
+                phases.pop(0)
+                phases.append(dict(payload))
+                trace["dropped_phase_count"] = int(trace.get("dropped_phase_count", 0)) + 1
+
+    def _pop_capture_performance_trace(self, request_id, generation):
+        lock, traces = self._capture_performance_trace_state()
+        key = self._capture_performance_trace_key(request_id, generation)
+        with lock:
+            return traces.pop(key, None)
+
+    def _clear_capture_performance_traces(self):
+        lock, traces = self._capture_performance_trace_state()
+        with lock:
+            traces.clear()
+
+    @staticmethod
+    def _build_capture_performance_summary(trace, *, request_id=None, generation=None, backend_id=None, cap_id=None):
+        if not isinstance(trace, dict):
+            return None
+        phases = [dict(row) for row in trace.get("phases", ()) if isinstance(row, dict)]
+        retained_phase_counts = {}
+        phase_sequence = []
+        for row in phases:
+            name = str(row.get("phase") or "")
+            if not name:
+                continue
+            phase_sequence.append(name)
+            retained_phase_counts[name] = int(retained_phase_counts.get(name, 0)) + 1
+        phase_counts = dict(trace.get("phase_counts") or retained_phase_counts)
+
+        def _last(name):
+            for row in reversed(phases):
+                if str(row.get("phase") or "") == name:
+                    return row
+            return {}
+
+        def _float(value):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _delta(start_name, end_name):
+            start = _float(_last(start_name).get("elapsed_ms"))
+            end = _float(_last(end_name).get("elapsed_ms"))
+            if start is None or end is None:
+                return None
+            return max(0.0, end - start)
+
+        retry_result = _last("retry_attempt_result")
+        edge_done = [row for row in phases if str(row.get("phase") or "") == "edge_wait_done"]
+        retry_results = [row for row in phases if str(row.get("phase") or "") == "retry_attempt_result"]
+        retry_reasons = list(trace.get("retry_reasons") or [
+            str(row.get("reason")) for row in retry_results if row.get("reason") not in (None, "")
+        ])
+        edge_elapsed = [value for value in (_float(row.get("elapsed_ms")) for row in edge_done) if value is not None]
+        edge_timeout_count = int(trace.get("edge_timeout_count", 0) or 0)
+        if "edge_timeout_count" not in trace:
+            edge_timeout_count = sum(1 for row in edge_done if row.get("fired") is False)
+            edge_timeout_count += sum(1 for reason in retry_reasons if reason == "attempt_timeout")
+
+        summary = {
+            "schema_version": 1,
+            "request_id": request_id,
+            "generation": generation,
+            "backend_id": backend_id,
+            "cap_id": cap_id,
+            "phase_count": sum(int(count) for count in phase_counts.values()),
+            "retained_phase_count": len(phase_sequence),
+            "phase_counts": phase_counts,
+            "phase_sequence": phase_sequence,
+            "dropped_phase_count": int(trace.get("dropped_phase_count", 0) or 0),
+            "trigger_count": int(phase_counts.get("trigger_high", 0)),
+            "retry_attempt_count": int(phase_counts.get("retry_attempt_start", 0)),
+            "worker_retry_count": int(phase_counts.get("retrying", 0)),
+            "edge_wait_done_count": int(phase_counts.get("edge_wait_done", 0)),
+            "edge_timeout_count": int(edge_timeout_count),
+            "max_edge_wait_elapsed_ms": trace.get("max_edge_wait_elapsed_ms") if trace.get(
+                "max_edge_wait_elapsed_ms"
+            ) is not None else (max(edge_elapsed) if edge_elapsed else None),
+            "retry_reasons": retry_reasons,
+            "edge_wait_duration_ms": _delta("edge_wait_start", "edge_wait_done"),
+            "post_ack_to_result_ms": _delta("edge_wait_done", "retry_attempt_result"),
+            "arm_to_result_ms": _delta("arm_start", "retry_attempt_result"),
+        }
+        copy_fields = (
+            "make_array_ms", "signal_mean_ms", "rotate_ms", "frame_select_reason", "mean", "threshold",
+            "cap_seen", "cap_max_new", "capture_profile", "requested_profile", "effective_profile",
+            "fallback_active", "fallback_reason", "fallback_error", "signal_stride", "signal_channel",
+            "cap_emit_rotate", "detection_stream", "lores_size", "lores_format", "lores_make_array_ms",
+            "lores_signal_mean_ms", "main_make_array_ms", "main_converted_for_selected_frame",
+            "capture_arm_timing_mode", "early_arm_mark", "early_arm_to_ack_ms", "early_arm_to_result_ms",
+            "buffered_post_arm_frames", "buffered_threshold_selected", "selected_frame_index",
+            "selected_frame_interval_ms", "selected_frame_index_after_ack", "selected_frame_done_after_ack_ms",
+            "stream_main_size", "stream_main_format", "stream_buffer_count", "configured_exposure_time_us",
+            "configured_frame_duration_us", "selected_metadata_exposure_time_us",
+            "selected_metadata_frame_duration_us", "selected_metadata_sensor_timestamp_ns",
+        )
+        for field in copy_fields:
+            if field in retry_result:
+                summary[field] = retry_result.get(field)
+        if "mean" in summary:
+            summary["selected_frame_mean"] = summary.pop("mean")
+        if "threshold" in summary:
+            summary["selected_frame_threshold"] = summary.pop("threshold")
+        if "fallback_active" in summary:
+            summary["capture_profile_fallback_active"] = summary.pop("fallback_active")
+        if "fallback_reason" in summary:
+            summary["capture_profile_fallback_reason"] = summary.pop("fallback_reason")
+        if "fallback_error" in summary:
+            summary["capture_profile_fallback_error"] = summary.pop("fallback_error")
+        return summary
 
     def _should_print_capture_debug(self, level="info"):
         return self.is_capture_debug_logging_enabled() or self._capture_phase_is_warning_or_error(level)
@@ -1067,6 +1258,9 @@ class DropletCamera(QObject):
             self._close_camera_object(self.camera)
             self.camera = None
         self._trigger_low()
+        worker_active = getattr(self, "_capture_worker_active", None)
+        if worker_active is None or not bool(worker_active.is_set()):
+            self._clear_capture_performance_traces()
 
     def get_last_capture_result(self) -> dict | None:
         """
@@ -1113,9 +1307,11 @@ class DropletCamera(QObject):
         **fields,
     ):
         level_text = str(level or "info")
+        warning_or_error = self._capture_phase_is_warning_or_error(level_text)
         should_emit = self._should_emit_capture_phase(level_text)
+        should_accumulate = self.is_capture_performance_diagnostics_enabled() and not warning_or_error
         should_print = bool(print_phase) and self._should_print_capture_debug(level_text)
-        if not should_emit and not should_print:
+        if not should_emit and not should_accumulate and not should_print:
             return None
         elapsed_ms = 0.0
         if started_ns is not None:
@@ -1135,8 +1331,6 @@ class DropletCamera(QObject):
         details.update(fields)
         if should_print:
             print("[CameraPhase] " + str(phase) + " " + " ".join(f"{k}={v}" for k, v in details.items()))
-        if not should_emit:
-            return None
         payload = {
             "phase": str(phase),
             "request_id": request_id,
@@ -1147,6 +1341,10 @@ class DropletCamera(QObject):
             "level": level_text,
         }
         payload.update(fields)
+        if should_accumulate:
+            self._append_capture_performance_phase(payload)
+        if not should_emit:
+            return payload
         try:
             self.capture_phase_signal.emit(payload)
         except Exception as exc:
@@ -2211,6 +2409,7 @@ class DropletCamera(QObject):
         with self._cv:
             self._capture_generation += 1
             generation = int(self._capture_generation)
+        self._start_capture_performance_trace(request_id, generation)
 
         def _runner():
             worker_started_monotonic_ns = time.monotonic_ns()
@@ -2287,6 +2486,17 @@ class DropletCamera(QObject):
             payload["queued_monotonic_ns"] = int(queued_monotonic_ns)
             payload["worker_started_monotonic_ns"] = int(worker_started_monotonic_ns)
             payload["worker_completed_monotonic_ns"] = int(worker_completed_monotonic_ns)
+
+            trace = self._pop_capture_performance_trace(request_id, generation)
+            capture_performance_summary = self._build_capture_performance_summary(
+                trace,
+                request_id=request_id,
+                generation=generation,
+                backend_id=backend_id,
+                cap_id=payload.get("cap_id"),
+            )
+            if capture_performance_summary is not None:
+                payload["capture_performance_summary"] = capture_performance_summary
 
             current_generation = int(getattr(self, "_capture_generation", 0))
             current_backend = self._get_current_capture_backend()

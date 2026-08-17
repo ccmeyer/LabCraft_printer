@@ -271,6 +271,9 @@ class DropletCapturePerformanceDiagnostics:
         def _camera_phase_rows(rows):
             return [row for row in rows if str(row.get("event_kind") or "") == "camera_phase"]
 
+        def _camera_summary_row(rows):
+            return _last_by_kind(rows, "camera_capture_summary")
+
         def _last_camera_phase(camera_rows, phase):
             wanted = str(phase)
             for row in reversed(camera_rows):
@@ -285,7 +288,29 @@ class DropletCapturePerformanceDiagnostics:
                 return None
             return max(0.0, end - start)
 
-        def _worker_timing_fields(camera_rows):
+        def _worker_timing_fields(rows):
+            compact = _camera_summary_row(rows)
+            if compact:
+                field_names = (
+                    "edge_wait_duration_ms", "post_ack_to_result_ms", "arm_to_result_ms",
+                    "make_array_ms", "signal_mean_ms", "rotate_ms", "frame_select_reason",
+                    "selected_frame_mean", "selected_frame_threshold", "cap_seen", "cap_max_new",
+                    "capture_profile", "requested_profile", "effective_profile",
+                    "capture_profile_fallback_active", "capture_profile_fallback_reason",
+                    "capture_profile_fallback_error", "signal_stride", "signal_channel",
+                    "cap_emit_rotate", "detection_stream", "lores_size", "lores_format",
+                    "lores_make_array_ms", "lores_signal_mean_ms", "main_make_array_ms",
+                    "main_converted_for_selected_frame", "capture_arm_timing_mode", "early_arm_mark",
+                    "early_arm_to_ack_ms", "early_arm_to_result_ms", "buffered_post_arm_frames",
+                    "buffered_threshold_selected", "selected_frame_index", "selected_frame_interval_ms",
+                    "selected_frame_index_after_ack", "selected_frame_done_after_ack_ms",
+                    "stream_main_size", "stream_main_format", "stream_buffer_count",
+                    "configured_exposure_time_us", "configured_frame_duration_us",
+                    "selected_metadata_exposure_time_us", "selected_metadata_frame_duration_us",
+                    "selected_metadata_sensor_timestamp_ns",
+                )
+                return {name: compact.get(name) for name in field_names}
+            camera_rows = _camera_phase_rows(rows)
             retry_result = _last_camera_phase(camera_rows, "retry_attempt_result")
             early_arm_row = _last_camera_phase(camera_rows, "early_arm_mark")
             fields = {
@@ -373,7 +398,6 @@ class DropletCapturePerformanceDiagnostics:
         for request_id, rows in by_request.items():
             first_by_kind = _first_by_kind(rows)
             completion = first_by_kind.get("controller_completion_received") or {}
-            camera_rows = _camera_phase_rows(rows)
             summary = {
                 "request_id": request_id,
                 "event_count": len(rows),
@@ -393,7 +417,7 @@ class DropletCapturePerformanceDiagnostics:
                     (first_by_kind.get("ui_pending_cleared") or {}).get("monotonic_ns"),
                 ),
             }
-            summary.update(_worker_timing_fields(camera_rows))
+            summary.update(_worker_timing_fields(rows))
             request_summaries.append(self._json_safe(summary))
 
         ui_sequence_summaries = []
@@ -515,6 +539,7 @@ class DropletCapturePerformanceDiagnostics:
                 }
             )
             camera_rows = _camera_phase_rows(rows)
+            compact_camera_summary = _camera_summary_row(rows)
             trigger_count = sum(1 for row in camera_rows if str(row.get("phase") or "") == "trigger_high")
             edge_done_rows = [row for row in camera_rows if str(row.get("phase") or "") == "edge_wait_done"]
             edge_timeout_count = sum(1 for row in edge_done_rows if row.get("fired") is False)
@@ -538,6 +563,21 @@ class DropletCapturePerformanceDiagnostics:
                 for row in retry_result_rows
                 if row.get("reason")
             ]
+            if compact_camera_summary:
+                trigger_count = int(compact_camera_summary.get("trigger_count") or 0)
+                edge_done_count = int(compact_camera_summary.get("edge_wait_done_count") or 0)
+                edge_timeout_count = int(compact_camera_summary.get("edge_timeout_count") or 0)
+                max_edge_wait_elapsed_ms = _float_or_none(
+                    compact_camera_summary.get("max_edge_wait_elapsed_ms")
+                )
+                retry_reasons = list(compact_camera_summary.get("retry_reasons") or [])
+                delayed_ack_count = int(
+                    max_edge_wait_elapsed_ms is not None
+                    and max_edge_wait_elapsed_ms > delayed_ack_threshold_ms
+                )
+            else:
+                edge_done_count = len(edge_done_rows)
+                max_edge_wait_elapsed_ms = max(edge_wait_values) if edge_wait_values else None
             capture_summary = {
                 "capture_diag_id": capture_diag_id,
                 "request_id": _first_nonempty(
@@ -595,12 +635,16 @@ class DropletCapturePerformanceDiagnostics:
                 "queue_to_worker_start_ms": completion.get("queue_to_worker_start_ms"),
                 "worker_complete_to_controller_ms": completion.get("worker_complete_to_controller_ms"),
                 "trigger_count": trigger_count,
-                "worker_retry_count": max(0, trigger_count - 1),
-                "edge_wait_done_count": len(edge_done_rows),
+                "worker_retry_count": int(
+                    compact_camera_summary.get("worker_retry_count")
+                    if compact_camera_summary and compact_camera_summary.get("worker_retry_count") is not None
+                    else max(0, trigger_count - 1)
+                ),
+                "edge_wait_done_count": edge_done_count,
                 "edge_timeout_count": edge_timeout_count,
                 "delayed_ack_threshold_ms": delayed_ack_threshold_ms,
                 "delayed_ack_count": delayed_ack_count,
-                "max_edge_wait_elapsed_ms": max(edge_wait_values) if edge_wait_values else None,
+                "max_edge_wait_elapsed_ms": max_edge_wait_elapsed_ms,
                 "retry_reasons": retry_reasons,
                 "attempt_to_callback_ms": self._delta_ms(
                     attempt.get("monotonic_ns"),
@@ -615,7 +659,7 @@ class DropletCapturePerformanceDiagnostics:
                     completed.get("monotonic_ns"),
                 ),
             }
-            capture_summary.update(_worker_timing_fields(camera_rows))
+            capture_summary.update(_worker_timing_fields(rows))
             calibration_capture_summaries.append(self._json_safe(capture_summary))
 
         settings_request_summaries = []
@@ -708,9 +752,43 @@ class DropletCapturePerformanceDiagnostics:
                 )
             )
 
+        def _distribution(values):
+            ordered = sorted(float(value) for value in values if value is not None)
+            if not ordered:
+                return {"count": 0, "median_ms": None, "p95_ms": None, "maximum_ms": None}
+            count = len(ordered)
+            midpoint = count // 2
+            median = (
+                ordered[midpoint]
+                if count % 2
+                else (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+            )
+            p95_index = max(0, min(count - 1, int((0.95 * count) + 0.999999) - 1))
+            return {
+                "count": count,
+                "median_ms": median,
+                "p95_ms": ordered[p95_index],
+                "maximum_ms": ordered[-1],
+            }
+
+        ui_metric_sources = {
+            "model_ui_image_update": ("model_image_updated", "duration_ms"),
+            "calibration_callback_handling": ("calibration_callback_handled", "duration_ms"),
+            "image_rendering": ("image_rendered", "duration_ms"),
+            "characterization_summary_refresh": ("characterization_summary_refreshed", "duration_ms"),
+        }
+        ui_work_summaries = {
+            name: _distribution(
+                _float_or_none(row.get(field_name))
+                for row in events
+                if str(row.get("event_kind") or "") == event_kind
+            )
+            for name, (event_kind, field_name) in ui_metric_sources.items()
+        }
+
         snapshot = {
             "kind": "droplet_capture_performance_snapshot",
-            "schema_version": 9,
+            "schema_version": 10,
             "reason": str(reason or "manual_export"),
             "generated_at_utc": self._now_utc(),
             "generated_monotonic_ns": int(time.monotonic_ns()),
@@ -725,6 +803,7 @@ class DropletCapturePerformanceDiagnostics:
             "calibration_process_summaries": calibration_process_summaries,
             "calibration_capture_summaries": calibration_capture_summaries,
             "settings_request_summaries": settings_request_summaries,
+            "ui_work_summaries": ui_work_summaries,
             "event_log_tail": events,
             "last_snapshot_path": self.last_snapshot_path,
         }
@@ -9310,10 +9389,8 @@ class Controller(QObject):
         data = dict(payload or {}) if isinstance(payload, dict) else {"payload": payload}
         level = str(data.get("level") or "info")
         self.record_droplet_capture_performance_marker("camera_phase", data)
-        diagnostics = getattr(self, "_droplet_capture_performance_diagnostics", None)
-        diagnostics_enabled = bool(getattr(diagnostics, "enabled", False))
         level_text = level.strip().lower()
-        if diagnostics_enabled or level_text in {"warning", "warn", "error", "critical", "exception"}:
+        if level_text in {"warning", "warn", "error", "critical", "exception"}:
             self._record_active_calibration_event("camera_capture_phase", data, level=level)
 
     def _emit_active_calibration_error(self, message: str):
@@ -9598,6 +9675,11 @@ class Controller(QObject):
     @QtCore.Slot(object)
     def _on_capture_completed_payload(self, payload):
         payload = dict(payload or {}) if isinstance(payload, dict) else {"status": "failed", "error": str(payload)}
+        camera_summary = payload.pop("capture_performance_summary", None)
+        if isinstance(camera_summary, dict):
+            summary_event = dict(camera_summary)
+            summary_event.setdefault("capture_context", payload.get("capture_context"))
+            self.record_droplet_capture_performance_marker("camera_capture_summary", summary_event)
         request_id = payload.get("request_id")
         status = str(payload.get("status") or "").lower()
         controller_received_ns = time.monotonic_ns()
@@ -9730,10 +9812,16 @@ class Controller(QObject):
         save_metadata = self._build_droplet_capture_save_metadata(capture_context=capture_context)
 
         callback = pending_snapshot.get("callback")
+        diagnostics_enabled = self.is_droplet_capture_performance_diagnostics_enabled()
+        model_update_started_ns = time.monotonic_ns() if diagnostics_enabled else None
 
         # Update the model and/or view (assuming your model has such a method)
         try:
             self.model.droplet_camera_model.update_image(frame, capture_info=cap_info, save_metadata=save_metadata)
+            model_update_duration_ms = DropletCapturePerformanceDiagnostics._delta_ms(
+                model_update_started_ns,
+                time.monotonic_ns() if diagnostics_enabled else None,
+            )
             self.record_droplet_capture_performance_marker(
                 "model_image_updated",
                 {
@@ -9742,6 +9830,7 @@ class Controller(QObject):
                     "cap_id": (cap_info or {}).get("cap_id") if isinstance(cap_info, dict) else None,
                     "generation": (cap_info or {}).get("generation") if isinstance(cap_info, dict) else None,
                     "backend_id": (cap_info or {}).get("backend_id") if isinstance(cap_info, dict) else None,
+                    "duration_ms": model_update_duration_ms,
                 },
             )
             droplet_count = self._current_imaging_droplet_count()
@@ -9785,7 +9874,24 @@ class Controller(QObject):
                 status=CaptureStatus.SUCCESS,
                 metadata=metadata,
             )
-            callback(frame)
+            callback_started_ns = time.monotonic_ns() if diagnostics_enabled else None
+            try:
+                callback(frame)
+            finally:
+                if diagnostics_enabled and isinstance(capture_context, dict) and str(
+                    capture_context.get("kind") or ""
+                ) == "calibration_capture":
+                    self.record_droplet_capture_performance_marker(
+                        "calibration_callback_handled",
+                        {
+                            "request_id": request_id,
+                            "capture_context": capture_context,
+                            "duration_ms": DropletCapturePerformanceDiagnostics._delta_ms(
+                                callback_started_ns,
+                                time.monotonic_ns(),
+                            ),
+                        },
+                    )
 
     @QtCore.Slot(str)
     def _on_capture_failed(self, msg: str):
