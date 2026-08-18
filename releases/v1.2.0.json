@@ -1,0 +1,26 @@
+{
+  "channel": "stable",
+  "notes": [
+    "This metadata-only release promotes the deployed v1.2.0-rc.6 application and firmware payload unchanged to final stable v1.2.0.",
+    "Updates release discovery metadata to prepare the support-guided v1.3.0-rc.1 pointer and later v1.3.0 release candidates.",
+    "Keeps normal online updates on the stable release channel by default while preserving the support-guided release-candidate toggle.",
+    "Keeps application behavior, the bundled firmware binary, device protocol, motion, pressure control, Model behavior, and updater logic identical to v1.2.0-rc.6.",
+    "Machines already running v1.2.0-rc.6 do not require another firmware flash."
+  ],
+  "previous_version": "v1.2.0-rc.6",
+  "release_date": "2026-08-18",
+  "requires_firmware": {
+    "artifact": "firmware/artifacts/LabCraft_firmware.bin",
+    "note": "Uses the same bundled firmware artifact as v1.2.0-rc.6; machines already running that release candidate do not require another firmware flash."
+  },
+  "rollback_version": "v1.1.17",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Final stable promotion of the deployed v1.2.0-rc.6 payload.",
+  "tag": "v1.2.0",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.2.0"
+}

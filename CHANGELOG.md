@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.2.0 - 2026-08-18
+
+### Changed
+
+- Promoted the deployed `v1.2.0-rc.6` application and firmware payload unchanged to final stable `v1.2.0`.
+- Set `v1.2.0` as the stable application release and prepared support-guided release-candidate discovery for `v1.3.0-rc.1` and later `v1.3.0-rc.N` tags.
+- Kept normal online updates on the stable release channel by default while preserving the support-guided release-candidate toggle.
+- Kept application behavior, the bundled firmware binary, device protocol, motion, pressure control, Model behavior, and updater logic identical to `v1.2.0-rc.6`.
+
+### Validation
+
+- Full Python suite:
+  `.\env\Scripts\python.exe -m pytest -q`
+- The release metadata validator from the current release tooling was run externally against this promotion checkout.
+- Metadata and static checks:
+  `git diff --check`
+  `Get-ChildItem releases\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.17`.
+
 ## v1.2.0-rc.6 - 2026-07-07
 
 ### Changed
