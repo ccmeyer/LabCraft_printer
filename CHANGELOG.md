@@ -1,5 +1,54 @@
 # Changelog
 
+## v1.3.0-rc.1 - 2026-08-18
+
+### Changed
+
+- Added normalized-LUT direct XYZ motion and coordinated production XY motion with bounded terminal guarantees.
+- Added MCU XY failure context, bounded homing recovery for rejected move starts, and guided operator recovery for failed XY motion.
+- Hardened firmware watchdog, motion-limit, pressure, gripper, flash, and printing behavior while expanding host, HIL, and qualification coverage.
+- Made canonical calibration recording and history authoritative, with historical conversion, recovery, and refined Droplet and Stream calibration workflows.
+- Improved durable experiment execution, resume behavior, experiment editing, workflow diagnostics, and hardware-isolated verification.
+- Updated the application and bundled firmware together; `v1.3.0-rc.1` must be deployed with its matching firmware because the command and reset-diagnostic contracts evolved in lockstep.
+
+### Validation
+
+- Full Python suite:
+  `.\env\Scripts\python.exe -m pytest -q`
+- Firmware host tests and headless build:
+  `powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug`
+- Full firmware HIL plus focused direct-LUT, normal-XY, production-MRES3, and camera-transition qualification on `LC-001`.
+- Metadata and static checks:
+  `.\env\Scripts\python.exe tools\validate_release_metadata.py`
+  `git diff --check`
+  `Get-ChildItem releases\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }`
+
+### Rollback
+
+- Roll back the application to `v1.2.0` and restore its matching firmware; the application updater does not flash firmware automatically.
+
+## v1.2.0 - 2026-08-18
+
+### Changed
+
+- Promoted the deployed `v1.2.0-rc.6` application and firmware payload unchanged to final stable `v1.2.0`.
+- Set `v1.2.0` as the stable application release and prepared support-guided release-candidate discovery for `v1.3.0-rc.1` and later `v1.3.0-rc.N` tags.
+- Kept normal online updates on the stable release channel by default while preserving the support-guided release-candidate toggle.
+- Kept application behavior, the bundled firmware binary, device protocol, motion, pressure control, Model behavior, and updater logic identical to `v1.2.0-rc.6`.
+
+### Validation
+
+- Full Python suite:
+  `.\env\Scripts\python.exe -m pytest -q`
+- The release metadata validator from the current release tooling was run externally against this promotion checkout.
+- Metadata and static checks:
+  `git diff --check`
+  `Get-ChildItem releases\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }`
+
+### Rollback
+
+- Recommended rollback version: `v1.1.17`.
+
 ## v1.2.0-rc.6 - 2026-07-07
 
 ### Changed

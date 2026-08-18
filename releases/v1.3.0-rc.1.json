@@ -1,0 +1,31 @@
+{
+  "channel": "release_candidate",
+  "notes": [
+    "Adds normalized-LUT direct XYZ motion and coordinated production XY motion with bounded terminal guarantees.",
+    "Adds MCU XY failure context, bounded homing recovery for rejected move starts, and guided operator recovery for failed XY motion.",
+    "Hardens firmware watchdog, motion-limit, pressure, gripper, flash, and printing behavior while expanding verification coverage.",
+    "Makes canonical calibration recording and history authoritative, with historical conversion, recovery, and refined Droplet and Stream calibration workflows.",
+    "Improves durable experiment execution, resume behavior, experiment editing, workflow diagnostics, and hardware-isolated verification.",
+    "The application and bundled firmware must be deployed together because command handling and reset-diagnostic extensions evolved in lockstep; the application updater does not flash firmware automatically."
+  ],
+  "previous_version": "v1.2.0",
+  "release_date": "2026-08-18",
+  "requires_firmware": {
+    "artifact": "firmware/artifacts/LabCraft_firmware.bin",
+    "note": "Firmware is updated for this release candidate and must be installed with the v1.3.0-rc.1 application; do not pair this application with v1.2.0 firmware."
+  },
+  "rollback_version": "v1.2.0",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Release candidate for coordinated motion, recovery, calibration, and workflow-reliability improvements.",
+  "tag": "v1.3.0-rc.1",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q",
+    "powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug",
+    "powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost 192.168.0.33 -IdentityFile verification_reports\\pi_sil_codex_network_ed25519 -Profile FULL",
+    "Focused qualification: direct_xyz_lut_v1, normal_xy_route_v1, coordinated_xy_production_mres3_v5, and coordinated_xy_camera_transition_v4 on LC-001",
+    ".\\env\\Scripts\\python.exe tools\\validate_release_metadata.py",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.3.0-rc.1"
+}

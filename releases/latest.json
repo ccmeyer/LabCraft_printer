@@ -1,6 +1,12 @@
 {
-  "release_candidate": "v1.2.0-rc.6",
+  "release_candidate": "v1.3.0-rc.1",
+  "release_candidate_series": {
+    "minimum": "v1.3.0-rc.1",
+    "tag_prefix": "v1.3.0-rc."
+  },
   "releases": [
+    "v1.3.0-rc.1",
+    "v1.2.0",
     "v1.2.0-rc.6",
     "v1.1.17",
     "v1.1.16",
@@ -21,5 +27,5 @@
     "v1.1.0"
   ],
   "schema_version": "labcraft_release_index_v1",
-  "stable": "v1.1.17"
+  "stable": "v1.2.0"
 }
