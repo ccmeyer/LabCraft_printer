@@ -1729,7 +1729,7 @@ class MainWindow(QMainWindow):
         pressure_box = getattr(self, "pressure_box", None)
         calibration_idle = getattr(pressure_box, "calibration_session_is_idle", None)
         if callable(calibration_idle) and not calibration_idle():
-            focus_dialog = getattr(pressure_box, "_focus_active_droplet_imager_dialog", None)
+            focus_dialog = getattr(pressure_box, "_focus_active_calibration_dialog", None)
             if callable(focus_dialog):
                 focus_dialog()
             self.popup_message(
@@ -3010,17 +3010,23 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self._pressure_spinbox_focus_targets = {}
         self._pressure_spinboxes = []
         self._active_spinbox_highlight = None
+        self._calibration_launch_token_counter = 0
         self._print_profile_apply_pending = False
+        self._print_profile_apply_token = None
         self._droplet_imager_dialog = None
         self._droplet_imager_dialog_state = "inactive"
         self._droplet_imager_profile_lease = None
         self._droplet_imager_result_dialog = None
         self._droplet_imager_launch_pending = False
+        self._droplet_imager_launch_token = None
         self._refuel_camera_dialog = None
         self._refuel_camera_launch_pending = False
+        self._refuel_camera_launch_token = None
         self._manual_refuel_check_dialog = None
         self._manual_refuel_check_launch_pending = False
+        self._manual_refuel_check_launch_token = None
         self._manual_refuel_check_after_imager_pending = False
+        self._manual_refuel_check_after_imager_token = None
         self._calibration_profile_leases = {}
         self._simulation_calibration_generate_callback = None
         self._simulation_calibration_availability_callback = None
@@ -3047,6 +3053,15 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         transport_fault_signal = getattr(self.controller, "transport_fault_ui_signal", None)
         if transport_fault_signal is not None:
             transport_fault_signal.connect(self.handle_transport_fault_ui)
+        workflow_interrupted_signal = getattr(
+            self.controller,
+            "machine_workflow_interrupted_signal",
+            None,
+        )
+        if workflow_interrupted_signal is not None:
+            workflow_interrupted_signal.connect(
+                self.handle_machine_workflow_interrupted
+            )
         self.toggle_regulation_requested.connect(self.controller.toggle_regulation)
         # self.update_target_pressure_input.connect(self.controller.set_absolute_pressure)
         # self.update_pulse_width_input.connect(self.controller.set_pulse_width)
@@ -3249,10 +3264,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             return
 
         if self._selected_print_profile_is_loaded(profile):
-            self._print_profile_apply_pending = False
+            self._set_print_profile_apply_pending(False)
             self._set_print_profile_button("Loaded", enabled=False, color="#777777")
         elif not self._machine_is_connected():
-            self._print_profile_apply_pending = False
+            self._set_print_profile_apply_pending(False)
             self._set_print_profile_button("Apply", enabled=False, color="#777777")
         elif self._print_profile_apply_pending:
             self._set_print_profile_button("Applying...", enabled=False, color=self.color_dict["light_blue"])
@@ -3260,7 +3275,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self._set_print_profile_button("Apply", enabled=True, color=self.color_dict["light_blue"])
 
     def handle_print_profile_selection_change(self, _index=None):
-        self._print_profile_apply_pending = False
+        self._set_print_profile_apply_pending(False)
         self._refresh_print_profile_combo_tooltip()
         self.update_print_profile_button_state()
 
@@ -3269,30 +3284,42 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         if profile is None:
             return
         if not self._machine_is_connected():
-            self._print_profile_apply_pending = False
+            self._set_print_profile_apply_pending(False)
             self.update_print_profile_button_state()
             return
-        self._print_profile_apply_pending = True
+        apply_token = self._set_print_profile_apply_pending(True)
         self.update_print_profile_button_state()
         result = self.controller.apply_print_profile(
             profile,
-            callback=self._handle_print_profile_apply_complete,
+            callback=lambda *args, **kwargs: self._handle_print_profile_apply_complete(
+                apply_token,
+                *args,
+                **kwargs,
+            ),
         )
         if result is False:
-            self._print_profile_apply_pending = False
+            self._set_print_profile_apply_pending(False)
             self.update_print_profile_button_state()
 
-    def _handle_print_profile_apply_complete(self, *args, **kwargs):
-        QTimer.singleShot(0, self._finish_print_profile_apply)
+    def _handle_print_profile_apply_complete(self, apply_token=None, *args, **kwargs):
+        QTimer.singleShot(
+            0,
+            lambda: self._finish_print_profile_apply(apply_token),
+        )
 
-    def _finish_print_profile_apply(self):
-        self._print_profile_apply_pending = False
+    def _finish_print_profile_apply(self, apply_token=None):
+        if (
+            apply_token is not None
+            and apply_token != getattr(self, "_print_profile_apply_token", None)
+        ):
+            return
+        self._set_print_profile_apply_pending(False)
         self.update_print_profile_button_state()
 
     def _mark_print_profile_settings_changed(self):
         if self.legacy_mode or not hasattr(self, "print_profile_apply_button"):
             return
-        self._print_profile_apply_pending = False
+        self._set_print_profile_apply_pending(False)
         self.update_print_profile_button_state()
 
     def init_ui(self):
@@ -3633,17 +3660,106 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self.pressure_regulation_button.setText("Regulate Pressure")
             self.pressure_regulation_button.setStyleSheet(f"background-color: {self.color_dict['light_blue']}; color: white;")
 
+    def _next_calibration_launch_token(self):
+        self._calibration_launch_token_counter = int(
+            getattr(self, "_calibration_launch_token_counter", 0)
+        ) + 1
+        return self._calibration_launch_token_counter
+
+    def _set_pending_action(self, pending_attr, token_attr, pending):
+        pending = bool(pending)
+        if pending:
+            current_token = getattr(self, token_attr, None)
+            if getattr(self, pending_attr, False) and current_token is not None:
+                return current_token
+            token = self._next_calibration_launch_token()
+            setattr(self, pending_attr, True)
+            setattr(self, token_attr, token)
+            return token
+        setattr(self, pending_attr, False)
+        setattr(self, token_attr, None)
+        return None
+
+    def _set_print_profile_apply_pending(self, pending):
+        return self._set_pending_action(
+            "_print_profile_apply_pending",
+            "_print_profile_apply_token",
+            pending,
+        )
+
+    def _set_manual_refuel_check_after_imager_pending(self, pending):
+        return self._set_pending_action(
+            "_manual_refuel_check_after_imager_pending",
+            "_manual_refuel_check_after_imager_token",
+            pending,
+        )
+
+    def _pending_action_token_is_current(self, token_attr, token):
+        return token is not None and token == getattr(self, token_attr, None)
+
+    def _droplet_imager_session_is_active(self):
+        return bool(
+            getattr(self, "_droplet_imager_dialog_state", "inactive")
+            in {"opening", "active", "closing"}
+            or getattr(self, "_droplet_imager_result_dialog", None) is not None
+        )
+
     @QtCore.Slot(object)
-    def handle_transport_fault_ui(self, _report=None):
-        """Release UI actions that were waiting for command-completion callbacks."""
-        self._print_profile_apply_pending = False
-        self._droplet_imager_launch_pending = False
-        self._refuel_camera_launch_pending = False
-        self._manual_refuel_check_launch_pending = False
-        self._manual_refuel_check_after_imager_pending = False
+    def handle_machine_workflow_interrupted(self, report=None):
+        """Cancel pre-launch UI actions whose command callbacks can no longer run."""
+        payload = dict(report) if isinstance(report, Mapping) else {}
+        canceled_pending_action = False
+
+        if (
+            getattr(self, "_droplet_imager_launch_pending", False)
+            and not self._droplet_imager_session_is_active()
+        ):
+            self._set_droplet_imager_launch_pending(False)
+            canceled_pending_action = True
+        if (
+            getattr(self, "_refuel_camera_launch_pending", False)
+            and getattr(self, "_refuel_camera_dialog", None) is None
+        ):
+            self._set_refuel_camera_launch_pending(False)
+            canceled_pending_action = True
+        if (
+            getattr(self, "_manual_refuel_check_launch_pending", False)
+            and getattr(self, "_manual_refuel_check_dialog", None) is None
+        ):
+            self._set_manual_refuel_check_launch_pending(False)
+            canceled_pending_action = True
+        if getattr(self, "_manual_refuel_check_after_imager_pending", False):
+            self._set_manual_refuel_check_after_imager_pending(False)
+            canceled_pending_action = True
+        if getattr(self, "_print_profile_apply_pending", False):
+            self._set_print_profile_apply_pending(False)
+            canceled_pending_action = True
+
         self._refresh_droplet_imager_button_state()
         self._refresh_refuel_camera_button_state()
         self.update_print_profile_button_state()
+
+        if canceled_pending_action and bool(payload.get("notify_user", False)):
+            reason = str(payload.get("reason") or "machine workflow interruption")
+            if reason == "queue_clear_requested":
+                detail = "the Clear Queue request"
+            elif reason == "mcu_reset_requested":
+                detail = "the MCU reset request"
+            else:
+                detail = "a machine workflow interruption"
+            self.popup_message_signal.emit(
+                "Calibration Action Canceled",
+                f"The pending calibration or camera action was canceled by {detail}. "
+                "Start it again after the machine is ready.",
+            )
+
+    @QtCore.Slot(object)
+    def handle_transport_fault_ui(self, report=None):
+        """Release UI actions that were waiting for command-completion callbacks."""
+        payload = dict(report) if isinstance(report, Mapping) else {}
+        payload.setdefault("reason", "transport_fault")
+        payload["notify_user"] = False
+        self.handle_machine_workflow_interrupted(payload)
 
     def _droplet_imager_launch_is_active(self):
         return bool(
@@ -3732,8 +3848,13 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         return "nominal_stream" if mode == "stream" else "nominal_droplet"
 
     def _set_droplet_imager_launch_pending(self, pending):
-        self._droplet_imager_launch_pending = bool(pending)
+        token = self._set_pending_action(
+            "_droplet_imager_launch_pending",
+            "_droplet_imager_launch_token",
+            pending,
+        )
         self._refresh_droplet_imager_button_state()
+        return token
 
     def _clear_droplet_imager_launch_state(self, dialog=None):
         active_dialog = getattr(self, "_droplet_imager_dialog", None)
@@ -3742,8 +3863,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             if getattr(self, "_droplet_imager_dialog_state", "inactive") != "shutdown":
                 self._droplet_imager_dialog_state = "inactive"
             self.set_pressure_render_suspended(False)
-        self._droplet_imager_launch_pending = False
-        self._refresh_droplet_imager_button_state()
+        self._set_droplet_imager_launch_pending(False)
 
     def _set_active_droplet_imager_dialog(self, dialog):
         """Make one constructed imager dialog the active pressure renderer."""
@@ -3837,13 +3957,23 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self._clear_droplet_imager_launch_state(dialog)
             raise
         self._set_active_droplet_imager_dialog(dialog)
-        self._droplet_imager_launch_pending = False
+        self._set_droplet_imager_launch_pending(False)
         return dialog
 
     def _focus_active_droplet_imager_dialog(self):
-        dialog = getattr(self, "_droplet_imager_dialog", None)
+        result_dialog = getattr(self, "_droplet_imager_result_dialog", None)
+        if result_dialog is not None:
+            dialog = result_dialog
+        elif getattr(self, "_droplet_imager_dialog_state", "inactive") in {
+            "opening",
+            "active",
+            "closing",
+        }:
+            dialog = getattr(self, "_droplet_imager_dialog", None)
+        else:
+            dialog = None
         if dialog is None:
-            return
+            return False
         for method_name in ("show", "raise_", "activateWindow"):
             method = getattr(dialog, method_name, None)
             if callable(method):
@@ -3851,6 +3981,27 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                     method()
                 except Exception:
                     pass
+        return True
+
+    def _focus_active_calibration_dialog(self):
+        if self._focus_active_droplet_imager_dialog():
+            return True
+        for dialog_attr in (
+            "_refuel_camera_dialog",
+            "_manual_refuel_check_dialog",
+        ):
+            dialog = getattr(self, dialog_attr, None)
+            if dialog is None:
+                continue
+            for method_name in ("show", "raise_", "activateWindow"):
+                method = getattr(dialog, method_name, None)
+                if callable(method):
+                    try:
+                        method()
+                    except Exception:
+                        pass
+            return True
+        return False
 
     def _reject_duplicate_droplet_imager_launch(self):
         self._focus_active_droplet_imager_dialog()
@@ -3880,14 +4031,18 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             )
 
     def _set_refuel_camera_launch_pending(self, pending):
-        self._refuel_camera_launch_pending = bool(pending)
+        token = self._set_pending_action(
+            "_refuel_camera_launch_pending",
+            "_refuel_camera_launch_token",
+            pending,
+        )
         self._refresh_refuel_camera_button_state()
+        return token
 
     def _clear_refuel_camera_launch_state(self, dialog=None):
         if dialog is None or getattr(self, "_refuel_camera_dialog", None) is dialog:
             self._refuel_camera_dialog = None
-        self._refuel_camera_launch_pending = False
-        self._refresh_refuel_camera_button_state()
+        self._set_refuel_camera_launch_pending(False)
 
     def _focus_active_refuel_camera_dialog(self):
         dialog = getattr(self, "_refuel_camera_dialog", None)
@@ -3916,13 +4071,17 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         )
 
     def _set_manual_refuel_check_launch_pending(self, pending):
-        self._manual_refuel_check_launch_pending = bool(pending)
+        return self._set_pending_action(
+            "_manual_refuel_check_launch_pending",
+            "_manual_refuel_check_launch_token",
+            pending,
+        )
 
     def _clear_manual_refuel_check_launch_state(self, dialog=None):
         if dialog is None or getattr(self, "_manual_refuel_check_dialog", None) is dialog:
             self._manual_refuel_check_dialog = None
-        self._manual_refuel_check_launch_pending = False
-        self._manual_refuel_check_after_imager_pending = False
+        self._set_manual_refuel_check_launch_pending(False)
+        self._set_manual_refuel_check_after_imager_pending(False)
 
     def _focus_active_manual_refuel_check_dialog(self):
         dialog = getattr(self, "_manual_refuel_check_dialog", None)
@@ -4000,9 +4159,9 @@ class PressurePlotBox(QtWidgets.QGroupBox):
 
     def calibration_session_is_idle(self):
         return not bool(
-            self._droplet_imager_launch_is_active()
-            or self._refuel_camera_launch_is_active()
-            or self._manual_refuel_check_launch_is_active()
+            self._droplet_imager_session_is_active()
+            or getattr(self, "_refuel_camera_dialog", None) is not None
+            or getattr(self, "_manual_refuel_check_dialog", None) is not None
             or self._calibration_profile_leases
         )
 
@@ -4118,7 +4277,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             )
             self._droplet_imager_result_dialog = dialog
             self.set_pressure_render_suspended(True)
-            self._droplet_imager_launch_pending = False
+            self._set_droplet_imager_launch_pending(False)
             finished_signal = getattr(dialog, "finished", None)
             if finished_signal is not None:
                 finished_signal.connect(self._on_droplet_imager_result_finished)
@@ -4137,9 +4296,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
     def _on_droplet_imager_result_finished(self, _result=None):
         dialog = getattr(self, "_droplet_imager_result_dialog", None)
         self._droplet_imager_result_dialog = None
-        self._droplet_imager_launch_pending = False
+        self._set_droplet_imager_launch_pending(False)
         self.set_pressure_render_suspended(False)
-        self._refresh_droplet_imager_button_state()
         if dialog is not None:
             delete_later = getattr(dialog, "deleteLater", None)
             if callable(delete_later):
@@ -4437,15 +4595,18 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             )
             return
 
-        self._set_droplet_imager_launch_pending(True)
+        launch_token = self._set_droplet_imager_launch_pending(True)
 
         def _launch_after_camera_move():
+            if not self._pending_action_token_is_current(
+                "_droplet_imager_launch_token",
+                launch_token,
+            ):
+                return
             if getattr(self, "_droplet_imager_dialog_state", "inactive") in {
                 "opening", "active", "closing", "shutdown"
             }:
                 self._reject_duplicate_droplet_imager_launch()
-                return
-            if not getattr(self, "_droplet_imager_launch_pending", False):
                 return
             self._launch_droplet_imager_dialog()
 
@@ -4522,13 +4683,16 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             )
             return
 
-        self._set_refuel_camera_launch_pending(True)
+        launch_token = self._set_refuel_camera_launch_pending(True)
 
         def _launch_refuel_after_camera_move():
+            if not self._pending_action_token_is_current(
+                "_refuel_camera_launch_token",
+                launch_token,
+            ):
+                return
             if getattr(self, "_refuel_camera_dialog", None) is not None:
                 self._reject_duplicate_refuel_camera_launch()
-                return
-            if not getattr(self, "_refuel_camera_launch_pending", False):
                 return
             self._launch_refuel_camera_dialog()
 
@@ -4605,10 +4769,15 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             self._reject_duplicate_manual_refuel_check_launch()
             return False
 
-        self._manual_refuel_check_after_imager_pending = True
+        after_imager_token = self._set_manual_refuel_check_after_imager_pending(
+            True
+        )
 
         def _launch_after_imager_closed():
-            if not getattr(self, "_manual_refuel_check_after_imager_pending", False):
+            if not self._pending_action_token_is_current(
+                "_manual_refuel_check_after_imager_token",
+                after_imager_token,
+            ):
                 return
             if getattr(self, "_droplet_imager_dialog_state", "inactive") in {
                 "opening", "active", "closing"
@@ -4625,7 +4794,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             if not queue_idle:
                 QtCore.QTimer.singleShot(100, _launch_after_imager_closed)
                 return
-            self._manual_refuel_check_after_imager_pending = False
+            self._set_manual_refuel_check_after_imager_pending(False)
             self.manual_refuel_check_after_stream_apply()
 
         QtCore.QTimer.singleShot(0, _launch_after_imager_closed)
@@ -4660,13 +4829,16 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             )
             return
 
-        self._set_manual_refuel_check_launch_pending(True)
+        launch_token = self._set_manual_refuel_check_launch_pending(True)
 
         def _launch_after_loading_move():
+            if not self._pending_action_token_is_current(
+                "_manual_refuel_check_launch_token",
+                launch_token,
+            ):
+                return
             if getattr(self, "_manual_refuel_check_dialog", None) is not None:
                 self._reject_duplicate_manual_refuel_check_launch()
-                return
-            if not getattr(self, "_manual_refuel_check_launch_pending", False):
                 return
 
             # The move handler runs inside the machine command-completion stack.
@@ -4675,10 +4847,13 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             # queued by the dialog cannot start until the dialog closes.  Hand
             # ownership back to Qt first, then launch from a fresh event turn.
             def _launch_after_completion_unwinds():
+                if not self._pending_action_token_is_current(
+                    "_manual_refuel_check_launch_token",
+                    launch_token,
+                ):
+                    return
                 if getattr(self, "_manual_refuel_check_dialog", None) is not None:
                     self._reject_duplicate_manual_refuel_check_launch()
-                    return
-                if not getattr(self, "_manual_refuel_check_launch_pending", False):
                     return
                 self._launch_manual_refuel_check_dialog()
 

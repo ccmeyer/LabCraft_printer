@@ -878,6 +878,7 @@ class Controller(QObject):
     update_volumes_in_view_signal = Signal()
     error_occurred_signal = Signal(str,str)
     transport_fault_ui_signal = Signal(object)
+    machine_workflow_interrupted_signal = Signal(object)
     experimental_balance_connection_changed = Signal(object)
     experimental_balance_reading_received = Signal(object)
     experimental_balance_error_occurred = Signal(object)
@@ -1286,6 +1287,7 @@ class Controller(QObject):
 
     def reset_board(self):
         """Reset the machine board."""
+        self._emit_machine_workflow_interrupted("machine_disconnected")
         self.machine.reset_board()
         self.model.machine_model.disconnect_machine()
     
@@ -2156,10 +2158,12 @@ class Controller(QObject):
             PRODUCTION_RUNTIME_CONTEXT,
         )
         if runtime_context.is_simulation:
+            self._emit_machine_workflow_interrupted("disconnect_requested")
             return self.machine.disconnect_board()
         if self._reject_physical_action("machine disconnection") is not None:
             return
-        self.machine.disconnect_board()
+        self._emit_machine_workflow_interrupted("disconnect_requested")
+        return self.machine.disconnect_board()
     # @QtCore.Slot()
     # def disconnect_machine(self):
     #     # self.machine.reset_board()
@@ -2217,11 +2221,13 @@ class Controller(QObject):
             self._restore_print_settings_after_board_reset()
         else:
             print("Controller: Failed to connect to the machine.")
+            self._emit_machine_workflow_interrupted("machine_disconnected")
             self._interrupt_array_after_machine_disconnect()
             self.model.machine_model.disconnect_machine()
 
     def handle_reset_report(self, report: dict):
         report = dict(report or {})
+        self._emit_machine_workflow_interrupted("board_reset_detected")
         manager = self._stream_capture_manager()
         invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
         if callable(invalidate):
@@ -2361,6 +2367,7 @@ class Controller(QObject):
         return export_reset_debug_bundle(context, output_dir=destination)
 
     def handle_serial_connection_lost(self, report: dict):
+        self._emit_machine_workflow_interrupted("serial_connection_lost")
         manager = self._stream_capture_manager()
         invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
         if callable(invalidate):
@@ -2393,6 +2400,7 @@ class Controller(QObject):
 
     def handle_transport_fault(self, report: dict):
         report = dict(report or {})
+        self._emit_machine_workflow_interrupted("transport_fault")
         manager = self._stream_capture_manager()
         invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
         if callable(invalidate):
@@ -4091,6 +4099,10 @@ class Controller(QObject):
         """Reset the MCU board."""
         if self._reject_physical_action("MCU/GPIO reset") is not None:
             return
+        self._emit_machine_workflow_interrupted(
+            "mcu_reset_requested",
+            notify_user=True,
+        )
         self.machine.reset_mcu_board()
         self.machine.reset_board()
 
@@ -4111,8 +4123,10 @@ class Controller(QObject):
 
     def clear_command_queue(self):
         """Clear the command queue."""
-        self.machine.clear_command_queue()
-        self.model.machine_model.clear_command_queue()
+        self._clear_machine_and_model_command_queues(
+            reason="queue_clear_requested",
+            notify_user=True,
+        )
         if self.get_array_run_state() != "idle":
             context = getattr(self, "_array_context", None)
             if isinstance(context, dict):
@@ -4221,6 +4235,31 @@ class Controller(QObject):
             signal.emit(*args)
         except Exception:
             pass
+
+    def _emit_machine_workflow_interrupted(self, reason, *, notify_user=False):
+        payload = {
+            "reason": str(reason or "machine_workflow_interrupted"),
+            "notify_user": bool(notify_user),
+        }
+        self._emit_optional("machine_workflow_interrupted_signal", payload)
+        return payload
+
+    def _clear_machine_and_model_command_queues(
+        self,
+        *,
+        reason,
+        notify_user=False,
+        handler=None,
+    ):
+        self._emit_machine_workflow_interrupted(
+            reason,
+            notify_user=notify_user,
+        )
+        if handler is None:
+            self.machine.clear_command_queue()
+        else:
+            self.machine.clear_command_queue(handler=handler)
+        self.model.machine_model.clear_command_queue()
 
     def _set_array_run_state(self, state):
         state = str(state or "idle")
@@ -4841,8 +4880,10 @@ class Controller(QObject):
         return self._enqueue_array_finalize(reason)
 
     def _clear_command_queue_for_soft_stop(self, on_cleared=None):
-        self.machine.clear_command_queue(handler=on_cleared)
-        self.model.machine_model.clear_command_queue()
+        self._clear_machine_and_model_command_queues(
+            reason="array_queue_clear",
+            handler=on_cleared,
+        )
 
     def _begin_soft_stop_clear_and_park(self):
         context = getattr(self, "_array_context", None)
@@ -6886,8 +6927,9 @@ class Controller(QObject):
         if clear_on_failure and not context.get("array_clear_fallback_requested"):
             context["array_clear_fallback_requested"] = True
             try:
-                self.machine.clear_command_queue()
-                self.model.machine_model.clear_command_queue()
+                self._clear_machine_and_model_command_queues(
+                    reason="array_queue_clear",
+                )
             except Exception:
                 pass
         return False
@@ -6900,8 +6942,9 @@ class Controller(QObject):
             if isinstance(context, dict) and not context.get("array_clear_fallback_requested"):
                 context["array_clear_fallback_requested"] = True
                 try:
-                    self.machine.clear_command_queue()
-                    self.model.machine_model.clear_command_queue()
+                    self._clear_machine_and_model_command_queues(
+                        reason="array_queue_clear",
+                    )
                 except Exception:
                     pass
             self._mark_evap_plate_dock_check_required("array_hard_abort")

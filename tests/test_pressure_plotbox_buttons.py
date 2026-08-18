@@ -161,6 +161,7 @@ def _make_controller(events, *, queue_clear=True, imaging_preflight=None, refuel
             "record": {"status": "required"},
         }
     return SimpleNamespace(
+        machine_workflow_interrupted_signal=_SignalStub(),
         toggle_regulation=Mock(),
         set_absolute_print_pressure=Mock(),
         set_absolute_refuel_pressure=Mock(),
@@ -1438,6 +1439,175 @@ def test_transport_fault_releases_pending_camera_launch_controls(qapp):
     assert box._print_profile_apply_pending is False
     assert box.calibrate_pressure_button.isEnabled()
     assert box.refuel_camera_button.isEnabled()
+
+
+def test_clear_queue_cancels_camera_launch_and_invalidates_stale_completion(
+    monkeypatch, qapp
+):
+    events = []
+    popups = []
+    main_window = _make_main_window(
+        CURRENT_PROFILE,
+        popups,
+        popup_response=QMessageBox.StandardButton.Yes,
+    )
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            current_location="plate",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+    _patch_droplet_launch(
+        monkeypatch,
+        events,
+        main_window=main_window,
+        model=model,
+        controller=controller,
+    )
+
+    box.calibrate_pressure()
+    stale_completion = controller.move_to_location.call_args.kwargs["on_complete"]
+
+    controller.machine_workflow_interrupted_signal.emit(
+        {"reason": "queue_clear_requested", "notify_user": True}
+    )
+
+    assert box._droplet_imager_launch_pending is False
+    assert box.calibrate_pressure_button.isEnabled()
+    assert popups == [
+        (
+            "Calibration Action Canceled",
+            "The pending calibration or camera action was canceled by the Clear Queue request. "
+            "Start it again after the machine is ready.",
+        )
+    ]
+
+    stale_completion()
+    controller.machine_workflow_interrupted_signal.emit(
+        {"reason": "machine_disconnected", "notify_user": False}
+    )
+
+    assert events == []
+    assert len(popups) == 1
+
+
+def test_old_camera_completion_cannot_take_over_new_launch(monkeypatch, qapp):
+    events = []
+    popups = []
+    main_window = _make_main_window(
+        CURRENT_PROFILE,
+        popups,
+        popup_response=QMessageBox.StandardButton.Yes,
+    )
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            current_location="plate",
+        ),
+        events,
+        printer_head=object(),
+    )
+    controller = _make_controller(events)
+    box = PressurePlotBox(main_window, model, controller)
+    _patch_droplet_launch(
+        monkeypatch,
+        events,
+        main_window=main_window,
+        model=model,
+        controller=controller,
+    )
+
+    box.calibrate_pressure()
+    old_completion = controller.move_to_location.call_args.kwargs["on_complete"]
+    controller.machine_workflow_interrupted_signal.emit(
+        {"reason": "queue_clear_requested", "notify_user": False}
+    )
+    box.calibrate_pressure()
+    new_completion = controller.move_to_location.call_args.kwargs["on_complete"]
+
+    old_completion()
+    assert events == []
+
+    new_completion()
+    assert events == [
+        "enable_print_profile",
+        "droplet_dialog_init",
+        "droplet_dialog_activate:calibration",
+        "droplet_dialog_exec",
+        "disable_print_profile",
+    ]
+
+
+def test_workflow_interruption_cancels_all_pending_launch_types_once(qapp):
+    events = []
+    popups = []
+    controller = _make_controller(events)
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(_FakeMachineModel(), events),
+        controller,
+    )
+    box._set_droplet_imager_launch_pending(True)
+    box._set_refuel_camera_launch_pending(True)
+    box._set_manual_refuel_check_launch_pending(True)
+    box._set_manual_refuel_check_after_imager_pending(True)
+    box._set_print_profile_apply_pending(True)
+
+    controller.machine_workflow_interrupted_signal.emit(
+        {"reason": "mcu_reset_requested", "notify_user": True}
+    )
+    controller.machine_workflow_interrupted_signal.emit(
+        {"reason": "board_reset_detected", "notify_user": False}
+    )
+
+    assert box._droplet_imager_launch_pending is False
+    assert box._refuel_camera_launch_pending is False
+    assert box._manual_refuel_check_launch_pending is False
+    assert box._manual_refuel_check_after_imager_pending is False
+    assert box._print_profile_apply_pending is False
+    assert popups == [
+        (
+            "Calibration Action Canceled",
+            "The pending calibration or camera action was canceled by the MCU reset request. "
+            "Start it again after the machine is ready.",
+        )
+    ]
+
+
+def test_interruption_preserves_active_dialog_and_inactive_cached_dialog_is_not_focused(qapp):
+    events = []
+    popups = []
+    controller = _make_controller(events)
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(_FakeMachineModel(), events),
+        controller,
+    )
+    dialog = SimpleNamespace(
+        show=Mock(),
+        raise_=Mock(),
+        activateWindow=Mock(),
+    )
+    box._droplet_imager_dialog = dialog
+
+    assert box._focus_active_calibration_dialog() is False
+    dialog.show.assert_not_called()
+
+    box._droplet_imager_dialog_state = "active"
+    controller.machine_workflow_interrupted_signal.emit(
+        {"reason": "queue_clear_requested", "notify_user": True}
+    )
+
+    assert box._droplet_imager_dialog is dialog
+    assert box._droplet_imager_dialog_state == "active"
+    assert box.calibration_session_is_idle() is False
+    assert box._focus_active_calibration_dialog() is True
+    dialog.show.assert_called_once_with()
+    assert popups == []
 
 
 def test_current_profile_calibrate_pressure_allows_relaunch_after_droplet_dialog_cleanup(monkeypatch, qapp):

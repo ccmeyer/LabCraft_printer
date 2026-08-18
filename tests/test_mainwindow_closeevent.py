@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QMessageBox
@@ -65,6 +66,55 @@ def test_mainwindow_closeevent_starts_pending_disconnect_and_ignores_initial_clo
     assert dialog_states == ["waiting"]
     assert mw._close_disconnect_pending is True
     assert mw._close_disconnect_timeout_prompt is False
+    assert event.isAccepted() is False
+
+
+def test_mainwindow_closeevent_ignores_stale_pending_launch_and_starts_disconnect(
+    qapp, fake_signal
+):
+    mw, disconnect_calls, _close_calls, _dismiss_calls, dialog_states = (
+        _make_stub_mainwindow(fake_signal)
+    )
+    focus_active = Mock()
+    mw.pressure_box = SimpleNamespace(
+        calibration_session_is_idle=lambda: True,
+        _focus_active_calibration_dialog=focus_active,
+    )
+
+    event = QCloseEvent()
+    MainWindow.closeEvent(mw, event)
+
+    assert disconnect_calls["count"] == 1
+    assert dialog_states == ["waiting"]
+    assert mw._popup_messages == []
+    focus_active.assert_not_called()
+    assert event.isAccepted() is False
+
+
+def test_mainwindow_closeevent_blocks_and_focuses_actual_active_calibration(
+    qapp, fake_signal
+):
+    mw, disconnect_calls, _close_calls, _dismiss_calls, dialog_states = (
+        _make_stub_mainwindow(fake_signal)
+    )
+    focus_active = Mock(return_value=True)
+    mw.pressure_box = SimpleNamespace(
+        calibration_session_is_idle=lambda: False,
+        _focus_active_calibration_dialog=focus_active,
+    )
+
+    event = QCloseEvent()
+    MainWindow.closeEvent(mw, event)
+
+    assert disconnect_calls["count"] == 0
+    assert dialog_states == []
+    focus_active.assert_called_once_with()
+    assert mw._popup_messages == [
+        (
+            "Calibration Still Active",
+            "Close the calibration, optics, or camera window before closing the application.",
+        )
+    ]
     assert event.isAccepted() is False
 
 
