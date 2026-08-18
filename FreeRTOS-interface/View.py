@@ -11553,6 +11553,11 @@ class ExperimentDesignDialog(QDialog):
             "Units", "Ejection Vol (nL)", "Max / Rxn (nL)", "Total Drops", "Total Vol (µL)"
         ])
         self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.stock_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.stock_table.setToolTip(
+            "Calculated stock solutions. Edit the reagent settings above, then update "
+            "the design."
+        )
         self.stock_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.stock_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
 
@@ -15400,23 +15405,29 @@ class ExperimentDesignDialog(QDialog):
     # Stock table & summary updates
     # -----------------------------
 
+    @staticmethod
+    def _stock_output_item(text: Any) -> QTableWidgetItem:
+        item = QTableWidgetItem(str(text))
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        return item
+
     def _refresh_stock_table(self):
         rows = self.model.get_stock_table_rows(include_fill=True)
         self.stock_table.setRowCount(0)
         for r in rows:
             rr = self.stock_table.rowCount()
             self.stock_table.insertRow(rr)
-            self.stock_table.setItem(rr, 0, QTableWidgetItem(str(r.get("factor_name", ""))))
-            self.stock_table.setItem(rr, 1, QTableWidgetItem(str(r.get("option_name", ""))))
-            self.stock_table.setItem(rr, 2, QTableWidgetItem(self._fmt_stock_conc_display(r.get("stock_concentration", ""))))
-            self.stock_table.setItem(rr, 3, QTableWidgetItem(self._fmt_num(r.get("delta_per_drop", ""))))
-            self.stock_table.setItem(rr, 4, QTableWidgetItem(str(r.get("units", ""))))
-            self.stock_table.setItem(rr, 5, QTableWidgetItem(self._fmt_num(r.get("droplet_volume_nL", ""))))
+            self.stock_table.setItem(rr, 0, self._stock_output_item(r.get("factor_name", "")))
+            self.stock_table.setItem(rr, 1, self._stock_output_item(r.get("option_name", "")))
+            self.stock_table.setItem(rr, 2, self._stock_output_item(self._fmt_stock_conc_display(r.get("stock_concentration", ""))))
+            self.stock_table.setItem(rr, 3, self._stock_output_item(self._fmt_num(r.get("delta_per_drop", ""))))
+            self.stock_table.setItem(rr, 4, self._stock_output_item(r.get("units", "")))
+            self.stock_table.setItem(rr, 5, self._stock_output_item(self._fmt_num(r.get("droplet_volume_nL", ""))))
             # 3) New column: per-reaction max volume (nL)
             max_nL = r.get("max_per_rxn_nL", "")
-            self.stock_table.setItem(rr, 6, QTableWidgetItem(self._fmt_num(max_nL) if max_nL != "" else ""))
-            self.stock_table.setItem(rr, 7, QTableWidgetItem(str(r.get("total_droplets", ""))))
-            self.stock_table.setItem(rr, 8, QTableWidgetItem(self._fmt_num(r.get("total_volume_uL", ""))))
+            self.stock_table.setItem(rr, 6, self._stock_output_item(self._fmt_num(max_nL) if max_nL != "" else ""))
+            self.stock_table.setItem(rr, 7, self._stock_output_item(r.get("total_droplets", "")))
+            self.stock_table.setItem(rr, 8, self._stock_output_item(self._fmt_num(r.get("total_volume_uL", ""))))
     
     def _on_experiment_generated(self, total_reactions: int, worst_nonfill_nL: float):
         # Update summary when model emits

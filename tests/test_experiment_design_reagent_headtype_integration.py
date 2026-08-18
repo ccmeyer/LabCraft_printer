@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pandas as pd
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QGroupBox, QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget
+from PySide6.QtWidgets import QAbstractItemView, QComboBox, QDoubleSpinBox, QGroupBox, QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget
 
 import LocalConfig
 import View as view_module
@@ -767,6 +767,43 @@ def test_experiment_designer_uses_grouped_wide_layout_without_export_action(qapp
         dialog._apply_uploaded_design_mode_to_ui(True)
         dialog._apply_uploaded_design_mode_to_ui(False)
     assert dialog.design_tools_layout.count() == layout_count
+    dialog.close()
+
+
+def test_stock_solution_table_is_read_only_calculated_output(qapp):
+    dialog = _build_real_dialog()
+    dialog.model.get_stock_table_rows = lambda include_fill=True: [
+        {
+            "factor_name": "Calculated stock",
+            "option_name": "",
+            "stock_concentration": 12.5,
+            "delta_per_drop": 0.25,
+            "units": "mM",
+            "droplet_volume_nL": 10.0,
+            "max_per_rxn_nL": 20.0,
+            "total_droplets": 4,
+            "total_volume_uL": 1.0,
+        }
+    ]
+
+    dialog._refresh_stock_table()
+    first_item = dialog.stock_table.item(0, 0)
+
+    assert dialog.stock_table.isEnabled() is True
+    assert dialog.stock_table.editTriggers() == QAbstractItemView.NoEditTriggers
+    assert "Calculated stock solutions" in dialog.stock_table.toolTip()
+    for column in range(dialog.stock_table.columnCount()):
+        assert not (
+            dialog.stock_table.item(0, column).flags() & Qt.ItemFlag.ItemIsEditable
+        )
+
+    dialog.stock_table.editItem(first_item)
+    qapp.processEvents()
+    assert dialog.stock_table.findChildren(QLineEdit) == []
+
+    first_item.setText("Temporary widget-only edit")
+    dialog._refresh_stock_table()
+    assert dialog.stock_table.item(0, 0).text() == "Calculated stock"
     dialog.close()
 
 
