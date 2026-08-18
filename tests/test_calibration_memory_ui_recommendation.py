@@ -776,18 +776,32 @@ def test_calibration_window_size_and_panel_widths_are_screen_aware_and_cached(
         calibration_view.QtCore.QRect(0, 0, 1600, 900)
     ) == (1504, 846)
     assert calibration_view._calibration_dialog_target_size(None) == (1600, 1000)
-    assert calibration_view._calibration_panel_widths(1764) == (441, 760)
+    assert calibration_view._calibration_panel_widths(1764) == (441, 700)
     assert calibration_view._calibration_panel_widths(1564) == (391, 613)
+    assert 1764 - sum(calibration_view._calibration_panel_widths(1764)) == 623
 
     dialog = _build_real_dialog_for_layout(monkeypatch, qapp)
     dialog.resize(1800, 1000)
     dialog._last_panel_widths = None
     assert dialog._set_equal_panel_widths() is True
     assert dialog.control_panel_scroll.maximumWidth() == 441
-    assert dialog.info_panel_scroll.maximumWidth() == 760
+    assert dialog.info_panel_scroll.maximumWidth() == 700
     assert dialog.analysis_panel.minimumWidth() == 560
-    assert dialog._last_panel_widths == (441, 760)
+    assert dialog._last_panel_widths == (441, 700)
     assert dialog._set_equal_panel_widths() is False
+    assert dialog.summary_result_set_combo.minimumWidth() == 220
+    assert (
+        dialog.summary_result_set_combo.sizePolicy().horizontalPolicy()
+        == calibration_view.QtWidgets.QSizePolicy.Expanding
+    )
+    result_set_layout_index = dialog.summary_toolbar.indexOf(
+        dialog.summary_result_set_combo
+    )
+    assert dialog.summary_toolbar.stretch(result_set_layout_index) == 1
+    assert (
+        dialog.summary_result_set_combo.toolTip()
+        == dialog.summary_result_set_combo.currentText()
+    )
     dialog.show()
     qapp.processEvents()
     assert dialog.summary_table.horizontalScrollBar().isVisible() is False

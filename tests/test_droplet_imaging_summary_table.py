@@ -1366,7 +1366,7 @@ def test_result_set_table_sort_keeps_rechecks_with_parent_and_source_filter_keep
 
     assert model.headerData(model.column_index("result_set_no"), Qt.Horizontal) == "Set"
     assert model.headerData(model.column_index("timestamp_display"), Qt.Horizontal) == "Recorded"
-    assert model.headerData(model.column_index("volume_difference"), Qt.Horizontal) == "Difference"
+    assert model.headerData(model.column_index("volume_difference"), Qt.Horizontal) == "Diff"
 
     mean_column = model.column_index("mean_nL")
     proxy.sort(mean_column, Qt.DescendingOrder)
@@ -1465,6 +1465,45 @@ def test_characterization_table_prioritizes_columns_and_compacts_main_time(qapp)
     assert compact.headerData(0, Qt.Horizontal) == "✓"
     assert compact.headerData(0, Qt.Horizontal, Qt.ToolTipRole) == "Applied to design"
     assert compact.headerData(compact.column_index("phase_label"), Qt.Horizontal) == "Measurement"
+    difference_column = compact.column_index("volume_difference")
+    assert compact.headerData(difference_column, Qt.Horizontal) == "Diff"
+    assert (
+        compact.headerData(difference_column, Qt.Horizontal, Qt.ToolTipRole)
+        == "Difference from original candidate (nL)"
+    )
+    assert compact.data(compact.index(0, difference_column), Qt.DisplayRole) == "\u2014"
+
+    recheck = calibration_view.CharacterizationSummaryTableModel()
+    recheck.set_rows(
+        [
+            {
+                "row_role": "recheck",
+                "volume_delta_nL": -0.08,
+                "volume_delta_percent": -0.8,
+            },
+            {"row_role": "recheck"},
+        ]
+    )
+    recheck_difference_column = recheck.column_index("volume_difference")
+    assert (
+        recheck.data(recheck.index(0, recheck_difference_column), Qt.DisplayRole)
+        == "-0.080"
+    )
+    assert (
+        recheck.data(recheck.index(0, recheck_difference_column), Qt.ToolTipRole)
+        == "Difference from original candidate: -0.080 nL (-0.8%)"
+    )
+    assert (
+        recheck.data(
+            recheck.index(0, recheck_difference_column),
+            calibration_view.SUMMARY_SORT_ROLE,
+        )
+        == -0.08
+    )
+    assert (
+        recheck.data(recheck.index(1, recheck_difference_column), Qt.DisplayRole)
+        == "\u2014"
+    )
     time_column = compact.column_index("timestamp_display")
     assert compact.headerData(time_column, Qt.Horizontal) == "Time"
     assert compact.data(compact.index(0, time_column), Qt.DisplayRole) == "10:05:00"
@@ -1474,6 +1513,8 @@ def test_characterization_table_prioritizes_columns_and_compacts_main_time(qapp)
         == "2026-08-17T10:05:00Z"
     )
     assert compact.data(compact.index(1, time_column), Qt.DisplayRole) == "bad-ts"
+    assert calibration_view._CHARACTERIZATION_COLUMN_WIDTHS["volume_difference"] == 66
+    assert calibration_view._CHARACTERIZATION_COLUMN_WIDTHS["timestamp_display"] == 86
 
     history = calibration_view.CharacterizationSummaryTableModel(
         include_recorded=True,
@@ -1483,6 +1524,11 @@ def test_characterization_table_prioritizes_columns_and_compacts_main_time(qapp)
     history_time_column = history.column_index("timestamp_display")
     assert history.headerData(history_time_column, Qt.Horizontal) == "Recorded"
     assert history.data(history.index(0, history_time_column), Qt.DisplayRole) == "2026-08-17 10:05:00"
+
+    history_table = calibration_view.QtWidgets.QTableView()
+    history_table.setModel(history)
+    calibration_view._configure_characterization_table_view(history_table, history)
+    assert history_table.columnWidth(history_time_column) == 150
 
     table = calibration_view.QtWidgets.QTableView()
     table.setModel(compact)
@@ -1542,6 +1588,10 @@ def test_explicit_set_and_selected_candidate_survive_live_refresh(monkeypatch, q
         dialog.summary_result_set_combo.findData(first_set_key)
     )
     qapp.processEvents()
+    assert (
+        dialog.summary_result_set_combo.toolTip()
+        == dialog.summary_result_set_combo.currentText()
+    )
     _select_visible_row(dialog, 0)
     qapp.processEvents()
     _, selected_before = dialog._selected_summary_row()

@@ -876,10 +876,10 @@ _CHARACTERIZATION_COLUMN_WIDTHS = {
     "pressure_psi": 88,
     "cv_pct": 52,
     "mean_nL": 78,
-    "volume_difference": 110,
+    "volume_difference": 66,
     "pw_us": 60,
     "result_set_no": 42,
-    "timestamp_display": 68,
+    "timestamp_display": 86,
     "status_label": 72,
 }
 
@@ -907,7 +907,7 @@ def _calibration_panel_widths(available_width):
         min(460, available_width // 4 if available_width > 0 else 380),
     )
     info_capacity = available_width - control_width - 560
-    info_width = max(460, min(760, info_capacity))
+    info_width = max(460, min(700, info_capacity))
     return control_width, info_width
 
 
@@ -1069,7 +1069,7 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
             },
             {
                 "key": "volume_difference",
-                "label": "Difference",
+                "label": "Diff",
                 "alignment": right,
                 "display": self._display_difference,
                 "sort": lambda row: row.get("volume_delta_nL"),
@@ -1131,11 +1131,20 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
             delta = float(row.get("volume_delta_nL"))
         except (TypeError, ValueError):
             return "\u2014"
+        return f"{delta:+.3f}"
+
+    @staticmethod
+    def _difference_tooltip(row):
+        try:
+            delta = float(row.get("volume_delta_nL"))
+        except (TypeError, ValueError):
+            return None
+        detail = f"Difference from original candidate: {delta:+.3f} nL"
         try:
             percent = float(row.get("volume_delta_percent"))
         except (TypeError, ValueError):
-            return f"{delta:+.3f}"
-        return f"{delta:+.3f} ({percent:+.1f}%)"
+            return detail
+        return f"{detail} ({percent:+.1f}%)"
 
     def columns(self):
         return self._columns
@@ -1199,8 +1208,11 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
             column = self._columns[section]
             if role == Qt.DisplayRole:
                 return column["label"]
-            if role == Qt.ToolTipRole and column["key"] == "applied_marker":
-                return "Applied to design"
+            if role == Qt.ToolTipRole:
+                if column["key"] == "applied_marker":
+                    return "Applied to design"
+                if column["key"] == "volume_difference":
+                    return "Difference from original candidate (nL)"
         return None
 
     def data(self, index, role=Qt.DisplayRole):
@@ -1229,6 +1241,8 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
                 return "Applied to design"
             if key == "timestamp_display":
                 return str(row.get("timestamp_display") or "")
+            if key == "volume_difference":
+                return self._difference_tooltip(row)
             if str(row.get("row_state") or "") == "in_progress":
                 return (
                     "This result is saved as a canonical update but remains in progress. "
@@ -1422,6 +1436,7 @@ def _populate_result_set_selector(combo, rows, *, default_selection):
     if index < 0:
         index = combo.findData(default_selection)
     combo.setCurrentIndex(max(index, 0))
+    combo.setToolTip(combo.currentText())
     del blocker
 
 
@@ -4300,6 +4315,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_toolbar = QtWidgets.QHBoxLayout()
         self.summary_toolbar.setSpacing(8)
         self.summary_result_set_combo = QtWidgets.QComboBox()
+        self.summary_result_set_combo.setMinimumWidth(220)
+        self.summary_result_set_combo.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Preferred,
+        )
         _populate_result_set_selector(
             self.summary_result_set_combo,
             [],
@@ -4319,7 +4339,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         self.summary_toolbar.addWidget(QtWidgets.QLabel("Result set:"))
-        self.summary_toolbar.addWidget(self.summary_result_set_combo)
+        self.summary_toolbar.addWidget(self.summary_result_set_combo, 1)
         self.summary_toolbar.addWidget(self.summary_valid_only_checkbox)
         self.summary_toolbar.addWidget(QtWidgets.QLabel("Source:"))
         self.summary_toolbar.addWidget(self.summary_source_combo)
@@ -14922,6 +14942,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.summary_result_set_combo.setCurrentIndex(index)
 
     def _refresh_summary_filters(self):
+        self.summary_result_set_combo.setToolTip(
+            self.summary_result_set_combo.currentText()
+        )
         self.summary_table_proxy_model.setResultSetFilter(
             self.summary_result_set_combo.currentData()
         )
