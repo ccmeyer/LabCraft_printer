@@ -390,7 +390,7 @@ int main(void)
 
   MX_GRIPPER_Init();
   MX_PRINTER_Init(1300,2500);
-  MX_FLASH_Init(/*pulseDurationUs=*/2000);	// 1usec pulse = 180 ticks
+  MX_FLASH_Init(/*pulseDurationNs=*/1000);	// 1 us pulse = 180 ticks
 
   MX_ORCH_Init();
   CrashLog_SetBootStage(CRASH_BOOT_STAGE_ORCH_READY);
