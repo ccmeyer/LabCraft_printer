@@ -3,7 +3,7 @@ import json
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from types import MethodType
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -32,7 +32,8 @@ from ExecutionResumeStore import (
     save_execution_resume,
 )
 from Model import Model, PrinterHeadManager, RackModel
-from test_execution_terminal_cache import _ready_completion
+from test_execution_pass_start_cache import _preflight_and_prepare
+from test_execution_terminal_cache import _complete_cached_progress, _ready_completion
 
 
 PLAN_ID = "f33cf5d6-2f38-4ca7-86fd-74f73baac81d"
@@ -204,6 +205,65 @@ def _hashes(directory):
 
 def _complete_execution(experiment_model_factory):
     model, experiment = _ready_completion(experiment_model_factory)
+    completed = experiment.try_complete_execution_plan()
+    assert completed.state is ExecutionPlanState.COMPLETED
+    return model, experiment, completed
+
+
+def _connect_production_plate_format_signal(model):
+    model._well_plate_reassignment_suppression_depth = 0
+    model.well_plate.plate_format_changed_signal.connect(model.update_well_plate)
+
+
+def _complete_manual_two_well_execution(experiment_model_factory):
+    model = experiment_model_factory()
+    experiment = model.experiment_model
+    experiment.factors = []
+    experiment.add_additive(
+        "Manual Reagent",
+        [1.0, 2.0],
+        "mM",
+        10.0,
+        forced_stock_conc=10.0,
+    )
+    experiment.set_metadata(
+        randomize_assignments=False,
+        replicates=1,
+        target_reaction_volume_nL=100.0,
+        final_reaction_volume_nL=100.0,
+        printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+    )
+    assert experiment.optimize_stock_solutions()["best"]
+    experiment.generate_experiment()
+    assert experiment.get_number_of_reactions() == 2
+    experiment._uploaded_well_ids = ["A1", "B2"]
+    experiment.save_experiment()
+    _connect_production_plate_format_signal(model)
+    Model.load_experiment_from_model(
+        model,
+        plate_name=model.well_plate.get_current_plate_name(),
+        finalize_execution_plan=True,
+    )
+    plan = experiment.get_execution_plan_snapshot()
+    stock = next(
+        stock
+        for stock in plan.stocks
+        if any(
+            dispense.stock_id == stock.stock_id
+            and dispense.target_dispenses > 0
+            for well in plan.wells
+            for dispense in well.dispenses
+        )
+    )
+    head = SimpleNamespace(
+        printer_head_id="manual-completion-head",
+        get_stock_id=lambda: stock.stock_id,
+        get_printing_mode=lambda: stock.printing_mode,
+    )
+    _preflight_and_prepare(experiment, head)
+    _complete_cached_progress(experiment)
     completed = experiment.try_complete_execution_plan()
     assert completed.state is ExecutionPlanState.COMPLETED
     return model, experiment, completed
@@ -758,6 +818,9 @@ def test_completed_execution_view_projects_exact_finished_runtime_without_writes
         source_experiment.experiment_file_path,
         source_experiment.experiment_dir_path,
     )
+    _connect_production_plate_format_signal(loaded)
+    loaded_events = []
+    loaded.experiment_loaded.emit = lambda: loaded_events.append("loaded")
     before = _hashes(Path(source_experiment.experiment_dir_path))
 
     monkeypatch.setattr(
@@ -798,6 +861,7 @@ def test_completed_execution_view_projects_exact_finished_runtime_without_writes
     assert loaded_experiment._active_authoritative_execution_session is None
     assert not loaded_experiment.uses_durable_execution_checkpoint()
     assert _hashes(Path(source_experiment.experiment_dir_path)) == before
+    assert loaded_events == ["loaded"]
 
     stock_ids = {
         stock.stock_id for stock in loaded.stock_solutions.get_all_stock_solutions()
@@ -820,6 +884,56 @@ def test_completed_execution_view_projects_exact_finished_runtime_without_writes
             assert reagent.added_droplets == dispense.target_dispenses
             assert reagent.completed
         assert reaction.check_all_complete()
+
+
+def test_same_session_completed_automatic_projection_ignores_live_reassignment(
+    experiment_model_factory,
+):
+    model, experiment, completed = _complete_execution(experiment_model_factory)
+    _connect_production_plate_format_signal(model)
+    loaded_events = []
+    model.experiment_loaded.emit = lambda: loaded_events.append("loaded")
+    before = _hashes(Path(experiment.experiment_dir_path))
+
+    eligibility = model.load_completed_execution_view()
+
+    assignments = {
+        well.well_id: well.get_assigned_reaction().unique_id
+        for well in model.well_plate.get_all_wells()
+        if well.get_assigned_reaction() is not None
+    }
+    assert assignments == {
+        well.well_id: well.reaction_id for well in completed.wells
+    }
+    assert eligibility["status"] == "analysis_only"
+    assert loaded_events == ["loaded"]
+    assert _hashes(Path(experiment.experiment_dir_path)) == before
+
+
+def test_same_session_completed_manual_projection_assigns_authoritative_wells_once(
+    experiment_model_factory,
+):
+    model, experiment, completed = _complete_manual_two_well_execution(
+        experiment_model_factory
+    )
+    assert [well.well_id for well in completed.wells] == ["A1", "B2"]
+    loaded_events = []
+    model.experiment_loaded.emit = lambda: loaded_events.append("loaded")
+    before = _hashes(Path(experiment.experiment_dir_path))
+
+    eligibility = model.load_completed_execution_view()
+
+    assignments = {
+        well.well_id: well.get_assigned_reaction().unique_id
+        for well in model.well_plate.get_all_wells()
+        if well.get_assigned_reaction() is not None
+    }
+    assert assignments == {
+        well.well_id: well.reaction_id for well in completed.wells
+    }
+    assert eligibility["status"] == "analysis_only"
+    assert loaded_events == ["loaded"]
+    assert _hashes(Path(experiment.experiment_dir_path)) == before
 
 
 def test_completed_execution_view_rejects_aborted_terminal_bundle(

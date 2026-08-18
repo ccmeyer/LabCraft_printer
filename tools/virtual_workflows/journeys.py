@@ -69,6 +69,7 @@ from tools.virtual_workflows.assertions import (
     dispense_counts_reconciled_assertion,
     soft_stop_paused_assertions,
     soft_stop_terminal_assertions,
+    same_session_completed_projection_assertion,
     terminal_execution_assertion,
     two_reagent_isolation_assertion,
 )
@@ -121,6 +122,7 @@ from tools.virtual_workflows.page_drivers import (
     CalibrationDialogDriver,
     ExperimentLoaderDriver,
     MachineControlsDriver,
+    RackDriver,
 )
 from tools.virtual_workflows.report import ComposedReportPayload
 from tools.virtual_workflows.joined_interaction_cases import (
@@ -244,6 +246,7 @@ SMOKE_REQUIRED_ASSERTIONS = (
     "execution.applied_calibration_valid",
     "execution.terminal_bundle_valid",
     "calibration.post_completion_diagnostics_available",
+    "execution.same_session_completed_projection_exact",
     "artifacts.cleanup_complete",
 )
 REGRESSION_REQUIRED_ASSERTIONS = (
@@ -1478,6 +1481,55 @@ def _run_post_completion_diagnostics(
     )
 
 
+def _run_same_session_completed_projection(runtime: JourneyRuntime) -> None:
+    """Display the just-completed execution read-only without rotating sessions."""
+
+    context = runtime.context
+    before = capture_authoritative_bundle(context)
+    active_head = context.model.rack_model.get_gripper_printer_head()
+    returned_head = None
+    if active_head is not None:
+        rack = RackDriver(context)
+        unload_slots = [
+            index
+            for index, row in enumerate(context.view.rack_box.slot_widgets)
+            if str(row[2].text() or "") == "Unload"
+        ]
+        if len(unload_slots) != 1:
+            raise RuntimeError(
+                "same-session completed projection requires exactly one "
+                f"Unload control; observed {unload_slots}"
+            )
+        slot_index = unload_slots[0]
+        returned_head = runtime.harness.run_action(
+            "head.return_via_ui",
+            lambda: (
+                rack.unload(slot_index)
+                or {
+                    "slot": slot_index,
+                    "stock_id": str(active_head.get_stock_id()),
+                    "printer_head_id": str(active_head.printer_head_id),
+                    "returned": True,
+                }
+            ),
+        )["evidence"]
+    driver = ExperimentLoaderDriver(context).inspect_same_session_completed_execution(
+        expected_name=str(runtime.fixture.get("fixture_id") or ""),
+        action_runner=runtime.harness.run_action,
+    )
+    driver["returned_head"] = dict(returned_head or {})
+    after = capture_authoritative_bundle(context)
+    assertion = same_session_completed_projection_assertion(
+        before=before,
+        after=after,
+        driver=driver,
+    )
+    runtime.add_assertion(assertion)
+    runtime.observations["same_session_completed_projection"] = dict(
+        assertion.evidence
+    )
+
+
 def _smoke_body(runtime: JourneyRuntime) -> None:
     expected_wells = _well_ids(runtime.fixture)
     runtime.observations["expected_wells"] = expected_wells
@@ -1540,6 +1592,7 @@ def _smoke_body(runtime: JourneyRuntime) -> None:
     )
     if profile is None:
         _run_post_completion_diagnostics(runtime, stock_pass)
+        _run_same_session_completed_projection(runtime)
 
 
 def _editor_body(runtime: JourneyRuntime) -> None:
@@ -4292,6 +4345,12 @@ def _smoke_payload(
             "values": {
                 "assertion_decisions": decisions,
                 "terminal": evidence.get("execution.terminal_bundle_valid", {}),
+                "same_session_completed_projection": dict(
+                    runtime.observations.get(
+                        "same_session_completed_projection"
+                    )
+                    or {}
+                ),
             },
         }),
         responsiveness=(
@@ -5770,8 +5829,26 @@ SMOKE_DEFINITION = JourneyDefinition(
     scenario_name=SMOKE_SCENARIO_NAME,
     scenario_version=SMOKE_SCENARIO_VERSION,
     workload_id=SMOKE_WORKLOAD_ID,
-    required_action_ids=_COMMON_ACTIONS | _EDITOR_ACTIONS | _PRINT_ACTIONS,
-    required_ui_action_ids=SMOKE_REQUIRED_UI_ACTIONS,
+    required_action_ids=(
+        _COMMON_ACTIONS
+        | _EDITOR_ACTIONS
+        | _PRINT_ACTIONS
+        | frozenset(
+            {
+                "experiment.inspect_completed_via_ui",
+                "head.return_via_ui",
+            }
+        )
+    ),
+    required_ui_action_ids=(
+        SMOKE_REQUIRED_UI_ACTIONS
+        | frozenset(
+            {
+                "experiment.inspect_completed_via_ui",
+                "head.return_via_ui",
+            }
+        )
+    ),
     required_assertion_ids=SMOKE_REQUIRED_ASSERTIONS,
     required_screenshots=frozenset({"editor_opened", "generated", "ready", "printing", "completed"}),
     fixture_loader=_smoke_fixture,

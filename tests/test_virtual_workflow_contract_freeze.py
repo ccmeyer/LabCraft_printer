@@ -235,8 +235,17 @@ def test_96_well_regression_uses_the_shared_composed_one_stock_contract():
     assert registry_definition.supports_report_sets is True
     assert regression.body is smoke.body
     assert regression.payload_builder is smoke.payload_builder
-    assert regression.required_action_ids == smoke.required_action_ids
-    assert regression.required_ui_action_ids == smoke.required_ui_action_ids
+    smoke_only_completed_projection_actions = {
+        "head.return_via_ui",
+        "experiment.inspect_completed_via_ui",
+    }
+    assert smoke.required_action_ids == (
+        regression.required_action_ids | smoke_only_completed_projection_actions
+    )
+    assert smoke.required_ui_action_ids == (
+        regression.required_ui_action_ids
+        | smoke_only_completed_projection_actions
+    )
     assert regression.midpoint_completion_count == 48
     assert regression.required_assertion_ids == REGRESSION_REQUIRED_ASSERTIONS
     assert regression.required_screenshots == {

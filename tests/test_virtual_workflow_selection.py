@@ -62,6 +62,7 @@ def test_standard_suite_plan_is_frozen_and_non_executing():
                 "execution.applied_calibration_valid",
                 "execution.terminal_bundle_valid",
                 "calibration.post_completion_diagnostics_available",
+                "execution.same_session_completed_projection_exact",
                 "artifacts.cleanup_complete",
             ],
             "capability_ids": [
@@ -70,6 +71,7 @@ def test_standard_suite_plan_is_frozen_and_non_executing():
                 "execution.array_happy_path",
                 "execution.terminal_bundle",
                 "calibration.post_completion_diagnostics",
+                "execution.same_session_completed_projection",
             ],
             "required_pi_evidence": [],
         }

@@ -41,6 +41,62 @@ def test_manual_assignment_uses_explicit_well_ids_exactly(experiment_model_facto
     assert [wid for _, wid in by_reaction_idx] == explicit
 
 
+def test_manual_finalization_with_production_plate_signal_emits_only_final_load(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design_for_manual(em)
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    em._uploaded_well_ids = [
+        f"B{i + 1}" for i in range(em.get_number_of_reactions())
+    ]
+    em.save_experiment()
+    loaded_events = []
+    model.experiment_loaded.emit = lambda: loaded_events.append("loaded")
+    model.well_plate.plate_format_changed_signal.connect(model.update_well_plate)
+
+    Model.load_experiment_from_model(
+        model,
+        plate_name=model.well_plate.get_current_plate_name(),
+        finalize_execution_plan=True,
+    )
+
+    assert loaded_events == ["loaded"]
+    assert _assigned_ordered_pairs(model.well_plate) == [
+        (f"R{i + 1}", f"B{i + 1}")
+        for i in range(em.get_number_of_reactions())
+    ]
+
+
+def test_legacy_csv_load_with_production_plate_signal_emits_only_final_load(
+    experiment_model_factory,
+    tmp_path,
+):
+    model = experiment_model_factory()
+    csv_path = tmp_path / "legacy_design.csv"
+    csv_path.write_text(
+        "reaction_id,StockA_1.00_mM\nR1,3\nR2,5\n",
+        encoding="utf-8",
+    )
+    loaded_events = []
+    model.experiment_loaded.emit = lambda: loaded_events.append("loaded")
+    model.well_plate.plate_format_changed_signal.connect(model.update_well_plate)
+
+    Model.load_experiment_from_file(
+        model,
+        str(csv_path),
+        plate_name=model.well_plate.get_current_plate_name(),
+    )
+
+    assert loaded_events == ["loaded"]
+    assert _assigned_ordered_pairs(model.well_plate) == [
+        ("R1", "A1"),
+        ("R2", "B1"),
+    ]
+
+
 def test_manual_assignment_overrides_printable_well_selection(experiment_model_factory):
     model = experiment_model_factory()
     em = model.experiment_model

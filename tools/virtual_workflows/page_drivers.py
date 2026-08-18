@@ -1695,6 +1695,351 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             directory, purpose="prepared", on_loaded=inspect_loaded
         )["loaded"]
 
+    def inspect_same_session_completed_execution(
+        self,
+        *,
+        expected_name: str,
+        action_runner: Callable[..., dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Open and display the current completed execution in the live session."""
+
+        from View import ExperimentDesignDialog
+        from tools.virtual_workflows.actions import execute_action
+
+        button = self.view.well_plate_widget.design_experiment_button
+        if not button.isVisible() or not button.isEnabled():
+            raise RuntimeError("Experiment Editor control is not visible and enabled")
+
+        state: dict[str, Any] = {
+            "error": None,
+            "prompt": None,
+            "editor": None,
+            "inspection": None,
+        }
+        timer = QtCore.QTimer(self.app)
+        timer.setInterval(5)
+
+        def run_action(
+            action_id: str,
+            operation: Callable[[], Mapping[str, Any] | None],
+            *,
+            allowed_dialogs: tuple[Any, ...] = (),
+        ) -> dict[str, Any]:
+            if action_runner is not None:
+                return action_runner(
+                    action_id,
+                    operation,
+                    allowed_dialogs=allowed_dialogs,
+                )
+            return execute_action(self.context, action_id, operation)
+
+        def dispatch_snapshot() -> dict[str, int]:
+            instrumentation = getattr(self.context, "instrumentation", None)
+            machine = getattr(self.context, "machine", None)
+            return {
+                "intent_begins": len(
+                    getattr(instrumentation, "intent_begins", ()) or ()
+                ),
+                "intent_attachments": len(
+                    getattr(instrumentation, "intent_attachments", ()) or ()
+                ),
+                "intent_completions": len(
+                    getattr(instrumentation, "intent_completions", ()) or ()
+                ),
+                "simulator_dispenses": len(
+                    getattr(instrumentation, "simulator_dispenses", ()) or ()
+                ),
+                "machine_commands": len(
+                    getattr(machine, "command_event_history", ()) or ()
+                ),
+            }
+
+        def inspect_and_close(dialog) -> Mapping[str, Any]:
+            plan = self.context.experiment_model.get_execution_plan_snapshot()
+            eligibility = (
+                self.context.experiment_model.get_execution_resume_eligibility()
+                or {}
+            )
+            progress_data = self.context.experiment_model.progress_data
+            status_text = str(dialog.status_lbl.text() or "")
+            banner_text = str(dialog.lifecycle_banner.text() or "")
+            initial_checks = {
+                "open_read_only_selected": bool(state["prompt"]),
+                "name_matches": dialog.exp_name_edit.text() == expected_name,
+                "plan_completed": str(plan.state.value) == "completed",
+                "live_runtime_assignments_present": any(
+                    well.get_assigned_reaction() is not None
+                    for well in self.context.model.well_plate.get_all_wells()
+                ),
+                "action_is_view_completed": dialog.finish_btn.text()
+                == "View Completed Experiment",
+                "action_enabled": bool(dialog.finish_btn.isEnabled()),
+                "read_only_guidance": (
+                    "experiment complete" in status_text.casefold()
+                    and "view completed experiment" in status_text.casefold()
+                )
+                or (
+                    "saved printing progress" in status_text.casefold()
+                    and "view-only" in status_text.casefold()
+                ),
+                "visible_lock_banner": not dialog.lifecycle_banner.isHidden()
+                and "locked and read-only" in banner_text.casefold(),
+                "eligibility_terminal_analysis_only": eligibility.get("status")
+                == "analysis_only",
+            }
+            dispatch_before = dispatch_snapshot()
+            unexpected_before = len(self.context.unexpected_dialogs)
+            errors_before = len(self.context.errors)
+            modal_failure: dict[str, Any] = {}
+            modal_watch = QtCore.QTimer(self.app)
+            modal_watch.setInterval(5)
+
+            def reject_unexpected_result_dialog() -> None:
+                modal = self.app.activeModalWidget()
+                if modal is None or modal is dialog:
+                    return
+                modal_failure.update(
+                    {
+                        "type": type(modal).__name__,
+                        "title": str(modal.windowTitle() or ""),
+                        "text": str(
+                            modal.text()
+                            if isinstance(modal, QtWidgets.QMessageBox)
+                            else ""
+                        ),
+                    }
+                )
+                if isinstance(modal, QtWidgets.QDialog) and modal.isVisible():
+                    modal.reject()
+
+            modal_watch.timeout.connect(reject_unexpected_result_dialog)
+            modal_watch.start()
+            try:
+                self.click(dialog.finish_btn)
+            finally:
+                modal_watch.stop()
+                modal_watch.deleteLater()
+            self.context.pump_events()
+
+            model = self.context.model
+            experiment_model = self.context.experiment_model
+            well_plate = model.well_plate
+            assignments = {
+                well.well_id: well.get_assigned_reaction().unique_id
+                for well in well_plate.get_all_wells()
+                if well.get_assigned_reaction() is not None
+            }
+            expected_assignments = {
+                well.well_id: well.reaction_id for well in plan.wells
+            }
+            expected_targets = {
+                well.well_id: {
+                    dispense.stock_id: int(dispense.target_dispenses)
+                    for dispense in well.dispenses
+                }
+                for well in plan.wells
+            }
+            expected_added = {
+                plan_well.well_id: {
+                    dispense.stock_id: int(
+                        progress_data[plan_well.well_id]["reagents"][
+                            dispense.stock_id
+                        ].get("added_droplets", 0)
+                        or 0
+                    )
+                    for dispense in plan_well.dispenses
+                }
+                for plan_well in plan.wells
+            }
+            displayed_targets: dict[str, dict[str, int]] = {}
+            displayed_added: dict[str, dict[str, int]] = {}
+            completed_wells = []
+            for plan_well in plan.wells:
+                reaction = well_plate.get_well(
+                    plan_well.well_id
+                ).get_assigned_reaction()
+                displayed_targets[plan_well.well_id] = {
+                    stock_id: int(reagent.target_droplets)
+                    for stock_id, reagent in reaction.get_all_reagents().items()
+                }
+                displayed_added[plan_well.well_id] = {
+                    stock_id: int(reagent.added_droplets)
+                    for stock_id, reagent in reaction.get_all_reagents().items()
+                }
+                if reaction.check_all_complete():
+                    completed_wells.append(plan_well.well_id)
+
+            plate_widget = self.context.view.well_plate_widget
+            calibration_button = (
+                self.context.view.pressure_box.calibrate_pressure_button
+            )
+            projected_eligibility = (
+                experiment_model.get_execution_resume_eligibility() or {}
+            )
+            dispatch_after = dispatch_snapshot()
+            checks = {
+                **initial_checks,
+                "no_result_warning_dialog": not modal_failure,
+                "dialog_closed_after_explicit_action": not dialog.isVisible(),
+                "display_projection_active": bool(
+                    model.is_completed_execution_view_active()
+                ),
+                "runtime_inactive_after_view": not bool(
+                    experiment_model.is_authoritative_execution_runtime_active()
+                ),
+                "controller_still_idle": self.context.controller.get_array_run_state()
+                == "idle",
+                "eligibility_still_terminal_analysis_only": (
+                    projected_eligibility.get("status") == "analysis_only"
+                    and not projected_eligibility.get("can_activate_runtime")
+                    and not projected_eligibility.get("can_start_hardware")
+                    and not projected_eligibility.get("can_resume_hardware")
+                ),
+                "plate_identity_exact": (
+                    well_plate.get_current_plate_name() == plan.plate.name
+                    and well_plate.get_plate_dimensions()
+                    == (int(plan.plate.rows), int(plan.plate.columns))
+                ),
+                "well_assignments_exact": assignments == expected_assignments,
+                "targets_exact": displayed_targets == expected_targets,
+                "added_progress_exact": displayed_added == expected_added
+                and expected_added == expected_targets,
+                "all_assigned_wells_complete": set(completed_wells)
+                == set(expected_assignments),
+                "start_control_disabled": (
+                    plate_widget.start_print_array_button.text()
+                    == "Experiment Complete"
+                    and not plate_widget.start_print_array_button.isEnabled()
+                ),
+                "mutation_controls_disabled": (
+                    not plate_widget.stock_prep_button.isEnabled()
+                    and not plate_widget.calibration_button.isEnabled()
+                ),
+                "printer_head_diagnostics_disabled": not bool(
+                    calibration_button.isEnabled()
+                ),
+                "no_machine_or_simulator_dispatch": dispatch_after
+                == dispatch_before,
+                "no_new_unexpected_dialogs": len(self.context.unexpected_dialogs)
+                == unexpected_before,
+                "no_new_errors": len(self.context.errors) == errors_before,
+            }
+            evidence = {
+                "checks": checks,
+                "failed_checks": [
+                    name for name, passed in checks.items() if not passed
+                ],
+                "prompt": dict(state["prompt"] or {}),
+                "experiment_name": dialog.exp_name_edit.text(),
+                "plan_id": str(plan.plan_id),
+                "plan_revision": int(plan.plan_revision),
+                "plan_state": str(plan.state.value),
+                "eligibility": projected_eligibility,
+                "status_text": status_text,
+                "banner_text": banner_text,
+                "runtime_assignments": assignments,
+                "expected_assignments": expected_assignments,
+                "displayed_targets": displayed_targets,
+                "displayed_added": displayed_added,
+                "persisted_added": expected_added,
+                "completed_well_ids": sorted(completed_wells),
+                "dispatch_before": dispatch_before,
+                "dispatch_after": dispatch_after,
+                "unexpected_result_dialog": modal_failure,
+                "activation_performed": False,
+                "display_projection_performed": True,
+            }
+            if not all(checks.values()):
+                raise RuntimeError(
+                    "same-session completed projection was not exact: "
+                    f"{checks}"
+                )
+            return evidence
+
+        def drive_modal() -> None:
+            modal = self.app.activeModalWidget()
+            try:
+                if self.context.deadline.remaining_seconds() <= 0:
+                    raise RuntimeError(
+                        "same-session completed projection deadline expired"
+                    )
+                if modal is None:
+                    return
+                if isinstance(modal, QtWidgets.QMessageBox):
+                    if modal.windowTitle() != "Saved Progress Found":
+                        raise RuntimeError(
+                            "unexpected completed editor prompt: "
+                            f"{modal.windowTitle()!r}"
+                        )
+                    keep = next(
+                        (
+                            item
+                            for item in modal.buttons()
+                            if item.text().replace("&", "") == "Open Read-Only"
+                        ),
+                        None,
+                    )
+                    if keep is None:
+                        raise RuntimeError(
+                            "completed editor prompt has no Open Read-Only action"
+                        )
+                    state["prompt"] = {
+                        "title": str(modal.windowTitle() or ""),
+                        "text": str(modal.text() or ""),
+                        "informative_text": str(modal.informativeText() or ""),
+                        "selected_action": "Open Read-Only",
+                    }
+                    self.click(keep)
+                    return
+                if not isinstance(modal, ExperimentDesignDialog):
+                    raise RuntimeError(
+                        "unexpected modal while opening same-session completed "
+                        f"editor: {type(modal).__name__} {modal.windowTitle()!r}"
+                    )
+                if not modal.isVisible() or not modal.finish_btn.isVisible():
+                    return
+                timer.stop()
+                state["editor"] = run_action(
+                    "editor.open_via_ui",
+                    lambda: {
+                        "window_title": str(modal.windowTitle() or ""),
+                        "dialog_visible": bool(modal.isVisible()),
+                        "open_read_only_selected": bool(state["prompt"]),
+                    },
+                    allowed_dialogs=(modal,),
+                )["evidence"]
+                state["inspection"] = run_action(
+                    "experiment.inspect_completed_via_ui",
+                    lambda: inspect_and_close(modal),
+                    allowed_dialogs=(modal,),
+                )["evidence"]
+            except BaseException as exc:
+                state["error"] = exc
+                timer.stop()
+                if isinstance(modal, QtWidgets.QDialog) and modal.isVisible():
+                    modal.reject()
+
+        timer.timeout.connect(drive_modal)
+        timer.start()
+        with _expected_dialogs(
+            self.app,
+            ("Saved Progress Found", "QMessageBox"),
+            ("Experiment Design (v2)", "ExperimentDesignDialog"),
+        ):
+            self.click(button)
+        timer.stop()
+        timer.deleteLater()
+        if state["error"] is not None:
+            raise state["error"]
+        if state["editor"] is None or state["inspection"] is None:
+            raise RuntimeError(
+                "same-session completed editor inspection did not finish"
+            )
+        return {
+            "editor": dict(state["editor"]),
+            "inspection": dict(state["inspection"]),
+        }
+
     def inspect_completed_execution(
         self,
         experiment_dir,

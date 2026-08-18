@@ -352,6 +352,13 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert "calibration.post_completion_diagnostics" in smoke[
         "capability_ids"
     ]
+    assert "experiment.inspect_completed_via_ui" in smoke["action_ids"]
+    assert "execution.same_session_completed_projection_exact" in smoke[
+        "assertion_ids"
+    ]
+    assert "execution.same_session_completed_projection" in smoke[
+        "capability_ids"
+    ]
 
     capabilities = {
         capability["id"]: capability for capability in payload["capabilities"]
@@ -379,6 +386,32 @@ def test_tracked_manifest_validates_and_describes_current_truth():
             "The host SIL uses a synthetic full calibration; trajectory-aware "
             "Recheck dispatch remains focused Qt integration coverage and no "
             "physical camera, pressure, or droplet behavior is claimed."
+        ],
+        "max_evidence_age_days": 2,
+    }
+    assert capabilities["execution.same_session_completed_projection"] == {
+        "id": "execution.same_session_completed_projection",
+        "risk": (
+            "A completed execution could fail to display read-only in the live "
+            "session because plate-format signals reassign stale runtime reactions "
+            "during authoritative projection."
+        ),
+        "owner_role": "execution persistence maintainers",
+        "status": "covered",
+        "required_verification_layers": ["contract", "host_sil"],
+        "active_scenario_ids": ["print_array_smoke_24_v1"],
+        "required_assertion_ids": [
+            "execution.same_session_completed_projection_exact"
+        ],
+        "related_source_areas": [
+            "FreeRTOS-interface/Model.py",
+            "FreeRTOS-interface/View.py",
+            "tools/virtual_workflows/page_drivers.py",
+        ],
+        "limitations": [
+            "The host SIL verifies same-session Qt projection and persisted "
+            "immutability with a generated design; explicit uploaded/manual "
+            "assignments remain focused Model integration coverage."
         ],
         "max_evidence_age_days": 2,
     }

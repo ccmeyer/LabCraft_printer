@@ -2388,6 +2388,131 @@ def post_completion_diagnostics_assertion(
     )
 
 
+def same_session_completed_projection_assertion(
+    *,
+    before: Any,
+    after: Any,
+    driver: Mapping[str, Any],
+) -> AssertionResult:
+    """Prove the live completed execution projects read-only without writes."""
+
+    def inspect() -> tuple[bool, Mapping[str, Any]]:
+        observed_driver = dict(driver)
+        inspection = dict(observed_driver.get("inspection") or {})
+        driver_checks = dict(inspection.get("checks") or {})
+        checks = {
+            "same_session_ui_flow_exact": bool(driver_checks)
+            and all(bool(value) for value in driver_checks.values())
+            and bool(
+                dict(observed_driver.get("editor") or {}).get(
+                    "open_read_only_selected"
+                )
+            ),
+            "completed_runtime_projected_display_only": (
+                before.plan_state == after.plan_state == "completed"
+                and not bool(after.runtime_active)
+                and after.eligibility_status == "analysis_only"
+                and dict(before.runtime_assignments)
+                == dict(before.plan_assignments)
+            ),
+            "display_projection_matches_plan": (
+                dict(after.runtime_assignments) == dict(after.plan_assignments)
+                and dict(inspection.get("runtime_assignments") or {})
+                == dict(after.plan_assignments)
+                and dict(inspection.get("expected_assignments") or {})
+                == dict(after.plan_assignments)
+            ),
+            "design_immutable": (
+                before.design_json == after.design_json
+                and before.design_sha256 == after.design_sha256
+                and before.plan_design_sha256 == after.plan_design_sha256
+                and before.key_rows_json == after.key_rows_json
+                and before.concentration_rows_json
+                == after.concentration_rows_json
+            ),
+            "plan_immutable": (
+                before.plan_json == after.plan_json
+                and before.plan_id == after.plan_id
+                and before.plan_revision == after.plan_revision
+                and before.history_json == after.history_json
+            ),
+            "progress_immutable": (
+                before.progress_schema_version
+                == after.progress_schema_version
+                and before.progress_plan_id == after.progress_plan_id
+                and before.progress_plan_revision
+                == after.progress_plan_revision
+                and before.progress_targets == after.progress_targets
+                and before.total_added_droplets
+                == after.total_added_droplets
+                and before.completed_well_ids == after.completed_well_ids
+            ),
+            "resume_boundary_immutable": (
+                before.resume_present == after.resume_present
+                and before.resume_state == after.resume_state
+                and before.resume_plan_id == after.resume_plan_id
+                and before.resume_plan_revision == after.resume_plan_revision
+                and before.resume_intent_count == after.resume_intent_count == 0
+            ),
+            "calibration_linkage_immutable": (
+                before.calibration_present == after.calibration_present
+                and before.calibration_record_count
+                == after.calibration_record_count
+                and before.manual_refuel_check_count
+                == after.manual_refuel_check_count
+            ),
+            "audit_immutable": before.audit_rows_json == after.audit_rows_json,
+            "authoritative_files_byte_identical": before.directory.hashes
+            == after.directory.hashes,
+            "authoritative_bundles_valid": bool(
+                before.bundle_valid and after.bundle_valid
+            ),
+        }
+        evidence = {
+            "checks": checks,
+            "failed_checks": [
+                name for name, passed in checks.items() if not passed
+            ],
+            "driver": observed_driver,
+            "before": {
+                "plan_id": before.plan_id,
+                "plan_revision": before.plan_revision,
+                "plan_state": before.plan_state,
+                "design_sha256": before.design_sha256,
+                "runtime_active": before.runtime_active,
+                "runtime_assignments": dict(before.runtime_assignments),
+                "total_added_droplets": before.total_added_droplets,
+                "completed_well_ids": list(before.completed_well_ids),
+                "resume_state": before.resume_state,
+                "resume_intent_count": before.resume_intent_count,
+                "calibration_record_count": before.calibration_record_count,
+                "core_file_hashes": before.core_file_hashes,
+            },
+            "after": {
+                "plan_id": after.plan_id,
+                "plan_revision": after.plan_revision,
+                "plan_state": after.plan_state,
+                "design_sha256": after.design_sha256,
+                "runtime_active": after.runtime_active,
+                "runtime_assignments": dict(after.runtime_assignments),
+                "total_added_droplets": after.total_added_droplets,
+                "completed_well_ids": list(after.completed_well_ids),
+                "resume_state": after.resume_state,
+                "resume_intent_count": after.resume_intent_count,
+                "calibration_record_count": after.calibration_record_count,
+                "core_file_hashes": after.core_file_hashes,
+            },
+        }
+        return all(checks.values()), evidence
+
+    return evaluate_assertion(
+        "execution.same_session_completed_projection_exact",
+        "same_session_completed_projection",
+        ("ui", "model", "persistence", "session", "simulator"),
+        inspect,
+    )
+
+
 def terminal_execution_assertion(
     context: Any,
     *,

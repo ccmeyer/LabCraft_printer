@@ -15582,6 +15582,7 @@ class Model(QObject):
         self.reaction_collection = ReactionCollection()
         self.printer_head_manager = PrinterHeadManager(self.printer_head_colors,self.rack_model)
         self._rack_runtime_plan_id = None
+        self._well_plate_reassignment_suppression_depth = 0
 
         # self.calibration_model = MassCalibrationModel(self.machine_model,self.printer_head_manager,self.rack_model,self.predictive_model_dir)
         self.experiment_file_path = None
@@ -16380,7 +16381,7 @@ class Model(QObject):
             self.reaction_collection = ReactionCollection()
             self.well_plate.clear_all_wells()
         if plate_name is not None:
-            self.well_plate.set_plate_format(plate_name)
+            self._set_plate_format_for_runtime_rebuild(plate_name)
         self.stock_solutions, self.reaction_collection = self.load_reactions_from_csv(file_path)
         #print(f'Stock Solutions:{self.stock_solutions.get_stock_solution_names()}')
         self.well_plate.assign_reactions_to_wells(self.reaction_collection.get_all_reactions())
@@ -16698,7 +16699,7 @@ class Model(QObject):
         self._clear_runtime_experiment_without_signal()
         self.well_plate.excluded_wells = preserved_exclusions
         if plate_name is not None:
-            self.well_plate.set_plate_format(plate_name)
+            self._set_plate_format_for_runtime_rebuild(plate_name)
             self.experiment_model.metadata["plate_name"] = self.well_plate.get_current_plate_name()
             self.experiment_model.metadata["plate_rows"] = self.well_plate.get_num_rows()
             self.experiment_model.metadata["plate_columns"] = self.well_plate.get_num_cols()
@@ -16908,6 +16909,9 @@ class Model(QObject):
         - manual assignments, if present, or
         - automatic zig-zag from start_row/start_col, as before.
         """
+        if getattr(self, "_well_plate_reassignment_suppression_depth", 0) > 0:
+            return
+
         if self.reaction_collection is None:
             print("No experiment data loaded.")
             return
@@ -16942,6 +16946,19 @@ class Model(QObject):
             )
 
         self.experiment_loaded.emit()
+
+    def _set_plate_format_for_runtime_rebuild(self, plate_name):
+        """Reset the plate format without triggering mid-transaction assignment."""
+        previous_depth = getattr(
+            self,
+            "_well_plate_reassignment_suppression_depth",
+            0,
+        )
+        self._well_plate_reassignment_suppression_depth = previous_depth + 1
+        try:
+            self.well_plate.set_plate_format(plate_name)
+        finally:
+            self._well_plate_reassignment_suppression_depth = previous_depth
 
     def _clear_runtime_experiment_without_signal(self):
         """Clear runtime execution state without announcing a successful load."""
@@ -17227,7 +17244,7 @@ class Model(QObject):
         self.experiment_model.ensure_execution_resume_checkpoint()
 
         self._clear_runtime_experiment_without_signal()
-        self.well_plate.set_plate_format(projection.spec.plate_name)
+        self._set_plate_format_for_runtime_rebuild(projection.spec.plate_name)
         self.stock_solutions = projection.stock_manager
         self.reaction_collection = projection.reaction_collection
         self.well_plate.assign_reactions_to_specific_wells(
@@ -17414,7 +17431,7 @@ class Model(QObject):
 
         self._rack_runtime_plan_id = None
         self.well_plate.clear_all_wells()
-        self.well_plate.set_plate_format(projection.spec.plate_name)
+        self._set_plate_format_for_runtime_rebuild(projection.spec.plate_name)
         self.stock_solutions = projection.stock_manager
         self.reaction_collection = projection.reaction_collection
         self.well_plate.assign_reactions_to_specific_wells(

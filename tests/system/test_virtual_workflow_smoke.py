@@ -129,7 +129,10 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
     ]
     assert {
         item["action_id"] for item in workflow["action_results"]
-    } == COMPOSED_SMOKE_ACTION_IDS
+    } == COMPOSED_SMOKE_ACTION_IDS | {
+        "experiment.inspect_completed_via_ui",
+        "head.return_via_ui",
+    }
     assert {item["status"] for item in workflow["action_results"]} == {"pass"}
     action_counts = Counter(
         item["action_id"] for item in workflow["action_results"]
@@ -138,6 +141,9 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
     assert action_counts["calibration.generate_via_ui"] == 2
     assert action_counts["calibration.select_via_ui"] == 2
     assert action_counts["calibration.apply_via_ui"] == 1
+    assert action_counts["editor.open_via_ui"] == 2
+    assert action_counts["experiment.inspect_completed_via_ui"] == 1
+    assert action_counts["head.return_via_ui"] == 1
     surfaces = {
         item["action_id"]: item["interaction_surface"]
         for item in workflow["action_results"]
@@ -179,6 +185,18 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
     persistence = report["metrics"]["persistence"]["values"]
     assert persistence["terminal"]["plan_state"] == "completed"
     assert persistence["terminal"]["checkpoint_intent_count"] == 0
+    projection = persistence["same_session_completed_projection"]
+    assert projection["failed_checks"] == []
+    assert all(projection["checks"].values())
+    assert projection["before"]["plan_state"] == "completed"
+    assert projection["after"]["runtime_active"] is False
+    assert projection["before"]["runtime_assignments"] == projection["after"][
+        "runtime_assignments"
+    ]
+    assert projection["before"]["core_file_hashes"] == projection["after"][
+        "core_file_hashes"
+    ]
+    assert projection["driver"]["inspection"]["unexpected_result_dialog"] == {}
 
     assert json.loads(
         (report_dir / "report.json").read_text(encoding="utf-8")

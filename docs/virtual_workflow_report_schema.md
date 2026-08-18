@@ -324,6 +324,24 @@ extend it. Teardown is deadline-independent, attempts every cleanup phase, and
 records one `scenario.teardown` action result. These additions are diagnostic;
 existing classification and comparison-policy meanings are unchanged.
 
+The standard 24-well smoke adds two post-completion evidence objects without
+changing the report-v1 envelope:
+
+- `metrics.workflow.values.post_completion_diagnostics` records the live
+  terminal diagnostic launch, generated/selected preview, unavailable Apply
+  state, and immutable execution boundary; and
+- `metrics.persistence.values.same_session_completed_projection` records the
+  real Qt `Open Read-Only` and `View Completed Experiment` flow after the final
+  head is returned. It compares the before/after design, plan identity and
+  immutable history, progress, resume checkpoint, execution-calibration
+  linkage, audit rows, full experiment-directory hashes, exact displayed
+  assignments/targets/completed counts, idle Controller, and zero machine or
+  simulator dispatch.
+
+The completed projection remains in the original application session. It is
+distinct from `execution.completed_terminal_reload_exact`, which closes the
+application and proves the separate fresh-session historical reload boundary.
+
 ### Editor lifecycle nested evidence
 
 `experiment_editor_create_finalize_v1` uses the same report-v1 envelope and
