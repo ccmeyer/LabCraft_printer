@@ -67,3 +67,31 @@ TEST(StepperLimitPolicyHelpers, StaleDebounceCallbackDoesNotApplyToNewMove)
     CHECK_FALSE(StepperLimitPolicy::shouldApplyDebounceCallback(0u, 7u));
     CHECK_FALSE(StepperLimitPolicy::shouldApplyDebounceCallback(7u, 8u));
 }
+
+TEST(StepperLimitPolicyHelpers, DirectMoveMayEscapeAnAlreadyAssertedLimit)
+{
+    LONGS_EQUAL(
+        static_cast<long>(StepperLimitPolicy::DirectStartDecision::EscapeAssertedLimit),
+        static_cast<long>(StepperLimitPolicy::classifyDirectStart(
+            true, true, false, false)));
+}
+
+TEST(StepperLimitPolicyHelpers, DirectMoveRejectsTowardAnAssertedLimit)
+{
+    LONGS_EQUAL(
+        static_cast<long>(StepperLimitPolicy::DirectStartDecision::RejectAssertedTowardLimit),
+        static_cast<long>(StepperLimitPolicy::classifyDirectStart(
+            true, false, false, false)));
+}
+
+TEST(StepperLimitPolicyHelpers, DirectApproachRequiresConfirmedRelease)
+{
+    LONGS_EQUAL(
+        static_cast<long>(StepperLimitPolicy::DirectStartDecision::RejectUntilReleased),
+        static_cast<long>(StepperLimitPolicy::classifyDirectStart(
+            false, false, false, false)));
+    LONGS_EQUAL(
+        static_cast<long>(StepperLimitPolicy::DirectStartDecision::Proceed),
+        static_cast<long>(StepperLimitPolicy::classifyDirectStart(
+            false, false, false, true)));
+}

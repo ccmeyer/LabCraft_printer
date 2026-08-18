@@ -43,6 +43,21 @@ AbsXyDisposition evaluateAbsXyCompletion(const AbsXyCompletionInput& input) {
     return AbsXyDisposition::Completed;
 }
 
+DirectMoveDisposition evaluateDirectMoveCompletion(
+    const DirectMoveCompletionInput& input) {
+    if (!input.startAccepted || input.terminalFailure) {
+        return DirectMoveDisposition::MotionFailure;
+    }
+    if (input.controlInterrupted) {
+        return DirectMoveDisposition::Interrupted;
+    }
+    if (!input.waitCompleted || !input.terminalCompleted ||
+        !input.endpointMatches || !input.targetsMatch) {
+        return DirectMoveDisposition::MotionFailure;
+    }
+    return DirectMoveDisposition::Completed;
+}
+
 void retireCurrentCommand(uint32_t currentCmdNum, uint32_t& lastExecutedCmdNum, uint32_t& lastRetiredCmdNum) {
     lastExecutedCmdNum = currentCmdNum;
     lastRetiredCmdNum = currentCmdNum;

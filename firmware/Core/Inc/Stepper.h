@@ -36,6 +36,52 @@ public:
 	R_AXIS = 4,
 	NUM_AXES = 5
   };
+
+  enum class DirectMoveStartStatus : uint8_t {
+    Started = 0u,
+    Immediate = 1u,
+    Unavailable = 2u,
+    Busy = 3u,
+    InvalidRequest = 4u,
+    PositionOutOfRange = 5u,
+    LimitBlocked = 6u,
+  };
+
+  enum class DirectMoveState : uint8_t {
+    Idle = 0u,
+    Armed = 1u,
+    Running = 2u,
+    Paused = 3u,
+    Completed = 4u,
+    Canceled = 5u,
+    LimitAborted = 6u,
+    Faulted = 7u,
+  };
+
+  enum class DirectMoveTerminalReason : uint8_t {
+    None = 0u,
+    Completed = 1u,
+    Canceled = 2u,
+    LimitAborted = 3u,
+    ProfileFault = 4u,
+    StartRejected = 5u,
+  };
+
+  struct DirectMoveSnapshot {
+    Axis axis = X_AXIS;
+    DirectMoveStartStatus startStatus = DirectMoveStartStatus::Unavailable;
+    DirectMoveState state = DirectMoveState::Idle;
+    DirectMoveTerminalReason terminalReason = DirectMoveTerminalReason::None;
+    int32_t startPosition = 0;
+    int32_t targetPosition = 0;
+    int32_t endPosition = 0;
+    uint32_t requestedEdges = 0u;
+    uint32_t emittedEdges = 0u;
+    bool direction = true;
+    bool movingTowardLimit = false;
+    bool limitAssertedAtStart = false;
+    bool limitSeen = false;
+  };
   /// Construct & register yourself
   Stepper();
 
@@ -71,9 +117,15 @@ public:
    *  - `targetHz` maximum step-frequency in Hz
    *  - `accelSteps` how many full steps to spend accelerating (and same to decelerate)
    */
-  void move(bool direction, uint32_t steps, uint32_t targetHz, uint32_t accelSteps);
+  DirectMoveStartStatus move(bool direction,
+                             uint32_t steps,
+                             uint32_t targetHz,
+                             uint32_t accelSteps);
 
-  void moveTo(bool sign, uint32_t newPos, uint32_t freqHz, uint32_t accelSteps);
+  DirectMoveStartStatus moveTo(bool sign,
+                               uint32_t newPos,
+                               uint32_t freqHz,
+                               uint32_t accelSteps);
 
   void setSpeedHz(uint32_t freqHz);		/// Change speed on the fly (constant‐rate mode only)
 
@@ -106,7 +158,7 @@ public:
   void pauseMove();
 
   /// Restart the timer from wherever we left off
-  void resumeMove();
+  DirectMoveStartStatus resumeMove();
 
   /// Cancel the move entirely (clear remaining toggles)
   void cancelMove();
@@ -123,6 +175,7 @@ public:
   /// Current full-step position
   int32_t getPosition() const { return _pos; }
   int32_t getTargetPosition() const { return _targetPos; }
+  DirectMoveSnapshot getLastDirectMoveSnapshot() const;
 
   struct HomeDiagnosticSnapshot {
     enum class Phase : uint8_t {
@@ -243,6 +296,10 @@ private:
   volatile bool _coordinatedReserved = false;
   volatile bool _homeSequenceActive = false;
   volatile bool _legacyMoveStartPending = false;
+  DirectMoveSnapshot _directMoveSnapshot{};
+  DirectMoveSnapshot _directMoveResumeSnapshot{};
+  bool _directMoveResumePending = false;
+  uint32_t _directMoveEmittedOffset = 0u;
 
   // motion profile
   uint32_t _totalToggles     = 0;   // 2×full steps

@@ -248,6 +248,7 @@ XY_MOTION_CONTEXT_WIRE_SIZE = 60
 XY_MOTION_REASON_NAMES = {
     0: "none", 1: "start_rejected", 2: "x_limit", 3: "y_limit",
     4: "planner_fault", 5: "endpoint_mismatch", 6: "resume_terminal_mismatch",
+    7: "z_limit",
 }
 XY_MOTION_START_STATUS_NAMES = {
     0: "started", 1: "immediate", 2: "disabled", 3: "busy",
@@ -260,7 +261,12 @@ XY_MOTION_EXECUTOR_STATE_NAMES = {
 }
 XY_MOTION_TERMINAL_REASON_NAMES = {
     0: "none", 1: "completed", 2: "canceled", 3: "x_limit",
-    4: "y_limit", 5: "planner_fault",
+    4: "y_limit", 5: "planner_fault", 6: "z_limit",
+}
+DIRECT_GANTRY_COMMAND_NAMES = {
+    0x02: ("RELATIVE_X", "X"), 0x03: ("RELATIVE_Y", "Y"),
+    0x04: ("RELATIVE_Z", "Z"), 0x0A: ("ABSOLUTE_X", "X"),
+    0x0B: ("ABSOLUTE_Y", "Y"), 0x0C: ("ABSOLUTE_Z", "Z"),
 }
 CRASH_FAULT_NAMES = {
     0: "none", 1: "hardfault", 2: "memmanage", 3: "busfault", 4: "usagefault",
@@ -496,7 +502,7 @@ def decode_xy_motion_context(raw: bytes | None) -> dict | None:
     if values[0] != 1 or values[1] == 0:
         return None
     flags = values[6]
-    return {
+    result = {
         "version": values[0],
         "valid": True,
         "reason": values[2],
@@ -508,6 +514,7 @@ def decode_xy_motion_context(raw: bytes | None) -> dict | None:
         "terminal_reason": values[5],
         "terminal_reason_name": XY_MOTION_TERMINAL_REASON_NAMES.get(values[5], f"terminal_{values[5]}"),
         "flags": flags,
+        "reserved": values[7],
         "targets_canonical": bool(flags & 0x01),
         "start_accepted": bool(flags & 0x02),
         "wait_completed": bool(flags & 0x04),
@@ -530,6 +537,26 @@ def decode_xy_motion_context(raw: bytes | None) -> dict | None:
         "emitted_y_edges": values[19],
         "done_bits": values[20],
     }
+    direct_command = DIRECT_GANTRY_COMMAND_NAMES.get(values[7])
+    if direct_command is not None:
+        command_type, axis = direct_command
+        result.update({
+            "motion_kind": "direct_axis",
+            "command_type": command_type,
+            "axis": axis,
+            "axis_start": values[10],
+            "axis_target": values[12],
+            "axis_end": values[14],
+            "requested_edges": values[16],
+            "emitted_edges": values[18],
+        })
+    else:
+        result.update({
+            "motion_kind": "coordinated_xy",
+            "command_type": "ABSOLUTE_XY",
+            "axis": "XY",
+        })
+    return result
 
 
 def decode_reset_report(tlv: dict[int, bytes]) -> dict:

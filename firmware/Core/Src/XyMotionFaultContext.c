@@ -40,6 +40,7 @@ const char* XyMotionFaultContext_ReasonName(uint8_t reason)
     case XY_MOTION_FAULT_PLANNER: return "planner_fault";
     case XY_MOTION_FAULT_ENDPOINT_MISMATCH: return "endpoint_mismatch";
     case XY_MOTION_FAULT_RESUME_TERMINAL_MISMATCH: return "resume_terminal_mismatch";
+    case XY_MOTION_FAULT_Z_LIMIT: return "z_limit";
     default: return "unknown";
   }
 }

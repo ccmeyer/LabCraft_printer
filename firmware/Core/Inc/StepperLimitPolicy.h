@@ -5,6 +5,13 @@
 
 namespace StepperLimitPolicy {
 
+enum class DirectStartDecision : uint8_t {
+  Proceed = 0u,
+  EscapeAssertedLimit = 1u,
+  RejectAssertedTowardLimit = 2u,
+  RejectUntilReleased = 3u,
+};
+
 enum class PullMode : uint32_t {
   None = 0u,
   Up = 1u,
@@ -61,6 +68,23 @@ constexpr bool shouldApplyDebounceCallback(uint32_t armedGeneration,
                                            uint32_t currentGeneration)
 {
   return (armedGeneration != 0u) && (armedGeneration == currentGeneration);
+}
+
+constexpr DirectStartDecision classifyDirectStart(bool limitAsserted,
+                                                   bool direction,
+                                                   bool homeTowardLimitDirection,
+                                                   bool releaseConfirmed)
+{
+  const bool movingTowardLimit = direction == homeTowardLimitDirection;
+  if (limitAsserted) {
+    return movingTowardLimit
+        ? DirectStartDecision::RejectAssertedTowardLimit
+        : DirectStartDecision::EscapeAssertedLimit;
+  }
+  if (movingTowardLimit && !releaseConfirmed) {
+    return DirectStartDecision::RejectUntilReleased;
+  }
+  return DirectStartDecision::Proceed;
 }
 
 }  // namespace StepperLimitPolicy

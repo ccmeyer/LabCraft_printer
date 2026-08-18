@@ -150,6 +150,48 @@ TEST(OrchestratorCompletionPolicyTests, AbsXyLimitOrPlannerFailureWinsOverContro
         static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyCompletion(input)));
 }
 
+TEST(OrchestratorCompletionPolicyTests, DirectMoveCompletionRequiresEveryGate) {
+    OrchestratorCompletionPolicy::DirectMoveCompletionInput input{
+        true, true, false, true, false, true, true};
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::DirectMoveDisposition::Completed),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateDirectMoveCompletion(input)));
+
+    input.endpointMatches = false;
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::DirectMoveDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateDirectMoveCompletion(input)));
+    input.endpointMatches = true;
+    input.targetsMatch = false;
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::DirectMoveDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateDirectMoveCompletion(input)));
+}
+
+TEST(OrchestratorCompletionPolicyTests, DirectMovePauseIsResumable) {
+    const OrchestratorCompletionPolicy::DirectMoveCompletionInput input{
+        true, false, true, false, false, false, false};
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::DirectMoveDisposition::Interrupted),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateDirectMoveCompletion(input)));
+}
+
+TEST(OrchestratorCompletionPolicyTests, DirectMoveFailureWinsOverPause) {
+    const OrchestratorCompletionPolicy::DirectMoveCompletionInput input{
+        true, false, true, false, true, false, false};
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::DirectMoveDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateDirectMoveCompletion(input)));
+}
+
+TEST(OrchestratorCompletionPolicyTests, DirectMoveRejectedStartIsTerminal) {
+    const OrchestratorCompletionPolicy::DirectMoveCompletionInput input{
+        false, false, false, false, false, false, false};
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::DirectMoveDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateDirectMoveCompletion(input)));
+}
+
 TEST(OrchestratorCompletionPolicyTests, DispenseLikeInterruptedWaitDoesNotRetire) {
     uint32_t lastExecuted = 20u;
     uint32_t lastRetired = 20u;

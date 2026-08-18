@@ -28,10 +28,12 @@ def test_direct_lut_fails_before_motor_enable_and_preserves_legacy_fallbacks():
     stepper = _read("firmware/Core/Src/Stepper.cpp")
 
     preparation = stepper.index("DirectStepperProfile::prepare")
-    rejection = stepper.index("_targetPos = _pos;", preparation)
-    event = stepper.index("xEventGroupSetBits", rejection)
+    event = stepper.index("xEventGroupSetBits", preparation)
     motor_enable = stepper.index("// ---------- GPIO DIR/EN ----------", event)
-    assert preparation < rejection < event < motor_enable
+    failure_path = stepper[preparation:motor_enable]
+    assert preparation < event < motor_enable
+    assert "DirectMoveTerminalReason::ProfileFault" in failure_path
+    assert "_targetPos = _pos;" not in failure_path
     assert "DirectStepperProfile::abort(_directProfileState);" in stepper[
         stepper.index("void Stepper::_requestSoftStop"):
         stepper.index("uint32_t Stepper::recommendedWaitTimeoutMs")

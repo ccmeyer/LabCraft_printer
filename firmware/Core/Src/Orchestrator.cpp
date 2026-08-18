@@ -294,7 +294,7 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 			  _gripperRefreshResetRequested = true;
 			  // Reset any stale state and request HELLO_ACK
 			  discardPressureRegulatorResume();
-			  _paused = _xyMotionFailureLatched; _pauseRequested = false;
+			  _paused = _gantryMotionFailureLatched; _pauseRequested = false;
 		  _seqEpoch=0; _lastSeq8=0; _currentCmdNum=0; _lastExecutedCmdNum=0;
 		  _resumeRequested = false; _clearRequested = false;
 		  _shutdownRequested = false;
@@ -390,10 +390,10 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 		return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
 	}
 
-	// A terminal XY failure is recoverable only through CMD_CLEAR. Keep the
+	// A terminal gantry failure is recoverable only through CMD_CLEAR. Keep the
 	// expected frontier fixed so no normal command can become accepted while
 	// the failure latch is active. Control commands were handled above.
-	if (_xyMotionFailureLatched) {
+	if (_gantryMotionFailureLatched) {
 		ack.ackResult = ACK_RESULT_BUSY;
 		return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
 	}
@@ -442,6 +442,205 @@ void Orchestrator::cancelCurrent() {
 //  Logger::instance()->log("cancelCurrent\r\n");
   Gantry::instance()->cancelXYZMotors();
   Printer::instance()->cancelDispense();
+}
+
+Orchestrator::DirectAxisExecutionResult Orchestrator::executeDirectAxis(
+    const Command& cmd,
+    Stepper* stepper,
+    EventBits_t doneBit,
+    bool latchFailure) {
+  DirectAxisExecutionResult result{};
+  result.snapshot.axis = (cmd.cmd == CMD_MOVE_X || cmd.cmd == CMD_ABS_X)
+      ? Stepper::X_AXIS
+      : ((cmd.cmd == CMD_MOVE_Y || cmd.cmd == CMD_ABS_Y)
+          ? Stepper::Y_AXIS
+          : Stepper::Z_AXIS);
+  _directMotionContextValid = false;
+  _directMotionAxis = result.snapshot.axis;
+  if (stepper == nullptr) {
+    result.startStatus = Stepper::DirectMoveStartStatus::Unavailable;
+    result.snapshot.startStatus = result.startStatus;
+    result.snapshot.state = Stepper::DirectMoveState::Faulted;
+    result.snapshot.terminalReason =
+        Stepper::DirectMoveTerminalReason::StartRejected;
+  } else {
+    result.startPosition = stepper->getPosition();
+    result.targetPosition = result.startPosition;
+
+    const bool absolute =
+        cmd.cmd == CMD_ABS_X || cmd.cmd == CMD_ABS_Y || cmd.cmd == CMD_ABS_Z;
+    if (absolute) {
+      const int64_t requestedWide = cmd.p1b()
+          ? static_cast<int64_t>(cmd.p2u())
+          : -static_cast<int64_t>(cmd.p2u());
+      if (requestedWide >= static_cast<int64_t>(INT32_MIN) &&
+          requestedWide <= static_cast<int64_t>(INT32_MAX)) {
+        result.targetCanonical = MotionUnitScale::canonicalizeAbsoluteTarget(
+            result.startPosition,
+            static_cast<int32_t>(requestedWide),
+            result.targetPosition);
+      }
+    } else {
+      const int64_t requestedDelta = cmd.p1b()
+          ? static_cast<int64_t>(cmd.p2u())
+          : -static_cast<int64_t>(cmd.p2u());
+      const MotionUnitScale::QuantizedDisplacement quantized =
+          MotionUnitScale::quantizeDisplacement(
+              result.startPosition, requestedDelta);
+      result.targetCanonical = quantized.valid;
+      if (quantized.valid) result.targetPosition = quantized.target;
+    }
+
+    _directMotionContextValid = true;
+    _directMotionAxis = result.snapshot.axis;
+    _directMotionStart = result.startPosition;
+    _directMotionTarget = result.targetPosition;
+    _directMotionRequestedEdges = 0u;
+
+    if (result.targetCanonical) {
+      result.startStatus = absolute
+          ? stepper->moveTo(cmd.p1b(), cmd.p2u(), cmd.p3u(), 2000u)
+          : stepper->move(cmd.p1b(), cmd.p2u(), cmd.p3u(), 2000u);
+      result.snapshot = stepper->getLastDirectMoveSnapshot();
+      _directMotionRequestedEdges = result.snapshot.requestedEdges;
+    } else {
+      result.startStatus = absolute
+          ? Stepper::DirectMoveStartStatus::PositionOutOfRange
+          : Stepper::DirectMoveStartStatus::InvalidRequest;
+      result.snapshot.startStatus = result.startStatus;
+      result.snapshot.state = Stepper::DirectMoveState::Faulted;
+      result.snapshot.terminalReason =
+          Stepper::DirectMoveTerminalReason::StartRejected;
+      result.snapshot.startPosition = result.startPosition;
+      result.snapshot.targetPosition = result.targetPosition;
+      result.snapshot.endPosition = result.startPosition;
+    }
+  }
+
+  const bool startAccepted =
+      result.startStatus == Stepper::DirectMoveStartStatus::Started ||
+      result.startStatus == Stepper::DirectMoveStartStatus::Immediate;
+  if (result.startStatus == Stepper::DirectMoveStartStatus::Started) {
+    result.waitCompleted = waitForBit(doneBit);
+  } else if (result.startStatus == Stepper::DirectMoveStartStatus::Immediate) {
+    result.waitCompleted = true;
+  }
+
+  const bool controlInterrupted =
+      _paused || _pauseRequested || _clearRequested || _shutdownRequested;
+  if (stepper != nullptr) result.snapshot = stepper->getLastDirectMoveSnapshot();
+  result.snapshot.startStatus = result.startStatus;
+  result.endPosition = stepper != nullptr
+      ? stepper->getPosition()
+      : result.startPosition;
+  result.endpointMatches = result.targetCanonical &&
+      result.endPosition == result.targetPosition;
+  result.targetsMatch = stepper != nullptr && result.targetCanonical &&
+      stepper->getTargetPosition() == result.targetPosition;
+  const bool terminalCompleted =
+      result.snapshot.state == Stepper::DirectMoveState::Completed &&
+      result.snapshot.terminalReason ==
+          Stepper::DirectMoveTerminalReason::Completed;
+  const bool terminalFailure =
+      result.snapshot.state == Stepper::DirectMoveState::LimitAborted ||
+      result.snapshot.state == Stepper::DirectMoveState::Faulted ||
+      result.snapshot.terminalReason ==
+          Stepper::DirectMoveTerminalReason::LimitAborted ||
+      result.snapshot.terminalReason ==
+          Stepper::DirectMoveTerminalReason::ProfileFault ||
+      result.snapshot.terminalReason ==
+          Stepper::DirectMoveTerminalReason::StartRejected;
+  result.disposition =
+      OrchestratorCompletionPolicy::evaluateDirectMoveCompletion({
+          startAccepted,
+          result.waitCompleted,
+          controlInterrupted,
+          terminalCompleted,
+          terminalFailure,
+          result.endpointMatches,
+          result.targetsMatch,
+      });
+
+  if (latchFailure && result.disposition ==
+          OrchestratorCompletionPolicy::DirectMoveDisposition::MotionFailure) {
+    latchDirectAxisMotionFailure(
+        cmd, result, startAccepted, controlInterrupted, false);
+  } else if (result.disposition ==
+             OrchestratorCompletionPolicy::DirectMoveDisposition::Completed) {
+    _directMotionContextValid = false;
+  }
+  return result;
+}
+
+bool Orchestrator::validateResumedDirectAxis(const Command& cmd) {
+  Stepper* stepper = Stepper::getAxis(_directMotionAxis);
+  EventBits_t doneBit = BIT_STEPPER3_DONE;
+  if (_directMotionAxis == Stepper::X_AXIS) doneBit = BIT_STEPPER1_DONE;
+  else if (_directMotionAxis == Stepper::Y_AXIS) doneBit = BIT_STEPPER2_DONE;
+
+  DirectAxisExecutionResult result{};
+  result.startPosition = _directMotionStart;
+  result.targetPosition = _directMotionTarget;
+  result.targetCanonical = _directMotionContextValid && stepper != nullptr;
+  result.snapshot = stepper != nullptr
+      ? stepper->getLastDirectMoveSnapshot()
+      : Stepper::DirectMoveSnapshot{};
+  result.startStatus = result.snapshot.startStatus;
+
+  if (result.snapshot.state == Stepper::DirectMoveState::Running) {
+    result.waitCompleted = waitForBit(doneBit);
+  } else if (result.snapshot.state == Stepper::DirectMoveState::Completed) {
+    result.waitCompleted = true;
+  }
+
+  const bool startAccepted =
+      result.startStatus == Stepper::DirectMoveStartStatus::Started ||
+      result.startStatus == Stepper::DirectMoveStartStatus::Immediate;
+  const bool controlInterrupted =
+      _paused || _pauseRequested || _clearRequested || _shutdownRequested;
+  if (stepper != nullptr) result.snapshot = stepper->getLastDirectMoveSnapshot();
+  result.endPosition = stepper != nullptr
+      ? stepper->getPosition()
+      : result.startPosition;
+  result.endpointMatches = result.targetCanonical &&
+      result.endPosition == result.targetPosition;
+  result.targetsMatch = stepper != nullptr && result.targetCanonical &&
+      stepper->getTargetPosition() == result.targetPosition;
+  const bool terminalCompleted =
+      result.snapshot.state == Stepper::DirectMoveState::Completed &&
+      result.snapshot.terminalReason ==
+          Stepper::DirectMoveTerminalReason::Completed;
+  const bool terminalFailure =
+      result.snapshot.state == Stepper::DirectMoveState::LimitAborted ||
+      result.snapshot.state == Stepper::DirectMoveState::Faulted ||
+      result.snapshot.terminalReason ==
+          Stepper::DirectMoveTerminalReason::LimitAborted ||
+      result.snapshot.terminalReason ==
+          Stepper::DirectMoveTerminalReason::ProfileFault ||
+      result.snapshot.terminalReason ==
+          Stepper::DirectMoveTerminalReason::StartRejected;
+  result.disposition =
+      OrchestratorCompletionPolicy::evaluateDirectMoveCompletion({
+          startAccepted,
+          result.waitCompleted,
+          controlInterrupted,
+          terminalCompleted,
+          terminalFailure,
+          result.endpointMatches,
+          result.targetsMatch,
+      });
+  if (result.disposition ==
+      OrchestratorCompletionPolicy::DirectMoveDisposition::MotionFailure) {
+    latchDirectAxisMotionFailure(
+        cmd, result, startAccepted, controlInterrupted, true);
+    return false;
+  }
+  if (result.disposition ==
+      OrchestratorCompletionPolicy::DirectMoveDisposition::Completed) {
+    _directMotionContextValid = false;
+    return true;
+  }
+  return false;
 }
 
 Orchestrator::AbsoluteXyExecutionResult Orchestrator::executeAbsoluteXy(
@@ -574,7 +773,7 @@ Orchestrator::AbsoluteXyExecutionResult Orchestrator::executeAbsoluteXy(
                CoordinatedXyExecutor::TerminalReason::PlannerFault) {
       reason = XY_MOTION_FAULT_PLANNER;
     }
-    latchXyMotionFailure(reason,
+    latchCoordinatedXyMotionFailure(reason,
                          result,
                          start,
                          actualTargetX,
@@ -622,7 +821,7 @@ bool Orchestrator::validateResumedAbsoluteXy(int32_t targetX,
     const bool startAccepted =
         snapshot.startStatus == CoordinatedStartStatus::Started ||
         snapshot.startStatus == CoordinatedStartStatus::Immediate;
-    latchXyMotionFailure(XY_MOTION_FAULT_RESUME_TERMINAL_MISMATCH,
+    latchCoordinatedXyMotionFailure(XY_MOTION_FAULT_RESUME_TERMINAL_MISMATCH,
                          result,
                          position,
                          actualTargetX,
@@ -637,7 +836,7 @@ bool Orchestrator::validateResumedAbsoluteXy(int32_t targetX,
   return completed;
 }
 
-void Orchestrator::latchXyMotionFailure(
+void Orchestrator::latchCoordinatedXyMotionFailure(
     XyMotionFaultReason reason,
     const AbsoluteXyExecutionResult& result,
     const GantryPosition& start,
@@ -677,9 +876,96 @@ void Orchestrator::latchXyMotionFailure(
   context.emittedXEdges = snapshot.emittedXEdges;
   context.emittedYEdges = snapshot.emittedYEdges;
   context.doneBits = snapshot.doneBits;
-  CrashLog_CaptureXyMotionContext(&context);
+  latchGantryMotionFailure(context);
+}
 
-  _xyMotionFailureLatched = true;
+void Orchestrator::latchDirectAxisMotionFailure(
+    const Command& cmd,
+    const DirectAxisExecutionResult& result,
+    bool startAccepted,
+    bool controlInterrupted,
+    bool resumeValidation) {
+  Stepper::Axis axis = _directMotionAxis;
+  if (cmd.cmd == CMD_MOVE_X || cmd.cmd == CMD_ABS_X) axis = Stepper::X_AXIS;
+  else if (cmd.cmd == CMD_MOVE_Y || cmd.cmd == CMD_ABS_Y) axis = Stepper::Y_AXIS;
+  else if (cmd.cmd == CMD_MOVE_Z || cmd.cmd == CMD_ABS_Z) axis = Stepper::Z_AXIS;
+
+  XyMotionFaultReason reason = XY_MOTION_FAULT_ENDPOINT_MISMATCH;
+  if (!startAccepted) {
+    reason = XY_MOTION_FAULT_START_REJECTED;
+  } else if (result.snapshot.terminalReason ==
+             Stepper::DirectMoveTerminalReason::LimitAborted) {
+    reason = axis == Stepper::X_AXIS
+        ? XY_MOTION_FAULT_X_LIMIT
+        : (axis == Stepper::Y_AXIS
+            ? XY_MOTION_FAULT_Y_LIMIT
+            : XY_MOTION_FAULT_Z_LIMIT);
+  } else if (result.snapshot.terminalReason ==
+             Stepper::DirectMoveTerminalReason::ProfileFault) {
+    reason = XY_MOTION_FAULT_PLANNER;
+  } else if (resumeValidation) {
+    reason = XY_MOTION_FAULT_RESUME_TERMINAL_MISMATCH;
+  }
+
+  XyMotionFaultContext context{};
+  XyMotionFaultContext_Init(&context);
+  context.valid = 1u;
+  context.reason = static_cast<uint8_t>(reason);
+  context.startStatus = static_cast<uint8_t>(result.startStatus);
+  context.executorState = static_cast<uint8_t>(result.snapshot.state);
+  switch (result.snapshot.terminalReason) {
+    case Stepper::DirectMoveTerminalReason::Completed:
+      context.terminalReason = 1u;
+      break;
+    case Stepper::DirectMoveTerminalReason::Canceled:
+      context.terminalReason = 2u;
+      break;
+    case Stepper::DirectMoveTerminalReason::LimitAborted:
+      context.terminalReason = axis == Stepper::X_AXIS
+          ? 3u : (axis == Stepper::Y_AXIS ? 4u : 6u);
+      break;
+    case Stepper::DirectMoveTerminalReason::ProfileFault:
+      context.terminalReason = 5u;
+      break;
+    default:
+      context.terminalReason = 0u;
+      break;
+  }
+  if (result.targetCanonical) context.flags |= XY_MOTION_FAULT_FLAG_TARGETS_CANONICAL;
+  if (startAccepted) context.flags |= XY_MOTION_FAULT_FLAG_START_ACCEPTED;
+  if (result.waitCompleted) context.flags |= XY_MOTION_FAULT_FLAG_WAIT_COMPLETED;
+  if (controlInterrupted) context.flags |= XY_MOTION_FAULT_FLAG_CONTROL_INTERRUPTED;
+  if (result.endpointMatches) context.flags |= XY_MOTION_FAULT_FLAG_ENDPOINT_MATCHES;
+  if (result.targetsMatch) context.flags |= XY_MOTION_FAULT_FLAG_TARGETS_MATCH;
+  if (result.snapshot.state == Stepper::DirectMoveState::Running ||
+      result.snapshot.state == Stepper::DirectMoveState::Paused) {
+    context.flags |= XY_MOTION_FAULT_FLAG_TIMER_OWNED;
+  }
+  if (resumeValidation) context.flags |= XY_MOTION_FAULT_FLAG_RESUME_VALIDATION;
+  context.reserved = static_cast<uint8_t>(cmd.cmd);
+  context.commandSeq32 = _currentCmdNum;
+  context.captureUptimeMs = HAL_GetTick();
+  context.startX = _directMotionContextValid
+      ? _directMotionStart : result.startPosition;
+  context.targetX = _directMotionContextValid
+      ? _directMotionTarget : result.targetPosition;
+  context.endX = result.endPosition;
+  context.startY = 0;
+  context.targetY = 0;
+  context.endY = 0;
+  context.requestedXEdges = _directMotionContextValid
+      ? _directMotionRequestedEdges : result.snapshot.requestedEdges;
+  context.emittedXEdges = result.snapshot.emittedEdges;
+  context.requestedYEdges = 0u;
+  context.emittedYEdges = 0u;
+  context.doneBits = xEventGroupGetBits(_doneEvents);
+  latchGantryMotionFailure(context);
+}
+
+void Orchestrator::latchGantryMotionFailure(
+    const XyMotionFaultContext& context) {
+  CrashLog_CaptureXyMotionContext(&context);
+  _gantryMotionFailureLatched = true;
   _paused = true;
   _pauseRequested = false;
   Gantry::instance()->cancelXYZMotors();
@@ -689,14 +975,16 @@ void Orchestrator::latchXyMotionFailure(
   OrchestratorCompletionPolicy::retireFailedAcceptedCommands(
       _lastAcceptedCmdNum, _currentCmdNum, _lastRetiredCmdNum);
   _hasInFlightCommand = false;
+  _directMotionContextValid = false;
   _pauseAfterSeq32 = 0u;
   _pauseWatermarkReached = false;
-  Logger::instance()->log("[XY] motion failure latched reason=%s\r\n",
+  Logger::instance()->log("[Gantry] motion failure latched reason=%s\r\n",
                           XyMotionFaultContext_ReasonName(context.reason));
 }
 
-void Orchestrator::clearXyMotionFailure() {
-  _xyMotionFailureLatched = false;
+void Orchestrator::clearGantryMotionFailure() {
+  _gantryMotionFailureLatched = false;
+  _directMotionContextValid = false;
 }
 
 void Orchestrator::pausePressureRegulators() {
@@ -1077,8 +1365,8 @@ void Orchestrator::_run() {
 			_resumeRequested = false;
 			continue;
 		}
-		if (_xyMotionFailureLatched) {
-			Logger::instance()->log("[XY] Resume ignored while motion failure is latched\r\n");
+		if (_gantryMotionFailureLatched) {
+			Logger::instance()->log("[Gantry] Resume ignored while motion failure is latched\r\n");
 			_resumeRequested = false;
 			continue;
 		}
@@ -1118,15 +1406,11 @@ void Orchestrator::_run() {
 		  switch (_lastPausedCmd.cmd) {
 			case CMD_MOVE_X:
 			case CMD_ABS_X:
-			  resumedCommandCompleted = waitForBit(BIT_STEPPER1_DONE);
-			  break;
 			case CMD_MOVE_Y:
 			case CMD_ABS_Y:
-			  resumedCommandCompleted = waitForBit(BIT_STEPPER2_DONE);
-			  break;
 			case CMD_MOVE_Z:
 			case CMD_ABS_Z:
-			  resumedCommandCompleted = waitForBit(BIT_STEPPER3_DONE);
+			  resumedCommandCompleted = validateResumedDirectAxis(_lastPausedCmd);
 			  break;
 			case CMD_ABS_XY:
 			  resumedCommandCompleted =
@@ -1204,7 +1488,7 @@ void Orchestrator::_run() {
 
         const bool clearSettled = homesSettled && printerSettled;
 		if (clearSettled) {
-		  clearXyMotionFailure();
+		  clearGantryMotionFailure();
 		}
         _paused = !clearSettled;
         _homeFailureLatched = !homesSettled;
@@ -1295,44 +1579,46 @@ void Orchestrator::executeCommand(const Command &cmd) {
           break;
         }
         case CMD_MOVE_X: {
-          // p1=direction, p2=steps, p3=freqHz
-          Stepper::stepperX()->move(cmd.p1, cmd.p2, cmd.p3,2000);
-          // wait for stepper ISR to signal BIT_STEPPER_DONE
-      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_STEPPER1_DONE));
+          const DirectAxisExecutionResult result = executeDirectAxis(
+              cmd, Stepper::stepperX(), BIT_STEPPER1_DONE);
+          commandCompleted = result.disposition ==
+              OrchestratorCompletionPolicy::DirectMoveDisposition::Completed;
           break;
         }
         case CMD_MOVE_Y: {
-          // p1=direction, p2=steps, p3=freqHz
-          Stepper::stepperY()->move(cmd.p1, cmd.p2, cmd.p3,2000);
-      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_STEPPER2_DONE));
+          const DirectAxisExecutionResult result = executeDirectAxis(
+              cmd, Stepper::stepperY(), BIT_STEPPER2_DONE);
+          commandCompleted = result.disposition ==
+              OrchestratorCompletionPolicy::DirectMoveDisposition::Completed;
           break;
         }
         case CMD_MOVE_Z: {
-          // p1=direction, p2=steps, p3=freqHz
-          Stepper::stepperZ()->move(cmd.p1, cmd.p2, cmd.p3,2000);
-      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_STEPPER3_DONE));
+          const DirectAxisExecutionResult result = executeDirectAxis(
+              cmd, Stepper::stepperZ(), BIT_STEPPER3_DONE);
+          commandCompleted = result.disposition ==
+              OrchestratorCompletionPolicy::DirectMoveDisposition::Completed;
           break;
         }
         case CMD_ABS_X: {
-          // p1=direction, p2=steps, p3=freqHz
-          Stepper::stepperX()->moveTo(cmd.p1, cmd.p2, cmd.p3,2000);
-          // wait for stepper ISR to signal BIT_STEPPER_DONE
-      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_STEPPER1_DONE));
+          const DirectAxisExecutionResult result = executeDirectAxis(
+              cmd, Stepper::stepperX(), BIT_STEPPER1_DONE);
+          commandCompleted = result.disposition ==
+              OrchestratorCompletionPolicy::DirectMoveDisposition::Completed;
           break;
         }
         case CMD_ABS_Y: {
-          // p1=direction, p2=steps, p3=freqHz
-          Stepper::stepperY()->moveTo(cmd.p1, cmd.p2, cmd.p3,2000);
-          // wait for stepper ISR to signal BIT_STEPPER_DONE
-      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_STEPPER2_DONE));
+          const DirectAxisExecutionResult result = executeDirectAxis(
+              cmd, Stepper::stepperY(), BIT_STEPPER2_DONE);
+          commandCompleted = result.disposition ==
+              OrchestratorCompletionPolicy::DirectMoveDisposition::Completed;
           break;
         }
         case CMD_ABS_Z: {
-          // p1=direction, p2=steps, p3=freqHz
           Logger::instance()->log("ABS-Z\r\n");
-          Stepper::stepperZ()->moveTo(cmd.p1, cmd.p2, cmd.p3,2000);
-          // wait for stepper ISR to signal BIT_STEPPER_DONE
-      	  commandCompleted = OrchestratorCompletionPolicy::didInterruptibleWaitComplete(waitForBit(BIT_STEPPER3_DONE));
+          const DirectAxisExecutionResult result = executeDirectAxis(
+              cmd, Stepper::stepperZ(), BIT_STEPPER3_DONE);
+          commandCompleted = result.disposition ==
+              OrchestratorCompletionPolicy::DirectMoveDisposition::Completed;
           break;
         }
 	        case CMD_SET_AXIS_MAXSPEED: {
@@ -2068,7 +2354,7 @@ void Orchestrator::performShutdown(uint8_t byeSeq8, uint32_t byeSeq32, bool have
 #endif//
 
   _paused = true;     // remain paused until next HELLO
-  clearXyMotionFailure();
+  clearGantryMotionFailure();
   _clearing = false;
 
   Logger::instance()->log("Shutdown done\r\n");

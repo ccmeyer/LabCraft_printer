@@ -3221,6 +3221,7 @@ XY_MOTION_REASON_NAMES = {
     4: "planner_fault",
     5: "endpoint_mismatch",
     6: "resume_terminal_mismatch",
+    7: "z_limit",
 }
 
 XY_MOTION_START_STATUS_NAMES = {
@@ -3253,6 +3254,26 @@ XY_MOTION_TERMINAL_REASON_NAMES = {
     3: "x_limit",
     4: "y_limit",
     5: "planner_fault",
+    6: "z_limit",
+}
+
+DIRECT_GANTRY_COMMAND_NAMES = {
+    0x02: ("RELATIVE_X", "X"),
+    0x03: ("RELATIVE_Y", "Y"),
+    0x04: ("RELATIVE_Z", "Z"),
+    0x0A: ("ABSOLUTE_X", "X"),
+    0x0B: ("ABSOLUTE_Y", "Y"),
+    0x0C: ("ABSOLUTE_Z", "Z"),
+}
+
+GANTRY_TERMINAL_COMMAND_TYPES = {
+    "RELATIVE_X",
+    "RELATIVE_Y",
+    "RELATIVE_Z",
+    "ABSOLUTE_X",
+    "ABSOLUTE_Y",
+    "ABSOLUTE_Z",
+    "ABSOLUTE_XY",
 }
 
 XY_MOTION_FLAG_NAMES = {
@@ -3536,7 +3557,7 @@ def _decode_xy_motion_context(raw):
         executor_state,
         terminal_reason,
         flags,
-        _reserved,
+        reserved,
         command_seq32,
         capture_uptime_ms,
         start_x,
@@ -3572,6 +3593,7 @@ def _decode_xy_motion_context(raw):
             terminal_reason, f"terminal_{terminal_reason}"
         ),
         "flags": flags,
+        "reserved": reserved,
         "flag_names": [name for bit, (_key, name) in XY_MOTION_FLAG_NAMES.items() if flags & bit],
         "command_seq32": command_seq32,
         "capture_uptime_ms": capture_uptime_ms,
@@ -3587,6 +3609,29 @@ def _decode_xy_motion_context(raw):
         "emitted_y_edges": emitted_y_edges,
         "done_bits": done_bits,
     }
+    direct_command = DIRECT_GANTRY_COMMAND_NAMES.get(reserved)
+    if direct_command is not None:
+        command_type, axis = direct_command
+        result.update(
+            {
+                "motion_kind": "direct_axis",
+                "command_type": command_type,
+                "axis": axis,
+                "axis_start": start_x,
+                "axis_target": target_x,
+                "axis_end": end_x,
+                "requested_edges": requested_x_edges,
+                "emitted_edges": emitted_x_edges,
+            }
+        )
+    else:
+        result.update(
+            {
+                "motion_kind": "coordinated_xy",
+                "command_type": "ABSOLUTE_XY",
+                "axis": "XY",
+            }
+        )
     result.update(
         {
             key: bool(flags & bit)
@@ -3599,8 +3644,18 @@ def _decode_xy_motion_context(raw):
 def _xy_motion_context_summary(context):
     if not context:
         return ""
+    if context.get("motion_kind") == "direct_axis":
+        return (
+            " Gantry motion context: "
+            f"reason={context['reason_name']}, seq={context['command_seq32']}, "
+            f"command={context['command_type']}, axis={context['axis']}, "
+            f"state={context['executor_state_name']}/{context['terminal_reason_name']}, "
+            f"start={context['axis_start']}, target={context['axis_target']}, "
+            f"end={context['axis_end']}, "
+            f"edges={context['emitted_edges']}/{context['requested_edges']}."
+        )
     return (
-        " XY motion context: "
+        " Gantry motion context: "
         f"reason={context['reason_name']}, seq={context['command_seq32']}, "
         f"state={context['executor_state_name']}/{context['terminal_reason_name']}, "
         f"start=({context['start_x']},{context['start_y']}), "
@@ -6435,7 +6490,7 @@ class Machine(QObject):
         report = getattr(self, "_xy_motion_fault_report", None)
         if report:
             self._record_black_box_event(
-                "xy_motion_recovery_reset",
+                "gantry_motion_recovery_reset",
                 {
                     "reason": str(reason or "session_reset"),
                     "failed_command_number": report.get("failed_command_number"),
@@ -6501,7 +6556,10 @@ class Machine(QObject):
             source = "post_hello_latched_status"
         elif current == retired == accepted and retired > completed:
             failed_command = self._first_local_nonterminal_after(completed)
-            if failed_command is None or failed_command.command_type != "ABSOLUTE_XY":
+            if (
+                failed_command is None
+                or failed_command.command_type not in GANTRY_TERMINAL_COMMAND_TYPES
+            ):
                 return None
             source = "terminal_frontier"
         else:
@@ -6521,15 +6579,23 @@ class Machine(QObject):
         )
         if fault_key == getattr(self, "_xy_motion_fault_key", None):
             return None
+        failed_command_type = (
+            str(failed_command.command_type)
+            if failed_command is not None
+            else None
+        )
+        if failed_command_type == "ABSOLUTE_XY":
+            failed_axis = "XY"
+        elif failed_command_type and failed_command_type[-1:] in {"X", "Y", "Z"}:
+            failed_axis = failed_command_type[-1]
+        else:
+            failed_axis = None
         return {
             "fault_key": fault_key,
             "source": source,
             "failed_command_number": failed_seq32,
-            "failed_command_type": (
-                str(failed_command.command_type)
-                if failed_command is not None
-                else "ABSOLUTE_XY"
-            ),
+            "failed_command_type": failed_command_type,
+            "failed_axis": failed_axis,
             "frontiers": {
                 "current": current,
                 "completed": completed,
@@ -6546,34 +6612,40 @@ class Machine(QObject):
         self._set_xy_motion_recovery_state("clear_required")
         self._cancel_all_queue_ack_waits()
         self._cancel_pending_pause_after_requests()
-        self._clear_queue_gap_repair("xy_motion_failure")
+        self._clear_queue_gap_repair("gantry_motion_failure")
         try:
             self.stop_execution_timer()
         except Exception:
             pass
 
         payload = {
-            "fault_code": "xy_motion_terminal_failure",
+            "fault_code": "gantry_motion_terminal_failure",
             **candidate,
         }
-        self._record_black_box_event("xy_motion_failure", payload)
-        snapshot_result = self._write_black_box_snapshot("xy_motion_failure", payload)
+        self._record_black_box_event("gantry_motion_failure", payload)
+        snapshot_result = self._write_black_box_snapshot("gantry_motion_failure", payload)
+        failed_axis = candidate.get("failed_axis")
+        summary = (
+            f"{failed_axis} motion stopped before reaching its commanded endpoint."
+            if failed_axis
+            else "Gantry motion stopped before reaching its commanded endpoint."
+        )
         report = {
-            "reason": "xy_motion_failure",
-            "fault_code": "xy_motion_terminal_failure",
-            "summary": "XY motion stopped before reaching its commanded endpoint.",
+            "reason": "gantry_motion_failure",
+            "fault_code": "gantry_motion_terminal_failure",
+            "summary": summary,
             **candidate,
             "requested_stop": False,
             "port": getattr(self, "port", None),
             "requires_clear": True,
             "requires_homing": True,
             "requires_reset": False,
-            "black_box_reason": "xy_motion_failure",
+            "black_box_reason": "gantry_motion_failure",
             "black_box_log_path": snapshot_result.get("path"),
             "black_box_log_error": snapshot_result.get("error"),
         }
         self._xy_motion_fault_report = dict(report)
-        self._record_black_box_event("xy_motion_failure_reported", report)
+        self._record_black_box_event("gantry_motion_failure_reported", report)
         self.xy_motion_faulted.emit(dict(report))
         return report
 

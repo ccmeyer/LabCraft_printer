@@ -203,6 +203,21 @@ public:
     bool refuelHoldAcquired = false;
   };
 
+  struct DirectAxisExecutionResult {
+    Stepper::DirectMoveStartStatus startStatus =
+        Stepper::DirectMoveStartStatus::Unavailable;
+    Stepper::DirectMoveSnapshot snapshot{};
+    OrchestratorCompletionPolicy::DirectMoveDisposition disposition =
+        OrchestratorCompletionPolicy::DirectMoveDisposition::MotionFailure;
+    int32_t startPosition = 0;
+    int32_t targetPosition = 0;
+    int32_t endPosition = 0;
+    bool targetCanonical = false;
+    bool waitCompleted = false;
+    bool endpointMatches = false;
+    bool targetsMatch = false;
+  };
+
   Orchestrator();
 
   static Orchestrator* instance();
@@ -302,7 +317,12 @@ public:
   bool _interruptedCommandHome = false;
   bool _restartingInterruptedHome = false;
   bool _homeFailureLatched = false;
-  volatile bool _xyMotionFailureLatched = false;
+  volatile bool _gantryMotionFailureLatched = false;
+  bool _directMotionContextValid = false;
+  Stepper::Axis _directMotionAxis = Stepper::X_AXIS;
+  int32_t _directMotionStart = 0;
+  int32_t _directMotionTarget = 0;
+  uint32_t _directMotionRequestedEdges = 0u;
   HomeInterruptionPolicy::Lifecycle _homeLifecycle{};
   RegulatorPausePolicy::Snapshot _regulatorPauseSnapshot{};
 
@@ -439,19 +459,31 @@ private:
                                                uint32_t feedHz,
                                                bool latchFailure,
                                                uint32_t diagnosticTimeoutMs = 0u);
+  DirectAxisExecutionResult executeDirectAxis(const Command& cmd,
+                                              Stepper* stepper,
+                                              EventBits_t doneBit,
+                                              bool latchFailure = true);
+  bool validateResumedDirectAxis(const Command& cmd);
   bool validateResumedAbsoluteXy(int32_t targetX, int32_t targetY);
-  void latchXyMotionFailure(XyMotionFaultReason reason,
-                            const AbsoluteXyExecutionResult& result,
-                            const GantryPosition& start,
-                            int32_t targetX,
-                            int32_t targetY,
-                            const GantryPosition& end,
-                            const CoordinatedXySnapshot& snapshot,
-                            bool targetsCanonical,
-                            bool startAccepted,
-                            bool controlInterrupted,
-                            bool resumeValidation = false);
-  void clearXyMotionFailure();
+  void latchCoordinatedXyMotionFailure(
+      XyMotionFaultReason reason,
+      const AbsoluteXyExecutionResult& result,
+      const GantryPosition& start,
+      int32_t targetX,
+      int32_t targetY,
+      const GantryPosition& end,
+      const CoordinatedXySnapshot& snapshot,
+      bool targetsCanonical,
+      bool startAccepted,
+      bool controlInterrupted,
+      bool resumeValidation = false);
+  void latchDirectAxisMotionFailure(const Command& cmd,
+                                    const DirectAxisExecutionResult& result,
+                                    bool startAccepted,
+                                    bool controlInterrupted,
+                                    bool resumeValidation = false);
+  void latchGantryMotionFailure(const XyMotionFaultContext& context);
+  void clearGantryMotionFailure();
 
   QueueHandle_t          _cmdQueue;
   QueueHandle_t          _ackQueue;

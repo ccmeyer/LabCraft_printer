@@ -2455,13 +2455,13 @@ class Controller(QObject):
     def handle_xy_motion_fault(self, report: dict):
         report = dict(report or {})
         if getattr(self, "_seq_state", "idle") == "running":
-            self._abort_sequence("XY motion stopped before the sequence completed.")
+            self._abort_sequence("Gantry motion stopped before the sequence completed.")
 
         manager = self._stream_capture_manager()
         invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
         if callable(invalidate):
             invalidate(
-                "XY motion failure invalidated the reusable mass baseline.",
+                "Gantry motion failure invalidated the reusable mass baseline.",
                 transport_uncertain=True,
             )
 
@@ -2472,9 +2472,9 @@ class Controller(QObject):
         self.expected_location = None
         self._interrupt_array_after_transport_fault(
             report,
-            reason="xy_motion_failure",
+            reason="gantry_motion_failure",
         )
-        self._emit_machine_workflow_interrupted("xy_motion_failure")
+        self._emit_machine_workflow_interrupted("gantry_motion_failure")
         self.xy_motion_recovery_requested.emit(report)
 
     def _append_reset_report_log(self, report: dict) -> str:
@@ -4524,14 +4524,16 @@ class Controller(QObject):
                 "remaining_wells_for_loaded_stock": has_remaining,
             }
         )
+        gantry_motion_failure = reason in {
+            "gantry_motion_failure",
+            "xy_motion_failure",  # Legacy compatibility.
+        }
         event_suffix = (
-            "xy_motion_failure"
-            if reason == "xy_motion_failure"
-            else "transport_fault"
+            "gantry_motion_failure" if gantry_motion_failure else "transport_fault"
         )
         event_message = (
-            "Print array interrupted by XY motion failure"
-            if reason == "xy_motion_failure"
+            "Print array interrupted by gantry motion failure"
+            if gantry_motion_failure
             else "Print array interrupted by command transport fault"
         )
         self._record_print_array_audit_event(

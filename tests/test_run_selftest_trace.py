@@ -1865,6 +1865,27 @@ def test_selftest_reset_decoder_decodes_optional_xy_motion_context():
     assert mod.decode_xy_motion_context(_xy_motion_context_payload(valid=0)) is None
 
 
+def test_selftest_reset_decoder_decodes_direct_z_motion_context():
+    mod = _load_run_selftest()
+    payload = struct.pack(
+        "<8BII6i5I",
+        1, 1, 7, 0, 6, 6, 0x06, 0x0C,
+        88, 654321, 1000, 0, 5000, 0, 2400, 0,
+        4000, 0, 1400, 0, 1 << 3,
+    )
+
+    context = mod.decode_xy_motion_context(payload)
+
+    assert context["reason_name"] == "z_limit"
+    assert context["terminal_reason_name"] == "z_limit"
+    assert context["motion_kind"] == "direct_axis"
+    assert context["command_type"] == "ABSOLUTE_Z"
+    assert context["axis"] == "Z"
+    assert context["axis_start"] == 1000
+    assert context["axis_target"] == 5000
+    assert context["axis_end"] == 2400
+
+
 def test_startup_reset_report_trailing_hello_ack_in_same_read_is_retained(
     monkeypatch, tmp_path, capsys
 ):

@@ -559,7 +559,7 @@ def test_serial_reader_decodes_xy_motion_context_and_adds_summary(qapp):
     assert context["end_x"] == 300
     assert context["emitted_x_edges"] == 200
     assert context["requested_x_edges"] == 400
-    assert "XY motion context: reason=x_limit, seq=123" in report["summary"]
+    assert "Gantry motion context: reason=x_limit, seq=123" in report["summary"]
     assert "end=(300,400)" in report["summary"]
 
 
@@ -574,7 +574,32 @@ def test_serial_reader_ignores_malformed_or_unsupported_xy_motion_context(qapp):
         )
         assert report is not None
         assert report["xy_motion_context"] is None
-        assert "XY motion context:" not in report["summary"]
+        assert "Gantry motion context:" not in report["summary"]
+
+
+def test_serial_reader_decodes_direct_z_motion_context(qapp):
+    direct_context = struct.pack(
+        "<8BII6i5I",
+        1, 1, 7, 0, 6, 6, 0x06, mfr.CMD_MAP["ABSOLUTE_Z"],
+        88, 654321, 1000, 0, 5000, 0, 2400, 0,
+        4000, 0, 1400, 0, 1 << 3,
+    )
+    reset_payload = _reset_report_payload(3) + _tlv(
+        mfr.TAG_RESET_XY_MOTION_CONTEXT, direct_context
+    )
+
+    report = mfr.SerialReader._parse_reset_report(reset_payload)
+
+    context = report["xy_motion_context"]
+    assert context["reason_name"] == "z_limit"
+    assert context["terminal_reason_name"] == "z_limit"
+    assert context["motion_kind"] == "direct_axis"
+    assert context["command_type"] == "ABSOLUTE_Z"
+    assert context["axis"] == "Z"
+    assert context["axis_start"] == 1000
+    assert context["axis_target"] == 5000
+    assert context["axis_end"] == 2400
+    assert "command=ABSOLUTE_Z, axis=Z" in report["summary"]
 
 
 def test_serial_reader_accepts_older_reset_report_without_raw_flags(qapp):

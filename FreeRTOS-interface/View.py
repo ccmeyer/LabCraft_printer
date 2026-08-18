@@ -514,7 +514,7 @@ class AuditTimelineWindow(QtWidgets.QDialog):
 
 
 class XyMotionRecoveryDialog(QtWidgets.QDialog):
-    """Non-modal, state-driven recovery guide for a terminal XY failure."""
+    """Non-modal, state-driven recovery guide for a terminal gantry failure."""
 
     def __init__(self, main_window, controller):
         super().__init__(main_window)
@@ -524,7 +524,7 @@ class XyMotionRecoveryDialog(QtWidgets.QDialog):
         self._previous_state = None
         self._report = {}
 
-        self.setWindowTitle("XY Motion Stopped")
+        self.setWindowTitle("Gantry Motion Stopped")
         self.setModal(False)
         self.setWindowModality(QtCore.Qt.NonModal)
         self.setMinimumWidth(560)
@@ -563,15 +563,23 @@ class XyMotionRecoveryDialog(QtWidgets.QDialog):
     def update_report(self, report):
         self._report = dict(report or {})
         summary = self._report.get("summary") or (
-            "XY motion stopped before reaching its commanded endpoint."
+            "Gantry motion stopped before reaching its commanded endpoint."
         )
         self.summary_label.setText(str(summary))
 
         failed_seq32 = self._report.get("failed_command_number")
+        failed_command_type = self._report.get("failed_command_type")
+        failed_axis = self._report.get("failed_axis")
         if failed_seq32 is None:
-            command_detail = "A retained XY motion-failure latch was detected after reconnecting."
+            command_detail = (
+                "A retained gantry motion-failure latch was detected after reconnecting."
+            )
         else:
-            command_detail = f"Failed command: ABSOLUTE_XY sequence {failed_seq32}."
+            type_text = str(failed_command_type or "gantry motion")
+            axis_text = f" ({failed_axis} axis)" if failed_axis else ""
+            command_detail = (
+                f"Failed command: {type_text}{axis_text}, sequence {failed_seq32}."
+            )
         log_path = self._report.get("black_box_log_path")
         log_error = self._report.get("black_box_log_error")
         if log_path:
@@ -593,7 +601,7 @@ class XyMotionRecoveryDialog(QtWidgets.QDialog):
 
         if state == "clear_required":
             self.instruction_label.setText(
-                "Keep clear of the gantry. Inspect the X/Y travel and limit switches, release any "
+                "Keep clear of the gantry. Inspect the X/Y/Z travel and limit switches, release any "
                 "unexpectedly asserted switch, then confirm the inspection below."
             )
             self.primary_button.setText("I Checked the Machine — Clear Queue")
@@ -722,7 +730,7 @@ class MainWindow(QMainWindow):
             self._on_xy_motion_recovery_state_changed(recovery_getter())
 
     def _init_xy_motion_recovery_ui(self):
-        toolbar = QtWidgets.QToolBar("XY Motion Recovery", self)
+        toolbar = QtWidgets.QToolBar("Gantry Motion Recovery", self)
         toolbar.setObjectName("xyMotionRecoveryBanner")
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
@@ -734,7 +742,7 @@ class MainWindow(QMainWindow):
             "QLabel { color: white; font-weight: 700; font-size: 14px; padding: 4px 12px; }"
         )
 
-        self.xy_motion_recovery_banner_label = QtWidgets.QLabel("XY Recovery Required", toolbar)
+        self.xy_motion_recovery_banner_label = QtWidgets.QLabel("Motion Recovery Required", toolbar)
         toolbar.addWidget(self.xy_motion_recovery_banner_label)
         spacer = QtWidgets.QWidget(toolbar)
         spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
@@ -748,11 +756,11 @@ class MainWindow(QMainWindow):
 
     def _xy_recovery_banner_text(self, state):
         return {
-            "clear_required": "XY Recovery Required — inspect the machine and Clear Queue",
-            "clear_pending": "XY Recovery — waiting for Clear Queue confirmation",
-            "home_required": "XY Recovery Required — Home Machine",
-            "home_in_progress": "XY Recovery — full-machine homing in progress",
-        }.get(str(state or "idle"), "XY Recovery Required")
+            "clear_required": "Motion Recovery Required — inspect the machine and Clear Queue",
+            "clear_pending": "Motion Recovery — waiting for Clear Queue confirmation",
+            "home_required": "Motion Recovery Required — Home Machine",
+            "home_in_progress": "Motion Recovery — full-machine homing in progress",
+        }.get(str(state or "idle"), "Motion Recovery Required")
 
     @Slot(object)
     def show_xy_motion_recovery(self, report=None):
@@ -3517,8 +3525,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         recovery_state = self._xy_motion_recovery_state()
         if recovery_state in {"clear_required", "clear_pending"}:
             return (
-                "XY Recovery Required",
-                "XY motion stopped. Use Clear Queue, wait for confirmation, then run a full Home.",
+                "Motion Recovery Required",
+                "Gantry motion stopped. Use Clear Queue, wait for confirmation, then run a full Home.",
             )
         if recovery_state in {"home_required", "home_in_progress"}:
             return (

@@ -89,6 +89,67 @@ def test_xy_fault_terminalizes_accepted_and_unsent_work_before_one_drain(
 
 
 @pytest.mark.parametrize(
+    "command_type,expected_axis",
+    [
+        ("RELATIVE_X", "X"),
+        ("RELATIVE_Y", "Y"),
+        ("RELATIVE_Z", "Z"),
+        ("ABSOLUTE_X", "X"),
+        ("ABSOLUTE_Y", "Y"),
+        ("ABSOLUTE_Z", "Z"),
+        ("ABSOLUTE_XY", "XY"),
+    ],
+)
+def test_terminal_detector_covers_every_supported_gantry_motion(
+    qapp, test_profile, tmp_path, command_type, expected_axis
+):
+    machine, commands, callbacks = _machine_with_xy_window(
+        test_profile, tmp_path, first_type=command_type
+    )
+    reports = []
+    machine.xy_motion_faulted.connect(reports.append)
+
+    machine.update_status(_terminal_fault_status(command_type=command_type))
+
+    assert len(reports) == 1
+    assert reports[0]["fault_code"] == "gantry_motion_terminal_failure"
+    assert reports[0]["failed_command_type"] == command_type
+    assert reports[0]["failed_axis"] == expected_axis
+    assert reports[0]["requires_reset"] is False
+    assert [command.status for command in commands] == ["Canceled"] * 3
+    assert callbacks == []
+
+
+def test_failed_safe_z_terminalizes_following_xy_before_its_handler_runs(
+    qapp, test_profile, tmp_path
+):
+    machine = mfr.Machine(
+        SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path
+    )
+    machine._transport_ready = True
+    machine._tx_paused = False
+    machine._write_frame = Mock()
+    machine.command_queue.command_number = 40
+    callbacks = []
+    safe_z = machine.command_queue.add_command(
+        "ABSOLUTE_Z", 1, 5000, 30000, handler=lambda: callbacks.append("z")
+    )
+    camera_xy = machine.command_queue.add_command(
+        "ABSOLUTE_XY", 1000, 2000, 30000, handler=lambda: callbacks.append("xy")
+    )
+    safe_z.mark_as_accepted()
+    safe_z.mark_as_executing()
+    camera_xy.mark_as_accepted()
+
+    machine.update_status(_terminal_fault_status(command_type="ABSOLUTE_Z"))
+
+    assert safe_z.status == "Canceled"
+    assert camera_xy.status == "Canceled"
+    assert callbacks == []
+    assert machine.get_xy_motion_recovery_state() == "clear_required"
+
+
+@pytest.mark.parametrize(
     "overrides,first_type",
     [
         ({"Transport_paused": False}, "ABSOLUTE_XY"),

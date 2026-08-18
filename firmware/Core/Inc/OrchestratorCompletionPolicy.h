@@ -10,7 +10,23 @@ enum class AbsXyDisposition : uint8_t {
     MotionFailure = 2u,
 };
 
+enum class DirectMoveDisposition : uint8_t {
+    Completed = 0u,
+    Interrupted = 1u,
+    MotionFailure = 2u,
+};
+
 struct AbsXyCompletionInput {
+    bool startAccepted = false;
+    bool waitCompleted = false;
+    bool controlInterrupted = false;
+    bool terminalCompleted = false;
+    bool terminalFailure = false;
+    bool endpointMatches = false;
+    bool targetsMatch = false;
+};
+
+struct DirectMoveCompletionInput {
     bool startAccepted = false;
     bool waitCompleted = false;
     bool controlInterrupted = false;
@@ -24,6 +40,8 @@ bool didInterruptibleWaitComplete(bool waitCompleted);
 bool didPauseAwareDelayComplete(bool delayCompleted, uint32_t remainingTicks);
 bool shouldHoldRegulatorsForAbsXy(int32_t dx, int32_t dy, uint32_t thresholdSteps, bool printerBusy);
 AbsXyDisposition evaluateAbsXyCompletion(const AbsXyCompletionInput& input);
+DirectMoveDisposition evaluateDirectMoveCompletion(
+    const DirectMoveCompletionInput& input);
 void retireCurrentCommand(uint32_t currentCmdNum, uint32_t& lastExecutedCmdNum, uint32_t& lastRetiredCmdNum);
 void retireFailedAcceptedCommands(uint32_t lastAcceptedCmdNum,
                                   uint32_t& currentCmdNum,

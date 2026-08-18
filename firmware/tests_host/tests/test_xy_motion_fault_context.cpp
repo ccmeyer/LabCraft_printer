@@ -20,6 +20,7 @@ TEST(XyMotionFaultContext, ReasonWireValuesAndNamesRemainStable)
     STRCMP_EQUAL("endpoint_mismatch", XyMotionFaultContext_ReasonName(XY_MOTION_FAULT_ENDPOINT_MISMATCH));
     STRCMP_EQUAL("resume_terminal_mismatch",
                  XyMotionFaultContext_ReasonName(XY_MOTION_FAULT_RESUME_TERMINAL_MISMATCH));
+    STRCMP_EQUAL("z_limit", XyMotionFaultContext_ReasonName(XY_MOTION_FAULT_Z_LIMIT));
     STRCMP_EQUAL("unknown", XyMotionFaultContext_ReasonName(0xFFu));
 }
 

@@ -13,8 +13,10 @@ def test_recovery_dialog_guides_clear_retry_home_and_completion(qapp):
     dialog = XyMotionRecoveryDialog(None, controller)
     dialog.update_report(
         {
-            "summary": "XY motion stopped.",
+            "summary": "Z motion stopped.",
             "failed_command_number": 77,
+            "failed_command_type": "ABSOLUTE_Z",
+            "failed_axis": "Z",
             "black_box_log_path": "logs/machine_black_box/xy.json",
         }
     )
@@ -25,6 +27,8 @@ def test_recovery_dialog_guides_clear_retry_home_and_completion(qapp):
     assert dialog.primary_button.isEnabled()
     assert "did not reset" in dialog.detail_label.text()
     assert "sequence 77" in dialog.detail_label.text()
+    assert "ABSOLUTE_Z (Z axis)" in dialog.detail_label.text()
+    assert dialog.windowTitle() == "Gantry Motion Stopped"
 
     dialog.primary_button.click()
     controller.clear_xy_motion_recovery.assert_called_once_with()

@@ -1479,8 +1479,8 @@ def test_xy_recovery_disables_calibration_and_rejects_stale_click(qapp):
     controller.move_to_location.assert_not_called()
     assert popups == [
         (
-            "XY Recovery Required",
-            "XY motion stopped. Use Clear Queue, wait for confirmation, then run a full Home.",
+            "Motion Recovery Required",
+            "Gantry motion stopped. Use Clear Queue, wait for confirmation, then run a full Home.",
         )
     ]
 
