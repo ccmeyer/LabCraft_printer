@@ -4343,6 +4343,40 @@ class CalibrationManager(QObject):
         except Exception:
             return None
 
+    def record_calibration_mode_override(
+        self,
+        *,
+        declared_head_mode,
+        requested_mode,
+        profile_id=None,
+        profile_name=None,
+        confirmed_print_pulse_width_us=None,
+    ):
+        """Best-effort audit record for an explicitly authorized cross-mode start."""
+        declared_mode = str(declared_head_mode or "").strip().lower()
+        target_mode = str(requested_mode or "").strip().lower()
+        try:
+            confirmed_pulse_width = int(confirmed_print_pulse_width_us)
+        except (TypeError, ValueError):
+            confirmed_pulse_width = None
+        profile_label = str(profile_name or profile_id or "selected profile")
+        summary = (
+            f"Authorized {target_mode or 'requested-mode'} calibration for a head "
+            f"declared as {declared_mode or 'unknown'} using {profile_label}."
+        )
+        return self._record_calibration_audit_event(
+            "calibration_mode_override_authorized",
+            summary,
+            details={
+                "declared_head_mode": declared_mode or None,
+                "requested_mode": target_mode or None,
+                "profile_id": str(profile_id or "") or None,
+                "profile_name": str(profile_name or "") or None,
+                "confirmed_print_pulse_width_us": confirmed_pulse_width,
+            },
+            level="warning",
+        )
+
     # ------------- Session / File management -------------
 
     def begin_session(self, calibration_file_path: str, notes: str = None):

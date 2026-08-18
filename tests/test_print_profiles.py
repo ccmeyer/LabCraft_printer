@@ -226,6 +226,7 @@ def test_calibration_mode_preflight_flags_head_mode_mismatch():
     assert result["code"] == "head_mode_mismatch"
     assert result["requested_mode"] == "droplet"
     assert result["head_mode"] == "stream"
+    assert result["matching_profiles"] == [_PREFLIGHT_PROFILES[0]]
 
 
 def test_calibration_mode_preflight_fails_closed_without_loaded_head():

@@ -285,11 +285,12 @@ class CalibrationModePreflightDialog(QtWidgets.QDialog):
         details.setWordWrap(True)
         layout.addWidget(details)
 
-        pulse_mismatch_codes = {
+        profile_selection_codes = {
+            "head_mode_mismatch",
             "pulse_width_mismatch",
             "synthetic_pulse_width_out_of_range",
         }
-        if code in pulse_mismatch_codes and profiles:
+        if code in profile_selection_codes and profiles:
             self._profile_combo = QtWidgets.QComboBox()
             for profile in profiles:
                 profile_data = dict(profile)
@@ -316,9 +317,19 @@ class CalibrationModePreflightDialog(QtWidgets.QDialog):
             button_row.addWidget(button)
             return button
 
-        if code == "head_mode_mismatch":
+        if code == "head_mode_mismatch" and profiles:
+            requested_label = self._mode_label(requested_mode)
+            add_button(
+                f"Apply Selected {requested_label} Profile and Calibrate in {requested_label} Mode",
+                self.ACTION_APPLY_PROFILE,
+                default=True,
+            )
+            add_button(f"Switch to {self._mode_label(head_mode)} Tab", self.ACTION_SWITCH_TAB)
+            add_button("Continue with Current Settings", self.ACTION_CONTINUE_ANYWAY)
+            add_button("Cancel", self.ACTION_CANCEL)
+        elif code == "head_mode_mismatch":
             add_button(f"Switch to {self._mode_label(head_mode)} Tab", self.ACTION_SWITCH_TAB, default=True)
-            add_button("Continue Anyway", self.ACTION_CONTINUE_ANYWAY)
+            add_button("Continue with Current Settings", self.ACTION_CONTINUE_ANYWAY)
             add_button("Cancel", self.ACTION_CANCEL)
         elif code == "pulse_width_mismatch" and profiles:
             add_button("Apply Selected Profile and Continue", self.ACTION_APPLY_PROFILE, default=True)
@@ -12230,6 +12241,47 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 pass
         print(warning)
 
+    def _emit_confirmed_calibration_mode_override(self, pending, preflight):
+        selected_profile = dict(pending.get("selected_profile") or {})
+        requested_mode = str(pending.get("requested_mode") or "").strip().lower()
+        declared_mode = str(
+            pending.get("authorized_head_mode") or preflight.get("head_mode") or ""
+        ).strip().lower()
+        confirmed_pulse_width = preflight.get("current_print_pulse_width_us")
+        profile_id = selected_profile.get("id")
+        profile_name = selected_profile.get("name")
+        mode_label = self._printing_mode_label(requested_mode)
+        head_label = self._printing_mode_label(declared_mode)
+        profile_label = str(profile_name or profile_id or "selected profile")
+        pulse_label = self._calibration_mode_confirmation_value(
+            confirmed_pulse_width
+        )
+        warning = (
+            f"Continuing {mode_label} calibration for a head declared {head_label} "
+            f"after applying {profile_label} and confirming {pulse_label} us print "
+            "pulse width."
+        )
+        manager = getattr(getattr(self, "model", None), "calibration_manager", None)
+        recorder = getattr(manager, "record_calibration_mode_override", None)
+        if callable(recorder):
+            try:
+                recorder(
+                    declared_head_mode=declared_mode,
+                    requested_mode=requested_mode,
+                    profile_id=profile_id,
+                    profile_name=profile_name,
+                    confirmed_print_pulse_width_us=confirmed_pulse_width,
+                )
+            except Exception:
+                pass
+        signal = getattr(manager, "calibrationStageChanged", None)
+        if signal is not None:
+            try:
+                signal.emit(warning, "orange")
+            except Exception:
+                pass
+        print(warning)
+
     def _show_calibration_mode_preflight_error(self, preflight):
         message = str(
             (preflight or {}).get("message")
@@ -12358,6 +12410,45 @@ class DropletImagingDialog(QtWidgets.QDialog):
         except Exception:
             return False
 
+    def _calibration_profile_matches_preflight(
+        self,
+        profile,
+        preflight,
+        requested_mode,
+    ):
+        if not isinstance(profile, dict):
+            return False, "No compatible print profile was selected."
+        requested_mode = self._normalize_printing_mode(requested_mode)
+        candidates = [
+            dict(candidate)
+            for candidate in list((preflight or {}).get("matching_profiles") or [])
+            if isinstance(candidate, dict)
+        ]
+        if not any(dict(profile) == candidate for candidate in candidates):
+            return False, "The selected print profile is no longer compatible."
+        profile_mode = str(profile.get("mode") or "").strip().lower()
+        if profile_mode != requested_mode:
+            return (
+                False,
+                "The selected print profile does not match the requested calibration mode.",
+            )
+        try:
+            profile_pulse_width = int(profile.get("print_pulse_width"))
+            expected_pulse_width = int(
+                (preflight or {}).get("expected_print_pulse_width_us")
+            )
+        except (TypeError, ValueError):
+            return (
+                False,
+                "The selected print profile pulse width could not be verified.",
+            )
+        if profile_pulse_width != expected_pulse_width:
+            return (
+                False,
+                "The selected print profile has an unexpected print pulse width.",
+            )
+        return True, ""
+
     def _cancel_calibration_mode_setting_confirmation(self, *, reset_action=False):
         pending = self._pending_calibration_mode_confirmation
         self._pending_calibration_mode_confirmation = None
@@ -12376,6 +12467,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         start_callback,
         *,
         selected_profile=None,
+        authorized_head_mode=None,
+        authorized_head=None,
+        expected_print_pulse_width_us=None,
     ):
         self._cancel_calibration_mode_setting_confirmation(reset_action=True)
         generation = self._calibration_mode_confirmation_generation
@@ -12387,6 +12481,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "selected_profile": (
                 dict(selected_profile) if isinstance(selected_profile, dict) else None
             ),
+            "authorized_head_mode": (
+                str(authorized_head_mode or "").strip().lower() or None
+            ),
+            "authorized_head": authorized_head,
+            "expected_print_pulse_width_us": expected_print_pulse_width_us,
             "command_complete": False,
             "profile_pressure_synchronized": False,
         }
@@ -12395,17 +12494,118 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _calibration_mode_confirmation_preflight(self, pending):
         requested_mode = pending.get("requested_mode")
         preflight = self._get_calibration_mode_preflight(requested_mode)
-        if self._machine_is_connected_for_printing_controls():
+        if not self._machine_is_connected_for_printing_controls():
+            return {
+                **dict(preflight or {}),
+                "ok": False,
+                "code": "machine_disconnected",
+                "requested_mode": requested_mode,
+                "message": (
+                    "The machine disconnected before the calibration print settings "
+                    "could be confirmed."
+                ),
+            }
+
+        authorized_head = pending.get("authorized_head")
+        fresh_head = self._get_loaded_printer_head()
+        if (
+            authorized_head is not None
+            and fresh_head is not None
+            and fresh_head is not authorized_head
+        ):
+            return {
+                **dict(preflight or {}),
+                "ok": False,
+                "code": "printer_head_changed",
+                "message": (
+                    "The loaded printer head changed while calibration settings were "
+                    "being confirmed. Review the settings and try again."
+                ),
+            }
+
+        selected_profile = pending.get("selected_profile")
+        if isinstance(selected_profile, dict):
+            profile_ok, profile_error = self._calibration_profile_matches_preflight(
+                selected_profile,
+                preflight,
+                requested_mode,
+            )
+            if not profile_ok:
+                return {
+                    **dict(preflight or {}),
+                    "ok": False,
+                    "code": "profile_no_longer_compatible",
+                    "message": profile_error,
+                }
+
+        if bool(preflight.get("ok")):
             return preflight
+
+        authorized_head_mode = str(
+            pending.get("authorized_head_mode") or ""
+        ).strip().lower()
+        code = str(preflight.get("code") or "")
+        fresh_requested_mode = str(
+            preflight.get("requested_mode") or ""
+        ).strip().lower()
+        fresh_head_mode = str(preflight.get("head_mode") or "").strip().lower()
+        if not (
+            authorized_head_mode
+            and code == "head_mode_mismatch"
+            and fresh_requested_mode == str(requested_mode or "").strip().lower()
+            and fresh_head_mode == authorized_head_mode
+        ):
+            return preflight
+
+        try:
+            expected_pulse_width = int(
+                pending.get("expected_print_pulse_width_us")
+            )
+            fresh_expected_pulse_width = int(
+                preflight.get("expected_print_pulse_width_us")
+            )
+        except (TypeError, ValueError):
+            return {
+                **dict(preflight),
+                "ok": False,
+                "code": "pulse_width_unavailable",
+                "message": "Expected print pulse width could not be confirmed.",
+            }
+        if fresh_expected_pulse_width != expected_pulse_width:
+            return {
+                **dict(preflight),
+                "ok": False,
+                "code": "preflight_changed",
+                "message": "The expected calibration print pulse width changed during confirmation.",
+            }
+        try:
+            current_pulse_width = int(
+                preflight.get("current_print_pulse_width_us")
+            )
+        except (TypeError, ValueError):
+            return {
+                **dict(preflight),
+                "ok": False,
+                "code": "pulse_width_unavailable",
+                "message": "Current print pulse width could not be confirmed.",
+            }
+        if current_pulse_width != expected_pulse_width:
+            return {
+                **dict(preflight),
+                "ok": False,
+                "code": "pulse_width_mismatch",
+                "message": (
+                    f"{self._printing_mode_label(requested_mode)} calibration expects "
+                    f"{expected_pulse_width} us print pulse width, but the machine "
+                    f"last reported {current_pulse_width} us."
+                ),
+            }
         return {
-            **dict(preflight or {}),
-            "ok": False,
-            "code": "machine_disconnected",
-            "requested_mode": requested_mode,
-            "message": (
-                "The machine disconnected before the calibration print settings "
-                "could be confirmed."
-            ),
+            **dict(preflight),
+            "ok": True,
+            "code": "authorized_head_mode_override",
+            "head_mode_override_used": True,
+            "message": "",
         }
 
     def _finish_calibration_mode_setting_correction(self, generation):
@@ -12450,7 +12650,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if bool(preflight.get("ok")):
             action_key = pending.get("action_key")
             start_callback = pending.get("start_callback")
+            override_used = bool(preflight.get("head_mode_override_used"))
+            completed_context = dict(pending)
             self._cancel_calibration_mode_setting_confirmation(reset_action=False)
+            if override_used:
+                self._emit_confirmed_calibration_mode_override(
+                    completed_context,
+                    preflight,
+                )
             return self._start_calibration_after_mode_preflight(
                 action_key,
                 start_callback,
@@ -12485,10 +12692,23 @@ class DropletImagingDialog(QtWidgets.QDialog):
     def _on_calibration_mode_confirmation_timeout(self):
         return self._try_finish_calibration_mode_setting_confirmation(final=True)
 
-    def _apply_calibration_mode_profile_then_start(self, profile, requested_mode, action_key, start_callback):
-        if not isinstance(profile, dict):
+    def _apply_calibration_mode_profile_then_start(
+        self,
+        profile,
+        requested_mode,
+        action_key,
+        start_callback,
+        *,
+        preflight,
+    ):
+        profile_ok, profile_error = self._calibration_profile_matches_preflight(
+            profile,
+            preflight,
+            requested_mode,
+        )
+        if not profile_ok:
             self._show_calibration_mode_preflight_error(
-                {"message": "No compatible print profile was selected."}
+                {"message": profile_error}
             )
             return False
 
@@ -12504,6 +12724,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
             action_key,
             start_callback,
             selected_profile=profile,
+            authorized_head_mode=(
+                preflight.get("head_mode")
+                if str(preflight.get("code") or "") == "head_mode_mismatch"
+                else None
+            ),
+            authorized_head=self._get_loaded_printer_head(),
+            expected_print_pulse_width_us=preflight.get(
+                "expected_print_pulse_width_us"
+            ),
         )
         self._set_calibration_action_text(action_key, "Applying...")
 
@@ -12599,6 +12828,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 requested_mode,
                 action_key,
                 start_callback,
+                preflight=preflight,
             )
         if action == CalibrationModePreflightDialog.ACTION_SET_PULSE_WIDTH:
             return self._set_calibration_mode_pulse_width_then_start(

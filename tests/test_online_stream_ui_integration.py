@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PySide6 import QtCore
+from PySide6 import QtCore, QtWidgets
 
 from tests.calibration_test_utils import SignalStub, ensure_calibration_import_stubs
 
@@ -105,6 +105,7 @@ class _CalibrationManagerStub:
         self.sequence_state = {"status": "idle"}
         self.droplet_sequence_state = {"status": "idle"}
         self.start_pressure = 0.80
+        self.mode_override_audit_calls = []
 
     def clear_calibration_memory_ui_recommendation_state(self):
         return None
@@ -158,6 +159,10 @@ class _CalibrationManagerStub:
 
     def get_start_pressure(self):
         return float(self.start_pressure)
+
+    def record_calibration_mode_override(self, **details):
+        self.mode_override_audit_calls.append(dict(details))
+        return {"event_type": "calibration_mode_override_authorized"}
 
 
 class _MachineModelStub:
@@ -624,6 +629,64 @@ def test_stream_preflight_ok_starts_without_dialog(monkeypatch, qapp):
     dialog.deleteLater()
 
 
+def test_head_mode_mismatch_dialog_offers_requested_mode_profile(qapp):
+    preflight = {
+        "ok": False,
+        "code": "head_mode_mismatch",
+        "requested_mode": "stream",
+        "head_mode": "droplet",
+        "current_print_pulse_width_us": 1300,
+        "expected_print_pulse_width_us": 2500,
+        "matching_profiles": [_PRINT_PROFILES[1]],
+        "message": "Head mode does not match.",
+    }
+    dialog = CalibrationModePreflightDialog(preflight=preflight)
+
+    assert dialog._profile_combo is not None
+    assert dialog._profile_combo.count() == 1
+    assert dialog._profile_combo.currentData() == _PRINT_PROFILES[1]
+    button_texts = {
+        button.text() for button in dialog.findChildren(QtWidgets.QPushButton)
+    }
+    assert (
+        "Apply Selected Stream Profile and Calibrate in Stream Mode"
+        in button_texts
+    )
+    assert "Switch to Droplet Tab" in button_texts
+    assert "Continue with Current Settings" in button_texts
+    assert "Cancel" in button_texts
+
+    dialog.deleteLater()
+
+
+def test_head_mode_mismatch_without_profiles_keeps_non_profile_choices(qapp):
+    dialog = CalibrationModePreflightDialog(
+        preflight={
+            "ok": False,
+            "code": "head_mode_mismatch",
+            "requested_mode": "stream",
+            "head_mode": "droplet",
+            "current_print_pulse_width_us": 1300,
+            "expected_print_pulse_width_us": 2500,
+            "matching_profiles": [],
+            "message": "Head mode does not match.",
+        }
+    )
+
+    assert dialog._profile_combo is None
+    button_texts = {
+        button.text() for button in dialog.findChildren(QtWidgets.QPushButton)
+    }
+    assert not any(text.startswith("Apply Selected") for text in button_texts)
+    assert button_texts == {
+        "Switch to Droplet Tab",
+        "Continue with Current Settings",
+        "Cancel",
+    }
+
+    dialog.deleteLater()
+
+
 def test_stream_preflight_applies_matching_profile_then_starts(monkeypatch, qapp):
     dialog, _manager, controller = _build_dialog(
         monkeypatch,
@@ -653,6 +716,312 @@ def test_stream_preflight_applies_matching_profile_then_starts(monkeypatch, qapp
     assert dialog.model.machine_model.get_print_pulse_width() == 2500
     assert controller.start_online_stream_calls == 1
     assert dialog.calibrate_online_stream_button.text() == "Stop Calibration"
+
+    dialog.deleteLater()
+
+
+def test_droplet_head_can_apply_stream_profile_and_start_after_confirmation(
+    monkeypatch,
+    qapp,
+):
+    dialog, manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="droplet",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+    dialog.calibration_tabs.setCurrentWidget(dialog.stream_tab)
+    pending = {}
+    errors = []
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: (
+            CalibrationModePreflightDialog.ACTION_APPLY_PROFILE,
+            preflight["matching_profiles"][0],
+        ),
+    )
+
+    def apply_profile_later(profile, callback=None):
+        controller.apply_print_profile_calls.append(dict(profile))
+        pending["callback"] = callback
+        return True
+
+    monkeypatch.setattr(controller, "apply_print_profile", apply_profile_later)
+    monkeypatch.setattr(
+        dialog,
+        "_show_calibration_mode_preflight_error",
+        lambda preflight: errors.append(dict(preflight)),
+    )
+
+    dialog.calibrate_all_stream_button.click()
+    qapp.processEvents()
+    assert dialog.calibrate_all_stream_button.text() == "Applying..."
+    assert controller.start_stream_calibration_sequence_calls == 0
+
+    pending["callback"]()
+    qapp.processEvents()
+    assert controller.start_stream_calibration_sequence_calls == 0
+    assert dialog.calibration_mode_confirmation_timer.isActive() is True
+    assert controller.start_pressure_values == [0.80]
+
+    dialog.model.machine_model.printing_parameters_updated.emit()
+    qapp.processEvents()
+    assert controller.start_stream_calibration_sequence_calls == 0
+    assert manager.mode_override_audit_calls == []
+
+    dialog.model.machine_model.print_pulse_width = 2500
+    dialog.model.machine_model.printing_parameters_updated.emit()
+    qapp.processEvents()
+
+    assert errors == []
+    assert controller.apply_print_profile_calls == [_PRINT_PROFILES[1]]
+    assert controller.start_stream_calibration_sequence_calls == 1
+    assert dialog._pending_calibration_mode_confirmation is None
+    assert dialog.calibration_mode_confirmation_timer.isActive() is False
+    assert manager.mode_override_audit_calls == [
+        {
+            "declared_head_mode": "droplet",
+            "requested_mode": "stream",
+            "profile_id": "water_stream",
+            "profile_name": "Water - stream",
+            "confirmed_print_pulse_width_us": 2500,
+        }
+    ]
+    assert len(manager.calibrationStageChanged.calls) == 1
+    warning = manager.calibrationStageChanged.calls[0][0][0]
+    assert "Stream calibration" in warning
+    assert "head declared Droplet" in warning
+    assert "Water - stream" in warning
+    assert "2500 us" in warning
+
+    dialog.model.machine_model.printing_parameters_updated.emit()
+    qapp.processEvents()
+    assert controller.start_stream_calibration_sequence_calls == 1
+    assert len(manager.mode_override_audit_calls) == 1
+    assert len(manager.calibrationStageChanged.calls) == 1
+
+    dialog.deleteLater()
+
+
+def test_stream_head_can_apply_droplet_profile_and_start(monkeypatch, qapp):
+    dialog, manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="stream",
+        print_pulse_width=2500,
+        preflight_enabled=True,
+    )
+    dialog.calibration_tabs.setCurrentWidget(dialog.droplet_tab)
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: (
+            CalibrationModePreflightDialog.ACTION_APPLY_PROFILE,
+            preflight["matching_profiles"][0],
+        ),
+    )
+
+    dialog.calibrate_all_button.click()
+    qapp.processEvents()
+    qapp.processEvents()
+
+    assert controller.apply_print_profile_calls == [_PRINT_PROFILES[0]]
+    assert dialog.model.machine_model.get_print_pulse_width() == 1300
+    assert controller.start_droplet_calibration_sequence_calls == 1
+    assert manager.mode_override_audit_calls == [
+        {
+            "declared_head_mode": "stream",
+            "requested_mode": "droplet",
+            "profile_id": "water_droplet",
+            "profile_name": "Water - droplet",
+            "confirmed_print_pulse_width_us": 1300,
+        }
+    ]
+
+    dialog.deleteLater()
+
+
+def test_head_mode_mismatch_rejects_profile_not_in_preflight(monkeypatch, qapp):
+    dialog, manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="droplet",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+    errors = []
+    incompatible_profile = {**_PRINT_PROFILES[1], "name": "Modified profile"}
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: (
+            CalibrationModePreflightDialog.ACTION_APPLY_PROFILE,
+            incompatible_profile,
+        ),
+    )
+    monkeypatch.setattr(
+        dialog,
+        "_show_calibration_mode_preflight_error",
+        lambda preflight: errors.append(dict(preflight)),
+    )
+
+    dialog.calibrate_all_stream_button.click()
+    qapp.processEvents()
+
+    assert controller.apply_print_profile_calls == []
+    assert controller.start_stream_calibration_sequence_calls == 0
+    assert manager.mode_override_audit_calls == []
+    assert errors and "no longer compatible" in errors[0]["message"]
+
+    dialog.deleteLater()
+
+
+def test_head_mode_change_to_requested_mode_needs_no_override_audit(
+    monkeypatch,
+    qapp,
+):
+    dialog, manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="droplet",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+    pending = {}
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: (
+            CalibrationModePreflightDialog.ACTION_APPLY_PROFILE,
+            preflight["matching_profiles"][0],
+        ),
+    )
+
+    def apply_profile_later(_profile, callback=None):
+        pending["callback"] = callback
+        return True
+
+    monkeypatch.setattr(controller, "apply_print_profile", apply_profile_later)
+
+    dialog.calibrate_all_stream_button.click()
+    pending["callback"]()
+    qapp.processEvents()
+    assert dialog.calibration_mode_confirmation_timer.isActive() is True
+
+    loaded_head = dialog.model.rack_model.get_gripper_printer_head()
+    loaded_head.get_printing_mode = lambda: "stream"
+    dialog.model.machine_model.print_pulse_width = 2500
+    dialog.model.machine_model.printing_parameters_updated.emit()
+    qapp.processEvents()
+
+    assert controller.start_stream_calibration_sequence_calls == 1
+    assert manager.mode_override_audit_calls == []
+    assert manager.calibrationStageChanged.calls == []
+
+    dialog.deleteLater()
+
+
+def test_printer_head_swap_during_cross_mode_confirmation_fails_closed(
+    monkeypatch,
+    qapp,
+):
+    dialog, manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="droplet",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+    pending = {}
+    errors = []
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: (
+            CalibrationModePreflightDialog.ACTION_APPLY_PROFILE,
+            preflight["matching_profiles"][0],
+        ),
+    )
+
+    def apply_profile_later(_profile, callback=None):
+        pending["callback"] = callback
+        return True
+
+    monkeypatch.setattr(controller, "apply_print_profile", apply_profile_later)
+    monkeypatch.setattr(
+        dialog,
+        "_show_calibration_mode_preflight_error",
+        lambda preflight: errors.append(dict(preflight)),
+    )
+
+    dialog.calibrate_all_stream_button.click()
+    pending["callback"]()
+    qapp.processEvents()
+    replacement_head = SimpleNamespace(get_printing_mode=lambda: "droplet")
+    dialog.model.rack_model.get_gripper_printer_head = lambda: replacement_head
+    assert (
+        dialog.model.rack_model.get_gripper_printer_head()
+        is not dialog._pending_calibration_mode_confirmation["authorized_head"]
+    )
+    dialog.model.machine_model.print_pulse_width = 2500
+    dialog.model.machine_model.printing_parameters_updated.emit()
+    qapp.processEvents()
+
+    assert controller.start_stream_calibration_sequence_calls == 0
+    assert dialog._pending_calibration_mode_confirmation is None
+    assert manager.mode_override_audit_calls == []
+    assert errors and errors[0]["code"] == "printer_head_changed"
+
+    dialog.deleteLater()
+
+
+def test_head_removed_during_cross_mode_confirmation_fails_closed(
+    monkeypatch,
+    qapp,
+):
+    dialog, manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="droplet",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+    pending = {}
+    errors = []
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: (
+            CalibrationModePreflightDialog.ACTION_APPLY_PROFILE,
+            preflight["matching_profiles"][0],
+        ),
+    )
+
+    def apply_profile_later(_profile, callback=None):
+        pending["callback"] = callback
+        return True
+
+    monkeypatch.setattr(controller, "apply_print_profile", apply_profile_later)
+    monkeypatch.setattr(
+        dialog,
+        "_show_calibration_mode_preflight_error",
+        lambda preflight: errors.append(dict(preflight)),
+    )
+
+    dialog.calibrate_all_stream_button.click()
+    pending["callback"]()
+    qapp.processEvents()
+    dialog.model.rack_model.get_gripper_printer_head = lambda: None
+    dialog.model.machine_model.printing_parameters_updated.emit()
+    qapp.processEvents()
+
+    assert controller.start_stream_calibration_sequence_calls == 0
+    assert dialog._pending_calibration_mode_confirmation is None
+    assert dialog.calibration_mode_confirmation_timer.isActive() is False
+    assert manager.mode_override_audit_calls == []
+    assert errors and errors[0]["code"] == "no_printer_head"
 
     dialog.deleteLater()
 

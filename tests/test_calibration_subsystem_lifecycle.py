@@ -164,6 +164,33 @@ def _manager_model(tmp_path):
     )
 
 
+def test_calibration_mode_override_uses_existing_experiment_audit(tmp_path):
+    manager = CalibrationManager(_manager_model(tmp_path))
+    manager._record_calibration_audit_event = Mock(return_value={"event_id": "audit-1"})
+
+    result = manager.record_calibration_mode_override(
+        declared_head_mode="droplet",
+        requested_mode="stream",
+        profile_id="water_stream",
+        profile_name="Water - stream",
+        confirmed_print_pulse_width_us=2500,
+    )
+
+    assert result == {"event_id": "audit-1"}
+    manager._record_calibration_audit_event.assert_called_once_with(
+        "calibration_mode_override_authorized",
+        "Authorized stream calibration for a head declared as droplet using Water - stream.",
+        details={
+            "declared_head_mode": "droplet",
+            "requested_mode": "stream",
+            "profile_id": "water_stream",
+            "profile_name": "Water - stream",
+            "confirmed_print_pulse_width_us": 2500,
+        },
+        level="warning",
+    )
+
+
 def test_experiment_transition_resets_volatile_state_but_preserves_policy(tmp_path):
     manager = CalibrationManager(_manager_model(tmp_path))
     first = tmp_path / "one" / "calibration.json"
