@@ -66,6 +66,11 @@ def test_registered_legacy_read_only_report(qapp, tmp_path):
         LEGACY_READ_ONLY_REQUIRED_SCREENSHOTS
     )
     editable_copy = workflow["editable_copy"]
+    assert editable_copy["direct_read_only_launch"] is True
+    assert editable_copy["saved_progress_prompt_absent"] is True
+    assert editable_copy["source_opened_read_only"] is True
+    assert editable_copy["copy_button_clicked"] is True
+    assert editable_copy["name_dialog_handled"] is True
     assert editable_copy["controls_editable"] is True
     assert editable_copy["progress_empty"] is True
     assert editable_copy["no_execution_plan"] is True

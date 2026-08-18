@@ -331,8 +331,9 @@ changing the report-v1 envelope:
   terminal diagnostic launch, generated/selected preview, unavailable Apply
   state, and immutable execution boundary; and
 - `metrics.persistence.values.same_session_completed_projection` records the
-  real Qt `Open Read-Only` and `View Completed Experiment` flow after the final
-  head is returned. It compares the before/after design, plan identity and
+  real Qt direct read-only editor launch and `View Completed Experiment` flow
+  after the final head is returned. It requires the saved-progress choice popup
+  to remain absent and compares the before/after design, plan identity and
   immutable history, progress, resume checkpoint, execution-calibration
   linkage, audit rows, full experiment-directory hashes, exact displayed
   assignments/targets/completed counts, idle Controller, and zero machine or

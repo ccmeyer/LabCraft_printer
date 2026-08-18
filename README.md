@@ -852,8 +852,9 @@ The `legacy_experiment_read_only_v1` scenario materializes a deterministic
 older experiment with one complete well and one partial well. It uses the real
 Experiment Editor to select **View Older Experiment**, verifies the exact saved
 targets and progress in the main window, validates the prefilled plate-reader
-analysis preview, and creates a fresh editable copy. The report records source
-hashes, disabled hardware controls, and zero machine/simulator dispatch.
+analysis preview, then opens the read-only editor directly and creates a fresh
+editable copy with its **Create Editable Copy...** button. The report records
+source hashes, disabled hardware controls, and zero machine/simulator dispatch.
 
 Run it offscreen or visibly:
 
@@ -942,7 +943,8 @@ printer-head calibration dialog and generates a synthetic diagnostic result.
 The report proves the preview and diagnostic controls remain available while
 Apply is unavailable and authoritative execution artifacts remain unchanged.
 It then returns the final printer head through the normal rack UI, opens the
-editor with **Open Read-Only**, and activates **View Completed Experiment**.
+editor directly in read-only mode, and activates **View Completed Experiment**.
+Any saved-progress choice popup is treated as a workflow failure.
 The `execution.same_session_completed_projection_exact` assertion proves the
 displayed assignments, targets, and completed progress match the authoritative
 plan while the Controller stays idle, no machine/simulator command is

@@ -1712,7 +1712,8 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
 
         state: dict[str, Any] = {
             "error": None,
-            "prompt": None,
+            "direct_launch": False,
+            "unexpected_launch_dialog": {},
             "editor": None,
             "inspection": None,
         }
@@ -1764,7 +1765,10 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
             status_text = str(dialog.status_lbl.text() or "")
             banner_text = str(dialog.lifecycle_banner.text() or "")
             initial_checks = {
-                "open_read_only_selected": bool(state["prompt"]),
+                "direct_read_only_launch": bool(state["direct_launch"]),
+                "saved_progress_prompt_absent": not bool(
+                    state["unexpected_launch_dialog"]
+                ),
                 "name_matches": dialog.exp_name_edit.text() == expected_name,
                 "plan_completed": str(plan.state.value) == "completed",
                 "live_runtime_assignments_present": any(
@@ -1929,7 +1933,13 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 "failed_checks": [
                     name for name, passed in checks.items() if not passed
                 ],
-                "prompt": dict(state["prompt"] or {}),
+                "launch": {
+                    "direct_read_only": bool(state["direct_launch"]),
+                    "saved_progress_prompt_absent": not bool(
+                        state["unexpected_launch_dialog"]
+                    ),
+                    "unexpected_dialog": dict(state["unexpected_launch_dialog"]),
+                },
                 "experiment_name": dialog.exp_name_edit.text(),
                 "plan_id": str(plan.plan_id),
                 "plan_revision": int(plan.plan_revision),
@@ -1966,31 +1976,15 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 if modal is None:
                     return
                 if isinstance(modal, QtWidgets.QMessageBox):
-                    if modal.windowTitle() != "Saved Progress Found":
-                        raise RuntimeError(
-                            "unexpected completed editor prompt: "
-                            f"{modal.windowTitle()!r}"
-                        )
-                    keep = next(
-                        (
-                            item
-                            for item in modal.buttons()
-                            if item.text().replace("&", "") == "Open Read-Only"
-                        ),
-                        None,
-                    )
-                    if keep is None:
-                        raise RuntimeError(
-                            "completed editor prompt has no Open Read-Only action"
-                        )
-                    state["prompt"] = {
+                    state["unexpected_launch_dialog"] = {
                         "title": str(modal.windowTitle() or ""),
                         "text": str(modal.text() or ""),
                         "informative_text": str(modal.informativeText() or ""),
-                        "selected_action": "Open Read-Only",
                     }
-                    self.click(keep)
-                    return
+                    raise RuntimeError(
+                        "unexpected dialog while directly opening completed editor: "
+                        f"{state['unexpected_launch_dialog']}"
+                    )
                 if not isinstance(modal, ExperimentDesignDialog):
                     raise RuntimeError(
                         "unexpected modal while opening same-session completed "
@@ -1999,12 +1993,16 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 if not modal.isVisible() or not modal.finish_btn.isVisible():
                     return
                 timer.stop()
+                state["direct_launch"] = True
                 state["editor"] = run_action(
                     "editor.open_via_ui",
                     lambda: {
                         "window_title": str(modal.windowTitle() or ""),
                         "dialog_visible": bool(modal.isVisible()),
-                        "open_read_only_selected": bool(state["prompt"]),
+                        "direct_read_only_launch": True,
+                        "saved_progress_prompt_absent": not bool(
+                            state["unexpected_launch_dialog"]
+                        ),
                     },
                     allowed_dialogs=(modal,),
                 )["evidence"]
@@ -2023,7 +2021,6 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
         timer.start()
         with _expected_dialogs(
             self.app,
-            ("Saved Progress Found", "QMessageBox"),
             ("Experiment Design (v2)", "ExperimentDesignDialog"),
         ):
             self.click(button)
@@ -2507,41 +2504,81 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
         if not button.isVisible() or not button.isEnabled():
             raise RuntimeError("Experiment Editor control is not visible and enabled")
         state: dict[str, Any] = {
-            "policy_clicked": False,
+            "editor_opened": False,
+            "source_opened_read_only": False,
+            "copy_button_clicked": False,
+            "copy_action_active": False,
             "name_handled": False,
             "error": None,
             "evidence": None,
         }
 
-        def drive_progress_and_name_dialogs() -> None:
+        def inspect_editable_copy(dialog) -> None:
+            if Path(self.context.experiment_model.experiment_dir_path).resolve() != destination:
+                raise RuntimeError("editable copy did not become the active design")
+            progress = json.loads(
+                (destination / "progress.json").read_text(encoding="utf-8")
+            )
+            controls_editable = (
+                dialog.exp_name_edit.isEnabled()
+                and not dialog.exp_name_edit.isReadOnly()
+                and dialog.run_btn.isEnabled()
+                and dialog.finish_btn.isEnabled()
+                and dialog.finish_btn.text() == "Finalize Experiment"
+            )
+            evidence = {
+                "source": str(directory),
+                "destination": str(destination),
+                "copy_name": str(dialog.exp_name_edit.text()),
+                "direct_read_only_launch": bool(state["editor_opened"]),
+                "saved_progress_prompt_absent": True,
+                "source_opened_read_only": bool(state["source_opened_read_only"]),
+                "copy_button_clicked": bool(state["copy_button_clicked"]),
+                "name_dialog_handled": bool(state["name_handled"]),
+                "controls_editable": controls_editable,
+                "legacy_state_cleared": not dialog.model.is_read_only_legacy_execution(),
+                "progress_empty": progress == {},
+                "no_execution_plan": not (
+                    destination / "execution_plan.json"
+                ).exists(),
+                "no_resume_checkpoint": not (
+                    destination / "execution_resume.json"
+                ).exists(),
+            }
+            capture_milestone(
+                self.context,
+                "legacy_editable_copy",
+                evidence=evidence,
+                widget=dialog,
+            )
+            state["evidence"] = evidence
+            dialog.reject()
+
+        def click_copy_and_inspect(dialog) -> None:
+            try:
+                self.click(dialog.duplicate_btn)
+                state["copy_action_active"] = False
+                if not state["name_handled"]:
+                    raise RuntimeError(
+                        "editable-copy name dialog was not completed"
+                    )
+                inspect_editable_copy(dialog)
+            except BaseException as exc:
+                state["copy_action_active"] = False
+                state["error"] = exc
+                if dialog.isVisible():
+                    dialog.reject()
+
+        def drive_editor_and_name_dialog() -> None:
             modal = self.app.activeModalWidget()
             if modal is None:
                 return
             try:
                 if isinstance(modal, QtWidgets.QMessageBox):
-                    if state["policy_clicked"]:
-                        return
-                    copy_button = next(
-                        (
-                            item
-                            for item in modal.buttons()
-                            if item.text() == "Create Editable Copy"
-                        ),
-                        None,
+                    raise RuntimeError(
+                        "unexpected prompt while directly opening the read-only editor: "
+                        f"{modal.windowTitle()!r}"
                     )
-                    if (
-                        modal.windowTitle() != "Saved Progress Found"
-                        or copy_button is None
-                    ):
-                        raise RuntimeError(
-                            "unexpected saved-progress prompt while creating copy"
-                        )
-                    state["policy_clicked"] = True
-                    QtTest.QTest.mouseClick(
-                        copy_button,
-                        QtCore.Qt.MouseButton.LeftButton,
-                    )
-                    return
                 if isinstance(modal, QtWidgets.QInputDialog):
                     if state["name_handled"]:
                         return
@@ -2571,6 +2608,29 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                         QtCore.Qt.MouseButton.LeftButton,
                     )
                     return
+                if isinstance(modal, ExperimentDesignDialog):
+                    if state["copy_action_active"]:
+                        return
+                    if state["evidence"] is not None:
+                        return
+                    if not state["editor_opened"]:
+                        state["editor_opened"] = True
+                        state["source_opened_read_only"] = bool(
+                            getattr(modal, "_progress_protected", False)
+                            and modal.model.is_read_only_legacy_execution()
+                            and not modal.finish_btn.text() == "Finalize Experiment"
+                        )
+                        if not modal.duplicate_btn.isEnabled():
+                            raise RuntimeError(
+                                "Create Editable Copy is disabled in the read-only editor"
+                            )
+                        state["copy_button_clicked"] = True
+                        state["copy_action_active"] = True
+                        QtCore.QTimer.singleShot(
+                            0,
+                            lambda dialog=modal: click_copy_and_inspect(dialog),
+                        )
+                    return
                 raise RuntimeError(
                     "unexpected modal while creating editable copy: "
                     f"{type(modal).__name__} {modal.windowTitle()!r}"
@@ -2583,12 +2643,12 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
         def operation() -> Mapping[str, Any]:
             modal_timer = QtCore.QTimer(self.app)
             modal_timer.setInterval(5)
-            modal_timer.timeout.connect(drive_progress_and_name_dialogs)
+            modal_timer.timeout.connect(drive_editor_and_name_dialog)
             modal_timer.start()
             try:
                 with _expected_dialogs(
                     self.app,
-                    ("Saved Progress Found", "QMessageBox"),
+                    ("Experiment Design (v2)", "ExperimentDesignDialog"),
                     ("Create Editable Copy", "EditableCopyNameDialog"),
                 ):
                     self.click(button)
@@ -2597,71 +2657,11 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                 modal_timer.deleteLater()
             if state["error"] is not None:
                 raise state["error"]
-            if not state["policy_clicked"] or not state["name_handled"]:
+            if not state["editor_opened"] or not state["name_handled"]:
                 raise RuntimeError(
-                    "saved-progress editable-copy choices were not completed"
+                    "read-only editor editable-copy flow was not completed"
                 )
-            if Path(self.context.experiment_model.experiment_dir_path).resolve() != destination:
-                raise RuntimeError("editable copy did not become the active design")
-
-            progress = json.loads(
-                (destination / "progress.json").read_text(encoding="utf-8")
-            )
-            inspection: dict[str, Any] = {"entered": False, "error": None}
-
-            def inspect_copy_editor() -> None:
-                modal = self.app.activeModalWidget()
-                try:
-                    if not isinstance(modal, ExperimentDesignDialog):
-                        raise RuntimeError(
-                            "editable copy editor did not open for inspection"
-                        )
-                    inspection["entered"] = True
-                    controls_editable = (
-                        modal.exp_name_edit.isEnabled()
-                        and not modal.exp_name_edit.isReadOnly()
-                        and modal.run_btn.isEnabled()
-                        and modal.finish_btn.isEnabled()
-                        and modal.finish_btn.text() == "Finalize Experiment"
-                    )
-                    evidence = {
-                        "source": str(directory),
-                        "destination": str(destination),
-                        "copy_name": str(modal.exp_name_edit.text()),
-                        "progress_policy_selected": bool(state["policy_clicked"]),
-                        "name_dialog_handled": bool(state["name_handled"]),
-                        "controls_editable": controls_editable,
-                        "legacy_state_cleared": not modal.model.is_read_only_legacy_execution(),
-                        "progress_empty": progress == {},
-                        "no_execution_plan": not (
-                            destination / "execution_plan.json"
-                        ).exists(),
-                        "no_resume_checkpoint": not (
-                            destination / "execution_resume.json"
-                        ).exists(),
-                    }
-                    capture_milestone(
-                        self.context,
-                        "legacy_editable_copy",
-                        evidence=evidence,
-                        widget=modal,
-                    )
-                    state["evidence"] = evidence
-                    modal.reject()
-                except BaseException as exc:
-                    inspection["error"] = exc
-                    if isinstance(modal, QtWidgets.QDialog) and modal.isVisible():
-                        modal.reject()
-
-            QtCore.QTimer.singleShot(0, inspect_copy_editor)
-            with _expected_dialogs(
-                self.app,
-                ("Experiment Design (v2)", "ExperimentDesignDialog"),
-            ):
-                self.click(button)
-            if inspection["error"] is not None:
-                raise inspection["error"]
-            if not inspection["entered"] or state["evidence"] is None:
+            if state["evidence"] is None:
                 raise RuntimeError("editable copy editor inspection did not finish")
             if not all(
                 value

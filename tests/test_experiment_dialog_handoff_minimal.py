@@ -102,19 +102,20 @@ def test_view_completed_execution_rejects_nonidle_controller_without_projection(
     project.assert_not_called()
 
 
-def _dialog_for_progress_policy(prompt_policy):
+def _dialog_for_progress_policy(*, has_printed_progress=True):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog.model = SimpleNamespace(
         get_progress_status=Mock(
             return_value={
-                "has_printed_progress": True,
-                "total_added_droplets": 3,
-                "wells_with_progress": 2,
+                "has_printed_progress": has_printed_progress,
+                "total_added_droplets": 3 if has_printed_progress else 0,
+                "wells_with_progress": 2 if has_printed_progress else 0,
             }
         ),
         clear_progress_for_design_edit=Mock(),
+        create_editable_copy_from_current=Mock(),
+        save_experiment=Mock(),
     )
-    dialog._prompt_progress_policy = Mock(return_value=prompt_policy)
     dialog._set_status = Mock()
     dialog._refresh_all_lock_states = Mock()
     dialog._progress_protected = False
@@ -139,86 +140,43 @@ def _dialog_for_progress_policy(prompt_policy):
     return dialog
 
 
-def test_saved_progress_prompt_only_offers_read_only_copy_or_return(monkeypatch):
-    observed = {}
-
-    class _MessageBox:
-        Warning = object()
-        AcceptRole = object()
-        ActionRole = object()
-        RejectRole = object()
-
-        def __init__(self, _parent):
-            self.buttons = {}
-            observed["instance"] = self
-
-        def setWindowTitle(self, value):
-            observed["title"] = value
-
-        def setIcon(self, _value):
-            pass
-
-        def setText(self, value):
-            observed["text"] = value
-
-        def setInformativeText(self, value):
-            observed["informative_text"] = value
-
-        def addButton(self, label, role):
-            button = object()
-            self.buttons[label] = {"button": button, "role": role}
-            return button
-
-        def setDefaultButton(self, button):
-            observed["default_button"] = button
-
-        def exec(self):
-            self.clicked = self.buttons["Open Read-Only"]["button"]
-
-        def clickedButton(self):
-            return self.clicked
-
-    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
-    dialog._progress_status_message = (
-        ExperimentDesignDialog._progress_status_message.__get__(
-            dialog, ExperimentDesignDialog
-        )
-    )
-    monkeypatch.setattr(View, "QMessageBox", _MessageBox)
-
-    policy = ExperimentDesignDialog._prompt_progress_policy(
-        dialog,
-        {"total_added_droplets": 3, "wells_with_progress": 2},
-        title="Saved Progress Found",
-    )
-
-    assert policy == ExperimentDesignDialog.PROGRESS_POLICY_RESUME
-    assert tuple(observed["instance"].buttons) == (
-        "Open Read-Only",
-        "Create Editable Copy",
-        "Return to Main Window",
-    )
-    assert "Continue Printing" not in observed["instance"].buttons
-    assert observed["title"] == "Saved Progress Found"
-
-
-def test_prepare_progress_policy_reset_clears_progress_and_allows_editing():
-    dialog = _dialog_for_progress_policy(ExperimentDesignDialog.PROGRESS_POLICY_RESET)
+def test_prepare_progress_policy_without_progress_keeps_editor_editable():
+    dialog = _dialog_for_progress_policy(has_printed_progress=False)
 
     assert dialog.prepare_progress_policy_for_current_design() is True
 
-    dialog.model.clear_progress_for_design_edit.assert_called_once_with()
     assert dialog._progress_protected is False
     assert dialog._preserve_progress_on_finish is False
-    assert dialog._progress_reset_confirmed is True
+    assert dialog._progress_reset_confirmed is False
+    dialog._set_status.assert_not_called()
+    dialog._refresh_all_lock_states.assert_called_once_with()
+    dialog.model.clear_progress_for_design_edit.assert_not_called()
+    dialog.model.create_editable_copy_from_current.assert_not_called()
+    dialog.model.save_experiment.assert_not_called()
 
 
-def test_prepare_progress_policy_resume_preserves_progress_and_locks_editing():
-    dialog = _dialog_for_progress_policy(ExperimentDesignDialog.PROGRESS_POLICY_RESUME)
+def test_prepare_progress_policy_opens_saved_progress_read_only_without_prompt(
+    monkeypatch,
+):
+    dialog = _dialog_for_progress_policy()
 
+    def fail_if_message_box_is_created(*_args, **_kwargs):
+        raise AssertionError("saved-progress launch must not display a message box")
+
+    monkeypatch.setattr(View, "QMessageBox", fail_if_message_box_is_created)
+
+    assert dialog.prepare_progress_policy_for_current_design() is True
     assert dialog.prepare_progress_policy_for_current_design() is True
 
     dialog.model.clear_progress_for_design_edit.assert_not_called()
+    dialog.model.create_editable_copy_from_current.assert_not_called()
+    dialog.model.save_experiment.assert_not_called()
     assert dialog._progress_protected is True
     assert dialog._preserve_progress_on_finish is True
     assert dialog._progress_reset_confirmed is False
+    assert "3 droplet(s) recorded across 2 well(s)" in (
+        dialog._progress_lock_status_message
+    )
+    assert "view-only" in dialog._progress_lock_status_message
+    assert dialog._set_status.call_count == 2
+    assert dialog._refresh_all_lock_states.call_count == 2

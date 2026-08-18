@@ -196,6 +196,13 @@ def test_standard_smoke_completes_with_required_evidence(qapp, tmp_path):
     assert projection["before"]["core_file_hashes"] == projection["after"][
         "core_file_hashes"
     ]
+    assert projection["driver"]["editor"]["direct_read_only_launch"] is True
+    assert projection["driver"]["editor"]["saved_progress_prompt_absent"] is True
+    assert projection["driver"]["inspection"]["launch"] == {
+        "direct_read_only": True,
+        "saved_progress_prompt_absent": True,
+        "unexpected_dialog": {},
+    }
     assert projection["driver"]["inspection"]["unexpected_result_dialog"] == {}
 
     assert json.loads(

@@ -11391,8 +11391,6 @@ class ExperimentDesignDialog(QDialog):
 
     PROGRESS_POLICY_RESUME = "resume"
     PROGRESS_POLICY_RESET = "reset"
-    PROGRESS_POLICY_COPY = "copy"
-    PROGRESS_POLICY_CANCEL = "cancel"
 
     ACTION_FINALIZE_DESIGN = "Finalize Experiment"
     ACTION_LOAD_EXECUTION = "Load Experiment"
@@ -14154,30 +14152,6 @@ class ExperimentDesignDialog(QDialog):
             else ""
         )
 
-    def _prompt_progress_policy(self, status: Mapping[str, Any], *, title: str) -> str:
-        message = self._progress_status_message(status)
-        msg = QMessageBox(self)
-        msg.setWindowTitle(title)
-        msg.setIcon(QMessageBox.Warning)
-        msg.setText(message)
-        msg.setInformativeText(
-            "Open Read-Only lets you review the experiment without changing its saved "
-            "progress. Create Editable Copy starts a new editable experiment without "
-            "changing the recorded droplets."
-        )
-        keep_btn = msg.addButton("Open Read-Only", QMessageBox.AcceptRole)
-        copy_btn = msg.addButton("Create Editable Copy", QMessageBox.ActionRole)
-        cancel_btn = msg.addButton("Return to Main Window", QMessageBox.RejectRole)
-        msg.setDefaultButton(keep_btn)
-        msg.exec()
-
-        clicked = msg.clickedButton()
-        if clicked is copy_btn:
-            return self.PROGRESS_POLICY_COPY
-        if clicked is cancel_btn:
-            return self.PROGRESS_POLICY_CANCEL
-        return self.PROGRESS_POLICY_RESUME
-
     def prepare_progress_policy_for_current_design(self) -> bool:
         get_status = getattr(self.model, "get_progress_status", None)
         status = get_status() if callable(get_status) else {}
@@ -14187,26 +14161,9 @@ class ExperimentDesignDialog(QDialog):
             self._refresh_all_lock_states()
             return True
 
-        policy = self._prompt_progress_policy(
-            status,
-            title="Saved Progress Found",
-        )
-        if policy == self.PROGRESS_POLICY_CANCEL:
-            return False
-        if policy == self.PROGRESS_POLICY_COPY:
-            self._on_duplicate_design()
-            return False
-        if policy == self.PROGRESS_POLICY_RESET:
-            clearer = getattr(self.model, "clear_progress_for_design_edit", None)
-            if callable(clearer):
-                clearer()
-            self._progress_reset_confirmed = True
-            self._set_progress_protection(False)
-            self._set_status("Saved progress deleted. The design can be edited.")
-        else:
-            self._progress_reset_confirmed = False
-            self._set_progress_protection(True, status)
-            self._set_status(self._progress_lock_status_message)
+        self._progress_reset_confirmed = False
+        self._set_progress_protection(True, status)
+        self._set_status(self._progress_lock_status_message)
         self._refresh_all_lock_states()
         return True
 

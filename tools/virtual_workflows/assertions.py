@@ -2405,7 +2405,12 @@ def same_session_completed_projection_assertion(
             and all(bool(value) for value in driver_checks.values())
             and bool(
                 dict(observed_driver.get("editor") or {}).get(
-                    "open_read_only_selected"
+                    "direct_read_only_launch"
+                )
+            )
+            and bool(
+                dict(observed_driver.get("editor") or {}).get(
+                    "saved_progress_prompt_absent"
                 )
             ),
             "completed_runtime_projected_display_only": (
