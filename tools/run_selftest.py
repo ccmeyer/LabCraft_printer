@@ -81,6 +81,7 @@ TAG_RESET_WATCHDOG_LATE_TASK = 0x1E
 TAG_RESET_ACTIVE_COMMAND = 0x1F
 TAG_RESET_REG_CONTEXT = 0x22
 TAG_RESET_FAULT_CONTEXT = 0x23
+TAG_RESET_XY_MOTION_CONTEXT = 0x24
 
 ACK_RESULT_ACCEPTED = 1
 ACK_RESULT_DUPLICATE = 2
@@ -243,6 +244,24 @@ REGULATOR_TELEMETRY_AGE_UNKNOWN = 0xFFFFFFFF
 REGULATOR_RESET_CONTEXT_WIRE_SIZE = 30
 FAULT_CONTEXT_V1_WIRE_SIZE = 112
 FAULT_CONTEXT_WIRE_SIZE = 132
+XY_MOTION_CONTEXT_WIRE_SIZE = 60
+XY_MOTION_REASON_NAMES = {
+    0: "none", 1: "start_rejected", 2: "x_limit", 3: "y_limit",
+    4: "planner_fault", 5: "endpoint_mismatch", 6: "resume_terminal_mismatch",
+}
+XY_MOTION_START_STATUS_NAMES = {
+    0: "started", 1: "immediate", 2: "disabled", 3: "busy",
+    4: "invalid_plan", 5: "position_out_of_range", 6: "limit_asserted",
+    7: "hardware_mismatch", 8: "unsupported_mixed_axis",
+}
+XY_MOTION_EXECUTOR_STATE_NAMES = {
+    0: "idle", 1: "armed", 2: "running", 3: "paused", 4: "completed",
+    5: "canceled", 6: "limit_aborted", 7: "faulted",
+}
+XY_MOTION_TERMINAL_REASON_NAMES = {
+    0: "none", 1: "completed", 2: "canceled", 3: "x_limit",
+    4: "y_limit", 5: "planner_fault",
+}
 CRASH_FAULT_NAMES = {
     0: "none", 1: "hardfault", 2: "memmanage", 3: "busfault", 4: "usagefault",
     5: "nmi", 6: "stack_overflow", 7: "assert", 8: "error_handler", 9: "wdt",
@@ -470,6 +489,49 @@ def decode_fault_context(raw: bytes | None) -> dict | None:
     return None
 
 
+def decode_xy_motion_context(raw: bytes | None) -> dict | None:
+    if raw is None or len(raw) != XY_MOTION_CONTEXT_WIRE_SIZE:
+        return None
+    values = struct.unpack("<8BII6i5I", raw)
+    if values[0] != 1 or values[1] == 0:
+        return None
+    flags = values[6]
+    return {
+        "version": values[0],
+        "valid": True,
+        "reason": values[2],
+        "reason_name": XY_MOTION_REASON_NAMES.get(values[2], f"reason_{values[2]}"),
+        "start_status": values[3],
+        "start_status_name": XY_MOTION_START_STATUS_NAMES.get(values[3], f"start_status_{values[3]}"),
+        "executor_state": values[4],
+        "executor_state_name": XY_MOTION_EXECUTOR_STATE_NAMES.get(values[4], f"state_{values[4]}"),
+        "terminal_reason": values[5],
+        "terminal_reason_name": XY_MOTION_TERMINAL_REASON_NAMES.get(values[5], f"terminal_{values[5]}"),
+        "flags": flags,
+        "targets_canonical": bool(flags & 0x01),
+        "start_accepted": bool(flags & 0x02),
+        "wait_completed": bool(flags & 0x04),
+        "control_interrupted": bool(flags & 0x08),
+        "endpoint_matches": bool(flags & 0x10),
+        "targets_match": bool(flags & 0x20),
+        "timer_owned": bool(flags & 0x40),
+        "resume_validation": bool(flags & 0x80),
+        "command_seq32": values[8],
+        "capture_uptime_ms": values[9],
+        "start_x": values[10],
+        "start_y": values[11],
+        "target_x": values[12],
+        "target_y": values[13],
+        "end_x": values[14],
+        "end_y": values[15],
+        "requested_x_edges": values[16],
+        "requested_y_edges": values[17],
+        "emitted_x_edges": values[18],
+        "emitted_y_edges": values[19],
+        "done_bits": values[20],
+    }
+
+
 def decode_reset_report(tlv: dict[int, bytes]) -> dict:
     return {
         "reset_seq32": _tlv_u32(tlv, TAG_RESET_SEQ32),
@@ -490,6 +552,9 @@ def decode_reset_report(tlv: dict[int, bytes]) -> dict:
         "active_command": _tlv_u8(tlv, TAG_RESET_ACTIVE_COMMAND),
         "regulator_context": decode_regulator_context(tlv.get(TAG_RESET_REG_CONTEXT)),
         "fault_context": decode_fault_context(tlv.get(TAG_RESET_FAULT_CONTEXT)),
+        "xy_motion_context": decode_xy_motion_context(
+            tlv.get(TAG_RESET_XY_MOTION_CONTEXT)
+        ),
     }
 
 

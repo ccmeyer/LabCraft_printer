@@ -1,5 +1,6 @@
 import json
 import time
+from collections import deque
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -73,6 +74,7 @@ def _benign_startup_report():
         "last_fault": 0,
         "last_fault_name": "none",
         "fault_context": None,
+        "xy_motion_context": None,
         "active_command": 0,
         "boot_count": 2,
         "fault_count": 0,
@@ -104,6 +106,30 @@ def test_status_delivery_diagnostics_are_bounded(qapp, test_profile, tmp_path):
         diagnostics["last_quartile_rx_to_main_thread_ms"]["median_ms"]
         > diagnostics["first_quartile_rx_to_main_thread_ms"]["median_ms"]
     )
+
+
+def test_fault_snapshot_copies_existing_bounded_mcu_log_history(qapp, test_profile, tmp_path):
+    machine = _make_machine(qapp, test_profile, tmp_path)
+    history = deque(maxlen=2)
+    history.extend(
+        [
+            {"ts": 1.0, "text": "older", "level": "INFO"},
+            {"ts": 2.0, "text": "[XY] motion failure", "level": "ERROR"},
+        ]
+    )
+    machine.log_reader = SimpleNamespace(
+        message_history=history,
+        get_recent_messages=lambda: list(history),
+    )
+
+    snapshot = machine._build_black_box_snapshot("mcu_unresponsive")
+
+    assert snapshot["schema_version"] == "host_black_box_v2"
+    assert snapshot["mcu_log_history"]["source"] == "log_reader"
+    assert snapshot["mcu_log_history"]["entry_limit"] == 2
+    assert snapshot["mcu_log_history"]["retained_count"] == 2
+    assert snapshot["mcu_log_history"]["possibly_truncated"] is True
+    assert snapshot["mcu_log_history"]["entries"][-1]["text"] == "[XY] motion failure"
 
 
 def _with_actionable_host_context(report):
@@ -189,6 +215,15 @@ def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp,
     }
 
     report = {"summary": "Board restarted after watchdog reset.", "reset_cause_name": "iwdg"}
+    machine._pre_reset_mcu_log_history = {
+        "source": "log_reader",
+        "capture_reason": "reset_board_teardown",
+        "captured_at_monotonic_ns": 123,
+        "entry_limit": 2000,
+        "retained_count": 1,
+        "possibly_truncated": False,
+        "entries": [{"ts": 1.0, "text": "[XY] x_limit", "level": None}],
+    }
 
     machine._on_reset_report(report)
 
@@ -198,7 +233,7 @@ def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp,
     assert len(snapshot_history) == 1
     assert snapshot_history[0]["reason"] == "reset_report"
     assert snapshot_history[0]["session_id"] == machine.black_box_recorder.session_id
-    assert snapshot["schema_version"] == "host_black_box_v1"
+    assert snapshot["schema_version"] == "host_black_box_v2"
     assert snapshot["reason"] == "reset_report"
     assert snapshot["last_reset_report"] == expected_report
     assert snapshot["flash_state"] == {
@@ -230,6 +265,9 @@ def test_reset_report_writes_snapshot_before_recovery_clears_session_state(qapp,
     assert any(event["event"] == "queued" and event["request_id"] is None for event in snapshot["command_events"])
     assert any(event["kind"] == "ack" and event["payload"]["matched_pending"] for event in snapshot["black_box_events"])
     assert any(event["kind"] == "reset_report" for event in snapshot["black_box_events"])
+    assert snapshot["mcu_log_history"]["source"] == "pre_reset_log_reader"
+    assert snapshot["mcu_log_history"]["entries"][0]["text"] == "[XY] x_limit"
+    assert machine._pre_reset_mcu_log_history is None
     assert emitted == [expected_report]
     assert len(machine.command_queue.queue) == 0
 
@@ -451,6 +489,15 @@ def test_black_box_log_write_failure_does_not_block_reset_recovery(qapp, test_pr
     machine.reset_report_received.connect(emitted.append)
     machine.command_queue.add_command("LED_ON", 0, 0, 0)
     machine.black_box_recorder.write_snapshot = lambda _snapshot: {"path": None, "error": "disk unavailable"}
+    machine._pre_reset_mcu_log_history = {
+        "source": "log_reader",
+        "capture_reason": "reset_board_teardown",
+        "captured_at_monotonic_ns": 123,
+        "entry_limit": 2000,
+        "retained_count": 1,
+        "possibly_truncated": False,
+        "entries": [{"ts": 1.0, "text": "retained", "level": None}],
+    }
 
     report = {"summary": "Board restarted after power/brownout reset.", "reset_cause_name": "power"}
 
@@ -460,6 +507,7 @@ def test_black_box_log_write_failure_does_not_block_reset_recovery(qapp, test_pr
     assert machine._last_black_box_log_result == {"path": None, "error": "disk unavailable"}
     assert len(machine.command_queue.queue) == 0
     assert any(event["kind"] == "black_box_log_write_failed" for event in machine.black_box_recorder.recent_events())
+    assert machine._pre_reset_mcu_log_history is not None
 
 
 def test_unclean_serial_loss_with_log_write_failure_still_emits_and_clears(qapp, test_profile, tmp_path):

@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "CrashFaultContext.h"
+#include "XyMotionFaultContext.h"
 #include "RegulatorTelemetry.h"
 #include "PressureSensorWatchdogTelemetry.h"
 
@@ -129,6 +130,8 @@ typedef struct {
   uint32_t faultTaskName4;
   uint8_t faultContextValid;
   CrashFaultContextV2 faultContext;
+  uint8_t xyMotionContextValid;
+  XyMotionFaultContext xyMotionContext;
   RegulatorTelemetryResetContext regulatorContext;
   uint8_t pressureSensorContextValid;
   PressureSensorWatchdogResetContext pressureSensorContext;
@@ -151,6 +154,8 @@ void CrashLog_RequestWatchdogRecoveryReset(uint32_t rawStatus);
 void CrashLog_ClearWatchdogRecoveryReset(void);
 void CrashLog_CaptureRegulatorContext(const RegulatorTelemetryResetContext* context);
 void CrashLog_CapturePressureSensorContext(const PressureSensorWatchdogResetContext* context);
+void CrashLog_CaptureXyMotionContext(const XyMotionFaultContext* context);
+void CrashLog_ClearXyMotionContext(void);
 uint32_t CrashLog_IsWatchdogRecoveryBoot(void);
 void CrashLog_MarkBootHealthy(void);
 void CrashLog_GetSnapshot(CrashLogSnapshot* out);

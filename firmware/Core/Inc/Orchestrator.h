@@ -17,6 +17,7 @@
 #include "HomeInterruptionPolicy.h"
 #include "Gantry.h"
 #include "OrchestratorCompletionPolicy.h"
+#include "XyMotionFaultContext.h"
 
 #include <cstdint>
 #include <cstring>
@@ -439,7 +440,17 @@ private:
                                                bool latchFailure,
                                                uint32_t diagnosticTimeoutMs = 0u);
   bool validateResumedAbsoluteXy(int32_t targetX, int32_t targetY);
-  void latchXyMotionFailure(const char* reason);
+  void latchXyMotionFailure(XyMotionFaultReason reason,
+                            const AbsoluteXyExecutionResult& result,
+                            const GantryPosition& start,
+                            int32_t targetX,
+                            int32_t targetY,
+                            const GantryPosition& end,
+                            const CoordinatedXySnapshot& snapshot,
+                            bool targetsCanonical,
+                            bool startAccepted,
+                            bool controlInterrupted,
+                            bool resumeValidation = false);
   void clearXyMotionFailure();
 
   QueueHandle_t          _cmdQueue;

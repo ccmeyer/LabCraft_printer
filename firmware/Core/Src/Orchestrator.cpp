@@ -160,8 +160,12 @@ void maybeSendResetReport(uint8_t seq8, uint32_t seq32, bool hostReady) {
   if (!ResetReport_ShouldAttemptDelivery(&snap, hostReady, s_resetReportSent)) {
     return;
   }
-  s_resetReportSent = Comm::instance()->sendResetReport(
+  const bool sent = Comm::instance()->sendResetReport(
       seq8, seq32, &snap, CrashLog_IsWatchdogRecoveryBoot());
+  if (sent) {
+    s_resetReportSent = true;
+    CrashLog_ClearXyMotionContext();
+  }
 }
 }
 
@@ -549,20 +553,29 @@ Orchestrator::AbsoluteXyExecutionResult Orchestrator::executeAbsoluteXy(
   if (latchFailure &&
       result.disposition ==
           OrchestratorCompletionPolicy::AbsXyDisposition::MotionFailure) {
-    const char* reason = "endpoint_mismatch";
+    XyMotionFaultReason reason = XY_MOTION_FAULT_ENDPOINT_MISMATCH;
     if (!startAccepted) {
-      reason = "start_rejected";
+      reason = XY_MOTION_FAULT_START_REJECTED;
     } else if (result.terminalReason ==
                CoordinatedXyExecutor::TerminalReason::XLimit) {
-      reason = "x_limit";
+      reason = XY_MOTION_FAULT_X_LIMIT;
     } else if (result.terminalReason ==
                CoordinatedXyExecutor::TerminalReason::YLimit) {
-      reason = "y_limit";
+      reason = XY_MOTION_FAULT_Y_LIMIT;
     } else if (result.terminalReason ==
                CoordinatedXyExecutor::TerminalReason::PlannerFault) {
-      reason = "planner_fault";
+      reason = XY_MOTION_FAULT_PLANNER;
     }
-    latchXyMotionFailure(reason);
+    latchXyMotionFailure(reason,
+                         result,
+                         start,
+                         actualTargetX,
+                         actualTargetY,
+                         end,
+                         snapshot,
+                         targetsCanonical,
+                         startAccepted,
+                         controlInterrupted);
   }
   return result;
 }
@@ -585,22 +598,85 @@ bool Orchestrator::validateResumedAbsoluteXy(int32_t targetX,
       stepperX->getTargetPosition() == actualTargetX &&
       stepperY->getTargetPosition() == actualTargetY;
   const CoordinatedXySnapshot snapshot = Gantry::instance()->coordinatedSnapshot();
+  AbsoluteXyExecutionResult result{};
+  result.startStatus = snapshot.startStatus;
+  result.terminalReason = snapshot.terminalReason;
+  result.waitCompleted = true;
+  result.endpointMatches = targetsCanonical &&
+      position.x == actualTargetX && position.y == actualTargetY;
+  result.targetsMatch = stepperX != nullptr && stepperY != nullptr &&
+      stepperX->getTargetPosition() == actualTargetX &&
+      stepperY->getTargetPosition() == actualTargetY;
   completed = completed &&
       snapshot.state == CoordinatedXyExecutor::State::Completed &&
       snapshot.terminalReason == CoordinatedXyExecutor::TerminalReason::Completed;
   if (!completed) {
-    latchXyMotionFailure("resume_terminal_mismatch");
+    const bool startAccepted =
+        snapshot.startStatus == CoordinatedStartStatus::Started ||
+        snapshot.startStatus == CoordinatedStartStatus::Immediate;
+    latchXyMotionFailure(XY_MOTION_FAULT_RESUME_TERMINAL_MISMATCH,
+                         result,
+                         position,
+                         actualTargetX,
+                         actualTargetY,
+                         position,
+                         snapshot,
+                         targetsCanonical,
+                         startAccepted,
+                         false,
+                         true);
   }
   return completed;
 }
 
-void Orchestrator::latchXyMotionFailure(const char* reason) {
+void Orchestrator::latchXyMotionFailure(
+    XyMotionFaultReason reason,
+    const AbsoluteXyExecutionResult& result,
+    const GantryPosition& start,
+    int32_t targetX,
+    int32_t targetY,
+    const GantryPosition& end,
+    const CoordinatedXySnapshot& snapshot,
+    bool targetsCanonical,
+    bool startAccepted,
+    bool controlInterrupted,
+    bool resumeValidation) {
+  XyMotionFaultContext context{};
+  XyMotionFaultContext_Init(&context);
+  context.valid = 1u;
+  context.reason = static_cast<uint8_t>(reason);
+  context.startStatus = static_cast<uint8_t>(result.startStatus);
+  context.executorState = static_cast<uint8_t>(snapshot.state);
+  context.terminalReason = static_cast<uint8_t>(result.terminalReason);
+  if (targetsCanonical) context.flags |= XY_MOTION_FAULT_FLAG_TARGETS_CANONICAL;
+  if (startAccepted) context.flags |= XY_MOTION_FAULT_FLAG_START_ACCEPTED;
+  if (result.waitCompleted) context.flags |= XY_MOTION_FAULT_FLAG_WAIT_COMPLETED;
+  if (controlInterrupted) context.flags |= XY_MOTION_FAULT_FLAG_CONTROL_INTERRUPTED;
+  if (result.endpointMatches) context.flags |= XY_MOTION_FAULT_FLAG_ENDPOINT_MATCHES;
+  if (result.targetsMatch) context.flags |= XY_MOTION_FAULT_FLAG_TARGETS_MATCH;
+  if (snapshot.timerOwned) context.flags |= XY_MOTION_FAULT_FLAG_TIMER_OWNED;
+  if (resumeValidation) context.flags |= XY_MOTION_FAULT_FLAG_RESUME_VALIDATION;
+  context.commandSeq32 = _currentCmdNum;
+  context.captureUptimeMs = HAL_GetTick();
+  context.startX = start.x;
+  context.startY = start.y;
+  context.targetX = targetX;
+  context.targetY = targetY;
+  context.endX = end.x;
+  context.endY = end.y;
+  context.requestedXEdges = snapshot.requestedXEdges;
+  context.requestedYEdges = snapshot.requestedYEdges;
+  context.emittedXEdges = snapshot.emittedXEdges;
+  context.emittedYEdges = snapshot.emittedYEdges;
+  context.doneBits = snapshot.doneBits;
+  CrashLog_CaptureXyMotionContext(&context);
+
   _xyMotionFailureLatched = true;
   _paused = true;
   _pauseRequested = false;
   Gantry::instance()->cancelXYZMotors();
   Logger::instance()->log("[XY] motion failure latched reason=%s\r\n",
-                          reason != nullptr ? reason : "unknown");
+                          XyMotionFaultContext_ReasonName(context.reason));
 }
 
 void Orchestrator::clearXyMotionFailure() {

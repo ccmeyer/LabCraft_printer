@@ -171,6 +171,15 @@ def _fault_context_v2_payload(version: int = 2) -> bytes:
     )
 
 
+def _xy_motion_context_payload(version: int = 1, valid: int = 1) -> bytes:
+    return struct.pack(
+        "<8BII6i5I",
+        version, valid, 3, 0, 6, 4, 0x43, 0,
+        77, 123456, -10, 20, 1000, 2000, 400, 500,
+        1010, 1980, 410, 480, 3,
+    )
+
+
 def _selftest_result_metrics(mod, test_id: int, name: str, passed: bool, metrics: str) -> bytes:
     payload = bytearray([mod.CMD_SELFTEST_RESULT, 2])
     payload += bytes([mod.TAG_TEST_ID, 2]) + test_id.to_bytes(2, "little")
@@ -1839,6 +1848,23 @@ def test_selftest_reset_decoder_accepts_v1_v2_and_ignores_bad_fault_context():
     assert mod.decode_fault_context(_fault_context_v2_payload(version=3)) is None
 
 
+def test_selftest_reset_decoder_decodes_optional_xy_motion_context():
+    mod = _load_run_selftest()
+
+    context = mod.decode_xy_motion_context(_xy_motion_context_payload())
+
+    assert context["reason_name"] == "y_limit"
+    assert context["executor_state_name"] == "limit_aborted"
+    assert context["terminal_reason_name"] == "y_limit"
+    assert context["command_seq32"] == 77
+    assert context["start_x"] == -10
+    assert context["emitted_y_edges"] == 480
+    assert context["timer_owned"] is True
+    assert mod.decode_xy_motion_context(b"\x01") is None
+    assert mod.decode_xy_motion_context(_xy_motion_context_payload(version=2)) is None
+    assert mod.decode_xy_motion_context(_xy_motion_context_payload(valid=0)) is None
+
+
 def test_startup_reset_report_trailing_hello_ack_in_same_read_is_retained(
     monkeypatch, tmp_path, capsys
 ):
@@ -2067,6 +2093,7 @@ def test_reset_report_during_selftest_is_classified(monkeypatch, tmp_path, capsy
         "active_command": mod.CMD_SELFTEST_START,
         "regulator_context": expected_regulator_context,
         "fault_context": None,
+        "xy_motion_context": None,
     }
     reset_frames = [frame for frame in details["recent_frames"] if frame["cmd"] == mod.CMD_RESET_REPORT]
     assert reset_frames

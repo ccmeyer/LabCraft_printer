@@ -32,7 +32,7 @@ from hardware.serial_ports import (
     SerialPortValidationReason,
     resolve_preferred_usb_serial_port,
 )
-from HostBlackBoxLog import HostBlackBoxRecorder
+from HostBlackBoxLog import HostBlackBoxRecorder, SCHEMA_VERSION as HOST_BLACK_BOX_SCHEMA_VERSION
 from GravimetricLedger import (
     EJECTION_COMMAND_TYPES,
     EjectionCommandEvent,
@@ -2721,6 +2721,7 @@ TAG_RESET_RCC_FLAGS         = 0x20
 TAG_RESET_TASK_NAME4        = 0x21
 TAG_RESET_REG_CONTEXT       = 0x22
 TAG_RESET_FAULT_CONTEXT     = 0x23
+TAG_RESET_XY_MOTION_CONTEXT = 0x24
 
 ACK_TLV_SEQ32 = 0x10
 ACK_TLV_RESULT = 0x11
@@ -3086,6 +3087,7 @@ def classify_reset_report_for_host(report, *, connection_phase):
         "last_fault",
         "last_fault_name",
         "fault_context",
+        "xy_motion_context",
         "active_command",
     }
     if not required_fields.issubset(report):
@@ -3111,6 +3113,7 @@ def classify_reset_report_for_host(report, *, connection_phase):
         and last_fault == 0
         and report.get("last_fault_name") == "none"
         and report.get("fault_context") is None
+        and report.get("xy_motion_context") is None
         and active_command == 0
     )
     if benign:
@@ -3207,6 +3210,61 @@ FAULT_CONTEXT_V1_VERSION = 1
 FAULT_CONTEXT_V1_WIRE_SIZE = 112
 FAULT_CONTEXT_VERSION = 2
 FAULT_CONTEXT_WIRE_SIZE = 132
+XY_MOTION_CONTEXT_VERSION = 1
+XY_MOTION_CONTEXT_WIRE_SIZE = 60
+
+XY_MOTION_REASON_NAMES = {
+    0: "none",
+    1: "start_rejected",
+    2: "x_limit",
+    3: "y_limit",
+    4: "planner_fault",
+    5: "endpoint_mismatch",
+    6: "resume_terminal_mismatch",
+}
+
+XY_MOTION_START_STATUS_NAMES = {
+    0: "started",
+    1: "immediate",
+    2: "disabled",
+    3: "busy",
+    4: "invalid_plan",
+    5: "position_out_of_range",
+    6: "limit_asserted",
+    7: "hardware_mismatch",
+    8: "unsupported_mixed_axis",
+}
+
+XY_MOTION_EXECUTOR_STATE_NAMES = {
+    0: "idle",
+    1: "armed",
+    2: "running",
+    3: "paused",
+    4: "completed",
+    5: "canceled",
+    6: "limit_aborted",
+    7: "faulted",
+}
+
+XY_MOTION_TERMINAL_REASON_NAMES = {
+    0: "none",
+    1: "completed",
+    2: "canceled",
+    3: "x_limit",
+    4: "y_limit",
+    5: "planner_fault",
+}
+
+XY_MOTION_FLAG_NAMES = {
+    0x01: ("targets_canonical", "targets_canonical"),
+    0x02: ("start_accepted", "start_accepted"),
+    0x04: ("wait_completed", "wait_completed"),
+    0x08: ("control_interrupted", "control_interrupted"),
+    0x10: ("endpoint_matches", "endpoint_matches"),
+    0x20: ("targets_match", "targets_match"),
+    0x40: ("timer_owned", "timer_owned"),
+    0x80: ("resume_validation", "resume_validation"),
+}
 
 FAULT_CONTEXT_FLAG_NAMES = {
     0x01: "core_frame_valid",
@@ -3464,6 +3522,93 @@ def _fault_context_summary(context):
     if context.get("bfar_valid"):
         parts.insert(3 if context.get("core_frame_valid") else 1, f"BFAR=0x{context['bfar']:08X}")
     return " Fault context: " + ", ".join(parts) + "."
+
+
+def _decode_xy_motion_context(raw):
+    if raw is None or len(raw) != XY_MOTION_CONTEXT_WIRE_SIZE:
+        return None
+    values = struct.unpack("<8BII6i5I", raw)
+    (
+        version,
+        valid,
+        reason,
+        start_status,
+        executor_state,
+        terminal_reason,
+        flags,
+        _reserved,
+        command_seq32,
+        capture_uptime_ms,
+        start_x,
+        start_y,
+        target_x,
+        target_y,
+        end_x,
+        end_y,
+        requested_x_edges,
+        requested_y_edges,
+        emitted_x_edges,
+        emitted_y_edges,
+        done_bits,
+    ) = values
+    if version != XY_MOTION_CONTEXT_VERSION or valid == 0:
+        return None
+
+    result = {
+        "version": version,
+        "valid": True,
+        "reason": reason,
+        "reason_name": XY_MOTION_REASON_NAMES.get(reason, f"reason_{reason}"),
+        "start_status": start_status,
+        "start_status_name": XY_MOTION_START_STATUS_NAMES.get(
+            start_status, f"start_status_{start_status}"
+        ),
+        "executor_state": executor_state,
+        "executor_state_name": XY_MOTION_EXECUTOR_STATE_NAMES.get(
+            executor_state, f"state_{executor_state}"
+        ),
+        "terminal_reason": terminal_reason,
+        "terminal_reason_name": XY_MOTION_TERMINAL_REASON_NAMES.get(
+            terminal_reason, f"terminal_{terminal_reason}"
+        ),
+        "flags": flags,
+        "flag_names": [name for bit, (_key, name) in XY_MOTION_FLAG_NAMES.items() if flags & bit],
+        "command_seq32": command_seq32,
+        "capture_uptime_ms": capture_uptime_ms,
+        "start_x": start_x,
+        "start_y": start_y,
+        "target_x": target_x,
+        "target_y": target_y,
+        "end_x": end_x,
+        "end_y": end_y,
+        "requested_x_edges": requested_x_edges,
+        "requested_y_edges": requested_y_edges,
+        "emitted_x_edges": emitted_x_edges,
+        "emitted_y_edges": emitted_y_edges,
+        "done_bits": done_bits,
+    }
+    result.update(
+        {
+            key: bool(flags & bit)
+            for bit, (key, _name) in XY_MOTION_FLAG_NAMES.items()
+        }
+    )
+    return result
+
+
+def _xy_motion_context_summary(context):
+    if not context:
+        return ""
+    return (
+        " XY motion context: "
+        f"reason={context['reason_name']}, seq={context['command_seq32']}, "
+        f"state={context['executor_state_name']}/{context['terminal_reason_name']}, "
+        f"start=({context['start_x']},{context['start_y']}), "
+        f"target=({context['target_x']},{context['target_y']}), "
+        f"end=({context['end_x']},{context['end_y']}), "
+        f"edges=X {context['emitted_x_edges']}/{context['requested_x_edges']} "
+        f"Y {context['emitted_y_edges']}/{context['requested_y_edges']}."
+    )
 
 def _regulator_context_summary(context):
     if not context or not context.get("valid"):
@@ -3759,6 +3904,9 @@ class SerialReader(QThread):
         active_command = _u8(TAG_RESET_ACTIVE_COMMAND)
         regulator_context = _decode_regulator_context(tlvs.get(TAG_RESET_REG_CONTEXT))
         fault_context = _decode_fault_context(tlvs.get(TAG_RESET_FAULT_CONTEXT))
+        xy_motion_context = _decode_xy_motion_context(
+            tlvs.get(TAG_RESET_XY_MOTION_CONTEXT)
+        )
         pending = bool(flags & CRASHLOG_FLAG_PENDING)
         sticky = bool(flags & CRASHLOG_FLAG_WDT_ARM_STICKY)
 
@@ -3809,6 +3957,7 @@ class SerialReader(QThread):
         if regulator_summary and (reset_cause_name in {"iwdg", "wwdg"} or last_fault_name == "wdt"):
             summary += regulator_summary
         summary += _fault_context_summary(fault_context)
+        summary += _xy_motion_context_summary(xy_motion_context)
 
         return {
             "seq8": seq8,
@@ -3843,6 +3992,7 @@ class SerialReader(QThread):
             "recovery_boot": bool(_u8(TAG_RESET_RECOVERY_BOOT)),
             "regulator_context": regulator_context,
             "fault_context": fault_context,
+            "xy_motion_context": xy_motion_context,
             "summary": summary,
         }
 
@@ -4416,6 +4566,7 @@ class Machine(QObject):
         self.reader = None
         self.black_box_recorder = HostBlackBoxRecorder(log_dir=black_box_log_dir)
         self._last_black_box_log_result = None
+        self._pre_reset_mcu_log_history = None
         self._expected_serial_reader_stop_reason = None
         self._handling_unclean_serial_loss = False
         
@@ -4719,7 +4870,7 @@ class Machine(QObject):
         queue = getattr(getattr(self, "command_queue", None), "queue", [])
         completed = getattr(getattr(self, "command_queue", None), "completed", [])
         return {
-            "schema_version": "host_black_box_v1",
+            "schema_version": HOST_BLACK_BOX_SCHEMA_VERSION,
             "reason": str(reason or "snapshot"),
             "session_id": getattr(recorder, "session_id", None),
             "trigger": dict(trigger or {}),
@@ -4735,6 +4886,7 @@ class Machine(QObject):
                 for event in list(getattr(self, "command_event_history", []))
             ],
             "black_box_events": recorder.recent_events() if recorder is not None else [],
+            "mcu_log_history": self._mcu_log_history_for_snapshot(reason),
             "commands": {
                 "queued": [self._compact_command_for_black_box(cmd) for cmd in list(queue)],
                 "completed": [self._compact_command_for_black_box(cmd) for cmd in list(completed)],
@@ -5245,6 +5397,10 @@ class Machine(QObject):
                 "Reader shutdown finished in "
                 f"{total_shutdown_ms} ms (serial={serial_shutdown_ms} ms, log={log_shutdown_ms} ms)"
             )
+        self._pre_reset_mcu_log_history = self._capture_mcu_log_history(
+            log_reader,
+            "reset_board_teardown",
+        )
         self._flash_state = default_flash_safety_state()
         self.flash_state_updated.emit(dict(self._flash_state))
 
@@ -5570,9 +5726,14 @@ class Machine(QObject):
         self._last_reset_report = dict(report)
         if classification == HOST_RESET_CLASSIFICATION_BENIGN_STARTUP:
             self._record_black_box_event("benign_startup_reset", dict(report))
+            self._pre_reset_mcu_log_history = None
         else:
             self._record_black_box_event("reset_report", dict(report))
-            self._write_black_box_snapshot("reset_report", {"report": dict(report)})
+            snapshot_result = self._write_black_box_snapshot(
+                "reset_report", {"report": dict(report)}
+            )
+            if snapshot_result.get("path"):
+                self._pre_reset_mcu_log_history = None
         self._reset_session_state_for_recovery()
         self._begin_recovery_handshake()
         self.reset_report_received.emit(dict(report))
@@ -6117,6 +6278,56 @@ class Machine(QObject):
             "p95_ms": ordered[p95_index],
             "maximum_ms": ordered[-1],
         }
+
+    def _capture_mcu_log_history(self, reader, capture_reason):
+        captured_at_monotonic_ns = int(time.monotonic_ns())
+        if reader is None:
+            return {
+                "source": "unavailable",
+                "capture_reason": str(capture_reason or "snapshot"),
+                "captured_at_monotonic_ns": captured_at_monotonic_ns,
+                "entry_limit": 0,
+                "retained_count": 0,
+                "possibly_truncated": False,
+                "entries": [],
+            }
+
+        try:
+            entries = [dict(entry) for entry in reader.get_recent_messages()]
+            history = getattr(reader, "message_history", None)
+            entry_limit = int(getattr(history, "maxlen", None) or len(entries))
+            return {
+                "source": "log_reader",
+                "capture_reason": str(capture_reason or "snapshot"),
+                "captured_at_monotonic_ns": captured_at_monotonic_ns,
+                "entry_limit": entry_limit,
+                "retained_count": len(entries),
+                "possibly_truncated": bool(entry_limit and len(entries) >= entry_limit),
+                "entries": entries,
+            }
+        except Exception as exc:
+            return {
+                "source": "unavailable",
+                "capture_reason": str(capture_reason or "snapshot"),
+                "captured_at_monotonic_ns": captured_at_monotonic_ns,
+                "entry_limit": 0,
+                "retained_count": 0,
+                "possibly_truncated": False,
+                "error": str(exc) or exc.__class__.__name__,
+                "entries": [],
+            }
+
+    def _mcu_log_history_for_snapshot(self, reason):
+        cached = getattr(self, "_pre_reset_mcu_log_history", None)
+        if cached is not None:
+            result = dict(cached)
+            result["source"] = "pre_reset_log_reader"
+            result["entries"] = [dict(entry) for entry in cached.get("entries", [])]
+            return result
+        return self._capture_mcu_log_history(
+            getattr(self, "log_reader", None),
+            f"fault_snapshot:{reason}",
+        )
 
     def get_status_delivery_diagnostics(self):
         """Return bounded main-thread delivery statistics for received status frames."""

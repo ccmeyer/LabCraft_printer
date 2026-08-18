@@ -89,6 +89,7 @@ def _benign_startup_report():
         "last_fault": 0,
         "last_fault_name": "none",
         "fault_context": None,
+        "xy_motion_context": None,
         "active_command": 0,
         "host_context": {
             "connection_phase": "initial",

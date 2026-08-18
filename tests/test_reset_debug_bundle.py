@@ -35,6 +35,13 @@ def test_export_reset_debug_bundle_writes_zip_with_manifest_and_snapshots(tmp_pa
             "watchdog_age_ms": 42,
         },
     }
+    xy_motion_context = {
+        "valid": True,
+        "reason_name": "x_limit",
+        "command_seq32": 76,
+        "end_x": 1200,
+        "end_y": 3400,
+    }
     context = {
         "repo_root": str(tmp_path),
         "reset_report": {
@@ -45,6 +52,7 @@ def test_export_reset_debug_bundle_writes_zip_with_manifest_and_snapshots(tmp_pa
             "pending": True,
             "sticky": True,
             "regulator_context": regulator_context,
+            "xy_motion_context": xy_motion_context,
         },
         "reset_report_log_path": str(board_log),
         "black_box_session_id": "session-abc",
@@ -91,7 +99,9 @@ def test_export_reset_debug_bundle_writes_zip_with_manifest_and_snapshots(tmp_pa
     assert manifest["reset"]["reset_cause_name"] == "iwdg"
     assert manifest["reset"]["seq32"] == 77
     assert manifest["reset"]["regulator_context"] == regulator_context
+    assert manifest["reset"]["xy_motion_context"] == xy_motion_context
     assert current_reset_report["regulator_context"] == regulator_context
+    assert current_reset_report["xy_motion_context"] == xy_motion_context
     reasons = {entry["reason"] for entry in manifest["black_box_snapshots"]}
     assert reasons == {"serial_reader_stopped", "reset_report"}
     assert all(entry["included"] for entry in manifest["black_box_snapshots"])

@@ -47,6 +47,7 @@ add_executable(fw_tests
     tests/test_exti_debounce.cpp
     tests/test_crash_log_codec.cpp
     tests/test_crash_fault_context.cpp
+    tests/test_xy_motion_fault_context.cpp
     tests/test_reset_report_policy.cpp
     tests/test_crash_watchdog_selftest_policy.cpp
     tests/test_watchdog_participation_policy.cpp
@@ -94,6 +95,7 @@ add_executable(fw_tests
     ../Core/Src/StepperInstrumentationReport.cpp
     ../Core/Src/CrashLogCodec.c
     ../Core/Src/CrashFaultContext.c
+    ../Core/Src/XyMotionFaultContext.c
     ../Core/Src/ResetReportPolicy.cpp
     ../Core/Src/CrashWatchdogSelfTestPolicy.cpp
     ../Core/Src/FlashSafety.cpp

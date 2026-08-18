@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCHEMA_VERSION = "host_black_box_v1"
+SCHEMA_VERSION = "host_black_box_v2"
 
 
 def utc_now_iso():

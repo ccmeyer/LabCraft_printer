@@ -95,6 +95,7 @@ static constexpr uint8_t TAG_RESET_RCC_FLAGS          = 0x20;
 static constexpr uint8_t TAG_RESET_TASK_NAME4         = 0x21;
 static constexpr uint8_t TAG_RESET_REG_CONTEXT        = 0x22;
 static constexpr uint8_t TAG_RESET_FAULT_CONTEXT      = 0x23;
+static constexpr uint8_t TAG_RESET_XY_MOTION_CONTEXT  = 0x24;
 
 static constexpr uint8_t ACK_RESULT_ACCEPTED = 1;
 static constexpr uint8_t ACK_RESULT_DUPLICATE = 2;

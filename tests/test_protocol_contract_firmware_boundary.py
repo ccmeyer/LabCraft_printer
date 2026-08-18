@@ -85,6 +85,20 @@ def test_fault_context_v2_version_and_wire_size_match_firmware_header():
     assert mfr.FAULT_CONTEXT_WIRE_SIZE == int(wire_size.group(1))
 
 
+def test_xy_motion_context_tag_version_and_wire_size_match_firmware_headers():
+    comm = Path("firmware/Core/Inc/Comm.h").read_text(encoding="utf-8")
+    context = Path("firmware/Core/Inc/XyMotionFaultContext.h").read_text(encoding="utf-8")
+    tag = re.search(r"TAG_RESET_XY_MOTION_CONTEXT\s*=\s*0[xX]([0-9A-Fa-f]+)", comm)
+    version = re.search(r"XY_MOTION_FAULT_CONTEXT_VERSION\s+(\d+)u", context)
+    wire_size = re.search(r"XY_MOTION_FAULT_CONTEXT_WIRE_SIZE\s+(\d+)u", context)
+    assert tag is not None
+    assert version is not None
+    assert wire_size is not None
+    assert mfr.TAG_RESET_XY_MOTION_CONTEXT == int(tag.group(1), 16)
+    assert mfr.XY_MOTION_CONTEXT_VERSION == int(version.group(1))
+    assert mfr.XY_MOTION_CONTEXT_WIRE_SIZE == int(wire_size.group(1))
+
+
 def test_maximum_v2_reset_report_fits_one_byte_payload_length():
     base_report_bytes = 86
     regulator_tlv_bytes = 2 + 30
@@ -92,6 +106,11 @@ def test_maximum_v2_reset_report_fits_one_byte_payload_length():
     maximum_report_bytes = base_report_bytes + regulator_tlv_bytes + fault_context_tlv_bytes
     assert maximum_report_bytes == 252
     assert maximum_report_bytes <= 255
+
+    xy_context_tlv_bytes = 2 + mfr.XY_MOTION_CONTEXT_WIRE_SIZE
+    maximum_xy_report_bytes = base_report_bytes + regulator_tlv_bytes + xy_context_tlv_bytes
+    assert maximum_xy_report_bytes == 180
+    assert maximum_xy_report_bytes <= 255
 
 
 def test_periodic_runtime_stats_are_disabled_in_production_firmware():

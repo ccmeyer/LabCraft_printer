@@ -20,6 +20,7 @@ static volatile uint8_t g_activeCommand = 0u;
 static RegulatorTelemetryRetainedContext g_regulatorContext __attribute__((section(".noinit")));
 static PressureSensorWatchdogRetainedContext g_pressureSensorContext __attribute__((section(".noinit")));
 static CrashFaultContextRetained g_faultContext __attribute__((section(".noinit")));
+static XyMotionFaultRetainedContext g_xyMotionContext __attribute__((section(".noinit")));
 volatile uint32_t g_crashFaultEntryCallee[8] __attribute__((section(".noinit")));
 static CrashFaultStackRange g_taskStackRanges[CRASH_HOME_AXIS_COUNT];
 static volatile uint8_t g_homePhases[CRASH_HOME_AXIS_COUNT];
@@ -137,6 +138,7 @@ static void CrashLog_ResetStorage(void)
   RegulatorTelemetry_ClearRetainedContext(&g_regulatorContext);
   PressureSensorWatchdogTelemetry_ClearRetainedContext(&g_pressureSensorContext);
   CrashLog_ClearFaultContext();
+  XyMotionFaultContext_ClearRetained(&g_xyMotionContext);
 }
 
 static uint32_t CrashLog_IsStorageValid(void)
@@ -186,6 +188,8 @@ static void CrashLog_FillSnapshot(CrashLogSnapshot* out)
   out->faultTaskName4 = CrashLog_Read(CRASHLOG_BKP_FAULT_TASK_NAME4);
   out->faultContextValid = (uint8_t)CrashFaultContext_ValidateRetained(
       &g_faultContext, &out->faultContext);
+  out->xyMotionContextValid = (uint8_t)XyMotionFaultContext_ReadRetained(
+      &g_xyMotionContext, &out->xyMotionContext);
   RegulatorTelemetry_InitResetContext(&out->regulatorContext);
   if (CrashLog_ShouldKeepRegulatorContext(out->resetCause) != 0u) {
     (void)RegulatorTelemetry_ReadRetainedContext(&g_regulatorContext,
@@ -250,6 +254,7 @@ void CrashLog_EarlyBootInit(void)
     RegulatorTelemetry_ClearRetainedContext(&g_regulatorContext);
     PressureSensorWatchdogTelemetry_ClearRetainedContext(&g_pressureSensorContext);
     CrashLog_ClearFaultContext();
+    XyMotionFaultContext_ClearRetained(&g_xyMotionContext);
   }
   g_watchdogRecoveryBoot = (((flags & CRASHLOG_FLAG_WDT_RECOVERY_PENDING) != 0u) &&
       (resetCause == CRASH_RESET_SOFTWARE)) ? 1u : 0u;
@@ -692,6 +697,24 @@ void CrashLog_CapturePressureSensorContext(const PressureSensorWatchdogResetCont
     return;
   }
   PressureSensorWatchdogTelemetry_WriteRetainedContext(&g_pressureSensorContext, context);
+}
+
+void CrashLog_CaptureXyMotionContext(const XyMotionFaultContext* context)
+{
+#if (LC_CRASHLOG_ENABLE == 0)
+  (void)context;
+  return;
+#endif
+  if (context == NULL || context->valid == 0u) {
+    XyMotionFaultContext_ClearRetained(&g_xyMotionContext);
+    return;
+  }
+  XyMotionFaultContext_WriteRetained(&g_xyMotionContext, context);
+}
+
+void CrashLog_ClearXyMotionContext(void)
+{
+  XyMotionFaultContext_ClearRetained(&g_xyMotionContext);
 }
 
 uint32_t CrashLog_IsWatchdogRecoveryBoot(void)

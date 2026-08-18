@@ -1,3 +1,4 @@
+from collections import deque
 from types import SimpleNamespace
 
 import Machine_FreeRTOS as mfr
@@ -331,6 +332,13 @@ def test_reset_board_requests_both_reader_stops_before_waiting(qapp, test_profil
             self.messageReceived = _SignalTracker()
             self.flashStateChanged = _SignalTracker()
             self.wait_calls = 0
+            self.message_history = deque(
+                [{"ts": 1.0, "text": "pre-reset XY fault", "level": None}],
+                maxlen=2000,
+            )
+
+        def get_recent_messages(self):
+            return list(self.message_history)
 
         def request_stop(self):
             events.append("log:request")
@@ -355,6 +363,9 @@ def test_reset_board_requests_both_reader_stops_before_waiting(qapp, test_profil
     assert "Requesting serial and log reader shutdown..." in out
     assert "Log reader thread fast stop timed out" in out
     assert "Reader shutdown finished in" in out
+    assert machine._pre_reset_mcu_log_history["capture_reason"] == "reset_board_teardown"
+    assert machine._pre_reset_mcu_log_history["retained_count"] == 1
+    assert machine._pre_reset_mcu_log_history["entries"][0]["text"] == "pre-reset XY fault"
 
 
 def test_release_serial_for_external_owner_closes_without_goodbye_or_disconnect_signal(qapp, test_profile):

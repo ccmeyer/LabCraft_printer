@@ -292,8 +292,12 @@ bool Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot*
   constexpr size_t resetBasePayloadBytes = 86u;
   constexpr size_t resetRegulatorTlvBytes = 2u + REG_TEL_RESET_CONTEXT_WIRE_SIZE;
   constexpr size_t resetFaultTlvBytes = 2u + CRASH_FAULT_CONTEXT_WIRE_SIZE;
+  constexpr size_t resetXyMotionTlvBytes = 2u + XY_MOTION_FAULT_CONTEXT_WIRE_SIZE;
   static_assert(resetBasePayloadBytes + resetRegulatorTlvBytes + resetFaultTlvBytes <= 255u,
-                "Maximum reset report must fit the one-byte protocol length");
+                "Reset report with CPU fault context must fit the one-byte protocol length");
+  static_assert(resetBasePayloadBytes + resetRegulatorTlvBytes + resetXyMotionTlvBytes <= 255u,
+                "Reset report with XY context must fit the one-byte protocol length");
+  const ResetReportContextSelection contextSelection = ResetReport_SelectContexts(snap);
   size_t idx = 0;
   payload[idx++] = Orchestrator::CMD_RESET_REPORT;
   payload[idx++] = seq8;
@@ -316,7 +320,7 @@ bool Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot*
   appendU32(payload, idx, TAG_RESET_RCC_FLAGS, snap->resetFlagsRaw);
   appendU32(payload, idx, TAG_RESET_TASK_NAME4, snap->faultTaskName4);
   uint8_t regulatorContext[REG_TEL_RESET_CONTEXT_WIRE_SIZE] = {0u};
-  if (ResetReport_ShouldIncludeRegulatorContext(snap) &&
+  if (contextSelection.includeRegulatorContext &&
       RegulatorTelemetry_PackResetContext(&snap->regulatorContext,
                                           regulatorContext,
                                           sizeof(regulatorContext)) != 0u) {
@@ -330,7 +334,7 @@ bool Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot*
   uint8_t faultContext[CRASH_FAULT_CONTEXT_WIRE_SIZE] = {0u};
   static_assert(CRASH_FAULT_CONTEXT_WIRE_SIZE <= 255u,
                 "Fault context TLV length must fit in one byte");
-  if (snap->faultContextValid != 0u &&
+  if (contextSelection.includeFaultContext &&
       CrashFaultContext_Pack(&snap->faultContext,
                              faultContext,
                              sizeof(faultContext)) != 0u) {
@@ -340,6 +344,20 @@ bool Comm::sendResetReport(uint8_t seq8, uint32_t seq32, const CrashLogSnapshot*
                          TAG_RESET_FAULT_CONTEXT,
                          faultContext,
                          static_cast<uint8_t>(sizeof(faultContext)));
+  }
+  uint8_t xyMotionContext[XY_MOTION_FAULT_CONTEXT_WIRE_SIZE] = {0u};
+  static_assert(XY_MOTION_FAULT_CONTEXT_WIRE_SIZE <= 255u,
+                "XY motion context TLV length must fit in one byte");
+  if (contextSelection.includeXyMotionContext &&
+      XyMotionFaultContext_Pack(&snap->xyMotionContext,
+                                xyMotionContext,
+                                sizeof(xyMotionContext)) != 0u) {
+    (void)tryAppendBytes(payload,
+                         payloadCapacity,
+                         idx,
+                         TAG_RESET_XY_MOTION_CONTEXT,
+                         xyMotionContext,
+                         static_cast<uint8_t>(sizeof(xyMotionContext)));
   }
   if (xSemaphoreTake(_txMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
     return false;

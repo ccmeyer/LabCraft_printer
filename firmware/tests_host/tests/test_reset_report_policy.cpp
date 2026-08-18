@@ -136,3 +136,69 @@ TEST(ResetReportPolicy, NullSnapshotDoesNotIncludeRegulatorContext)
 {
     CHECK_FALSE(ResetReport_ShouldIncludeRegulatorContext(nullptr));
 }
+
+TEST(ResetReportPolicy, XyContextIsIncludedWhenNoCpuFaultContextExists)
+{
+    CrashLogSnapshot snap = makeSnapshot(CRASH_RESET_SOFTWARE);
+    snap.xyMotionContextValid = 1u;
+
+    const ResetReportContextSelection selection = ResetReport_SelectContexts(&snap);
+
+    CHECK_TRUE(selection.includeXyMotionContext);
+    CHECK_FALSE(selection.includeFaultContext);
+}
+
+TEST(ResetReportPolicy, PendingCpuFaultContextTakesPriorityOverXyContext)
+{
+    CrashLogSnapshot snap = makeSnapshot(CRASH_RESET_IWDG, CRASHLOG_FLAG_PENDING);
+    snap.faultContextValid = 1u;
+    snap.xyMotionContextValid = 1u;
+
+    const ResetReportContextSelection selection = ResetReport_SelectContexts(&snap);
+
+    CHECK_TRUE(selection.includeFaultContext);
+    CHECK_FALSE(selection.includeXyMotionContext);
+}
+
+TEST(ResetReportPolicy, XyContextTakesPriorityOverStaleCpuFaultContext)
+{
+    CrashLogSnapshot snap = makeSnapshot(CRASH_RESET_SOFTWARE);
+    snap.faultContextValid = 1u;
+    snap.xyMotionContextValid = 1u;
+
+    const ResetReportContextSelection selection = ResetReport_SelectContexts(&snap);
+
+    CHECK_FALSE(selection.includeFaultContext);
+    CHECK_TRUE(selection.includeXyMotionContext);
+}
+
+TEST(ResetReportPolicy, CpuFaultContextIsIncludedWhenItIsTheOnlyExtendedContext)
+{
+    CrashLogSnapshot snap = makeSnapshot(CRASH_RESET_SOFTWARE);
+    snap.faultContextValid = 1u;
+
+    const ResetReportContextSelection selection = ResetReport_SelectContexts(&snap);
+
+    CHECK_TRUE(selection.includeFaultContext);
+    CHECK_FALSE(selection.includeXyMotionContext);
+}
+
+TEST(ResetReportPolicy, RegulatorContextCanAccompanyXyContext)
+{
+    CrashLogSnapshot snap = makeSnapshot(CRASH_RESET_IWDG);
+    snap.regulatorContext.valid = 1u;
+    snap.xyMotionContextValid = 1u;
+
+    const ResetReportContextSelection selection = ResetReport_SelectContexts(&snap);
+
+    CHECK_TRUE(selection.includeRegulatorContext);
+    CHECK_TRUE(selection.includeXyMotionContext);
+}
+
+TEST(ResetReportPolicy, NullSnapshotSelectsNoContexts)
+{
+    const ResetReportContextSelection selection = ResetReport_SelectContexts(nullptr);
+    CHECK_FALSE(selection.includeRegulatorContext);
+    CHECK_FALSE(selection.includeFaultContext);
+    CHECK_FALSE(selection.includeXyMotionContext);
+}

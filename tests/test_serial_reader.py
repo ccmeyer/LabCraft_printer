@@ -92,6 +92,31 @@ def _fault_context_v2_payload(*, version=2) -> bytes:
     )
 
 
+def _xy_motion_context_payload(*, version=1, valid=1) -> bytes:
+    return struct.pack(
+        "<8BII6i5I",
+        version,
+        valid,
+        2,
+        0,
+        6,
+        3,
+        0x47,
+        0,
+        123,
+        456,
+        100,
+        200,
+        500,
+        600,
+        300,
+        400,
+        400,
+        400,
+        200,
+        200,
+        3,
+    )
 class FakeSerial:
     def __init__(self, data: bytes):
         self._buf = bytearray(data)
@@ -510,6 +535,48 @@ def test_serial_reader_ignores_malformed_and_unknown_fault_context(qapp):
         assert "Fault context:" not in report["summary"]
 
 
+def test_serial_reader_decodes_xy_motion_context_and_adds_summary(qapp):
+    reset_payload = _reset_report_payload(3) + _tlv(
+        mfr.TAG_RESET_XY_MOTION_CONTEXT, _xy_motion_context_payload()
+    )
+
+    report = mfr.SerialReader._parse_reset_report(reset_payload)
+
+    assert report is not None
+    context = report["xy_motion_context"]
+    assert context["version"] == 1
+    assert context["reason_name"] == "x_limit"
+    assert context["start_status_name"] == "started"
+    assert context["executor_state_name"] == "limit_aborted"
+    assert context["terminal_reason_name"] == "x_limit"
+    assert context["targets_canonical"] is True
+    assert context["start_accepted"] is True
+    assert context["wait_completed"] is True
+    assert context["timer_owned"] is True
+    assert context["command_seq32"] == 123
+    assert context["start_x"] == 100
+    assert context["target_y"] == 600
+    assert context["end_x"] == 300
+    assert context["emitted_x_edges"] == 200
+    assert context["requested_x_edges"] == 400
+    assert "XY motion context: reason=x_limit, seq=123" in report["summary"]
+    assert "end=(300,400)" in report["summary"]
+
+
+def test_serial_reader_ignores_malformed_or_unsupported_xy_motion_context(qapp):
+    for raw in (
+        b"\x01\x01",
+        _xy_motion_context_payload(version=2),
+        _xy_motion_context_payload(valid=0),
+    ):
+        report = mfr.SerialReader._parse_reset_report(
+            _reset_report_payload(3) + _tlv(mfr.TAG_RESET_XY_MOTION_CONTEXT, raw)
+        )
+        assert report is not None
+        assert report["xy_motion_context"] is None
+        assert "XY motion context:" not in report["summary"]
+
+
 def test_serial_reader_accepts_older_reset_report_without_raw_flags(qapp):
     report = mfr.SerialReader._parse_reset_report(_reset_report_payload(1))
 
@@ -521,6 +588,7 @@ def test_serial_reader_accepts_older_reset_report_without_raw_flags(qapp):
     assert report["fault_task_name4"] is None
     assert report["regulator_context"] is None
     assert report["fault_context"] is None
+    assert report["xy_motion_context"] is None
 
 
 def test_serial_reader_maps_new_crash_task_ids():

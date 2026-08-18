@@ -234,6 +234,7 @@ def export_reset_debug_bundle(
             "pending": reset_report.get("pending"),
             "sticky": reset_report.get("sticky"),
             "regulator_context": reset_report.get("regulator_context"),
+            "xy_motion_context": reset_report.get("xy_motion_context"),
         },
         "connection_loss": {
             "summary": connection_loss_report.get("summary"),
