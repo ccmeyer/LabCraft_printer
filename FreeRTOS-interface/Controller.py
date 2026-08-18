@@ -879,6 +879,8 @@ class Controller(QObject):
     error_occurred_signal = Signal(str,str)
     transport_fault_ui_signal = Signal(object)
     machine_workflow_interrupted_signal = Signal(object)
+    xy_motion_recovery_requested = Signal(object)
+    xy_motion_recovery_state_changed = Signal(str)
     experimental_balance_connection_changed = Signal(object)
     experimental_balance_reading_received = Signal(object)
     experimental_balance_error_occurred = Signal(object)
@@ -1060,6 +1062,13 @@ class Controller(QObject):
         xy_motion_fault_signal = getattr(self.machine, "xy_motion_faulted", None)
         if xy_motion_fault_signal is not None:
             xy_motion_fault_signal.connect(self.handle_xy_motion_fault)
+        xy_recovery_state_signal = getattr(
+            self.machine,
+            "xy_motion_recovery_state_changed",
+            None,
+        )
+        if xy_recovery_state_signal is not None:
+            xy_recovery_state_signal.connect(self.xy_motion_recovery_state_changed.emit)
         self.machine.disconnect_complete_signal.connect(self.reset_board)
         self.machine.flash_state_updated.connect(self.model.update_flash_session_state)
         ejection_signal = getattr(self.machine, "ejection_command_event", None)
@@ -2466,31 +2475,7 @@ class Controller(QObject):
             reason="xy_motion_failure",
         )
         self._emit_machine_workflow_interrupted("xy_motion_failure")
-
-        summary = report.get("summary") or "XY motion stopped before reaching its commanded endpoint."
-        failed_seq32 = report.get("failed_command_number")
-        sequence_detail = (
-            f"Failed command: ABSOLUTE_XY sequence {failed_seq32}."
-            if failed_seq32 is not None
-            else "The MCU reported a retained XY motion-failure latch after reconnecting."
-        )
-        guidance = (
-            "The MCU did not reset and the move will not resume automatically. Keep clear of the gantry, "
-            "inspect the X/Y travel and release any asserted limit switch. Then use Clear Queue, wait for "
-            "confirmation, and run a full Home before sending more motion or calibration commands."
-        )
-        log_path = report.get("black_box_log_path")
-        log_error = report.get("black_box_log_error")
-        if log_path:
-            log_status = f"Black-box log: {log_path}"
-        elif log_error:
-            log_status = f"Black-box log save failed: {log_error}"
-        else:
-            log_status = "Black-box log: not available"
-        self.error_occurred_signal.emit(
-            "XY Motion Stopped",
-            "\n\n".join((summary, sequence_detail, guidance, log_status)),
-        )
+        self.xy_motion_recovery_requested.emit(report)
 
     def _append_reset_report_log(self, report: dict) -> str:
         path = Path(getattr(self, "_reset_report_log_path", Path("logs") / "board_reset_reports.jsonl"))
@@ -4294,6 +4279,19 @@ class Controller(QObject):
         except Exception:
             pass
 
+    def clear_xy_motion_recovery(self):
+        """Request the operator-confirmed Clear step for an XY motion fault."""
+        if self.get_xy_motion_recovery_state() != "clear_required":
+            return False
+        try:
+            result = self._clear_machine_and_model_command_queues(
+                reason="xy_motion_recovery_clear",
+                notify_user=False,
+            )
+        except Exception:
+            return False
+        return result is not False
+
     def _emit_machine_workflow_interrupted(self, reason, *, notify_user=False):
         payload = {
             "reason": str(reason or "machine_workflow_interrupted"),
@@ -4314,10 +4312,11 @@ class Controller(QObject):
             notify_user=notify_user,
         )
         if handler is None:
-            self.machine.clear_command_queue()
+            result = self.machine.clear_command_queue()
         else:
-            self.machine.clear_command_queue(handler=handler)
+            result = self.machine.clear_command_queue(handler=handler)
         self.model.machine_model.clear_command_queue()
+        return result
 
     def _set_array_run_state(self, state):
         state = str(state or "idle")
@@ -5714,6 +5713,9 @@ class Controller(QObject):
 
     def home_machine(self):
         """Home the machine."""
+        recovery_state = self.get_xy_motion_recovery_state()
+        if recovery_state not in {"idle", "home_required"}:
+            return False
         print("Homing machine...")
         self.model.machine_model.reset_home_status()
         self.model.machine_model.home_status_signal.emit()

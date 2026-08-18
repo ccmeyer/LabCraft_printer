@@ -4545,6 +4545,7 @@ class Machine(QObject):
     serial_connection_lost = Signal(dict)
     transport_faulted = Signal(dict)
     xy_motion_faulted = Signal(dict)
+    xy_motion_recovery_state_changed = Signal(str)
     all_calibration_droplets_printed = Signal()  # Signal to emit when all calibration droplets are printed
     require_gripper_confirmation = Signal(str)   # "OPEN" or "CLOSE"
     log_message_received = Signal(str)  # Signal to emit when a log message is received
@@ -6415,18 +6416,20 @@ class Machine(QObject):
 
     def _set_xy_motion_recovery_state(self, state):
         state = str(state or "idle")
+        previous_state = self.get_xy_motion_recovery_state()
         self._xy_motion_recovery_state = state
         if state == "idle":
             if str(getattr(self, "_command_queue_blocked_reason", "") or "").startswith("xy_"):
                 self._command_queue_blocked_reason = None
             self._xy_rehome_command_numbers.clear()
-            return
-        if state == "home_required":
+        elif state == "home_required":
             self._command_queue_blocked_reason = "xy_rehome_required"
         elif state == "home_in_progress":
             self._command_queue_blocked_reason = "xy_rehome_in_progress"
         else:
             self._command_queue_blocked_reason = "xy_motion_failure"
+        if state != previous_state:
+            self.xy_motion_recovery_state_changed.emit(state)
 
     def _reset_xy_motion_recovery(self, reason=None):
         report = getattr(self, "_xy_motion_fault_report", None)
@@ -8234,10 +8237,12 @@ class Machine(QObject):
             "xy_motion_recovery_completed",
             {"failed_command_number": report.get("failed_command_number")},
         )
+        # homing_completed is delivered synchronously to the Controller, so the
+        # model is homed before the View observes recovery returning to idle.
+        self.home_motor_handler()
         self._xy_motion_fault_report = None
         self._xy_motion_fault_key = None
         self._set_xy_motion_recovery_state("idle")
-        self.home_motor_handler()
         if additional_handler is not None and additional_handler != self.home_motor_handler:
             additional_handler(**dict(additional_kwargs or {}))
 

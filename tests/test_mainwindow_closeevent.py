@@ -91,6 +91,22 @@ def test_mainwindow_closeevent_ignores_stale_pending_launch_and_starts_disconnec
     assert event.isAccepted() is False
 
 
+def test_xy_recovery_dialog_does_not_block_application_close(qapp, fake_signal):
+    mw, disconnect_calls, _close_calls, _dismiss_calls, dialog_states = (
+        _make_stub_mainwindow(fake_signal)
+    )
+    mw.pressure_box = SimpleNamespace(calibration_session_is_idle=lambda: True)
+    mw._xy_motion_recovery_dialog = SimpleNamespace(isVisible=lambda: True)
+
+    event = QCloseEvent()
+    MainWindow.closeEvent(mw, event)
+
+    assert disconnect_calls["count"] == 1
+    assert dialog_states == ["waiting"]
+    assert mw._popup_messages == []
+    assert event.isAccepted() is False
+
+
 def test_mainwindow_closeevent_blocks_and_focuses_actual_active_calibration(
     qapp, fake_signal
 ):

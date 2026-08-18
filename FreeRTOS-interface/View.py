@@ -512,6 +512,148 @@ class AuditTimelineWindow(QtWidgets.QDialog):
 #         """Return a list of shortcuts and their descriptions."""
 #         return self.shortcuts
 
+
+class XyMotionRecoveryDialog(QtWidgets.QDialog):
+    """Non-modal, state-driven recovery guide for a terminal XY failure."""
+
+    def __init__(self, main_window, controller):
+        super().__init__(main_window)
+        self.main_window = main_window
+        self.controller = controller
+        self._state = "idle"
+        self._previous_state = None
+        self._report = {}
+
+        self.setWindowTitle("XY Motion Stopped")
+        self.setModal(False)
+        self.setWindowModality(QtCore.Qt.NonModal)
+        self.setMinimumWidth(560)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        self.summary_label = QtWidgets.QLabel()
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet("font-weight: 700; font-size: 14px;")
+        layout.addWidget(self.summary_label)
+
+        self.detail_label = QtWidgets.QLabel()
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        layout.addWidget(self.detail_label)
+
+        self.instruction_label = QtWidgets.QLabel()
+        self.instruction_label.setWordWrap(True)
+        layout.addWidget(self.instruction_label)
+
+        self.feedback_label = QtWidgets.QLabel()
+        self.feedback_label.setWordWrap(True)
+        self.feedback_label.setStyleSheet("color: #8B0000; font-weight: 600;")
+        self.feedback_label.hide()
+        layout.addWidget(self.feedback_label)
+
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+        self.close_button = QtWidgets.QPushButton("Close (Recovery Remains Required)")
+        self.close_button.clicked.connect(self.hide)
+        button_row.addWidget(self.close_button)
+        self.primary_button = QtWidgets.QPushButton()
+        self.primary_button.clicked.connect(self._run_primary_action)
+        button_row.addWidget(self.primary_button)
+        layout.addLayout(button_row)
+
+    def update_report(self, report):
+        self._report = dict(report or {})
+        summary = self._report.get("summary") or (
+            "XY motion stopped before reaching its commanded endpoint."
+        )
+        self.summary_label.setText(str(summary))
+
+        failed_seq32 = self._report.get("failed_command_number")
+        if failed_seq32 is None:
+            command_detail = "A retained XY motion-failure latch was detected after reconnecting."
+        else:
+            command_detail = f"Failed command: ABSOLUTE_XY sequence {failed_seq32}."
+        log_path = self._report.get("black_box_log_path")
+        log_error = self._report.get("black_box_log_error")
+        if log_path:
+            log_detail = f"Black-box log: {log_path}"
+        elif log_error:
+            log_detail = f"Black-box log save failed: {log_error}"
+        else:
+            log_detail = "Black-box log: not available"
+        self.detail_label.setText(
+            f"{command_detail}\n\nThe MCU did not reset, and canceled commands will not resume.\n\n{log_detail}"
+        )
+
+    def set_recovery_state(self, state):
+        state = str(state or "idle")
+        previous_state = self._state
+        self._previous_state = previous_state
+        self._state = state
+        self.feedback_label.hide()
+
+        if state == "clear_required":
+            self.instruction_label.setText(
+                "Keep clear of the gantry. Inspect the X/Y travel and limit switches, release any "
+                "unexpectedly asserted switch, then confirm the inspection below."
+            )
+            self.primary_button.setText("I Checked the Machine — Clear Queue")
+            self.primary_button.setEnabled(True)
+            if previous_state == "clear_pending":
+                self._show_feedback(
+                    "Clear Queue was not confirmed by a settled, unpaused MCU. Check the connection "
+                    "and machine, then try again."
+                )
+        elif state == "clear_pending":
+            self.instruction_label.setText(
+                "The Clear request was sent. Waiting for the MCU to confirm an empty, settled, "
+                "unpaused command queue."
+            )
+            self.primary_button.setText("Clearing Queue…")
+            self.primary_button.setEnabled(False)
+        elif state == "home_required":
+            self.instruction_label.setText(
+                "Clear Queue was confirmed. Make sure the motion envelope is clear, then run the "
+                "required full-machine Home."
+            )
+            self.primary_button.setText("Home Machine")
+            self.primary_button.setEnabled(True)
+        elif state == "home_in_progress":
+            self.instruction_label.setText(
+                "Full-machine homing is in progress. Keep clear of the motion envelope."
+            )
+            self.primary_button.setText("Homing…")
+            self.primary_button.setEnabled(False)
+        else:
+            self.primary_button.setEnabled(False)
+            self.hide()
+
+    def _show_feedback(self, message):
+        self.feedback_label.setText(str(message or "Recovery action could not be started."))
+        self.feedback_label.show()
+
+    def _run_primary_action(self):
+        if self._state == "clear_required":
+            self.primary_button.setEnabled(False)
+            self.primary_button.setText("Sending Clear Request…")
+            request_clear = getattr(self.controller, "clear_xy_motion_recovery", None)
+            if not callable(request_clear) or request_clear() is False:
+                self.primary_button.setText("I Checked the Machine — Clear Queue")
+                self.primary_button.setEnabled(True)
+                self._show_feedback(
+                    "The Clear request could not be sent. Verify the MCU connection and try again."
+                )
+        elif self._state == "home_required":
+            self.primary_button.setEnabled(False)
+            self.primary_button.setText("Starting Home…")
+            request_home = getattr(self.controller, "home_machine", None)
+            if not callable(request_home) or request_home() is False:
+                self.primary_button.setText("Home Machine")
+                self.primary_button.setEnabled(True)
+                self._show_feedback(
+                    "The full Home could not be queued. Verify the connection and recovery state, "
+                    "then try again."
+                )
+
 class MainWindow(QMainWindow):
     CLOSE_DISCONNECT_TIMEOUT_MS = 5000
 
@@ -537,6 +679,9 @@ class MainWindow(QMainWindow):
         self.audit_timeline_window = None
         self._plate_reader_analysis_window = None
         self._app_update_close_requested = False
+        self._xy_motion_recovery_dialog = None
+        self._xy_motion_recovery_report = {}
+        self._xy_motion_recovery_state = "idle"
 
         base_title = "Droplet Printer Interface v1.0.3"
         if self.runtime_context.is_simulation:
@@ -547,6 +692,7 @@ class MainWindow(QMainWindow):
         if self.runtime_context.is_simulation:
             self._add_simulation_banner()
             self._apply_simulation_ui_safety()
+        self._init_xy_motion_recovery_ui()
         self.disconnected = False
         self._close_disconnect_pending = False
         self._close_after_disconnect = False
@@ -556,10 +702,89 @@ class MainWindow(QMainWindow):
         self._close_disconnect_signal_hooked = False
 
         self.controller.error_occurred_signal.connect(self.popup_message)
+        xy_recovery_requested = getattr(self.controller, "xy_motion_recovery_requested", None)
+        if xy_recovery_requested is not None:
+            xy_recovery_requested.connect(self.show_xy_motion_recovery)
+        xy_recovery_state_changed = getattr(
+            self.controller,
+            "xy_motion_recovery_state_changed",
+            None,
+        )
+        if xy_recovery_state_changed is not None:
+            xy_recovery_state_changed.connect(self._on_xy_motion_recovery_state_changed)
         self.controller.machine.disconnect_complete_signal.connect(self.disconnect_successful)
         self._ensure_close_disconnect_signal_hook()
         self.controller.update_volumes_in_view_signal.connect(self.rack_box.update_all_slots)
         self.controller.machine.require_gripper_confirmation.connect(self.on_require_gripper_confirmation)
+
+        recovery_getter = getattr(self.controller, "get_xy_motion_recovery_state", None)
+        if callable(recovery_getter):
+            self._on_xy_motion_recovery_state_changed(recovery_getter())
+
+    def _init_xy_motion_recovery_ui(self):
+        toolbar = QtWidgets.QToolBar("XY Motion Recovery", self)
+        toolbar.setObjectName("xyMotionRecoveryBanner")
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        toolbar.setAllowedAreas(QtCore.Qt.TopToolBarArea)
+        toolbar.setContextMenuPolicy(QtCore.Qt.NoContextMenu)
+        toolbar.toggleViewAction().setEnabled(False)
+        toolbar.setStyleSheet(
+            "QToolBar { background-color: #8B0000; border: 1px solid #FFCC00; padding: 5px; }"
+            "QLabel { color: white; font-weight: 700; font-size: 14px; padding: 4px 12px; }"
+        )
+
+        self.xy_motion_recovery_banner_label = QtWidgets.QLabel("XY Recovery Required", toolbar)
+        toolbar.addWidget(self.xy_motion_recovery_banner_label)
+        spacer = QtWidgets.QWidget(toolbar)
+        spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        toolbar.addWidget(spacer)
+        self.xy_motion_recovery_open_button = QtWidgets.QPushButton("Open Recovery", toolbar)
+        self.xy_motion_recovery_open_button.clicked.connect(self.show_xy_motion_recovery)
+        toolbar.addWidget(self.xy_motion_recovery_open_button)
+        self.addToolBar(QtCore.Qt.TopToolBarArea, toolbar)
+        toolbar.hide()
+        self.xy_motion_recovery_banner = toolbar
+
+    def _xy_recovery_banner_text(self, state):
+        return {
+            "clear_required": "XY Recovery Required — inspect the machine and Clear Queue",
+            "clear_pending": "XY Recovery — waiting for Clear Queue confirmation",
+            "home_required": "XY Recovery Required — Home Machine",
+            "home_in_progress": "XY Recovery — full-machine homing in progress",
+        }.get(str(state or "idle"), "XY Recovery Required")
+
+    @Slot(object)
+    def show_xy_motion_recovery(self, report=None):
+        if isinstance(report, dict):
+            self._xy_motion_recovery_report = dict(report)
+        if self._xy_motion_recovery_state == "idle":
+            recovery_getter = getattr(self.controller, "get_xy_motion_recovery_state", None)
+            if callable(recovery_getter):
+                self._xy_motion_recovery_state = str(recovery_getter() or "idle")
+        if self._xy_motion_recovery_state == "idle":
+            return
+        if self._xy_motion_recovery_dialog is None:
+            self._xy_motion_recovery_dialog = XyMotionRecoveryDialog(self, self.controller)
+        dialog = self._xy_motion_recovery_dialog
+        dialog.update_report(self._xy_motion_recovery_report)
+        dialog.set_recovery_state(self._xy_motion_recovery_state)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    @Slot(str)
+    def _on_xy_motion_recovery_state_changed(self, state):
+        state = str(state or "idle")
+        self._xy_motion_recovery_state = state
+        active = state != "idle"
+        banner = getattr(self, "xy_motion_recovery_banner", None)
+        if banner is not None:
+            self.xy_motion_recovery_banner_label.setText(self._xy_recovery_banner_text(state))
+            banner.setVisible(active)
+        dialog = getattr(self, "_xy_motion_recovery_dialog", None)
+        if dialog is not None:
+            dialog.set_recovery_state(state)
 
     def _add_simulation_banner(self):
         toolbar = QtWidgets.QToolBar(self.runtime_context.identity_text, self)

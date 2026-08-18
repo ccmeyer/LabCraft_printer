@@ -181,6 +181,11 @@ def test_confirmed_clear_allows_only_atomic_full_home_then_restores_commands(
     qapp, test_profile, fake_serial_main, tmp_path
 ):
     machine, _commands, _callbacks = _machine_with_xy_window(test_profile, tmp_path)
+    recovery_events = []
+    machine.xy_motion_recovery_state_changed.connect(
+        lambda state: recovery_events.append(f"state:{state}")
+    )
+    machine.homing_completed.connect(lambda: recovery_events.append("homed"))
     machine.ser = fake_serial_main
     machine.update_status(_terminal_fault_status())
     machine.clear_command_queue()
@@ -222,6 +227,14 @@ def test_confirmed_clear_allows_only_atomic_full_home_then_restores_commands(
     assert machine.get_xy_motion_recovery_state() == "idle"
     assert machine.homed is True
     assert machine._command_queue_blocked_reason is None
+    assert recovery_events == [
+        "state:clear_required",
+        "state:clear_pending",
+        "state:home_required",
+        "state:home_in_progress",
+        "homed",
+        "state:idle",
+    ]
     machine._transport_ready = False
     assert machine.wait_ms(10) is not False
     machine._cancel_pending_acks()
@@ -231,6 +244,7 @@ def test_confirmed_clear_allows_only_atomic_full_home_then_restores_commands(
 def test_controller_xy_fault_invalidates_home_and_aborts_before_workflow_notice():
     events = []
     popups = []
+    recovery_requests = []
     machine_model = SimpleNamespace(
         reset_home_status=Mock(side_effect=lambda: events.append("home_reset")),
         home_status_signal=SimpleNamespace(emit=lambda: events.append("home_signal")),
@@ -252,6 +266,9 @@ def test_controller_xy_fault_invalidates_home_and_aborts_before_workflow_notice(
     controller.error_occurred_signal = SimpleNamespace(
         emit=lambda title, message: popups.append((title, message))
     )
+    controller.xy_motion_recovery_requested = SimpleNamespace(
+        emit=lambda report: recovery_requests.append(dict(report))
+    )
 
     Controller.handle_xy_motion_fault(
         controller,
@@ -271,6 +288,64 @@ def test_controller_xy_fault_invalidates_home_and_aborts_before_workflow_notice(
     ]
     assert controller.expected_position == {"X": 12, "Y": 34, "Z": 56}
     assert controller.expected_location is None
-    assert popups[0][0] == "XY Motion Stopped"
-    assert "did not reset" in popups[0][1]
-    assert "Clear Queue" in popups[0][1]
+    assert popups == []
+    assert recovery_requests == [
+        {
+            "summary": "XY stopped.",
+            "failed_command_number": 77,
+            "black_box_log_path": "logs/machine_black_box/xy.json",
+        }
+    ]
+
+
+def test_xy_recovery_state_signal_is_transition_only(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(
+        SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path
+    )
+    states = []
+    machine.xy_motion_recovery_state_changed.connect(states.append)
+
+    machine._set_xy_motion_recovery_state("idle")
+    machine._set_xy_motion_recovery_state("clear_required")
+    machine._set_xy_motion_recovery_state("clear_required")
+    machine._set_xy_motion_recovery_state("clear_pending")
+    machine._set_xy_motion_recovery_state("clear_pending")
+    machine._set_xy_motion_recovery_state("home_required")
+
+    assert states == ["clear_required", "clear_pending", "home_required"]
+    machine.stop_execution_timer()
+
+
+def test_controller_xy_recovery_actions_are_state_guarded():
+    controller = Controller.__new__(Controller)
+    state = {"value": "clear_required"}
+    machine_clear = Mock(return_value=True)
+    model_clear = Mock()
+    reset_home = Mock()
+    home_status = Mock()
+    controller.machine = SimpleNamespace(
+        get_xy_motion_recovery_state=lambda: state["value"],
+        clear_command_queue=machine_clear,
+        home_motors=Mock(return_value=True),
+    )
+    controller.model = SimpleNamespace(
+        machine_model=SimpleNamespace(
+            clear_command_queue=model_clear,
+            reset_home_status=reset_home,
+            home_status_signal=SimpleNamespace(emit=home_status),
+        )
+    )
+    controller._emit_machine_workflow_interrupted = Mock()
+
+    assert Controller.clear_xy_motion_recovery(controller) is True
+    machine_clear.assert_called_once_with()
+    model_clear.assert_called_once_with()
+
+    assert Controller.home_machine(controller) is False
+    reset_home.assert_not_called()
+
+    state["value"] = "home_required"
+    assert Controller.clear_xy_motion_recovery(controller) is False
+    assert Controller.home_machine(controller) is True
+    reset_home.assert_called_once_with()
+    home_status.assert_called_once_with()
