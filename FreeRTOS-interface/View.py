@@ -10020,7 +10020,6 @@ class _BusyUiContext:
         self.failure_message = failure_message
         self.show_dialog = bool(show_dialog)
         self._enabled_states: list[tuple[Any, bool]] = []
-        self._tooltip_states: list[tuple[Any, str]] = []
         self._dialog = None
 
     def __enter__(self):
@@ -10028,10 +10027,6 @@ class _BusyUiContext:
             try:
                 self._enabled_states.append((widget, bool(widget.isEnabled())))
                 widget.setEnabled(False)
-                busy_tooltip = widget.property("busyDisabledToolTip")
-                if busy_tooltip:
-                    self._tooltip_states.append((widget, widget.toolTip()))
-                    widget.setToolTip(str(busy_tooltip))
             except Exception:
                 pass
 
@@ -10091,12 +10086,6 @@ class _BusyUiContext:
             except Exception:
                 pass
         self._enabled_states.clear()
-        for widget, tooltip in self._tooltip_states:
-            try:
-                widget.setToolTip(tooltip)
-            except Exception:
-                pass
-        self._tooltip_states.clear()
 
         if exc_type is not None and self.failure_message:
             setter = self.failure_status_setter or self.status_setter
@@ -11545,35 +11534,7 @@ class ExperimentDesignDialog(QDialog):
             "QHeaderView::section { padding-left: 10px; padding-right: 8px; }"
         )
         self.reagent_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.reagent_editor_region = QWidget(self)
-        reagent_editor_layout = QHBoxLayout(self.reagent_editor_region)
-        reagent_editor_layout.setContentsMargins(0, 0, 0, 0)
-        reagent_editor_layout.setSpacing(8)
-        reagent_editor_layout.addWidget(self.reagent_table, stretch=1)
-
-        self.reagent_action_rail = QFrame(self.reagent_editor_region)
-        self.reagent_action_rail.setObjectName("reagentActionRail")
-        self.reagent_action_rail.setFixedWidth(126)
-        self.reagent_action_rail.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self.reagent_action_rail.setStyleSheet(
-            "QFrame#reagentActionRail { border:1px solid #8c8c8c; border-radius:4px; }"
-        )
-        reagent_action_layout = QVBoxLayout(self.reagent_action_rail)
-        reagent_action_layout.setContentsMargins(8, 8, 8, 8)
-        self.table_add_reagent_btn = QPushButton("+ Add Reagent", self.reagent_action_rail)
-        self.table_add_reagent_btn.setObjectName("tableAddReagentButton")
-        self.table_add_reagent_btn.setProperty(
-            "busyDisabledToolTip",
-            "Wait for the current design calculation to finish before adding a reagent.",
-        )
-        self.table_add_reagent_btn.setToolTip(
-            "Add a reagent column to the manual reaction design."
-        )
-        self.table_add_reagent_btn.clicked.connect(self._on_add_reagent)
-        reagent_action_layout.addWidget(self.table_add_reagent_btn)
-        reagent_action_layout.addStretch(1)
-        reagent_editor_layout.addWidget(self.reagent_action_rail, stretch=0)
-        right.addWidget(self.reagent_editor_region, stretch=1)
+        right.addWidget(self.reagent_table, stretch=1)
 
         # ---------- Stock table (bottom-right) ----------
         self.stock_information_region = QWidget(self)
@@ -11680,29 +11641,68 @@ class ExperimentDesignDialog(QDialog):
         reaction_form.addRow(QLabel("Fill Ejection Vol (nL)"), self.fill_dv_spin)
 
         # Randomize well assignments + seed
-        self.randomize_chk = QCheckBox()
+        self.randomization_options_row = QWidget(options_group)
+        randomization_options_layout = QHBoxLayout(self.randomization_options_row)
+        randomization_options_layout.setContentsMargins(0, 0, 0, 0)
+        randomization_options_layout.setSpacing(8)
+        self.randomize_chk = QCheckBox("Randomize well assignments")
         self.randomize_chk.setChecked(bool(self.model.metadata.get("randomize_assignments", False)))
-        options_form.addRow(QLabel("Randomize well assignments"), self.randomize_chk)
+        self.randomize_chk.setToolTip(
+            "Randomize reaction assignments among the selected reaction wells."
+        )
+        randomization_options_layout.addWidget(self.randomize_chk)
+        randomization_options_layout.addStretch(1)
 
+        self.random_seed_lbl = QLabel("Random seed")
         self.random_seed_spin = QSpinBox()
         self.random_seed_spin.setMinimum(0); self.random_seed_spin.setMaximum(9999999)
+        self.random_seed_spin.setFixedWidth(100)
         current_seed = self.model.metadata.get("random_seed", 0) or 0
         self.random_seed_spin.setValue(int(current_seed))
-        self.randomize_chk.toggled.connect(self.random_seed_spin.setEnabled)
-        self.random_seed_spin.setEnabled(self.randomize_chk.isChecked())
-        options_form.addRow(QLabel("Random seed"), self.random_seed_spin)
+        random_seed_tooltip = (
+            "Seed used to reproduce randomized reaction-well assignments. Available "
+            "when randomization is enabled."
+        )
+        self.random_seed_lbl.setToolTip(random_seed_tooltip)
+        self.random_seed_spin.setToolTip(random_seed_tooltip)
+        randomization_options_layout.addWidget(self.random_seed_lbl)
+        randomization_options_layout.addWidget(self.random_seed_spin)
+        options_form.addRow(self.randomization_options_row)
 
         # Use subset design + reduction factor
-        self.subset_chk = QCheckBox()
+        self.subset_design_options_row = QWidget(options_group)
+        subset_design_options_layout = QHBoxLayout(self.subset_design_options_row)
+        subset_design_options_layout.setContentsMargins(0, 0, 0, 0)
+        subset_design_options_layout.setSpacing(8)
+        self.subset_chk = QCheckBox("Use subset design")
         self.subset_chk.setChecked(bool(self.model.metadata.get("use_subset_design", False)))
-        options_form.addRow(QLabel("Use subset design"), self.subset_chk)
+        self.subset_chk.setToolTip(
+            "Generate a reduced subset of the full factorial design."
+        )
+        subset_design_options_layout.addWidget(self.subset_chk)
+        subset_design_options_layout.addStretch(1)
 
+        self.reduction_factor_lbl = QLabel("Reduction factor")
         self.reduction_spin = QSpinBox()
         self.reduction_spin.setMinimum(1); self.reduction_spin.setMaximum(999)
+        self.reduction_spin.setFixedWidth(100)
         self.reduction_spin.setValue(int(self.model.metadata.get("reduction_factor", 1)))
-        self.subset_chk.toggled.connect(self.reduction_spin.setEnabled)
-        self.reduction_spin.setEnabled(self.subset_chk.isChecked())
-        options_form.addRow(QLabel("Reduction factor"), self.reduction_spin)
+        reduction_tooltip = (
+            "Controls how strongly the factorial source space is reduced. Available "
+            "when subset design is enabled."
+        )
+        self.reduction_factor_lbl.setToolTip(reduction_tooltip)
+        self.reduction_spin.setToolTip(reduction_tooltip)
+        subset_design_options_layout.addWidget(self.reduction_factor_lbl)
+        subset_design_options_layout.addWidget(self.reduction_spin)
+        options_form.addRow(self.subset_design_options_row)
+        self.randomize_chk.toggled.connect(
+            self._refresh_conditional_design_option_states
+        )
+        self.subset_chk.toggled.connect(
+            self._refresh_conditional_design_option_states
+        )
+        self._refresh_conditional_design_option_states()
 
         # Hidden legacy start-offset controls kept for old designs/tests.
         self.start_col_spin = QSpinBox(self)
@@ -11777,10 +11777,6 @@ class ExperimentDesignDialog(QDialog):
 
         self.add_reagent_btn = QPushButton("Add Reagent")
         self.add_reagent_btn.setMinimumHeight(36)
-        self.add_reagent_btn.setStyleSheet(
-            f"background-color:{self.color_dict.get('blue', '#1e64b4')}; "
-            "color:white; font-weight:600;"
-        )
         self.add_reagent_btn.clicked.connect(self._on_add_reagent)
         self.design_tools_layout.addWidget(self.add_reagent_btn, 0, 0, 1, 2)
 
@@ -13440,9 +13436,10 @@ class ExperimentDesignDialog(QDialog):
             getattr(self, "unique_conditions_btn", None),
             getattr(self, "preview_reactions_btn", None),
             getattr(self, "add_reagent_btn", None),
-            getattr(self, "table_add_reagent_btn", None),
             getattr(self, "well_selection_btn", None),
             getattr(self, "auto_update_chk", None),
+            getattr(self, "randomization_options_row", None),
+            getattr(self, "subset_design_options_row", None),
             getattr(self, "new_btn", None),
             getattr(self, "load_btn", None),
         ]
@@ -13847,12 +13844,6 @@ class ExperimentDesignDialog(QDialog):
         if hasattr(self, "randomize_chk") and self.randomize_chk is not None:
             self.randomize_chk.setEnabled(not active)
 
-        # Random seed spinbox: only enabled if not manual & randomize is checked
-        if hasattr(self, "random_seed_spin") and self.random_seed_spin is not None:
-            self.random_seed_spin.setEnabled(
-                (not active) and self.randomize_chk.isChecked()
-            )
-
         if hasattr(self, "start_col_spin") and self.start_col_spin is not None:
             self.start_col_spin.setEnabled(not active)
         if hasattr(self, "start_row_spin") and self.start_row_spin is not None:
@@ -13869,6 +13860,7 @@ class ExperimentDesignDialog(QDialog):
             widget = getattr(self, attr_name, None)
             if widget is not None:
                 widget.setEnabled(preview_enabled)
+        self._refresh_conditional_design_option_states()
 
     def _is_gripper_loaded(self) -> bool:
         try:
@@ -13891,29 +13883,25 @@ class ExperimentDesignDialog(QDialog):
         lifecycle = self._refresh_editor_lifecycle_state()
         self._refresh_editable_copy_availability()
         self._apply_gripper_edit_lock_state(lifecycle=lifecycle)
-        self._refresh_table_add_reagent_availability()
+        self._refresh_conditional_design_option_states()
 
-    def _refresh_table_add_reagent_availability(self):
-        button = getattr(self, "table_add_reagent_btn", None)
-        if button is None:
-            return
-        reason = ""
-        if getattr(self, "_uploaded_design_active", False):
-            reason = "Clear the imported design before adding reagent columns."
-        elif getattr(self, "_progress_protected", False):
-            reason = getattr(
-                self,
-                "_progress_lock_status_message",
-                "This experiment is view-only.",
+    def _refresh_conditional_design_option_states(self, *_args):
+        for checkbox_name, label_name, spin_name in (
+            ("randomize_chk", "random_seed_lbl", "random_seed_spin"),
+            ("subset_chk", "reduction_factor_lbl", "reduction_spin"),
+        ):
+            checkbox = getattr(self, checkbox_name, None)
+            label = getattr(self, label_name, None)
+            spin = getattr(self, spin_name, None)
+            enabled = bool(
+                checkbox is not None
+                and checkbox.isEnabled()
+                and checkbox.isChecked()
             )
-        elif self._model_execution_is_read_only(self.model):
-            reason = "This experiment is read-only. Create an editable copy to add reagents."
-        elif self._gripper_edit_lock_is_active():
-            reason = self.GRIPPER_LOCK_STATUS
-        button.setEnabled(not bool(reason))
-        button.setToolTip(
-            reason or "Add a reagent column to the manual reaction design."
-        )
+            if label is not None:
+                label.setEnabled(enabled)
+            if spin is not None:
+                spin.setEnabled(enabled)
 
     def _apply_uploaded_design_mode_to_ui(self, active: bool):
         self._uploaded_design_active = bool(active)
@@ -13924,7 +13912,6 @@ class ExperimentDesignDialog(QDialog):
         if reset_button is not None:
             reset_button.setVisible(active)
         self.subset_chk.setEnabled(not active)
-        self.reduction_spin.setEnabled(not active and self.subset_chk.isChecked())
 
         lock_cols = {
             self.COL_STOCK_LABEL,
@@ -13949,7 +13936,7 @@ class ExperimentDesignDialog(QDialog):
                     w.setReadOnly(False)
                 else:
                     w.setEnabled(True)
-        self._refresh_table_add_reagent_availability()
+        self._refresh_conditional_design_option_states()
 
     def _apply_gripper_edit_lock_state(self, *, lifecycle=None):
         self._editing_locked_by_gripper = self._is_gripper_loaded()
@@ -14086,10 +14073,7 @@ class ExperimentDesignDialog(QDialog):
         if hasattr(self, "exp_name_edit") and self.exp_name_edit is not None:
             self.exp_name_edit.setReadOnly(False)
 
-        if hasattr(self, "random_seed_spin") and hasattr(self, "randomize_chk"):
-            self.random_seed_spin.setEnabled(self.randomize_chk.isChecked())
-        if hasattr(self, "reduction_spin") and hasattr(self, "subset_chk"):
-            self.reduction_spin.setEnabled(self.subset_chk.isChecked())
+        self._refresh_conditional_design_option_states()
 
         if hasattr(self, "reagent_table") and self.reagent_table is not None:
             for _row, _col, w in self._iter_reagent_widgets():
@@ -15522,13 +15506,11 @@ class ExperimentDesignDialog(QDialog):
         if hasattr(self, "random_seed_spin"):
             seed = md.get("random_seed", 0) or 0
             self.random_seed_spin.setValue(int(seed))
-            self.random_seed_spin.setEnabled(self.randomize_chk.isChecked())
 
         if hasattr(self, "subset_chk"):
             self.subset_chk.setChecked(bool(md.get("use_subset_design", False)))
         if hasattr(self, "reduction_spin"):
             self.reduction_spin.setValue(int(md.get("reduction_factor", 1)))
-            self.reduction_spin.setEnabled(self.subset_chk.isChecked())
 
         if hasattr(self, "start_col_spin"):
             self.start_col_spin.setValue(int(md.get("start_col", 0)))
@@ -15547,6 +15529,7 @@ class ExperimentDesignDialog(QDialog):
         self._recompute_silent()
         self._update_well_selection_summary()
         self._apply_manual_assignment_lock_state()
+        self._refresh_conditional_design_option_states()
 
     def _ensure_experiment_dir(self):
         """

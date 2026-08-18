@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTableWidget,
+    QWidget,
 )
 
 from View import ExperimentDesignDialog
@@ -67,10 +68,20 @@ def _build_dialog_stub(
     dialog.fill_mode_combo = QComboBox()
     dialog.fill_dv_spin = QDoubleSpinBox()
     dialog.allow_two_chk = QCheckBox()
+    dialog.randomization_options_row = QWidget()
     dialog.randomize_chk = QCheckBox()
+    dialog.random_seed_lbl = QLabel("Random seed")
     dialog.random_seed_spin = QSpinBox()
+    dialog.subset_design_options_row = QWidget()
     dialog.subset_chk = QCheckBox()
+    dialog.reduction_factor_lbl = QLabel("Reduction factor")
     dialog.reduction_spin = QSpinBox()
+    dialog.randomize_chk.toggled.connect(
+        dialog._refresh_conditional_design_option_states
+    )
+    dialog.subset_chk.toggled.connect(
+        dialog._refresh_conditional_design_option_states
+    )
     dialog.start_col_spin = QSpinBox()
     dialog.start_row_spin = QSpinBox()
     dialog.well_selection_btn = QPushButton()
@@ -182,11 +193,13 @@ def _assert_mutating_controls_disabled(dialog):
         dialog.rep_spin,
         dialog.allow_two_chk,
         dialog.randomize_chk,
+        dialog.random_seed_lbl,
         dialog.random_seed_spin,
         dialog.start_col_spin,
         dialog.start_row_spin,
         dialog.well_selection_btn,
         dialog.subset_chk,
+        dialog.reduction_factor_lbl,
         dialog.reduction_spin,
         dialog.plate_format_combo,
     ]
@@ -431,6 +444,7 @@ def test_experiment_designer_lock_precedence_matrix(
     assert dialog.add_reagent_btn.isEnabled() is (not uploaded_active)
     assert dialog.subset_chk.isEnabled() is (not uploaded_active)
     assert dialog.reduction_spin.isEnabled() is (not uploaded_active)
+    assert dialog.reduction_factor_lbl.isEnabled() is (not uploaded_active)
 
     # Manual assignment lock behavior
     assert dialog.rep_spin.isEnabled() is (not manual_assignments)
@@ -439,6 +453,18 @@ def test_experiment_designer_lock_precedence_matrix(
     assert dialog.start_row_spin.isEnabled() is (not manual_assignments)
     assert dialog.well_selection_btn.isEnabled() is (not manual_assignments)
     assert dialog.random_seed_spin.isEnabled() is (not manual_assignments)
+    assert dialog.random_seed_lbl.isEnabled() is (not manual_assignments)
+
+    if manual_assignments:
+        dialog.randomize_chk.setChecked(False)
+        dialog.randomize_chk.setChecked(True)
+        assert dialog.random_seed_spin.isEnabled() is False
+        assert dialog.random_seed_lbl.isEnabled() is False
+    if uploaded_active:
+        dialog.subset_chk.setChecked(False)
+        dialog.subset_chk.setChecked(True)
+        assert dialog.reduction_spin.isEnabled() is False
+        assert dialog.reduction_factor_lbl.isEnabled() is False
 
     # Unaffected mutating controls remain enabled without gripper lock
     assert dialog.finish_btn.isEnabled() is True

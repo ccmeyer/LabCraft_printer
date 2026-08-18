@@ -678,6 +678,9 @@ def test_experiment_designer_fill_mode_updates_volume_range_and_metadata(qapp):
 
 def test_experiment_designer_uses_grouped_wide_layout_without_export_action(qapp):
     dialog = _build_real_dialog()
+    dialog.resize(1560, 840)
+    dialog.show()
+    qapp.processEvents()
 
     group_titles = {group.title() for group in dialog.findChildren(QGroupBox)}
 
@@ -696,8 +699,14 @@ def test_experiment_designer_uses_grouped_wide_layout_without_export_action(qapp
     assert dialog.stock_table.minimumWidth() == 700
     assert dialog.stock_table.parentWidget() is dialog.stock_information_region
     assert dialog.design_information_panel.parentWidget() is dialog.stock_information_region
-    assert dialog.reagent_table.parentWidget() is dialog.reagent_editor_region
-    assert dialog.table_add_reagent_btn.parentWidget() is dialog.reagent_action_rail
+    assert dialog.reagent_table.parentWidget() is dialog
+    assert not hasattr(dialog, "reagent_editor_region")
+    assert not hasattr(dialog, "reagent_action_rail")
+    assert not hasattr(dialog, "table_add_reagent_btn")
+    assert abs(
+        dialog.reagent_table.geometry().right()
+        - dialog.stock_information_region.geometry().right()
+    ) <= 1
     assert dialog._stock_information_layout.indexOf(dialog.design_information_panel) < dialog._stock_information_layout.indexOf(dialog.stock_table)
     assert dialog.design_messages_scroll.isAncestorOf(dialog.status_lbl)
     assert dialog.design_messages_scroll.isAncestorOf(dialog.stock_table_status_lbl)
@@ -712,6 +721,7 @@ def test_experiment_designer_uses_grouped_wide_layout_without_export_action(qapp
     assert dialog.reset_upload_btn.text() == "Clear Imported Design"
     assert dialog.reset_upload_btn.isHidden() is True
     assert dialog.add_reagent_btn.minimumHeight() == 36
+    assert dialog.add_reagent_btn.styleSheet() == ""
     assert dialog.auto_update_chk.text() == "Automatically recalculate design"
     assert "does not save" in dialog.auto_update_chk.toolTip()
     assert dialog.save_btn.text() == "Save Draft"
@@ -740,8 +750,7 @@ def test_experiment_designer_uses_grouped_wide_layout_without_export_action(qapp
     dialog._apply_uploaded_design_mode_to_ui(True)
 
     assert dialog.reset_upload_btn.isHidden() is False
-    assert dialog.table_add_reagent_btn.isEnabled() is False
-    assert "Clear the imported design" in dialog.table_add_reagent_btn.toolTip()
+    assert dialog.add_reagent_btn.isEnabled() is False
     assert dialog.design_tools_layout.getItemPosition(
         dialog.design_tools_layout.indexOf(dialog.upload_design_btn)
     ) == (2, 0, 1, 1)
@@ -761,41 +770,116 @@ def test_experiment_designer_uses_grouped_wide_layout_without_export_action(qapp
     dialog.close()
 
 
-def test_table_add_reagent_uses_shared_action_and_lock_guidance(qapp):
+def test_primary_add_reagent_button_uses_standard_style_and_shared_action(qapp):
     dialog = _build_real_dialog()
     dialog.auto_update_chk.setChecked(False)
 
-    dialog.table_add_reagent_btn.click()
     dialog.add_reagent_btn.click()
 
-    assert dialog._reagent_row_count() == 2
+    assert dialog._reagent_row_count() == 1
     assert dialog._draft_is_dirty() is True
+    assert dialog.add_reagent_btn.minimumHeight() == 36
+    assert dialog.add_reagent_btn.styleSheet() == ""
+    assert not hasattr(dialog, "table_add_reagent_btn")
+    dialog.close()
 
-    dialog._uploaded_design_active = True
-    dialog._refresh_table_add_reagent_availability()
-    assert dialog.table_add_reagent_btn.isEnabled() is False
-    assert "Clear the imported design" in dialog.table_add_reagent_btn.toolTip()
 
-    dialog._uploaded_design_active = False
-    dialog._progress_protected = True
-    dialog._progress_lock_status_message = "Printing progress protects this experiment."
-    dialog._refresh_table_add_reagent_availability()
-    assert dialog.table_add_reagent_btn.isEnabled() is False
-    assert dialog.table_add_reagent_btn.toolTip() == dialog._progress_lock_status_message
+def test_compact_design_option_rows_toggle_dependents_without_reset(qapp):
+    dialog = _build_real_dialog()
 
-    dialog._progress_protected = False
-    dialog._refresh_table_add_reagent_availability()
-    normal_tooltip = dialog.table_add_reagent_btn.toolTip()
+    assert dialog.randomize_chk.parentWidget() is dialog.randomization_options_row
+    assert dialog.random_seed_lbl.parentWidget() is dialog.randomization_options_row
+    assert dialog.random_seed_spin.parentWidget() is dialog.randomization_options_row
+    assert dialog.subset_chk.parentWidget() is dialog.subset_design_options_row
+    assert dialog.reduction_factor_lbl.parentWidget() is dialog.subset_design_options_row
+    assert dialog.reduction_spin.parentWidget() is dialog.subset_design_options_row
+    assert dialog.random_seed_spin.width() == 100
+    assert dialog.reduction_spin.width() == 100
+    assert dialog.randomize_chk.text() == "Randomize well assignments"
+    assert dialog.subset_chk.text() == "Use subset design"
+    assert "reproduce randomized reaction-well assignments" in dialog.random_seed_spin.toolTip()
+    assert "factorial source space" in dialog.reduction_spin.toolTip()
+
+    dialog.random_seed_spin.setValue(2468)
+    dialog.reduction_spin.setValue(7)
+    dialog.randomize_chk.setChecked(False)
+    dialog.subset_chk.setChecked(False)
+
+    assert dialog.random_seed_lbl.isEnabled() is False
+    assert dialog.random_seed_spin.isEnabled() is False
+    assert dialog.reduction_factor_lbl.isEnabled() is False
+    assert dialog.reduction_spin.isEnabled() is False
+
+    dialog.randomize_chk.setChecked(True)
+    dialog.subset_chk.setChecked(True)
+
+    assert dialog.random_seed_lbl.isEnabled() is True
+    assert dialog.random_seed_spin.isEnabled() is True
+    assert dialog.reduction_factor_lbl.isEnabled() is True
+    assert dialog.reduction_spin.isEnabled() is True
+    assert dialog.random_seed_spin.value() == 2468
+    assert dialog.reduction_spin.value() == 7
+
+    dialog.randomize_chk.setChecked(False)
+    dialog.subset_chk.setChecked(False)
+    assert dialog.random_seed_spin.value() == 2468
+    assert dialog.reduction_spin.value() == 7
+    dialog._update_metadata_from_controls()
+    assert dialog.model.metadata["random_seed"] is None
+    assert dialog.model.metadata["reduction_factor"] == 1
+    assert dialog.random_seed_spin.value() == 2468
+    assert dialog.reduction_spin.value() == 7
+    dialog.close()
+
+
+def test_design_option_model_sync_restores_values_and_conditional_state(qapp):
+    dialog = _build_real_dialog()
+    dialog._recompute_silent = Mock()
+    dialog.model.metadata.update(
+        {
+            "randomize_assignments": True,
+            "random_seed": 9876,
+            "use_subset_design": True,
+            "reduction_factor": 9,
+        }
+    )
+
+    dialog._sync_controls_from_model()
+
+    assert dialog.randomize_chk.isChecked() is True
+    assert dialog.random_seed_spin.value() == 9876
+    assert dialog.random_seed_lbl.isEnabled() is True
+    assert dialog.random_seed_spin.isEnabled() is True
+    assert dialog.subset_chk.isChecked() is True
+    assert dialog.reduction_spin.value() == 9
+    assert dialog.reduction_factor_lbl.isEnabled() is True
+    assert dialog.reduction_spin.isEnabled() is True
+    dialog._recompute_silent.assert_called_once_with()
+    dialog.close()
+
+
+def test_design_option_rows_are_disabled_together_during_busy_work(qapp):
+    dialog = _build_real_dialog()
+    dialog.randomize_chk.setChecked(True)
+    dialog.subset_chk.setChecked(True)
+
     with view_module._BusyUiContext(
         dialog,
         "Updating design...",
-        widgets=[dialog.table_add_reagent_btn],
+        widgets=dialog._design_busy_widgets(),
         show_dialog=False,
     ):
-        assert dialog.table_add_reagent_btn.isEnabled() is False
-        assert "calculation to finish" in dialog.table_add_reagent_btn.toolTip()
-    assert dialog.table_add_reagent_btn.isEnabled() is True
-    assert dialog.table_add_reagent_btn.toolTip() == normal_tooltip
+        assert dialog.randomization_options_row.isEnabled() is False
+        assert dialog.random_seed_lbl.isEnabled() is False
+        assert dialog.random_seed_spin.isEnabled() is False
+        assert dialog.subset_design_options_row.isEnabled() is False
+        assert dialog.reduction_factor_lbl.isEnabled() is False
+        assert dialog.reduction_spin.isEnabled() is False
+
+    assert dialog.randomization_options_row.isEnabled() is True
+    assert dialog.random_seed_spin.isEnabled() is True
+    assert dialog.subset_design_options_row.isEnabled() is True
+    assert dialog.reduction_spin.isEnabled() is True
     dialog.close()
 
 
