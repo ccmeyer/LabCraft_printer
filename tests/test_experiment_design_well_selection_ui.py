@@ -234,7 +234,7 @@ def test_printable_wells_accept_updates_model_and_summary(monkeypatch, qapp):
     ExperimentDesignDialog._on_choose_printable_wells(dialog)
 
     dialog.model.set_well_selection.assert_called_once_with(["A1", "B2"])
-    assert "2 printable" in dialog.well_selection_summary_lbl.text()
+    assert "2 reaction well" in dialog.well_selection_summary_lbl.text()
     dialog._update_summary_labels.assert_called_once()
     dialog._schedule_auto_update.assert_called_once()
 

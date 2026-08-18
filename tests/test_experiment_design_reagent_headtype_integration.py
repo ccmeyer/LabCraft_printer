@@ -6,9 +6,10 @@ from unittest.mock import Mock
 import pandas as pd
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QGroupBox, QLabel, QLineEdit, QMessageBox, QTableWidget
+from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QGroupBox, QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget
 
 import LocalConfig
+import View as view_module
 from CalibrationMemoryStore import CalibrationMemoryStore
 from Model import (
     CURRENT_PROFILE,
@@ -199,7 +200,7 @@ def _build_dialog_stub(runtime_model):
         "Max Stock Conc",
         "Ejection Vol (nL)",
         "Prior",
-        "Delete",
+        "Actions",
     ]
     dialog.reagent_table = QTableWidget(ExperimentDesignDialog.COL_DELETE + 1, 0)
     dialog.reagent_table.setVerticalHeaderLabels(dialog._reagent_field_labels)
@@ -261,7 +262,11 @@ def _build_real_dialog():
         },
         profile=SimpleNamespace(name="modern"),
     )
-    return ExperimentDesignDialog(ExperimentModel(prof=CURRENT_PROFILE), main_window)
+    dialog = ExperimentDesignDialog(ExperimentModel(prof=CURRENT_PROFILE), main_window)
+    # Most layout/integration tests close the dialog as fixture cleanup. Tests
+    # exercising the unsaved prompt explicitly restore this to False.
+    dialog._allow_close_without_prompt = True
+    return dialog
 
 
 def _head_type_index(combo: QComboBox, head_type_id: str) -> int:
@@ -691,6 +696,9 @@ def test_experiment_designer_uses_grouped_wide_layout_without_export_action(qapp
     assert dialog.stock_table.minimumWidth() == 700
     assert dialog.stock_table.parentWidget() is dialog.stock_information_region
     assert dialog.design_information_panel.parentWidget() is dialog.stock_information_region
+    assert dialog.reagent_table.parentWidget() is dialog.reagent_editor_region
+    assert dialog.table_add_reagent_btn.parentWidget() is dialog.reagent_action_rail
+    assert dialog._stock_information_layout.indexOf(dialog.design_information_panel) < dialog._stock_information_layout.indexOf(dialog.stock_table)
     assert dialog.design_messages_scroll.isAncestorOf(dialog.status_lbl)
     assert dialog.design_messages_scroll.isAncestorOf(dialog.stock_table_status_lbl)
     assert dialog.design_messages_scroll.isAncestorOf(dialog.tip_lbl)
@@ -703,10 +711,357 @@ def test_experiment_designer_uses_grouped_wide_layout_without_export_action(qapp
     assert not hasattr(dialog, "export_reaction_preview_btn")
     assert dialog.reset_upload_btn.text() == "Clear Imported Design"
     assert dialog.reset_upload_btn.isHidden() is True
+    assert dialog.add_reagent_btn.minimumHeight() == 36
+    assert dialog.auto_update_chk.text() == "Automatically recalculate design"
+    assert "does not save" in dialog.auto_update_chk.toolTip()
+    assert dialog.save_btn.text() == "Save Draft"
+    assert dialog.advanced_settings_panel.isHidden() is True
+    assert "Allowed Printed-Volume Overage (nL)" in {
+        label.text() for label in dialog.advanced_settings_panel.findChildren(QLabel)
+    }
+
+    add_position = dialog.design_tools_layout.getItemPosition(
+        dialog.design_tools_layout.indexOf(dialog.add_reagent_btn)
+    )
+    conditions_position = dialog.design_tools_layout.getItemPosition(
+        dialog.design_tools_layout.indexOf(dialog.unique_conditions_btn)
+    )
+    preview_position = dialog.design_tools_layout.getItemPosition(
+        dialog.design_tools_layout.indexOf(dialog.preview_reactions_btn)
+    )
+    import_position = dialog.design_tools_layout.getItemPosition(
+        dialog.design_tools_layout.indexOf(dialog.upload_design_btn)
+    )
+    assert add_position == (0, 0, 1, 2)
+    assert conditions_position == (1, 0, 1, 1)
+    assert preview_position == (1, 1, 1, 1)
+    assert import_position == (2, 0, 1, 2)
 
     dialog._apply_uploaded_design_mode_to_ui(True)
 
     assert dialog.reset_upload_btn.isHidden() is False
+    assert dialog.table_add_reagent_btn.isEnabled() is False
+    assert "Clear the imported design" in dialog.table_add_reagent_btn.toolTip()
+    assert dialog.design_tools_layout.getItemPosition(
+        dialog.design_tools_layout.indexOf(dialog.upload_design_btn)
+    ) == (2, 0, 1, 1)
+    assert dialog.design_tools_layout.getItemPosition(
+        dialog.design_tools_layout.indexOf(dialog.reset_upload_btn)
+    ) == (2, 1, 1, 1)
+
+    dialog._apply_uploaded_design_mode_to_ui(False)
+    assert dialog.design_tools_layout.getItemPosition(
+        dialog.design_tools_layout.indexOf(dialog.upload_design_btn)
+    ) == (2, 0, 1, 2)
+    layout_count = dialog.design_tools_layout.count()
+    for _ in range(3):
+        dialog._apply_uploaded_design_mode_to_ui(True)
+        dialog._apply_uploaded_design_mode_to_ui(False)
+    assert dialog.design_tools_layout.count() == layout_count
+    dialog.close()
+
+
+def test_table_add_reagent_uses_shared_action_and_lock_guidance(qapp):
+    dialog = _build_real_dialog()
+    dialog.auto_update_chk.setChecked(False)
+
+    dialog.table_add_reagent_btn.click()
+    dialog.add_reagent_btn.click()
+
+    assert dialog._reagent_row_count() == 2
+    assert dialog._draft_is_dirty() is True
+
+    dialog._uploaded_design_active = True
+    dialog._refresh_table_add_reagent_availability()
+    assert dialog.table_add_reagent_btn.isEnabled() is False
+    assert "Clear the imported design" in dialog.table_add_reagent_btn.toolTip()
+
+    dialog._uploaded_design_active = False
+    dialog._progress_protected = True
+    dialog._progress_lock_status_message = "Printing progress protects this experiment."
+    dialog._refresh_table_add_reagent_availability()
+    assert dialog.table_add_reagent_btn.isEnabled() is False
+    assert dialog.table_add_reagent_btn.toolTip() == dialog._progress_lock_status_message
+
+    dialog._progress_protected = False
+    dialog._refresh_table_add_reagent_availability()
+    normal_tooltip = dialog.table_add_reagent_btn.toolTip()
+    with view_module._BusyUiContext(
+        dialog,
+        "Updating design...",
+        widgets=[dialog.table_add_reagent_btn],
+        show_dialog=False,
+    ):
+        assert dialog.table_add_reagent_btn.isEnabled() is False
+        assert "calculation to finish" in dialog.table_add_reagent_btn.toolTip()
+    assert dialog.table_add_reagent_btn.isEnabled() is True
+    assert dialog.table_add_reagent_btn.toolTip() == normal_tooltip
+    dialog.close()
+
+
+def test_duplicate_reagent_copies_editable_fields_and_waits_for_unique_label(qapp):
+    dialog = _build_real_dialog()
+    dialog.auto_update_chk.setChecked(False)
+    dialog.choice_groups = {"Buffer options"}
+    dialog._add_reagent_row(
+        name="Buffer A",
+        group="Buffer options",
+        targets="0.5, 1.25, 2.5",
+        units="mg/mL",
+        droplet_nL=37.0,
+        starting_conc=0.75,
+        forced_stock_conc=8.5,
+        max_stock_conc=12.25,
+        reagent_id="water",
+        reagent_display_name="Water",
+        intended_head_type_id="nozzle_100um",
+        intended_head_type_display_name="100 um nozzle",
+        printing_mode="stream",
+        schedule_update=False,
+    )
+    dialog._add_reagent_row(
+        name="Trailing reagent",
+        group=dialog.GROUP_ADDITIVE,
+        schedule_update=False,
+    )
+    source_prior = dialog._reagent_cell_widget(0, dialog.COL_PRIOR)
+    source_prior.setText("sentinel that must not be copied")
+    optimize = Mock()
+    dialog.model.optimize_stock_solutions = optimize
+    dialog.show()
+    qapp.processEvents()
+
+    actions = dialog._reagent_cell_widget(0, dialog.COL_ACTIONS)
+    duplicate_button = actions.findChild(QPushButton, "duplicateReagentButton")
+    duplicate_button.click()
+    qapp.processEvents()
+
+    assert dialog._reagent_row_count() == 3
+    assert dialog._reagent_cell_widget(2, dialog.COL_STOCK_LABEL).text() == "Trailing reagent"
+    for field in (
+        dialog.COL_STOCK_LABEL,
+        dialog.COL_REAGENT,
+        dialog.COL_GROUP,
+        dialog.COL_HEAD_TYPE,
+        dialog.COL_MODE,
+        dialog.COL_STARTING,
+        dialog.COL_TARGETS,
+        dialog.COL_UNITS,
+        dialog.COL_SET_STOCK,
+        dialog.COL_MAX_STOCK,
+        dialog.COL_DROPLET,
+    ):
+        source = dialog._reagent_cell_widget(0, field)
+        copied = dialog._reagent_cell_widget(1, field)
+        if isinstance(source, QLineEdit):
+            assert copied.text() == source.text()
+        elif isinstance(source, QComboBox):
+            assert copied.currentText() == source.currentText()
+            assert copied.currentData() == source.currentData()
+        elif isinstance(source, QDoubleSpinBox):
+            assert copied.value() == pytest.approx(source.value())
+    assert dialog._reagent_cell_widget(1, dialog.COL_PRIOR).text() != source_prior.text()
+    assert dialog._duplicate_reagent_label_rows() == {0, 1}
+    copied_name = dialog._reagent_cell_widget(1, dialog.COL_STOCK_LABEL)
+    assert copied_name.hasFocus()
+    assert copied_name.selectedText() == "Buffer A"
+    assert dialog._auto_timer.isActive() is False
+    assert dialog._design_optimization_dirty is True
+    assert dialog._draft_is_dirty() is True
+    assert "Rename one Stock / Label" in dialog.status_lbl.text()
+    optimize.assert_not_called()
+
+    copied_name.setText("Buffer B")
+    assert dialog._reject_duplicate_reagent_labels(show_dialog=False) is None
+    dialog.close()
+
+
+def test_duplicate_label_preflight_scopes_choice_options_by_group(qapp):
+    dialog = _build_real_dialog()
+    dialog.auto_update_chk.setChecked(False)
+    dialog.choice_groups = {"Group A", "Group B"}
+    dialog._add_reagent_row(
+        name="Shared option", group="Group A", schedule_update=False
+    )
+    dialog._add_reagent_row(
+        name="Shared option", group="Group B", schedule_update=False
+    )
+    assert dialog._duplicate_reagent_label_rows() == set()
+
+    dialog._add_reagent_row(
+        name="Shared option", group="Group A", schedule_update=False
+    )
+    rebuild = Mock()
+    dialog._rebuild_model_from_table = rebuild
+
+    ok, result = dialog._run_design_optimization_flow(
+        show_failure_dialog=False,
+        show_capacity_dialog=False,
+    )
+
+    assert ok is False
+    assert result["duplicate_reagent_rows"] == [0, 2]
+    assert dialog._duplicate_reagent_label_rows() == {0, 2}
+    assert dialog.status_heading_lbl.text() == "Error"
+    rebuild.assert_not_called()
+    dialog.close()
+
+
+def test_advanced_overage_setting_remains_metadata_compatible(qapp):
+    dialog = _build_real_dialog()
+
+    assert dialog.advanced_settings_panel.isHidden() is True
+    dialog.advanced_settings_toggle.setChecked(True)
+    assert dialog.advanced_settings_panel.isHidden() is False
+    assert "droplet-rounding overages" in dialog.volume_tolerance_spin.toolTip()
+
+    dialog.volume_tolerance_spin.setValue(123.5)
+    dialog._update_metadata_from_controls()
+
+    assert dialog.model.metadata["printed_volume_tolerance_nL"] == pytest.approx(123.5)
+    dialog.close()
+
+
+def test_draft_dirty_indicator_is_separate_from_recalculation_freshness(qapp):
+    dialog = _build_real_dialog()
+    dialog._mark_draft_saved()
+
+    assert dialog.windowTitle() == "Experiment Design (v2)"
+    assert dialog.save_btn.text() == "Save Draft"
+
+    dialog._mark_draft_dirty()
+    dialog._mark_design_optimization_clean({"best": True})
+
+    assert dialog._draft_is_dirty() is True
+    assert dialog.windowTitle().endswith(" *")
+    assert dialog.save_btn.text() == "Save Draft *"
+
+    dialog._mark_draft_saved()
+    assert dialog._draft_is_dirty() is False
+    assert dialog.windowTitle() == "Experiment Design (v2)"
+    assert dialog.save_btn.text() == "Save Draft"
+    dialog.close()
+
+
+def test_save_draft_clears_dirty_only_after_persistence_succeeds(monkeypatch, qapp):
+    dialog = _build_real_dialog()
+    dialog._run_design_optimization_flow = Mock(return_value=(True, {}))
+    dialog._persist_design_identity_registry_entries = Mock()
+    dialog._ensure_experiment_dir = Mock()
+    dialog.model.execution_plan_file_path = None
+    dialog.model.save_experiment = Mock()
+    dialog._mark_draft_dirty()
+
+    assert dialog._on_save_design() is True
+    assert dialog._draft_is_dirty() is False
+
+    dialog.model.save_experiment = Mock(side_effect=OSError("disk unavailable"))
+    dialog._mark_draft_dirty()
+    warning = Mock()
+    monkeypatch.setattr(QMessageBox, "warning", warning)
+
+    assert dialog._on_save_design() is False
+    assert dialog._draft_is_dirty() is True
+    assert dialog.save_btn.text() == "Save Draft *"
+    warning.assert_called_once()
+    dialog.close()
+
+
+class _UnsavedPromptFake:
+    Warning = QMessageBox.Warning
+    AcceptRole = QMessageBox.AcceptRole
+    DestructiveRole = QMessageBox.DestructiveRole
+    RejectRole = QMessageBox.RejectRole
+    choice = "Cancel"
+    last_instance = None
+
+    def __init__(self, _parent):
+        type(self).last_instance = self
+        self.buttons = {}
+        self.default_button = None
+        self.escape_button = None
+        self.clicked_button = None
+
+    def setWindowTitle(self, title):
+        self.title = title
+
+    def setIcon(self, icon):
+        self.icon = icon
+
+    def setText(self, text):
+        self.text = text
+
+    def setInformativeText(self, text):
+        self.informative_text = text
+
+    def addButton(self, label, _role):
+        button = object()
+        self.buttons[label] = button
+        return button
+
+    def setDefaultButton(self, button):
+        self.default_button = button
+
+    def setEscapeButton(self, button):
+        self.escape_button = button
+
+    def exec(self):
+        self.clicked_button = self.buttons[type(self).choice]
+
+    def clickedButton(self):
+        return self.clicked_button
+
+
+@pytest.mark.parametrize(
+    ("choice", "save_result", "expected", "expected_save_calls"),
+    [
+        ("Save Draft", True, True, 1),
+        ("Save Draft", False, False, 1),
+        ("Discard Changes", True, True, 0),
+        ("Cancel", True, False, 0),
+    ],
+)
+def test_unsaved_prompt_save_discard_cancel_paths(
+    monkeypatch,
+    qapp,
+    choice,
+    save_result,
+    expected,
+    expected_save_calls,
+):
+    dialog = _build_real_dialog()
+    dialog._allow_close_without_prompt = False
+    dialog._mark_draft_dirty()
+    save = Mock(return_value=save_result)
+    dialog._on_save_design = save
+    _UnsavedPromptFake.choice = choice
+    monkeypatch.setattr(view_module, "QMessageBox", _UnsavedPromptFake)
+
+    assert dialog._confirm_unsaved_changes("closing the editor") is expected
+    assert save.call_count == expected_save_calls
+    prompt = _UnsavedPromptFake.last_instance
+    assert prompt.title == "Unsaved Experiment Design"
+    assert prompt.default_button is prompt.buttons["Save Draft"]
+    assert prompt.escape_button is prompt.buttons["Cancel"]
+
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
+def test_new_experiment_is_cancelled_before_replacing_an_unsaved_draft(qapp):
+    dialog = _build_real_dialog()
+    dialog._allow_close_without_prompt = False
+    dialog._mark_draft_dirty()
+    dialog._confirm_unsaved_changes = Mock(return_value=False)
+    dialog.main_window.start_new_experiment_model = Mock()
+
+    assert dialog._on_new_experiment() is False
+    dialog._confirm_unsaved_changes.assert_called_once_with(
+        "starting a new experiment"
+    )
+    dialog.main_window.start_new_experiment_model.assert_not_called()
+
+    dialog._allow_close_without_prompt = True
     dialog.close()
 
 

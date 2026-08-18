@@ -144,7 +144,7 @@ def test_validate_plate_capacity_counts_custom_well_selection_and_ignores_start_
     _, _title, msg = warn.call_args[0]
     assert "Required reactions: 4" in msg
     assert "Available wells on 'test-plate': 3" in msg
-    assert "adjust printable wells" in msg
+    assert "adjust reaction wells" in msg
 
 
 def test_validate_plate_capacity_counts_exclusions_inside_custom_well_selection(monkeypatch, qapp):

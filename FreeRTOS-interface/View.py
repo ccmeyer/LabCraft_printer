@@ -10020,6 +10020,7 @@ class _BusyUiContext:
         self.failure_message = failure_message
         self.show_dialog = bool(show_dialog)
         self._enabled_states: list[tuple[Any, bool]] = []
+        self._tooltip_states: list[tuple[Any, str]] = []
         self._dialog = None
 
     def __enter__(self):
@@ -10027,6 +10028,10 @@ class _BusyUiContext:
             try:
                 self._enabled_states.append((widget, bool(widget.isEnabled())))
                 widget.setEnabled(False)
+                busy_tooltip = widget.property("busyDisabledToolTip")
+                if busy_tooltip:
+                    self._tooltip_states.append((widget, widget.toolTip()))
+                    widget.setToolTip(str(busy_tooltip))
             except Exception:
                 pass
 
@@ -10086,6 +10091,12 @@ class _BusyUiContext:
             except Exception:
                 pass
         self._enabled_states.clear()
+        for widget, tooltip in self._tooltip_states:
+            try:
+                widget.setToolTip(tooltip)
+            except Exception:
+                pass
+        self._tooltip_states.clear()
 
         if exc_type is not None and self.failure_message:
             setter = self.failure_status_setter or self.status_setter
@@ -11306,7 +11317,7 @@ class WellSelectionDialog(QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Printable Wells")
+        self.setWindowTitle("Select Reaction Wells")
         self.grid = WellSelectionGridWidget(
             rows,
             columns,
@@ -11378,7 +11389,10 @@ class ExperimentDesignDialog(QDialog):
     COL_MAX_STOCK    = 9
     COL_DROPLET      = 10
     COL_PRIOR        = 11
-    COL_DELETE       = 12
+    COL_ACTIONS      = 12
+    # Compatibility alias for existing integrations/tests that still refer to
+    # the former single-purpose Delete row.
+    COL_DELETE       = COL_ACTIONS
 
     REAGENT_COLUMN_DEFAULT_WIDTH = 230
     REAGENT_COLUMN_MINIMUM_WIDTH = 170
@@ -11455,6 +11469,9 @@ class ExperimentDesignDialog(QDialog):
         self._status_severity: str = "info"
         self._status_tip_text: str = ""
         self._stock_table_stale_active: bool = False
+        self._draft_dirty: bool = bool(getattr(self.model, "unsaved_changes", False))
+        self._allow_close_without_prompt: bool = False
+        self._unsaved_prompt_active: bool = False
 
 
         # Debounced auto-update timer (4)
@@ -11513,7 +11530,7 @@ class ExperimentDesignDialog(QDialog):
             "Max Stock Conc",
             "Ejection Vol (nL)",
             "Prior",
-            "Delete",
+            "Actions",
         ]
         self.reagent_table = QTableWidget(self.COL_DELETE + 1, 0, self)
         self.reagent_table.setVerticalHeaderLabels(self._reagent_field_labels)
@@ -11528,7 +11545,35 @@ class ExperimentDesignDialog(QDialog):
             "QHeaderView::section { padding-left: 10px; padding-right: 8px; }"
         )
         self.reagent_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        right.addWidget(self.reagent_table, stretch=1)
+        self.reagent_editor_region = QWidget(self)
+        reagent_editor_layout = QHBoxLayout(self.reagent_editor_region)
+        reagent_editor_layout.setContentsMargins(0, 0, 0, 0)
+        reagent_editor_layout.setSpacing(8)
+        reagent_editor_layout.addWidget(self.reagent_table, stretch=1)
+
+        self.reagent_action_rail = QFrame(self.reagent_editor_region)
+        self.reagent_action_rail.setObjectName("reagentActionRail")
+        self.reagent_action_rail.setFixedWidth(126)
+        self.reagent_action_rail.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.reagent_action_rail.setStyleSheet(
+            "QFrame#reagentActionRail { border:1px solid #8c8c8c; border-radius:4px; }"
+        )
+        reagent_action_layout = QVBoxLayout(self.reagent_action_rail)
+        reagent_action_layout.setContentsMargins(8, 8, 8, 8)
+        self.table_add_reagent_btn = QPushButton("+ Add Reagent", self.reagent_action_rail)
+        self.table_add_reagent_btn.setObjectName("tableAddReagentButton")
+        self.table_add_reagent_btn.setProperty(
+            "busyDisabledToolTip",
+            "Wait for the current design calculation to finish before adding a reagent.",
+        )
+        self.table_add_reagent_btn.setToolTip(
+            "Add a reagent column to the manual reaction design."
+        )
+        self.table_add_reagent_btn.clicked.connect(self._on_add_reagent)
+        reagent_action_layout.addWidget(self.table_add_reagent_btn)
+        reagent_action_layout.addStretch(1)
+        reagent_editor_layout.addWidget(self.reagent_action_rail, stretch=0)
+        right.addWidget(self.reagent_editor_region, stretch=1)
 
         # ---------- Stock table (bottom-right) ----------
         self.stock_information_region = QWidget(self)
@@ -11549,7 +11594,6 @@ class ExperimentDesignDialog(QDialog):
         self.stock_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.stock_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.stock_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._stock_information_layout.addWidget(self.stock_table, stretch=1)
 
         # ---------- Organized controls (left) ----------
         controls_col = left
@@ -11600,7 +11644,11 @@ class ExperimentDesignDialog(QDialog):
         self.volume_tolerance_spin.setRange(0.0, 1_000_000.0)
         self.volume_tolerance_spin.setSingleStep(10.0)
         self.volume_tolerance_spin.setValue(float(self.model.metadata.get("printed_volume_tolerance_nL", 50.0)))
-        reaction_form.addRow(QLabel("Printed Volume Tolerance (nL)"), self.volume_tolerance_spin)
+        self.volume_tolerance_spin.setToolTip(
+            "Allows small droplet-rounding overages above the requested printed volume. "
+            "It does not change the requested volume; accepted overages are reported "
+            "as warnings."
+        )
 
         self.allow_two_chk = QCheckBox()
         self.allow_two_chk.setChecked(bool(self.model.metadata.get("allow_two_stock_solutions", False)))
@@ -11683,7 +11731,7 @@ class ExperimentDesignDialog(QDialog):
                 self.plate_format_combo.setCurrentIndex(idx)
         experiment_form.addRow(QLabel("Plate format"), self.plate_format_combo)
 
-        self.well_selection_btn = QPushButton("Printable Wells...")
+        self.well_selection_btn = QPushButton("Select Reaction Wells...")
         self.well_selection_btn.clicked.connect(self._on_choose_printable_wells)
         self.well_selection_summary_lbl = QLabel("")
         self.well_selection_summary_lbl.setWordWrap(True)
@@ -11692,56 +11740,83 @@ class ExperimentDesignDialog(QDialog):
         well_selection_layout.setContentsMargins(0, 0, 0, 0)
         well_selection_layout.addWidget(self.well_selection_btn)
         well_selection_layout.addWidget(self.well_selection_summary_lbl, stretch=1)
-        experiment_form.addRow(QLabel("Printable Wells"), well_selection_row)
+        experiment_form.addRow(QLabel("Reaction wells"), well_selection_row)
 
         controls_col.addWidget(experiment_group)
         controls_col.addWidget(reaction_group)
         controls_col.addWidget(options_group)
 
+        self.advanced_settings_toggle = QPushButton("Advanced Settings ▸")
+        self.advanced_settings_toggle.setCheckable(True)
+        self.advanced_settings_toggle.setFlat(True)
+        self.advanced_settings_toggle.setStyleSheet(
+            "QPushButton { text-align:left; font-weight:600; padding:4px; }"
+        )
+        controls_col.addWidget(self.advanced_settings_toggle)
+
+        self.advanced_settings_panel = QGroupBox("Advanced Settings")
+        advanced_settings_form = QFormLayout(self.advanced_settings_panel)
+        advanced_settings_form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        advanced_settings_form.addRow(
+            QLabel("Allowed Printed-Volume Overage (nL)"),
+            self.volume_tolerance_spin,
+        )
+        self.advanced_settings_panel.setVisible(False)
+        self.advanced_settings_toggle.toggled.connect(
+            self._on_advanced_settings_toggled
+        )
+        controls_col.addWidget(self.advanced_settings_panel)
+
         # --- Design tools ---
         design_tools_group = QGroupBox("Design Tools")
-        design_tools_layout = QGridLayout(design_tools_group)
-        design_tools_layout.setColumnStretch(0, 1)
-        design_tools_layout.setColumnStretch(1, 1)
+        self.design_tools_layout = QGridLayout(design_tools_group)
+        self.design_tools_layout.setColumnStretch(0, 1)
+        self.design_tools_layout.setColumnStretch(1, 1)
 
         self.add_reagent_btn = QPushButton("Add Reagent")
+        self.add_reagent_btn.setMinimumHeight(36)
+        self.add_reagent_btn.setStyleSheet(
+            f"background-color:{self.color_dict.get('blue', '#1e64b4')}; "
+            "color:white; font-weight:600;"
+        )
         self.add_reagent_btn.clicked.connect(self._on_add_reagent)
-        design_tools_layout.addWidget(self.add_reagent_btn, 0, 0)
+        self.design_tools_layout.addWidget(self.add_reagent_btn, 0, 0, 1, 2)
+
+        self.unique_conditions_btn = QPushButton("Additional Conditions...")
+        self.unique_conditions_btn.clicked.connect(self._on_unique_conditions)
+        self.design_tools_layout.addWidget(self.unique_conditions_btn, 1, 0)
+
+        self.preview_reactions_btn = QPushButton("Preview Reactions...")
+        self.preview_reactions_btn.clicked.connect(self._on_preview_reactions)
+        self.design_tools_layout.addWidget(self.preview_reactions_btn, 1, 1)
 
         # --- Manual design vs uploaded design controls ---
         self.upload_design_btn = QPushButton("Import Reaction Design (CSV)…")
         self.upload_design_btn.clicked.connect(self._on_upload_design)
-        design_tools_layout.addWidget(self.upload_design_btn, 1, 0)
 
         self.reset_upload_btn = QPushButton("Clear Imported Design")
         self.reset_upload_btn.setToolTip(
             "Remove the imported reactions and reagent rows, then return to an empty manual design."
         )
         self.reset_upload_btn.clicked.connect(self._on_reset_uploaded_design)
-        design_tools_layout.addWidget(self.reset_upload_btn, 1, 1)
+        self._update_import_design_button_layout(self._uploaded_design_active)
 
-        self.unique_conditions_btn = QPushButton("Additional Conditions...")
-        self.unique_conditions_btn.clicked.connect(self._on_unique_conditions)
-        design_tools_layout.addWidget(self.unique_conditions_btn, 0, 1)
-
-        self.preview_reactions_btn = QPushButton("Preview Reactions...")
-        self.preview_reactions_btn.clicked.connect(self._on_preview_reactions)
-        design_tools_layout.addWidget(self.preview_reactions_btn, 2, 0, 1, 2)
-
-        self.auto_update_chk = QCheckBox("Auto update design")
+        self.auto_update_chk = QCheckBox("Automatically recalculate design")
         self.auto_update_chk.setChecked(True)
         self.auto_update_chk.setToolTip(
-            "When enabled, design edits automatically update reactions and stock "
-            "solutions after a short delay. Turn this off to make several edits before "
-            "pressing Update Reactions and Stock Solutions."
+            "When enabled, edits automatically recalculate reactions and stock solutions "
+            "after a short delay. Recalculation does not save the experiment. Turn this "
+            "off to make several edits before pressing Update Reactions and Stock Solutions."
         )
         self.auto_update_chk.toggled.connect(self._on_auto_update_toggled)
-        design_tools_layout.addWidget(self.auto_update_chk, 3, 0, 1, 2)
+        self.design_tools_layout.addWidget(self.auto_update_chk, 3, 0, 1, 2)
 
         self.run_btn = new_btn = QPushButton("Update Reactions and Stock Solutions")
         self._run_btn_default_stylesheet = self.run_btn.styleSheet()
         self.run_btn.clicked.connect(self._on_optimize_and_generate)
-        design_tools_layout.addWidget(self.run_btn, 4, 0, 1, 2)
+        self.design_tools_layout.addWidget(self.run_btn, 4, 0, 1, 2)
         controls_col.addWidget(design_tools_group)
 
         # --- Experiment lifecycle actions ---
@@ -11759,7 +11834,7 @@ class ExperimentDesignDialog(QDialog):
         self.duplicate_btn.clicked.connect(self._on_duplicate_design)
         experiment_actions_layout.addWidget(self.duplicate_btn, 1, 1)
 
-        self.save_btn = QPushButton("Save Design…")
+        self.save_btn = QPushButton("Save Draft")
         self.save_btn.clicked.connect(self._on_save_design)
         experiment_actions_layout.addWidget(self.save_btn, 1, 0)
 
@@ -11874,6 +11949,7 @@ class ExperimentDesignDialog(QDialog):
         self._stock_information_layout.addWidget(
             self.design_information_panel, stretch=0
         )
+        self._stock_information_layout.addWidget(self.stock_table, stretch=1)
         self._refresh_design_information_style()
         right.addWidget(self.stock_information_region, stretch=1)
 
@@ -11911,6 +11987,7 @@ class ExperimentDesignDialog(QDialog):
         self._update_unique_conditions_button_label()
         self._refresh_all_lock_states()
         self._sync_reagent_tables_geometry()
+        self._refresh_draft_dirty_indicator()
         self._gripper_lock_connection = self.main_window.model.rack_model.gripper_updated.connect(
             self._refresh_all_lock_states
         )
@@ -11919,6 +11996,33 @@ class ExperimentDesignDialog(QDialog):
     # -----------------------------
     # Reagent table utilities
     # -----------------------------
+
+    def _on_advanced_settings_toggled(self, checked: bool):
+        panel = getattr(self, "advanced_settings_panel", None)
+        if panel is not None:
+            panel.setVisible(bool(checked))
+        toggle = getattr(self, "advanced_settings_toggle", None)
+        if toggle is not None:
+            toggle.setText(
+                "Advanced Settings ▾" if checked else "Advanced Settings ▸"
+            )
+
+    def _update_import_design_button_layout(self, active: bool):
+        layout = getattr(self, "design_tools_layout", None)
+        upload_button = getattr(self, "upload_design_btn", None)
+        clear_button = getattr(self, "reset_upload_btn", None)
+        if layout is None or upload_button is None or clear_button is None:
+            return
+        layout.removeWidget(upload_button)
+        layout.removeWidget(clear_button)
+        if active:
+            layout.addWidget(upload_button, 2, 0)
+            layout.addWidget(clear_button, 2, 1)
+            clear_button.show()
+        else:
+            layout.addWidget(upload_button, 2, 0, 1, 2)
+            clear_button.hide()
+        layout.invalidate()
 
     @classmethod
     def _responsive_reagent_column_width(cls, reagent_count: int, available_width: int) -> int:
@@ -12543,8 +12647,15 @@ class ExperimentDesignDialog(QDialog):
                         reagent_display_name: str | None = None,
                         intended_head_type_id: str | None = None,
                         intended_head_type_display_name: str | None = None,
-                        printing_mode: str | None = None):
-        row = self._reagent_row_count()
+                        printing_mode: str | None = None,
+                        insert_at: int | None = None,
+                        schedule_update: bool = True):
+        reagent_count = self._reagent_row_count()
+        row = (
+            reagent_count
+            if insert_at is None
+            else max(0, min(int(insert_at), reagent_count))
+        )
         self._reagent_insert_row(row)
 
         # 0 Stock / Label
@@ -12637,25 +12748,150 @@ class ExperimentDesignDialog(QDialog):
         prior_label.setStyleSheet("color:#996515;")
         self._set_reagent_cell_widget(row, self.COL_PRIOR, prior_label)
 
-        # 12 Delete
-        del_btn = QPushButton("Delete")
-        del_btn.clicked.connect(lambda _, r=row: self._delete_row(r))
-        self._set_reagent_cell_widget(row, self.COL_DELETE, del_btn)
+        # 12 Actions
+        actions_widget = QWidget()
+        actions_layout = QHBoxLayout(actions_widget)
+        actions_layout.setContentsMargins(2, 2, 2, 2)
+        actions_layout.setSpacing(4)
+        duplicate_btn = QPushButton("Duplicate", actions_widget)
+        duplicate_btn.setObjectName("duplicateReagentButton")
+        delete_btn = QPushButton("Delete", actions_widget)
+        delete_btn.setObjectName("deleteReagentButton")
+        duplicate_btn.clicked.connect(
+            lambda _checked=False, button=duplicate_btn: self._duplicate_reagent_row(
+                self._reagent_column_for_action_button(button)
+            )
+        )
+        delete_btn.clicked.connect(
+            lambda _checked=False, button=delete_btn: self._delete_row(
+                self._reagent_column_for_action_button(button)
+            )
+        )
+        actions_layout.addWidget(duplicate_btn)
+        actions_layout.addWidget(delete_btn)
+        self._set_reagent_cell_widget(row, self.COL_ACTIONS, actions_widget)
 
         self._sync_reagent_row_height(row)
         self._refresh_prior_availability_for_row(row)
         self._sync_reagent_tables_geometry()
-        self._schedule_auto_update()
+        if schedule_update:
+            self._schedule_auto_update()
+
+    def _reagent_column_for_action_button(self, button: QPushButton) -> int:
+        for row in range(self._reagent_row_count()):
+            actions = self._reagent_cell_widget(row, self.COL_ACTIONS)
+            if actions is not None and actions.isAncestorOf(button):
+                return row
+        return -1
+
+    def _duplicate_reagent_row(self, row: int):
+        if row < 0 or row >= self._reagent_row_count():
+            return
+        if (
+            getattr(self, "_uploaded_design_active", False)
+            or getattr(self, "_progress_protected", False)
+            or self._model_execution_is_read_only(self.model)
+            or self._gripper_edit_lock_is_active()
+        ):
+            self._set_status(
+                "Reagent duplication is unavailable while the design is read-only.",
+                severity="warning",
+            )
+            return
+
+        name_edit = self._reagent_cell_widget(row, self.COL_STOCK_LABEL)
+        reagent_combo = self._reagent_cell_widget(row, self.COL_REAGENT)
+        group_combo = self._reagent_cell_widget(row, self.COL_GROUP)
+        head_type_combo = self._reagent_cell_widget(row, self.COL_HEAD_TYPE)
+        mode_combo = self._reagent_cell_widget(row, self.COL_MODE)
+        start_spin = self._reagent_cell_widget(row, self.COL_STARTING)
+        targets_edit = self._reagent_cell_widget(row, self.COL_TARGETS)
+        units_edit = self._reagent_cell_widget(row, self.COL_UNITS)
+        stock_edit = self._reagent_cell_widget(row, self.COL_SET_STOCK)
+        max_stock_edit = self._reagent_cell_widget(row, self.COL_MAX_STOCK)
+        droplet_spin = self._reagent_cell_widget(row, self.COL_DROPLET)
+
+        reagent_payload = self._combo_current_payload(reagent_combo) or {}
+        head_type_payload = self._combo_current_payload(head_type_combo) or {}
+        self._add_reagent_row(
+            name=name_edit.text() if name_edit is not None else "",
+            group=self._combo_current_text(group_combo) or self.GROUP_ADDITIVE,
+            targets=targets_edit.text() if targets_edit is not None else "",
+            units=units_edit.text() if units_edit is not None else "",
+            droplet_nL=float(droplet_spin.value()) if droplet_spin is not None else self.default_droplet_volume_nL,
+            starting_conc=float(start_spin.value()) if start_spin is not None else 0.0,
+            forced_stock_conc=self._parse_float_or_none(stock_edit.text()) if stock_edit is not None else None,
+            max_stock_conc=self._parse_float_or_none(max_stock_edit.text()) if max_stock_edit is not None else None,
+            reagent_id=reagent_payload.get("reagent_id"),
+            reagent_display_name=self._combo_current_text(reagent_combo),
+            intended_head_type_id=head_type_payload.get("head_type_id"),
+            intended_head_type_display_name=(
+                head_type_payload.get("display_name")
+                or self._combo_current_text(head_type_combo)
+            ),
+            printing_mode=(mode_combo.currentData() if mode_combo is not None else None),
+            insert_at=row + 1,
+            schedule_update=False,
+        )
+        self._mark_design_optimization_dirty()
+        self._mark_draft_dirty()
+        message = (
+            "Reagent duplicated. Rename one Stock / Label before updating the design."
+        )
+        self._apply_duplicate_reagent_label_state()
+        self._set_stock_table_stale(
+            True,
+            "Showing the last valid stock solutions; duplicate reagent labels must be resolved.",
+        )
+        self._set_status(message, severity="warning")
+        timer = getattr(self, "_auto_timer", None)
+        if timer is not None:
+            timer.stop()
+        copied_name = self._reagent_cell_widget(row + 1, self.COL_STOCK_LABEL)
+        if copied_name is not None:
+            copied_name.setFocus(Qt.FocusReason.OtherFocusReason)
+            copied_name.selectAll()
+
+    def _duplicate_reagent_label_rows(self) -> set[int]:
+        rows_by_key: Dict[tuple[str, str], list[int]] = {}
+        for row in range(self._reagent_row_count()):
+            name_edit = self._reagent_cell_widget(row, self.COL_STOCK_LABEL)
+            group_combo = self._reagent_cell_widget(row, self.COL_GROUP)
+            label = (name_edit.text() if name_edit is not None else "").strip()
+            if not label:
+                continue
+            group = self._combo_current_text(group_combo) or self.GROUP_ADDITIVE
+            key = (group.casefold(), label.casefold())
+            rows_by_key.setdefault(key, []).append(row)
+        return {
+            row
+            for matching_rows in rows_by_key.values()
+            if len(matching_rows) > 1
+            for row in matching_rows
+        }
+
+    def _apply_duplicate_reagent_label_state(self) -> set[int]:
+        duplicate_rows = self._duplicate_reagent_label_rows()
+        for row in range(self._reagent_row_count()):
+            name_edit = self._reagent_cell_widget(row, self.COL_STOCK_LABEL)
+            if name_edit is None:
+                continue
+            is_duplicate = row in duplicate_rows
+            name_edit.setStyleSheet(
+                "border:1px solid #8a0303;" if is_duplicate else ""
+            )
+            name_edit.setToolTip(
+                "Stock / Label must be unique among additives or within this choice group."
+                if is_duplicate
+                else ""
+            )
+        return duplicate_rows
 
     def _delete_row(self, r: int):
+        if r < 0 or r >= self._reagent_row_count():
+            return
         self._reagent_remove_row(r)
-        for i in range(self._reagent_row_count()):
-            btn: QPushButton = self._reagent_cell_widget(i, self.COL_DELETE)
-            try:
-                btn.clicked.disconnect()
-            except Exception:
-                pass
-            btn.clicked.connect(lambda _, rr=i: self._delete_row(rr))
+        self._apply_duplicate_reagent_label_state()
         self._update_all_reagent_column_headers()
         self._sync_reagent_tables_geometry()
         self._refresh_all_prior_availability()
@@ -12707,6 +12943,45 @@ class ExperimentDesignDialog(QDialog):
         self._design_optimization_dirty = True
         self._update_run_button_dirty_state()
 
+    def _draft_is_dirty(self) -> bool:
+        return bool(getattr(self, "_draft_dirty", False))
+
+    def _refresh_draft_dirty_indicator(self):
+        dirty = self._draft_is_dirty()
+        base_title = "Experiment Design (v2)"
+        try:
+            self.setWindowTitle(f"{base_title} *" if dirty else base_title)
+        except RuntimeError:
+            pass
+        save_button = getattr(self, "save_btn", None)
+        if save_button is not None:
+            save_button.setText("Save Draft *" if dirty else "Save Draft")
+            save_button.setToolTip(
+                "Save the current experiment design to disk."
+                if dirty
+                else "The current experiment design has no unsaved changes."
+            )
+
+    def _mark_draft_dirty(self):
+        self._draft_dirty = True
+        model = getattr(self, "model", None)
+        if model is not None and hasattr(model, "unsaved_changes"):
+            model.unsaved_changes = True
+        self._refresh_draft_dirty_indicator()
+
+    def _mark_draft_saved(self):
+        self._draft_dirty = False
+        model = getattr(self, "model", None)
+        if model is not None and hasattr(model, "unsaved_changes"):
+            model.unsaved_changes = False
+        self._refresh_draft_dirty_indicator()
+
+    def _reset_draft_dirty_from_model(self):
+        self._draft_dirty = bool(
+            getattr(getattr(self, "model", None), "unsaved_changes", False)
+        )
+        self._refresh_draft_dirty_indicator()
+
     def _mark_design_optimization_clean(self, result: dict | None = None):
         self._design_optimization_dirty = False
         self._last_optimization_result = result
@@ -12754,6 +13029,7 @@ class ExperimentDesignDialog(QDialog):
 
         if mark_dirty:
             self._mark_design_optimization_dirty()
+            self._mark_draft_dirty()
 
         if (
             getattr(self, "_uploaded_design_active", False)
@@ -13164,6 +13440,7 @@ class ExperimentDesignDialog(QDialog):
             getattr(self, "unique_conditions_btn", None),
             getattr(self, "preview_reactions_btn", None),
             getattr(self, "add_reagent_btn", None),
+            getattr(self, "table_add_reagent_btn", None),
             getattr(self, "well_selection_btn", None),
             getattr(self, "auto_update_chk", None),
             getattr(self, "new_btn", None),
@@ -13282,9 +13559,11 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_all_lock_states()
 
     def _ensure_reaction_preview_current(self) -> bool:
+        if self._reject_duplicate_reagent_labels(show_dialog=True) is not None:
+            return False
         if self._manual_assignments_active() and not self._can_reuse_current_generated_design():
             message = (
-                "Reaction preview/export requires a current generated design when explicit "
+                "Reaction preview requires a current generated design when explicit "
                 "well assignments are active."
             )
             self._set_status(message, severity="error")
@@ -13298,7 +13577,7 @@ class ExperimentDesignDialog(QDialog):
             failure_title="Could not update reactions and stock solutions",
             show_capacity_dialog=False,
             busy_message=(
-                "Updating reactions and stock solutions before preview or export... this "
+                "Updating reactions and stock solutions before preview... this "
                 "may take a moment on Raspberry Pi."
             ),
         )
@@ -13318,87 +13597,6 @@ class ExperimentDesignDialog(QDialog):
         preview_df = self._reaction_preview_dataframe()
         dialog = ReactionPreviewDialog(preview_df, self)
         dialog.exec()
-
-    # -----------------------------
-    # Uploaded design mode toggling
-    # -----------------------------
-    def _apply_uploaded_design_mode_to_ui(self, active: bool):
-        """
-        Turn CSV-upload mode on/off.
-
-        When active:
-          - Disable manual *structure* editing (adding/removing reagents, changing groups/targets/units).
-          - Keep 'Starting', 'Set Stock Conc', and 'Droplet Vol' fully editable.
-        """
-        self._uploaded_design_active = bool(active)
-
-        #
-        # Top-level controls:
-        #
-        # These should be disabled when a custom design CSV is in control of the reactions.
-        #
-        self.add_reagent_btn.setEnabled(not active)
-        # If you have any "Remove reagent", "Clone reagent", etc. buttons, disable them here too.
-
-        # You may or may not want to disable subset-design controls;
-        # with an uploaded design they're usually meaningless, so I disable them:
-        self.subset_chk.setEnabled(not active)
-        self.reduction_spin.setEnabled(not active and self.subset_chk.isChecked())
-
-        # "New experiment" and "Load Design…" usually remain allowed so user can leave upload-mode.
-        # If in your previous version you disabled them, you can keep that behavior if you prefer.
-        # self.new_btn.setEnabled(not active)
-        # self.load_btn.setEnabled(not active)
-
-        #
-        # Per-row reagent table behavior:
-        #
-        #  Lock these columns:
-        #    - Stock / Label
-        #    - Group
-        #    - Targets
-        #    - Units
-        #    - Delete
-        #
-        #  Keep editable:
-        #    - Reagent
-        #    - Head Type
-        #    - Prior indicator (read-only)
-        #    - Starting
-        #    - Set Stock Conc
-        #    - Droplet Vol
-        #
-        lock_cols = {
-            self.COL_STOCK_LABEL,
-            self.COL_GROUP,
-            self.COL_TARGETS,
-            self.COL_UNITS,
-            self.COL_DELETE,
-        }
-
-        for row in range(self.reagent_table.rowCount()):
-            for col in range(self.reagent_table.columnCount()):
-                w = self.reagent_table.cellWidget(row, col)
-                if w is None:
-                    continue
-
-                if col in lock_cols:
-                    # Structural / identity columns – freeze when active
-                    if isinstance(w, QLineEdit):
-                        w.setReadOnly(active)
-                    elif isinstance(w, QComboBox):
-                        w.setEnabled(not active)
-                    elif isinstance(w, QPushButton):
-                        w.setEnabled(not active)
-                    else:
-                        w.setEnabled(not active)
-                else:
-                    # Starting conc, Set Stock, Droplet Vol – always editable
-                    if isinstance(w, QLineEdit):
-                        w.setReadOnly(False)
-                    else:
-                        w.setEnabled(True)
-        
 
     def _on_upload_design(self):
         """Launch a feasibility wizard for explicit reaction designs."""
@@ -13514,6 +13712,7 @@ class ExperimentDesignDialog(QDialog):
         self._load_factors_into_table()
         self._update_unique_conditions_button_label()
         self._update_metadata_from_controls()
+        self._mark_draft_dirty()
 
         # Immediately optimize & generate using the uploaded design
         self._run_design_optimization_flow(
@@ -13598,6 +13797,7 @@ class ExperimentDesignDialog(QDialog):
             self._auto_update_suspended = previous_suspended
 
         self._refresh_all_lock_states()
+        self._mark_draft_dirty()
         self._set_tip("")
         self._set_status(
             "Imported design cleared. Add reagents or import another design.",
@@ -13691,11 +13891,35 @@ class ExperimentDesignDialog(QDialog):
         lifecycle = self._refresh_editor_lifecycle_state()
         self._refresh_editable_copy_availability()
         self._apply_gripper_edit_lock_state(lifecycle=lifecycle)
+        self._refresh_table_add_reagent_availability()
+
+    def _refresh_table_add_reagent_availability(self):
+        button = getattr(self, "table_add_reagent_btn", None)
+        if button is None:
+            return
+        reason = ""
+        if getattr(self, "_uploaded_design_active", False):
+            reason = "Clear the imported design before adding reagent columns."
+        elif getattr(self, "_progress_protected", False):
+            reason = getattr(
+                self,
+                "_progress_lock_status_message",
+                "This experiment is view-only.",
+            )
+        elif self._model_execution_is_read_only(self.model):
+            reason = "This experiment is read-only. Create an editable copy to add reagents."
+        elif self._gripper_edit_lock_is_active():
+            reason = self.GRIPPER_LOCK_STATUS
+        button.setEnabled(not bool(reason))
+        button.setToolTip(
+            reason or "Add a reagent column to the manual reaction design."
+        )
 
     def _apply_uploaded_design_mode_to_ui(self, active: bool):
         self._uploaded_design_active = bool(active)
 
         self.add_reagent_btn.setEnabled(not active)
+        self._update_import_design_button_layout(active)
         reset_button = getattr(self, "reset_upload_btn", None)
         if reset_button is not None:
             reset_button.setVisible(active)
@@ -13725,6 +13949,7 @@ class ExperimentDesignDialog(QDialog):
                     w.setReadOnly(False)
                 else:
                     w.setEnabled(True)
+        self._refresh_table_add_reagent_availability()
 
     def _apply_gripper_edit_lock_state(self, *, lifecycle=None):
         self._editing_locked_by_gripper = self._is_gripper_loaded()
@@ -14575,6 +14800,36 @@ class ExperimentDesignDialog(QDialog):
             "design_size_estimate": estimate,
         }
 
+    def _reject_duplicate_reagent_labels(
+        self,
+        *,
+        show_dialog: bool,
+        refresh_lock_states: bool = False,
+    ) -> tuple[bool, dict] | None:
+        duplicate_rows = self._apply_duplicate_reagent_label_state()
+        if not duplicate_rows:
+            return None
+        message = (
+            "Stock / Label must be unique among additives and within each choice "
+            "group. Rename the highlighted reagent columns before updating the design."
+        )
+        self._mark_design_optimization_dirty()
+        self._set_stock_table_stale(
+            True,
+            "Showing the last valid stock solutions; duplicate reagent labels must be resolved.",
+        )
+        self._set_status(message, severity="error")
+        if refresh_lock_states:
+            self._refresh_all_lock_states()
+        if show_dialog:
+            QMessageBox.warning(self, "Duplicate Reagent Labels", message)
+        return False, {
+            "best": None,
+            "reason": message,
+            "issues_by_key": {},
+            "duplicate_reagent_rows": sorted(duplicate_rows),
+        }
+
     def _run_design_optimization_flow(
         self,
         *,
@@ -14607,6 +14862,12 @@ class ExperimentDesignDialog(QDialog):
                 "issues_by_key": {},
                 "read_only": True,
             }
+        duplicate_failure = self._reject_duplicate_reagent_labels(
+            show_dialog=bool(show_failure_dialog or show_capacity_dialog),
+            refresh_lock_states=refresh_lock_states,
+        )
+        if duplicate_failure is not None:
+            return duplicate_failure
         self._rebuild_model_from_table()
         self._update_metadata_from_controls()
 
@@ -14874,12 +15135,12 @@ class ExperimentDesignDialog(QDialog):
         try:
             available, _plate_name = self._available_wells_for_selected_plate()
         except Exception:
-            return "Printable wells unavailable."
+            return "Reaction wells unavailable."
 
         included_getter = getattr(self.model, "get_auto_assignment_included_wells", None)
         included_wells = included_getter() if callable(included_getter) else None
         if included_wells is not None:
-            return f"{available} printable well(s) selected."
+            return f"{available} reaction well(s) selected."
 
         try:
             non_excluded_total = len(self._well_ids_for_plate()) - len(self._excluded_ids_for_plate())
@@ -14887,7 +15148,7 @@ class ExperimentDesignDialog(QDialog):
             non_excluded_total = None
         if non_excluded_total is not None and available == non_excluded_total:
             return f"All non-excluded wells ({available})."
-        return f"Legacy start offset ({available} printable well(s))."
+        return f"Legacy start offset ({available} reaction well(s))."
 
     def _update_well_selection_summary(self):
         label = getattr(self, "well_selection_summary_lbl", None)
@@ -14900,7 +15161,7 @@ class ExperimentDesignDialog(QDialog):
 
     def _on_choose_printable_wells(self):
         if self._manual_assignments_active():
-            self._set_status("Printable wells are disabled because explicit uploaded wells control layout.")
+            self._set_status("Reaction-well selection is disabled because explicit uploaded wells control layout.")
             return
         if getattr(self, "_progress_protected", False):
             self._set_status(getattr(self, "_progress_lock_status_message", "Design is view-only."))
@@ -14911,13 +15172,13 @@ class ExperimentDesignDialog(QDialog):
 
         wp = self._well_plate_for_design()
         if wp is None:
-            self._set_status("No plate format is available for printable well selection.")
+            self._set_status("No plate format is available for reaction-well selection.")
             return
 
         try:
             rows, cols, plate_name = self._plate_dimensions_for_design()
         except Exception as e:
-            self._set_status(f"Could not open printable wells: {e}")
+            self._set_status(f"Could not open reaction-well selection: {e}")
             return
 
         dialog = WellSelectionDialog(
@@ -14948,7 +15209,7 @@ class ExperimentDesignDialog(QDialog):
     def _available_wells_for_selected_plate(self) -> tuple[int, str]:
         """
         Compute assignable wells for the selected plate using the same gating inputs
-        as runtime assignment (manual wells, printable wells, start offset, exclusions).
+        as runtime assignment (manual wells, reaction wells, start offset, exclusions).
         """
         selected_plate = self.plate_format_combo.currentText().strip()
         wp = getattr(getattr(self.main_window, "model", None), "well_plate", None)
@@ -15030,7 +15291,7 @@ class ExperimentDesignDialog(QDialog):
             "Not enough available wells for this experiment design.\n\n"
             f"Required reactions: {required}\n"
             f"Available wells on '{plate_name}': {available}\n\n"
-            "Choose a larger plate, reduce the design size, adjust printable wells, "
+            "Choose a larger plate, reduce the design size, adjust reaction wells, "
             "or include more wells."
         )
         if show_dialog:
@@ -15314,6 +15575,8 @@ class ExperimentDesignDialog(QDialog):
         - Create Experiments/<name>/ with initial files
         - Refresh UI
         """
+        if not self._confirm_unsaved_changes("starting a new experiment"):
+            return False
         self._set_tip("")
         main_window = getattr(self, "main_window", None)
         if main_window is not None and hasattr(
@@ -15398,11 +15661,14 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_all_prior_availability()
         self._refresh_editor_lifecycle_state()
         self._refresh_editable_copy_availability()
+        self._apply_requested = False
+        self._reset_draft_dirty_from_model()
 
         self._set_status(
             f"New experiment created: {getattr(self.model, 'experiment_dir_path', '(unsaved yet)')}",
             severity="success",
         )
+        return True
 
     def _on_save_design(self):
         """
@@ -15414,7 +15680,7 @@ class ExperimentDesignDialog(QDialog):
                 "This experiment is locked and cannot be saved as changes.",
                 severity="warning",
             )
-            return
+            return False
         ok, res = self._run_design_optimization_flow(
             show_failure_dialog=True,
             failure_title="Could not update reactions and stock solutions",
@@ -15425,7 +15691,7 @@ class ExperimentDesignDialog(QDialog):
             ),
         )
         if not ok:
-            return
+            return False
         self._persist_design_identity_registry_entries()
 
         has_prepared_plan = bool(
@@ -15449,6 +15715,7 @@ class ExperimentDesignDialog(QDialog):
                     f"Experiment saved: {self.model.experiment_file_path}",
                     severity="success",
                 )
+                self._mark_draft_saved()
             except Exception as exc:
                 message = "The experiment could not be saved. See the application logs for details."
                 self._set_status(message, severity="error")
@@ -15458,17 +15725,32 @@ class ExperimentDesignDialog(QDialog):
                     "Could not save experiment",
                     message,
                 )
-            return
+                return False
+            return True
 
         # Ensure folder exists / name is current, then save
-        self._ensure_experiment_dir()
-        self.model.save_experiment()
+        try:
+            self._ensure_experiment_dir()
+            self.model.save_experiment()
+        except Exception as exc:
+            message = (
+                "The experiment draft could not be saved. See the application logs "
+                "for details."
+            )
+            self._set_status(message, severity="error")
+            print(f"[ExperimentDesignDialog] draft-save error: {exc}")
+            QMessageBox.warning(self, "Could not save draft", message)
+            return False
+        self._mark_draft_saved()
         self._set_status(
             f"Design saved to: {self.model.experiment_file_path}",
             severity="success",
         )
+        return True
 
     def _on_duplicate_design(self):
+        if not self._confirm_unsaved_changes("creating an editable copy"):
+            return False
         source_file, source_dir, source_error = (
             self._resolve_current_persisted_design_source()
         )
@@ -15587,12 +15869,15 @@ class ExperimentDesignDialog(QDialog):
         self._update_unique_conditions_button_label()
         self._refresh_all_prior_availability()
         self._refresh_all_lock_states()
+        self._apply_requested = False
+        self._reset_draft_dirty_from_model()
 
         self._set_status(
             f"Editable copy created from: {source_dir}. "
             f"New experiment: {new_experiment_path}",
             severity="success",
         )
+        return True
 
     def _on_load_design(self):
         # Default directory = Experiments
@@ -15618,6 +15903,9 @@ class ExperimentDesignDialog(QDialog):
                 severity="error",
             )
             return
+
+        if not self._confirm_unsaved_changes("loading another experiment"):
+            return False
 
         progress_path = os.path.join(exp_dir, "progress.json")
         progress_status = {}
@@ -15730,6 +16018,8 @@ class ExperimentDesignDialog(QDialog):
         self._update_unique_conditions_button_label()
         self._refresh_all_prior_availability()
         self._refresh_all_lock_states()
+        self._apply_requested = False
+        self._reset_draft_dirty_from_model()
 
         if legacy_read_only or execution_locked:
             self._set_status(self._progress_lock_status_message, severity="warning")
@@ -15742,6 +16032,7 @@ class ExperimentDesignDialog(QDialog):
             )
         else:
             self._set_status(f"Design loaded from: {exp_dir}", severity="success")
+        return True
 
     def _on_finish(self):
         """
@@ -15779,6 +16070,7 @@ class ExperimentDesignDialog(QDialog):
                     if completed
                     else "Older experiment displayed read-only."
                 )
+                self._allow_close_without_prompt = True
                 self.accept()
             except Exception as exc:
                 print(f"[ExperimentDesignDialog] older experiment view error: {exc}")
@@ -15845,6 +16137,7 @@ class ExperimentDesignDialog(QDialog):
                         else "Experiment loaded."
                     )
                 )
+                self._allow_close_without_prompt = True
                 self.accept()
             except Exception as exc:
                 print(f"[ExperimentDesignDialog] experiment load error: {exc}")
@@ -15875,6 +16168,8 @@ class ExperimentDesignDialog(QDialog):
             return
         if self._editing_locked_by_gripper:
             self._set_status("Design is view-only while a printer head is loaded in the gripper.")
+            return
+        if self._reject_duplicate_reagent_labels(show_dialog=True) is not None:
             return
 
         if (
@@ -15946,6 +16241,8 @@ class ExperimentDesignDialog(QDialog):
             return
 
         # Close dialog after explicit apply.
+        self._mark_draft_saved()
+        self._allow_close_without_prompt = True
         self.accept()
 
     def _effective_status_severity(self) -> str:
@@ -16051,11 +16348,60 @@ class ExperimentDesignDialog(QDialog):
             return f"{xv:.3f}".rstrip("0").rstrip(".")
         except Exception:
             return str(x)
+
+    def _confirm_unsaved_changes(self, action_text: str) -> bool:
+        if (
+            getattr(self, "_allow_close_without_prompt", False)
+            or not self._draft_is_dirty()
+            or self._model_execution_is_read_only(self.model)
+        ):
+            return True
+        if getattr(self, "_unsaved_prompt_active", False):
+            return False
+
+        self._unsaved_prompt_active = True
+        try:
+            prompt = QMessageBox(self)
+            prompt.setWindowTitle("Unsaved Experiment Design")
+            prompt.setIcon(QMessageBox.Warning)
+            prompt.setText(
+                f"This experiment design has unsaved changes. Save them before {action_text}?"
+            )
+            prompt.setInformativeText(
+                "Save Draft validates and writes the current design. Discard Changes "
+                "continues without saving."
+            )
+            save_button = prompt.addButton("Save Draft", QMessageBox.AcceptRole)
+            discard_button = prompt.addButton(
+                "Discard Changes", QMessageBox.DestructiveRole
+            )
+            cancel_button = prompt.addButton("Cancel", QMessageBox.RejectRole)
+            prompt.setDefaultButton(save_button)
+            prompt.setEscapeButton(cancel_button)
+            prompt.exec()
+            clicked = prompt.clickedButton()
+            if clicked is save_button:
+                return bool(self._on_save_design())
+            if clicked is discard_button:
+                return True
+            return False
+        finally:
+            self._unsaved_prompt_active = False
+
+    def reject(self):
+        if not self._confirm_unsaved_changes("closing the editor"):
+            return
+        self._allow_close_without_prompt = True
+        super().reject()
         
     def closeEvent(self, event):
         """
-        Close-time cleanup only. Applying the design is explicit via Finish.
+        Protect unsaved drafts, then perform close-time cleanup.
         """
+        if not self._confirm_unsaved_changes("closing the editor"):
+            event.ignore()
+            return
+        self._allow_close_without_prompt = True
         try:
             self._auto_timer.stop()
         except Exception:
