@@ -12,6 +12,20 @@ enum class DirectStartDecision : uint8_t {
   RejectUntilReleased = 3u,
 };
 
+enum class HomeMoveStartKind : uint8_t {
+  Started = 0u,
+  Immediate = 1u,
+  LimitBlocked = 2u,
+  OtherFailure = 3u,
+};
+
+enum class HomeMoveStartAction : uint8_t {
+  WaitForMotion = 0u,
+  CompleteNoOp = 1u,
+  ReleaseAndRetry = 2u,
+  Fail = 3u,
+};
+
 enum class PullMode : uint32_t {
   None = 0u,
   Up = 1u,
@@ -85,6 +99,27 @@ constexpr DirectStartDecision classifyDirectStart(bool limitAsserted,
     return DirectStartDecision::RejectUntilReleased;
   }
   return DirectStartDecision::Proceed;
+}
+
+constexpr HomeMoveStartAction classifyHomeMoveStart(
+    HomeMoveStartKind kind,
+    bool requestedMotion,
+    bool movingTowardLimit,
+    bool retryAlreadyUsed)
+{
+  if (kind == HomeMoveStartKind::Started) {
+    return HomeMoveStartAction::WaitForMotion;
+  }
+  if (kind == HomeMoveStartKind::Immediate) {
+    return requestedMotion ? HomeMoveStartAction::Fail
+                           : HomeMoveStartAction::CompleteNoOp;
+  }
+  if (kind == HomeMoveStartKind::LimitBlocked &&
+      movingTowardLimit &&
+      !retryAlreadyUsed) {
+    return HomeMoveStartAction::ReleaseAndRetry;
+  }
+  return HomeMoveStartAction::Fail;
 }
 
 }  // namespace StepperLimitPolicy

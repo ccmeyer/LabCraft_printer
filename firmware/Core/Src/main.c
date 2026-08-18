@@ -658,10 +658,10 @@ static void MX_TIM2_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM2_Init 2 */
-  // enable the update interrupt
-  __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_UPDATE);
-  // and start the timer in interrupt mode
-  HAL_TIM_Base_Start_IT(&htim2);
+
+  // TIM2 is owned by the X stepper and coordinated XY executor. Leave it
+  // stopped/READY after peripheral initialization; each motion start enables
+  // the update interrupt and timer through HAL_TIM_Base_Start_IT().
   /* USER CODE END TIM2_Init 2 */
 
 }

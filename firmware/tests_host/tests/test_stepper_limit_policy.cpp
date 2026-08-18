@@ -95,3 +95,68 @@ TEST(StepperLimitPolicyHelpers, DirectApproachRequiresConfirmedRelease)
         static_cast<long>(StepperLimitPolicy::classifyDirectStart(
             false, false, false, true)));
 }
+
+TEST(StepperLimitPolicyHelpers, HomingStartedMoveWaitsForPhysicalCompletion)
+{
+    LONGS_EQUAL(
+        static_cast<long>(StepperLimitPolicy::HomeMoveStartAction::WaitForMotion),
+        static_cast<long>(StepperLimitPolicy::classifyHomeMoveStart(
+            StepperLimitPolicy::HomeMoveStartKind::Started,
+            true,
+            true,
+            false)));
+}
+
+TEST(StepperLimitPolicyHelpers, HomingImmediateIsAcceptedOnlyForZeroStepRequest)
+{
+    LONGS_EQUAL(
+        static_cast<long>(StepperLimitPolicy::HomeMoveStartAction::CompleteNoOp),
+        static_cast<long>(StepperLimitPolicy::classifyHomeMoveStart(
+            StepperLimitPolicy::HomeMoveStartKind::Immediate,
+            false,
+            true,
+            false)));
+    LONGS_EQUAL(
+        static_cast<long>(StepperLimitPolicy::HomeMoveStartAction::Fail),
+        static_cast<long>(StepperLimitPolicy::classifyHomeMoveStart(
+            StepperLimitPolicy::HomeMoveStartKind::Immediate,
+            true,
+            true,
+            false)));
+}
+
+TEST(StepperLimitPolicyHelpers, HomingTowardBlockedLimitGetsOneReleaseRetry)
+{
+    LONGS_EQUAL(
+        static_cast<long>(StepperLimitPolicy::HomeMoveStartAction::ReleaseAndRetry),
+        static_cast<long>(StepperLimitPolicy::classifyHomeMoveStart(
+            StepperLimitPolicy::HomeMoveStartKind::LimitBlocked,
+            true,
+            true,
+            false)));
+    LONGS_EQUAL(
+        static_cast<long>(StepperLimitPolicy::HomeMoveStartAction::Fail),
+        static_cast<long>(StepperLimitPolicy::classifyHomeMoveStart(
+            StepperLimitPolicy::HomeMoveStartKind::LimitBlocked,
+            true,
+            true,
+            true)));
+}
+
+TEST(StepperLimitPolicyHelpers, HomingDoesNotRetryAwayOrNonLimitStartFailures)
+{
+    LONGS_EQUAL(
+        static_cast<long>(StepperLimitPolicy::HomeMoveStartAction::Fail),
+        static_cast<long>(StepperLimitPolicy::classifyHomeMoveStart(
+            StepperLimitPolicy::HomeMoveStartKind::LimitBlocked,
+            true,
+            false,
+            false)));
+    LONGS_EQUAL(
+        static_cast<long>(StepperLimitPolicy::HomeMoveStartAction::Fail),
+        static_cast<long>(StepperLimitPolicy::classifyHomeMoveStart(
+            StepperLimitPolicy::HomeMoveStartKind::OtherFailure,
+            true,
+            true,
+            false)));
+}

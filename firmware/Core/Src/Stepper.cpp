@@ -50,6 +50,25 @@ static constexpr uint32_t kMoveWaitSlackMs = 4000u;
 static constexpr uint32_t kMoveWaitMinMs = 1000u;
 static constexpr uint32_t kMoveWaitMaxMs = 30000u;
 
+static StepperLimitPolicy::HomeMoveStartKind homeMoveStartKind(
+    Stepper::DirectMoveStartStatus status)
+{
+  switch (status) {
+    case Stepper::DirectMoveStartStatus::Started:
+      return StepperLimitPolicy::HomeMoveStartKind::Started;
+    case Stepper::DirectMoveStartStatus::Immediate:
+      return StepperLimitPolicy::HomeMoveStartKind::Immediate;
+    case Stepper::DirectMoveStartStatus::LimitBlocked:
+      return StepperLimitPolicy::HomeMoveStartKind::LimitBlocked;
+    case Stepper::DirectMoveStartStatus::Unavailable:
+    case Stepper::DirectMoveStartStatus::Busy:
+    case Stepper::DirectMoveStartStatus::InvalidRequest:
+    case Stepper::DirectMoveStartStatus::PositionOutOfRange:
+      return StepperLimitPolicy::HomeMoveStartKind::OtherFailure;
+  }
+  return StepperLimitPolicy::HomeMoveStartKind::OtherFailure;
+}
+
 static inline void stepperEnableCycleCounter()
 {
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
@@ -405,6 +424,7 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
     _directMoveSnapshot.state = DirectMoveState::Faulted;
     _directMoveSnapshot.terminalReason = DirectMoveTerminalReason::StartRejected;
     _directMoveSnapshot.endPosition = _pos;
+    _targetPos = _pos;
     taskEXIT_CRITICAL();
     xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
     return DirectMoveStartStatus::LimitBlocked;
@@ -459,6 +479,7 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
     _directMoveSnapshot.terminalReason = DirectMoveTerminalReason::ProfileFault;
     _directMoveSnapshot.endPosition = _pos;
     _directMoveSnapshot.emittedEdges = _directMoveEmittedOffset;
+    _targetPos = _pos;
     taskEXIT_CRITICAL();
     xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
     return DirectMoveStartStatus::Started;
@@ -500,6 +521,7 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
     _directMoveSnapshot.terminalReason = DirectMoveTerminalReason::StartRejected;
     _directMoveSnapshot.endPosition = _pos;
     _directMoveSnapshot.emittedEdges = _directMoveEmittedOffset;
+    _targetPos = _pos;
     taskEXIT_CRITICAL();
     xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
     return DirectMoveStartStatus::Unavailable;
@@ -695,24 +717,87 @@ HomeInterruptionPolicy::Outcome Stepper::home(
     bool limitSeen = false;
     bool limitAsserted = false;
     bool limitDroppedAfterLatch = false;
+    DirectMoveStartStatus startStatus = DirectMoveStartStatus::Unavailable;
+    DirectMoveState terminalState = DirectMoveState::Idle;
+    DirectMoveTerminalReason terminalReason = DirectMoveTerminalReason::None;
   };
 
-  auto runMoveAndWait = [&](bool direction, uint32_t steps, uint32_t freqHz) -> MoveResult {
+  auto runMoveAndWait = [&](bool direction,
+                            uint32_t steps,
+                            uint32_t freqHz,
+                            const char* phaseLabel) -> MoveResult {
     MoveResult result{};
-    if (canceledWithRestore()) {
+    const bool movingTowardLimit = direction == _homeTowardLimitDir;
+    bool retryAlreadyUsed = false;
+
+    for (;;) {
+      if (canceledWithRestore()) {
+        return result;
+      }
+      setHomeCheckpoint(CRASH_HOME_CHECKPOINT_BEFORE_EVENT_CLEAR);
+      xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+      setHomeCheckpoint(CRASH_HOME_CHECKPOINT_BEFORE_MOVE);
+      result.startStatus = move(direction, steps, freqHz, 0u);
+      _homeDiagnosticSnapshot.lastMoveStartStatus = result.startStatus;
+
+      const StepperLimitPolicy::HomeMoveStartAction startAction =
+          StepperLimitPolicy::classifyHomeMoveStart(
+              homeMoveStartKind(result.startStatus),
+              steps != 0u,
+              movingTowardLimit,
+              retryAlreadyUsed);
+      if (startAction == StepperLimitPolicy::HomeMoveStartAction::WaitForMotion) {
+        break;
+      }
+
+      // Immediate and rejected starts signal the normal stepper done bit even
+      // though no timer-driven motion occurred. Consume it here so homing can
+      // never confuse the notification with physical completion.
+      xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+      if (startAction == StepperLimitPolicy::HomeMoveStartAction::CompleteNoOp) {
+        const DirectMoveSnapshot snapshot = getLastDirectMoveSnapshot();
+        result.terminalState = snapshot.state;
+        result.terminalReason = snapshot.terminalReason;
+        result.completed = snapshot.state == DirectMoveState::Completed &&
+            snapshot.terminalReason == DirectMoveTerminalReason::Completed;
+        setHomeCheckpoint(CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);
+        result.limitAsserted = _isLimitAsserted();
+        setHomeCheckpoint(CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
+        return result;
+      }
+
+      if (startAction == StepperLimitPolicy::HomeMoveStartAction::ReleaseAndRetry) {
+        _homeDiagnosticSnapshot.blockedStartRecoveryCount++;
+        Logger::instance()->log(
+            "[Home %d] blocked start phase=%s status=%u; release and retry\r\n",
+            (int)_axis,
+            (phaseLabel != nullptr) ? phaseLabel : "approach",
+            (unsigned)result.startStatus);
+        if (!_backOffLimitUntilReleased(
+                releaseChunkSteps,
+                slowHz,
+                releaseGuardSteps,
+                false,
+                phaseLabel,
+                cancelToken)) {
+          return result;
+        }
+        retryAlreadyUsed = true;
+        continue;
+      }
+
+      _homeDiagnosticSnapshot.moveStartFailureCount++;
+      Logger::instance()->log(
+          "[Home %d] move start failed phase=%s status=%u toward=%u retry=%u\r\n",
+          (int)_axis,
+          (phaseLabel != nullptr) ? phaseLabel : "move",
+          (unsigned)result.startStatus,
+          movingTowardLimit ? 1u : 0u,
+          retryAlreadyUsed ? 1u : 0u);
+      _logLimitDebug("home move start failed");
       return result;
     }
-    setHomeCheckpoint(CRASH_HOME_CHECKPOINT_BEFORE_EVENT_CLEAR);
-    xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
-    setHomeCheckpoint(CRASH_HOME_CHECKPOINT_BEFORE_MOVE);
-    move(direction, steps, freqHz, 0u);
-    if (steps == 0u) {
-      result.completed = true;
-      setHomeCheckpoint(CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);
-      result.limitAsserted = _isLimitAsserted();
-      setHomeCheckpoint(CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
-      return result;
-    }
+
     const uint32_t timeoutMs = Stepper::recommendedWaitTimeoutMs(steps, freqHz);
     setHomeCheckpoint(CRASH_HOME_CHECKPOINT_WAITING_FOR_MOVE);
     const bool moveCompleted = waitUntilDone(timeoutMs, cancelToken);
@@ -721,16 +806,42 @@ HomeInterruptionPolicy::Outcome Stepper::home(
       return result;
     }
     if (moveCompleted) {
-      result.completed = true;
+      const DirectMoveSnapshot snapshot = getLastDirectMoveSnapshot();
+      result.terminalState = snapshot.state;
+      result.terminalReason = snapshot.terminalReason;
+      const bool terminalCompleted =
+          snapshot.state == DirectMoveState::Completed &&
+          snapshot.terminalReason == DirectMoveTerminalReason::Completed;
+      const bool terminalLimitAborted =
+          snapshot.state == DirectMoveState::LimitAborted &&
+          snapshot.terminalReason == DirectMoveTerminalReason::LimitAborted;
+      const bool endpointMatches =
+          snapshot.endPosition == snapshot.targetPosition &&
+          _pos == snapshot.targetPosition;
+      result.completed = movingTowardLimit
+          ? ((terminalCompleted && endpointMatches) || terminalLimitAborted)
+          : (terminalCompleted && endpointMatches);
       result.limitSeen = _limitSeenThisMove;
       setHomeCheckpoint(CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);
       result.limitAsserted = _isLimitAsserted();
       setHomeCheckpoint(CRASH_HOME_CHECKPOINT_AFTER_LIMIT_SAMPLE);
       result.limitDroppedAfterLatch = _limitDroppedAfterLatch;
+      if (!result.completed) {
+        Logger::instance()->log(
+            "[Home %d] invalid terminal phase=%s state=%u reason=%u pos=%ld target=%ld\r\n",
+            (int)_axis,
+            (phaseLabel != nullptr) ? phaseLabel : "move",
+            (unsigned)snapshot.state,
+            (unsigned)snapshot.terminalReason,
+            (long)_pos,
+            (long)snapshot.targetPosition);
+        _logLimitDebug("home move terminal invalid");
+      }
       return result;
     }
-    Logger::instance()->log("[Home %d] move timeout steps=%lu hz=%lu\r\n",
+    Logger::instance()->log("[Home %d] move timeout phase=%s steps=%lu hz=%lu\r\n",
                             (int)_axis,
+                            (phaseLabel != nullptr) ? phaseLabel : "move",
                             (unsigned long)steps,
                             (unsigned long)freqHz);
     _homeDiagnosticSnapshot.moveTimeoutCount++;
@@ -770,7 +881,8 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   const int32_t coarseStartPosition = _pos;
   CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_COARSE_SEEK);
   _softStopOnLimit = true;
-  const MoveResult coarse = runMoveAndWait(_homeTowardLimitDir, _homeGuardSteps, fastHz);
+  const MoveResult coarse = runMoveAndWait(
+      _homeTowardLimitDir, _homeGuardSteps, fastHz, "coarse seek");
   const int64_t coarseDelta = static_cast<int64_t>(_pos) -
                               static_cast<int64_t>(coarseStartPosition);
   _homeDiagnosticSnapshot.coarseAccountedSteps = static_cast<uint32_t>(
@@ -787,7 +899,8 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   if (!coarseDetected) {
     _homeDiagnosticSnapshot.phase = HomeDiagnosticSnapshot::Phase::Probe;
     _softStopOnLimit = true;
-    const MoveResult probe = runMoveAndWait(_homeTowardLimitDir, backoffSteps * 4u, slowHz);
+    const MoveResult probe = runMoveAndWait(
+        _homeTowardLimitDir, backoffSteps * 4u, slowHz, "probe");
     _homeDiagnosticSnapshot.limitSeen =
         _homeDiagnosticSnapshot.limitSeen || probe.limitSeen;
     _homeDiagnosticSnapshot.limitAsserted = probe.limitAsserted;
@@ -835,7 +948,8 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   CrashLog_SetHomePhase(crashAxis, CRASH_HOME_PHASE_FINE_SEEK);
   _softstop_accel_override_sps2 = home_brake_accel;
   _softStopOnLimit = true;
-  const MoveResult fine = runMoveAndWait(_homeTowardLimitDir, backoffSteps * 8u, slowHz);
+  const MoveResult fine = runMoveAndWait(
+      _homeTowardLimitDir, backoffSteps * 8u, slowHz, "fine seek");
   _homeDiagnosticSnapshot.limitSeen =
       _homeDiagnosticSnapshot.limitSeen || fine.limitSeen;
   _homeDiagnosticSnapshot.limitAsserted = fine.limitAsserted;
@@ -858,7 +972,11 @@ HomeInterruptionPolicy::Outcome Stepper::home(
   _softstop_accel_override_sps2 = 0.f;
   const uint32_t finalBackoffSteps =
       StepperLimitPolicy::finalHomeBackoffSteps(backoffSteps);
-  if (!runMoveAndWait(!_homeTowardLimitDir, finalBackoffSteps, slowHz).completed) {
+  if (!runMoveAndWait(
+          !_homeTowardLimitDir,
+          finalBackoffSteps,
+          slowHz,
+          "final backoff").completed) {
     return finishOutcome(cancellationRequested() ? Outcome::Canceled : Outcome::Failed);
   }
   if (canceledWithRestore()) {
@@ -873,10 +991,6 @@ HomeInterruptionPolicy::Outcome Stepper::home(
 bool Stepper::waitUntilDone(
     uint32_t timeoutMs,
     const HomeInterruptionPolicy::CancellationToken* cancelToken) {
-  if (_togglesRemaining == 0u) {
-    return true;
-  }
-
   if (timeoutMs == 0u) {
     xEventGroupWaitBits(
         Orchestrator::getDoneEvents(),
@@ -889,7 +1003,7 @@ bool Stepper::waitUntilDone(
 
   const TickType_t pollTicks = stepperMsToAtLeast1Tick(kMoveWaitPollMs);
   const uint32_t startMs = HAL_GetTick();
-  while (_togglesRemaining != 0u) {
+  for (;;) {
     if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
       stop();
       xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
@@ -901,7 +1015,23 @@ bool Stepper::waitUntilDone(
         pdTRUE, pdTRUE,
         pollTicks
     );
-    if ((result & _doneBit) != 0u || _togglesRemaining == 0u) {
+    if ((result & _doneBit) != 0u) {
+      return true;
+    }
+
+    // The final physical edge makes _togglesRemaining zero one timer update
+    // before _stepTick() stops the timer, records the terminal snapshot, and
+    // signals _doneBit. Do not allow a following homing phase to start in
+    // that interval. Terminal snapshots also cover a completion whose event
+    // was consumed by another waiter without treating an armed/running move
+    // as complete.
+    const DirectMoveSnapshot snapshot = getLastDirectMoveSnapshot();
+    const bool terminal =
+        snapshot.state == DirectMoveState::Completed ||
+        snapshot.state == DirectMoveState::Canceled ||
+        snapshot.state == DirectMoveState::LimitAborted ||
+        snapshot.state == DirectMoveState::Faulted;
+    if (terminal && _togglesRemaining == 0u) {
       return true;
     }
     if ((HAL_GetTick() - startMs) >= timeoutMs) {
@@ -915,7 +1045,6 @@ bool Stepper::waitUntilDone(
       return false;
     }
   }
-  return true;
 }
 
 Stepper::LimitStableSample Stepper::_sampleLimitStable(
@@ -1084,18 +1213,63 @@ bool Stepper::_backOffLimitUntilReleased(uint32_t chunkSteps,
     CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_BEFORE_EVENT_CLEAR);
     xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
     CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_BEFORE_MOVE);
-    move(!_homeTowardLimitDir, stepThisMove, freqHz, 0u);
+    const DirectMoveStartStatus startStatus =
+        move(!_homeTowardLimitDir, stepThisMove, freqHz, 0u);
+    _homeDiagnosticSnapshot.lastMoveStartStatus = startStatus;
+    const StepperLimitPolicy::HomeMoveStartAction startAction =
+        StepperLimitPolicy::classifyHomeMoveStart(
+            homeMoveStartKind(startStatus),
+            true,
+            false,
+            false);
+    if (startAction != StepperLimitPolicy::HomeMoveStartAction::WaitForMotion) {
+      xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+      _homeDiagnosticSnapshot.moveStartFailureCount++;
+      Logger::instance()->log(
+          "[Home %d] release start failed phase=%s status=%u steps=%lu\r\n",
+          (int)_axis,
+          (phaseLabel != nullptr) ? phaseLabel : "release",
+          (unsigned)startStatus,
+          (unsigned long)stepThisMove);
+      _logLimitDebug("home release start failed");
+      return false;
+    }
     const uint32_t timeoutMs = Stepper::recommendedWaitTimeoutMs(stepThisMove, freqHz);
     CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_WAITING_FOR_MOVE);
     if (!waitUntilDone(timeoutMs, cancelToken)) {
+      if (HomeInterruptionPolicy::cancellationRequested(cancelToken)) {
+        stop();
+        xEventGroupClearBits(Orchestrator::getDoneEvents(), _doneBit);
+        return false;
+      }
       Logger::instance()->log("[Home %d] release move timeout phase=%s steps=%lu hz=%lu\r\n",
                               (int)_axis,
                               (phaseLabel != nullptr) ? phaseLabel : "release",
                               (unsigned long)stepThisMove,
                               (unsigned long)freqHz);
+      _homeDiagnosticSnapshot.moveTimeoutCount++;
       return false;
     }
     CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_AFTER_MOVE);
+
+    const DirectMoveSnapshot terminal = getLastDirectMoveSnapshot();
+    const bool terminalCompleted =
+        terminal.state == DirectMoveState::Completed &&
+        terminal.terminalReason == DirectMoveTerminalReason::Completed &&
+        terminal.endPosition == terminal.targetPosition &&
+        _pos == terminal.targetPosition;
+    if (!terminalCompleted) {
+      Logger::instance()->log(
+          "[Home %d] release terminal invalid phase=%s state=%u reason=%u pos=%ld target=%ld\r\n",
+          (int)_axis,
+          (phaseLabel != nullptr) ? phaseLabel : "release",
+          (unsigned)terminal.state,
+          (unsigned)terminal.terminalReason,
+          (long)_pos,
+          (long)terminal.targetPosition);
+      _logLimitDebug("home release terminal invalid");
+      return false;
+    }
 
     moved += stepThisMove;
     CrashLog_SetHomeCheckpoint(crashAxis, CRASH_HOME_CHECKPOINT_BEFORE_LIMIT_SAMPLE);

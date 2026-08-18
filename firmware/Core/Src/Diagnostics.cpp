@@ -8894,6 +8894,10 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						      startRegHomeAsync(&PressureRegulator::regR(), kHomeFastHz, kHomeSlowHz, kHomeBackoffSteps, BIT_HOME_R_DONE);
 						#endif
 						      const bool homeCompleted = waitBitsWithTimeout(homeBits, kHomeTimeoutMs);
+						      const Stepper::HomeDiagnosticSnapshot xHome =
+						          Stepper::stepperX()->getLastHomeDiagnosticSnapshot();
+						      const Stepper::HomeDiagnosticSnapshot yHome =
+						          Stepper::stepperY()->getLastHomeDiagnosticSnapshot();
 
 						      if (isHomedPosition(Stepper::stepperX()->getPosition())) homeSuccessAxes++;
 						      if (isHomedPosition(Stepper::stepperY()->getPosition())) homeSuccessAxes++;
@@ -8906,12 +8910,28 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
 						      const uint32_t limitHits = homeSuccessAxes;
 						      const bool homePass = homeCompleted && (homeSuccessAxes == expectedAxes);
 						      fullHomePass = homePass;
-						      char metrics[96];
+						      char metrics[256];
 						      snprintf(metrics, sizeof(metrics),
-						               "home_time_ms=%lu;home_success_axes=%lu;limit_hits=%lu",
+						               "home_time_ms=%lu;home_success_axes=%lu;limit_hits=%lu;"
+						               "x_pos=%ld;x_phase=%u;x_out=%u;x_start=%u;x_rec=%lu;x_fail=%lu;x_to=%lu;"
+						               "y_pos=%ld;y_phase=%u;y_out=%u;y_start=%u;y_rec=%lu;y_fail=%lu;y_to=%lu",
 						               static_cast<unsigned long>(homeTimeMs),
 						               static_cast<unsigned long>(homeSuccessAxes),
-						               static_cast<unsigned long>(limitHits));
+						               static_cast<unsigned long>(limitHits),
+						               static_cast<long>(Stepper::stepperX()->getPosition()),
+						               static_cast<unsigned>(xHome.phase),
+						               static_cast<unsigned>(xHome.outcome),
+						               static_cast<unsigned>(xHome.lastMoveStartStatus),
+						               static_cast<unsigned long>(xHome.blockedStartRecoveryCount),
+						               static_cast<unsigned long>(xHome.moveStartFailureCount),
+						               static_cast<unsigned long>(xHome.moveTimeoutCount),
+						               static_cast<long>(Stepper::stepperY()->getPosition()),
+						               static_cast<unsigned>(yHome.phase),
+						               static_cast<unsigned>(yHome.outcome),
+						               static_cast<unsigned>(yHome.lastMoveStartStatus),
+						               static_cast<unsigned long>(yHome.blockedStartRecoveryCount),
+						               static_cast<unsigned long>(yHome.moveStartFailureCount),
+						               static_cast<unsigned long>(yHome.moveTimeoutCount));
 						      if (!runOne(2001, "motion_home_cycle_full", homePass, metrics)) goto selftest_done;
 						      if (!homePass) goto selftest_done;
 						    }

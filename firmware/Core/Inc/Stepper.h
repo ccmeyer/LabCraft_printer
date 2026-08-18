@@ -196,6 +196,10 @@ public:
     uint32_t coarseCommandSteps = 0;
     uint32_t coarseAccountedSteps = 0;
     uint32_t moveTimeoutCount = 0;
+    uint32_t blockedStartRecoveryCount = 0;
+    uint32_t moveStartFailureCount = 0;
+    DirectMoveStartStatus lastMoveStartStatus =
+        DirectMoveStartStatus::Unavailable;
     Phase phase = Phase::NotStarted;
     HomeInterruptionPolicy::Outcome outcome =
         HomeInterruptionPolicy::Outcome::NotStarted;

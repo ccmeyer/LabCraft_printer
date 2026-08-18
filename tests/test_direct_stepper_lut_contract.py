@@ -33,7 +33,8 @@ def test_direct_lut_fails_before_motor_enable_and_preserves_legacy_fallbacks():
     failure_path = stepper[preparation:motor_enable]
     assert preparation < event < motor_enable
     assert "DirectMoveTerminalReason::ProfileFault" in failure_path
-    assert "_targetPos = _pos;" not in failure_path
+    assert "_targetPos = _pos;" in failure_path
+    assert "_directMoveSnapshot.targetPosition = _targetPos;" in stepper[:preparation]
     assert "DirectStepperProfile::abort(_directProfileState);" in stepper[
         stepper.index("void Stepper::_requestSoftStop"):
         stepper.index("uint32_t Stepper::recommendedWaitTimeoutMs")
