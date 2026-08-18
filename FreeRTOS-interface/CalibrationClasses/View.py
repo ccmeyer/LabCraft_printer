@@ -3123,6 +3123,7 @@ class ExperimentalBalanceConnectionGroup(QtWidgets.QGroupBox):
 class DropletImagingDialog(QtWidgets.QDialog):
     sessionDeactivated = QtCore.Signal(str)
     PRINT_PROFILE_PRESSURE_TOLERANCE = 0.005
+    CALIBRATION_MODE_CONFIRMATION_TIMEOUT_MS = 2_000
     LIVE_PRESSURE_RENDER_INTERVAL_MS = 100
     STATUS_UI_DIAGNOSTIC_SAMPLE_LIMIT = 256
     REFUEL_LEVEL_CHART_WINDOW_SAMPLES = 100
@@ -3293,6 +3294,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.gripper_settle_banner_timer.timeout.connect(
             self._sync_calibration_gripper_status_banner
         )
+        self.calibration_mode_confirmation_timer = QTimer(self)
+        self.calibration_mode_confirmation_timer.setSingleShot(True)
+        self.calibration_mode_confirmation_timer.setInterval(
+            self.CALIBRATION_MODE_CONFIRMATION_TIMEOUT_MS
+        )
+        self.calibration_mode_confirmation_timer.timeout.connect(
+            self._on_calibration_mode_confirmation_timeout
+        )
+        self._calibration_mode_confirmation_generation = 0
+        self._pending_calibration_mode_confirmation = None
         self._status_ui_dirty_categories = set()
         self._status_ui_refresh_requests = Counter()
         self._status_ui_refresh_batch_count = 0
@@ -4761,6 +4772,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
 
     def _schedule_machine_state_ui_refresh(self, *_args):
+        if (
+            self._pending_calibration_mode_confirmation is not None
+            and not self._machine_is_connected_for_printing_controls()
+        ):
+            self._cancel_calibration_mode_setting_confirmation(reset_action=True)
         fingerprint = self._machine_state_ui_fingerprint_value()
         if fingerprint == self._machine_state_ui_fingerprint:
             return False
@@ -4782,6 +4798,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._status_ui_refresh_batch_count += 1
         if "printing" in categories:
             self._sync_printing_controls_from_model()
+            if self._pending_calibration_mode_confirmation is not None:
+                self._try_finish_calibration_mode_setting_confirmation()
         elif "pressure" in categories:
             self._refresh_current_pressure_values()
             self._request_live_pressure_render()
@@ -5023,6 +5041,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return False
         force_close = str(reason or "").strip().lower() == "force_close"
         self._session_state = "closing"
+        self._cancel_calibration_mode_setting_confirmation(reset_action=True)
         self._stream_capture_dialog_closing = True
         for child_name in ("_printer_head_recovery_dialog", "_printer_head_cleaning_dialog"):
             child = getattr(self, child_name, None)
@@ -5074,6 +5093,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "status_ui_refresh_timer",
             "manual_focus_refresh_timer",
             "gripper_settle_banner_timer",
+            "calibration_mode_confirmation_timer",
         ):
             timer = getattr(self, timer_name, None)
             if timer is not None:
@@ -5144,6 +5164,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return False
         if self._session_state != "inactive":
             self.deactivate_session(reason="shutdown")
+        self._cancel_calibration_mode_setting_confirmation(reset_action=True)
         self._disconnect_external_session_signals()
         self._invalidate_selected_characterization_readiness_cache()
         self._session_state = "shutdown"
@@ -7399,6 +7420,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 tooltip_override=tooltip_override,
             )
 
+    def _render_pending_calibration_mode_confirmation(self):
+        pending = self._pending_calibration_mode_confirmation
+        if not isinstance(pending, dict):
+            return
+        action_key = pending.get("action_key")
+        if not action_key:
+            return
+        self._set_calibration_action_text(action_key, "Applying...")
+        self._set_calibration_action_state(
+            action_key,
+            False,
+            tooltip_override=(
+                "Waiting for the machine to confirm the requested print pulse width."
+            ),
+        )
+
     @staticmethod
     def _normalize_printing_mode(value, *, fallback: str = "droplet") -> str:
         mode = str(value or "").strip().lower()
@@ -8893,6 +8930,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._recompute_online_stream_button_state()
         self._recompute_stream_calibration_sequence_button_state()
         self._recompute_droplet_calibration_sequence_button_state()
+        self._render_pending_calibration_mode_confirmation()
         self._refresh_calibration_tab_lock_state()
 
     def eventFilter(self, watched, event):
@@ -9580,6 +9618,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
     def _handle_printing_controls_transport_fault(self, _report=None):
         self._print_profile_apply_pending = False
+        self._cancel_calibration_mode_setting_confirmation(reset_action=True)
         self._sync_printing_controls_from_model(force=True)
         self._refresh_printing_controls_enabled_state()
         dialog = getattr(self, "_printer_head_cleaning_dialog", None)
@@ -12319,24 +12358,132 @@ class DropletImagingDialog(QtWidgets.QDialog):
         except Exception:
             return False
 
-    def _finish_calibration_mode_setting_correction(
+    def _cancel_calibration_mode_setting_confirmation(self, *, reset_action=False):
+        pending = self._pending_calibration_mode_confirmation
+        self._pending_calibration_mode_confirmation = None
+        self._calibration_mode_confirmation_generation += 1
+        self.calibration_mode_confirmation_timer.stop()
+        if reset_action and isinstance(pending, dict):
+            action_key = pending.get("action_key")
+            if action_key:
+                self._set_calibration_action_text(action_key, use_default=True)
+        return pending is not None
+
+    def _begin_calibration_mode_setting_confirmation(
         self,
         requested_mode,
         action_key,
         start_callback,
         *,
-        applied_profile=None,
+        selected_profile=None,
     ):
-        self._refresh_print_pulse_width_control()
-        if isinstance(applied_profile, dict):
-            self._sync_pressure_scan_start_pressure_from_profile(applied_profile)
+        self._cancel_calibration_mode_setting_confirmation(reset_action=True)
+        generation = self._calibration_mode_confirmation_generation
+        self._pending_calibration_mode_confirmation = {
+            "generation": generation,
+            "requested_mode": self._normalize_printing_mode(requested_mode),
+            "action_key": str(action_key),
+            "start_callback": start_callback,
+            "selected_profile": (
+                dict(selected_profile) if isinstance(selected_profile, dict) else None
+            ),
+            "command_complete": False,
+            "profile_pressure_synchronized": False,
+        }
+        return generation
+
+    def _calibration_mode_confirmation_preflight(self, pending):
+        requested_mode = pending.get("requested_mode")
         preflight = self._get_calibration_mode_preflight(requested_mode)
+        if self._machine_is_connected_for_printing_controls():
+            return preflight
+        return {
+            **dict(preflight or {}),
+            "ok": False,
+            "code": "machine_disconnected",
+            "requested_mode": requested_mode,
+            "message": (
+                "The machine disconnected before the calibration print settings "
+                "could be confirmed."
+            ),
+        }
+
+    def _finish_calibration_mode_setting_correction(self, generation):
+        pending = self._pending_calibration_mode_confirmation
+        if (
+            not isinstance(pending, dict)
+            or int(pending.get("generation", -1)) != int(generation)
+            or int(generation) != self._calibration_mode_confirmation_generation
+            or self._session_state not in {"opening", "active"}
+        ):
+            return False
+
+        selected_profile = pending.get("selected_profile")
+        if (
+            isinstance(selected_profile, dict)
+            and not bool(pending.get("profile_pressure_synchronized"))
+        ):
+            self._sync_pressure_scan_start_pressure_from_profile(selected_profile)
+            pending["profile_pressure_synchronized"] = True
+        pending["command_complete"] = True
+        self.calibration_mode_confirmation_timer.start()
+        return self._try_finish_calibration_mode_setting_confirmation()
+
+    @staticmethod
+    def _calibration_mode_confirmation_value(value):
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            return "unavailable"
+
+    def _try_finish_calibration_mode_setting_confirmation(self, *, final=False):
+        pending = self._pending_calibration_mode_confirmation
+        if not isinstance(pending, dict) or not bool(pending.get("command_complete")):
+            return False
+
+        generation = int(pending.get("generation", -1))
+        if generation != self._calibration_mode_confirmation_generation:
+            return False
+
+        self._refresh_print_pulse_width_control()
+        preflight = self._calibration_mode_confirmation_preflight(pending)
         if bool(preflight.get("ok")):
-            return self._start_calibration_after_mode_preflight(action_key, start_callback)
-        self._set_calibration_action_text(action_key, use_default=True)
+            action_key = pending.get("action_key")
+            start_callback = pending.get("start_callback")
+            self._cancel_calibration_mode_setting_confirmation(reset_action=False)
+            return self._start_calibration_after_mode_preflight(
+                action_key,
+                start_callback,
+            )
+
+        code = str(preflight.get("code") or "")
+        if code == "pulse_width_mismatch" and not final:
+            return False
+
+        if code == "pulse_width_mismatch":
+            expected = self._calibration_mode_confirmation_value(
+                preflight.get("expected_print_pulse_width_us")
+            )
+            observed = self._calibration_mode_confirmation_value(
+                preflight.get("current_print_pulse_width_us")
+            )
+            mode = str(pending.get("requested_mode") or "calibration").title()
+            preflight = {
+                **dict(preflight),
+                "message": (
+                    f"Timed out waiting for the machine to confirm the {mode} "
+                    "calibration print pulse width. "
+                    f"Expected {expected} us; last reported {observed} us."
+                ),
+            }
+
+        self._cancel_calibration_mode_setting_confirmation(reset_action=True)
         self._refresh_manual_control_lock_state()
         self._show_calibration_mode_preflight_error(preflight)
         return False
+
+    def _on_calibration_mode_confirmation_timeout(self):
+        return self._try_finish_calibration_mode_setting_confirmation(final=True)
 
     def _apply_calibration_mode_profile_then_start(self, profile, requested_mode, action_key, start_callback):
         if not isinstance(profile, dict):
@@ -12352,22 +12499,32 @@ class DropletImagingDialog(QtWidgets.QDialog):
             )
             return False
 
+        generation = self._begin_calibration_mode_setting_confirmation(
+            requested_mode,
+            action_key,
+            start_callback,
+            selected_profile=profile,
+        )
         self._set_calibration_action_text(action_key, "Applying...")
 
         def _after_apply(*_args, **_kwargs):
             QTimer.singleShot(
                 0,
-                lambda: self._finish_calibration_mode_setting_correction(
-                    requested_mode,
-                    action_key,
-                    start_callback,
-                    applied_profile=profile,
+                lambda token=generation: self._finish_calibration_mode_setting_correction(
+                    token
                 ),
             )
 
-        result = applier(profile, callback=_after_apply)
+        try:
+            result = applier(profile, callback=_after_apply)
+        except Exception:
+            if generation == self._calibration_mode_confirmation_generation:
+                self._cancel_calibration_mode_setting_confirmation(reset_action=True)
+                self._refresh_manual_control_lock_state()
+            raise
         if result is False:
-            self._set_calibration_action_text(action_key, use_default=True)
+            if generation == self._calibration_mode_confirmation_generation:
+                self._cancel_calibration_mode_setting_confirmation(reset_action=True)
             self._refresh_manual_control_lock_state()
             return False
         self._refresh_manual_control_lock_state()
@@ -12388,21 +12545,31 @@ class DropletImagingDialog(QtWidgets.QDialog):
             )
             return False
 
+        generation = self._begin_calibration_mode_setting_confirmation(
+            requested_mode,
+            action_key,
+            start_callback,
+        )
         self._set_calibration_action_text(action_key, "Applying...")
 
         def _after_set(*_args, **_kwargs):
             QTimer.singleShot(
                 0,
-                lambda: self._finish_calibration_mode_setting_correction(
-                    requested_mode,
-                    action_key,
-                    start_callback,
+                lambda token=generation: self._finish_calibration_mode_setting_correction(
+                    token
                 ),
             )
 
-        result = setter(expected_pw, manual=True, handler=_after_set)
+        try:
+            result = setter(expected_pw, manual=True, handler=_after_set)
+        except Exception:
+            if generation == self._calibration_mode_confirmation_generation:
+                self._cancel_calibration_mode_setting_confirmation(reset_action=True)
+                self._refresh_manual_control_lock_state()
+            raise
         if result is False:
-            self._set_calibration_action_text(action_key, use_default=True)
+            if generation == self._calibration_mode_confirmation_generation:
+                self._cancel_calibration_mode_setting_confirmation(reset_action=True)
             self._refresh_manual_control_lock_state()
             return False
         self._refresh_manual_control_lock_state()
@@ -12793,6 +12960,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._recompute_online_stream_button_state()
         self._recompute_stream_calibration_sequence_button_state()
         self._recompute_droplet_calibration_sequence_button_state()
+        self._render_pending_calibration_mode_confirmation()
 
     def _enable_non_readiness_calibration_buttons(self):
         for action_key in (

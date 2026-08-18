@@ -657,6 +657,252 @@ def test_stream_preflight_applies_matching_profile_then_starts(monkeypatch, qapp
     dialog.deleteLater()
 
 
+def test_stream_calibrate_all_waits_for_reported_profile_pulse_width(
+    monkeypatch,
+    qapp,
+):
+    dialog, _manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="stream",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+    pending = {}
+    errors = []
+
+    def choose_profile(self, preflight):
+        return (
+            CalibrationModePreflightDialog.ACTION_APPLY_PROFILE,
+            preflight["matching_profiles"][0],
+        )
+
+    def apply_profile_later(profile, callback=None):
+        controller.apply_print_profile_calls.append(dict(profile))
+        pending["callback"] = callback
+        return True
+
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        choose_profile,
+    )
+    monkeypatch.setattr(controller, "apply_print_profile", apply_profile_later)
+    monkeypatch.setattr(
+        dialog,
+        "_show_calibration_mode_preflight_error",
+        lambda preflight: errors.append(dict(preflight)),
+    )
+
+    dialog.calibrate_all_stream_button.click()
+    qapp.processEvents()
+    assert dialog.calibrate_all_stream_button.text() == "Applying..."
+    assert controller.start_stream_calibration_sequence_calls == 0
+    assert dialog.calibration_mode_confirmation_timer.isActive() is False
+
+    pending["callback"]()
+    qapp.processEvents()
+    assert controller.start_stream_calibration_sequence_calls == 0
+    assert errors == []
+    assert dialog.calibration_mode_confirmation_timer.isActive() is True
+
+    dialog.model.machine_model.printing_parameters_updated.emit()
+    qapp.processEvents()
+    assert controller.start_stream_calibration_sequence_calls == 0
+    assert errors == []
+
+    dialog.model.machine_model.print_pulse_width = 2500
+    dialog.model.machine_model.printing_parameters_updated.emit()
+    qapp.processEvents()
+
+    assert controller.start_stream_calibration_sequence_calls == 1
+    assert dialog._pending_calibration_mode_confirmation is None
+    assert dialog.calibration_mode_confirmation_timer.isActive() is False
+    assert dialog.calibrate_all_stream_button.text() == "Stop Calibration"
+    assert errors == []
+
+    dialog.model.machine_model.printing_parameters_updated.emit()
+    qapp.processEvents()
+    assert controller.start_stream_calibration_sequence_calls == 1
+
+    dialog.deleteLater()
+
+
+def test_stream_profile_confirmation_times_out_fail_closed(monkeypatch, qapp):
+    dialog, _manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="stream",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+    pending = {}
+    errors = []
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: (
+            CalibrationModePreflightDialog.ACTION_APPLY_PROFILE,
+            preflight["matching_profiles"][0],
+        ),
+    )
+
+    def apply_profile_later(profile, callback=None):
+        controller.apply_print_profile_calls.append(dict(profile))
+        pending["callback"] = callback
+        return True
+
+    monkeypatch.setattr(controller, "apply_print_profile", apply_profile_later)
+    monkeypatch.setattr(
+        dialog,
+        "_show_calibration_mode_preflight_error",
+        lambda preflight: errors.append(dict(preflight)),
+    )
+
+    dialog.calibrate_all_stream_button.click()
+    pending["callback"]()
+    qapp.processEvents()
+    dialog._on_calibration_mode_confirmation_timeout()
+
+    assert controller.start_stream_calibration_sequence_calls == 0
+    assert dialog._pending_calibration_mode_confirmation is None
+    assert dialog.calibration_mode_confirmation_timer.isActive() is False
+    assert dialog.calibrate_all_stream_button.text() == "Calibrate All"
+    assert len(errors) == 1
+    assert "Expected 2500 us" in errors[0]["message"]
+    assert "last reported 1300 us" in errors[0]["message"]
+
+    dialog.deleteLater()
+
+
+def test_stream_pulse_width_only_waits_for_reported_value(monkeypatch, qapp):
+    dialog, _manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="stream",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+    pending = {}
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: (
+            CalibrationModePreflightDialog.ACTION_SET_PULSE_WIDTH,
+            None,
+        ),
+    )
+
+    def set_pulse_width_later(pulse_width, *, manual=False, handler=None):
+        controller.set_print_pulse_width_calls.append(
+            {"pulse_width": int(pulse_width), "manual": bool(manual)}
+        )
+        pending["callback"] = handler
+        return True
+
+    monkeypatch.setattr(controller, "set_print_pulse_width", set_pulse_width_later)
+
+    dialog.calibrate_all_stream_button.click()
+    pending["callback"]()
+    qapp.processEvents()
+    assert controller.start_stream_calibration_sequence_calls == 0
+    assert dialog.calibration_mode_confirmation_timer.isActive() is True
+
+    dialog.model.machine_model.print_pulse_width = 2500
+    dialog.model.machine_model.printing_parameters_updated.emit()
+    qapp.processEvents()
+
+    assert controller.set_print_pulse_width_calls == [
+        {"pulse_width": 2500, "manual": True}
+    ]
+    assert controller.start_stream_calibration_sequence_calls == 1
+    assert dialog._pending_calibration_mode_confirmation is None
+
+    dialog.deleteLater()
+
+
+def test_rejected_profile_correction_clears_confirmation_state(monkeypatch, qapp):
+    dialog, _manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="stream",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: (
+            CalibrationModePreflightDialog.ACTION_APPLY_PROFILE,
+            preflight["matching_profiles"][0],
+        ),
+    )
+    def reject_after_callback(_profile, callback=None):
+        if callback is not None:
+            callback()
+        return False
+
+    monkeypatch.setattr(controller, "apply_print_profile", reject_after_callback)
+
+    dialog.calibrate_all_stream_button.click()
+    qapp.processEvents()
+
+    assert controller.start_stream_calibration_sequence_calls == 0
+    assert dialog._pending_calibration_mode_confirmation is None
+    assert dialog.calibration_mode_confirmation_timer.isActive() is False
+    assert dialog.calibrate_all_stream_button.text() == "Calibrate All"
+
+    dialog.deleteLater()
+
+
+def test_disconnection_cancels_profile_confirmation_and_ignores_late_status(
+    monkeypatch,
+    qapp,
+):
+    dialog, _manager, controller = _build_dialog(
+        monkeypatch,
+        qapp,
+        printing_mode="stream",
+        print_pulse_width=1300,
+        preflight_enabled=True,
+    )
+    pending = {}
+    monkeypatch.setattr(
+        DropletImagingDialog,
+        "_run_calibration_mode_preflight_dialog",
+        lambda self, preflight: (
+            CalibrationModePreflightDialog.ACTION_APPLY_PROFILE,
+            preflight["matching_profiles"][0],
+        ),
+    )
+
+    def apply_profile_later(_profile, callback=None):
+        pending["callback"] = callback
+        return True
+
+    monkeypatch.setattr(controller, "apply_print_profile", apply_profile_later)
+
+    dialog.calibrate_all_stream_button.click()
+    pending["callback"]()
+    qapp.processEvents()
+    assert dialog.calibration_mode_confirmation_timer.isActive() is True
+
+    dialog.model.machine_model.machine_connected = False
+    dialog.model.machine_model.machine_state_updated.emit(False)
+    qapp.processEvents()
+
+    assert dialog._pending_calibration_mode_confirmation is None
+    assert dialog.calibration_mode_confirmation_timer.isActive() is False
+    assert dialog.calibrate_all_stream_button.text() == "Calibrate All"
+
+    dialog.model.machine_model.print_pulse_width = 2500
+    dialog.model.machine_model.printing_parameters_updated.emit()
+    qapp.processEvents()
+    assert controller.start_stream_calibration_sequence_calls == 0
+
+    dialog.deleteLater()
+
+
 def test_droplet_preflight_profile_apply_updates_pressure_scan_start(monkeypatch, qapp):
     dialog, manager, controller = _build_dialog(
         monkeypatch,

@@ -123,6 +123,37 @@ def test_dialog_external_callbacks_exist_only_during_active_session(
     assert dialog._session_signal_connections == []
 
 
+def test_dialog_deactivation_cancels_pending_mode_confirmation(
+    monkeypatch,
+    qapp,
+):
+    dialog, _refuel_model, _controller = _build_droplet_dialog(
+        monkeypatch,
+        qapp,
+    )
+    start_callback = Mock(return_value=True)
+    token = dialog._begin_calibration_mode_setting_confirmation(
+        "stream",
+        "stream_calibrate_all",
+        start_callback,
+        selected_profile={"print_pressure": 0.8},
+    )
+    dialog.calibration_mode_confirmation_timer.start()
+
+    assert dialog._pending_calibration_mode_confirmation is not None
+    assert dialog.calibration_mode_confirmation_timer.isActive() is True
+    assert dialog.deactivate_session(reason="test_confirmation_cleanup") is True
+    assert dialog._pending_calibration_mode_confirmation is None
+    assert dialog.calibration_mode_confirmation_timer.isActive() is False
+
+    assert dialog._finish_calibration_mode_setting_correction(token) is False
+    start_callback.assert_not_called()
+
+    assert dialog.activate_session() is True
+    assert dialog._pending_calibration_mode_confirmation is None
+    assert dialog.calibration_mode_confirmation_timer.isActive() is False
+
+
 def _manager_model(tmp_path):
     return SimpleNamespace(
         experiment_model=SimpleNamespace(
