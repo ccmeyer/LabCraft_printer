@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from tests.calibration_test_utils import Recorder, SignalStub, ensure_calibration_import_stubs
 
@@ -25,7 +26,11 @@ from CalibrationClasses.Model import (  # noqa: E402
     CalibrationManager,
     OnlineStreamCalibrationProcess,
 )
-from CalibrationRecordingStore import CalibrationRecordingStore  # noqa: E402
+from CalibrationRecordingReader import CalibrationRecordingReader  # noqa: E402
+from CalibrationRecordingStore import (  # noqa: E402
+    CalibrationRecordingStore,
+    CalibrationStoreDurabilityError,
+)
 from CaptureTypes import CaptureStatus  # noqa: E402
 from Controller import Controller  # noqa: E402
 
@@ -3848,6 +3853,7 @@ def test_calibration_manager_tail_start_override_appends_superseding_stream_step
     mgr.calibration_file_path = str(tmp_path / "calibration.json")
     mgr._completed_canonical_session_cache = {}
     mgr._canonical_session_result_cache = []
+    mgr._in_progress_characterization_rows = {}
     mgr._calibration_history_revision = 0
     mgr.data = {
         "schema_version": 1,
@@ -3863,7 +3869,12 @@ def test_calibration_manager_tail_start_override_appends_superseding_stream_step
         experiment_model=SimpleNamespace(get_calibration_file_path=lambda: str(tmp_path / "calibration.json"))
     )
     mgr.get_current_settings = lambda: {"print_width": 1350, "print_pressure": 0.42}
-    mgr._build_calibration_stock_identity_snapshot = lambda: {"stock_solution": "water"}
+    identity = {
+        "printer_head_id": "head_A",
+        "stock_id": "stock_A",
+        "stock_solution": "water",
+    }
+    mgr._build_calibration_stock_identity_snapshot = lambda: dict(identity)
     mgr._update_stream_capture_online_summary_from_payload = lambda *args, **kwargs: None
     mgr.record_analysis = lambda record: None
     mgr.ensure_loaded = lambda: None
@@ -3899,14 +3910,70 @@ def test_calibration_manager_tail_start_override_appends_superseding_stream_step
     assert len(index_rows) == 1
     result_path = tmp_path / index_rows[0]["result_relpath"]
     validated = CalibrationRecordingStore.validate_run(result_path.parent)
-    assert validated["result"]["outcome"] == "completed"
+    standalone_result = validated["result"]
+    assert standalone_result["outcome"] == "completed"
     assert validated["updates"][0]["payload"]["result"]["tail_phase"][
         "tail_start_delay_from_emergence_us"
     ] == 4050
     assert not (tmp_path / "calibration.json").exists()
-    assert mgr.characterizationSummaryUpdated.calls
+    assert mgr._in_progress_characterization_rows == {}
+    assert len(mgr.characterizationSummaryUpdated.calls) == 1
+
+    reader = CalibrationRecordingReader(tmp_path)
+    snapshot = reader.history_snapshot(
+        legacy_document={"schema_version": 1, "runs": []}
+    )
+    assert len(snapshot.rows) == 1
+    summary_row = dict(snapshot.rows[0])
+    assert summary_row["process_run_id"] == standalone_result["process_run_id"]
+    assert summary_row["result_id"]
+    assert summary_row["update_id"]
+    assert summary_row.get("row_state") != "in_progress"
+    resolved = reader.resolve_selection(summary_row, expected_identity=identity)
+    assert resolved["ok"] is True
     assert memory_observations[-1][0] == "online_stream_tail_start_override"
     assert audit_events[-1][0] == "online_stream_tail_start_override"
+
+    second_payload = CalibrationManager.apply_online_stream_tail_start_override(
+        mgr, 4075
+    )
+    assert second_payload["result"]["predicted_stream_duration_us"] == 4075
+    assert mgr._in_progress_characterization_rows == {}
+    assert len(mgr.characterizationSummaryUpdated.calls) == 2
+    repeated_snapshot = reader.history_snapshot(
+        legacy_document={"schema_version": 1, "runs": []}
+    )
+    assert len(repeated_snapshot.rows) == 2
+    assert all(
+        reader.resolve_selection(dict(row), expected_identity=identity)["ok"]
+        for row in repeated_snapshot.rows
+    )
+
+    mgr._shadow_storage_diagnostics = []
+    mgr._abort_active_process_for_storage_failure = lambda *args, **kwargs: True
+    for failed_stage, expected_error in (
+        ("update_append.write", RuntimeError),
+        ("index_append.write", CalibrationStoreDurabilityError),
+    ):
+        failure_root = tmp_path / failed_stage.replace(".", "_")
+
+        def fail_once(stage, *, target=failed_stage):
+            if stage == target:
+                raise OSError(f"injected {target}")
+
+        mgr._calibration_recording_store = CalibrationRecordingStore(
+            failure_root,
+            fault_hook=fail_once,
+        )
+        with pytest.raises(expected_error):
+            CalibrationManager.apply_online_stream_tail_start_override(mgr, 4100)
+        assert mgr._active_shadow_run is None
+        assert mgr._in_progress_characterization_rows == {}
+        failed_snapshot = CalibrationRecordingReader(failure_root).history_snapshot(
+            legacy_document={"schema_version": 1, "runs": []}
+        )
+        assert failed_snapshot.rows == ()
+        assert len(mgr.characterizationSummaryUpdated.calls) == 2
 
 
 def test_online_stream_final_tail_fit_contains_uniform_window_segmented_diagnostics(tmp_path):

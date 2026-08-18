@@ -8976,7 +8976,13 @@ class CalibrationManager(QObject):
         phase_key = self._resolve_phase_key(phase)
         self._append_calibration_step_payload(data, phase_key=phase_key)
 
-    def _append_calibration_step_payload(self, data, *, phase_key: str):
+    def _append_calibration_step_payload(
+        self,
+        data,
+        *,
+        phase_key: str,
+        publish_in_progress_characterization: bool = True,
+    ):
         if self._run_idx is None:
             # fallback to default session in CWD
             self.begin_session(self.model.experiment_model.get_calibration_file_path(), notes="auto-started during data update")
@@ -9044,7 +9050,11 @@ class CalibrationManager(QObject):
         phase_counts[phase_key] = source_step_index + 1
 
         live_rows_changed = False
-        if canonical_update is not None and shadow_run is not None:
+        if (
+            publish_in_progress_characterization
+            and canonical_update is not None
+            and shadow_run is not None
+        ):
             try:
                 live_rows_changed = self._remember_in_progress_characterization_rows(
                     canonical_update,
@@ -9064,12 +9074,16 @@ class CalibrationManager(QObject):
             }
         )
 
-        if live_rows_changed or phase_key in {
-            "pressure_sweep_characterization",
-            "droplet_recheck",
-            "droplet_search",
-            "online_stream_calibration",
-        }:
+        if publish_in_progress_characterization and (
+            live_rows_changed
+            or phase_key
+            in {
+                "pressure_sweep_characterization",
+                "droplet_recheck",
+                "droplet_search",
+                "online_stream_calibration",
+            }
+        ):
             self.characterizationSummaryUpdated.emit()
 
     def _try_append_flat_rows_from_payload(self, run_obj, phase_key, payload):
@@ -9234,6 +9248,7 @@ class CalibrationManager(QObject):
             self._append_calibration_step_payload(
                 payload,
                 phase_key="online_stream_calibration",
+                publish_in_progress_characterization=standalone_run is None,
             )
             if standalone_run is not None:
                 if len(standalone_run.updates) != update_count_before + 1:
@@ -9255,11 +9270,18 @@ class CalibrationManager(QObject):
                 self._last_shadow_run = standalone_run
                 self._last_shadow_commit = commit
                 self._register_terminal_canonical_run(standalone_run, commit)
+                self._clear_in_progress_characterization_rows(
+                    process_run_id=str(standalone_run.process_run_id)
+                )
                 self._register_completed_canonical_run(
                     standalone_run, summary_projection=summary
                 )
         finally:
             if standalone_run is not None:
+                if self._clear_in_progress_characterization_rows(
+                    process_run_id=str(standalone_run.process_run_id)
+                ):
+                    self.characterizationSummaryUpdated.emit()
                 self._active_shadow_run = None
         result = dict(payload.get("result") or {})
         manual_override = dict(result.get("manual_override") or {})
