@@ -497,7 +497,11 @@ def _build_real_dialog_for_layout(monkeypatch, qapp, *, reset_quick_controls=Tru
 def test_real_dialog_uses_three_column_layout_with_controls_left_and_results_right(monkeypatch, qapp):
     dialog = _build_real_dialog_for_layout(monkeypatch, qapp)
 
-    assert dialog.width() == 1600
+    screen = dialog.screen() or calibration_view.QApplication.primaryScreen()
+    available_geometry = screen.availableGeometry() if screen is not None else None
+    expected_size = calibration_view._calibration_dialog_target_size(available_geometry)
+    assert dialog._initial_window_size_target == expected_size
+    assert (dialog.width(), dialog.height()) == expected_size
     assert dialog.layout.count() == 3
     assert dialog.layout.itemAt(0).widget() is dialog.control_panel_scroll
     assert dialog.control_panel_scroll.widget() is dialog.control_panel
@@ -758,6 +762,35 @@ def test_real_dialog_creates_duplicate_shared_buttons_for_droplet_and_stream_tab
     assert dialog.calibrate_focus_button.text() == dialog.calibrate_focus_stream_button.text()
     assert dialog.calibrate_emergence_button.text() == dialog.calibrate_emergence_stream_button.text()
 
+    dialog.deleteLater()
+
+
+def test_calibration_window_size_and_panel_widths_are_screen_aware_and_cached(
+    monkeypatch,
+    qapp,
+):
+    assert calibration_view._calibration_dialog_target_size(
+        calibration_view.QtCore.QRect(0, 0, 1920, 1080)
+    ) == (1800, 1000)
+    assert calibration_view._calibration_dialog_target_size(
+        calibration_view.QtCore.QRect(0, 0, 1600, 900)
+    ) == (1504, 846)
+    assert calibration_view._calibration_dialog_target_size(None) == (1600, 1000)
+    assert calibration_view._calibration_panel_widths(1764) == (441, 760)
+    assert calibration_view._calibration_panel_widths(1564) == (391, 613)
+
+    dialog = _build_real_dialog_for_layout(monkeypatch, qapp)
+    dialog.resize(1800, 1000)
+    dialog._last_panel_widths = None
+    assert dialog._set_equal_panel_widths() is True
+    assert dialog.control_panel_scroll.maximumWidth() == 441
+    assert dialog.info_panel_scroll.maximumWidth() == 760
+    assert dialog.analysis_panel.minimumWidth() == 560
+    assert dialog._last_panel_widths == (441, 760)
+    assert dialog._set_equal_panel_widths() is False
+    dialog.show()
+    qapp.processEvents()
+    assert dialog.summary_table.horizontalScrollBar().isVisible() is False
     dialog.deleteLater()
 
 

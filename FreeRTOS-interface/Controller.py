@@ -10009,7 +10009,7 @@ class Controller(QObject):
         )
 
     def start_pressure_sweep_characterization(self):
-        self.model.calibration_manager.start_pressure_sweep_characterization()
+        return self.model.calibration_manager.start_pressure_sweep_characterization()
 
     def start_droplet_recheck_characterization(self, selected_summary_row):
         return self.model.calibration_manager.start_droplet_recheck_characterization(selected_summary_row)
@@ -10018,7 +10018,7 @@ class Controller(QObject):
         self.model.calibration_manager.start_droplet_timecourse_process()
 
     def start_online_stream_calibration(self):
-        self.model.calibration_manager.start_online_stream_calibration()
+        return self.model.calibration_manager.start_online_stream_calibration()
 
     def apply_online_stream_tail_start_override(self, tail_start_delay_from_emergence_us: int):
         return self.model.calibration_manager.apply_online_stream_tail_start_override(
@@ -10217,7 +10217,7 @@ class Controller(QObject):
 
     def start_droplet_characterization_calibration(self):
         # Tell the Model to start the droplet characterization calibration.
-        self.model.calibration_manager.start_manual_droplet_characterization()
+        return self.model.calibration_manager.start_manual_droplet_characterization()
 
     def start_all_calibrations(self):
         # Tell the Model to start all calibrations.

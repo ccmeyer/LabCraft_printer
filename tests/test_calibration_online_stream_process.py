@@ -502,13 +502,14 @@ def test_controller_start_online_stream_calibration_forwards_to_manager():
     called = {"count": 0}
     controller.model = SimpleNamespace(
         calibration_manager=SimpleNamespace(
-            start_online_stream_calibration=lambda: called.__setitem__("count", called["count"] + 1)
+            start_online_stream_calibration=lambda: called.__setitem__("count", called["count"] + 1) or False
         )
     )
 
-    Controller.start_online_stream_calibration(controller)
+    started = Controller.start_online_stream_calibration(controller)
 
     assert called["count"] == 1
+    assert started is False
 
 
 def test_controller_online_stream_tail_override_forwards_to_manager():

@@ -112,9 +112,12 @@ def _make_model(audit_sink):
         serial="head-1",
         get_stock_solution=lambda: stock,
     )
-    return SimpleNamespace(
+    model = SimpleNamespace(
         record_experiment_audit_event=audit_sink.record,
-        experiment_model=SimpleNamespace(get_calibration_file_path=lambda: "calibration.json"),
+        experiment_model=SimpleNamespace(
+            get_calibration_file_path=lambda: "calibration.json",
+            lock_execution_plan=Mock(),
+        ),
         rack_model=SimpleNamespace(get_gripper_printer_head=lambda: printer_head),
         droplet_camera_model=SimpleNamespace(get_image_metadata=lambda: (1, 2, 3, 4, 5)),
         machine_model=SimpleNamespace(
@@ -126,6 +129,17 @@ def _make_model(audit_sink):
         ),
         calibration_memory_store=None,
     )
+    model.get_calibration_process_start_eligibility = Mock(
+        return_value={
+            "ok": True,
+            "code": "mutable_design",
+            "message": "Calibration may start.",
+            "requires_execution_lock": False,
+            "diagnostic_only": False,
+            "plan_state": None,
+        }
+    )
+    return model
 
 
 def _make_manager(tmp_path, *, audit_fail=False):
@@ -355,9 +369,12 @@ def test_start_active_calibration_records_volume_process_started(tmp_path, proce
         ) or True
     )
 
-    mgr.start_active_calibration()
+    assert mgr.start_active_calibration() is True
 
     assert proc.started is True
+    mgr.model.get_calibration_process_start_eligibility.assert_called_once_with(
+        result_producing=True
+    )
     assert _event_types(mgr) == ["calibration_process_started"]
     event = mgr.audit_sink.events[0]
     assert event["details"]["process_name"] == process_name
@@ -374,9 +391,12 @@ def test_non_volume_calibration_process_is_not_audited(tmp_path):
     mgr.clear_pending_process_verdict = Mock()
     mgr._begin_process_recording = Mock(return_value=True)
 
-    mgr.start_active_calibration()
+    assert mgr.start_active_calibration() is True
 
     assert proc.started is True
+    mgr.model.get_calibration_process_start_eligibility.assert_called_once_with(
+        result_producing=False
+    )
     assert _event_types(mgr) == []
 
 
@@ -390,10 +410,18 @@ def test_volume_calibration_locks_execution_plan_before_recording_or_start(tmp_p
     mgr.model.experiment_model.lock_execution_plan = Mock(
         side_effect=lambda reason: events.append(("lock", reason))
     )
+    mgr.model.get_calibration_process_start_eligibility.return_value = {
+        "ok": True,
+        "code": "execution_lock_required",
+        "message": "Calibration may start after locking.",
+        "requires_execution_lock": True,
+        "diagnostic_only": False,
+        "plan_state": "prepared",
+    }
     mgr.clear_pending_process_verdict = Mock()
     mgr._begin_process_recording = Mock(side_effect=lambda _proc: events.append("record") or True)
 
-    mgr.start_active_calibration()
+    assert mgr.start_active_calibration() is True
 
     assert events[:3] == [("lock", "calibration_started"), "record", "start"]
 
@@ -406,15 +434,125 @@ def test_volume_calibration_lock_failure_prevents_process_start(tmp_path):
     mgr.model.experiment_model.lock_execution_plan = Mock(
         side_effect=OSError("disk unavailable")
     )
+    mgr.model.get_calibration_process_start_eligibility.return_value = {
+        "ok": True,
+        "code": "execution_lock_required",
+        "message": "Calibration may start after locking.",
+        "requires_execution_lock": True,
+        "diagnostic_only": False,
+        "plan_state": "active",
+    }
     mgr.clear_pending_process_verdict = Mock()
     mgr._begin_process_recording = Mock(return_value=True)
 
-    mgr.start_active_calibration()
+    assert mgr.start_active_calibration() is False
 
     assert proc.started is False
     mgr._begin_process_recording.assert_not_called()
     assert mgr.activeCalibration is None
     assert "durably locked" in mgr.calibrationError.calls[-1][0][0]
+
+
+@pytest.mark.parametrize("plan_state", ["completed", "aborted"])
+@pytest.mark.parametrize(
+    ("process_name", "phase_name", "manual_start"),
+    [
+        ("PressureSweepCharacterizationProcess", "pressure_sweep_characterization", False),
+        ("DropletSearchCalibrationProcess", "droplet_characterization", True),
+        ("OnlineStreamCalibrationProcess", "online_stream_calibration", False),
+    ],
+)
+def test_terminal_result_process_records_and_starts_without_lock(
+    tmp_path,
+    plan_state,
+    process_name,
+    phase_name,
+    manual_start,
+):
+    mgr = _make_manager(tmp_path)
+    _seed_open_session(mgr)
+    proc = _FakeVolumeCalibrationProcess(
+        process_name=process_name,
+        phase_name=phase_name,
+        manual_start=manual_start,
+    )
+    events = []
+    proc.start = lambda: events.append("start")
+    mgr.activeCalibration = proc
+    mgr.model.get_calibration_process_start_eligibility.return_value = {
+        "ok": True,
+        "code": "terminal_diagnostics",
+        "message": "Terminal diagnostics may be recorded.",
+        "requires_execution_lock": False,
+        "diagnostic_only": True,
+        "plan_state": plan_state,
+    }
+    mgr.model.experiment_model.lock_execution_plan = Mock()
+    mgr.clear_pending_process_verdict = Mock()
+    mgr._begin_process_recording = Mock(
+        side_effect=lambda _proc: events.append("record") or True
+    )
+
+    assert mgr.start_active_calibration() is True
+
+    assert events == ["record", "start"]
+    mgr.model.experiment_model.lock_execution_plan.assert_not_called()
+    assert _event_types(mgr) == ["calibration_process_started"]
+
+
+def test_historical_policy_rejection_prevents_recording_and_dispatch(tmp_path):
+    mgr = _make_manager(tmp_path)
+    _seed_open_session(mgr)
+    proc = _FakeVolumeCalibrationProcess(process_name="OnlineStreamCalibrationProcess")
+    mgr.activeCalibration = proc
+    mgr.model.get_calibration_process_start_eligibility.return_value = {
+        "ok": False,
+        "code": "historical_read_only",
+        "message": "Historical experiments are analysis only.",
+        "requires_execution_lock": False,
+        "diagnostic_only": False,
+        "plan_state": "completed",
+    }
+    mgr.model.experiment_model.lock_execution_plan = Mock()
+    mgr.clear_pending_process_verdict = Mock()
+    mgr._begin_process_recording = Mock(return_value=True)
+
+    assert mgr.start_active_calibration() is False
+
+    assert proc.started is False
+    assert mgr.activeCalibration is None
+    mgr.model.experiment_model.lock_execution_plan.assert_not_called()
+    mgr._begin_process_recording.assert_not_called()
+    assert _event_types(mgr) == []
+    assert mgr.calibrationError.calls[-1][0] == (
+        "Historical experiments are analysis only.",
+    )
+
+
+def test_try_start_process_propagates_start_active_rejection(tmp_path):
+    class _ConstructibleProcess(_FakeCalibrationProcess):
+        def __init__(self, *_args, **_kwargs):
+            super().__init__()
+
+    mgr = _make_manager(tmp_path)
+    mgr._stream_capture_state = {"status": "idle"}
+    mgr._stream_calibration_sequence_state = {"status": "idle"}
+    mgr._droplet_calibration_sequence_state = {"status": "idle"}
+    mgr.has_open_stream_gravimetric_capture = Mock(return_value=False)
+    mgr.has_open_stream_calibration_sequence = Mock(return_value=False)
+    mgr.has_open_droplet_calibration_sequence = Mock(return_value=False)
+    mgr.get_calibration_storage_start_block_message = Mock(return_value=None)
+    mgr._prepare_calibration_memory_prior_application = Mock(
+        side_effect=lambda _proc_cls, kwargs: dict(kwargs)
+    )
+    mgr.is_calibration_store_authoritative = Mock(return_value=False)
+    mgr._process_missing = Mock(return_value=[])
+    mgr.start_active_calibration = Mock(return_value=False)
+
+    started = mgr._try_start_process(_ConstructibleProcess)
+
+    assert started is False
+    mgr.start_active_calibration.assert_called_once_with()
 
 
 def test_non_volume_calibration_terminal_event_is_not_audited(tmp_path):

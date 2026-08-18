@@ -827,6 +827,83 @@ def test_calibration_application_eligibility_allows_mutable_design(
     }
 
 
+@pytest.mark.parametrize(
+    ("result_producing", "expected_code"),
+    (
+        (False, "normal_diagnostics"),
+        (True, "mutable_design"),
+    ),
+)
+def test_calibration_process_start_eligibility_without_plan_requires_no_lock(
+    experiment_model_factory,
+    result_producing,
+    expected_code,
+):
+    model = experiment_model_factory()
+    _configure_design(model.experiment_model)
+
+    result = model.get_calibration_process_start_eligibility(
+        result_producing=result_producing
+    )
+
+    assert result["ok"] is True
+    assert result["code"] == expected_code
+    assert result["requires_execution_lock"] is False
+    assert result["diagnostic_only"] is False
+    assert result["plan_state"] is None
+
+
+@pytest.mark.parametrize(
+    "activate",
+    (False, True),
+    ids=("prepared", "active"),
+)
+def test_result_process_requires_lock_for_live_nonterminal_execution(
+    experiment_model_factory,
+    activate,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    if activate:
+        em.lock_execution_plan("printing_started")
+
+    result = model.get_calibration_process_start_eligibility(result_producing=True)
+
+    assert result["ok"] is True
+    assert result["code"] == "execution_lock_required"
+    assert result["requires_execution_lock"] is True
+    assert result["diagnostic_only"] is False
+    assert result["plan_state"] == ("active" if activate else "prepared")
+
+
+def test_historical_and_inactive_persisted_executions_reject_calibration_start(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    em._execution_plan_source = "persisted_execution_plan"
+    em._authoritative_runtime_active = False
+
+    inactive = model.get_calibration_process_start_eligibility(result_producing=True)
+
+    assert inactive["ok"] is False
+    assert inactive["code"] == "inactive_persisted_execution"
+    assert inactive["plan_state"] == "prepared"
+
+    model._read_only_experiment_view_active = True
+    for result_producing in (False, True):
+        historical = model.get_calibration_process_start_eligibility(
+            result_producing=result_producing
+        )
+        assert historical["ok"] is False
+        assert historical["code"] == "historical_read_only"
+        assert historical["requires_execution_lock"] is False
+
+
 def test_calibration_application_eligibility_is_stock_specific_after_progress(
     experiment_model_factory,
 ):
@@ -917,8 +994,16 @@ def test_terminal_execution_disables_apply_without_writing(
     em._last_authoritative_calibration_transition = "unchanged"
     before = _directory_bytes(Path(em.experiment_dir_path))
 
+    process_eligibility = model.get_calibration_process_start_eligibility(
+        result_producing=True
+    )
     eligibility = em.get_calibration_application_eligibility(stock_id=stock.stock_id)
 
+    assert process_eligibility["ok"] is True
+    assert process_eligibility["code"] == "terminal_diagnostics"
+    assert process_eligibility["requires_execution_lock"] is False
+    assert process_eligibility["diagnostic_only"] is True
+    assert process_eligibility["plan_state"] == terminal_state.value
     assert eligibility["ok"] is False
     assert eligibility["code"] == "terminal_execution"
     assert message_fragment in eligibility["message"]

@@ -960,8 +960,12 @@ def test_completed_execution_keeps_diagnostics_available_but_disables_apply(
         experiment_model=experiment_model,
     )
     recheck_calls = []
+    stream_calls = []
     dialog.controller.start_droplet_recheck_characterization = (
         lambda row: recheck_calls.append(dict(row)) or True
+    )
+    dialog.controller.start_online_stream_calibration = (
+        lambda: stream_calls.append("started") or True
     )
 
     _select_visible_row(dialog, 0)
@@ -975,6 +979,10 @@ def test_completed_execution_keeps_diagnostics_available_but_disables_apply(
     assert completion_message in dialog.bridge_status_label.text()
     assert dialog.load_selected_button.isEnabled()
     assert dialog.recheck_selected_button.isEnabled()
+
+    dialog.toggle_start_online_stream_calibration()
+    assert stream_calls == ["started"]
+    assert dialog.calibrate_online_stream_button.text() == "Stop Calibration"
 
     dialog.recheck_selected_button.click()
     assert recheck_calls
@@ -1412,6 +1420,93 @@ def test_result_set_table_sort_keeps_rechecks_with_parent_and_source_filter_keep
     assert sum(row["row_role"] == "recheck" for row in filtered) == 2
 
 
+def test_characterization_table_prioritizes_columns_and_compacts_main_time(qapp):
+    rows = [
+        {
+            "phase": "sweep",
+            "phase_label": "Sweep",
+            "timestamp": "2026-08-17T10:05:00Z",
+            "timestamp_display": "2026-08-17 10:05:00",
+            "pw_us": 1400,
+            "pressure_psi": 0.62,
+            "mean_nL": 10.0,
+            "cv_pct": 2.5,
+            "valid": True,
+        },
+        {
+            "phase": "search",
+            "phase_label": "Search",
+            "timestamp": "bad-ts",
+            "timestamp_display": "bad-ts",
+            "pw_us": 1500,
+            "pressure_psi": 0.72,
+            "mean_nL": 11.0,
+            "cv_pct": 3.5,
+            "valid": True,
+        },
+    ]
+    compact = calibration_view.CharacterizationSummaryTableModel(
+        include_recorded=True,
+        recorded_display_mode="time",
+    )
+    compact.set_rows(rows)
+    assert [column["key"] for column in compact.columns()] == [
+        "applied_marker",
+        "phase_label",
+        "pressure_psi",
+        "cv_pct",
+        "mean_nL",
+        "volume_difference",
+        "pw_us",
+        "result_set_no",
+        "timestamp_display",
+        "status_label",
+    ]
+    assert compact.headerData(0, Qt.Horizontal) == "✓"
+    assert compact.headerData(0, Qt.Horizontal, Qt.ToolTipRole) == "Applied to design"
+    assert compact.headerData(compact.column_index("phase_label"), Qt.Horizontal) == "Measurement"
+    time_column = compact.column_index("timestamp_display")
+    assert compact.headerData(time_column, Qt.Horizontal) == "Time"
+    assert compact.data(compact.index(0, time_column), Qt.DisplayRole) == "10:05:00"
+    assert compact.data(compact.index(0, time_column), Qt.ToolTipRole) == "2026-08-17 10:05:00"
+    assert (
+        compact.data(compact.index(0, time_column), calibration_view.SUMMARY_SORT_ROLE)
+        == "2026-08-17T10:05:00Z"
+    )
+    assert compact.data(compact.index(1, time_column), Qt.DisplayRole) == "bad-ts"
+
+    history = calibration_view.CharacterizationSummaryTableModel(
+        include_recorded=True,
+        recorded_display_mode="full",
+    )
+    history.set_rows(rows)
+    history_time_column = history.column_index("timestamp_display")
+    assert history.headerData(history_time_column, Qt.Horizontal) == "Recorded"
+    assert history.data(history.index(0, history_time_column), Qt.DisplayRole) == "2026-08-17 10:05:00"
+
+    table = calibration_view.QtWidgets.QTableView()
+    table.setModel(compact)
+    calibration_view._configure_characterization_table_view(table, compact)
+    header = table.horizontalHeader()
+    for index, column in enumerate(compact.columns()):
+        mode = header.sectionResizeMode(index)
+        assert mode != calibration_view.QtWidgets.QHeaderView.ResizeToContents
+        if column["key"] == "applied_marker":
+            assert mode == calibration_view.QtWidgets.QHeaderView.Fixed
+        elif column["key"] == "status_label":
+            assert mode == calibration_view.QtWidgets.QHeaderView.Stretch
+        else:
+            assert mode == calibration_view.QtWidgets.QHeaderView.Interactive
+            assert table.columnWidth(index) == calibration_view._CHARACTERIZATION_COLUMN_WIDTHS[column["key"]]
+
+    reset_count = []
+    compact.modelReset.connect(lambda: reset_count.append(1))
+    for _ in range(1000):
+        compact.set_rows(rows)
+    assert len(reset_count) == 1000
+    assert compact.rowCount() == 2
+
+
 def test_explicit_set_and_selected_candidate_survive_live_refresh(monkeypatch, qapp, tmp_path):
     dialog, manager = _build_dialog(monkeypatch, qapp, tmp_path, [])
 
@@ -1586,7 +1681,7 @@ def test_stream_results_filter_and_detail_strip_show_stream_metadata(monkeypatch
             dialog.summary_table_model.column_index("mean_nL"),
             Qt.Horizontal,
         )
-        == "Volume (nL)"
+        == "Volume"
     )
 
     dialog.summary_source_combo.setCurrentIndex(dialog.summary_source_combo.findData("stream"))

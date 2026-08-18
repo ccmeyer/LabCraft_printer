@@ -17477,6 +17477,121 @@ class Model(QObject):
     def is_read_only_experiment_view_active(self):
         return bool(getattr(self, "_read_only_experiment_view_active", False))
 
+    def get_calibration_process_start_eligibility(
+        self,
+        *,
+        result_producing: bool,
+    ) -> dict[str, Any]:
+        """Return whether a calibration process may start in this session.
+
+        Result production is independent from applying a result.  A live terminal
+        execution may record diagnostic observations, but it must never be locked
+        again or revised by the calibration start path.
+        """
+        experiment_model = getattr(self, "experiment_model", None)
+        plan_getter = getattr(experiment_model, "get_execution_plan_snapshot", None)
+        plan = plan_getter() if callable(plan_getter) else None
+        state = getattr(plan, "state", None)
+        plan_state = getattr(state, "value", state)
+        if plan_state not in (None, ""):
+            plan_state = str(plan_state)
+        else:
+            plan_state = None
+
+        def _result(
+            ok: bool,
+            code: str,
+            message: str,
+            *,
+            requires_execution_lock: bool = False,
+            diagnostic_only: bool = False,
+        ) -> dict[str, Any]:
+            return {
+                "ok": bool(ok),
+                "code": str(code),
+                "message": str(message),
+                "requires_execution_lock": bool(requires_execution_lock),
+                "diagnostic_only": bool(diagnostic_only),
+                "plan_state": plan_state,
+            }
+
+        legacy_getter = getattr(
+            experiment_model,
+            "is_read_only_legacy_execution",
+            None,
+        )
+        source_getter = getattr(experiment_model, "get_execution_plan_source", None)
+        source = source_getter() if callable(source_getter) else None
+        if (
+            self.is_read_only_experiment_view_active()
+            or (callable(legacy_getter) and legacy_getter())
+            or source == "legacy_reconstruction"
+        ):
+            return _result(
+                False,
+                "historical_read_only",
+                "Historical experiments are analysis only; calibration processes cannot be started.",
+            )
+
+        runtime_getter = getattr(
+            experiment_model,
+            "is_authoritative_execution_runtime_active",
+            None,
+        )
+        runtime_active = bool(runtime_getter()) if callable(runtime_getter) else False
+        if (
+            source == "persisted_execution_plan"
+            and state in {ExecutionPlanState.PREPARED, ExecutionPlanState.ACTIVE}
+            and not runtime_active
+        ):
+            return _result(
+                False,
+                "inactive_persisted_execution",
+                "The persisted execution is analysis only until it is explicitly activated before calibration.",
+            )
+
+        if not result_producing:
+            return _result(
+                True,
+                "normal_diagnostics",
+                "This calibration process may start without changing the execution plan.",
+            )
+
+        if plan is None:
+            return _result(
+                True,
+                "mutable_design",
+                "This calibration process may record results without an execution-plan lock.",
+            )
+
+        if state in {ExecutionPlanState.PREPARED, ExecutionPlanState.ACTIVE}:
+            return _result(
+                True,
+                "execution_lock_required",
+                "This result-producing calibration requires the active execution plan to be durably locked.",
+                requires_execution_lock=True,
+            )
+
+        if state in {ExecutionPlanState.COMPLETED, ExecutionPlanState.ABORTED}:
+            terminal_label = (
+                "completed"
+                if state is ExecutionPlanState.COMPLETED
+                else "aborted"
+            )
+            return _result(
+                True,
+                "terminal_diagnostics",
+                f"This {terminal_label} execution may record diagnostic calibration results, "
+                "but those results cannot modify the execution.",
+                diagnostic_only=True,
+            )
+
+        return _result(
+            False,
+            "unsupported_execution_state",
+            "Calibration cannot start because the execution plan is in an unsupported state.",
+        )
+
     def get_read_only_experiment_display_heads(self):
         return tuple(getattr(self, "_read_only_experiment_display_heads", ()) or ())
 

@@ -859,6 +859,47 @@ def _characterization_table_stylesheet():
     )
 
 
+_CHARACTERIZATION_COLUMN_WIDTHS = {
+    "applied_marker": 30,
+    "phase_label": 104,
+    "pressure_psi": 88,
+    "cv_pct": 52,
+    "mean_nL": 78,
+    "volume_difference": 110,
+    "pw_us": 60,
+    "result_set_no": 42,
+    "timestamp_display": 68,
+    "status_label": 72,
+}
+
+
+def _calibration_dialog_target_size(available_geometry=None):
+    if available_geometry is None:
+        return 1600, 1000
+    try:
+        available_width = int(available_geometry.width())
+        available_height = int(available_geometry.height())
+    except Exception:
+        return 1600, 1000
+    if available_width <= 0 or available_height <= 0:
+        return 1600, 1000
+    return (
+        min(1800, int(available_width * 0.94)),
+        min(1000, int(available_height * 0.94)),
+    )
+
+
+def _calibration_panel_widths(available_width):
+    available_width = max(0, int(available_width or 0))
+    control_width = max(
+        380,
+        min(460, available_width // 4 if available_width > 0 else 380),
+    )
+    info_capacity = available_width - control_width - 560
+    info_width = max(460, min(760, info_capacity))
+    return control_width, info_width
+
+
 def _configure_characterization_table_view(table, model):
     table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
     table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
@@ -879,10 +920,17 @@ def _configure_characterization_table_view(table, model):
     header.setSectionsClickable(True)
     header.setSortIndicatorShown(False)
     for idx, column in enumerate(model.columns()):
-        if column["key"] == "status_label":
+        key = column["key"]
+        width = _CHARACTERIZATION_COLUMN_WIDTHS.get(key, 72)
+        if key == "timestamp_display" and model.recorded_display_mode == "full":
+            width = 150
+        if key == "applied_marker":
+            header.setSectionResizeMode(idx, QtWidgets.QHeaderView.Fixed)
+        elif key == "status_label":
             header.setSectionResizeMode(idx, QtWidgets.QHeaderView.Stretch)
         else:
-            header.setSectionResizeMode(idx, QtWidgets.QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(idx, QtWidgets.QHeaderView.Interactive)
+        table.setColumnWidth(idx, width)
 
 
 def _synthetic_record_state_label(row):
@@ -895,14 +943,27 @@ def _synthetic_record_state_label(row):
 
 
 class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
-    def __init__(self, parent=None, *, include_recorded=False, muted_brush=None, applied_brush=None, synthetic_brush=None):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        include_recorded=False,
+        recorded_display_mode="full",
+        muted_brush=None,
+        applied_brush=None,
+        synthetic_brush=None,
+    ):
         super().__init__(parent)
         self._include_recorded = bool(include_recorded)
+        self.recorded_display_mode = str(recorded_display_mode or "full").strip().lower()
+        if self.recorded_display_mode not in {"full", "time"}:
+            raise ValueError("recorded_display_mode must be 'full' or 'time'")
         self._muted_brush = muted_brush or QBrush(QColor(255, 255, 255, 150))
         self._applied_brush = applied_brush or QBrush(QColor(59, 130, 246, 64))
         self._synthetic_brush = synthetic_brush or QBrush(QColor(245, 158, 11, 72))
         self._applied_row_fingerprint = None
         self._rows = []
+        self._recorded_display_values = []
         self._columns = self._build_columns()
 
     @staticmethod
@@ -944,6 +1005,17 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
             and _summary_row_fingerprint(row) == self._applied_row_fingerprint
         )
 
+    @staticmethod
+    def _compact_recorded_time(value):
+        if value in (None, ""):
+            return ""
+        text = str(value)
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return text
+        return parsed.strftime("%H:%M:%S")
+
     def _build_columns(self):
         right = int(Qt.AlignRight | Qt.AlignVCenter)
         left = int(Qt.AlignLeft | Qt.AlignVCenter)
@@ -951,10 +1023,52 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
         columns = [
             {
                 "key": "applied_marker",
-                "label": "",
+                "label": "✓",
                 "alignment": center,
                 "display": lambda row: "✓" if self._is_applied_row(row) else "",
                 "sort": lambda row: 0 if self._is_applied_row(row) else 1,
+            },
+            {
+                "key": "phase_label",
+                "label": "Measurement",
+                "alignment": left,
+                "display": self._display_source,
+                "sort": lambda row: str(row.get("phase_label") or "").lower(),
+            },
+            {
+                "key": "pressure_psi",
+                "label": "Pressure",
+                "alignment": right,
+                "display": lambda row: self._format_float(row.get("pressure_psi"), 3),
+                "sort": lambda row: row.get("pressure_psi"),
+            },
+            {
+                "key": "cv_pct",
+                "label": "CV",
+                "alignment": right,
+                "display": lambda row: self._format_float(row.get("cv_pct"), 2),
+                "sort": lambda row: row.get("cv_pct"),
+            },
+            {
+                "key": "mean_nL",
+                "label": "Volume",
+                "alignment": right,
+                "display": lambda row: self._format_float(row.get("mean_nL"), 3),
+                "sort": lambda row: row.get("mean_nL"),
+            },
+            {
+                "key": "volume_difference",
+                "label": "Difference",
+                "alignment": right,
+                "display": self._display_difference,
+                "sort": lambda row: row.get("volume_delta_nL"),
+            },
+            {
+                "key": "pw_us",
+                "label": "PW",
+                "alignment": right,
+                "display": lambda row: self._format_float(row.get("pw_us"), 0),
+                "sort": lambda row: row.get("pw_us"),
             },
             {
                 "key": "result_set_no",
@@ -967,69 +1081,25 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
                 ),
                 "sort": lambda row: row.get("result_set_no"),
             },
-            {
-                "key": "phase_label",
-                "label": "Source",
-                "alignment": left,
-                "display": self._display_source,
-                "sort": lambda row: str(row.get("phase_label") or "").lower(),
-            },
         ]
         if self._include_recorded:
             columns.append(
                 {
                     "key": "timestamp_display",
-                    "label": "Recorded",
+                    "label": "Time" if self.recorded_display_mode == "time" else "Recorded",
                     "alignment": left,
                     "display": lambda row: str(row.get("timestamp_display") or ""),
                     "sort": lambda row: row.get("timestamp") or "",
                 }
             )
-        columns.extend(
-            [
-                {
-                    "key": "pw_us",
-                    "label": "PW (us)",
-                    "alignment": right,
-                    "display": lambda row: self._format_float(row.get("pw_us"), 0),
-                    "sort": lambda row: row.get("pw_us"),
-                },
-                {
-                    "key": "pressure_psi",
-                    "label": "Pressure (psi)",
-                    "alignment": right,
-                    "display": lambda row: self._format_float(row.get("pressure_psi"), 3),
-                    "sort": lambda row: row.get("pressure_psi"),
-                },
-                {
-                    "key": "mean_nL",
-                    "label": "Volume (nL)",
-                    "alignment": right,
-                    "display": lambda row: self._format_float(row.get("mean_nL"), 3),
-                    "sort": lambda row: row.get("mean_nL"),
-                },
-                {
-                    "key": "volume_difference",
-                    "label": "Difference",
-                    "alignment": right,
-                    "display": self._display_difference,
-                    "sort": lambda row: row.get("volume_delta_nL"),
-                },
-                {
-                    "key": "cv_pct",
-                    "label": "CV (%)",
-                    "alignment": right,
-                    "display": lambda row: self._format_float(row.get("cv_pct"), 2),
-                    "sort": lambda row: row.get("cv_pct"),
-                },
-                {
-                    "key": "status_label",
-                    "label": "Status",
-                    "alignment": left,
-                    "display": self._display_status,
-                    "sort": self._status_sort_value,
-                },
-            ]
+        columns.append(
+            {
+                "key": "status_label",
+                "label": "Status",
+                "alignment": left,
+                "display": self._display_status,
+                "sort": self._status_sort_value,
+            }
         )
         return columns
 
@@ -1066,8 +1136,18 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
         raise KeyError(key)
 
     def set_rows(self, rows):
+        prepared_rows = [dict(row) for row in (rows or [])]
+        recorded_display_values = (
+            [
+                self._compact_recorded_time(row.get("timestamp_display"))
+                for row in prepared_rows
+            ]
+            if self.recorded_display_mode == "time"
+            else []
+        )
         self.beginResetModel()
-        self._rows = [dict(row) for row in (rows or [])]
+        self._rows = prepared_rows
+        self._recorded_display_values = recorded_display_values
         self.endResetModel()
 
     def set_applied_row_fingerprint(self, fingerprint):
@@ -1104,10 +1184,12 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
         return len(self._columns)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if role != Qt.DisplayRole:
-            return None
         if orientation == Qt.Horizontal and 0 <= section < len(self._columns):
-            return self._columns[section]["label"]
+            column = self._columns[section]
+            if role == Qt.DisplayRole:
+                return column["label"]
+            if role == Qt.ToolTipRole and column["key"] == "applied_marker":
+                return "Applied to design"
         return None
 
     def data(self, index, role=Qt.DisplayRole):
@@ -1117,6 +1199,12 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
         column = self._columns[index.column()]
         key = column["key"]
 
+        if (
+            role in (Qt.DisplayRole, Qt.EditRole)
+            and key == "timestamp_display"
+            and self.recorded_display_mode == "time"
+        ):
+            return self._recorded_display_values[index.row()]
         if role in (Qt.DisplayRole, Qt.EditRole):
             return column["display"](row)
         if role == Qt.TextAlignmentRole:
@@ -1128,6 +1216,8 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
         if role == Qt.ToolTipRole:
             if key == "applied_marker" and self._is_applied_row(row):
                 return "Applied to design"
+            if key == "timestamp_display":
+                return str(row.get("timestamp_display") or "")
             if str(row.get("row_state") or "") == "in_progress":
                 return (
                     "This result is saved as a canonical update but remains in progress. "
@@ -1144,8 +1234,6 @@ class CharacterizationSummaryTableModel(QtCore.QAbstractTableModel):
             invalid_reason = row.get("invalid_reason")
             if row.get("valid") is False and invalid_reason:
                 return f"Invalid: {invalid_reason}"
-            if key == "timestamp_display":
-                return str(row.get("timestamp_display") or "")
             return None
         if role == Qt.BackgroundRole:
             if (
@@ -3270,6 +3358,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._calibration_record_export_thread = None
         self._calibration_record_export_worker = None
         self._calibration_record_export_in_progress = False
+        self._last_panel_widths = None
         if not self.camera_free_mode:
             try:
                 self.model.calibration_manager.clear_calibration_memory_ui_recommendation_state()
@@ -3277,7 +3366,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 pass
 
         self.setWindowTitle("Droplet Imaging")
-        self.resize(1600, 1000)
+        screen = self.screen() or QApplication.primaryScreen()
+        try:
+            available_geometry = screen.availableGeometry() if screen is not None else None
+        except Exception:
+            available_geometry = None
+        self._initial_window_size_target = _calibration_dialog_target_size(
+            available_geometry
+        )
+        self.resize(*self._initial_window_size_target)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
 
         # =========================
@@ -4221,6 +4318,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_table_model = CharacterizationSummaryTableModel(
             self,
             include_recorded=True,
+            recorded_display_mode="time",
             muted_brush=self._summary_muted_brush,
             applied_brush=self._summary_applied_brush,
         )
@@ -4231,34 +4329,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.summary_table.setModel(self.summary_table_proxy_model)
         _configure_characterization_table_view(self.summary_table, self.summary_table_model)
         self._unused_summary_columns = []
-        _ = (
-            ["Run #", "PW (µs)", "Pressure (psi)", "Mean (nL)", "CV (%)", "Valid"]
-        )
-        self.summary_table.verticalHeader().setVisible(False)
-        self.summary_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.summary_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        self.summary_table.setAlternatingRowColors(True)
-        self.summary_table.horizontalHeader().setStretchLastSection(True)
-        self.summary_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
-        self.summary_table.setColumnWidth(0, 26)
-        self.summary_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
-        self.summary_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
-        self.summary_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
-        self.summary_table.horizontalHeader().setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeToContents)
-        
-        # Allow selecting entire rows (single selection)
-        self.summary_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.summary_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
-
-        self.summary_table.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self.summary_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.summary_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.summary_table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
-        self.summary_table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
-
-        _configure_characterization_table_view(self.summary_table, self.summary_table_model)
-        self.summary_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Fixed)
-        self.summary_table.setColumnWidth(0, 26)
         self.summary_table.setMinimumHeight(280)
         summary_v.addWidget(self.summary_table, 1)
         summary_v.addWidget(self.summary_count_label)
@@ -8862,8 +8932,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
             0,
             self.width() - margins.left() - margins.right() - (2 * spacing),
         )
-        control_width = max(380, min(460, available_width // 4 if available_width > 0 else 380))
-        info_width = max(460, min(640, available_width // 3 if available_width > 0 else 460))
+        control_width, info_width = _calibration_panel_widths(available_width)
+        panel_widths = (control_width, info_width)
+        if panel_widths == getattr(self, "_last_panel_widths", None):
+            return False
+        self._last_panel_widths = panel_widths
 
         # QScrollArea's vertical scrollbar reduces the viewport width. Keep the
         # outer column fixed and let widgetResizable size its child to that viewport.
@@ -8879,6 +8952,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.analysis_panel.setMaximumWidth(16777215)
         self.control_panel.updateGeometry()
         self.analysis_panel.updateGeometry()
+        return True
 
     def _create_lightweight_tab_section_header(self, title):
         header = QtWidgets.QWidget()

@@ -206,6 +206,16 @@ disabled. Immutable artifacts that were written before a later failure are
 retained; an exact retry adopts them and repairs the remaining mirrors instead
 of creating another revision.
 
+Result-producing pressure-sweep, stream-volume, and manually started droplet
+search processes use that durable lock while an authoritative execution is
+`prepared` or `active`. After a same-session execution becomes `completed` or
+`aborted`, those processes remain available as diagnostics and record their
+normal calibration observations without requesting another execution-plan
+lock. Terminal plans and their progress, resume, revision-history, and
+execution-calibration artifacts remain immutable, and a diagnostic result
+cannot be applied to the terminal execution. Reopened historical or legacy
+executions remain analysis-only and cannot start calibration processes.
+
 Loading an active new-format plan validates the design hash, immutable history,
 latest mirror, progress reference and targets, and calibration references. It
 does not rewrite any artifact. Slice 5 extends this inspection into the explicit

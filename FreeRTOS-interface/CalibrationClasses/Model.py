@@ -4048,7 +4048,7 @@ class CalibrationManager(QObject):
             or process_obj.__class__.__name__
         )
 
-    def _is_volume_calibration_audit_process(self, process_obj=None):
+    def _is_result_producing_calibration_process(self, process_obj=None):
         process_name = self._calibration_audit_process_name(process_obj)
         if process_name in {
             "PressureSweepCharacterizationProcess",
@@ -4058,6 +4058,44 @@ class CalibrationManager(QObject):
         if process_name == "DropletSearchCalibrationProcess":
             return bool(getattr(process_obj, "manual_start", False))
         return False
+
+    def _is_volume_calibration_audit_process(self, process_obj=None):
+        """Compatibility name for the result-producing audit filter."""
+        return self._is_result_producing_calibration_process(process_obj)
+
+    def _get_calibration_process_start_eligibility(self, *, result_producing):
+        eligibility_getter = getattr(
+            self.model,
+            "get_calibration_process_start_eligibility",
+            None,
+        )
+        try:
+            if not callable(eligibility_getter):
+                if not result_producing:
+                    return {
+                        "ok": True,
+                        "code": "normal_diagnostics",
+                        "message": "This calibration process may start without changing the execution plan.",
+                        "requires_execution_lock": False,
+                        "diagnostic_only": False,
+                        "plan_state": None,
+                    }
+                raise RuntimeError("the calibration-process policy is unavailable")
+            eligibility = eligibility_getter(
+                result_producing=bool(result_producing)
+            )
+            if not isinstance(eligibility, dict):
+                raise RuntimeError("the calibration-process policy returned an invalid result")
+            return eligibility
+        except Exception as exc:
+            return {
+                "ok": False,
+                "code": "policy_unavailable",
+                "message": f"Calibration-process eligibility could not be determined: {exc}",
+                "requires_execution_lock": False,
+                "diagnostic_only": False,
+                "plan_state": None,
+            }
 
     def _should_record_calibration_audit_event(self, event_type, process_obj=None):
         event_type = str(event_type or "")
@@ -4682,97 +4720,122 @@ class CalibrationManager(QObject):
             self.calibrationQueueCompleted.emit()
 
     def start_active_calibration(self):
-        if self.activeCalibration is not None:
-            storage_block = self.get_calibration_storage_start_block_message()
-            if storage_block:
-                process_obj = self.activeCalibration
-                self.clear_calibration_queue()
-                try:
-                    release_fn = getattr(process_obj, "release_runtime_resources", None)
-                    if callable(release_fn):
-                        release_fn()
-                except Exception:
-                    pass
-                self.activeCalibration = None
-                self.calibrationStageChanged.emit(storage_block, "red")
-                self.calibrationError.emit(storage_block)
-                self.calibrationQueueCompleted.emit()
-                return
-            if self._is_volume_calibration_audit_process(self.activeCalibration):
-                experiment_model = getattr(self.model, "experiment_model", None)
-                lock_plan = getattr(experiment_model, "lock_execution_plan", None)
-                if callable(lock_plan):
-                    try:
-                        lock_plan("calibration_started")
-                    except Exception as exc:
-                        message = (
-                            "Calibration did not start because the execution plan could not be "
-                            f"durably locked: {exc}"
-                        )
-                        self.calibrationStageChanged.emit(message, "red")
-                        self.calibrationError.emit(message)
-                        self.clear_calibration_queue()
-                        self.activeCalibration = None
-                        self.calibrationQueueCompleted.emit()
-                        return
-            self.clear_pending_process_verdict(reason="starting_new_process")
-            # Ensure we have an open run to write into
-            if self._run_idx is None:
-                # Create a default session in CWD if the caller forgot
-                self.begin_session(self.model.experiment_model.get_calibration_file_path(), notes="auto-started session")
-            self._assign_capture_performance_process_instance(self.activeCalibration)
+        if self.activeCalibration is None:
+            return False
+
+        storage_block = self.get_calibration_storage_start_block_message()
+        if storage_block:
+            process_obj = self.activeCalibration
+            self.clear_calibration_queue()
             try:
-                storage_started = self._begin_process_recording(self.activeCalibration)
+                release_fn = getattr(process_obj, "release_runtime_resources", None)
+                if callable(release_fn):
+                    release_fn()
+            except Exception:
+                pass
+            self.activeCalibration = None
+            self.calibrationStageChanged.emit(storage_block, "red")
+            self.calibrationError.emit(storage_block)
+            self.calibrationQueueCompleted.emit()
+            return False
+
+        result_producing = self._is_result_producing_calibration_process(
+            self.activeCalibration
+        )
+        eligibility = self._get_calibration_process_start_eligibility(
+            result_producing=result_producing
+        )
+
+        if not bool(eligibility.get("ok")):
+            message = str(
+                eligibility.get("message")
+                or "Calibration cannot start in the current experiment state."
+            )
+            self.calibrationStageChanged.emit(message, "red")
+            self.calibrationError.emit(message)
+            self.clear_calibration_queue()
+            self.activeCalibration = None
+            self.calibrationQueueCompleted.emit()
+            return False
+
+        if bool(eligibility.get("requires_execution_lock")):
+            experiment_model = getattr(self.model, "experiment_model", None)
+            lock_plan = getattr(experiment_model, "lock_execution_plan", None)
+            try:
+                if not callable(lock_plan):
+                    raise RuntimeError("the execution-plan lock is unavailable")
+                lock_plan("calibration_started")
             except Exception as exc:
-                storage_started = False
-                self._record_shadow_storage_failure(
-                    "run_start_failed", exc, run=getattr(self, "_active_shadow_run", None)
+                message = (
+                    "Calibration did not start because the execution plan could not be "
+                    f"durably locked: {exc}"
                 )
-            if self.is_calibration_store_authoritative() and not storage_started:
-                process_obj = self.activeCalibration
-                message = "Calibration did not start because required storage could not be opened."
-                self.clear_calibration_queue()
-                try:
-                    release_fn = getattr(process_obj, "release_runtime_resources", None)
-                    if callable(release_fn):
-                        release_fn()
-                except Exception:
-                    pass
-                try:
-                    process_obj.deleteLater()
-                except Exception:
-                    pass
-                self.activeCalibration = None
-                self._finalize_process_recording("storage_error", error_message=message)
                 self.calibrationStageChanged.emit(message, "red")
                 self.calibrationError.emit(message)
+                self.clear_calibration_queue()
+                self.activeCalibration = None
                 self.calibrationQueueCompleted.emit()
-                return
-            # Canonical run creation is the authority boundary.  Process
-            # callbacks are connected only after durable storage is open.
-            self.activeCalibration.stageChanged.connect(self.onCalibrationStageChanged)
-            self.activeCalibration.calibrationCompleted.connect(self.onCalibrationCompleted)
-            self.activeCalibration.calibrationError.connect(self.onCalibrationError)
-            self.activeCalibration.calibrationDataUpdated.connect(self.onCalibrationDataUpdated)
-            self.activeCalibration.presentImageSignal.connect(self.onPresentImage)
-            debug_signal = getattr(self.activeCalibration, "onlineStreamDebugUpdated", None)
-            if debug_signal is not None:
-                debug_signal.connect(self.onOnlineStreamDebugUpdated)
-            process_name = self.activeCalibration.__class__.__name__
-            self.record_capture_performance_marker(
-                "calibration_process_started",
-                {
-                    "process_name": process_name,
-                    "queue_depth": len(getattr(self, "calibration_queue", []) or []),
-                },
-                process_obj=self.activeCalibration,
+                return False
+
+        self.clear_pending_process_verdict(reason="starting_new_process")
+        # Ensure we have an open run to write into
+        if self._run_idx is None:
+            # Create a default session in CWD if the caller forgot
+            self.begin_session(self.model.experiment_model.get_calibration_file_path(), notes="auto-started session")
+        self._assign_capture_performance_process_instance(self.activeCalibration)
+        try:
+            storage_started = self._begin_process_recording(self.activeCalibration)
+        except Exception as exc:
+            storage_started = False
+            self._record_shadow_storage_failure(
+                "run_start_failed", exc, run=getattr(self, "_active_shadow_run", None)
             )
-            self._record_calibration_audit_event(
-                "calibration_process_started",
-                f"Calibration process started: {process_name}",
-                process_obj=self.activeCalibration,
-            )
-            self.activeCalibration.start()
+        if self.is_calibration_store_authoritative() and not storage_started:
+            process_obj = self.activeCalibration
+            message = "Calibration did not start because required storage could not be opened."
+            self.clear_calibration_queue()
+            try:
+                release_fn = getattr(process_obj, "release_runtime_resources", None)
+                if callable(release_fn):
+                    release_fn()
+            except Exception:
+                pass
+            try:
+                process_obj.deleteLater()
+            except Exception:
+                pass
+            self.activeCalibration = None
+            self._finalize_process_recording("storage_error", error_message=message)
+            self.calibrationStageChanged.emit(message, "red")
+            self.calibrationError.emit(message)
+            self.calibrationQueueCompleted.emit()
+            return False
+        # Canonical run creation is the authority boundary.  Process
+        # callbacks are connected only after durable storage is open.
+        self.activeCalibration.stageChanged.connect(self.onCalibrationStageChanged)
+        self.activeCalibration.calibrationCompleted.connect(self.onCalibrationCompleted)
+        self.activeCalibration.calibrationError.connect(self.onCalibrationError)
+        self.activeCalibration.calibrationDataUpdated.connect(self.onCalibrationDataUpdated)
+        self.activeCalibration.presentImageSignal.connect(self.onPresentImage)
+        debug_signal = getattr(self.activeCalibration, "onlineStreamDebugUpdated", None)
+        if debug_signal is not None:
+            debug_signal.connect(self.onOnlineStreamDebugUpdated)
+        process_name = self.activeCalibration.__class__.__name__
+        self.record_capture_performance_marker(
+            "calibration_process_started",
+            {
+                "process_name": process_name,
+                "queue_depth": len(getattr(self, "calibration_queue", []) or []),
+            },
+            process_obj=self.activeCalibration,
+        )
+        self._record_calibration_audit_event(
+            "calibration_process_started",
+            f"Calibration process started: {process_name}",
+            process_obj=self.activeCalibration,
+        )
+        self.activeCalibration.start()
+        return True
 
     def stop(self):
         # --- Clear PW sweep state, if any ---
@@ -5203,7 +5266,7 @@ class CalibrationManager(QObject):
         replicates_per_pressure=20,
         order="desc",
     ):
-        self._try_start_process(PressureSweepCharacterizationProcess,
+        return self._try_start_process(PressureSweepCharacterizationProcess,
             sphere_delay_us=sphere_delay_us,
             imaging_z_offset_steps=imaging_z_offset_steps,
             max_nominal_delay_us=max_nominal_delay_us,
@@ -9535,6 +9598,32 @@ class CalibrationManager(QObject):
             self.calibrationError.emit(msg)
             return False
 
+        process_name = getattr(proc_cls, "__name__", "")
+        result_producing = process_name in {
+            "PressureSweepCharacterizationProcess",
+            "OnlineStreamCalibrationProcess",
+        } or (
+            process_name == "DropletSearchCalibrationProcess"
+            and bool(kwargs.get("manual_start", False))
+        )
+        eligibility_getter = getattr(
+            self.model,
+            "get_calibration_process_start_eligibility",
+            None,
+        )
+        if callable(eligibility_getter):
+            eligibility = self._get_calibration_process_start_eligibility(
+                result_producing=result_producing
+            )
+            if not bool(eligibility.get("ok")):
+                msg = str(
+                    eligibility.get("message")
+                    or "Calibration cannot start in the current experiment state."
+                )
+                self.calibrationStageChanged.emit(msg, "red")
+                self.calibrationError.emit(msg)
+                return False
+
         session_started = False
         if self._process_owns_calibration_memory_session(proc_cls) and self._run_idx is None:
             self.begin_session(
@@ -9565,8 +9654,8 @@ class CalibrationManager(QObject):
         self.activeCalibration._calibration_memory_session_run_id = (
             str(self._run_id) if session_started and self._run_id else None
         )
-        self.start_active_calibration()
-        return True
+        started = self.start_active_calibration()
+        return started is not False
 
     def _emit_readiness(self):
         # Helper to pack readiness + missing list for each process class

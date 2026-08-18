@@ -1149,7 +1149,12 @@ stream `Calibrate All` start while the authoritative plan is still
 `PREPARED`, the UI requires `Start Calibration` confirmation. `Cancel` is the
 safe default and occurs before calibration mode preflight, machine-setting
 changes, queue creation, or callbacks. The model remains authoritative for the
-durable `calibration_started` lock when a volume calibration is applied.
+durable `calibration_started` lock when a result-producing calibration starts
+against a prepared or active authoritative execution. A completed or aborted
+execution in the same live session can still run and record pressure-sweep,
+stream-volume, and recheck diagnostics without relocking or revising the
+terminal plan; **Apply** remains unavailable. Reopened historical executions
+remain analysis-only and cannot launch calibration processes.
 
 Run the print-array soft-stop/resume lifecycle directly with:
 
