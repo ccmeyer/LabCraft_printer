@@ -302,7 +302,7 @@ public:
   bool _interruptedCommandHome = false;
   bool _restartingInterruptedHome = false;
   bool _homeFailureLatched = false;
-  bool _xyMotionFailureLatched = false;
+  volatile bool _xyMotionFailureLatched = false;
   HomeInterruptionPolicy::Lifecycle _homeLifecycle{};
   RegulatorPausePolicy::Snapshot _regulatorPauseSnapshot{};
 

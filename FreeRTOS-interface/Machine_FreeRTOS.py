@@ -4364,6 +4364,7 @@ class CommandQueue(QObject):
         self.command_number = 0
         self.max_inflight_commands = 4  # Sliding-window size for accepted or pending-ack commands
         self._event_callback = event_callback
+        self._empty_completion_emitted = True
 
     def _emit_command_event(self, command, event_name):
         if callable(self._event_callback):
@@ -4390,6 +4391,7 @@ class CommandQueue(QObject):
             trace_metadata=trace_metadata,
         )
         self.queue.append(command)
+        self._empty_completion_emitted = False
         self._emit_command_event(command, "queued")
         return command
 
@@ -4490,7 +4492,8 @@ class CommandQueue(QObject):
 
         self._trim_terminal_commands()
 
-        if not self.queue:
+        if not self.queue and not self._empty_completion_emitted:
+            self._empty_completion_emitted = True
             self.commands_completed.emit()
 
         self.queue_updated.emit()
@@ -4501,7 +4504,26 @@ class CommandQueue(QObject):
         self.completed.clear()
         if reset_counter:
             self.command_number = 0
+        self._empty_completion_emitted = True
         self.queue_updated.emit()
+
+    def cancel_nonterminal_commands(self):
+        """Terminally cancel retained work without running success handlers."""
+        canceled = 0
+        for command in list(self.queue):
+            if command.status in {"Completed", "Canceled"}:
+                continue
+            if command.mark_as_canceled():
+                canceled += 1
+                self._emit_command_event(command, "canceled")
+
+        self._trim_terminal_commands()
+        if canceled and not self.queue and not self._empty_completion_emitted:
+            self._empty_completion_emitted = True
+            self.commands_completed.emit()
+        if canceled:
+            self.queue_updated.emit()
+        return canceled
 
 class Machine(QObject):
     """
@@ -4522,6 +4544,7 @@ class Machine(QObject):
     reset_report_received = Signal(dict)
     serial_connection_lost = Signal(dict)
     transport_faulted = Signal(dict)
+    xy_motion_faulted = Signal(dict)
     all_calibration_droplets_printed = Signal()  # Signal to emit when all calibration droplets are printed
     require_gripper_confirmation = Signal(str)   # "OPEN" or "CLOSE"
     log_message_received = Signal(str)  # Signal to emit when a log message is received
@@ -4603,6 +4626,13 @@ class Machine(QObject):
         self._handling_mcu_unresponsive = False
         self._command_queue_blocked_reason = None
         self._transport_fault_report = None
+        self._xy_motion_fault_report = None
+        self._xy_motion_fault_key = None
+        self._xy_motion_recovery_state = "idle"
+        self._xy_rehome_batch_queuing = False
+        self._xy_rehome_batch_index = 0
+        self._xy_rehome_command_numbers = set()
+        self._awaiting_first_status_after_hello = False
         self._ever_transport_ready = False
         self._hello_connection_phase = HOST_CONNECTION_PHASE_ESTABLISHED
         self._pause_after_ack_timeout_ms = 1000
@@ -4853,6 +4883,8 @@ class Machine(QObject):
             "transport_fault_code": str(
                 (getattr(self, "_transport_fault_report", None) or {}).get("fault_code") or ""
             ),
+            "xy_motion_recovery_state": self.get_xy_motion_recovery_state(),
+            "xy_motion_fault_active": bool(getattr(self, "_xy_motion_fault_report", None)),
             "pending_ack_count": len(pending_acks),
             "pending_ack_keys": [self._ack_key_for_output(key) for key in list(pending_acks.keys())],
             "command_queue_depth": len(queue),
@@ -5028,6 +5060,7 @@ class Machine(QObject):
 
     def _clear_transport_after_unclean_serial_loss(self):
         self._clear_transport_fault_latch("serial_connection_lost")
+        self._reset_xy_motion_recovery("serial_connection_lost")
         self._clear_queue_gap_repair("serial_connection_lost")
         self.command_queue.clear_queue(reset_counter=True)
         self.sent_command = None
@@ -5060,6 +5093,7 @@ class Machine(QObject):
 
     def _clear_transport_after_mcu_unresponsive(self):
         self._clear_transport_fault_latch("mcu_unresponsive")
+        self._reset_xy_motion_recovery("mcu_unresponsive")
         self._clear_queue_gap_repair("mcu_unresponsive")
         self.command_queue.clear_queue(reset_counter=True)
         self.sent_command = None
@@ -5255,6 +5289,7 @@ class Machine(QObject):
         )
         self._transport_ready = False
         self._transport_capabilities = 0
+        self._awaiting_first_status_after_hello = False
         self._stop_mcu_response_watchdog()
         hello_seq = self._alloc_ctl_seq32()
         self._write_frame(build_frame(HELLO, hello_seq))
@@ -5283,17 +5318,20 @@ class Machine(QObject):
             self._fail_connection_for_log_channel()
             return
         self._clear_transport_fault_latch("clean_hello")
+        self._reset_xy_motion_recovery("clean_hello")
         self._session_recovery_in_progress = False
         self._transport_capabilities = capabilities
         self._transport_ready = True
         self._ever_transport_ready = True
         self._command_queue_blocked_reason = None
-        self._tx_paused = False
+        # Firmware HELLO clears ordinary pause state but deliberately retains
+        # the XY motion latch. Hold traffic until its first status frame.
+        self._awaiting_first_status_after_hello = True
+        self._tx_paused = True
         self._sequence_pause = False
         self._waiting_for_post_clear_status = False
         self._start_mcu_response_watchdog()
         self.begin_execution_timer()
-        self.pump_send_queue()
         self.machine_connected_signal.emit(True)
         print(f"Connected to {self.ser.name}")
         self._connection_attempts = 0  # reset attempts on success
@@ -5343,6 +5381,7 @@ class Machine(QObject):
         self._expect_serial_reader_stop("reset_board")
         self._stop_mcu_response_watchdog()
         self._clear_transport_fault_latch("reset_board")
+        self._reset_xy_motion_recovery("reset_board")
         self._clear_queue_gap_repair("reset_board")
         self.command_queue.clear_queue(reset_counter=True)
         self._transport_capabilities = 0
@@ -5463,6 +5502,7 @@ class Machine(QObject):
 
     def _reset_session_state_for_recovery(self):
         self._clear_transport_fault_latch("session_recovery")
+        self._reset_xy_motion_recovery("session_recovery")
         self._clear_queue_gap_repair("session_recovery")
         self.command_queue.clear_queue(reset_counter=True)
         self.sent_command = None
@@ -5510,6 +5550,7 @@ class Machine(QObject):
         self._expect_serial_reader_stop("disconnect_handler")
         self._stop_mcu_response_watchdog()
         self._clear_transport_fault_latch("disconnect")
+        self._reset_xy_motion_recovery("disconnect")
         self._clear_queue_gap_repair("disconnect")
         self._record_black_box_event(
             "disconnect_complete",
@@ -6369,6 +6410,170 @@ class Machine(QObject):
             return
         self.command_queue.command_number = max(0, int(last_retired))
 
+    def get_xy_motion_recovery_state(self):
+        return str(getattr(self, "_xy_motion_recovery_state", "idle") or "idle")
+
+    def _set_xy_motion_recovery_state(self, state):
+        state = str(state or "idle")
+        self._xy_motion_recovery_state = state
+        if state == "idle":
+            if str(getattr(self, "_command_queue_blocked_reason", "") or "").startswith("xy_"):
+                self._command_queue_blocked_reason = None
+            self._xy_rehome_command_numbers.clear()
+            return
+        if state == "home_required":
+            self._command_queue_blocked_reason = "xy_rehome_required"
+        elif state == "home_in_progress":
+            self._command_queue_blocked_reason = "xy_rehome_in_progress"
+        else:
+            self._command_queue_blocked_reason = "xy_motion_failure"
+
+    def _reset_xy_motion_recovery(self, reason=None):
+        report = getattr(self, "_xy_motion_fault_report", None)
+        if report:
+            self._record_black_box_event(
+                "xy_motion_recovery_reset",
+                {
+                    "reason": str(reason or "session_reset"),
+                    "failed_command_number": report.get("failed_command_number"),
+                },
+            )
+        self._xy_motion_fault_report = None
+        self._xy_motion_fault_key = None
+        self._xy_rehome_batch_queuing = False
+        self._xy_rehome_batch_index = 0
+        self._xy_rehome_command_numbers.clear()
+        self._awaiting_first_status_after_hello = False
+        self._set_xy_motion_recovery_state("idle")
+
+    def _first_local_nonterminal_after(self, completed_frontier):
+        completed = int(completed_frontier or 0)
+        candidates = [
+            command
+            for command in list(getattr(self.command_queue, "queue", []))
+            if int(getattr(command, "command_number", 0) or 0) > completed
+            and str(getattr(command, "status", "")) not in {"Completed", "Canceled"}
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda command: int(command.command_number))
+
+    def _detect_xy_motion_fault(self, data):
+        if self.get_xy_motion_recovery_state() != "idle":
+            return None
+        if getattr(self, "_transport_fault_report", None):
+            return None
+        if getattr(self, "_waiting_for_post_clear_status", False):
+            return None
+        if getattr(self, "_pending_clear_request", None) is not None:
+            return None
+        if getattr(self, "_session_recovery_in_progress", False):
+            return None
+        if getattr(self, "_goodbye_seq32", None) is not None:
+            return None
+        if not bool(data.get("Transport_paused", False)):
+            return None
+        if bool(data.get("Pause_watermark_reached", False)):
+            return None
+
+        depth = self._coerce_optional_int(data.get("cmd_depth"))
+        current = self._coerce_optional_int(data.get("Current_command"))
+        completed = self._coerce_optional_int(data.get("Last_completed"))
+        accepted = self._coerce_optional_int(data.get("Last_accepted"))
+        retired = self._coerce_optional_int(data.get("Last_retired"))
+        if None in {depth, current, completed, accepted, retired}:
+            return None
+        if depth != 0:
+            return None
+
+        source = None
+        failed_command = None
+        if (
+            getattr(self, "_awaiting_first_status_after_hello", False)
+            and current == 0
+            and completed == 0
+            and accepted == 0
+            and retired == 0
+        ):
+            source = "post_hello_latched_status"
+        elif current == retired == accepted and retired > completed:
+            failed_command = self._first_local_nonterminal_after(completed)
+            if failed_command is None or failed_command.command_type != "ABSOLUTE_XY":
+                return None
+            source = "terminal_frontier"
+        else:
+            return None
+
+        failed_seq32 = (
+            int(failed_command.command_number)
+            if failed_command is not None
+            else None
+        )
+        fault_key = (
+            int(getattr(self, "_transport_epoch", 0)),
+            source,
+            failed_seq32,
+            completed,
+            retired,
+        )
+        if fault_key == getattr(self, "_xy_motion_fault_key", None):
+            return None
+        return {
+            "fault_key": fault_key,
+            "source": source,
+            "failed_command_number": failed_seq32,
+            "failed_command_type": (
+                str(failed_command.command_type)
+                if failed_command is not None
+                else "ABSOLUTE_XY"
+            ),
+            "frontiers": {
+                "current": current,
+                "completed": completed,
+                "accepted": accepted,
+                "retired": retired,
+                "depth": depth,
+            },
+        }
+
+    def _latch_xy_motion_fault(self, candidate):
+        candidate = dict(candidate or {})
+        self._xy_motion_fault_key = candidate.pop("fault_key", None)
+        self._tx_paused = True
+        self._set_xy_motion_recovery_state("clear_required")
+        self._cancel_all_queue_ack_waits()
+        self._cancel_pending_pause_after_requests()
+        self._clear_queue_gap_repair("xy_motion_failure")
+        try:
+            self.stop_execution_timer()
+        except Exception:
+            pass
+
+        payload = {
+            "fault_code": "xy_motion_terminal_failure",
+            **candidate,
+        }
+        self._record_black_box_event("xy_motion_failure", payload)
+        snapshot_result = self._write_black_box_snapshot("xy_motion_failure", payload)
+        report = {
+            "reason": "xy_motion_failure",
+            "fault_code": "xy_motion_terminal_failure",
+            "summary": "XY motion stopped before reaching its commanded endpoint.",
+            **candidate,
+            "requested_stop": False,
+            "port": getattr(self, "port", None),
+            "requires_clear": True,
+            "requires_homing": True,
+            "requires_reset": False,
+            "black_box_reason": "xy_motion_failure",
+            "black_box_log_path": snapshot_result.get("path"),
+            "black_box_log_error": snapshot_result.get("error"),
+        }
+        self._xy_motion_fault_report = dict(report)
+        self._record_black_box_event("xy_motion_failure_reported", report)
+        self.xy_motion_faulted.emit(dict(report))
+        return report
+
     def _record_command_event(self, command, event_name):
         metadata = dict(getattr(command, "trace_metadata", {}) or {})
         request_id = metadata.get("request_id")
@@ -6613,17 +6818,30 @@ class Machine(QObject):
             self.status_history.append(sample)
             self._latest_status_sample = dict(sample)
             self._update_pause_after_requests_from_status(sample)
+            fault_report = None
+            release_after_status = False
+            fault_candidate = self._detect_xy_motion_fault(data)
+            if fault_candidate is not None:
+                self._awaiting_first_status_after_hello = False
+                fault_report = self._latch_xy_motion_fault(fault_candidate)
+            elif getattr(self, "_awaiting_first_status_after_hello", False):
+                self._awaiting_first_status_after_hello = False
+                self._tx_paused = False
+                release_after_status = True
             if getattr(self, "_waiting_for_post_clear_status", False):
                 depth = data.get("cmd_depth", 0)
                 curr  = data.get("Current_command", 0)
                 last  = data.get("Last_completed", 0)
                 retired = data.get("Last_retired", last)
-                if depth == 0 and curr == retired:
+                transport_paused = bool(data.get("Transport_paused", False))
+                if depth == 0 and curr == retired and not transport_paused:
                     self._waiting_for_post_clear_status = False
                     self._align_command_counter_after_clear(retired)
                     self._tx_paused = False
+                    if self.get_xy_motion_recovery_state() == "clear_pending":
+                        self._set_xy_motion_recovery_state("home_required")
                     self.begin_execution_timer()
-                    self.pump_send_queue()
+                    release_after_status = True
                     self._complete_pending_clear_request(
                         status_confirmed=True,
                         status_timed_out=False,
@@ -6631,14 +6849,22 @@ class Machine(QObject):
                 elif time.time() > getattr(self, "_wait_for_clear_status_deadline", 0):
                     # fallback: don’t block forever
                     self._waiting_for_post_clear_status = False
-                    self._tx_paused = False
-                    self.begin_execution_timer()
-                    self.pump_send_queue()
+                    if self.get_xy_motion_recovery_state() == "clear_pending":
+                        self._tx_paused = True
+                        self._set_xy_motion_recovery_state("clear_required")
+                    else:
+                        self._tx_paused = False
+                        self.begin_execution_timer()
+                        release_after_status = True
                     self._complete_pending_clear_request(
                         status_confirmed=False,
                         status_timed_out=True,
                     )
             self.status_updated.emit(data)
+            if fault_report is not None:
+                self.command_queue.cancel_nonterminal_commands()
+            elif release_after_status:
+                self.pump_send_queue()
         else:
             print(f"Received non-dict status data: {data}")
     
@@ -6668,7 +6894,18 @@ class Machine(QObject):
             if accepted_frontiers:
                 self._advance_queue_gap_repair(max(accepted_frontiers), "status")
 
-    def add_command_to_queue(self, command_type, param1, param2, param3, handler=None, kwargs=None, manual=False, trace_metadata=None):
+    def add_command_to_queue(
+        self,
+        command_type,
+        param1,
+        param2,
+        param3,
+        handler=None,
+        kwargs=None,
+        manual=False,
+        trace_metadata=None,
+        _xy_rehome_authorized=False,
+    ):
         """Add a command to the queue."""
         # if self.board is None:
         #     print('No board connected')
@@ -6679,11 +6916,31 @@ class Machine(QObject):
         #         print('Cannot add manual command while commands are in queue')
         #         return False
         blocked_reason = getattr(self, "_command_queue_blocked_reason", None)
-        if blocked_reason:
-            message = (
-                f"Cannot queue {command_type}: machine connection is not trusted after "
-                f"{blocked_reason}. Reconnect to the MCU and home the motors before sending commands."
-            )
+        recovery_state = self.get_xy_motion_recovery_state()
+        recovery_types = ("HOME_Z", "HOME_XY", "HOME_PR_BOTH")
+        recovery_authorized = bool(
+            _xy_rehome_authorized
+            and getattr(self, "_xy_rehome_batch_queuing", False)
+            and recovery_state == "home_required"
+            and int(getattr(self, "_xy_rehome_batch_index", 0)) < len(recovery_types)
+            and command_type == recovery_types[int(self._xy_rehome_batch_index)]
+        )
+        if blocked_reason and not recovery_authorized:
+            if recovery_state in {"clear_required", "clear_pending"}:
+                message = (
+                    f"Cannot queue {command_type}: {blocked_reason}. "
+                    "Use Clear Queue and wait for confirmation before homing."
+                )
+            elif recovery_state in {"home_required", "home_in_progress"}:
+                message = (
+                    f"Cannot queue {command_type}: {blocked_reason}. "
+                    "Complete the required full Home before sending other commands."
+                )
+            else:
+                message = (
+                    f"Cannot queue {command_type}: machine connection is not trusted after "
+                    f"{blocked_reason}. Reconnect to the MCU and home the motors before sending commands."
+                )
             self._record_black_box_event(
                 "command_rejected_untrusted_transport",
                 {
@@ -6703,6 +6960,8 @@ class Machine(QObject):
             kwargs,
             trace_metadata=trace_metadata,
         )
+        if recovery_authorized:
+            self._xy_rehome_batch_index += 1
         if self._transport_ready and not self._tx_paused and not self._sequence_pause:
             self.pump_send_queue()
         return command
@@ -7370,7 +7629,15 @@ class Machine(QObject):
         """
         if not self._transport_ready:
             return
-        if getattr(self, "_command_queue_blocked_reason", None):
+        recovery_state = self.get_xy_motion_recovery_state()
+        blocked_reason = getattr(self, "_command_queue_blocked_reason", None)
+        if (
+            blocked_reason
+            and not (
+                recovery_state == "home_in_progress"
+                and blocked_reason == "xy_rehome_in_progress"
+            )
+        ):
             return
         if getattr(self, "_tx_paused", False) or getattr(self, "_sequence_pause", False):
             return
@@ -7381,6 +7648,11 @@ class Machine(QObject):
         while True:
             command = self.command_queue.get_next_command()
             if not command:
+                return
+            if (
+                recovery_state == "home_in_progress"
+                and int(command.command_number) not in self._xy_rehome_command_numbers
+            ):
                 return
 
             if command.command_type in ('OPEN_GRIPPER', 'CLOSE_GRIPPER') and not self._gripper_ack_required:
@@ -7421,6 +7693,11 @@ class Machine(QObject):
     def clear_command_queue(self, handler=None):
         print('Clearing command queue')
 
+        recovery_state = self.get_xy_motion_recovery_state()
+        if recovery_state == "clear_pending":
+            self.error_occurred.emit("Clear Queue is already waiting for MCU confirmation.")
+            return False
+
         self._clear_queue_gap_repair("queue_clear_requested")
 
         if hasattr(self, 'execution_timer') and self.execution_timer:
@@ -7437,6 +7714,11 @@ class Machine(QObject):
         seq = self._alloc_ctl_seq32()
         frame = build_frame(CLEAR_QUEUE, seq)
         self._write_frame(frame)
+        if recovery_state != "idle":
+            self._xy_rehome_batch_queuing = False
+            self._xy_rehome_batch_index = 0
+            self._xy_rehome_command_numbers.clear()
+            self._set_xy_motion_recovery_state("clear_pending")
         self._pending_clear_request = {
             "handler": handler,
             "ack_received": False,
@@ -7447,7 +7729,8 @@ class Machine(QObject):
             CLEAR_ACK, seq, 2000,
             on_ok=lambda: self._on_clear_ack(timed_out=False),
             on_timeout=lambda: self._on_clear_ack(timed_out=True)
-        )        
+        )
+        return True
 
     def set_sequence_pause(self, paused: bool):
         self._sequence_pause = bool(paused)
@@ -7945,12 +8228,97 @@ class Machine(QObject):
         self.location = 'Home'
         self.homing_completed.emit()
 
+    def _complete_xy_rehome(self, additional_handler=None, additional_kwargs=None):
+        report = dict(getattr(self, "_xy_motion_fault_report", None) or {})
+        self._record_black_box_event(
+            "xy_motion_recovery_completed",
+            {"failed_command_number": report.get("failed_command_number")},
+        )
+        self._xy_motion_fault_report = None
+        self._xy_motion_fault_key = None
+        self._set_xy_motion_recovery_state("idle")
+        self.home_motor_handler()
+        if additional_handler is not None and additional_handler != self.home_motor_handler:
+            additional_handler(**dict(additional_kwargs or {}))
+
     def home_motors(self,handler=None,kwargs=None,manual=False):
         # A new home invalidates the previous coordinate reference immediately.
         # Only the final command handler may mark the machine homed again.
         self.homed = False
         self.location = 'Unknown'
-        if handler == None:
+        recovery_state = self.get_xy_motion_recovery_state()
+        if recovery_state != "idle":
+            if recovery_state != "home_required":
+                self.error_occurred.emit(
+                    "Cannot home yet. Clear Queue must be confirmed after the XY motion failure."
+                )
+                return False
+            if (
+                not self._transport_ready
+                or self._tx_paused
+                or self._sequence_pause
+                or not self.check_if_all_completed()
+            ):
+                self.error_occurred.emit(
+                    "Cannot start XY recovery home until transport is ready and the command queue is empty."
+                )
+                return False
+
+            self._xy_rehome_batch_queuing = True
+            self._xy_rehome_batch_index = 0
+            self._sequence_pause = True
+            queued = []
+            try:
+                queued.append(self.add_command_to_queue(
+                    'HOME_Z', 10000, 1000, 1000,
+                    handler=None, kwargs=None, manual=manual,
+                    _xy_rehome_authorized=True,
+                ))
+                queued.append(self.add_command_to_queue(
+                    'HOME_XY', 10000, 1000, 1000,
+                    handler=None, kwargs=None, manual=manual,
+                    _xy_rehome_authorized=True,
+                ))
+                queued.append(self.add_command_to_queue(
+                    'HOME_PR_BOTH', 10000, 1000, 1000,
+                    handler=lambda: self._complete_xy_rehome(handler, kwargs),
+                    kwargs=None,
+                    manual=manual,
+                    _xy_rehome_authorized=True,
+                ))
+            except Exception as exc:
+                self._record_black_box_event(
+                    "xy_rehome_batch_queue_failed",
+                    {"error": str(exc)},
+                )
+                queued.append(False)
+            finally:
+                self._xy_rehome_batch_queuing = False
+                self._sequence_pause = False
+
+            if len(queued) != 3 or not all(queued):
+                self.command_queue.cancel_nonterminal_commands()
+                self._xy_rehome_batch_index = 0
+                self._xy_rehome_command_numbers.clear()
+                self._set_xy_motion_recovery_state("home_required")
+                self.error_occurred.emit(
+                    "The full recovery home could not be queued. Clear Queue and try Home again."
+                )
+                return False
+
+            self._xy_rehome_command_numbers = {
+                int(command.command_number) for command in queued
+            }
+            self._set_xy_motion_recovery_state("home_in_progress")
+            self._record_black_box_event(
+                "xy_rehome_batch_queued",
+                {"command_numbers": sorted(self._xy_rehome_command_numbers)},
+            )
+            self.begin_execution_timer()
+            self.pump_send_queue()
+            return True
+
+        if handler is None:
             handler = self.home_motor_handler
         self.add_command_to_queue('HOME_Z',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)
         self.add_command_to_queue('HOME_XY',10000,1000,1000,handler=None,kwargs=kwargs,manual=manual)

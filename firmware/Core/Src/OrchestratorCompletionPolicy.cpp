@@ -48,4 +48,13 @@ void retireCurrentCommand(uint32_t currentCmdNum, uint32_t& lastExecutedCmdNum, 
     lastRetiredCmdNum = currentCmdNum;
 }
 
+void retireFailedAcceptedCommands(uint32_t lastAcceptedCmdNum,
+                                  uint32_t& currentCmdNum,
+                                  uint32_t& lastRetiredCmdNum) {
+    if (lastAcceptedCmdNum > lastRetiredCmdNum) {
+        lastRetiredCmdNum = lastAcceptedCmdNum;
+    }
+    currentCmdNum = lastRetiredCmdNum;
+}
+
 }  // namespace OrchestratorCompletionPolicy

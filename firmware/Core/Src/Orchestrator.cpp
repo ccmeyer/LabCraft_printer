@@ -390,6 +390,14 @@ BaseType_t Orchestrator::enqueueFromISR(const Command& cmd, BaseType_t* pxHigher
 		return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
 	}
 
+	// A terminal XY failure is recoverable only through CMD_CLEAR. Keep the
+	// expected frontier fixed so no normal command can become accepted while
+	// the failure latch is active. Control commands were handled above.
+	if (_xyMotionFailureLatched) {
+		ack.ackResult = ACK_RESULT_BUSY;
+		return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
+	}
+
 	if (_cmdQueue == nullptr) {
 		ack.ackResult = ACK_RESULT_BUSY;
 		return enqueueAckFromISR(ack, pxHigherPriorityTaskWoken);
@@ -675,6 +683,14 @@ void Orchestrator::latchXyMotionFailure(
   _paused = true;
   _pauseRequested = false;
   Gantry::instance()->cancelXYZMotors();
+  if (_cmdQueue != nullptr) {
+    xQueueReset(_cmdQueue);
+  }
+  OrchestratorCompletionPolicy::retireFailedAcceptedCommands(
+      _lastAcceptedCmdNum, _currentCmdNum, _lastRetiredCmdNum);
+  _hasInFlightCommand = false;
+  _pauseAfterSeq32 = 0u;
+  _pauseWatermarkReached = false;
   Logger::instance()->log("[XY] motion failure latched reason=%s\r\n",
                           XyMotionFaultContext_ReasonName(context.reason));
 }

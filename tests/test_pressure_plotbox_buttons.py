@@ -37,6 +37,8 @@ _PRINT_PROFILES = [
 
 class _FakeMachineModel(QObject):
     machine_state_updated = Signal(bool)
+    motor_state_changed = Signal(bool)
+    home_status_signal = Signal()
     regulation_state_changed = Signal(bool)
     pressure_updated = Signal()
     printing_parameters_updated = Signal()
@@ -52,9 +54,13 @@ class _FakeMachineModel(QObject):
         print_pulse_width=3000,
         refuel_pulse_width=3000,
         connected=True,
+        motors_enabled=True,
+        motors_homed=True,
     ):
         super().__init__()
         self.machine_connected = bool(connected)
+        self.motors_enabled = bool(motors_enabled)
+        self.motors_homed = bool(motors_homed)
         self.regulating_print_pressure = regulating_print_pressure
         self.regulating_refuel_pressure = (
             regulating_print_pressure
@@ -74,7 +80,10 @@ class _FakeMachineModel(QObject):
         return self.machine_connected
 
     def motors_are_enabled(self):
-        return True
+        return self.motors_enabled
+
+    def motors_are_homed(self):
+        return self.motors_homed
 
     def get_print_pressure_readings(self):
         return list(self.print_pressure_readings)
@@ -182,6 +191,7 @@ def _make_controller(events, *, queue_clear=True, imaging_preflight=None, refuel
         ),
         disable_print_profile=Mock(side_effect=lambda: events.append("disable_print_profile")),
         clear_command_queue=Mock(),
+        get_xy_motion_recovery_state=Mock(return_value="idle"),
         get_print_array_imaging_calibration_preflight=Mock(return_value=imaging_preflight),
         get_print_array_refuel_check_preflight=Mock(return_value=refuel_preflight),
     )
@@ -1439,6 +1449,63 @@ def test_transport_fault_releases_pending_camera_launch_controls(qapp):
     assert box._print_profile_apply_pending is False
     assert box.calibrate_pressure_button.isEnabled()
     assert box.refuel_camera_button.isEnabled()
+
+
+def test_xy_recovery_disables_calibration_and_rejects_stale_click(qapp):
+    events = []
+    popups = []
+    controller = _make_controller(events)
+    controller.get_xy_motion_recovery_state.return_value = "clear_required"
+    model = _make_model(
+        _FakeMachineModel(
+            regulating_print_pressure=True,
+            current_location="camera",
+            motors_homed=False,
+        ),
+        events,
+        printer_head=object(),
+    )
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        model,
+        controller,
+    )
+
+    assert box.calibrate_pressure_button.isEnabled() is False
+    assert "Clear Queue" in box.calibrate_pressure_button.toolTip()
+
+    box.droplet_imager()
+
+    controller.move_to_location.assert_not_called()
+    assert popups == [
+        (
+            "XY Recovery Required",
+            "XY motion stopped. Use Clear Queue, wait for confirmation, then run a full Home.",
+        )
+    ]
+
+
+def test_calibration_reenables_after_xy_recovery_home_completes(qapp):
+    events = []
+    popups = []
+    controller = _make_controller(events)
+    recovery_state = {"value": "home_in_progress"}
+    controller.get_xy_motion_recovery_state.side_effect = (
+        lambda: recovery_state["value"]
+    )
+    machine_model = _FakeMachineModel(motors_homed=False)
+    box = PressurePlotBox(
+        _make_main_window(CURRENT_PROFILE, popups),
+        _make_model(machine_model, events, printer_head=object()),
+        controller,
+    )
+
+    assert box.calibrate_pressure_button.isEnabled() is False
+    recovery_state["value"] = "idle"
+    machine_model.motors_homed = True
+    machine_model.home_status_signal.emit()
+
+    assert box.calibrate_pressure_button.isEnabled() is True
 
 
 def test_clear_queue_cancels_camera_launch_and_invalidates_stale_completion(

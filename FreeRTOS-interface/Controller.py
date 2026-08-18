@@ -1057,6 +1057,9 @@ class Controller(QObject):
         transport_fault_signal = getattr(self.machine, "transport_faulted", None)
         if transport_fault_signal is not None:
             transport_fault_signal.connect(self.handle_transport_fault)
+        xy_motion_fault_signal = getattr(self.machine, "xy_motion_faulted", None)
+        if xy_motion_fault_signal is not None:
+            xy_motion_fault_signal.connect(self.handle_xy_motion_fault)
         self.machine.disconnect_complete_signal.connect(self.reset_board)
         self.machine.flash_state_updated.connect(self.model.update_flash_session_state)
         ejection_signal = getattr(self.machine, "ejection_command_event", None)
@@ -2440,6 +2443,55 @@ class Controller(QObject):
         sections.extend([guidance, log_status])
         self.error_occurred_signal.emit("Command Transport Paused", "\n\n".join(sections))
 
+    def handle_xy_motion_fault(self, report: dict):
+        report = dict(report or {})
+        if getattr(self, "_seq_state", "idle") == "running":
+            self._abort_sequence("XY motion stopped before the sequence completed.")
+
+        manager = self._stream_capture_manager()
+        invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
+        if callable(invalidate):
+            invalidate(
+                "XY motion failure invalidated the reusable mass baseline.",
+                transport_uncertain=True,
+            )
+
+        machine_model = self.model.machine_model
+        machine_model.reset_home_status()
+        machine_model.home_status_signal.emit()
+        self.expected_position = machine_model.get_current_position_dict()
+        self.expected_location = None
+        self._interrupt_array_after_transport_fault(
+            report,
+            reason="xy_motion_failure",
+        )
+        self._emit_machine_workflow_interrupted("xy_motion_failure")
+
+        summary = report.get("summary") or "XY motion stopped before reaching its commanded endpoint."
+        failed_seq32 = report.get("failed_command_number")
+        sequence_detail = (
+            f"Failed command: ABSOLUTE_XY sequence {failed_seq32}."
+            if failed_seq32 is not None
+            else "The MCU reported a retained XY motion-failure latch after reconnecting."
+        )
+        guidance = (
+            "The MCU did not reset and the move will not resume automatically. Keep clear of the gantry, "
+            "inspect the X/Y travel and release any asserted limit switch. Then use Clear Queue, wait for "
+            "confirmation, and run a full Home before sending more motion or calibration commands."
+        )
+        log_path = report.get("black_box_log_path")
+        log_error = report.get("black_box_log_error")
+        if log_path:
+            log_status = f"Black-box log: {log_path}"
+        elif log_error:
+            log_status = f"Black-box log save failed: {log_error}"
+        else:
+            log_status = "Black-box log: not available"
+        self.error_occurred_signal.emit(
+            "XY Motion Stopped",
+            "\n\n".join((summary, sequence_detail, guidance, log_status)),
+        )
+
     def _append_reset_report_log(self, report: dict) -> str:
         path = Path(getattr(self, "_reset_report_log_path", Path("logs") / "board_reset_reports.jsonl"))
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2457,6 +2509,12 @@ class Controller(QObject):
         if callable(getter):
             return getter()
         return getattr(self.machine, "port", "")
+
+    def get_xy_motion_recovery_state(self):
+        getter = getattr(self.machine, "get_xy_motion_recovery_state", None)
+        if callable(getter):
+            return str(getter() or "idle")
+        return "idle"
 
     # def connect_balance(self, port):
     #     """Connect to the microbalance."""
@@ -4433,12 +4491,13 @@ class Controller(QObject):
         )
         return next_state
 
-    def _interrupt_array_after_transport_fault(self, report=None):
+    def _interrupt_array_after_transport_fault(self, report=None, *, reason="transport_fault"):
         previous_state = self.get_array_run_state()
         if previous_state not in {"running", "stop_requested"}:
             return None
 
-        self._mark_evap_plate_dock_check_required("transport_fault")
+        reason = str(reason or "transport_fault")
+        self._mark_evap_plate_dock_check_required(reason)
 
         context = getattr(self, "_array_context", None)
         try:
@@ -4458,7 +4517,7 @@ class Controller(QObject):
         report = dict(report or {})
         audit_details.update(
             {
-                "finalize_reason": "transport_fault",
+                "finalize_reason": reason,
                 "fault_code": report.get("fault_code"),
                 "previous_array_state": previous_state,
                 "array_state": self.get_array_run_state(),
@@ -4466,9 +4525,19 @@ class Controller(QObject):
                 "remaining_wells_for_loaded_stock": has_remaining,
             }
         )
+        event_suffix = (
+            "xy_motion_failure"
+            if reason == "xy_motion_failure"
+            else "transport_fault"
+        )
+        event_message = (
+            "Print array interrupted by XY motion failure"
+            if reason == "xy_motion_failure"
+            else "Print array interrupted by command transport fault"
+        )
         self._record_print_array_audit_event(
-            "print_array_interrupted_by_transport_fault",
-            "Print array interrupted by command transport fault",
+            f"print_array_interrupted_by_{event_suffix}",
+            event_message,
             details=audit_details,
             level="error",
         )
@@ -5648,7 +5717,7 @@ class Controller(QObject):
         print("Homing machine...")
         self.model.machine_model.reset_home_status()
         self.model.machine_model.home_status_signal.emit()
-        self.machine.home_motors()
+        return self.machine.home_motors()
 
     def home_regulators(self):
         """Home the regulators."""

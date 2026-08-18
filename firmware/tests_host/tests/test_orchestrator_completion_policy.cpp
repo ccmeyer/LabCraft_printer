@@ -44,6 +44,30 @@ TEST(OrchestratorCompletionPolicyTests, SuccessfulWaitRetiresBothFrontiers) {
     UNSIGNED_LONGS_EQUAL(12u, lastRetired);
 }
 
+TEST(OrchestratorCompletionPolicyTests, FailedAbsXyRetiresAcceptedWindowWithoutCompletingIt) {
+    uint32_t current = 8u;
+    uint32_t lastExecuted = 7u;
+    uint32_t lastRetired = 7u;
+
+    OrchestratorCompletionPolicy::retireFailedAcceptedCommands(
+        11u, current, lastRetired);
+
+    UNSIGNED_LONGS_EQUAL(7u, lastExecuted);
+    UNSIGNED_LONGS_EQUAL(11u, lastRetired);
+    UNSIGNED_LONGS_EQUAL(11u, current);
+}
+
+TEST(OrchestratorCompletionPolicyTests, FailedAbsXyNeverMovesRetiredFrontierBackward) {
+    uint32_t current = 12u;
+    uint32_t lastRetired = 12u;
+
+    OrchestratorCompletionPolicy::retireFailedAcceptedCommands(
+        11u, current, lastRetired);
+
+    UNSIGNED_LONGS_EQUAL(12u, lastRetired);
+    UNSIGNED_LONGS_EQUAL(12u, current);
+}
+
 TEST(OrchestratorCompletionPolicyTests, WaitCommandOnlyRetiresWhenDelayCompletes) {
     CHECK_FALSE(OrchestratorCompletionPolicy::didPauseAwareDelayComplete(false, 4u));
     CHECK_FALSE(OrchestratorCompletionPolicy::didPauseAwareDelayComplete(true, 2u));

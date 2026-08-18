@@ -3047,6 +3047,13 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.model.machine_model.machine_state_updated.connect(self.update_regulation_button_state)
         self.model.machine_model.regulation_state_changed.connect(self.update_regulation_button)
         self.model.machine_model.printing_parameters_updated.connect(self.update_printing_controls)
+        self.model.machine_model.machine_state_updated.connect(
+            lambda *_args: self._refresh_droplet_imager_button_state()
+        )
+        for signal_name in ("motor_state_changed", "home_status_signal"):
+            signal = getattr(self.model.machine_model, signal_name, None)
+            if signal is not None:
+                signal.connect(lambda *_args: self._refresh_droplet_imager_button_state())
         experiment_loaded_signal = getattr(self.model, "experiment_loaded", None)
         if experiment_loaded_signal is not None:
             experiment_loaded_signal.connect(self._refresh_droplet_imager_button_state)
@@ -3069,6 +3076,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         self.update_regulation_button_state(self.model.machine_model.is_connected())
         self.popup_message_signal.connect(self.main_window.popup_message)
         self.update_printing_controls()
+        self._refresh_droplet_imager_button_state()
 
     @staticmethod
     def _spinbox_is_being_edited(spinbox):
@@ -3245,6 +3253,64 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             except Exception:
                 return False
         return bool(getattr(machine_model, "machine_connected", False))
+
+    def _motors_are_enabled_for_droplet_imager(self):
+        machine_model = getattr(self.model, "machine_model", None)
+        getter = getattr(machine_model, "motors_are_enabled", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        return bool(getattr(machine_model, "motors_enabled", True))
+
+    def _motors_are_homed_for_droplet_imager(self):
+        machine_model = getattr(self.model, "machine_model", None)
+        getter = getattr(machine_model, "motors_are_homed", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        return bool(getattr(machine_model, "motors_homed", True))
+
+    def _xy_motion_recovery_state(self):
+        getter = getattr(self.controller, "get_xy_motion_recovery_state", None)
+        if not callable(getter):
+            return "idle"
+        try:
+            return str(getter() or "idle")
+        except Exception:
+            return "idle"
+
+    def _droplet_imager_machine_blocker(self):
+        if not self._machine_is_connected():
+            return (
+                "Machine Not Connected",
+                "Connect to the machine before starting printer-head calibration.",
+            )
+        recovery_state = self._xy_motion_recovery_state()
+        if recovery_state in {"clear_required", "clear_pending"}:
+            return (
+                "XY Recovery Required",
+                "XY motion stopped. Use Clear Queue, wait for confirmation, then run a full Home.",
+            )
+        if recovery_state in {"home_required", "home_in_progress"}:
+            return (
+                "Homing Required",
+                "A full Home must complete before printer-head calibration can continue.",
+            )
+        if not self._motors_are_enabled_for_droplet_imager():
+            return (
+                "Motors Not Enabled",
+                "Enable the motors before starting printer-head calibration.",
+            )
+        if not self._motors_are_homed_for_droplet_imager():
+            return (
+                "Homing Required",
+                "Home the machine before starting printer-head calibration.",
+            )
+        return None
 
     def _set_print_profile_button(self, text, *, enabled, color):
         button = getattr(self, "print_profile_apply_button", None)
@@ -3808,8 +3874,15 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                     else "Waiting for the simulator calibration workflow to initialize."
                 )
             else:
-                button.setEnabled(not self._droplet_imager_launch_is_active())
-                button.setToolTip("")
+                blocker = self._droplet_imager_machine_blocker()
+                launch_active = self._droplet_imager_launch_is_active()
+                button.setEnabled(blocker is None and not launch_active)
+                if blocker is not None:
+                    button.setToolTip(blocker[1])
+                elif launch_active:
+                    button.setToolTip("The droplet imager is already opening or open.")
+                else:
+                    button.setToolTip("")
 
     def bind_simulation_workflows(
         self,
@@ -4556,6 +4629,12 @@ class PressurePlotBox(QtWidgets.QGroupBox):
                 )
                 return
             return self._launch_simulation_calibration_dialog()
+
+        blocker = self._droplet_imager_machine_blocker()
+        if blocker is not None:
+            self._refresh_droplet_imager_button_state()
+            self.popup_message_signal.emit(*blocker)
+            return
 
         if not self.controller.check_if_all_completed():
             self.popup_message_signal.emit(
