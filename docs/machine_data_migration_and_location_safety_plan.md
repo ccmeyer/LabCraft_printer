@@ -53,9 +53,9 @@ For every milestone update:
 | Milestone | Scope | Status | Implementation | Validation |
 | --- | --- | --- | --- | --- |
 | 0 | Preserve deployed machine state | `verified` | Operator backup complete | Operator attestation recorded |
-| 1 | Freeze external machine-data contract | `implementation_complete` | Inert contract complete on `update_bug_fix`; milestone commit pending | 101 focused and 5,100 full-suite tests passed |
-| 2 | Build inert migration and backup engine | `planned` | Not started | Not started |
-| 3 | Activate first-launch migration and verification | `planned` | Not started | Not started |
+| 1 | Freeze external machine-data contract | `verified` | Commit `9b882141` | 101 focused and 5,100 full-suite tests passed |
+| 2 | Build inert migration and backup engine | `verified` | Commit `157db800` | 180 focused and 5,179 full-suite tests plus static checks passed |
+| 3 | Activate first-launch migration and verification | `implementation_complete` | All eight implementation slices and the dedicated commit are complete on `update_bug_fix` | 287 focused passed/1 skipped; 5,232 full passed/153 skipped; standard host SIL passed; manual Pi gate pending |
 | 4 | Add transactional configuration history | `planned` | Not started | Not started |
 | 5 | Add guarded location and calibration changes | `planned` | Not started | Not started |
 | 6 | Protect future updates and controlled rollback | `planned` | Not started | Not started |
@@ -336,13 +336,26 @@ begins only after the update, when rc.2 is relaunched.
 
 ## Target architecture
 
-The exact OS paths are a Milestone 1 decision. The logical layout is:
+Milestone 1 froze the default base as
+`QStandardPaths.AppLocalDataLocation/machine-data` for the same OS account,
+with an explicitly constrained override for managed deployments and tests.
+Milestone 2 adds base-scoped migration locks/workspaces without changing the
+canonical per-machine contract. Milestone 3 adds a separate activation
+workspace and activation evidence without rewriting Milestone 2 provenance:
 
 ```text
 <machine-data-root>/
   active_machine.json
+  locks/
+    migration-<machine_uuid>.lock
+  migration_work/
+    <machine_uuid>/
+      <migration_id>/
+  activation_work/
+    <machine_uuid>/
+      <activation_id>/
   machines/
-    LC-001/
+    <machine_uuid>/
       config/
         Locations.json
         Settings.json
@@ -350,10 +363,16 @@ The exact OS paths are a Milestone 1 decision. The logical layout is:
         Obstacles.json
         RegulatorProfiles.json
       CalibrationMemory/
+      calibration/
+        droplet_imager_optics.json
+        regulator_optimization/
       metadata/
-        machine.json
+        machine_identity.json
+        candidate_evidence.json
+        migration_tree_manifest.json
         verification.json
         migration_receipt.json
+        activation_receipt.json
       history/
         configuration_events/
         pending_transactions/
@@ -367,15 +386,10 @@ The exact OS paths are a Milestone 1 decision. The logical layout is:
         configuration.lock
 ```
 
-Illustrative defaults to evaluate in Milestone 1:
-
-- Windows system-wide: `%PROGRAMDATA%/LabCraft/...`, with installer-managed
-  permissions.
-- Windows per-user fallback: an OS application-data directory outside the
-  checkout.
-- Raspberry Pi/Linux: an installation-configured writable data root outside
-  the repository, such as a service-owned directory or a stable directory
-  beneath the deployment user's home.
+The rc.2 default is per-account on both Windows and Pi/Linux. Changing the
+launcher OS account resolves a different root and must fail closed into the
+Milestone 3 source-selection workflow. A future system-wide installation path
+requires a separate permissions and deployment contract.
 
 Do not select a removable drive, Desktop backup, or Git worktree as the
 canonical root. Those are candidate/backup sources only.
@@ -390,6 +404,8 @@ canonical root. Those are candidate/backup sources only.
 | Obstacles | Yes | Yes | Safety-related, currently minimal |
 | Regulator profiles | Yes | Yes | Machine-owned configuration |
 | CalibrationMemory | Yes | Yes | Machine-owned learned/calibration state |
+| Droplet-imager optics | Yes | Yes when present | Optional machine calibration; injected path |
+| Regulator optimization | Yes | Yes when present | Machine calibration runs/diagnostics; not active profile authority |
 | Machine identity | Yes | Yes when present | Must not be guessed from hostname alone |
 | Configuration audit/history | Yes | Not present on legacy tags | Created by rc.2 |
 | Migration/update/rollback receipts | Yes | Legacy update logs included | Created or consolidated by rc.2 |
@@ -406,12 +422,16 @@ App.main()
 -> acquire application-wide instance lock
 -> MachineDataBootstrap.prepare()
    -> resolve external base
-   -> acquire canonical transaction/migration lock
-   -> resolve active machine identity
-   -> validate existing canonical store OR discover/import candidate
+   -> inspect active state OR discover/inspect explicit candidate
+   -> assign/confirm machine identity
+   -> acquire UUID migration lock when migration/activation is required
    -> create and verify migration backup
-   -> obtain copy/source/calibration verification decisions
-   -> return verified ApplicationRoots
+   -> publish/reconcile and verify immutable M2 copied-unverified baseline
+   -> obtain source/calibration verification decisions
+   -> acquire and retain per-machine configuration lock
+   -> write/reopen verification and activation receipts
+   -> write/reopen active pointer last
+   -> return AuthorizedMachineContext
 -> load Settings from returned config root
 -> construct Model with the same config root
 -> construct Controller/View/Machine only when startup authorization permits
@@ -426,12 +446,18 @@ The active-machine record must minimally identify:
 - schema name and version;
 - stable machine ID;
 - canonical machine directory;
+- activation and migration IDs plus the activation-receipt hash;
 - assignment timestamp;
 - assignment source and operator where available.
 
-The machine ID source and multi-machine behavior are open Milestone 1
-decisions. An MCU/USB serial may be recorded as supporting evidence but must
-not be assumed to identify the complete printer without qualification.
+Milestone 1 froze UUID as the canonical directory key and the display machine
+ID as metadata. One `active_machine.json` pointer is supported per OS account.
+Existing assigned qualification identity may be used when valid; otherwise
+Milestone 3 requires explicit operator assignment. An MCU/USB serial may be
+recorded as supporting evidence but is not assumed to identify the complete
+printer by itself. Milestone 3 writes the hash-bound version 2 pointer;
+version 1 is diagnostic-only and cannot authorize production because the inert
+Milestones 1 and 2 never wrote an active pointer.
 
 ### Verification contract
 
@@ -476,7 +502,9 @@ file automatically. Candidates with equal required-file hashes are shown as
 duplicates. Candidates with different hashes are a conflict requiring an
 explicit choice and recorded reason.
 
-### Migration state machine
+### Migration and activation state machines
+
+Milestone 2's journal ends at publication:
 
 ```text
 uninitialized
@@ -485,11 +513,24 @@ uninitialized
   -> backup_verified
   -> staged_copy_verified
   -> copied_unverified
-  -> source_verified
-  -> calibration_verification_pending
-  -> verified
-  -> active
 ```
+
+Its `labcraft.migration_receipt` v1 stays immutable at `copied_unverified` and
+cannot authorize activation. Milestone 3 uses a separate contained activation
+journal:
+
+```text
+identity_assigned
+  -> migration_published
+  -> verification_written
+  -> activation_receipt_written
+  -> pointer_written
+```
+
+The immutable `labcraft.activation_receipt` v1 stops at
+`ready_for_activation`; the separately reopened `active_machine.json`, written
+last, proves activation. The activation receipt binds hashes of the M2 receipt,
+M2 tree manifest, installed verified backup, and verification snapshot.
 
 Failure/alternate states:
 
@@ -505,8 +546,11 @@ conflict
 recovery_required
 ```
 
-Every transition is idempotent. Relaunch after a crash resumes or reconciles a
-recorded state instead of starting a second independent migration.
+Every journal transition is idempotent and revalidates its referenced
+artifacts. Relaunch after a crash resumes or reconciles recorded evidence
+instead of starting a second independent migration. A successful M2
+publication normally has no remaining M2 workspace; recovery uses the
+published receipt, candidate evidence, tree manifest, and installed backup.
 
 ### Legacy compatibility contract
 
@@ -787,7 +831,7 @@ current state.
 
 ## Milestone 1: Freeze the external machine-data contract
 
-Status: `implementation_complete`
+Status: `verified`
 
 Concrete plan:
 [Machine Data Migration Milestone 1: Contract Implementation Plan](machine_data_migration_milestone_1_implementation_plan.md)
@@ -867,7 +911,9 @@ Remove the inert resolver and tests. Legacy production behavior remains intact.
   cross-checkout equality, containment, schema validation, LocalConfig
   behavior, and production non-activation.
 - No directory is created, no legacy file is read or changed, and no runtime
-  call path imports the new module. A dedicated Milestone 1 commit is pending.
+  call path imports the new module.
+- Dedicated Milestone 1 commit: `9b882141` (`feat: define external machine
+  data contract`).
 
 ### Validation record
 
@@ -901,7 +947,10 @@ Remove the inert resolver and tests. Legacy production behavior remains intact.
 
 ## Milestone 2: Build the inert migration and backup engine
 
-Status: `planned`
+Status: `verified`
+
+Concrete plan:
+[Machine Data Migration Milestone 2: Inert Engine Implementation Plan](machine_data_migration_milestone_2_implementation_plan.md)
 
 ### Objective
 
@@ -935,10 +984,16 @@ and tests. Do not invoke it from production startup yet.
 
 ### Expected files touched
 
-- Machine-data module(s) introduced in Milestone 1.
-- New migration/backup modules if separation improves reviewability.
-- `FreeRTOS-interface/LocalConfig.py` validation helpers as appropriate.
-- New migration, archive, and fault-injection tests.
+- New inert archive, migration, and Qt lock-adapter modules.
+- `FreeRTOS-interface/LocalConfig.py` only if a public CalibrationMemory
+  validation helper is required.
+- A reviewed historical preset fingerprint catalog for rc.6 and rc.1.
+- New migration, archive, recovery, and fault-injection tests with synthetic
+  source-cohort fixtures.
+- Parent and detailed Milestone 2 plans.
+
+`App.py`, application composition, MVC, updater, firmware, protocol, motion,
+pressure, and release metadata are explicitly outside Milestone 2.
 
 ### Tests
 
@@ -970,15 +1025,36 @@ and fixtures if they remain useful for the redesigned approach.
 
 ### Implementation record
 
-- Not started.
+- 2026-08-19: Concrete implementation plan created.
+- 2026-08-19: Implemented the inert archive, candidate, preset-classification,
+  backup, staged-copy, locking, journal, receipt, atomic-publication, and exact
+  recovery modules plus synthetic rc.6/rc.1 and fault-injection coverage.
+- Canonical machine paths now include the classified calibration subtree.
+- Production activation remains out of scope and unchanged.
+- Dedicated implementation commit `157db800`
+  (`feat: add inert machine data migration engine`) records the Milestone 2
+  code, tests, catalog, fixtures, and detailed implementation plan.
 
 ### Validation record
 
-- Not started.
+- Planning audit confirmed the two supported local tags, their common
+  historical `camera` preset value, the rc.1 Settings/root differences, and
+  the legacy identity behavior.
+- Focused gate: `180 passed, 1 skipped, 110 warnings in 10.54s`.
+- Full Python gate: `5179 passed, 153 skipped, 585 warnings in 281.23s`.
+- The focused skip is the permission-dependent Windows filesystem-symlink
+  creation case; hostile ZIP link handling is covered independently.
+- Python compilation, JSON parsing, Markdown
+  fence/encoding/trailing-whitespace checks, and `git diff --check` passed.
+- Milestone 2 is verified. Its live-status update and the reviewed Milestone 3
+  plan are post-commit documentation changes.
 
 ## Milestone 3: Activate first-launch migration and verification
 
-Status: `planned`
+Status: `implementation_complete`
+
+Concrete plan:
+[Machine Data Migration Milestone 3: Bootstrap, Verification, and Activation Plan](machine_data_migration_milestone_3_implementation_plan.md)
 
 ### Objective
 
@@ -1000,10 +1076,8 @@ enforce fail-closed movement authorization.
 9. Only then does App load Settings and construct MVC/hardware components.
 
 If the operator cancels, source is ambiguous, or verification is incomplete,
-the initial safe behavior is to exit without constructing the normal
-hardware-capable application. A restricted calibration/recovery mode may be
-added only if its hardware permissions and allowed commands are separately
-specified and tested.
+the app exits without constructing the normal hardware-capable application.
+Milestone 3 does not include a restricted hardware/calibration mode.
 
 ### Verification policy
 
@@ -1011,34 +1085,60 @@ specified and tested.
 - Machine/source verification is an explicit operator decision.
 - Camera receives its own coordinate review and verification action.
 - Preset-like configurations cannot use a blanket trust action.
-- Unverified targets remain individually blocked.
+- Every existing named location, the rack pair, and every nonempty calibrated
+  plate must be covered before first activation.
+- Any Milestone 2 unclassified source path must be resolved by a reviewed
+  ownership rule before activation; there is no blanket ignore action.
+- A preset-matching Camera cannot use trusted-source verification and requires
+  independent service-record evidence or a future controlled calibration.
+- Unverified or subsequently changed targets remain individually blocked.
 - The verification record is bound to the exact coordinate values and config
   hash; changing values revokes it.
-- The accepted list of locations requiring verification before normal startup
-  is frozen during this milestone.
 
 ### Application integration requirements
 
 - `App.main()` runs bootstrap before `get_machine_config_path("Settings.json")`.
 - App and Model receive the same resolved canonical config root.
 - Production config resolution cannot silently seed a missing canonical file.
-- Controller rejects unverified named-location movement before queuing commands.
+- Production composition requires an immutable authorized machine context.
+- Controller rejects unverified named, rack-derived, plate-derived, and Camera
+  movement before queuing even an intermediate route command.
+- Optics, regulator-optimization, and qualification-identity paths resolve
+  beneath the active external machine root.
+- `QualificationRunWorker` receives the canonical identity path and cannot use
+  its checkout-local fallback in production.
 - Qualification/simulation composition remains isolated.
-- Existing app-local single-instance behavior is preserved and tested from
-  multiple checkouts; canonical transaction locking is added.
+- Existing app-local single-instance behavior is preserved; migration and
+  per-machine configuration locks follow a fixed order, and the configuration
+  lock is retained for the app lifetime.
+- M2 migration receipt/tree-manifest evidence remains immutable; M3 adds a
+  separately hashed activation receipt and fixed phase-specific tree
+  inventories.
+- Operator-selected legacy ZIPs and generated M2 backups use distinct
+  inspection/verification paths.
 
 ### Expected files touched
 
+- New pure ownership-policy, verification, and bootstrap modules plus a
+  checked-in ownership-rule catalog.
+- New standalone Qt bootstrap dialog/worker module.
 - `FreeRTOS-interface/App.py`.
 - `FreeRTOS-interface/ApplicationComposition.py`.
+- MachineData and Milestone 2 modules for activation paths, strict public
+  published-evidence parsing/phase verification, installed-backup validation,
+  and lock ownership. The M2 receipt schema/state is not extended.
 - `FreeRTOS-interface/LocalConfig.py`.
 - `FreeRTOS-interface/Model.py`.
+- `FreeRTOS-interface/CalibrationMemoryStore.py`.
+- `FreeRTOS-interface/CalibrationClasses/Model.py` for injected optics path.
 - `FreeRTOS-interface/Controller.py`.
-- A new bootstrap/migration dialog module; avoid expanding the main View when
-  a small pre-construction dialog is sufficient.
-- `FreeRTOS-interface/RegulatorProfiles.py` and other direct local-root callers
-  identified by a fresh search.
-- Startup, composition, Controller authorization, and migration UI tests.
+- `FreeRTOS-interface/QualificationRunWorker.py` for canonical identity-path
+  injection.
+- `FreeRTOS-interface/View.py` for the currently hard-coded optics display path.
+- RegulatorProfiles only if its existing injected-path behavior proves
+  insufficient.
+- Verification, bootstrap/recovery/dialog, startup, composition, Controller
+  authorization, direct-path, and no-hardware journey tests.
 
 ### Tests
 
@@ -1049,9 +1149,19 @@ specified and tested.
 - Current checkout source and manually selected backup source both work.
 - Exact copy plus unverified calibration cannot move.
 - Controller rejects Camera even if the UI incorrectly enables it.
+- Controller rejects unverified rack/plate-derived targets before any dogleg.
+- Override/manual/ignore-safe-height flags do not bypass verification.
 - Changed coordinate invalidates prior verification.
+- Changed source-file hash invalidates its bound targets.
 - App and Model paths are identical.
 - Production cannot call the old silent seeding path.
+- Active pointer is written last and crash recovery is idempotent.
+- M2 receipt/tree manifest stays unchanged while fixed M3 sidecars are
+  independently bound and arbitrary extra files remain fatal.
+- Completed M2 workspace absence is accepted; partial/mismatched stages remain
+  preserved and fail closed.
+- Generated M2 backup is reopened as an installed backup, never as a selected
+  candidate ZIP.
 - Simulation/test roots remain unaffected.
 
 ### Exit criteria
@@ -1059,6 +1169,8 @@ specified and tested.
 - Both source tags reach a verified external store through one migration path.
 - A new checkout after migration uses the same external store.
 - No failure path sends hardware commands or enables saved-location movement.
+- All classified active machine-owned paths are outside the checkout.
+- Verification is exact-value/hash bound and Controller enforced.
 - The original legacy source and verified migration archive remain intact.
 
 ### Rollback
@@ -1070,11 +1182,33 @@ merely switching app code back.
 
 ### Implementation record
 
-- Not started.
+- 2026-08-19: Concrete implementation plan created and all eight slices
+  implemented in this dedicated milestone commit on branch `update_bug_fix`.
+- 2026-08-19: Revised the plan against verified M2 commit `157db800` to keep
+  M2 provenance immutable and add separate activation evidence, fixed phase
+  inventories, and published-tree/workspace-absent recovery.
+- 2026-08-19: Added
+  `docs/machine_data_migration_milestone_3_first_start.md` for operator/source
+  selection, verification, recovery, exit-code, and rollback guidance.
 
 ### Validation record
 
-- Not started.
+- Focused Milestone 3 gate: `287 passed, 1 skipped`.
+- Full Python gate with an external pytest base: `5232 passed, 153 skipped` in
+  406.93 seconds.
+- Standard host SIL: `virtual_print_array_24_v1` passed, aggregate SHA-256
+  `d3f91486bd811f532588616777bba9fbceee74530f574a56c0b89e1ad536dfd8`.
+- Changed-module compilation, `git diff --check`, strict ownership JSON
+  parsing, and UTF-8/Markdown-fence checks passed.
+- Planning and post-implementation inspection covered App ordering,
+  composition roots, LocalConfig and CalibrationMemory seeding, Model/camera
+  path construction, qualification and regulator direct-local paths,
+  Controller named/derived movement, and override/direct absolute call sites.
+- Post-M2 review covered receipt/tree-manifest strictness, installed-backup
+  layout, workspace cleanup, lock preconditions, and partial-stage recovery at
+  commit `157db800`.
+- Manual target-Pi no-hardware validation remains before Milestone 3 can be
+  marked `verified`.
 
 ## Milestone 4: Add transactional configuration history
 
@@ -1268,7 +1402,8 @@ Before normal relaunch/use:
 4. For an intentional migration, require semantic equality of machine-owned
    coordinates plus an explicit migration event.
 5. Record verification results externally.
-6. Enter restricted/recovery behavior if any check fails.
+6. Enter fail-closed recovery-only behavior if any check fails; do not perform
+   a normal hardware-capable relaunch.
 
 ### Initial rc.6/rc.1 transition
 
@@ -1592,7 +1727,7 @@ rc.2 sees existing canonical plus changed legacy local
 - Online and offline update preservation.
 - Old-source first-launch behavior.
 - New-source pre/post hashes.
-- Relaunch result path and restricted failure behavior.
+- Relaunch result path and fail-closed recovery behavior.
 - Rollback compatibility export and re-upgrade divergence.
 
 ### Virtual/no-hardware workflows
@@ -1654,20 +1789,30 @@ Hardware use is last. It requires:
 | 2026-08-19 | Do not continuously dual-write canonical and legacy locations | Two live sources create ambiguity and conflict risk |
 | 2026-08-19 | Keep rollback support-guided until fully qualified | Legacy apps cannot read the external store without a compatibility export |
 | 2026-08-19 | Ship all safety milestones together in rc.2 | Partial rollout would leave known failure modes open |
+| 2026-08-19 | Use Qt application-local data plus `machine-data` for the same OS account | Stable across checkouts without installer-managed cross-user permissions |
+| 2026-08-19 | Key canonical machine directories by UUID and keep display IDs as metadata | Renaming a machine must not move or duplicate its data |
+| 2026-08-19 | Require an explicit assigned target identity before canonical import | Milestone 2 must not generate or silently activate an identity |
+| 2026-08-19 | Stage canonical data only from the newly verified full-source backup | Prevent live-source changes from creating mixed backup/canonical snapshots |
+| 2026-08-19 | Publish an absent complete machine tree with one same-filesystem rename | Config and CalibrationMemory cannot become partially canonical |
+| 2026-08-19 | Preserve all safe local files in backup but canonicalize only classified machine data | Avoid silent loss while auxiliary ownership remains unresolved |
+| 2026-08-19 | Use a checked-in semantic fingerprint catalog for rc.6 and rc.1 presets | The source cohorts differ in Settings and runtime cannot depend on Git tags |
+| 2026-08-19 | Require exact-value/hash-bound verification for every saved motion target present at activation | Copy integrity alone cannot establish that a target is physically safe for this machine |
+| 2026-08-19 | Keep Camera verification separate from trusted-source bulk verification | Camera was the damaging discrepancy and warrants an independent operator checkpoint |
+| 2026-08-19 | Reject a preset-matching Camera unless independent service evidence exists | A tracked starter value is not evidence of a physically calibrated Camera position |
+| 2026-08-19 | Exit before hardware construction when bootstrap or verification is incomplete | A restricted motion-capable mode would require a separate permissions and safety design |
+| 2026-08-19 | Require production composition to receive one immutable authorized machine context | Prevent App, Model, Controller, and auxiliary calibration paths from resolving different roots or verification state |
+| 2026-08-19 | Enforce saved-target authorization in Controller before route or dogleg commands are queued | UI state and route flags cannot be the final motion-safety boundary |
+| 2026-08-19 | Block activation while legacy paths remain unclassified | Unknown checkout-local data might still be active machine state and cannot be silently abandoned |
+| 2026-08-19 | Keep the M2 copied-unverified receipt and tree manifest immutable during M3 | Preserves the exact copy/provenance proof and prevents activation authority from being back-written into M2 evidence |
+| 2026-08-19 | Use a separate hash-bound activation receipt and pointer-last activation | Separates verification readiness from the final active-machine selection and makes crash recovery explicit |
+| 2026-08-19 | Write a version 2 active pointer bound to the activation-receipt hash | Pointer presence alone must not authorize a UUID or an unrelated/stale activation |
 
 ### Open decisions
 
 | Decision | Recommended direction | Resolve by | Status |
 | --- | --- | --- | --- |
-| Windows canonical base path | System-wide app data if permissions/install support are reliable; otherwise explicit per-user stable path | M1 | Open |
-| Pi/Linux canonical base path | Stable service/deployment-user data path outside repo | M1 | Open |
-| Machine identity source | Existing assigned identity when valid; operator assignment otherwise; do not infer solely from port/hostname | M1 | Open |
-| Multi-machine host behavior | External active-machine pointer plus explicit selection | M1 | Open |
 | Audit storage format | Immutable per-event JSON plus pending journal, or JSONL with equivalent durability/recovery | M1/M4 | Open |
 | History/backup retention | No automatic deletion in rc.2 unless a separately reviewed bounded policy is required | M4 | Open |
-| Required per-location verification list | Camera at minimum; evaluate Loading, Plate, rack anchors, Balance, and other automatic targets | M3 | Open |
-| Existing trusted-file bulk verification | Allow only with explicit machine/source attestation; never for preset-like data; Camera remains explicit | M3 | Open |
-| Failure UI | Exit before normal app is safest; restricted recovery/calibration mode only with separate command permissions | M3 | Open |
 | Camera/rack/plate delta thresholds | Derive from fleet data and physical geometry; no arbitrary universal threshold | M5 | Open |
 | Physical exclusion geometry | Measure and qualify separately; do not infer from current empty obstacle list | M5/M7 | Open |
 | rc.2 rollback target | Follow release-process current stable policy at release time | M7 | Open |
@@ -1687,6 +1832,22 @@ Hardware use is last. It requires:
 | 2026-08-19 | Planning | Plate calibration has four temporary corners and one acceptance action | Audit and commit it as one four-corner transaction |
 | 2026-08-19 | M1 planning | Existing direct-local machine data also includes droplet-imager optics and regulator-optimization data outside the central LocalConfig list | Classify before Milestone 3; do not expand inert Milestone 1 into production cutover |
 | 2026-08-19 | M1 planning | The current application-wide lock already uses Qt application-local storage | Use the same checkout-independent path convention and separately contract the canonical configuration lock |
+| 2026-08-19 | M2 planning | rc.6 and rc.1 tracked presets use the same lowercase `camera` coordinates, while rc.1 adds a Settings field | Use historical semantic preset fingerprints plus a separate camera-match flag |
+| 2026-08-19 | M2 planning | Re-reading a live source after backup verification could mix two source states | Build canonical stage exclusively from the reopened verified backup |
+| 2026-08-19 | M2 planning | A lock beneath the future machine root would create the publication target before atomic rename | Use a base-scoped UUID migration lock and workspace |
+| 2026-08-19 | M2 planning | Publishing config and CalibrationMemory in separate replaces exposes partial canonical state | Stage the complete machine tree and publish it with one same-filesystem rename |
+| 2026-08-19 | M2 implementation | Windows rejects file `fsync` on a read-only CRT descriptor and does not expose directory `fsync` through the current runtime | Reopen completed files `r+b` for content-preserving `fsync`; record directory-fsync capability as unsupported rather than claiming it |
+| 2026-08-19 | M2 implementation | Generated compression could make legitimate repetitive files violate the hostile-ZIP ratio policy | Store generated backup members without compression while continuing to reject suspicious selected ZIPs |
+| 2026-08-19 | M2 implementation | An interrupted partial stage cannot always be safely rebuilt without deleting evidence | Resume only an exactly verified stage; otherwise fail closed and preserve the partial stage and verified backup |
+| 2026-08-19 | M2 implementation | Direct-local closeout found `QualificationRunWorker` identity fallbacks and View's optics display path in addition to Controller/Model consumers | Keep them unchanged in inert M2 and add both to the M3 canonical-path injection audit |
+| 2026-08-19 | M3 planning | `LocalConfig` and `CalibrationMemoryStore` currently create or seed missing production data | Add strict canonical open paths; retain seeding only for legacy discovery and explicit test/simulation use |
+| 2026-08-19 | M3 planning | Controller can queue safe-height/dogleg moves before reaching a saved target | Authorize the resolved target immediately, before any intermediate command is queued |
+| 2026-08-19 | M3 planning | Droplet optics and regulator-optimization output still resolve directly beneath checkout-local data | Classify both under canonical `calibration/`, import them in Milestone 2, and inject their paths in Milestone 3 |
+| 2026-08-19 | M3 planning | Releasing a per-machine lock after bootstrap would permit another checkout to mutate active data | Retain the canonical configuration lock for the normal application's lifetime |
+| 2026-08-19 | M3 planning | A full backup preserves unknown local files but does not prove production no longer reads them | Require a versioned ownership rule for every unclassified path before activation; no generic operator ignore action |
+| 2026-08-19 | M3 post-M2 review | M2's exact tree verifier rejects verification, activation, and lock sidecars not present in its manifest | Keep the M2 manifest immutable and introduce fixed phase-specific additional-path inventories |
+| 2026-08-19 | M3 post-M2 review | Successful M2 publication removes its workspace, while the installed generated backup has a different layout from a selected candidate ZIP | Resume from published receipt/candidate/manifest/backup evidence and keep candidate inspection separate from installed-backup verification |
+| 2026-08-19 | M3 post-M2 review | M2 preserves partial or mismatched stages rather than deleting evidence | M3 recovery UI must fail closed with diagnostics/support exit and never auto-delete/rebuild the stage |
 
 Add findings here as work proceeds. Do not rewrite prior findings to hide an
 earlier assumption; add a correction with date and evidence.
@@ -1699,7 +1860,13 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-19 | 0 | Target Pi `local/` and `VERSION` recovery copies completed | Operator attestation | Repeat per-machine gate before each additional rollout |
 | 2026-08-19 | 1 | Concrete inert contract implementation plan created | `docs/machine_data_migration_milestone_1_implementation_plan.md` | Review frozen M1 decisions, then begin tests-first implementation |
 | 2026-08-19 | 1 | Tests-first inert contract implementation started | Working tree | Add path, identity, active-machine, and LocalConfig contract tests |
-| 2026-08-19 | 1 | Inert contract implementation and validation completed | 101 focused tests and 5,100 full-suite tests passed on `update_bug_fix` | Review and create the dedicated Milestone 1 commit before marking verified |
+| 2026-08-19 | 1 | Inert contract implementation and validation completed | 101 focused tests and 5,100 full-suite tests passed on `update_bug_fix` | Create the dedicated Milestone 1 commit |
+| 2026-08-19 | 1 | Milestone 1 verified | Commit `9b882141` | Freeze the concrete Milestone 2 implementation plan |
+| 2026-08-19 | 2 | Concrete inert engine implementation plan created | `docs/machine_data_migration_milestone_2_implementation_plan.md` plus rc.6/rc.1 tag inspection | Review frozen M2 decisions, then begin tests-first implementation |
+| 2026-08-19 | 2 | Inert engine implementation and validation completed | 180 focused and 5,179 full-suite tests passed on `update_bug_fix` | Create the dedicated Milestone 2 commit, then mark verified |
+| 2026-08-19 | 2 | Milestone 2 verified | Commit `157db800`; focused/full suites and static checks passed | Use the immutable M2 publication evidence as the Milestone 3 bootstrap baseline |
+| 2026-08-19 | 3 | Concrete bootstrap, verification, activation, and Controller-enforcement plan reviewed against the verified M2 engine | `docs/machine_data_migration_milestone_3_implementation_plan.md` plus startup/MVC/motion-path and M2 phase-handoff audits | Begin tests-first Milestone 3 implementation |
+| 2026-08-19 | 3 | Bootstrap, verification, activation, strict canonical loading, and Controller enforcement committed | Dedicated Milestone 3 commit; 287 focused passed/1 skipped; 5,232 full passed/153 skipped; standard host SIL and static checks passed | Run the exact target-Pi no-hardware gate |
 
 ## Definition of done for v1.3.0-rc.2
 
@@ -1735,3 +1902,9 @@ The work is complete only when:
 | 2026-08-19 | Created the living Milestones 0-7 migration, audit, safety, updater, rollback, qualification, and rollout plan for `v1.3.0-rc.2`. |
 | 2026-08-19 | Marked Milestone 0 verified from the target Pi backup attestation and linked the concrete Milestone 1 implementation plan. |
 | 2026-08-19 | Recorded the completed inert Milestone 1 implementation and focused/full validation; milestone remains implementation-complete pending its dedicated commit. |
+| 2026-08-19 | Recorded dedicated commit `9b882141` and marked Milestone 1 verified. |
+| 2026-08-19 | Added and linked the concrete Milestone 2 inert migration/backup engine implementation plan and its source-tag findings. |
+| 2026-08-19 | Added and linked the concrete Milestone 3 bootstrap, verification, activation, strict-root, and fail-closed motion-authorization implementation plan; classified optics and regulator-optimization data under canonical calibration ownership. |
+| 2026-08-19 | Recorded implementation-complete Milestone 2 inert engine, focused/full validation, platform durability and recovery findings, and pending dedicated-commit gate. |
+| 2026-08-19 | Recorded dedicated Milestone 2 commit `157db800`, marked Milestone 2 verified, and recorded the post-implementation Milestone 3 phase-handoff review. |
+| 2026-08-19 | Recorded implementation-complete Milestone 3 production cutover, operator guidance, focused/full/host-SIL evidence, findings, risks, rollback, and its remaining commit/manual-Pi verification gates. |

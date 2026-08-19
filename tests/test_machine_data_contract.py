@@ -356,7 +356,12 @@ def test_machine_data_contract_module_has_no_qt_mvc_or_hardware_imports():
         assert forbidden not in source
 
 
-def test_milestone_one_does_not_activate_machine_data_from_app():
+def test_milestone_three_bootstrap_precedes_production_composition():
     app_source = Path("FreeRTOS-interface/App.py").read_text(encoding="utf-8")
+    main_source = app_source.split("def main():", 1)[1]
 
-    assert "MachineData" not in app_source
+    lock_index = main_source.index("app_lock = acquire_single_instance_lock")
+    bootstrap_index = main_source.index("from MachineDataBootstrap import")
+    composition_index = main_source.index("from ApplicationComposition import")
+    assert lock_index < bootstrap_index < composition_index
+    assert "get_machine_config_path(" not in main_source

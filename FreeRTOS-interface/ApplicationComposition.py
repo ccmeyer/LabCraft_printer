@@ -23,6 +23,11 @@ class RuntimeMode(str, Enum):
     SIMULATION = "simulation"
 
 
+class RootLoadPolicy(str, Enum):
+    LEGACY_OR_SIMULATION_SEED_ALLOWED = "legacy_or_simulation_seed_allowed"
+    CANONICAL_EXISTING_ONLY = "canonical_existing_only"
+
+
 @dataclass(frozen=True)
 class RuntimeContext:
     mode: RuntimeMode
@@ -76,10 +81,24 @@ class ApplicationRoots:
     config_root: Path | None = None
     experiments_root: Path | None = None
     calibration_memory_root: Path | None = None
+    droplet_imager_optics_path: Path | None = None
+    regulator_optimization_root: Path | None = None
+    machine_identity_path: Path | None = None
+    load_policy: RootLoadPolicy = RootLoadPolicy.LEGACY_OR_SIMULATION_SEED_ALLOWED
 
     @classmethod
-    def production(cls) -> "ApplicationRoots":
-        return cls()
+    def production(cls, authorized_context) -> "ApplicationRoots":
+        if authorized_context is None:
+            raise ValueError("Production roots require an authorized machine context")
+        paths = authorized_context.paths
+        return cls(
+            config_root=paths.config_root,
+            calibration_memory_root=paths.calibration_memory_root,
+            droplet_imager_optics_path=paths.droplet_imager_optics_path,
+            regulator_optimization_root=paths.regulator_optimization_root,
+            machine_identity_path=paths.identity_path,
+            load_policy=RootLoadPolicy.CANONICAL_EXISTING_ONLY,
+        )
 
     @classmethod
     def beneath(cls, run_root: str | Path) -> "ApplicationRoots":
@@ -89,6 +108,9 @@ class ApplicationRoots:
             config_root=root / "config",
             experiments_root=root / "experiments",
             calibration_memory_root=root / "calibration-memory",
+            droplet_imager_optics_path=root / "calibration" / "droplet_imager_optics.json",
+            regulator_optimization_root=root / "calibration" / "regulator_optimization",
+            machine_identity_path=root / "metadata" / "machine_identity.json",
         )
         for path in (
             children.config_root,
@@ -116,6 +138,7 @@ class ApplicationDependencies:
     balance_factory: Factory
     experimental_balance_factory: Factory
     legacy_calibration_model_factory: Factory
+    authorized_machine_context: Any | None = None
 
     def __post_init__(self):
         factories = (
@@ -146,6 +169,10 @@ class ApplicationDependencies:
                     "Simulation dependencies require explicit roots: "
                     + ", ".join(missing)
                 )
+        elif self.authorized_machine_context is None:
+            raise ValueError(
+                "Production dependencies require an authorized machine context"
+            )
 
 
 class ApplicationConstructionError(RuntimeError):
@@ -165,6 +192,7 @@ class ApplicationComponents:
     balance: Any = None
     balance_service: Any = None
     experimental_features: ExperimentalFeatures = ExperimentalFeatures()
+    authorized_machine_context: Any = None
     _closed: bool = False
 
     def close(self):
@@ -245,6 +273,9 @@ class ApplicationComponents:
         app = QCoreApplication.instance()
         if app is not None:
             app.processEvents()
+        close_context = getattr(self.authorized_machine_context, "close", None)
+        if callable(close_context):
+            close_context()
         return True
 
 
@@ -311,10 +342,12 @@ def _production_legacy_calibration_model_factory(model):
     )
 
 
-def production_dependencies() -> ApplicationDependencies:
+def production_dependencies(authorized_machine_context) -> ApplicationDependencies:
+    if authorized_machine_context is None:
+        raise ValueError("Production dependencies require an authorized machine context")
     return ApplicationDependencies(
         runtime_context=PRODUCTION_RUNTIME_CONTEXT,
-        roots=ApplicationRoots.production(),
+        roots=ApplicationRoots.production(authorized_machine_context),
         machine_factory=_production_machine_factory,
         serial_factory=_production_serial_factory,
         refuel_camera_factory=_production_refuel_camera_factory,
@@ -323,6 +356,7 @@ def production_dependencies() -> ApplicationDependencies:
         balance_factory=_production_balance_factory,
         experimental_balance_factory=_production_experimental_balance_factory,
         legacy_calibration_model_factory=_production_legacy_calibration_model_factory,
+        authorized_machine_context=authorized_machine_context,
     )
 
 
@@ -438,6 +472,10 @@ def build_application_components(
             config_root=roots.config_root,
             experiments_root=roots.experiments_root,
             calibration_memory_root=roots.calibration_memory_root,
+            droplet_imager_optics_path=roots.droplet_imager_optics_path,
+            canonical_existing_only=(
+                roots.load_policy is RootLoadPolicy.CANONICAL_EXISTING_ONLY
+            ),
         )
         if model_setup is not None:
             model_setup(model)
@@ -465,6 +503,12 @@ def build_application_components(
             runtime_context=dependencies.runtime_context,
             experimental_features=effective_features,
             experimental_balance_service=balance_service,
+            saved_target_authorizer=(
+                getattr(dependencies.authorized_machine_context, "saved_target_authorizer", None)
+            ),
+            machine_data_paths=(
+                getattr(dependencies.authorized_machine_context, "paths", None)
+            ),
         )
 
         if profile.name == "legacy":
@@ -501,6 +545,7 @@ def build_application_components(
             balance=balance,
             balance_service=balance_service,
             experimental_features=effective_features,
+            authorized_machine_context=dependencies.authorized_machine_context,
         )
     except Exception as exc:
         _delete_partial_objects(
@@ -511,6 +556,9 @@ def build_application_components(
             model,
             balance_service=balance_service,
         )
+        close_context = getattr(dependencies.authorized_machine_context, "close", None)
+        if callable(close_context):
+            close_context()
         if isinstance(exc, ApplicationConstructionError):
             raise
         raise ApplicationConstructionError(

@@ -1,6 +1,6 @@
 # Machine Data Migration Milestone 2: Inert Engine Implementation Plan
 
-Status: `implementation_complete`
+Status: `verified`
 
 Prepared: 2026-08-19
 
@@ -930,7 +930,7 @@ production and hardware construction.
 - [x] App, MVC, updater, firmware, protocol, and motion remain unchanged.
 - [x] Focused and full Python suites pass.
 - [x] Parent plan records implementation findings and validation.
-- [ ] Dedicated Milestone 2 commit is recorded.
+- [x] Dedicated Milestone 2 commit is recorded.
 
 ## Risks and mitigations
 
@@ -1007,8 +1007,9 @@ Milestone 2 is `verified` only when:
   non-activation.
 - Production `App.py`, application composition, MVC, updater, firmware,
   protocol, motion, pressure, timing, and release metadata were not changed.
-- Dedicated Milestone 2 commit is pending; the milestone therefore remains
-  `implementation_complete` rather than `verified`.
+- Dedicated Milestone 2 commit: `157db800`
+  (`feat: add inert machine data migration engine`).
+- All Milestone 2 exit criteria are satisfied; the milestone is `verified`.
 
 ## Validation record
 
@@ -1021,8 +1022,12 @@ Milestone 2 is `verified` only when:
   covered without that permission.
 - Existing warnings are Qt deprecation warnings and are unrelated to this
   milestone.
-- Static/documentation validation and the dedicated commit remain to be
-  recorded before changing status to `verified`.
+- Static/documentation validation passed: Python compilation, JSON parsing,
+  Markdown fence/encoding/trailing-whitespace checks, and
+  `git diff --check` reported no errors.
+- Dedicated implementation commit `157db800` records the reviewed Milestone 2
+  boundary. The live status record and Milestone 3 review are intentionally
+  post-commit documentation updates.
 
 ## Findings discovered during planning
 
@@ -1071,3 +1076,4 @@ Milestone 2 is `verified` only when:
 | 2026-08-19 | Created the concrete inert candidate, archive, staged-copy, locking, receipt, and crash-recovery implementation plan for Milestone 2. |
 | 2026-08-19 | Incorporated Milestone 3 ownership findings by canonicalizing optics and regulator-optimization data beneath `calibration/`. |
 | 2026-08-19 | Recorded implementation-complete inert engine, focused/full validation, recovery findings, and pending dedicated-commit gate. |
+| 2026-08-19 | Recorded dedicated implementation commit `157db800`, completed static validation, and marked Milestone 2 verified. |

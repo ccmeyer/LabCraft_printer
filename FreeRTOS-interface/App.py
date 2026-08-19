@@ -4,6 +4,7 @@ from PySide6.QtCore import QLockFile, QStandardPaths, QTimer
 from PySide6.QtWidgets import QStyleFactory
 from PySide6.QtGui import QPalette, QColor, QPixmap, QIcon
 import os, json
+import hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 import threading
@@ -15,6 +16,10 @@ APP_APPLICATION_NAME = "LabCraft Printer"
 APP_DESKTOP_FILE_NAME = "labcraft-printer"
 SINGLE_INSTANCE_LOCK_FILENAME = "labcraft-printer-main.lock"
 EXIT_ALREADY_RUNNING = 1
+EXIT_BOOTSTRAP_CANCELLED = 2
+EXIT_BOOTSTRAP_FAILED = 3
+EXIT_RECOVERY_REQUIRED = 4
+EXIT_CONFIGURATION_LOCK_UNAVAILABLE = 5
 UI_FREEZE_DIAGNOSTIC_LOG_FILENAME = "ui-freeze-diagnostics.log"
 UI_FREEZE_WATCHDOG_INTERVAL_MS = 500
 UI_FREEZE_WATCHDOG_STALL_SECONDS = 5.0
@@ -25,7 +30,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from hardware.profile import get_profile
-from LocalConfig import get_machine_config_path
+from AppVersion import get_app_commit, get_app_version
 
 def configure_app_identity(app):
     app.setOrganizationName(APP_ORGANIZATION_NAME)
@@ -101,6 +106,13 @@ def load_settings(file_path):
         return loaded if isinstance(loaded, dict) else defaults.copy()
     except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
         return defaults.copy()
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 def freeze_diagnostics_log_path():
     log_dir = REPO_ROOT / "logs"
@@ -196,13 +208,65 @@ def main():
         return EXIT_ALREADY_RUNNING
 
     components = None
+    authorized_context = None
     try:
-        # Create splash screen
+        # Bootstrap-safe presentation only. Production composition, Settings,
+        # MVC, serial, camera, balance, and Machine imports happen later.
         script_dir = os.path.dirname(os.path.abspath(__file__))
         icon_path = os.path.join(script_dir, 'Presets', 'LabCraft_icon.png')
         app_icon = QIcon(icon_path)
         if not app_icon.isNull():
             app.setWindowIcon(app_icon)
+        set_dark_theme(app)
+
+        from MachineData import resolve_machine_data_base
+        from MachineDataBootstrap import BootstrapState, MachineDataBootstrap
+        from MachineDataBootstrapDialog import run_bootstrap_dialog
+
+        app_local_data = QStandardPaths.writableLocation(
+            QStandardPaths.AppLocalDataLocation
+        )
+        if not app_local_data:
+            QMessageBox.critical(
+                None,
+                "Machine Data Bootstrap Failed",
+                "Qt did not provide an application-local data directory.",
+            )
+            return EXIT_BOOTSTRAP_FAILED
+        try:
+            base = resolve_machine_data_base(
+                app_local_data_root=app_local_data,
+                repo_root=REPO_ROOT,
+            )
+            bootstrap = MachineDataBootstrap(
+                base,
+                app_version=get_app_version(REPO_ROOT),
+                app_commit=get_app_commit(REPO_ROOT),
+            )
+            authorized_context = run_bootstrap_dialog(
+                bootstrap,
+                current_checkout_local=REPO_ROOT / "local",
+            )
+        except Exception as exc:
+            code = str(getattr(exc, "code", "bootstrap_failed"))
+            QMessageBox.critical(
+                None,
+                "Machine Data Bootstrap Failed",
+                f"{code}: {exc}",
+            )
+            if code == "configuration_lock_unavailable":
+                return EXIT_CONFIGURATION_LOCK_UNAVAILABLE
+            if code == "recovery_required":
+                return EXIT_RECOVERY_REQUIRED
+            return EXIT_BOOTSTRAP_FAILED
+        if authorized_context is None:
+            state = bootstrap.inspect().state
+            if state is BootstrapState.RECOVERY_REQUIRED:
+                return EXIT_RECOVERY_REQUIRED
+            return EXIT_BOOTSTRAP_CANCELLED
+
+        # Create the normal splash only after exact external-store
+        # authorization and configuration-lock ownership.
         logo_path = os.path.join(script_dir, 'Presets','LabCraft_logo.png')
         pixmap = QPixmap(logo_path)  # Replace with your logo image path
         splash = QSplashScreen(pixmap)
@@ -215,14 +279,22 @@ def main():
             build_application_components,
             production_dependencies,
         )
-
-        settings = load_settings(get_machine_config_path("Settings.json"))
+        settings = dict(authorized_context.settings)
+        current_settings_sha = sha256_file(
+            authorized_context.paths.config_root / "Settings.json"
+        )
+        if current_settings_sha != authorized_context.settings_raw_sha256:
+            raise RuntimeError(
+                "Canonical Settings changed after bootstrap authorization."
+            )
 
         profile = get_profile(settings.get("HARDWARE_PROFILE", "current"))
 
-        set_dark_theme(app)
-
         def configure_model(model):
+            if model.settings != settings:
+                raise RuntimeError(
+                    "Model Settings differ from the bootstrap-authorized payload."
+                )
             dispenser_defaults = (
                 settings.get("DISPENSER_TYPES", {})
                 .get(settings.get("DEFAULT_DISPENSER", ""), {})
@@ -242,7 +314,7 @@ def main():
 
         components = build_application_components(
             profile,
-            production_dependencies(),
+            production_dependencies(authorized_context),
             model_setup=configure_model,
             experimental_features=ExperimentalFeatures.from_environment(
                 os.environ
@@ -265,6 +337,15 @@ def main():
 
         install_ui_freeze_watchdog(app)
         return app.exec()
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "LabCraft Startup Failed",
+            "Verified machine data could not be opened by the application. "
+            "No hardware-capable window was started.\n\n"
+            f"{exc}",
+        )
+        return EXIT_BOOTSTRAP_FAILED
     finally:
         if components is not None:
             if not components.close():
@@ -272,6 +353,8 @@ def main():
                     "Application components are still active; no forced calibration, "
                     "camera, or balance teardown was attempted."
                 )
+        elif authorized_context is not None:
+            authorized_context.close()
         app_lock.unlock()
 
 

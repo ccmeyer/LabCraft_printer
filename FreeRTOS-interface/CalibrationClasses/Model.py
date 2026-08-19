@@ -34533,7 +34533,7 @@ class DropletCameraModel(QObject):
         "print_completion_timeout": "Droplet burst did not complete within the flash safety timeout",
     }
 
-    def __init__(self,steps_conv_path):
+    def __init__(self,steps_conv_path, optics_config_path=None):
         super().__init__()
         print("\n--- DropletCameraModel initialized ---\n")
         self.latest_frame = None
@@ -34598,6 +34598,11 @@ class DropletCameraModel(QObject):
         self._last_capture_info = None
 
         self.steps_conv_path = steps_conv_path
+        self._optics_config_path = (
+            Path(optics_config_path).expanduser().resolve()
+            if optics_config_path is not None
+            else Path(self.OPTICS_CONFIG_PATH)
+        )
         self._step_conversion_source = "preset"
         self._motion_conversion_config = {}
         self._load_preset_step_conversion()
@@ -34620,9 +34625,8 @@ class DropletCameraModel(QObject):
             return list(o)
         return str(o)
 
-    @classmethod
-    def optics_config_path(cls):
-        return Path(cls.OPTICS_CONFIG_PATH)
+    def optics_config_path(self):
+        return Path(self._optics_config_path)
 
     @staticmethod
     def _valid_um_per_pixel(value):

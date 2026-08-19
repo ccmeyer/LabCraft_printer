@@ -107,6 +107,12 @@ class MigrationState(str, Enum):
     COPIED_UNVERIFIED = "copied_unverified"
 
 
+class PublishedMigrationPhase(str, Enum):
+    COPIED_UNVERIFIED = "copied_unverified"
+    ACTIVATION_STAGED = "activation_staged"
+    ACTIVE = "active"
+
+
 _STATE_ORDER = tuple(MigrationState)
 _LEGAL_NEXT_STATE = {
     MigrationState.CANDIDATE_SELECTED: MigrationState.SOURCE_VALIDATED,
@@ -414,6 +420,15 @@ class MigrationResult:
     receipt: MigrationReceipt
     backup_archive_path: Path
     reconciled: bool = False
+
+
+@dataclass(frozen=True)
+class PublishedMigrationEvidence:
+    receipt: MigrationReceipt
+    candidate: CandidateEvidence
+    backup: VerifiedBackup
+    migration_tree_manifest_sha256: str
+    additional_paths: tuple[str, ...]
 
 
 class MigrationFileOps(DurableFileOps):
@@ -1503,6 +1518,188 @@ def _parse_receipt(payload: object) -> MigrationReceipt:
     )
 
 
+def parse_migration_receipt(payload: object) -> MigrationReceipt:
+    """Public strict parser for immutable published M2 receipts."""
+
+    return _parse_receipt(payload)
+
+
+def load_migration_receipt(path: str | Path) -> MigrationReceipt:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MigrationRecoveryRequired(f"Cannot read migration receipt: {exc}") from exc
+    return parse_migration_receipt(payload)
+
+
+def _parse_evidence_file_list(value: object, label: str) -> tuple[FileEvidence, ...]:
+    if not isinstance(value, list):
+        raise MigrationRecoveryRequired(f"Candidate {label} must be a list.")
+    parsed: list[FileEvidence] = []
+    paths: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, dict):
+            raise MigrationRecoveryRequired(f"Candidate {label} entry must be an object.")
+        relative_path = raw.get("relative_path")
+        size = raw.get("size")
+        digest = raw.get("raw_sha256")
+        semantic = raw.get("semantic_json_sha256")
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or relative_path.startswith(("/", "\\"))
+            or ".." in Path(relative_path.replace("\\", "/")).parts
+            or type(size) is not int
+            or size < 0
+            or not _is_sha256(digest)
+            or (semantic is not None and not _is_sha256(semantic))
+        ):
+            raise MigrationRecoveryRequired(f"Candidate {label} evidence is invalid.")
+        normalized = relative_path.replace("\\", "/")
+        if normalized.casefold() in paths:
+            raise MigrationRecoveryRequired(f"Candidate {label} paths collide.")
+        paths.add(normalized.casefold())
+        parsed.append(FileEvidence(normalized, size, digest, semantic))
+    return tuple(parsed)
+
+
+def _parse_text_tuple(value: object, label: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item for item in value
+    ):
+        raise MigrationRecoveryRequired(f"Candidate {label} must contain text values.")
+    if len({item.casefold() for item in value}) != len(value):
+        raise MigrationRecoveryRequired(f"Candidate {label} contains duplicates.")
+    return tuple(value)
+
+
+def parse_candidate_evidence(payload: object) -> CandidateEvidence:
+    """Strictly reconstruct published candidate evidence without a live source."""
+
+    if not isinstance(payload, dict):
+        raise MigrationRecoveryRequired("Candidate evidence must be a JSON object.")
+    try:
+        source_kind = CandidateSourceKind(payload.get("source_kind"))
+    except ValueError as exc:
+        raise MigrationRecoveryRequired("Candidate source_kind is unknown.") from exc
+    candidate_id = payload.get("candidate_id")
+    normalized_source = payload.get("normalized_source")
+    label = payload.get("label")
+    inspected_at = payload.get("inspected_at_utc")
+    if not _is_sha256(candidate_id):
+        raise MigrationRecoveryRequired("Candidate ID must be SHA-256 text.")
+    if not isinstance(normalized_source, str) or not Path(normalized_source).is_absolute():
+        raise MigrationRecoveryRequired("Candidate normalized_source must be absolute.")
+    if not isinstance(label, str) or not _is_utc_timestamp(inspected_at):
+        raise MigrationRecoveryRequired("Candidate label/timestamp is invalid.")
+    version_text = payload.get("version_text")
+    if version_text is not None and not isinstance(version_text, str):
+        raise MigrationRecoveryRequired("Candidate version_text is invalid.")
+
+    fingerprint_fields = (
+        "required_config_fingerprint",
+        "migratable_tree_fingerprint",
+        "full_source_fingerprint",
+    )
+    if not all(_is_sha256(payload.get(name)) for name in fingerprint_fields):
+        raise MigrationRecoveryRequired("Candidate fingerprints are invalid.")
+    safety_snapshot = payload.get("safety_snapshot")
+    if not isinstance(safety_snapshot, dict):
+        raise MigrationRecoveryRequired("Candidate safety snapshot must be an object.")
+    identity_status = payload.get("identity_status")
+    calibration_status = payload.get("calibration_memory_status")
+    if not isinstance(identity_status, str) or not isinstance(calibration_status, str):
+        raise MigrationRecoveryRequired("Candidate status fields must be text.")
+    legacy_identity_payload = payload.get("legacy_identity")
+    legacy_identity = None
+    if legacy_identity_payload is not None:
+        try:
+            legacy_identity = parse_machine_identity(
+                legacy_identity_payload,
+                allow_legacy=True,
+                allow_unassigned=True,
+            )
+        except MachineIdentityError as exc:
+            raise MigrationRecoveryRequired(f"Candidate identity is invalid: {exc}") from exc
+    booleans = (
+        "camera_preset_match",
+        "declared_version_mismatch",
+    )
+    if any(type(payload.get(name)) is not bool for name in booleans):
+        raise MigrationRecoveryRequired("Candidate preset/version flags must be booleans.")
+
+    raw_issues = payload.get("issues")
+    if not isinstance(raw_issues, list):
+        raise MigrationRecoveryRequired("Candidate issues must be a list.")
+    issues: list[CandidateIssue] = []
+    for raw in raw_issues:
+        if not isinstance(raw, dict):
+            raise MigrationRecoveryRequired("Candidate issue must be an object.")
+        try:
+            severity = CandidateIssueSeverity(raw.get("severity"))
+        except ValueError as exc:
+            raise MigrationRecoveryRequired("Candidate issue severity is invalid.") from exc
+        code = raw.get("code")
+        message = raw.get("message")
+        relative_path = raw.get("relative_path")
+        if (
+            not isinstance(code, str)
+            or not code
+            or not isinstance(message, str)
+            or not message
+            or (relative_path is not None and not isinstance(relative_path, str))
+        ):
+            raise MigrationRecoveryRequired("Candidate issue fields are invalid.")
+        issues.append(CandidateIssue(severity, code, message, relative_path))
+
+    candidate = CandidateEvidence(
+        candidate_id=candidate_id,
+        source_kind=source_kind,
+        normalized_source=Path(normalized_source).resolve(strict=False),
+        label=label,
+        inspected_at_utc=inspected_at,
+        version_text=version_text,
+        required_files=_parse_evidence_file_list(
+            payload.get("required_files"), "required_files"
+        ),
+        migratable_files=_parse_evidence_file_list(
+            payload.get("migratable_files"), "migratable_files"
+        ),
+        required_config_fingerprint=payload["required_config_fingerprint"],
+        migratable_tree_fingerprint=payload["migratable_tree_fingerprint"],
+        full_source_fingerprint=payload["full_source_fingerprint"],
+        safety_snapshot=MappingProxyType(dict(safety_snapshot)),
+        identity_status=identity_status,
+        legacy_identity=legacy_identity,
+        calibration_memory_status=calibration_status,
+        missing_calibration_memory_seed_files=_parse_text_tuple(
+            payload.get("missing_calibration_memory_seed_files"),
+            "missing_calibration_memory_seed_files",
+        ),
+        preset_matches=_parse_text_tuple(payload.get("preset_matches"), "preset_matches"),
+        individual_preset_matches=_parse_text_tuple(
+            payload.get("individual_preset_matches"), "individual_preset_matches"
+        ),
+        camera_preset_match=payload["camera_preset_match"],
+        declared_version_mismatch=payload["declared_version_mismatch"],
+        unclassified_source_paths=_parse_text_tuple(
+            payload.get("unclassified_source_paths"), "unclassified_source_paths"
+        ),
+        issues=tuple(issues),
+    )
+    if "is_importable" in payload and payload.get("is_importable") is not candidate.is_importable:
+        raise MigrationRecoveryRequired("Candidate is_importable evidence is inconsistent.")
+    return candidate
+
+
+def load_candidate_evidence(path: str | Path) -> CandidateEvidence:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MigrationRecoveryRequired(f"Cannot read candidate evidence: {exc}") from exc
+    return parse_candidate_evidence(payload)
+
+
 def _manifest_candidate(manifest: Mapping[str, object]) -> Mapping[str, object]:
     payload = manifest.get("candidate_evidence")
     if not isinstance(payload, dict):
@@ -1677,6 +1874,8 @@ def _verify_machine_tree(
     *,
     expected_uuid: str,
     archive_policy: ArchivePolicy | None = None,
+    allowed_additional_paths: frozenset[str] = frozenset(),
+    required_additional_paths: frozenset[str] = frozenset(),
 ) -> MigrationReceipt:
     machine_root = Path(root)
     manifest_path = machine_root / "metadata" / "migration_tree_manifest.json"
@@ -1707,8 +1906,20 @@ def _verify_machine_tree(
         expected[path] = (size, digest)
     actual = _tree_files(machine_root)
     actual.pop("metadata/migration_tree_manifest.json", None)
-    if actual != expected:
-        raise MigrationRecoveryRequired("Machine tree differs from its exact manifest.")
+    baseline_actual = {path: actual.get(path) for path in expected}
+    if baseline_actual != expected:
+        raise MigrationRecoveryRequired("Machine tree differs from its immutable manifest.")
+    additional = frozenset(actual).difference(expected)
+    if not additional.issubset(allowed_additional_paths):
+        unexpected = ", ".join(sorted(additional.difference(allowed_additional_paths)))
+        raise MigrationRecoveryRequired(
+            f"Machine tree has unapproved phase files: {unexpected}"
+        )
+    if not required_additional_paths.issubset(additional):
+        missing = ", ".join(sorted(required_additional_paths.difference(additional)))
+        raise MigrationRecoveryRequired(
+            f"Machine tree is missing required phase files: {missing}"
+        )
     try:
         receipt_payload = json.loads(
             (machine_root / "metadata" / "migration_receipt.json").read_text(
@@ -1807,6 +2018,91 @@ def _verify_machine_tree(
                 f"Published backup and receipt differ for {field_name}."
             )
     return receipt
+
+
+_ACTIVATION_PHASE_PATHS = frozenset(
+    {
+        "metadata/verification.json",
+        "metadata/activation_receipt.json",
+        "locks/configuration.lock",
+    }
+)
+_ACTIVE_REQUIRED_PATHS = frozenset(
+    {
+        "metadata/verification.json",
+        "metadata/activation_receipt.json",
+    }
+)
+
+
+def verify_published_migration(
+    paths: MachineDataPaths,
+    *,
+    phase: PublishedMigrationPhase = PublishedMigrationPhase.COPIED_UNVERIFIED,
+    archive_policy: ArchivePolicy | None = None,
+) -> PublishedMigrationEvidence:
+    """Verify an installed migration with a fixed, versioned phase inventory."""
+
+    if not isinstance(paths, MachineDataPaths):
+        raise MachineDataPathError("paths must be a MachineDataPaths value.")
+    try:
+        selected_phase = PublishedMigrationPhase(phase)
+    except ValueError as exc:
+        raise MigrationRecoveryRequired(f"Unknown published migration phase: {phase!r}") from exc
+    allowed = (
+        frozenset()
+        if selected_phase is PublishedMigrationPhase.COPIED_UNVERIFIED
+        else _ACTIVATION_PHASE_PATHS
+    )
+    required = (
+        _ACTIVE_REQUIRED_PATHS
+        if selected_phase is PublishedMigrationPhase.ACTIVE
+        else frozenset()
+    )
+    receipt = _verify_machine_tree(
+        paths.machine_root,
+        expected_uuid=paths.machine_uuid,
+        archive_policy=archive_policy,
+        allowed_additional_paths=allowed,
+        required_additional_paths=required,
+    )
+    candidate = load_candidate_evidence(paths.candidate_evidence_path)
+    if candidate.candidate_id != receipt.candidate_id:
+        raise MigrationRecoveryRequired("Candidate evidence differs from migration receipt.")
+    backup_path = (
+        paths.backups_root
+        / "migration"
+        / receipt.migration_id
+        / "source_backup.zip"
+    )
+    backup = verify_backup_archive(backup_path, policy=archive_policy or ArchivePolicy())
+    manifest_sha256, _ = sha256_file(paths.migration_tree_manifest_path)
+    actual = _tree_files(paths.machine_root)
+    try:
+        manifest_payload = json.loads(
+            paths.migration_tree_manifest_path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MigrationRecoveryRequired(f"Cannot reopen migration tree manifest: {exc}") from exc
+    baseline_paths = {
+        item["relative_path"]
+        for item in manifest_payload.get("files", [])
+        if isinstance(item, dict) and isinstance(item.get("relative_path"), str)
+    }
+    additional = tuple(
+        sorted(
+            set(actual)
+            .difference(baseline_paths)
+            .difference({"metadata/migration_tree_manifest.json"})
+        )
+    )
+    return PublishedMigrationEvidence(
+        receipt=receipt,
+        candidate=candidate,
+        backup=backup,
+        migration_tree_manifest_sha256=manifest_sha256,
+        additional_paths=additional,
+    )
 
 
 def _cleanup_workspace(workspace: MigrationWorkspacePaths, *, io: MigrationFileOps) -> None:
@@ -2132,6 +2428,8 @@ __all__ = [
     "MigrationResult",
     "MigrationState",
     "MigrationWorkspacePaths",
+    "PublishedMigrationEvidence",
+    "PublishedMigrationPhase",
     "PresetFingerprintCatalog",
     "REQUIRED_CONFIG_NAMES",
     "build_migration_workspace_paths",
@@ -2139,7 +2437,12 @@ __all__ = [
     "create_verified_backup",
     "import_verified_candidate",
     "inspect_candidate",
+    "load_candidate_evidence",
+    "load_migration_receipt",
     "new_migration_workspace_paths",
+    "parse_candidate_evidence",
+    "parse_migration_receipt",
     "reconcile_migration",
+    "verify_published_migration",
     "validate_state_transition",
 ]

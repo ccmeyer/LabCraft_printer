@@ -264,7 +264,9 @@ class DurableFileOps:
         temporary = Path(temporary_name)
         try:
             self.checkpoint(f"before_{checkpoint_prefix}_write", target)
-            with os.fdopen(descriptor, "wb") as stream:
+            stream = os.fdopen(descriptor, "wb")
+            descriptor = -1
+            with stream:
                 stream.write(data)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -279,6 +281,11 @@ class DurableFileOps:
                 )
             return directory_fsynced
         except Exception:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
             try:
                 temporary.unlink()
             except OSError:

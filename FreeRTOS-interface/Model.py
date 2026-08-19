@@ -123,7 +123,12 @@ from CalibrationPersistencePolicy import (
     new_experiment_policy,
 )
 
-from LocalConfig import get_calibration_memory_root, get_machine_config_path
+from LocalConfig import (
+    get_calibration_memory_root,
+    get_existing_calibration_memory_root,
+    get_existing_machine_config_path,
+    get_machine_config_path,
+)
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 
 
@@ -15527,9 +15532,12 @@ class Model(QObject):
         config_root=None,
         experiments_root=None,
         calibration_memory_root=None,
+        droplet_imager_optics_path=None,
+        canonical_existing_only=False,
     ):
         super().__init__()
         self.profile = profile
+        self.canonical_existing_only = bool(canonical_existing_only)
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.config_root = (
             Path(config_root).expanduser().resolve()
@@ -15546,19 +15554,31 @@ class Model(QObject):
             if calibration_memory_root is not None
             else None
         )
+        self.droplet_imager_optics_path = (
+            Path(droplet_imager_optics_path).expanduser().resolve()
+            if droplet_imager_optics_path is not None
+            else None
+        )
+        config_path = (
+            lambda filename: get_existing_machine_config_path(
+                filename, config_root=self.config_root
+            )
+            if self.canonical_existing_only
+            else get_machine_config_path(filename, local_root=self.config_root)
+        )
         self.locations_path = str(
-            get_machine_config_path('Locations.json', local_root=self.config_root)
+            config_path('Locations.json')
         )
         self.plates_path = str(
-            get_machine_config_path('Plates.json', local_root=self.config_root)
+            config_path('Plates.json')
         )
         self.colors_path = os.path.join(self.script_dir, 'Presets','Printer_head_colors.json')
         self.settings_path = str(
-            get_machine_config_path('Settings.json', local_root=self.config_root)
+            config_path('Settings.json')
         )
         self.print_profiles_path = os.path.join(self.script_dir, 'Presets','PrintProfiles.json')
         self.obstacles_path = str(
-            get_machine_config_path('Obstacles.json', local_root=self.config_root)
+            config_path('Obstacles.json')
         )
         self.predictive_model_dir = os.path.join(self.script_dir, 'Presets','Predictive_models')
         self.pixel_step_conv_path = os.path.join(self.script_dir, 'Presets','step_conv_250813.json')
@@ -15587,7 +15607,10 @@ class Model(QObject):
         # self.calibration_model = MassCalibrationModel(self.machine_model,self.printer_head_manager,self.rack_model,self.predictive_model_dir)
         self.experiment_file_path = None
         self.refuel_camera_model = CalibrationClasses.RefuelCameraModel()
-        self.droplet_camera_model = CalibrationClasses.DropletCameraModel(self.pixel_step_conv_path)
+        self.droplet_camera_model = CalibrationClasses.DropletCameraModel(
+            self.pixel_step_conv_path,
+            optics_config_path=self.droplet_imager_optics_path,
+        )
         self.calibration_manager = CalibrationClasses.CalibrationManager(self)
         # self.experiment_model = ExperimentModel(self.well_plate,self.calibration_manager)
         self.experiment_model = ExperimentModel(
@@ -15637,15 +15660,27 @@ class Model(QObject):
             else:
                 root_dir = None
                 if self.calibration_memory_root is not None:
-                    root_dir = get_calibration_memory_root(
-                        local_root=self.calibration_memory_root
+                    root_dir = (
+                        get_existing_calibration_memory_root(
+                            root=self.calibration_memory_root
+                        )
+                        if self.canonical_existing_only
+                        else get_calibration_memory_root(
+                            local_root=self.calibration_memory_root
+                        )
                     )
-                store = CalibrationMemoryStore(model=self, root_dir=root_dir)
+                store = CalibrationMemoryStore(
+                    model=self,
+                    root_dir=root_dir,
+                    require_existing_baseline=self.canonical_existing_only,
+                )
             store.ensure_initialized()
             self.calibration_memory_store = store
         except Exception as e:
             print(f"[CalibrationMemory] Failed to initialize store: {e}")
             self.calibration_memory_store = None
+            if getattr(self, "canonical_existing_only", False):
+                raise
 
     def _initialize_regulator_profile_store(self):
         config_root = getattr(self, "config_root", None)
@@ -15654,9 +15689,12 @@ class Model(QObject):
             self.regulator_profile_store = RegulatorProfileStore()
         else:
             self.regulator_profiles_path = str(
-                get_machine_config_path(
-                    'RegulatorProfiles.json',
-                    local_root=config_root,
+                get_existing_machine_config_path(
+                    'RegulatorProfiles.json', config_root=config_root
+                )
+                if self.canonical_existing_only
+                else get_machine_config_path(
+                    'RegulatorProfiles.json', local_root=config_root
                 )
             )
             self.regulator_profile_store = RegulatorProfileStore(
@@ -15671,6 +15709,8 @@ class Model(QObject):
             self.regulator_profiles = factory_default_document()
             self.regulator_profile_store.document = self.regulator_profiles
             print(f"[RegulatorProfiles] Failed to load profile store: {e}")
+            if getattr(self, "canonical_existing_only", False):
+                raise
 
     def _get_experiment_audit_log(self):
         log = getattr(self, "experiment_audit_log", None)

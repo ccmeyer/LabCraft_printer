@@ -115,6 +115,28 @@ def get_machine_config_path(
     return local_path
 
 
+def get_existing_machine_config_path(
+    filename: str,
+    *,
+    config_root: str | Path,
+) -> Path:
+    """Return an existing canonical config file without preset fallback."""
+
+    if filename not in _EXPECTED_TOP_LEVEL_TYPES:
+        supported = ", ".join(sorted(_EXPECTED_TOP_LEVEL_TYPES))
+        raise ValueError(f"Unsupported machine config '{filename}'. Supported: {supported}")
+    if config_root is None:
+        raise ValueError("Canonical config_root is required.")
+    root = Path(config_root).expanduser().resolve(strict=False)
+    path = (root / filename).resolve(strict=False)
+    if root not in path.parents or path.parent != root:
+        raise ValueError(f"Canonical config path escaped its root: {path}")
+    if not path.is_file():
+        raise FileNotFoundError(f"Canonical machine config is missing: {path}")
+    _validate_json_file(path, filename)
+    return path
+
+
 def get_calibration_memory_root(
     *,
     local_root: str | Path | None = None,
@@ -137,4 +159,27 @@ def get_calibration_memory_root(
         _atomic_copy_bytes(template_path, local_path)
         _validate_json_top_level(local_path, expected_type, relative_path)
 
+    return target_root
+
+
+def get_existing_calibration_memory_root(
+    *,
+    root: str | Path,
+) -> Path:
+    """Validate the migrated CalibrationMemory baseline without creating it."""
+
+    if root is None:
+        raise ValueError("Canonical CalibrationMemory root is required.")
+    target_root = Path(root).expanduser().resolve(strict=False)
+    if not target_root.is_dir():
+        raise FileNotFoundError(
+            f"Canonical CalibrationMemory root is missing: {target_root}"
+        )
+    for relative_path, expected_type in _CALIBRATION_MEMORY_SEED_TYPES.items():
+        path = (target_root / relative_path).resolve(strict=False)
+        if target_root not in path.parents or not path.is_file():
+            raise FileNotFoundError(
+                f"Canonical CalibrationMemory baseline is missing: {path}"
+            )
+        _validate_json_top_level(path, expected_type, relative_path)
     return target_root

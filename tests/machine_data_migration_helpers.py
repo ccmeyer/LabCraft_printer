@@ -3,6 +3,7 @@ import shutil
 from pathlib import Path
 
 import MachineData
+import MachineDataLock
 import MachineDataMigration
 
 
@@ -124,3 +125,41 @@ def migration_policy(**archive_overrides):
         archive_policy=MachineDataMigration.ArchivePolicy(**archive_overrides),
         safety_margin_bytes=0,
     )
+
+
+def publish_candidate(tmp_path, *, candidate=None, wrapper_kwargs=None):
+    """Publish one synthetic copied-unverified tree for M3 contract tests."""
+
+    if candidate is None:
+        options = {"custom_camera": True}
+        options.update(dict(wrapper_kwargs or {}))
+        wrapper, _local = write_wrapper(
+            Path(tmp_path) / "candidate",
+            **options,
+        )
+        candidate = inspect_wrapper(wrapper)
+    base, paths = machine_data_paths(Path(tmp_path))
+    workspace = MachineDataMigration.build_migration_workspace_paths(
+        base, MACHINE_UUID, MIGRATION_ID
+    )
+    identity = target_identity()
+    with MachineDataLock.acquire_migration_lock(base, MACHINE_UUID) as lock:
+        backup = MachineDataMigration.create_verified_backup(
+            candidate,
+            workspace=workspace,
+            target_identity=identity,
+            acquired_lock=lock,
+            policy=migration_policy(),
+            clock=fixed_clock,
+        )
+        result = MachineDataMigration.import_verified_candidate(
+            candidate,
+            backup,
+            workspace=workspace,
+            target_paths=paths,
+            target_identity=identity,
+            acquired_lock=lock,
+            policy=migration_policy(),
+            clock=fixed_clock,
+        )
+    return base, paths, identity, candidate, result

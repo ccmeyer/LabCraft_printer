@@ -70,12 +70,15 @@ class QualificationRunWorker(QtCore.QThread):
 
         self.stage.emit("Preparing qualification run")
         suite_runner = self._external_qualification_runner or run_qualification
+        identity_path = self.config.get("identity_path")
+        if self.config.get("require_explicit_identity_path") and not identity_path:
+            raise ValueError("Production qualification requires canonical identity_path.")
         result = suite_runner(
             manifest_ref=self.config["manifest_ref"],
             port=str(self.config.get("port") or "/dev/ttyAMA0"),
             baud=int(self.config.get("baud") or 115200),
             machine_id=self._optional_text(self.config.get("machine_id")),
-            identity_path=self.config.get("identity_path") or self.repo_root / "local" / "machine_identity.json",
+            identity_path=identity_path or self.repo_root / "local" / "machine_identity.json",
             output_root=self.config.get("output_root") or self.repo_root / "hil_reports" / "qualification",
             timeout_ms=self._optional_int(self.config.get("timeout_ms")),
             run_selftest_path=self.config.get("run_selftest_path") or self.repo_root / "tools" / "run_selftest.py",
@@ -112,12 +115,15 @@ class QualificationRunWorker(QtCore.QThread):
 
         campaign_runner = self._external_campaign_runner or run_campaign
 
+        identity_path = self.config.get("identity_path")
+        if self.config.get("require_explicit_identity_path") and not identity_path:
+            raise ValueError("Production qualification requires canonical identity_path.")
         result = campaign_runner(
             campaign_ref=self.config["campaign_ref"],
             port=str(self.config.get("port") or "/dev/ttyAMA0"),
             baud=int(self.config.get("baud") or 115200),
             machine_id=self._optional_text(self.config.get("machine_id")),
-            identity_path=self.config.get("identity_path") or self.repo_root / "local" / "machine_identity.json",
+            identity_path=identity_path or self.repo_root / "local" / "machine_identity.json",
             campaign_output_root=self.config.get("campaign_output_root") or self.repo_root / "hil_reports" / "qualification_campaigns",
             suite_output_root=self.config.get("suite_output_root") or self.repo_root / "hil_reports" / "qualification",
             operator_prompts=bool(self.config.get("operator_prompts")),

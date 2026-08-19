@@ -1,6 +1,6 @@
 # Machine Data Migration Milestone 1: Contract Implementation Plan
 
-Status: `implementation_complete`
+Status: `verified`
 
 Prepared: 2026-08-19
 
@@ -741,7 +741,7 @@ this inert contract milestone.
 - [x] Existing application-wide single-instance tests still pass.
 - [x] Direct-local inventory has been refreshed and findings recorded.
 - [x] Full Python suite passes.
-- [ ] Parent plan contains the dedicated commit and validation evidence.
+- [x] Parent plan contains the dedicated commit and validation evidence.
 
 ## Risks and mitigations
 
@@ -802,8 +802,8 @@ Milestone 1 is `verified` only when:
   production-non-activation tests. `App.py`, application composition, MVC,
   updater, firmware, protocol, motion behavior, and release metadata remain
   unchanged.
-- Work is complete on branch `update_bug_fix`; the dedicated Milestone 1
-  commit is pending.
+- Dedicated Milestone 1 commit: `9b882141` (`feat: define external machine
+  data contract`).
 
 ## Validation record
 
@@ -857,3 +857,4 @@ Milestone 1 is `verified` only when:
 | --- | --- |
 | 2026-08-19 | Created the concrete inert contract implementation plan for Milestone 1. |
 | 2026-08-19 | Recorded the completed implementation and focused/full validation; retained implementation-complete status until the dedicated milestone commit exists. |
+| 2026-08-19 | Recorded dedicated commit `9b882141` and marked Milestone 1 verified. |

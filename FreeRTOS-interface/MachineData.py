@@ -1,9 +1,4 @@
-"""Pure contracts for checkout-independent LabCraft machine data.
-
-Milestone 1 intentionally keeps these helpers side-effect free. Production
-startup continues to use the legacy checkout-local configuration until the
-later migration/activation milestone supplies these paths explicitly.
-"""
+"""Pure contracts for checkout-independent LabCraft machine data."""
 
 from __future__ import annotations
 
@@ -23,6 +18,7 @@ MACHINE_IDENTITY_SCHEMA_NAME = "labcraft.machine_identity"
 MACHINE_IDENTITY_SCHEMA_VERSION = 1
 ACTIVE_MACHINE_SCHEMA_NAME = "labcraft.active_machine"
 ACTIVE_MACHINE_SCHEMA_VERSION = 1
+ACTIVE_MACHINE_AUTHORIZED_SCHEMA_VERSION = 2
 
 UNASSIGNED_MACHINE_ID = "LC-UNASSIGNED"
 ACTIVE_MACHINE_SELECTION_SOURCES = frozenset(
@@ -120,6 +116,10 @@ class MachineDataBasePaths:
         object.__setattr__(self, "active_machine_path", active_machine_path)
         object.__setattr__(self, "machines_root", machines_root)
 
+    @property
+    def activation_work_root(self) -> Path:
+        return self.root / "activation_work"
+
 
 @dataclass(frozen=True)
 class MachineDataPaths:
@@ -200,6 +200,18 @@ class MachineDataPaths:
                     f"{actual}"
                 )
             object.__setattr__(self, field, actual)
+
+    @property
+    def activation_receipt_path(self) -> Path:
+        return self.metadata_root / "activation_receipt.json"
+
+    @property
+    def candidate_evidence_path(self) -> Path:
+        return self.metadata_root / "candidate_evidence.json"
+
+    @property
+    def migration_tree_manifest_path(self) -> Path:
+        return self.metadata_root / "migration_tree_manifest.json"
 
 
 def resolve_machine_data_base(
@@ -426,16 +438,43 @@ class ActiveMachine:
     machine_uuid: str
     selected_at_utc: str
     selection_source: str
+    activation_id: str | None = None
+    migration_id: str | None = None
+    activation_receipt_sha256: str | None = None
+
+    @property
+    def authorizes_production(self) -> bool:
+        return all(
+            value is not None
+            for value in (
+                self.activation_id,
+                self.migration_id,
+                self.activation_receipt_sha256,
+            )
+        )
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_name": ACTIVE_MACHINE_SCHEMA_NAME,
-            "schema_version": ACTIVE_MACHINE_SCHEMA_VERSION,
+            "schema_version": (
+                ACTIVE_MACHINE_AUTHORIZED_SCHEMA_VERSION
+                if self.authorizes_production
+                else ACTIVE_MACHINE_SCHEMA_VERSION
+            ),
             "machine_id": self.machine_id,
             "machine_uuid": self.machine_uuid,
             "selected_at_utc": self.selected_at_utc,
             "selection_source": self.selection_source,
         }
+        if self.authorizes_production:
+            payload.update(
+                {
+                    "activation_id": self.activation_id,
+                    "migration_id": self.migration_id,
+                    "activation_receipt_sha256": self.activation_receipt_sha256,
+                }
+            )
+        return payload
 
 
 def parse_active_machine(payload: object) -> ActiveMachine:
@@ -443,13 +482,16 @@ def parse_active_machine(payload: object) -> ActiveMachine:
 
     if not isinstance(payload, dict):
         raise ActiveMachineError("Active machine must be a JSON object.")
-    _require_schema(
-        payload,
-        schema_name=ACTIVE_MACHINE_SCHEMA_NAME,
-        schema_version=ACTIVE_MACHINE_SCHEMA_VERSION,
-        label="Active machine",
-        error_type=ActiveMachineError,
-    )
+    if payload.get("schema_name") != ACTIVE_MACHINE_SCHEMA_NAME:
+        raise ActiveMachineError(
+            f"Active machine schema_name must be {ACTIVE_MACHINE_SCHEMA_NAME!r}."
+        )
+    version = payload.get("schema_version")
+    if type(version) is not int or version not in {
+        ACTIVE_MACHINE_SCHEMA_VERSION,
+        ACTIVE_MACHINE_AUTHORIZED_SCHEMA_VERSION,
+    }:
+        raise ActiveMachineError("Active machine schema_version is unsupported.")
 
     source = payload.get("selection_source")
     if not isinstance(source, str) or source not in ACTIVE_MACHINE_SELECTION_SOURCES:
@@ -457,6 +499,24 @@ def parse_active_machine(payload: object) -> ActiveMachine:
         raise ActiveMachineError(
             f"selection_source must be one of: {supported}."
         )
+
+    activation_id = migration_id = activation_receipt_sha256 = None
+    if version == ACTIVE_MACHINE_AUTHORIZED_SCHEMA_VERSION:
+        activation_id = _canonical_uuid(
+            payload.get("activation_id"), error_type=ActiveMachineError
+        )
+        migration_id = _canonical_uuid(
+            payload.get("migration_id"), error_type=ActiveMachineError
+        )
+        activation_receipt_sha256 = payload.get("activation_receipt_sha256")
+        if (
+            not isinstance(activation_receipt_sha256, str)
+            or len(activation_receipt_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in activation_receipt_sha256)
+        ):
+            raise ActiveMachineError(
+                "activation_receipt_sha256 must be lowercase SHA-256 text."
+            )
 
     return ActiveMachine(
         machine_id=_machine_id(
@@ -474,12 +534,27 @@ def parse_active_machine(payload: object) -> ActiveMachine:
             error_type=ActiveMachineError,
         ),
         selection_source=source,
+        activation_id=activation_id,
+        migration_id=migration_id,
+        activation_receipt_sha256=activation_receipt_sha256,
     )
+
+
+def require_authorized_active_machine(payload: object) -> ActiveMachine:
+    """Parse a pointer and reject diagnostic-only version 1 records."""
+
+    active = parse_active_machine(payload)
+    if not active.authorizes_production:
+        raise ActiveMachineError(
+            "Active-machine version 1 is diagnostic-only and cannot authorize production."
+        )
+    return active
 
 
 __all__ = [
     "ACTIVE_MACHINE_SCHEMA_NAME",
     "ACTIVE_MACHINE_SCHEMA_VERSION",
+    "ACTIVE_MACHINE_AUTHORIZED_SCHEMA_VERSION",
     "ACTIVE_MACHINE_SELECTION_SOURCES",
     "MACHINE_DATA_DIRNAME",
     "MACHINE_DATA_ROOT_ENV",
@@ -497,5 +572,6 @@ __all__ = [
     "build_machine_data_paths",
     "parse_active_machine",
     "parse_machine_identity",
+    "require_authorized_active_machine",
     "resolve_machine_data_base",
 ]

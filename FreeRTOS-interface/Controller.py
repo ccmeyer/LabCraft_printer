@@ -34,6 +34,7 @@ from simulation import SIMULATED_PORT
 from CaptureCoordinator import CaptureCoordinator
 from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
 from ApplicationComposition import ExperimentalFeatures, PRODUCTION_RUNTIME_CONTEXT
+from MachineDataVerification import SavedTargetAuthorizationRequest
 
 ARRAY_PAUSE_DEPARTURE_ACCEL = 32000
 ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
@@ -939,6 +940,8 @@ class Controller(QObject):
         runtime_context=None,
         experimental_features=None,
         experimental_balance_service=None,
+        saved_target_authorizer=None,
+        machine_data_paths=None,
     ):
         super().__init__()
 
@@ -946,6 +949,8 @@ class Controller(QObject):
         self.model = model
         self.profile = profile
         self.runtime_context = runtime_context or PRODUCTION_RUNTIME_CONTEXT
+        self.saved_target_authorizer = saved_target_authorizer
+        self.machine_data_paths = machine_data_paths
         self.experimental_features = (
             experimental_features or ExperimentalFeatures()
         )
@@ -3118,6 +3123,9 @@ class Controller(QObject):
         return self._repo_root / "hil_reports" / "qualification_campaigns"
 
     def qualification_identity_path(self):
+        machine_data_paths = getattr(self, "machine_data_paths", None)
+        if machine_data_paths is not None:
+            return machine_data_paths.identity_path
         return self._repo_root / "local" / "machine_identity.json"
 
     def qualification_default_machine_id(self):
@@ -3168,6 +3176,9 @@ class Controller(QObject):
 
         run_config = dict(config)
         run_config.setdefault("identity_path", self.qualification_identity_path())
+        run_config["require_explicit_identity_path"] = (
+            getattr(self, "machine_data_paths", None) is not None
+        )
         run_config.setdefault("output_root", self.qualification_output_root())
         run_config.setdefault("suite_output_root", self.qualification_output_root())
         run_config.setdefault("campaign_output_root", self.qualification_campaign_output_root())
@@ -3272,6 +3283,9 @@ class Controller(QObject):
         self._plate_reader_analysis_worker = None
 
     def regulator_calibration_output_root(self):
+        machine_data_paths = getattr(self, "machine_data_paths", None)
+        if machine_data_paths is not None:
+            return machine_data_paths.regulator_optimization_root
         return self._repo_root / "local" / "regulator_optimization"
 
     def is_regulator_calibration_running(self):
@@ -5824,6 +5838,117 @@ class Controller(QObject):
         """Check if all commands have been completed."""
         return self.machine.check_if_all_completed()
 
+    def _saved_target_authorization_request(
+        self,
+        *,
+        name,
+        original_target,
+        final_target,
+        x_offset,
+        z_offset,
+        manual,
+        override,
+        ignore_safe_height,
+    ):
+        authorizer = getattr(self, "saved_target_authorizer", None)
+        paths = getattr(self, "machine_data_paths", None)
+        if authorizer is None or paths is None:
+            return None
+        normalized = str(name or "").strip().casefold()
+        target_key = f"location:{normalized}"
+        target_kind = "location"
+        base_value = dict(original_target)
+        if normalized.startswith("slot-"):
+            calibrations = getattr(self.model.rack_model, "calibrations", {})
+            left = calibrations.get("rack_position_Left")
+            right = calibrations.get("rack_position_Right")
+            if not isinstance(left, dict) or not isinstance(right, dict):
+                return SavedTargetAuthorizationRequest(
+                    paths.machine_uuid,
+                    "rack:primary",
+                    "rack",
+                    {},
+                    dict(final_target),
+                    "rack_slot_move",
+                    {},
+                    manual,
+                    override,
+                    ignore_safe_height,
+                )
+            target_key = "rack:primary"
+            target_kind = "rack"
+            base_value = {"Left": dict(left), "Right": dict(right)}
+        elif normalized == "plate":
+            plate = getattr(self.model, "well_plate", None)
+            get_name = getattr(plate, "get_current_plate_name", None)
+            get_calibrations = getattr(plate, "get_all_current_plate_calibrations", None)
+            if callable(get_name) and callable(get_calibrations):
+                target_key = f"plate:{str(get_name()).casefold()}"
+                target_kind = "plate"
+                base_value = dict(get_calibrations() or {})
+        return SavedTargetAuthorizationRequest(
+            machine_uuid=paths.machine_uuid,
+            target_key=target_key,
+            target_kind=target_kind,
+            base_value=base_value,
+            final_coordinates=dict(final_target),
+            workflow="move_to_location",
+            offsets={"X": int(x_offset), "Y": 0, "Z": int(z_offset)},
+            manual=bool(manual),
+            override=bool(override),
+            ignore_safe_height=bool(ignore_safe_height),
+        )
+
+    def _authorize_saved_target(self, **kwargs):
+        authorizer = getattr(self, "saved_target_authorizer", None)
+        request = self._saved_target_authorization_request(**kwargs)
+        if request is None:
+            return True
+        decision = authorizer.authorize(request)
+        if decision.allowed:
+            return True
+        self.error_occurred_signal.emit("Move Blocked", decision.message)
+        print(
+            f"Move blocked by saved-target verification: "
+            f"{decision.reason_code}: {decision.message}"
+        )
+        return False
+
+    def _authorize_active_plate_derived_target(self, final_target, workflow):
+        authorizer = getattr(self, "saved_target_authorizer", None)
+        paths = getattr(self, "machine_data_paths", None)
+        if authorizer is None or paths is None:
+            return True
+        plate = getattr(self.model, "well_plate", None)
+        get_name = getattr(plate, "get_current_plate_name", None)
+        get_calibrations = getattr(plate, "get_all_current_plate_calibrations", None)
+        if not callable(get_name) or not callable(get_calibrations):
+            self.error_occurred_signal.emit(
+                "Move Blocked", "Active plate calibration evidence is unavailable."
+            )
+            return False
+        request = SavedTargetAuthorizationRequest(
+            machine_uuid=paths.machine_uuid,
+            target_key=f"plate:{str(get_name()).casefold()}",
+            target_kind="plate",
+            base_value=dict(get_calibrations() or {}),
+            final_coordinates=dict(final_target),
+            workflow=str(workflow),
+            offsets={},
+            manual=False,
+            override=True,
+            ignore_safe_height=False,
+        )
+        decision = authorizer.authorize(request)
+        if decision.allowed:
+            return True
+        self.error_occurred_signal.emit("Move Blocked", decision.message)
+        print(
+            f"Plate-derived move blocked by verification: "
+            f"{decision.reason_code}: {decision.message}"
+        )
+        return False
+
     def move_to_location(self, name, direct=True, safe_y=False, x_offset: int = 0,z_offset: int = 0,manual=False,coords=None,override=False,ignore_safe_height=False,on_complete=None):
         """Move to the saved location."""
         if self.profile.name != "legacy":
@@ -5891,6 +6016,18 @@ class Controller(QObject):
             final_target['X'] += x_offset
         if z_offset != 0:
             final_target['Z'] += z_offset
+
+        if not self._authorize_saved_target(
+            name=name,
+            original_target=original_target,
+            final_target=final_target,
+            x_offset=x_offset,
+            z_offset=z_offset,
+            manual=manual,
+            override=override,
+            ignore_safe_height=ignore_safe_height,
+        ):
+            return False
 
         needs_route_safe_z = (
             (current_is_camera or target_is_camera) or
@@ -6774,6 +6911,12 @@ class Controller(QObject):
         well_coords = well.get_coordinates()
         if not isinstance(well_coords, dict):
             self.error_occurred_signal.emit('Print Array Error', f'Well {well.well_id} has no coordinates')
+            self._complete_array_finalize("hard_abort")
+            return False
+
+        if not self._authorize_active_plate_derived_target(
+            well_coords, "print_array_well"
+        ):
             self._complete_array_finalize("hard_abort")
             return False
 

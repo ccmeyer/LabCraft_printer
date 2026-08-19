@@ -1090,7 +1090,7 @@ class MainWindow(QMainWindow):
         value = 1.5696
         source = "default"
         step_source = "preset"
-        config_path = "local/droplet_imager_optics.json"
+        config_path = "not configured"
         if cam is not None:
             getter = getattr(cam, "get_um_per_pixel", None)
             source_getter = getattr(cam, "get_um_per_pixel_source", None)

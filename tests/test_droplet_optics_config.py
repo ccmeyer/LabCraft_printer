@@ -70,6 +70,24 @@ def test_droplet_camera_ignores_invalid_optics_config(tmp_path, monkeypatch):
     assert cam.get_um_per_pixel_source() == "default"
 
 
+def test_explicit_optics_path_overrides_checkout_local_class_default(
+    tmp_path, monkeypatch
+):
+    checkout_local = tmp_path / "checkout" / "local" / "optics.json"
+    canonical = tmp_path / "external" / "machine" / "calibration" / "optics.json"
+    monkeypatch.setattr(DropletCameraModel, "OPTICS_CONFIG_PATH", checkout_local)
+    cam = DropletCameraModel(
+        str(_step_calibration_path(tmp_path)),
+        optics_config_path=canonical,
+    )
+
+    cam.set_um_per_pixel(2.75, source="canonical_test")
+
+    assert cam.optics_config_path() == canonical
+    assert json.loads(canonical.read_text(encoding="utf-8"))["um_per_pixel"] == 2.75
+    assert not checkout_local.exists()
+
+
 def test_droplet_camera_motion_conversion_falls_back_to_preset_when_missing_or_invalid(tmp_path, monkeypatch):
     config_path = tmp_path / "optics.json"
     config_path.write_text(

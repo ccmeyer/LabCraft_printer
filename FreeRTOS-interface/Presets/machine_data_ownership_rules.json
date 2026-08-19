@@ -1,0 +1,13 @@
+{
+  "schema_name": "labcraft.machine_data_ownership_rules",
+  "schema_version": 1,
+  "rules": [
+    {
+      "classification": "archive_only",
+      "match_kind": "prefix",
+      "pattern": "update_logs/",
+      "reason": "Legacy updater result logs are diagnostic evidence, not active machine configuration.",
+      "rule_id": "legacy-update-logs-v1"
+    }
+  ]
+}
