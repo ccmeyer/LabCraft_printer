@@ -61,6 +61,67 @@ def _deliver_queue_ack(machine, seq32, ack_result, *, expected_seq32=None):
     )
 
 
+def test_pause_and_clear_record_control_transaction_lifecycle(
+    qapp,
+    test_profile,
+    tmp_path,
+    fake_serial_main,
+):
+    machine = mfr.Machine(
+        SimpleNamespace(),
+        profile=test_profile,
+        black_box_log_dir=tmp_path,
+    )
+    machine.ser = fake_serial_main
+    machine.port = "COM9"
+    machine._start_ack_wait = lambda *args, **kwargs: None
+
+    assert machine.pause_commands() is True
+    assert machine.clear_command_queue() is True
+    machine._on_clear_ack(timed_out=False)
+    machine.update_status(
+        {
+            "cmd_depth": 0,
+            "Current_command": 9,
+            "Last_completed": 8,
+            "Last_retired": 9,
+            "Transport_paused": False,
+        }
+    )
+
+    events = machine.black_box_recorder.recent_events()
+    pause_events = [
+        event
+        for event in events
+        if event["payload"].get("command") == "PAUSE"
+    ]
+    clear_events = [
+        event
+        for event in events
+        if event["payload"].get("command") == "CLEAR_QUEUE"
+    ]
+
+    assert [event["kind"] for event in pause_events] == [
+        "control_command_tx_started",
+        "control_command_tx_succeeded",
+    ]
+    assert [event["kind"] for event in clear_events] == [
+        "control_command_tx_started",
+        "control_command_tx_succeeded",
+    ]
+    assert clear_events[0]["payload"]["seq32"] == machine._control_seq_base
+    assert any(
+        event["kind"] == "clear_ack_received"
+        and event["payload"]["seq32"] == machine._control_seq_base
+        for event in events
+    )
+    assert any(
+        event["kind"] == "clear_status_confirmed"
+        and event["payload"]["seq32"] == machine._control_seq_base
+        for event in events
+    )
+
+
 def _benign_startup_report():
     return {
         "summary": "Board restarted after software reset.",

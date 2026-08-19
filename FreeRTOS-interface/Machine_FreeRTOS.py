@@ -4640,6 +4640,9 @@ class Machine(QObject):
 
         self.command_queue = CommandQueue(event_callback=self._record_command_event)
         self.baud = 115200  # Default baud rate for serial communication
+        # RX ownership invariant: after begin_reader_thread(), SerialReader is the
+        # only component allowed to consume or discard bytes from the main port.
+        # Machine-side code may write frames, but must not flush the live RX path.
         self.ser = None
         self.port = None
         self.reader = None
@@ -5324,10 +5327,18 @@ class Machine(QObject):
             self._transport_epoch += 1
             self._confirmed_imaging_droplet_count = None
             self._last_acknowledged_imaging_ejection = None
-            self.ser = self._serial_factory(self.port, self.baud, timeout=0.1)
+            self.ser = self._serial_factory(
+                self.port,
+                self.baud,
+                timeout=0.1,
+                exclusive=True,
+            )
             if not self.ser.is_open:
                 raise IOError("Port not open")
-            self._record_black_box_event("connect_board", {"port": self.port})
+            self._record_black_box_event(
+                "connect_board",
+                {"port": self.port, "exclusive": True},
+            )
             
             self.begin_reader_thread()
             self._send_hello()
@@ -5551,6 +5562,10 @@ class Machine(QObject):
             "status_confirmed": bool(status_confirmed),
             "status_timed_out": bool(status_timed_out),
         }
+        self._record_black_box_event(
+            "clear_status_confirmed" if status_confirmed else "clear_status_timeout",
+            {**payload, "seq32": request.get("seq32")},
+        )
 
         handler = request.get("handler")
         if handler:
@@ -5581,11 +5596,9 @@ class Machine(QObject):
                 self.execution_timer.stop()
             except Exception:
                 pass
-        try:
-            if self.ser is not None:
-                self.ser.reset_input_buffer()
-        except Exception:
-            pass
+        # The live reader owns RX. Recovery is delimited by RESET_REPORT and the
+        # HELLO handshake; flushing here can race its blocking read and discard
+        # recovery frames.
         try:
             self._gripper_idle_timer.stop()
         except Exception:
@@ -5757,13 +5770,9 @@ class Machine(QObject):
         )
 
     def _on_goodbye_done(self):
-        try:
-            if self.ser is not None:
-                self.ser.reset_input_buffer()
-            print('Goodbye acknowledged, machine disconnected.')
-        except Exception:
-            print('Error during goodbye acknowledgment.')
-            pass
+        # Do not flush a port still owned by SerialReader. disconnect_handler()
+        # requests reader shutdown before closing the transport.
+        print('Goodbye acknowledged, machine disconnected.')
         # stop threads, close, etc.
         self.disconnect_handler()
 
@@ -7755,7 +7764,19 @@ class Machine(QObject):
         if self.sent_command is not None:
             print('Overriding command:',self.sent_command.get_command())
         print('Sending pause command')
-        self.send_command_to_board(new_command)
+        event_payload = {
+            "command": "PAUSE",
+            "command_code": CMD_MAP["PAUSE"],
+            "seq32": 0,
+            "port": self.port,
+        }
+        self._record_black_box_event("control_command_tx_started", event_payload)
+        sent = self.send_command_to_board(new_command)
+        self._record_black_box_event(
+            "control_command_tx_succeeded" if sent else "control_command_tx_failed",
+            event_payload,
+        )
+        return sent
     
     def resume_commands(self):
         print('Resuming commands')
@@ -7782,13 +7803,30 @@ class Machine(QObject):
         # Optionally pause TX for safety while waiting
         self._tx_paused = True
 
-        try: self.ser.reset_input_buffer()
-        except Exception: pass
-
-        # send CLEAR
+        # SerialReader exclusively owns RX while connected. In particular, do
+        # not flush here: CLEAR_ACK may arrive while its read is in progress.
         seq = self._alloc_ctl_seq32()
         frame = build_frame(CLEAR_QUEUE, seq)
-        self._write_frame(frame)
+        event_payload = {
+            "command": "CLEAR_QUEUE",
+            "command_code": CLEAR_QUEUE,
+            "seq32": seq,
+            "port": self.port,
+        }
+        self._record_black_box_event("control_command_tx_started", event_payload)
+        try:
+            self._write_frame(frame)
+        except Exception as exc:
+            self._record_black_box_event(
+                "control_command_tx_failed",
+                {
+                    **event_payload,
+                    "exception_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+            raise
+        self._record_black_box_event("control_command_tx_succeeded", event_payload)
         if recovery_state != "idle":
             self._xy_rehome_batch_queuing = False
             self._xy_rehome_batch_index = 0
@@ -7798,6 +7836,7 @@ class Machine(QObject):
             "handler": handler,
             "ack_received": False,
             "ack_timed_out": False,
+            "seq32": seq,
         }
 
         self._start_ack_wait(
@@ -7816,14 +7855,29 @@ class Machine(QObject):
                 "handler": None,
                 "ack_received": False,
                 "ack_timed_out": False,
+                "seq32": None,
             }
 
         if timed_out:
             print("No CLEAR_ACK received, proceeding anyway.")
             self._pending_clear_request["ack_timed_out"] = True
+            self._record_black_box_event(
+                "clear_ack_timeout",
+                {
+                    "ack_cmd": CLEAR_ACK,
+                    "seq32": self._pending_clear_request.get("seq32"),
+                },
+            )
         else:
             print("CLEAR_ACK received, command queue cleared.")
             self._pending_clear_request["ack_received"] = True
+            self._record_black_box_event(
+                "clear_ack_received",
+                {
+                    "ack_cmd": CLEAR_ACK,
+                    "seq32": self._pending_clear_request.get("seq32"),
+                },
+            )
 
         # Clear Python side queue & notify UI
         self.command_queue.clear_queue(reset_counter=False)

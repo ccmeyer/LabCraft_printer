@@ -124,7 +124,12 @@ def test_machine_on_reset_report_stores_clears_and_restarts_hello(qapp, test_pro
     machine.reset_report_received.connect(seen.append)
     machine.command_queue.add_command("OPEN_GRIPPER", 0, 0, 0)
     machine._pending_acks[(0xF4, 7)] = {"timer": SimpleNamespace(stop=lambda: None, deleteLater=lambda: None)}
-    machine.ser = SimpleNamespace(is_open=True, reset_input_buffer=lambda: None)
+    machine.ser = SimpleNamespace(
+        is_open=True,
+        reset_input_buffer=lambda: (_ for _ in ()).throw(
+            AssertionError("reset recovery must not flush the live reader")
+        ),
+    )
     machine._begin_recovery_handshake = lambda: recovery.append("hello")
 
     report = {

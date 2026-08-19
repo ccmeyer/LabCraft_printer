@@ -8,6 +8,7 @@ class FakeSerialMain:
         self.writes = []
         self.is_open = True
         self.name = "FAKE_MAIN"
+        self.reset_input_buffer_calls = 0
 
     def append_inbound(self, data: bytes):
         with self._lock:
@@ -46,6 +47,7 @@ class FakeSerialMain:
             raise OSError("serial closed")
 
     def reset_input_buffer(self):
+        self.reset_input_buffer_calls += 1
         with self._lock:
             self._buf.clear()
 
@@ -70,8 +72,12 @@ class FakeSerialFactory:
         self.main_inbound = main_inbound
         self.log_lines = log_lines or []
         self.instances = []
+        self.open_calls = []
 
-    def __call__(self, port, baud, timeout=0.1):
+    def __call__(self, port, baud, timeout=0.1, **kwargs):
+        self.open_calls.append(
+            {"port": port, "baud": baud, "timeout": timeout, **kwargs}
+        )
         if str(port) == "/dev/ttyUSB0":
             ser = FakeSerialLog(self.log_lines)
         else:
