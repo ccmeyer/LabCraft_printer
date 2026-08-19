@@ -130,6 +130,9 @@ class MachineDataPaths:
     machine_root: Path
     config_root: Path
     calibration_memory_root: Path
+    calibration_root: Path
+    droplet_imager_optics_path: Path
+    regulator_optimization_root: Path
     metadata_root: Path
     identity_path: Path
     verification_path: Path
@@ -160,6 +163,13 @@ class MachineDataPaths:
             "machine_root": machine_root,
             "config_root": machine_root / "config",
             "calibration_memory_root": machine_root / "CalibrationMemory",
+            "calibration_root": machine_root / "calibration",
+            "droplet_imager_optics_path": (
+                machine_root / "calibration" / "droplet_imager_optics.json"
+            ),
+            "regulator_optimization_root": (
+                machine_root / "calibration" / "regulator_optimization"
+            ),
             "metadata_root": machine_root / "metadata",
             "identity_path": machine_root / "metadata" / "machine_identity.json",
             "verification_path": machine_root / "metadata" / "verification.json",
@@ -260,6 +270,7 @@ def build_machine_data_paths(
 
     config_root = machine_root / "config"
     calibration_memory_root = machine_root / "CalibrationMemory"
+    calibration_root = machine_root / "calibration"
     metadata_root = machine_root / "metadata"
     history_root = machine_root / "history"
     backups_root = machine_root / "backups"
@@ -272,6 +283,13 @@ def build_machine_data_paths(
         machine_root=machine_root,
         config_root=config_root,
         calibration_memory_root=calibration_memory_root,
+        calibration_root=calibration_root,
+        droplet_imager_optics_path=(
+            calibration_root / "droplet_imager_optics.json"
+        ),
+        regulator_optimization_root=(
+            calibration_root / "regulator_optimization"
+        ),
         metadata_root=metadata_root,
         identity_path=metadata_root / "machine_identity.json",
         verification_path=metadata_root / "verification.json",

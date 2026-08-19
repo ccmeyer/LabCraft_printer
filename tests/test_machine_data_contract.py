@@ -187,6 +187,15 @@ def test_build_machine_paths_uses_canonical_uuid_and_stays_contained(tmp_path):
     assert paths.machine_root == base.machines_root / MACHINE_UUID
     assert paths.config_root == paths.machine_root / "config"
     assert paths.calibration_memory_root == paths.machine_root / "CalibrationMemory"
+    assert paths.calibration_root == paths.machine_root / "calibration"
+    assert (
+        paths.droplet_imager_optics_path
+        == paths.calibration_root / "droplet_imager_optics.json"
+    )
+    assert (
+        paths.regulator_optimization_root
+        == paths.calibration_root / "regulator_optimization"
+    )
     assert paths.identity_path == paths.metadata_root / "machine_identity.json"
     assert paths.verification_path == paths.metadata_root / "verification.json"
     assert paths.migration_receipt_path == paths.metadata_root / "migration_receipt.json"

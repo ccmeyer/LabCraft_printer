@@ -1,0 +1,20 @@
+{
+  "description": "Synthetic fixture rules derived from the reviewed v1.2.0-rc.6 and v1.3.0-rc.1 preset cohorts; no deployed machine data.",
+  "cohorts": {
+    "v1.2.0-rc.6": {
+      "declared_version": "v1.2.0-rc.6",
+      "remove_settings_keys": [
+        "MACHINE_LOG_PORT"
+      ]
+    },
+    "v1.3.0-rc.1": {
+      "declared_version": "v1.3.0-rc.1",
+      "remove_settings_keys": []
+    }
+  },
+  "custom_camera": {
+    "X": 11040,
+    "Y": 39636,
+    "Z": 98052
+  }
+}
