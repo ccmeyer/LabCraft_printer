@@ -1,4 +1,5 @@
 import json
+from types import MappingProxyType
 
 import pytest
 
@@ -52,6 +53,49 @@ def _write_calibration_memory_seed(root, *, marker="template"):
         path = root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text + "\n", encoding="utf-8")
+
+
+def test_machine_config_contract_inventory_is_public_and_read_only():
+    inventory = LocalConfig.machine_config_top_level_types()
+
+    assert isinstance(inventory, MappingProxyType)
+    assert dict(inventory) == {
+        "Settings.json": dict,
+        "Plates.json": list,
+        "Locations.json": dict,
+        "Obstacles.json": dict,
+        "RegulatorProfiles.json": dict,
+    }
+    with pytest.raises(TypeError):
+        inventory["Locations.json"] = list
+    assert LocalConfig.machine_config_top_level_types()["Locations.json"] is dict
+
+
+def test_calibration_memory_contract_inventory_is_public_and_read_only():
+    inventory = LocalConfig.calibration_memory_seed_top_level_types()
+
+    assert isinstance(inventory, MappingProxyType)
+    assert dict(inventory) == LocalConfig._CALIBRATION_MEMORY_SEED_TYPES
+    with pytest.raises(TypeError):
+        inventory["schema.json"] = list
+    assert LocalConfig.calibration_memory_seed_top_level_types()["schema.json"] is dict
+
+
+def test_public_machine_config_validator_reuses_current_contract(tmp_path):
+    path = tmp_path / "Locations.json"
+    payload = {"Camera": {"X": 1, "Y": 2, "Z": 3}}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert LocalConfig.validate_machine_config_file(path, "Locations.json") == payload
+
+    path.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="expected top-level dict"):
+        LocalConfig.validate_machine_config_file(path, "Locations.json")
+
+
+def test_public_machine_config_validator_rejects_unsupported_filename(tmp_path):
+    with pytest.raises(ValueError, match="Unsupported machine config"):
+        LocalConfig.validate_machine_config_file(tmp_path / "Other.json", "Other.json")
 
 
 def test_get_machine_config_path_seeds_missing_local_from_current_preset(monkeypatch, tmp_path):

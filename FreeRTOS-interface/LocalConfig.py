@@ -1,7 +1,9 @@
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +27,19 @@ _CALIBRATION_MEMORY_SEED_TYPES = {
     "entities/printer_heads.json": dict,
 }
 
+_MACHINE_CONFIG_TOP_LEVEL_TYPES_VIEW = MappingProxyType(_EXPECTED_TOP_LEVEL_TYPES)
+_CALIBRATION_MEMORY_SEED_TYPES_VIEW = MappingProxyType(_CALIBRATION_MEMORY_SEED_TYPES)
+
+
+def machine_config_top_level_types() -> Mapping[str, type]:
+    """Return the read-only managed machine-config filename/type contract."""
+    return _MACHINE_CONFIG_TOP_LEVEL_TYPES_VIEW
+
+
+def calibration_memory_seed_top_level_types() -> Mapping[str, type]:
+    """Return the read-only CalibrationMemory starter-file contract."""
+    return _CALIBRATION_MEMORY_SEED_TYPES_VIEW
+
 
 def _validate_json_top_level(path: Path, expected_type: type, label: str):
     try:
@@ -45,6 +60,14 @@ def _validate_json_top_level(path: Path, expected_type: type, label: str):
 def _validate_json_file(path: Path, filename: str):
     expected_type = _EXPECTED_TOP_LEVEL_TYPES[filename]
     return _validate_json_top_level(path, expected_type, filename)
+
+
+def validate_machine_config_file(path: str | Path, filename: str):
+    """Validate a managed config file using the existing production contract."""
+    if filename not in _EXPECTED_TOP_LEVEL_TYPES:
+        supported = ", ".join(sorted(_EXPECTED_TOP_LEVEL_TYPES))
+        raise ValueError(f"Unsupported machine config '{filename}'. Supported: {supported}")
+    return _validate_json_file(Path(path), filename)
 
 
 def _atomic_copy_bytes(source: Path, target: Path):
