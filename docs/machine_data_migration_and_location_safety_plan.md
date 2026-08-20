@@ -1548,7 +1548,10 @@ writes, audit history, and unverified-target blocking remain.
 
 ## Milestone 6: Protect future updates and controlled rollback
 
-Status: `planned`
+Status: `implemented; local validation passed; commit and target-Pi qualification pending`
+
+Concrete plan:
+[Machine Data Migration Milestone 6: Update Preservation and Controlled Rollback](machine_data_migration_milestone_6_implementation_plan.md)
 
 ### Objective
 
@@ -1647,11 +1650,41 @@ checks.
 
 ### Implementation record
 
-- Not started.
+- 2026-08-20: Audited the current online/offline update and rollback check/apply
+  paths, application lifetime lock, external machine-data paths, updater result
+  locations, exact rc.6/v1.2.0/rc.1 legacy layouts, and release-manifest
+  contract. This was the pre-implementation audit that preceded the
+  implementation recorded below.
+- Created the concrete eight-slice implementation plan. It requires an exact
+  machine/root launch binding, `update.lock -> configuration.lock` ordering, a
+  reopened external backup before Git mutation, exact post-update bytes by
+  default, immutable external receipts, and receipt-gated relaunch.
+- The plan uses target bootstrap recovery for explicitly declared future
+  schema transitions and a constrained one-time deployment-anchor enrollment
+  for the initial rc.6/rc.1-to-rc.2 transition, whose old updater cannot create
+  an M6 preflight receipt.
+- Legacy rollback is support-guided and exact-profile-only for
+  `v1.2.0-rc.6`, `v1.2.0`, and `v1.3.0-rc.1`. Normal one-click legacy rollback
+  remains disabled; revoked/hard-invalid targets, missing verified export, or
+  missing firmware-pairing attestation stop before Git rollback/relaunch.
+- Re-upgrade compares raw and semantic legacy bytes before MVC/hardware. Any
+  difference is an explicit recovery conflict; no dual write, timestamp merge,
+  or automatic canonical overwrite is permitted.
+- Implemented the external preservation state machine, deployment anchor,
+  online/offline updater integration, target-side schema-recovery adapter
+  boundary, exact legacy export/return paths, support attestations, external
+  logs/results, release-contract validation, tests, and support runbook. No
+  firmware, protocol, release metadata, or tag was changed.
 
 ### Validation record
 
-- Not started.
+- Local implementation gates passed on 2026-08-20: 331 focused tests; 5,402
+  full-suite tests passed with 156 skipped; release metadata validation;
+  changed-module compilation; `git diff --check`; and contained,
+  hardware-disabled `virtual_print_array_96_v1` at 96/96.
+- The dedicated Milestone 6 commit, clean target-Pi disposable no-hardware
+  qualification, evidence sealing, completion record, and final `verified`
+  status remain pending.
 
 ## Milestone 7: Qualify, release, and stage deployment
 
@@ -2072,6 +2105,7 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-20 | 5 | Concrete guarded-change implementation plan created | Post-M4 UI-to-firmware audit; versioned policy/telemetry/preview/audit/dispatch design; eight implementation slices; Windows, SIL, and target-Pi no-hardware gates | Complete Slice 0 characterization and approve the initial policy before tests-first implementation |
 | 2026-08-20 | 5 | Guarded-change implementation and local qualification completed | 14 new focused; 66 combined focused; 5,377 full passed/156 skipped; 96/96 contained SIL; compilation/diff checks; policy SHA-256 `7f724af4...fa4274` | Review, create the dedicated Milestone 5 commit, pull it to the Pi, then run the clean no-hardware qualification and cadence gate |
 | 2026-08-20 | 5 | Milestone 5 verified at implementation commit `8b50872d` | Clean target-Pi qualification from a verified M4 sequence-zero copy: 100 ms simulated cadence; ten guarded events; six backups; zero pending/commands; exact config/pointer restore; detached reopen; 168 focused tests; contained and traced SIL 96/96; archive SHA-256 `03c2de79...f95ff` | Create the concrete Milestone 6 updater-preservation and controlled-rollback plan |
+| 2026-08-20 | 6 | Update preservation and controlled rollback implemented; local validation passed | 331 focused; 5,402 full passed/156 skipped; metadata/compile/diff checks; contained SIL 96/96; no firmware/protocol/release metadata changes | Review and create the dedicated M6 commit, then run clean target-Pi disposable no-hardware qualification |
 
 ## Definition of done for v1.3.0-rc.2
 

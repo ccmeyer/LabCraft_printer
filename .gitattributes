@@ -2,3 +2,4 @@
 /tools/virtual_workflows/fixtures/execution_preflight_safeguards_v1.json text eol=lf
 /tools/virtual_workflows/fixtures/authoritative_persistence_safeguards_v1.json text eol=lf
 /FreeRTOS-interface/Policies/configuration_change_policy_v1.json text eol=lf
+/FreeRTOS-interface/Policies/legacy_compatibility_profiles_v1.json text eol=lf

@@ -20,6 +20,7 @@ RELEASE_CANDIDATE_VERSION_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}-rc\.[0-9]+")
 RELEASE_CANDIDATE_PREFIX_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}-rc\.")
 RELEASE_CHANNELS = ("stable", "release_candidate")
 KNOWN_METADATA_INCOMPLETE_RELEASES = ("v1.1.15",)
+MACHINE_DATA_CONTRACT_NAME = "labcraft.machine_data_update.v1"
 
 STATUS_VALID = "valid"
 STATUS_INVALID = "invalid"
@@ -169,6 +170,52 @@ def _validate_requires_firmware(value: object, *, manifest_name: str, issues: li
         issues.append(f"{manifest_name} requires_firmware.artifact must be a non-empty string.")
 
 
+def _requires_machine_data_contract(version: str) -> bool:
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?", str(version or ""))
+    if match is None:
+        return False
+    core = tuple(int(match.group(index)) for index in (1, 2, 3))
+    if core != (1, 3, 0):
+        return core > (1, 3, 0)
+    rc_number = match.group(4)
+    return rc_number is None or int(rc_number) >= 2
+
+
+def _validate_machine_data_contract(
+    value: object,
+    *,
+    version: str,
+    manifest_name: str,
+    issues: list[str],
+) -> None:
+    if value is None:
+        if _requires_machine_data_contract(version):
+            issues.append(f"{manifest_name} machine_data preservation contract is required.")
+        return
+    if not isinstance(value, dict):
+        issues.append(f"{manifest_name} machine_data must be an object.")
+        return
+    expected = {"preservation_contract", "data_schema_version", "transition", "transition_id"}
+    if set(value) != expected:
+        issues.append(f"{manifest_name} machine_data fields are invalid.")
+        return
+    if value.get("preservation_contract") != MACHINE_DATA_CONTRACT_NAME:
+        issues.append(f"{manifest_name} machine_data preservation_contract is unsupported.")
+    schema_version = value.get("data_schema_version")
+    if type(schema_version) is not int or schema_version <= 0:
+        issues.append(f"{manifest_name} machine_data data_schema_version must be a positive integer.")
+    transition = value.get("transition")
+    transition_id = value.get("transition_id")
+    if transition == "none":
+        if transition_id is not None:
+            issues.append(f"{manifest_name} machine_data transition_id must be null for transition none.")
+    elif transition == "bootstrap_recovery":
+        if not isinstance(transition_id, str) or not transition_id.strip():
+            issues.append(f"{manifest_name} machine_data bootstrap_recovery requires transition_id.")
+    else:
+        issues.append(f"{manifest_name} machine_data transition is unsupported.")
+
+
 def _validate_manifest(path: Path, *, issues: list[str]) -> dict | None:
     manifest_name = path.name
     payload = _read_json_file(path, label=f"Release manifest {manifest_name}", issues=issues)
@@ -213,6 +260,12 @@ def _validate_manifest(path: Path, *, issues: list[str]) -> dict | None:
         issues.append(f"{manifest_name} validation must be a list.")
 
     _validate_requires_firmware(payload.get("requires_firmware"), manifest_name=manifest_name, issues=issues)
+    _validate_machine_data_contract(
+        payload.get("machine_data"),
+        version=str(version or ""),
+        manifest_name=manifest_name,
+        issues=issues,
+    )
     return payload
 
 

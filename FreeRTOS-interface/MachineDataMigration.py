@@ -1877,6 +1877,7 @@ def _verify_machine_tree(
     allowed_additional_paths: frozenset[str] = frozenset(),
     required_additional_paths: frozenset[str] = frozenset(),
     exact_active_overrides: Mapping[str, tuple[int, str]] | None = None,
+    allowed_additional_prefixes: tuple[str, ...] = (),
 ) -> MigrationReceipt:
     machine_root = Path(root)
     manifest_path = machine_root / "metadata" / "migration_tree_manifest.json"
@@ -1931,8 +1932,13 @@ def _verify_machine_tree(
         raise MigrationRecoveryRequired("Machine tree differs from its immutable manifest.")
     additional = frozenset(actual).difference(expected)
     allowed_with_overrides = allowed_additional_paths | override_paths.difference(expected)
-    if not additional.issubset(allowed_with_overrides):
-        unexpected = ", ".join(sorted(additional.difference(allowed_with_overrides)))
+    unexpected_paths = {
+        path
+        for path in additional.difference(allowed_with_overrides)
+        if not any(path.startswith(prefix) for prefix in allowed_additional_prefixes)
+    }
+    if unexpected_paths:
+        unexpected = ", ".join(sorted(unexpected_paths))
         raise MigrationRecoveryRequired(
             f"Machine tree has unapproved phase files: {unexpected}"
         )
@@ -2054,6 +2060,7 @@ _ACTIVE_REQUIRED_PATHS = frozenset(
         "metadata/activation_receipt.json",
     }
 )
+_ACTIVE_ALLOWED_ADDITIONAL_PREFIXES = ("update_history/",)
 
 
 def verify_published_migration(
@@ -2092,6 +2099,11 @@ def verify_published_migration(
         allowed_additional_paths=allowed,
         required_additional_paths=required,
         exact_active_overrides=active_tree_overrides,
+        allowed_additional_prefixes=(
+            _ACTIVE_ALLOWED_ADDITIONAL_PREFIXES
+            if selected_phase is PublishedMigrationPhase.ACTIVE
+            else ()
+        ),
     )
     candidate = load_candidate_evidence(paths.candidate_evidence_path)
     if candidate.candidate_id != receipt.candidate_id:

@@ -179,6 +179,10 @@ class UpdaterWindow(QtWidgets.QDialog):
             self._show_log_path(result.log_path)
 
         if result.status in SUCCESS_STATUSES:
+            if not result.relaunch_authorized:
+                self._set_done_state(result.message)
+                self.exit_code = updater.EXIT_CODES[updater.STATUS_RECOVERY_REQUIRED]
+                return
             if self.config.no_relaunch:
                 self._set_done_state(MANUAL_REOPEN_MESSAGE.format(message=result.message))
                 return
@@ -208,7 +212,7 @@ class UpdaterWindow(QtWidgets.QDialog):
         self.status_label.setText(result.message)
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
-        self.reopen_button.show()
+        self.reopen_button.setVisible(bool(result.safe_to_reopen_current))
         self.retry_launch_button.hide()
         self.close_button.show()
         if result.log_path is not None:
@@ -223,7 +227,9 @@ class UpdaterWindow(QtWidgets.QDialog):
             self.retry_launch_button.show()
             self.reopen_button.hide()
         else:
-            self.reopen_button.show()
+            self.reopen_button.setVisible(
+                bool(self._result is None or self._result.safe_to_reopen_current)
+            )
             self.retry_launch_button.hide()
         self.close_button.show()
         self._append_details("Launch command:\n$ " + " ".join(command))
@@ -279,6 +285,8 @@ class UpdaterWindow(QtWidgets.QDialog):
 
     @QtCore.Slot()
     def _on_reopen_clicked(self) -> None:
+        if self._result is not None and not self._result.safe_to_reopen_current:
+            return
         self._try_launch_app(close_on_success=True)
 
     @QtCore.Slot()

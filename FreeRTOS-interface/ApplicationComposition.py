@@ -518,6 +518,7 @@ def build_application_components(
             machine_data_paths=(
                 getattr(dependencies.authorized_machine_context, "paths", None)
             ),
+            authorized_machine_context=dependencies.authorized_machine_context,
             configuration_transactions=(
                 getattr(
                     dependencies.authorized_machine_context,

@@ -14,6 +14,7 @@ def _manifest(
     notes: list[str] | None = None,
     validation: list[str] | None = None,
     requires_firmware=None,
+    machine_data=None,
 ) -> dict:
     return {
         "schema_version": validator.RELEASE_MANIFEST_SCHEMA_VERSION,
@@ -27,6 +28,7 @@ def _manifest(
         "summary": f"{version} summary.",
         "notes": ["Release note."] if notes is None else notes,
         "validation": ["Focused tests pass."] if validation is None else validation,
+        **({"machine_data": machine_data} if machine_data is not None else {}),
     }
 
 
@@ -132,6 +134,35 @@ def test_valid_release_candidate_metadata_with_series_passes(tmp_path):
 
     assert result.status == validator.STATUS_VALID
     assert result.issues == ()
+
+
+def test_rc2_and_later_require_machine_data_preservation_contract(tmp_path):
+    version = "v1.3.0-rc.2"
+    _write_release_tree(tmp_path, version=version)
+
+    result = _validate(tmp_path)
+
+    assert result.status == validator.STATUS_INVALID
+    assert f"{version}.json machine_data preservation contract is required." in result.issues
+
+
+def test_rc2_machine_data_preservation_contract_validates(tmp_path):
+    version = "v1.3.0-rc.2"
+    manifest = _manifest(
+        version,
+        channel="release_candidate",
+        machine_data={
+            "preservation_contract": validator.MACHINE_DATA_CONTRACT_NAME,
+            "data_schema_version": 1,
+            "transition": "none",
+            "transition_id": None,
+        },
+    )
+    _write_release_tree(tmp_path, version=version, manifests={version: manifest})
+
+    result = _validate(tmp_path)
+
+    assert result.status == validator.STATUS_VALID
 
 
 def test_check_tags_verifies_advertised_and_referenced_tags(tmp_path):

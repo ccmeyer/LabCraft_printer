@@ -1,0 +1,69 @@
+{
+  "profiles": [
+    {
+      "commit_sha": "199807eea95a238896137bddb2a83d3d892e2aab",
+      "profile_id": "legacy-local-v1.2.0-rc.6",
+      "release_manifest_canonical_sha256": "2640dd50926235b16514faf698909d9a75d5b3bd010afddb658890f514847ff1",
+      "requires_firmware_attestation": true,
+      "tag": "v1.2.0-rc.6"
+    },
+    {
+      "commit_sha": "177986e4243dd8db2faadd7453dbbfdd4514aaf2",
+      "profile_id": "legacy-local-v1.2.0",
+      "release_manifest_canonical_sha256": "68b305ffa7a204dd6734a59ad196bf3eca16af8771b1c41156b2c95bca048381",
+      "requires_firmware_attestation": true,
+      "tag": "v1.2.0"
+    },
+    {
+      "commit_sha": "922f2ac65eab2ff1f63ffc0719a98b777bc2128f",
+      "profile_id": "legacy-local-v1.3.0-rc.1",
+      "release_manifest_canonical_sha256": "2089039f188fb047c1817be4d8f99fe6752e0b9e830dfe016b5cad476b966b70",
+      "requires_firmware_attestation": true,
+      "tag": "v1.3.0-rc.1"
+    }
+  ],
+  "schema_name": "labcraft.legacy_compatibility_profiles",
+  "schema_version": 1,
+  "source_to_legacy": [
+    {
+      "legacy_path": "Settings.json",
+      "required": true,
+      "source_path": "config/Settings.json"
+    },
+    {
+      "legacy_path": "Locations.json",
+      "required": true,
+      "source_path": "config/Locations.json"
+    },
+    {
+      "legacy_path": "Plates.json",
+      "required": true,
+      "source_path": "config/Plates.json"
+    },
+    {
+      "legacy_path": "Obstacles.json",
+      "required": true,
+      "source_path": "config/Obstacles.json"
+    },
+    {
+      "legacy_path": "RegulatorProfiles.json",
+      "required": true,
+      "source_path": "config/RegulatorProfiles.json"
+    },
+    {
+      "legacy_path": "CalibrationMemory/",
+      "required": true,
+      "source_path": "CalibrationMemory/"
+    },
+    {
+      "legacy_path": "droplet_imager_optics.json",
+      "required": false,
+      "source_path": "calibration/droplet_imager_optics.json"
+    },
+    {
+      "legacy_path": "regulator_optimization/",
+      "required": false,
+      "source_path": "calibration/regulator_optimization/"
+    }
+  ]
+}

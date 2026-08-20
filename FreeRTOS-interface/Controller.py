@@ -5,7 +5,7 @@ from Model import Model,PrinterHead,Slot
 from dfu_update import reset_board
 from dfu_update_worker import DfuUpdateWorker
 from ResetDebugBundle import export_reset_debug_bundle
-from AppVersion import get_app_version as read_app_version
+from AppVersion import get_app_commit, get_app_version as read_app_version
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import Counter, deque
@@ -954,6 +954,7 @@ class Controller(QObject):
         experimental_balance_service=None,
         saved_target_authorizer=None,
         machine_data_paths=None,
+        authorized_machine_context=None,
         configuration_transactions=None,
         configuration_safety_guard=None,
     ):
@@ -965,6 +966,7 @@ class Controller(QObject):
         self.runtime_context = runtime_context or PRODUCTION_RUNTIME_CONTEXT
         self.saved_target_authorizer = saved_target_authorizer
         self.machine_data_paths = machine_data_paths
+        self.authorized_machine_context = authorized_machine_context
         self.configuration_transactions = configuration_transactions
         self.configuration_safety_guard = configuration_safety_guard
         self._configuration_capture_evidence = {}
@@ -2793,6 +2795,9 @@ class Controller(QObject):
         safe_label = "".join(ch if ch.isalnum() else "_" for ch in str(operation_label or "updater")).strip("_")
         if not safe_label:
             safe_label = "updater"
+        paths = getattr(self, "machine_data_paths", None)
+        if paths is not None:
+            return paths.update_history_root / "launcher_logs" / f"app_update_launcher_{safe_label}_{stamp}.log"
         return self._repo_root / "local" / "update_logs" / f"app_update_launcher_{safe_label}_{stamp}.log"
 
     @staticmethod
@@ -2867,6 +2872,32 @@ class Controller(QObject):
         command.append("--gui")
         command.append("--no-relaunch")
         command.append("--record-result")
+        context = getattr(self, "authorized_machine_context", None)
+        if context is not None:
+            from MachineDataUpdate import build_update_launch_binding
+
+            binding = build_update_launch_binding(
+                context,
+                source_app_version=read_app_version(self._repo_root),
+                source_commit=get_app_commit(self._repo_root),
+            )
+            binding_args = (
+                ("--machine-data-root", binding.machine_data_root),
+                ("--machine-uuid", binding.machine_uuid),
+                ("--machine-id", binding.machine_id),
+                ("--activation-id", binding.activation_id),
+                ("--migration-id", binding.migration_id),
+                ("--active-pointer-sha256", binding.active_pointer_sha256),
+                ("--source-app-version", binding.source_app_version),
+                ("--source-commit", binding.source_commit),
+                ("--update-request-id", binding.request_id),
+            )
+            for name, value in binding_args:
+                command.extend([name, str(value)])
+            updater_log = binding.machine_data_root / "machines" / binding.machine_uuid / "update_history" / "updater_logs" / f"{binding.request_id}.log"
+            latest_result = self.machine_data_paths.latest_update_ui_result_path
+            command.extend(["--log-path", str(updater_log)])
+            command.extend(["--latest-result-path", str(latest_result)])
         return command
 
     def build_app_update_command(self, wait_pid):

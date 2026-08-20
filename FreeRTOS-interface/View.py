@@ -2205,6 +2205,16 @@ class MainWindow(QMainWindow):
         if getattr(check_result, "status", "") != "rollback_available":
             self.popup_message("No Rollback Available", getattr(check_result, "message", "No app rollback is available."))
             return False
+        if bool(getattr(check_result, "legacy_support_required", False)):
+            self.popup_message(
+                "LabCraft Support Required",
+                getattr(
+                    check_result,
+                    "message",
+                    "This legacy rollback requires the reviewed support workflow.",
+                ),
+            )
+            return False
 
         update_source = str(getattr(check_result, "update_source", "") or "")
         if update_source == "offline":
@@ -2255,6 +2265,9 @@ class MainWindow(QMainWindow):
         return True
 
     def _latest_app_update_result_path(self):
+        machine_data_paths = getattr(self.controller, "machine_data_paths", None)
+        if machine_data_paths is not None:
+            return machine_data_paths.latest_update_ui_result_path
         repo_root = getattr(self.controller, "_repo_root", None)
         if repo_root is None:
             repo_root = Path(self.script_dir).parent
@@ -7863,7 +7876,9 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             blockers = blockers_getter() if callable(blockers_getter) else []
             rollback_button = getattr(self, "app_rollback_button", None)
             if rollback_button is not None:
-                can_rollback = not blockers
+                can_rollback = not blockers and not bool(
+                    getattr(result, "legacy_support_required", False)
+                )
                 rollback_button.setEnabled(can_rollback)
                 self._set_app_action_highlight(rollback_button, can_rollback)
 

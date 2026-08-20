@@ -225,6 +225,42 @@ class MachineDataPaths:
     def migration_tree_manifest_path(self) -> Path:
         return self.metadata_root / "migration_tree_manifest.json"
 
+    @property
+    def update_lock_path(self) -> Path:
+        """Exclusive lock held while application code or compatibility data changes."""
+
+        return self.locks_root / "update.lock"
+
+    @property
+    def update_transactions_root(self) -> Path:
+        """Immutable per-operation update evidence directories."""
+
+        return self.update_history_root / "transactions"
+
+    @property
+    def deployment_anchor_path(self) -> Path:
+        """Atomic pointer to the last application deployment authorized for this store."""
+
+        return self.update_history_root / "deployment_anchor.json"
+
+    @property
+    def latest_update_result_path(self) -> Path:
+        """Diagnostic pointer to the latest immutable update terminal result."""
+
+        return self.update_history_root / "latest_result.json"
+
+    @property
+    def latest_update_ui_result_path(self) -> Path:
+        """Disposable operator summary; never used as deployment authority."""
+
+        return self.update_history_root / "latest_ui_result.json"
+
+    @property
+    def legacy_session_path(self) -> Path:
+        """Atomic pointer to an unresolved checkout-local compatibility session."""
+
+        return self.update_history_root / "legacy_session.json"
+
 
 def resolve_machine_data_base(
     *,

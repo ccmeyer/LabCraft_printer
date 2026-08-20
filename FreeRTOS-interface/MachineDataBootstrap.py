@@ -80,6 +80,12 @@ from MachineDataTransactions import (
     inspect_configuration_state,
     read_governed_documents,
 )
+from MachineDataUpdate import (
+    MachineDataUpdateError,
+    inspect_deployment_gate,
+    load_current_release_machine_data_contract,
+    validate_or_enroll_deployment,
+)
 
 
 ACTIVATION_JOURNAL_SCHEMA_NAME = "labcraft.activation_journal"
@@ -187,6 +193,7 @@ class AuthorizedMachineContext:
     configuration_transactions: ConfigurationTransactionService
     configuration_safety_guard: ConfigurationChangeGuard
     configuration_lock: AcquiredConfigurationLock
+    deployment_anchor: Mapping[str, object] | None = None
 
     def close(self) -> None:
         self.configuration_lock.release()
@@ -235,6 +242,7 @@ class MachineDataBootstrap:
         clock: Callable[[], str] = utc_now,
         uuid_factory: Callable[[], object] = uuid4,
         io: DurableFileOps | None = None,
+        release_contract: Mapping[str, object] | None = None,
     ) -> None:
         self.base = base
         self.app_version = str(app_version or "").strip()
@@ -247,6 +255,14 @@ class MachineDataBootstrap:
         self.uuid_factory = uuid_factory
         self._cancel_event = threading.Event()
         self.io = io or MigrationFileOps(fault_hook=self._cancel_checkpoint)
+        self.release_contract = (
+            release_contract
+            if release_contract is not None
+            else load_current_release_machine_data_contract(
+                Path(__file__).resolve().parents[1],
+                self.app_version,
+            )
+        )
 
     def request_cancel(self) -> None:
         self._cancel_event.set()
@@ -960,6 +976,16 @@ class MachineDataBootstrap:
             paths, active, published, verification, activation,
             configuration_state=configuration_state,
         )
+        try:
+            inspect_deployment_gate(
+                paths,
+                active,
+                app_version=self.app_version,
+                app_commit=self.app_commit,
+                release_contract=self.release_contract,
+            )
+        except MachineDataUpdateError as exc:
+            raise BootstrapError("recovery_required", str(exc)) from exc
 
     def _context_from_active(
         self,
@@ -1043,6 +1069,35 @@ class MachineDataBootstrap:
             ) from exc
         transactions.configuration_safety_guard = guard
         transactions.require_configuration_guard_evidence = True
+        deployment_anchor = None
+        try:
+            if self.release_contract is not None and paths.legacy_session_path.exists():
+                from MachineDataCompatibility import resolve_legacy_session
+
+                deployment_anchor = resolve_legacy_session(
+                    paths,
+                    active,
+                    configuration_lock,
+                    app_version=self.app_version,
+                    app_commit=self.app_commit,
+                    release_contract=self.release_contract,
+                    keep_canonical=False,
+                    io=self.io,
+                    clock=self.clock,
+                )
+            if deployment_anchor is None:
+                deployment_anchor = validate_or_enroll_deployment(
+                    paths,
+                    active,
+                    configuration_lock,
+                    app_version=self.app_version,
+                    app_commit=self.app_commit,
+                    release_contract=self.release_contract,
+                    io=self.io,
+                    clock=self.clock,
+                )
+        except MachineDataUpdateError as exc:
+            raise BootstrapError("recovery_required", str(exc)) from exc
         return AuthorizedMachineContext(
             paths=paths,
             identity=identity,
@@ -1057,6 +1112,7 @@ class MachineDataBootstrap:
             configuration_transactions=transactions,
             configuration_safety_guard=guard,
             configuration_lock=configuration_lock,
+            deployment_anchor=deployment_anchor,
         )
 
     def _validate_bindings(

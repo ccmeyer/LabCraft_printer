@@ -7,6 +7,7 @@ import subprocess
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -519,6 +520,183 @@ def test_clean_fast_forward_returns_updated(tmp_path):
     assert result.target_release_version == "v1.1.2"
     assert result.target_release_tag == "v1.1.2"
     assert result.target_release_sha == "release789"
+
+
+def _m6_release_manifest(version="v1.1.2"):
+    return {
+        "schema_version": updater.RELEASE_MANIFEST_SCHEMA_VERSION,
+        "version": version,
+        "tag": version,
+        "channel": "stable",
+        "release_date": "2026-08-20",
+        "previous_version": "v1.1.1",
+        "rollback_version": "v1.1.1",
+        "requires_firmware": None,
+        "summary": "Protected update fixture.",
+        "notes": [],
+        "validation": [],
+        "machine_data": {
+            "preservation_contract": "labcraft.machine_data_update.v1",
+            "data_schema_version": 1,
+            "transition": "none",
+            "transition_id": None,
+        },
+    }
+
+
+class _PreparedUpdateDouble:
+    def __init__(self, tmp_path, events, *, fail_verify=False):
+        self.update_id = "00000000-0000-0000-0000-000000000099"
+        self.target = SimpleNamespace(machine_data_contract={"transition": "none"})
+        self.events = events
+        self.fail_verify = fail_verify
+        self.terminal = tmp_path / "external" / "terminal_result.json"
+
+    def record_git_result(self, **_kwargs):
+        self.events.append("git_result")
+
+    def verify_after(self):
+        self.events.append("post_verify")
+        if self.fail_verify:
+            raise RuntimeError("simulated post-check drift")
+
+    def authorize_relaunch(self):
+        self.events.append("authorize")
+        self.terminal.parent.mkdir(parents=True, exist_ok=True)
+        self.terminal.write_text("{}", encoding="utf-8")
+        return self.terminal
+
+    def fail(self, _message, *, recovery_required=None):
+        self.events.append(f"fail:{bool(recovery_required)}")
+        self.terminal.parent.mkdir(parents=True, exist_ok=True)
+        self.terminal.write_text("{}", encoding="utf-8")
+        return self.terminal
+
+    def close(self):
+        self.events.append("close")
+
+
+def test_protected_update_backup_gate_precedes_merge_and_authorizes_relaunch(tmp_path, monkeypatch):
+    _write_version(tmp_path, "v1.1.1")
+    events = []
+    prepared = _PreparedUpdateDouble(tmp_path, events)
+    runner = FakeGitRunner(
+        tmp_path,
+        before_sha="abc",
+        after_sha="release789",
+        release_manifest_payload=_m6_release_manifest(),
+    )
+
+    def recording_runner(args, cwd, timeout_s, env_updates):
+        if tuple(args[1:]) == ("merge", "--ff-only", "v1.1.2"):
+            events.append("merge")
+        return runner(args, cwd, timeout_s, env_updates)
+
+    monkeypatch.setattr(
+        updater,
+        "_begin_machine_data_protection",
+        lambda *args, **kwargs: events.append("backup_verified") or prepared,
+    )
+    result = updater.run_update(
+        _config(
+            tmp_path,
+            machine_data_required=True,
+            source_app_version="v1.1.1",
+            source_commit="abc",
+        ),
+        command_runner=recording_runner,
+    )
+
+    assert result.status == updater.STATUS_UPDATED
+    assert result.relaunch_authorized is True
+    assert result.machine_data_update_id == prepared.update_id
+    assert events == ["backup_verified", "merge", "git_result", "post_verify", "authorize", "close"]
+
+
+def test_protected_update_preflight_failure_issues_zero_merge(tmp_path, monkeypatch):
+    _write_version(tmp_path, "v1.1.1")
+    runner = FakeGitRunner(
+        tmp_path,
+        before_sha="abc",
+        after_sha="release789",
+        release_manifest_payload=_m6_release_manifest(),
+    )
+
+    def stop(*_args, **_kwargs):
+        raise RuntimeError("simulated backup failure")
+
+    monkeypatch.setattr(updater, "_begin_machine_data_protection", stop)
+    result = updater.run_update(
+        _config(
+            tmp_path,
+            machine_data_required=True,
+            source_app_version="v1.1.1",
+            source_commit="abc",
+        ),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_MACHINE_DATA_PROTECTION_FAILED
+    assert result.safe_to_reopen_current is True
+    assert not any(call[0][1:3] == ("merge", "--ff-only") for call in runner.calls)
+
+
+def test_protected_update_post_check_failure_blocks_relaunch(tmp_path, monkeypatch):
+    _write_version(tmp_path, "v1.1.1")
+    events = []
+    prepared = _PreparedUpdateDouble(tmp_path, events, fail_verify=True)
+    runner = FakeGitRunner(
+        tmp_path,
+        before_sha="abc",
+        after_sha="release789",
+        release_manifest_payload=_m6_release_manifest(),
+    )
+    monkeypatch.setattr(updater, "_begin_machine_data_protection", lambda *args, **kwargs: prepared)
+
+    result = updater.run_update(
+        _config(
+            tmp_path,
+            machine_data_required=True,
+            source_app_version="v1.1.1",
+            source_commit="abc",
+        ),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_RECOVERY_REQUIRED
+    assert result.relaunch_authorized is False
+    assert result.safe_to_reopen_current is False
+    assert events == ["git_result", "post_verify", "fail:True", "close"]
+
+
+def test_protected_failed_merge_with_changed_head_is_recovery_only(tmp_path, monkeypatch):
+    _write_version(tmp_path, "v1.1.1")
+    events = []
+    prepared = _PreparedUpdateDouble(tmp_path, events)
+    runner = FakeGitRunner(
+        tmp_path,
+        before_sha="abc",
+        after_sha="ambiguous-head",
+        pull_returncode=128,
+        release_manifest_payload=_m6_release_manifest(),
+    )
+    monkeypatch.setattr(updater, "_begin_machine_data_protection", lambda *args, **kwargs: prepared)
+
+    result = updater.run_update(
+        _config(
+            tmp_path,
+            machine_data_required=True,
+            source_app_version="v1.1.1",
+            source_commit="abc",
+        ),
+        command_runner=runner,
+    )
+
+    assert result.status == updater.STATUS_RECOVERY_REQUIRED
+    assert result.after_sha == "ambiguous-head"
+    assert result.relaunch_authorized is False
+    assert result.safe_to_reopen_current is False
+    assert events == ["fail:True", "close"]
 
 
 def test_pull_failure_returns_git_pull_failed_and_does_not_relaunch(tmp_path):

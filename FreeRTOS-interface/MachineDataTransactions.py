@@ -1378,6 +1378,50 @@ class ConfigurationTransactionService:
             guard_evidence=guard_evidence,
         )
 
+    def commit_schema_transition(
+        self,
+        exact_serialized: Mapping[str, bytes],
+        *,
+        transition_id: str,
+        expected_config_sha256: Mapping[str, str] | None = None,
+    ) -> ConfigurationTransactionResult:
+        """Journal a reviewed representation-only schema adapter output."""
+
+        transition_id = str(transition_id or "").strip()
+        if not transition_id:
+            raise ConfigurationValidationError("Schema transition ID is required.")
+        proposed = {}
+        before = _read_documents(self.paths)
+        for filename, data in dict(exact_serialized).items():
+            if filename not in CONFIG_FILENAMES or type(data) is not bytes:
+                raise ConfigurationValidationError(
+                    "Schema adapters may return only exact governed JSON bytes."
+                )
+            try:
+                payload = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ConfigurationValidationError(
+                    f"Schema adapter output is invalid JSON: {filename}: {exc}"
+                ) from exc
+            if semantic_json_sha256(payload) != semantic_json_sha256(before[filename]):
+                raise ConfigurationValidationError(
+                    f"Schema adapter changed safety semantics: {filename}"
+                )
+            proposed[filename] = payload
+        if not proposed:
+            raise ConfigurationValidationError("Schema adapter produced no governed files.")
+        return self._commit_documents(
+            proposed,
+            operator="target_bootstrap_recovery",
+            reason=f"Reviewed machine-data schema transition {transition_id}",
+            workflow="machine_data_schema_transition",
+            event_type="import",
+            expected_config_sha256=expected_config_sha256,
+            restore_reference=None,
+            guard_evidence=None,
+            exact_serialized=dict(exact_serialized),
+        )
+
     def _commit_documents(
         self,
         proposed: Mapping[str, object],
@@ -1394,7 +1438,10 @@ class ConfigurationTransactionService:
         if event_type not in {"change", "import", "restore"}:
             raise ConfigurationValidationError("Invalid mutating event type.")
         exact_serialized = dict(exact_serialized or {})
-        if exact_serialized and event_type != "restore":
+        if exact_serialized and not (
+            event_type == "restore"
+            or (event_type == "import" and workflow == "machine_data_schema_transition")
+        ):
             raise ConfigurationValidationError(
                 "Exact serialized files are restricted to verified restore transactions."
             )
