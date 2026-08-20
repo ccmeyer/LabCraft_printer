@@ -50,6 +50,30 @@ def _git_short_sha(repo_root: Path, command_runner) -> str:
     return stdout.splitlines()[0].strip()
 
 
+def _git_full_sha(repo_root: Path, command_runner) -> str:
+    try:
+        result = command_runner(("git", "rev-parse", "HEAD"), repo_root)
+    except Exception:
+        return ""
+
+    try:
+        returncode = int(getattr(result, "returncode", 1))
+    except (TypeError, ValueError):
+        return ""
+    if returncode != 0:
+        return ""
+
+    stdout = str(getattr(result, "stdout", "") or "").strip()
+    commit = stdout.splitlines()[0].strip() if stdout else ""
+    if (
+        len(commit) != 40
+        or commit != commit.lower()
+        or any(character not in "0123456789abcdef" for character in commit)
+    ):
+        return ""
+    return commit
+
+
 def get_app_version(repo_root: str | Path, command_runner=None) -> str:
     """Return VERSION content, a local commit fallback, or ``unknown``."""
     root = Path(repo_root)
@@ -64,8 +88,8 @@ def get_app_version(repo_root: str | Path, command_runner=None) -> str:
 
 
 def get_app_commit(repo_root: str | Path, command_runner=None) -> str:
-    """Return the installed Git commit evidence or ``unknown``."""
+    """Return the full installed Git commit evidence or ``unknown``."""
 
-    return _git_short_sha(
+    return _git_full_sha(
         Path(repo_root), command_runner or _default_command_runner
     ) or "unknown"

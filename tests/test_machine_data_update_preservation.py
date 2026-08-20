@@ -43,7 +43,12 @@ CONTRACT = {
 }
 
 
-def _active_context(tmp_path):
+def _active_context(
+    tmp_path,
+    *,
+    app_version="v1.3.0-rc.2",
+    app_commit=SOURCE_COMMIT,
+):
     wrapper, _ = write_wrapper(
         tmp_path / "source", cohort="v1.3.0-rc.1", custom_camera=True
     )
@@ -51,8 +56,8 @@ def _active_context(tmp_path):
     base, _ = machine_data_paths(tmp_path)
     bootstrap = MachineDataBootstrap.MachineDataBootstrap(
         base,
-        app_version="v1.3.0-rc.2",
-        app_commit=SOURCE_COMMIT,
+        app_version=app_version,
+        app_commit=app_commit,
         migration_policy=migration_policy(),
         clock=lambda: FIXED_TIME,
         uuid_factory=lambda: MIGRATION_ID,
@@ -75,8 +80,8 @@ def _active_context(tmp_path):
         context.paths,
         context.active_machine,
         context.configuration_lock,
-        app_version="v1.3.0-rc.2",
-        app_commit=SOURCE_COMMIT,
+        app_version=app_version,
+        app_commit=app_commit,
         release_contract=CONTRACT,
         clock=lambda: FIXED_TIME,
     )
@@ -131,6 +136,61 @@ def test_verified_backup_precedes_git_and_authorizes_exact_relaunch(tmp_path):
         assert anchor["update_id"] == prepared.update_id
     finally:
         prepared.close()
+
+
+def test_rc2_short_genesis_anchor_updates_to_full_target_anchor(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    context = _active_context(tmp_path)
+    paths = context.paths
+    anchor = json.loads(paths.deployment_anchor_path.read_text(encoding="utf-8"))
+    anchor["app_commit"] = SOURCE_COMMIT[:12]
+    paths.deployment_anchor_path.write_text(json.dumps(anchor), encoding="utf-8")
+    binding = build_update_launch_binding(
+        context,
+        source_app_version="v1.3.0-rc.2",
+        source_commit=SOURCE_COMMIT,
+        request_id="00000000-0000-0000-0000-000000000088",
+    )
+    base = paths.base
+    context.close()
+    target = UpdateTarget(
+        operation="update",
+        version="v1.3.0-rc.3",
+        tag="v1.3.0-rc.3",
+        commit=TARGET_COMMIT,
+        update_source="online",
+        release_manifest_sha256="3" * 64,
+        machine_data_contract=CONTRACT,
+    )
+
+    prepared = begin_update_preservation(binding, target, repo_root=repo)
+    try:
+        intent = json.loads(
+            (prepared.transaction_root / "01_intent.json").read_text(encoding="utf-8")
+        )
+        assert intent["binding"]["source_commit"] == SOURCE_COMMIT
+        prepared.record_git_result(
+            before_commit=SOURCE_COMMIT,
+            after_commit=TARGET_COMMIT,
+            command=("git", "merge", "--ff-only", target.tag),
+        )
+        prepared.verify_after()
+        prepared.authorize_relaunch()
+    finally:
+        prepared.close()
+
+    reopened = MachineDataBootstrap.MachineDataBootstrap(
+        base,
+        app_version="v1.3.0-rc.3",
+        app_commit=TARGET_COMMIT,
+        release_contract=CONTRACT,
+    ).open_ready()
+    try:
+        assert reopened.deployment_anchor["app_commit"] == TARGET_COMMIT
+        assert reopened.deployment_anchor["authorization_kind"] == "update"
+    finally:
+        reopened.close()
 
 
 def test_no_schema_post_check_rejects_one_camera_byte_change(tmp_path):

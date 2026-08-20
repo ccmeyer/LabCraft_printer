@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from AppVersion import get_app_version
+from AppVersion import get_app_commit, get_app_version
 
 
 def test_get_app_version_reads_version_file(tmp_path):
@@ -40,3 +40,22 @@ def test_get_app_version_returns_unknown_when_no_version_or_git_sha(tmp_path):
         return SimpleNamespace(returncode=128, stdout="")
 
     assert get_app_version(tmp_path, command_runner=runner) == "unknown"
+
+
+def test_get_app_commit_returns_full_git_commit(tmp_path):
+    calls = []
+    full_commit = "abc123def4567890abc123def4567890abc123de"
+
+    def runner(args, cwd):
+        calls.append((tuple(args), Path(cwd)))
+        return SimpleNamespace(returncode=0, stdout=f"{full_commit}\n")
+
+    assert get_app_commit(tmp_path, command_runner=runner) == full_commit
+    assert calls == [(('git', 'rev-parse', 'HEAD'), tmp_path)]
+
+
+def test_get_app_commit_rejects_noncanonical_git_output(tmp_path):
+    def runner(args, cwd):
+        return SimpleNamespace(returncode=0, stdout="abc123def456\n")
+
+    assert get_app_commit(tmp_path, command_runner=runner) == "unknown"

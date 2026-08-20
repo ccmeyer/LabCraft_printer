@@ -1,5 +1,11 @@
 # Machine Data Migration Milestone 7: Qualification, Release, and Staged Deployment
 
+> Current correction: the immutable rc.2 candidate passed first-start gates,
+> but its enrolled protected update failed safely before Git because the app
+> supplied a short commit and the updater expected a full commit. The
+> [rc.3 correction plan](machine_data_migration_milestone_7_rc3_correction_plan.md)
+> supersedes the remaining release target and downstream gates.
+
 Status: `in_progress` — Slices 1-4 passed on candidate `5f54a4a1`; Slice 0
 attended assignments and Slices 5-7 remain.
 
@@ -21,7 +27,7 @@ Depends on:
 - Milestone 6 update preservation `9e666291` and verification record
   `0ee3e50a` (`verified`)
 
-Target release: `v1.3.0-rc.2`
+Current target release: `v1.3.0-rc.3`
 
 ## Outcome
 

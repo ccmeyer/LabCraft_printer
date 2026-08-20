@@ -1,5 +1,39 @@
 # Changelog
 
+## v1.3.0-rc.3 - 2026-08-20
+
+### Fixed
+
+- Fixed the protected updater's source identity mismatch: the app now binds updates to the full 40-character Git commit used by the updater and deployment anchor.
+- Added narrowly scoped compatibility for the exact 12-character lowercase hexadecimal commit prefix written by `v1.3.0-rc.2`; shorter, uppercase, non-hexadecimal, and mismatched values continue to fail closed.
+- Added an attended recovery launch mode for an already-enrolled rc.2 machine. It derives identity from the authorized external store, requires the recorded `source_binding_mismatch` failure log, and requires a clean separately qualified updater checkout whose commit exactly equals the requested target tag.
+- Ensured a recovery updater executed from a separate target checkout uses that target's machine-data protection modules while still applying Git only to the explicitly selected production checkout.
+- Extended reviewed first-start genesis enrollment to rc.3 for machines upgrading directly from rc.6, v1.2.0, or rc.1, while binding enrollment to rc.3's exact activation and verification evidence so a removed rc.2 anchor cannot be silently recreated by rc.3.
+
+### Safety
+
+- The failed rc.2 update occurs before a preservation transaction or Git mutation; rc.3 retains that fail-before-Git behavior for every identity mismatch outside the exact historical compatibility case.
+- All new launch bindings, transaction evidence, and deployment anchors use full commit identities. Successful update authorization still requires a verified pre-update archive, unchanged protected bytes, the exact target commit, and a receipt-gated relaunch decision.
+- The rc.2 recovery mode cannot accept manually supplied machine identity fields, cannot run rollback/offline/automatic-relaunch paths, and cannot operate on any source version or deployment-anchor shape other than the affected rc.2 genesis enrollment.
+
+### Firmware
+
+- The bundled firmware artifact is unchanged from `v1.3.0-rc.2` and `v1.3.0-rc.1`: SHA-256 `EDA070CE734D5167F0795FAF30DF461C8A07341E09CA698DE9D850315B0D5884`.
+- Machines updating directly from `v1.2.0-rc.6` or `v1.2.0` still require the v1.3 firmware. Machines already on `v1.3.0-rc.1` or rc.2 must verify matching firmware provenance or redeploy the artifact.
+
+### Validation
+
+- Complete Python suite: `.\env\Scripts\python.exe -m pytest -q`.
+- Release metadata validation: `.\env\Scripts\python.exe tools\validate_release_metadata.py`.
+- Contained Windows and target-Pi `virtual_print_array_96_v1` qualification with hardware isolation.
+- Disposable target-Pi qualification of the exact rc.2 short-binding recovery, verified backup, no-schema byte preservation, full target anchor, and target bootstrap reopen.
+- Static checks: `git diff --check` and strict parsing of every release JSON file.
+
+### Rollback
+
+- The reviewed rollback target remains `v1.2.0` with its matching firmware.
+- Because `v1.2.0` predates the external machine-data preservation contract, use only the support-guided compatibility-export procedure in `docs/machine_data_update_and_rollback_runbook.md`.
+
 ## v1.3.0-rc.2 - 2026-08-20
 
 ### Added

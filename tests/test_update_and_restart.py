@@ -613,6 +613,308 @@ def test_protected_update_backup_gate_precedes_merge_and_authorizes_relaunch(tmp
     assert events == ["backup_verified", "merge", "git_result", "post_verify", "authorize", "close"]
 
 
+def test_begin_protection_canonicalizes_exact_rc2_short_source_commit(tmp_path, monkeypatch):
+    import MachineDataUpdate
+
+    full_commit = "5f54a4a174cd50f145e1bfa98aa61535b7aa59e9"
+    captured = {}
+    monkeypatch.setattr(
+        MachineDataUpdate,
+        "begin_update_preservation",
+        lambda binding, target, **kwargs: captured.update(
+            binding=binding,
+            target=target,
+            kwargs=kwargs,
+        ) or "prepared",
+    )
+    target = updater.ReleaseTargetInfo(
+        version="v1.3.0-rc.3",
+        tag="v1.3.0-rc.3",
+        sha="d" * 40,
+        release_manifest_sha256="e" * 64,
+        machine_data_contract=_m6_release_manifest()["machine_data"],
+    )
+    config = _config(
+        tmp_path,
+        machine_data_required=True,
+        machine_data_root=(tmp_path / "machine-data").resolve(),
+        machine_id="LC-001",
+        machine_uuid="00000000-0000-0000-0000-000000000001",
+        activation_id="00000000-0000-0000-0000-000000000002",
+        migration_id="00000000-0000-0000-0000-000000000003",
+        active_pointer_sha256="a" * 64,
+        source_app_version="v1.3.0-rc.2",
+        source_commit=full_commit[:12],
+        update_request_id="00000000-0000-0000-0000-000000000004",
+    )
+
+    prepared = updater._begin_machine_data_protection(
+        config,
+        repo_root=tmp_path,
+        before_release_version="v1.3.0-rc.2",
+        before_sha=full_commit,
+        target_info=target,
+        operation=updater.OPERATION_UPDATE,
+        update_source=updater.UPDATE_SOURCE_ONLINE,
+    )
+
+    assert prepared == "prepared"
+    assert captured["binding"].source_commit == full_commit
+
+
+@pytest.mark.parametrize(
+    "source_commit",
+    [
+        "5f54a4a174c",
+        "5f54a4a174ce",
+        "5F54A4A174CD",
+        "not-a-commit",
+    ],
+)
+def test_begin_protection_rejects_unsafe_legacy_source_commit(tmp_path, source_commit):
+    target = updater.ReleaseTargetInfo(
+        version="v1.3.0-rc.3",
+        tag="v1.3.0-rc.3",
+        sha="d" * 40,
+        release_manifest_sha256="e" * 64,
+        machine_data_contract=_m6_release_manifest()["machine_data"],
+    )
+    config = _config(
+        tmp_path,
+        machine_data_required=True,
+        machine_data_root=(tmp_path / "machine-data").resolve(),
+        source_app_version="v1.3.0-rc.2",
+        source_commit=source_commit,
+    )
+
+    with pytest.raises(Exception) as error:
+        updater._begin_machine_data_protection(
+            config,
+            repo_root=tmp_path,
+            before_release_version="v1.3.0-rc.2",
+            before_sha="5f54a4a174cd50f145e1bfa98aa61535b7aa59e9",
+            target_info=target,
+            operation=updater.OPERATION_UPDATE,
+            update_source=updater.UPDATE_SOURCE_ONLINE,
+        )
+
+    assert getattr(error.value, "code", "") == "source_binding_mismatch"
+
+
+def test_external_candidate_updater_uses_its_own_machine_data_modules(tmp_path):
+    production = tmp_path / "production"
+    candidate = tmp_path / "candidate"
+    production_interface = production / "FreeRTOS-interface"
+    candidate_interface = candidate / "FreeRTOS-interface"
+    production_interface.mkdir(parents=True)
+    candidate_interface.mkdir(parents=True)
+    candidate_script = candidate / "tools" / "update_and_restart.py"
+    candidate_script.parent.mkdir()
+    candidate_script.write_text("", encoding="utf-8")
+    (candidate_interface / "MachineDataUpdate.py").write_text("", encoding="utf-8")
+
+    assert updater._machine_data_import_root(
+        production,
+        updater_script=candidate_script,
+    ) == candidate_interface.resolve()
+
+
+def test_rc2_recovery_mode_builds_exact_binding_from_authorized_store(
+    tmp_path,
+    monkeypatch,
+):
+    from tests.test_machine_data_update_preservation import (
+        SOURCE_COMMIT,
+        _active_context,
+    )
+
+    context = _active_context(tmp_path)
+    machine_data_root = context.paths.base.root
+    anchor_path = context.paths.deployment_anchor_path
+    anchor = json.loads(anchor_path.read_text(encoding="utf-8"))
+    anchor["app_commit"] = SOURCE_COMMIT[:12]
+    anchor_path.write_text(json.dumps(anchor), encoding="utf-8")
+    support_reference = context.paths.update_history_root / "launcher_logs" / "failed.log"
+    support_reference.parent.mkdir(parents=True)
+    support_reference.write_text("source_binding_mismatch\n", encoding="utf-8")
+    context.close()
+
+    production = tmp_path / "production"
+    candidate = tmp_path / "candidate"
+    (production / "releases").mkdir(parents=True)
+    (production / "VERSION").write_text("v1.3.0-rc.2\n", encoding="utf-8")
+    (production / "releases" / "v1.3.0-rc.2.json").write_text(
+        json.dumps(_m6_release_manifest("v1.3.0-rc.2")),
+        encoding="utf-8",
+    )
+    (candidate / "tools").mkdir(parents=True)
+    candidate_script = candidate / "tools" / "update_and_restart.py"
+    candidate_script.write_text("", encoding="utf-8")
+    (candidate / "VERSION").write_text("v1.3.0-rc.3\n", encoding="utf-8")
+    target_commit = "d" * 40
+
+    def runner(args, cwd, timeout_s, env_updates):
+        git_args = tuple(str(value) for value in args[1:])
+        root = Path(cwd)
+        if root == production and git_args == ("rev-parse", "--show-toplevel"):
+            return updater.CommandResult(tuple(args), 0, stdout=f"{production}\n")
+        if root == production and git_args == ("rev-parse", "HEAD"):
+            return updater.CommandResult(tuple(args), 0, stdout=f"{SOURCE_COMMIT}\n")
+        if root == production and git_args == (
+            "rev-parse",
+            "refs/tags/v1.3.0-rc.3^{commit}",
+        ):
+            return updater.CommandResult(tuple(args), 0, stdout=f"{target_commit}\n")
+        if root == candidate and git_args == ("rev-parse", "--show-toplevel"):
+            return updater.CommandResult(tuple(args), 0, stdout=f"{candidate}\n")
+        if root == candidate and git_args == ("rev-parse", "HEAD"):
+            return updater.CommandResult(tuple(args), 0, stdout=f"{target_commit}\n")
+        if root == candidate and git_args == ("status", "--porcelain"):
+            return updater.CommandResult(tuple(args), 0, stdout="")
+        return updater.CommandResult(tuple(args), 99, stderr=f"unexpected: {root} {git_args}")
+
+    actual_interface = Path(updater.__file__).resolve().parents[1] / "FreeRTOS-interface"
+    monkeypatch.setattr(updater, "_machine_data_import_root", lambda *args, **kwargs: actual_interface)
+    config = _config(
+        production,
+        machine_data_required=True,
+        machine_data_root=machine_data_root,
+        target_release="v1.3.0-rc.3",
+        gui=True,
+        record_result=True,
+        recover_rc2_source_binding=True,
+        support_operator="Conary-Codex",
+        support_reason="Recover the rc.2 short source binding defect",
+        support_reference=str(support_reference),
+    )
+
+    recovered = updater.prepare_rc2_source_binding_recovery(
+        config,
+        command_runner=runner,
+        updater_script=candidate_script,
+    )
+
+    assert recovered.source_app_version == "v1.3.0-rc.2"
+    assert recovered.source_commit == SOURCE_COMMIT
+    assert recovered.machine_id == "LC-001"
+    assert recovered.active_pointer_sha256
+    assert recovered.update_request_id
+    assert recovered.log_path.parent.name == "updater_logs"
+    assert recovered.latest_result_path.name == "latest_ui_result.json"
+
+
+def test_rc2_recovery_mode_rejects_manually_supplied_identity(tmp_path):
+    config = _config(
+        tmp_path,
+        machine_data_required=True,
+        machine_data_root=(tmp_path / "machine-data").resolve(),
+        target_release="v1.3.0-rc.3",
+        gui=True,
+        record_result=True,
+        recover_rc2_source_binding=True,
+        source_commit="a" * 40,
+        support_operator="Operator",
+        support_reason="Recovery",
+        support_reference="failed.log",
+    )
+
+    with pytest.raises(updater.SourceBindingRecoveryError, match="must be derived"):
+        updater.prepare_rc2_source_binding_recovery(config)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"rollback": True},
+        {"offline_manifest_path": Path("offline.json")},
+        {"wait_pid": 1234},
+        {"gui": False},
+        {"no_relaunch": False},
+        {"record_result": False},
+        {"relaunch_on_failure": True},
+    ],
+)
+def test_rc2_recovery_mode_rejects_nonattended_modes(tmp_path, overrides):
+    values = {
+        "machine_data_required": True,
+        "machine_data_root": (tmp_path / "machine-data").resolve(),
+        "target_release": "v1.3.0-rc.3",
+        "gui": True,
+        "no_relaunch": True,
+        "record_result": True,
+        "recover_rc2_source_binding": True,
+        "support_operator": "Operator",
+        "support_reason": "Recovery",
+        "support_reference": "failed.log",
+    }
+    values.update(overrides)
+
+    with pytest.raises(updater.SourceBindingRecoveryError, match="attended online GUI"):
+        updater.prepare_rc2_source_binding_recovery(_config(tmp_path, **values))
+
+
+@pytest.mark.parametrize(
+    ("candidate_status", "target_commit", "expected"),
+    [
+        (" M tools/update_and_restart.py\n", "d" * 40, "not clean"),
+        ("", "e" * 40, "does not equal"),
+    ],
+)
+def test_rc2_recovery_mode_rejects_unqualified_candidate(
+    tmp_path,
+    candidate_status,
+    target_commit,
+    expected,
+):
+    production = tmp_path / "production"
+    candidate = tmp_path / "candidate"
+    production.mkdir()
+    (production / "VERSION").write_text("v1.3.0-rc.2\n", encoding="utf-8")
+    (candidate / "tools").mkdir(parents=True)
+    candidate_script = candidate / "tools" / "update_and_restart.py"
+    candidate_script.write_text("", encoding="utf-8")
+    (candidate / "VERSION").write_text("v1.3.0-rc.3\n", encoding="utf-8")
+    source_commit = "a" * 40
+    candidate_commit = "d" * 40
+
+    def runner(args, cwd, timeout_s, env_updates):
+        git_args = tuple(str(value) for value in args[1:])
+        root = Path(cwd)
+        responses = {
+            (production, ("rev-parse", "--show-toplevel")): (0, str(production)),
+            (production, ("rev-parse", "HEAD")): (0, source_commit),
+            (candidate, ("rev-parse", "--show-toplevel")): (0, str(candidate)),
+            (candidate, ("rev-parse", "HEAD")): (0, candidate_commit),
+            (candidate, ("status", "--porcelain")): (0, candidate_status),
+            (
+                production,
+                ("rev-parse", "refs/tags/v1.3.0-rc.3^{commit}"),
+            ): (0, target_commit),
+        }
+        returncode, stdout = responses.get((root, git_args), (99, ""))
+        return updater.CommandResult(tuple(args), returncode, stdout=f"{stdout}\n")
+
+    config = _config(
+        production,
+        machine_data_required=True,
+        machine_data_root=(tmp_path / "machine-data").resolve(),
+        target_release="v1.3.0-rc.3",
+        gui=True,
+        record_result=True,
+        recover_rc2_source_binding=True,
+        support_operator="Operator",
+        support_reason="Recovery",
+        support_reference="failed.log",
+    )
+
+    with pytest.raises(updater.SourceBindingRecoveryError, match=expected):
+        updater.prepare_rc2_source_binding_recovery(
+            config,
+            command_runner=runner,
+            updater_script=candidate_script,
+        )
+
+
 def test_protected_update_preflight_failure_issues_zero_merge(tmp_path, monkeypatch):
     _write_version(tmp_path, "v1.1.1")
     runner = FakeGitRunner(
@@ -1439,6 +1741,26 @@ def test_cli_parser_defaults_match_documented_usage():
     assert config.offline_manifest_path is None
     assert config.target_release is None
     assert config.rollback is False
+    assert config.recover_rc2_source_binding is False
+
+
+def test_cli_parser_accepts_rc2_source_binding_recovery():
+    config = updater.parse_args(
+        [
+            "--repo-root",
+            ".",
+            "--recover-rc2-source-binding",
+            "--support-operator",
+            "Conary-Codex",
+            "--support-reason",
+            "Recover rc.2 binding",
+            "--support-reference",
+            "failed.log",
+        ]
+    )
+
+    assert config.recover_rc2_source_binding is True
+    assert config.support_operator == "Conary-Codex"
 
 
 def test_cli_parser_accepts_relaunch_on_failure():

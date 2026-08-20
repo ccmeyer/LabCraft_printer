@@ -1,10 +1,13 @@
-# Machine Data Migration and Location Safety Plan for v1.3.0-rc.2
+# Machine Data Migration and Location Safety Plan for v1.3.0
 
 Status: `in_progress`
 
 Prepared: 2026-08-19
 
-Target release: `v1.3.0-rc.2`
+Current target release: `v1.3.0-rc.3`
+
+Milestone 7 rc.3 correction plan:
+[Protected-Update Correction Plan](machine_data_migration_milestone_7_rc3_correction_plan.md)
 
 ## Purpose
 
@@ -59,11 +62,11 @@ For every milestone update:
 | 4 | Add transactional configuration history | `verified` | Implementation `6925d029`; exact-restore correction `f6d65fd9` | 5,363 full-suite tests, contained 96-well SIL, and fresh target-Pi no-hardware qualification passed |
 | 5 | Add guarded location and calibration changes | `verified` | Commit `8b50872d` | 5,377 full-suite tests; clean target-Pi guarded transaction/reopen gate; 168 focused Pi tests; two 96/96 contained/traced SIL journeys; exact baseline-byte restoration; sealed evidence passed |
 | 6 | Protect future updates and controlled rollback | `verified` | Implementation `9e666291`; verification record `0ee3e50a` | 5,402 full-suite tests; clean target-Pi real-Git online/offline preservation, legacy profile/export/return focused tests, contained SIL, and sealed evidence passed |
-| 7 | Qualify, release, and stage deployment | `in_progress` | Concrete plan plus untagged rc.2 metadata and in-progress completion record prepared | Software traceability and read-only LC-001 backup preflight complete; Windows/Pi/attended/tag/rollout gates pending |
+| 7 | Qualify, release, and stage deployment | `in_progress` | rc.2 is immutable at `d59f73be`; attended update exposed a fail-safe source-binding defect; rc.3 correction and recovery plan is in progress | rc.2 Windows/Pi and first-start gates passed; failed update changed neither Git nor protected data; rc.3 exact-candidate/Pi/tag/attended/rollout gates pending |
 
-No local `v1.3.0-rc.2` release tag may be created until Milestones 0 through 6
-are `verified` and the Milestone 7 pre-tag gates pass. Do not push or advertise
-the tag until Milestone 7 qualification is complete. A release decision may
+The immutable local `v1.3.0-rc.2` tag records its qualified historical
+candidate and must not be moved, deleted, or retargeted. Do not create or
+publish `v1.3.0-rc.3` until its correction gates pass. A release decision may
 defer a documented non-safety-critical item, but the fixed safety invariants
 below cannot be deferred.
 
@@ -2196,6 +2199,7 @@ The work is complete only when:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Preserved immutable rc.2 after its enrolled update failed safely on short-versus-full source commit identity; advanced the Milestone 7 target to rc.3 and linked the concrete correction/recovery plan. |
 | 2026-08-19 | Created the living Milestones 0-7 migration, audit, safety, updater, rollback, qualification, and rollout plan for `v1.3.0-rc.2`. |
 | 2026-08-19 | Marked Milestone 0 verified from the target Pi backup attestation and linked the concrete Milestone 1 implementation plan. |
 | 2026-08-19 | Recorded the completed inert Milestone 1 implementation and focused/full validation; milestone remains implementation-complete pending its dedicated commit. |

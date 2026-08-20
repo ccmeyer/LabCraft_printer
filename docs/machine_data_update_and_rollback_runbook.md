@@ -33,6 +33,52 @@ protected by the Milestone 0 off-device copy and the M2/M3 first-start
 migration. The first valid rc.2 start creates the one permitted genesis
 deployment anchor. Every later update requires M6 evidence.
 
+## Enrolled rc.2 source-binding recovery
+
+The immutable rc.2 release emits a 12-character source commit while its
+protected updater compares against full Git `HEAD`. An enrolled rc.2 update can
+therefore stop safely with `source_binding_mismatch` before a preservation
+transaction or Git mutation. Do not retry it with reconstructed identity
+arguments and do not modify the deployment anchor.
+
+Use the rc.3 recovery mode only as an attended support procedure after rc.3's
+exact commit and tag have passed qualification. Before starting:
+
+- retain the failed updater and launcher windows/logs;
+- prove production `HEAD`, clean status, active pointer, deployment anchor, and
+  protected inventory are unchanged;
+- stage the immutable target tag in the production repository without moving
+  production `HEAD`;
+- create a clean detached checkout at that exact target commit outside the
+  production checkout; and
+- close the failed updater window and confirm no LabCraft app/updater process
+  remains.
+
+Run the target checkout's updater with the production interpreter and these
+support inputs:
+
+```text
+<production-python> -u <qualified-target-checkout>/tools/update_and_restart.py
+  --repo-root <production-repo>
+  --python <production-python>
+  --gui --no-relaunch --record-result
+  --machine-data-root <authorized-external-root>
+  --target-release v1.3.0-rc.3
+  --recover-rc2-source-binding
+  --support-operator <name>
+  --support-reason <reason>
+  --support-reference <retained-updater-log-with-source_binding_mismatch>
+```
+
+Do not supply UUID, machine ID, activation/migration ID, pointer hash, source
+version/commit, request ID, offline manifest, rollback, wait PID, or automatic
+relaunch flags. Recovery mode derives a fresh exact binding from the authorized
+store and fails unless the source is the affected short-commit rc.2 genesis
+anchor, the failure reference is in that machine's update history, and the
+clean target checkout equals the requested tag. The ordinary updater then owns
+the verified backup, fast-forward, exact post-check, receipt, and deployment-
+anchor advance. Close the updater after success and start LabCraft manually.
+
 ## Evidence locations
 
 For active machine UUID `<uuid>`, evidence is under:
@@ -112,7 +158,7 @@ pointer, coordinates, obstacles, hardware profile, target values, and target
 authorization. An unknown adapter or any semantic drift remains
 `recovery_required`.
 
-The rc.2 release itself declares `transition: none`.
+The rc.2 and rc.3 releases declare `transition: none`.
 
 ## Legacy rollback
 

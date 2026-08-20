@@ -45,11 +45,59 @@ def test_manual_commit_change_is_recovery_before_context_open(tmp_path):
         bootstrap.open_ready()
 
 
+def test_rc2_short_genesis_commit_reopens_with_exact_full_commit(tmp_path):
+    context = _active_context(tmp_path)
+    base = context.paths.base
+    anchor_path = context.paths.deployment_anchor_path
+    anchor = json.loads(anchor_path.read_text(encoding="utf-8"))
+    anchor["app_commit"] = SOURCE_COMMIT[:12]
+    anchor_path.write_text(json.dumps(anchor), encoding="utf-8")
+    context.close()
+
+    reopened = MachineDataBootstrap(
+        base,
+        app_version="v1.3.0-rc.2",
+        app_commit=SOURCE_COMMIT,
+        release_contract=CONTRACT,
+    ).open_ready()
+    try:
+        assert reopened.deployment_anchor["app_commit"] == SOURCE_COMMIT[:12]
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize(
+    "recorded_commit",
+    [
+        SOURCE_COMMIT[:11],
+        SOURCE_COMMIT[:11] + "2",
+        "ABCDEFABCDEF",
+        "not-a-commit",
+    ],
+)
+def test_legacy_anchor_compatibility_rejects_nonexact_prefixes(tmp_path, recorded_commit):
+    context = _active_context(tmp_path)
+    base = context.paths.base
+    anchor_path = context.paths.deployment_anchor_path
+    anchor = json.loads(anchor_path.read_text(encoding="utf-8"))
+    anchor["app_commit"] = recorded_commit
+    anchor_path.write_text(json.dumps(anchor), encoding="utf-8")
+    context.close()
+
+    with pytest.raises(BootstrapError, match="not authorized"):
+        MachineDataBootstrap(
+            base,
+            app_version="v1.3.0-rc.2",
+            app_commit=SOURCE_COMMIT,
+            release_contract=CONTRACT,
+        ).open_ready()
+
+
 def test_missing_anchor_cannot_be_reenrolled_by_later_release(tmp_path):
     context = _active_context(tmp_path)
     paths = context.paths
     paths.deployment_anchor_path.unlink()
-    with pytest.raises(MachineDataUpdateError, match="Only the reviewed"):
+    with pytest.raises(MachineDataUpdateError, match="Genesis enrollment"):
         validate_or_enroll_deployment(
             paths,
             context.active_machine,
@@ -59,6 +107,20 @@ def test_missing_anchor_cannot_be_reenrolled_by_later_release(tmp_path):
             release_contract=CONTRACT,
         )
     context.close()
+
+
+def test_rc3_direct_first_start_can_create_genesis_anchor(tmp_path):
+    context = _active_context(
+        tmp_path,
+        app_version="v1.3.0-rc.3",
+        app_commit="3" * 40,
+    )
+    try:
+        assert context.deployment_anchor["authorization_kind"] == "genesis"
+        assert context.deployment_anchor["app_version"] == "v1.3.0-rc.3"
+        assert context.deployment_anchor["app_commit"] == "3" * 40
+    finally:
+        context.close()
 
 
 def test_unfinished_update_transaction_blocks_bootstrap(tmp_path):

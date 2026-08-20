@@ -47,7 +47,11 @@ from MachineDataLock import (
     acquire_update_lock,
 )
 from MachineDataTransactions import inspect_configuration_state, read_governed_documents
-from MachineDataVerification import build_target_snapshot, load_machine_verification
+from MachineDataVerification import (
+    build_target_snapshot,
+    load_activation_receipt,
+    load_machine_verification,
+)
 
 
 UPDATE_CONTRACT_NAME = "labcraft.machine_data_update.v1"
@@ -63,6 +67,9 @@ DEPLOYMENT_ANCHOR_SCHEMA_VERSION = 1
 LATEST_RESULT_SCHEMA_NAME = "labcraft.machine_data_update_latest_result"
 LATEST_RESULT_SCHEMA_VERSION = 1
 GENESIS_ENROLLMENT_VERSION = "v1.3.0-rc.2"
+GENESIS_ENROLLMENT_VERSIONS = frozenset(
+    {GENESIS_ENROLLMENT_VERSION, "v1.3.0-rc.3"}
+)
 
 TRANSITION_NONE = "none"
 TRANSITION_BOOTSTRAP_RECOVERY = "bootstrap_recovery"
@@ -119,6 +126,26 @@ def _commit_text(value: object, label: str) -> str:
     if not text:
         raise MachineDataUpdateError("invalid_binding", f"{label} is required.")
     return text
+
+
+def commit_identities_match(recorded: object, actual: object) -> bool:
+    """Match an exact commit or rc.2's historical 12-hex commit prefix."""
+
+    recorded_text = str(recorded or "").strip()
+    actual_text = str(actual or "").strip()
+    if not recorded_text or not actual_text:
+        return False
+    if recorded_text == actual_text:
+        return True
+    return (
+        len(recorded_text) == 12
+        and len(actual_text) == 40
+        and recorded_text == recorded_text.lower()
+        and actual_text == actual_text.lower()
+        and all(character in "0123456789abcdef" for character in recorded_text)
+        and all(character in "0123456789abcdef" for character in actual_text)
+        and actual_text.startswith(recorded_text)
+    )
 
 
 def _json_safe(value: object) -> object:
@@ -772,7 +799,7 @@ def validate_deployment_anchor(
         or anchor["activation_id"] != active.activation_id
         or anchor["migration_id"] != active.migration_id
         or anchor["app_version"] != app_version
-        or anchor["app_commit"] != app_commit
+        or not commit_identities_match(anchor["app_commit"], app_commit)
         or dict(anchor["release_contract"]) != dict(release_contract)
     ):
         raise MachineDataUpdateError(
@@ -789,6 +816,45 @@ def validate_deployment_anchor(
         if not authority.is_file() or sha256_file(authority)[0] != digest:
             raise MachineDataUpdateError("deployment_anchor_invalid", "Deployment authorization evidence differs.", recovery_required=True)
     return anchor
+
+
+def _validate_genesis_enrollment_evidence(
+    paths: MachineDataPaths,
+    active: ActiveMachine,
+    *,
+    app_version: str,
+    app_commit: str,
+) -> None:
+    if app_version not in GENESIS_ENROLLMENT_VERSIONS:
+        raise MachineDataUpdateError(
+            "deployment_anchor_missing",
+            "Only a reviewed rc.2/rc.3 first-start deployment may create a genesis anchor.",
+            recovery_required=True,
+        )
+    try:
+        activation = load_activation_receipt(paths.activation_receipt_path)
+        verification = load_machine_verification(paths.verification_path)
+        activation_sha = sha256_file(paths.activation_receipt_path)[0]
+    except Exception as exc:
+        raise MachineDataUpdateError(
+            "deployment_anchor_missing",
+            f"Genesis enrollment evidence could not be validated: {exc}",
+            recovery_required=True,
+        ) from exc
+    if (
+        active.activation_receipt_sha256 != activation_sha
+        or active.activation_id != activation.activation_id
+        or active.migration_id != activation.migration_id
+        or activation.app_version != app_version
+        or not commit_identities_match(activation.app_commit, app_commit)
+        or verification.app_version != app_version
+        or not commit_identities_match(verification.app_commit, app_commit)
+    ):
+        raise MachineDataUpdateError(
+            "deployment_anchor_missing",
+            "Genesis enrollment is not bound to this exact first-start application.",
+            recovery_required=True,
+        )
 
 
 def _unresolved_transaction_directories(paths: MachineDataPaths) -> tuple[Path, ...]:
@@ -870,12 +936,12 @@ def inspect_deployment_gate(
             "Deployment history exists but its anchor is missing.",
             recovery_required=True,
         )
-    if app_version != GENESIS_ENROLLMENT_VERSION:
-        raise MachineDataUpdateError(
-            "deployment_anchor_missing",
-            "Only the reviewed v1.3.0-rc.2 first-start deployment may create a genesis anchor.",
-            recovery_required=True,
-        )
+    _validate_genesis_enrollment_evidence(
+        paths,
+        active,
+        app_version=app_version,
+        app_commit=app_commit,
+    )
     return None
 
 
@@ -890,7 +956,7 @@ def validate_or_enroll_deployment(
     io: DurableFileOps | None = None,
     clock: Callable[[], str] = utc_now,
 ) -> Mapping[str, object] | None:
-    """Validate M6 authority, or create the sole genesis anchor for rc.2."""
+    """Validate M6 authority or create a reviewed first-start genesis anchor."""
 
     if release_contract is None:
         return None
@@ -924,12 +990,12 @@ def validate_or_enroll_deployment(
             "Deployment history exists but its anchor is missing.",
             recovery_required=True,
         )
-    if app_version != GENESIS_ENROLLMENT_VERSION:
-        raise MachineDataUpdateError(
-            "deployment_anchor_missing",
-            "Only the reviewed v1.3.0-rc.2 first-start deployment may create a genesis anchor.",
-            recovery_required=True,
-        )
+    _validate_genesis_enrollment_evidence(
+        paths,
+        active,
+        app_version=app_version,
+        app_commit=app_commit,
+    )
     operations = io or DurableFileOps()
     payload = _anchor_payload(
         paths=paths,
@@ -1074,7 +1140,7 @@ class PreparedUpdate:
         return path, digest
 
     def record_git_result(self, *, before_commit: str, after_commit: str, command: Sequence[str]) -> None:
-        if before_commit != self.binding.source_commit:
+        if not commit_identities_match(self.binding.source_commit, before_commit):
             raise MachineDataUpdateError("source_commit_mismatch", "Git source commit differs from the launch binding.")
         if after_commit != self.target.commit:
             raise MachineDataUpdateError(
@@ -1404,6 +1470,7 @@ __all__ = [
     "DEPLOYMENT_ANCHOR_SCHEMA_VERSION",
     "LATEST_RESULT_SCHEMA_NAME",
     "GENESIS_ENROLLMENT_VERSION",
+    "GENESIS_ENROLLMENT_VERSIONS",
     "MachineDataUpdateError",
     "PreparedUpdate",
     "ProtectedMember",
@@ -1424,6 +1491,7 @@ __all__ = [
     "load_deployment_anchor",
     "parse_release_machine_data_contract",
     "validate_deployment_anchor",
+    "commit_identities_match",
     "validate_or_enroll_deployment",
     "verify_update_backup",
 ]

@@ -24,6 +24,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+from uuid import uuid4
 
 
 STATUS_UPDATED = "updated"
@@ -109,6 +110,7 @@ DEFAULT_GIT_TIMEOUT_S = 300.0
 DEFAULT_DEFERRED_LAUNCH_WAIT_TIMEOUT_S = 30.0
 DEFERRED_LAUNCH_ARG = "--deferred-launch"
 OFFLINE_UPDATES_DIR_NAME = "LabCraftUpdates"
+RC2_SOURCE_BINDING_RECOVERY_VERSION = "v1.3.0-rc.2"
 
 
 @dataclass(frozen=True)
@@ -226,6 +228,7 @@ class UpdaterConfig:
     support_reference: str = ""
     machine_id_confirmation: str = ""
     firmware_attestation: str = ""
+    recover_rc2_source_binding: bool = False
 
 
 CommandRunner = Callable[[Sequence[str], Path, float, Mapping[str, str] | None], CommandResult]
@@ -267,6 +270,10 @@ class OfflineBundleError(RuntimeError):
         super().__init__(message)
         self.message = message
         self.command_result = command_result
+
+
+class SourceBindingRecoveryError(RuntimeError):
+    """The narrow rc.2 source-binding recovery preconditions were not met."""
 
 
 class ReleaseMetadataError(RuntimeError):
@@ -1657,8 +1664,265 @@ def _make_check_result(
     )
 
 
-def _machine_data_import_root(repo_root: Path) -> Path:
-    return Path(repo_root).resolve(strict=False) / "FreeRTOS-interface"
+def _machine_data_import_root(
+    repo_root: Path,
+    *,
+    updater_script: Path | None = None,
+) -> Path:
+    requested_root = Path(repo_root).resolve(strict=False)
+    script_path = Path(__file__ if updater_script is None else updater_script).resolve(strict=False)
+    script_root = script_path.parents[1]
+    script_interface = script_root / "FreeRTOS-interface"
+    if (
+        script_root != requested_root
+        and (script_interface / "MachineDataUpdate.py").is_file()
+    ):
+        return script_interface
+    return requested_root / "FreeRTOS-interface"
+
+
+def _require_full_commit(result: CommandResult, label: str) -> str:
+    commit = result.stdout.strip() if result.returncode == 0 else ""
+    if (
+        len(commit) != 40
+        or commit != commit.lower()
+        or any(character not in "0123456789abcdef" for character in commit)
+    ):
+        detail = result.stderr.strip()
+        suffix = f" ({detail})" if detail else ""
+        raise SourceBindingRecoveryError(f"Could not resolve the exact {label} commit{suffix}.")
+    return commit
+
+
+def prepare_rc2_source_binding_recovery(
+    config: UpdaterConfig,
+    *,
+    command_runner: CommandRunner = default_command_runner,
+    updater_script: Path | None = None,
+) -> UpdaterConfig:
+    """Derive a fresh exact binding for the one affected rc.2 updater path."""
+
+    if not config.recover_rc2_source_binding:
+        return config
+    supplied_identity = {
+        "machine_uuid": config.machine_uuid,
+        "machine_id": config.machine_id,
+        "activation_id": config.activation_id,
+        "migration_id": config.migration_id,
+        "active_pointer_sha256": config.active_pointer_sha256,
+        "source_app_version": config.source_app_version,
+        "source_commit": config.source_commit,
+        "update_request_id": config.update_request_id,
+    }
+    if any(str(value or "").strip() for value in supplied_identity.values()):
+        raise SourceBindingRecoveryError(
+            "Recovery identity fields must be derived from the authorized store, not supplied manually."
+        )
+    if (
+        config.rollback
+        or config.offline_manifest_path is not None
+        or config.wait_pid is not None
+        or not config.gui
+        or not config.no_relaunch
+        or not config.record_result
+        or config.relaunch_on_failure
+    ):
+        raise SourceBindingRecoveryError(
+            "rc.2 source-binding recovery requires an attended online GUI update with no automatic relaunch."
+        )
+    if config.machine_data_root is None:
+        raise SourceBindingRecoveryError("--machine-data-root is required for rc.2 recovery.")
+    if not config.target_release:
+        raise SourceBindingRecoveryError("--target-release is required for rc.2 recovery.")
+    if not config.support_operator or not config.support_reason or not config.support_reference:
+        raise SourceBindingRecoveryError(
+            "Support operator, reason, and failed-launch reference are required for rc.2 recovery."
+        )
+
+    requested_root = Path(config.repo_root).resolve(strict=False)
+    source_top = _run_git(
+        requested_root,
+        ["rev-parse", "--show-toplevel"],
+        config.git_timeout_s,
+        command_runner,
+    )
+    if source_top.returncode != 0 or not source_top.stdout.strip():
+        raise SourceBindingRecoveryError("The rc.2 installation is not a Git checkout.")
+    source_root = Path(source_top.stdout.strip()).resolve(strict=False)
+    source_version = _read_worktree_release_version(source_root)
+    if source_version != RC2_SOURCE_BINDING_RECOVERY_VERSION:
+        raise SourceBindingRecoveryError(
+            f"Recovery is limited to {RC2_SOURCE_BINDING_RECOVERY_VERSION}; found {source_version}."
+        )
+    source_commit = _require_full_commit(
+        _run_git(source_root, ["rev-parse", "HEAD"], config.git_timeout_s, command_runner),
+        "source",
+    )
+
+    script_path = Path(__file__ if updater_script is None else updater_script).resolve(strict=False)
+    candidate_root = script_path.parents[1]
+    if candidate_root == source_root:
+        raise SourceBindingRecoveryError(
+            "Recovery must run from a separately qualified target checkout."
+        )
+    candidate_top = _run_git(
+        candidate_root,
+        ["rev-parse", "--show-toplevel"],
+        config.git_timeout_s,
+        command_runner,
+    )
+    if (
+        candidate_top.returncode != 0
+        or Path(candidate_top.stdout.strip()).resolve(strict=False) != candidate_root
+    ):
+        raise SourceBindingRecoveryError("The recovery updater is not in its own Git checkout.")
+    candidate_version = _read_worktree_release_version(candidate_root)
+    if candidate_version != config.target_release:
+        raise SourceBindingRecoveryError(
+            "The recovery updater VERSION does not equal the requested target release."
+        )
+    candidate_commit = _require_full_commit(
+        _run_git(candidate_root, ["rev-parse", "HEAD"], config.git_timeout_s, command_runner),
+        "recovery updater",
+    )
+    candidate_status = _run_git(
+        candidate_root,
+        ["status", "--porcelain"],
+        config.git_timeout_s,
+        command_runner,
+    )
+    if candidate_status.returncode != 0 or candidate_status.stdout.strip():
+        raise SourceBindingRecoveryError(
+            "The separately qualified recovery updater checkout is not clean."
+        )
+    target_commit = _require_full_commit(
+        _run_git(
+            source_root,
+            ["rev-parse", f"refs/tags/{config.target_release}^{{commit}}"],
+            config.git_timeout_s,
+            command_runner,
+        ),
+        "target tag",
+    )
+    if candidate_commit != target_commit:
+        raise SourceBindingRecoveryError(
+            "The recovery updater commit does not equal the requested target tag commit."
+        )
+
+    interface_root = _machine_data_import_root(source_root, updater_script=script_path)
+    if str(interface_root) not in sys.path:
+        sys.path.insert(0, str(interface_root))
+    from MachineData import (
+        build_machine_data_paths,
+        parse_machine_identity,
+        require_authorized_active_machine,
+        resolve_machine_data_base,
+    )
+    from MachineDataArchive import sha256_bytes
+    from MachineDataUpdate import (
+        UpdateLaunchBinding,
+        commit_identities_match,
+        load_current_release_machine_data_contract,
+        load_deployment_anchor,
+        validate_deployment_anchor,
+    )
+
+    base = resolve_machine_data_base(
+        app_local_data_root=Path(config.machine_data_root).resolve(strict=False).parent,
+        repo_root=source_root,
+        explicit_root=config.machine_data_root,
+    )
+    try:
+        pointer_bytes = base.active_machine_path.read_bytes()
+        active = require_authorized_active_machine(json.loads(pointer_bytes.decode("utf-8")))
+        paths = build_machine_data_paths(base, active.machine_uuid)
+        identity = parse_machine_identity(
+            json.loads(paths.identity_path.read_text(encoding="utf-8"))
+        )
+    except Exception as exc:
+        raise SourceBindingRecoveryError(
+            f"The authorized rc.2 machine identity could not be read: {exc}"
+        ) from exc
+    contract = load_current_release_machine_data_contract(source_root, source_version)
+    if contract is None:
+        raise SourceBindingRecoveryError("The rc.2 release preservation contract is missing.")
+    anchor = load_deployment_anchor(paths.deployment_anchor_path)
+    anchor_commit = str(anchor.get("app_commit") or "")
+    if (
+        anchor.get("authorization_kind") != "genesis"
+        or anchor.get("app_version") != RC2_SOURCE_BINDING_RECOVERY_VERSION
+        or len(anchor_commit) != 12
+        or not commit_identities_match(anchor_commit, source_commit)
+    ):
+        raise SourceBindingRecoveryError(
+            "The deployment anchor is not an affected rc.2 short-commit genesis anchor."
+        )
+    validate_deployment_anchor(
+        paths,
+        active,
+        app_version=source_version,
+        app_commit=source_commit,
+        release_contract=contract,
+    )
+    if identity.machine_id != active.machine_id or identity.machine_uuid != active.machine_uuid:
+        raise SourceBindingRecoveryError("The active pointer and machine identity differ.")
+
+    support_reference = Path(config.support_reference).expanduser().resolve(strict=False)
+    history_root = paths.update_history_root.resolve(strict=False)
+    if (
+        history_root not in support_reference.parents
+        or not support_reference.is_file()
+        or support_reference.parent
+        not in {
+            paths.update_history_root / "launcher_logs",
+            paths.update_history_root / "updater_logs",
+        }
+    ):
+        raise SourceBindingRecoveryError(
+            "The failed-launch reference must be an existing file in this machine's update history."
+        )
+    try:
+        support_text = support_reference.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SourceBindingRecoveryError(
+            f"The failed-launch reference could not be read: {exc}"
+        ) from exc
+    if "source_binding_mismatch" not in support_text:
+        raise SourceBindingRecoveryError(
+            "The failed-launch reference does not record the rc.2 source-binding defect."
+        )
+
+    request_id = str(uuid4())
+    binding = UpdateLaunchBinding(
+        machine_data_root=base.root,
+        machine_id=identity.machine_id,
+        machine_uuid=identity.machine_uuid,
+        activation_id=active.activation_id,
+        migration_id=active.migration_id,
+        active_pointer_sha256=sha256_bytes(pointer_bytes),
+        source_app_version=source_version,
+        source_commit=source_commit,
+        request_id=request_id,
+    )
+    return replace(
+        config,
+        repo_root=source_root,
+        machine_data_root=binding.machine_data_root,
+        machine_uuid=binding.machine_uuid,
+        machine_id=binding.machine_id,
+        activation_id=binding.activation_id,
+        migration_id=binding.migration_id,
+        active_pointer_sha256=binding.active_pointer_sha256,
+        source_app_version=binding.source_app_version,
+        source_commit=binding.source_commit,
+        update_request_id=binding.request_id,
+        log_path=(
+            paths.update_history_root
+            / "updater_logs"
+            / f"{binding.request_id}.log"
+        ),
+        latest_result_path=paths.latest_update_ui_result_path,
+    )
 
 
 def _begin_machine_data_protection(
@@ -1689,6 +1953,7 @@ def _begin_machine_data_protection(
         UpdateLaunchBinding,
         UpdateTarget,
         begin_update_preservation,
+        commit_identities_match,
         load_deployment_anchor,
     )
 
@@ -1699,7 +1964,10 @@ def _begin_machine_data_protection(
         )
     if config.machine_data_root is None:
         raise MachineDataUpdateError("invalid_binding", "--machine-data-root is required.")
-    if config.source_app_version != before_release_version or config.source_commit != before_sha:
+    if (
+        config.source_app_version != before_release_version
+        or not commit_identities_match(config.source_commit, before_sha)
+    ):
         raise MachineDataUpdateError(
             "source_binding_mismatch",
             "The running app version/commit differs from the checkout being updated.",
@@ -1712,7 +1980,7 @@ def _begin_machine_data_protection(
         migration_id=config.migration_id,
         active_pointer_sha256=config.active_pointer_sha256,
         source_app_version=config.source_app_version,
-        source_commit=config.source_commit,
+        source_commit=before_sha,
         request_id=config.update_request_id,
     )
 
@@ -3072,6 +3340,11 @@ def run_update(
     log.add("LabCraft updater started.")
     log.add(f"platform: {platform.platform()}")
     log.add(f"requested_repo_root: {requested_root}")
+    if config.recover_rc2_source_binding:
+        log.add("source_binding_recovery: rc2_short_commit")
+        log.add(f"support_operator: {config.support_operator}")
+        log.add(f"support_reason: {config.support_reason}")
+        log.add(f"support_reference: {config.support_reference}")
 
     log_path = Path(config.log_path).resolve() if config.log_path is not None else default_log_path(requested_root)
 
@@ -3614,6 +3887,7 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
     parser.add_argument("--support-reference", default="", help=argparse.SUPPRESS)
     parser.add_argument("--machine-id-confirmation", default="", help=argparse.SUPPRESS)
     parser.add_argument("--firmware-attestation", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--recover-rc2-source-binding", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     return UpdaterConfig(
@@ -3649,6 +3923,7 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
         support_reference=str(args.support_reference).strip(),
         machine_id_confirmation=str(args.machine_id_confirmation).strip(),
         firmware_attestation=str(args.firmware_attestation).strip(),
+        recover_rc2_source_binding=bool(args.recover_rc2_source_binding),
     )
 
 
@@ -3681,6 +3956,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_deferred_launch(argv[1:])
 
     config = parse_args(argv)
+    if config.recover_rc2_source_binding:
+        try:
+            config = prepare_rc2_source_binding_recovery(config)
+        except (SourceBindingRecoveryError, ReleaseMetadataError) as exc:
+            print(f"rc.2 source-binding recovery stopped before update: {exc}", file=sys.stderr)
+            return EXIT_CODES[STATUS_MACHINE_DATA_PROTECTION_FAILED]
     if config.gui:
         sanitize_qt_environment_for_gui()
         try:

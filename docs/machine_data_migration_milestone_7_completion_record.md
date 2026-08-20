@@ -1,11 +1,17 @@
 # Machine Data Migration Milestone 7 Completion Record
 
+> Current correction: rc.2 first-start qualification passed, but its enrolled
+> protected update failed safely before Git. The
+> [rc.3 correction plan](machine_data_migration_milestone_7_rc3_correction_plan.md)
+> now owns correction qualification, attended recovery, publication, and
+> rollout.
+
 Status: `in_progress` — Windows and unattended Pi gates passed; attended,
 tag-dependent, publication, and rollout gates remain.
 
 Started: 2026-08-20
 
-Target release: `v1.3.0-rc.2`
+Current target release: `v1.3.0-rc.3`
 
 Parent documents:
 
@@ -242,12 +248,41 @@ and verifies a release tag and has no commit-only bypass. Direct Git mutation
 remains prohibited. Creating the final local `v1.3.0-rc.2` tag therefore
 remains the explicit next authorization/pre-tag decision.
 
+That rc.2 tag was subsequently created locally and verified without being
+pushed. The attended enrolled-machine update then stopped before Git with
+`source_binding_mismatch`: rc.2's app-generated command recorded source commit
+`5f54a4a174cd`, while the updater resolved the same `HEAD` as full commit
+`5f54a4a174cd50f145e1bfa98aa61535b7aa59e9` and compared them literally.
+No update transaction directory was created. Read-only postflight proved the
+production checkout remained clean at the same commit and that the active
+pointer, genesis deployment anchor, and all protected machine-data bytes were
+unchanged. The updater and launcher logs are retained in the external update
+history; the operator left the error window open for evidence preservation.
+
+Because the immutable rc.2 tag contains both the short app binding and the
+literal full updater comparison, it cannot safely complete the next protected
+update or validate a full target anchor after relaunch. It will not be moved or
+retargeted. `v1.3.0-rc.3` supersedes it with full new bindings, exact
+compatibility for only rc.2's 12-lowercase-hex historical prefix, full new
+transaction/anchor evidence, and a narrowly gated attended recovery launcher.
+The implementation and qualification sequence is recorded in the linked rc.3
+correction plan.
+
+The rc.3 correction code and release metadata then passed the final Windows
+pre-commit gates: 602 focused tests with one skip, 5,430 complete-suite tests
+with 156 skips, contained SIL at 96/96, changed-file compilation, release
+metadata/JSON validation, static diff checks, and unchanged firmware SHA-256
+`EDA070CE...B0D5884`. The candidate remains untagged and has not changed
+LC-001. Its exact commit and disposable Pi results are pending.
+
 No-command probe, audit/restore, firmware provenance or flash, SAFE/HIL, and
 the machine-specific Camera route remain pending.
 
 ## Local tag, updater, and rollback qualification
 
-Status: pending attended pre-tag gate.
+Status: rc.2 tag/same-version discovery passed; rc.2-to-corrected-target apply
+exposed the fail-safe source-binding defect. rc.3 tag-dependent qualification
+is pending.
 
 Record peeled tag commit, metadata tag validation, release-aware bundle hash,
 exact rc.6/rc.1 old-updater lanes, offline equivalence, unchanged return, and
@@ -277,10 +312,11 @@ Final ignored evidence roots:
 
 ## Open gates
 
-- Authorize and create the final local `v1.3.0-rc.2` tag at corrected candidate
-  `d59f73be`; do not push it before the required tag-dependent gates pass.
-- Apply the corrected candidate to enrolled LC-001 through an authorized M6
-  update transaction and verify preservation/relaunch evidence.
+- Complete exact-candidate Windows and disposable-Pi qualification for rc.3.
+- Authorize and create the immutable local `v1.3.0-rc.3` tag; do not push it
+  before the required tag-dependent and attended recovery gates pass.
+- Apply rc.3 to enrolled LC-001 through the narrow attended rc.2 recovery mode
+  and verify preservation, full target anchor, and manual reopen evidence.
 - Private operator, rc.6 pilot, rc.1 pilot, fixtures, and Camera-route approval.
 - Attended designated-machine migration, firmware, HIL, and Camera route.
 - Local tag and exact legacy updater/rollback qualification.
@@ -290,6 +326,8 @@ Final ignored evidence roots:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Implemented the rc.3 full-commit binding, exact rc.2 prefix compatibility, candidate-side recovery updater, exact-evidence rc.3 genesis enrollment, release metadata, and runbook; final Windows gates passed 602 focused/1 skipped, 5,430 full/156 skipped, and 96/96 contained SIL. |
+| 2026-08-20 | Recorded the immutable rc.2 tag and fail-safe attended `source_binding_mismatch`, proved no Git/protected-data mutation, and began the rc.3 full-commit compatibility and attended recovery correction plan. |
 | 2026-08-20 | Froze correction candidate `d59f73be`; passed exact-commit Windows focused/full/static/release/SIL and affected target-Pi focused/private-device SIL gates; proved production remained unchanged; stopped the enrolled update at the intentional release-tag boundary. |
 | 2026-08-20 | Recorded passing attended backup/install/cancel/review/migration/activation/genesis gates on LC-001, then superseded `5f54a4a1` for release after its prefilled source failed closed and manual Camera transcription was judged unsafe; began the direct-source/read-only-Camera correction and required affected requalification. |
 | 2026-08-20 | Created the in-progress completion record, closed the software traceability audit without a code change, recorded sanitized read-only Pi preflight evidence, and documented the untagged rc.2 candidate changes and remaining gates. |
